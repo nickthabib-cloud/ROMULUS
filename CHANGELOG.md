@@ -12,6 +12,7 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 - Kept every capped search partial and nonresolving. Representative samples improve what reaches analysis context; they do not support a complete-coverage or clean-environment claim.
 - Added bounded sampling metadata to exact outcomes and the technical report only. Compact retention keeps aggregate strategies, requested/covered strata, retained counts, and fallback counts while deleting task/query/request bulk.
 - Added synthetic early/middle/late, deterministic-repeat, deduplication, malformed-time, offset-limit, scheduler, report-boundary, and compact-retention regressions without embedding holdout identities or attack-specific indicators.
+- Final review made the mapped timestamp explicit for unbounded Elasticsearch tasks, backfilled duplicate-suppressed sample slots within a two-times-cap read ceiling, preserved successful strata when another fails, retained bounded per-stratum matched counts, and added a plain-language sampled-coverage limitation to the customer report.
 
 ### Unified search scheduling and exact outcomes
 

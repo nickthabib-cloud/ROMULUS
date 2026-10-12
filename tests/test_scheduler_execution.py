@@ -155,6 +155,7 @@ class SchedulerExecutionTests(unittest.TestCase):
                 sampling_arguments["time_range"],
                 {"gte": "2024-11-13T10:58:00Z", "lte": "2024-11-13T11:10:00Z"},
             )
+            self.assertEqual(sampling_arguments["timestamp_field"], "@timestamp")
             self.assertEqual(sampling_arguments["sampling"]["strategy"], "time_or_rank_stratified")
             self.assertEqual(len(state["host"]), 1)
             self.assertEqual(state["pivot_results"], pivots_before)

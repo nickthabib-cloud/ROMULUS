@@ -43,11 +43,12 @@ class TSharkAdapter:
         global_heap=[]
         requested_strata=max(1,min(int((sampling or {}).get("strata",1)),24))
         use_time_sampling=isinstance(sample_start,datetime) and isinstance(sample_end,datetime)
-        strata=[]; allocations=[]; stratum_heaps=[]
+        strata=[]; allocations=[]; stratum_heaps=[]; stratum_matches=[]
         if use_time_sampling:
             allocations=allocate_cap(output_cap,requested_strata)
             strata=time_strata(sample_start,sample_end,len(allocations))
             stratum_heaps=[[] for _ in allocations]
+            stratum_matches=[0 for _ in allocations]
         timestamp_index=command_fields.index("frame.time_epoch")
         def read_stdout():
             for line in process.stdout or ():
@@ -61,7 +62,9 @@ class TSharkAdapter:
                             if observed>=item["start"] and (observed<item["end"] or item["include_end"] and observed<=item["end"]))
                     except (ValueError,IndexError,StopIteration,OverflowError):
                         counts["invalid_timestamps"]+=1
-                    else: _offer(stratum_heaps[index],allocations[index],ordinal,raw)
+                    else:
+                        stratum_matches[index]+=1
+                        _offer(stratum_heaps[index],allocations[index],ordinal,raw)
         def read_stderr():
             for line in process.stderr or ():
                 if sum(len(x) for x in errors)<2000: errors.append(line)
@@ -78,7 +81,8 @@ class TSharkAdapter:
         if matched<=output_cap:
             selected=global_rows
             sampling_summary={"version":1,"strategy":"exhaustive","requested_strata":1,
-                "covered_strata":1 if matched else 0,"retained_by_stratum":[len(selected)]}
+                "covered_strata":1 if matched else 0,"retained_by_stratum":[len(selected)],
+                "matched_by_stratum":[matched]}
         elif use_time_sampling and counts["invalid_timestamps"]==0:
             selected_by_stratum=[_ordered(heap) for heap in stratum_heaps]
             selected=[item for rows in selected_by_stratum for item in rows]
@@ -88,12 +92,14 @@ class TSharkAdapter:
             retained=[len(rows) for rows in selected_by_stratum]
             sampling_summary={"version":1,"strategy":"time_stratified_reservoir",
                 "requested_strata":len(strata),"covered_strata":sum(bool(value) for value in retained),
-                "retained_by_stratum":retained,"backfilled":max(0,len(selected)-sum(retained))}
+                "retained_by_stratum":retained,"matched_by_stratum":stratum_matches,
+                "backfilled":max(0,len(selected)-sum(retained))}
         else:
             selected=global_rows
             reason="malformed_or_missing_timestamp" if counts["invalid_timestamps"] else "missing_time_bounds"
             sampling_summary={"version":1,"strategy":"deterministic_reservoir","requested_strata":1,
                 "covered_strata":1 if selected else 0,"retained_by_stratum":[len(selected)],
+                "matched_by_stratum":[matched],
                 "fallback_reason":reason}
         records=[]
         for _,line in selected:

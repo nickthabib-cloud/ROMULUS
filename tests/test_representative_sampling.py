@@ -170,7 +170,37 @@ class ElasticsearchRepresentativeSamplingTests(unittest.TestCase):
         )
 
         retained_ids = [hit["_id"] for hit in result["hits"]]
+        self.assertEqual(len(retained_ids), 4)
         self.assertEqual(len(retained_ids), len(set(retained_ids)))
+
+    def test_failed_stratum_keeps_other_representative_rows_and_is_disclosed(self):
+        client = _SyntheticElasticsearch(_rows())
+        original_search = client.search
+
+        def fail_one_stratum(**kwargs):
+            ranges = _range_clauses(kwargs.get("query", {}))
+            if any(bounds.get("gte") == "2026-02-01T02:00:00Z" for _, bounds in ranges):
+                raise RuntimeError("synthetic stratum failure")
+            return original_search(**kwargs)
+
+        client.search = fail_one_stratum
+        settings = replace(Settings.from_env(), es_index_patterns=("synthetic-*",), max_results=20,
+            time_sampling_strata=4)
+        adapter = ElasticsearchAdapter(settings, client)
+
+        result = adapter.search_many(
+            ["synthetic-host"], {"match": {"message": "synthetic"}}, 4,
+            timestamp_field="@timestamp",
+            time_range={"gte": "2026-02-01T00:00:00Z", "lte": "2026-02-01T08:00:00Z"},
+            sampling={"version": 1, "strategy": "time_or_rank_stratified", "strata": 4},
+        )
+
+        self.assertEqual(result["sampling"]["strategy"], "time_stratified")
+        self.assertEqual(result["sampling"]["covered_strata"], 3)
+        self.assertEqual(result["sampling"]["failed_strata"], 1)
+        self.assertEqual(result["sampling"]["fallback_reason"], "stratum_error")
+        self.assertEqual(result["sampling"]["retained_by_stratum"], [1, 0, 1, 1])
+        self.assertEqual(len(result["hits"]), 3)
 
     def test_uncapped_search_preserves_all_records_and_is_deterministic(self):
         rows = _rows(3)
@@ -229,6 +259,7 @@ class ArkimeRepresentativeSamplingTests(unittest.TestCase):
         self.assertEqual(result["sampling"]["strategy"], "rank_stratified")
         self.assertEqual(result["sampling"]["covered_strata"], 4)
         self.assertEqual(result["sampling"]["retained_by_stratum"], [3, 3, 3, 3])
+        self.assertEqual(result["sampling"]["matched_by_stratum"], [3, 3, 3, 3])
 
     def test_rank_sampling_suppresses_duplicate_session_ids(self):
         rows = [{"id": f"session-{index:02d}", "firstPacket": index} for index in range(20)]
@@ -242,6 +273,7 @@ class ArkimeRepresentativeSamplingTests(unittest.TestCase):
         )
 
         retained = [row["id"] for row in result["sessions"]]
+        self.assertEqual(len(retained), 8)
         self.assertEqual(len(retained), len(set(retained)))
         self.assertEqual(result["duplicates_suppressed"], 1)
 
@@ -322,6 +354,7 @@ class TSharkRepresentativeSamplingTests(unittest.TestCase):
         self.assertEqual(result["sampling"]["strategy"], "time_stratified_reservoir")
         self.assertEqual(result["sampling"]["covered_strata"], 4)
         self.assertEqual(result["sampling"]["retained_by_stratum"], [1, 1, 1, 1])
+        self.assertEqual(result["sampling"]["matched_by_stratum"], [4, 4, 4, 4])
         self.assertLess(retained[0], (start + timedelta(hours=2)).timestamp())
         self.assertGreaterEqual(retained[-1], (start + timedelta(hours=6)).timestamp())
 

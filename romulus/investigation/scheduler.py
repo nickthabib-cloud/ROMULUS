@@ -425,7 +425,7 @@ def _normalized_sampling(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
     result: dict[str, Any] = {}
-    for field in ("version", "requested_strata", "covered_strata", "backfilled"):
+    for field in ("version", "requested_strata", "covered_strata", "failed_strata", "backfilled"):
         item = value.get(field)
         if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
             result[field] = item
@@ -438,6 +438,12 @@ def _normalized_sampling(value: Any) -> dict[str, Any] | None:
         result["retained_by_stratum"] = [
             int(item) for item in retained[:24]
             if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        ]
+    matched = value.get("matched_by_stratum")
+    if isinstance(matched, (list, tuple)):
+        result["matched_by_stratum"] = [
+            int(item) if isinstance(item, int) and not isinstance(item, bool) and item >= 0 else None
+            for item in matched[:24]
         ]
     return result or None
 

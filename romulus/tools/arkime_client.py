@@ -60,6 +60,7 @@ class ArkimeAdapter:
                 "duplicates_suppressed":0,"provenance":result.get("provenance",provenance),
                 "sampling":{"version":1,"strategy":"earliest_fallback","requested_strata":requested,
                     "covered_strata":1 if rows else 0,"retained_by_stratum":[len(rows)],
+                    "matched_by_stratum":[len(rows)],
                     "fallback_reason":"unknown_total"}}
         total=max(0,int(total_value))
         if total<=cap:
@@ -69,29 +70,33 @@ class ArkimeAdapter:
             return {"sessions":rows,"total":total,"requests":2,"pages":1,"capped":False,
                 "duplicates_suppressed":0,"provenance":result.get("provenance",provenance),
                 "sampling":{"version":1,"strategy":"exhaustive","requested_strata":1,
-                    "covered_strata":1 if total else 0,"retained_by_stratum":[len(rows)]}}
+                    "covered_strata":1 if total else 0,"retained_by_stratum":[len(rows)],
+                    "matched_by_stratum":[len(rows)]}}
         windows=rank_windows(total,cap,requested)
-        sessions=[]; seen=set(); duplicates=0; retained=[]; sampled_windows=[]; requests=1; offset_limited=False
+        sessions=[]; seen=set(); duplicates=0; retained=[]; matched_by=[]; sampled_windows=[]; requests=1; offset_limited=False
         for window in windows:
             offset=int(window["offset"]); length=int(window["length"])
             if offset>10_000_000:
-                offset_limited=True; retained.append(0)
+                offset_limited=True; retained.append(0); matched_by.append(None)
                 sampled_windows.append({**window,"status":"offset_limit","retained":0})
                 continue
-            result=self.search_sessions(expression,start_ms=start_ms,stop_ms=stop_ms,length=length,
+            request_length=min(self.settings.arkime_max_results,length+min(len(seen),length))
+            result=self.search_sessions(expression,start_ms=start_ms,stop_ms=stop_ms,length=request_length,
                 all_history=all_history,start=offset)
             requests+=1; added=0
-            for row in result.get("sessions",[]):
+            result_rows=list(result.get("sessions",[])); matched_by.append(min(len(result_rows),length))
+            for row in result_rows:
                 key=_session_key(row)
                 if key in seen:
                     duplicates+=1; continue
                 seen.add(key); sessions.append(row); added+=1
-                if len(sessions)>=cap: break
+                if added>=length or len(sessions)>=cap: break
             retained.append(added)
             sampled_windows.append({**window,"status":"covered","retained":added})
         covered=sum(1 for item in sampled_windows if item["status"]=="covered")
         summary={"version":1,"strategy":"rank_stratified","requested_strata":len(windows),
-            "covered_strata":covered,"retained_by_stratum":retained,"windows":sampled_windows}
+            "covered_strata":covered,"retained_by_stratum":retained,"matched_by_stratum":matched_by,
+            "windows":sampled_windows}
         if offset_limited: summary["fallback_reason"]="arkime_offset_limit"
         return {"sessions":sessions,"total":total,"requests":requests,"pages":covered,"capped":True,
             "duplicates_suppressed":duplicates,"provenance":provenance,"sampling":summary}

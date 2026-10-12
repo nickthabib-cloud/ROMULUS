@@ -936,13 +936,21 @@ class HuntEngine:
                 if not _query_enforces_scheduled_window(query,start_time,end_time):
                     raise ValueError("Scheduled Elasticsearch query does not enforce its time range")
                 size=max(1,min(int(query_spec.get("size",self.settings.max_results)),self.settings.max_results,500))
-                task_sampling=query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings)
+                task_sampling=(s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else
+                    query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings))
+                family_fields=(s.get("es_fields_by_class",{}).get(task.get("source_family"),[])
+                    if isinstance(s.get("es_fields_by_class"),dict) else [])
+                timestamp_field=next((field for field in
+                    ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
+                    if field in family_fields),None)
+                if timestamp_field is None and (not family_fields or s.get("timestamp_field") in family_fields):
+                    timestamp_field=s.get("timestamp_field")
                 adapter_time_range=({"gte":start_time.astimezone(timezone.utc).isoformat().replace("+00:00","Z"),
                     "lte":end_time.astimezone(timezone.utc).isoformat().replace("+00:00","Z")}
                     if start_time and end_time else None)
                 found=self._call(s,"elasticsearch.search",stage,
                     {"task_id":task_id,"indices":targets,"query":query,"size":size},scope,
-                    lambda:self.es.search_many(targets,query,size,time_range=adapter_time_range,
+                    lambda:self.es.search_many(targets,query,size,timestamp_field=timestamp_field,time_range=adapter_time_range,
                         sampling=task_sampling),lambda value:len(value.get("hits",[])))
                 if found is None:
                     incomplete=True
@@ -968,7 +976,8 @@ class HuntEngine:
                 start_ms=int(start_time.timestamp()*1000) if start_time else None
                 stop_ms=int(end_time.timestamp()*1000) if end_time else None
                 all_history=bool(self.settings.historical_search and start_ms is None and stop_ms is None)
-                task_sampling=query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings)
+                task_sampling=(s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else
+                    query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings))
                 found=self._call(s,"arkime.api.sessions",stage,
                     {"task_id":task_id,"source":"arkime","expression":expression,"limit":cap,
                         "date":-1 if all_history else ("explicit" if start_ms is not None else self.settings.arkime_default_hours)},scope,
@@ -1002,7 +1011,8 @@ class HuntEngine:
                 if start_time and end_time:
                     time_filter=f"frame.time_epoch >= {start_time.timestamp():.3f} && frame.time_epoch <= {end_time.timestamp():.3f}"
                 pcap=Path(targets[0]).resolve()
-                task_sampling=query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings)
+                task_sampling=(s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else
+                    query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings))
                 found=self._call(s,"tshark.read_pcap",stage,
                     {"task_id":task_id,"pcap":str(pcap),"display_filter":display_filter,"fields":fields},scope,
                     lambda:self.tshark.inspect(pcap,display_filter=display_filter,fields=fields,limit=limit,time_filter=time_filter,

@@ -120,9 +120,12 @@ def _scheduler_lines(state):
         outcome=outcomes.get(task.get("task_id"),{})
         sampling=outcome.get("sampling") if isinstance(outcome.get("sampling"),dict) else {}
         retained=sampling.get("retained_by_stratum")
+        matched_by=sampling.get("matched_by_stratum")
         retained_total=sum(value for value in retained if isinstance(value,int) and not isinstance(value,bool)) if isinstance(retained,list) else 0
         sampling_text=(f"sampling={sampling.get('strategy')}; strata={sampling.get('covered_strata')}/{sampling.get('requested_strata')}; "
-            f"sampled_records={retained_total}; sampling_fallback={sampling.get('fallback_reason') or 'none'}; "
+            f"sampled_records={retained_total}; retained_by_stratum={_join_text(retained) or 'not recorded'}; "
+            f"matched_by_stratum={_join_text(matched_by) or 'not recorded'}; "
+            f"sampling_fallback={sampling.get('fallback_reason') or 'none'}; "
             if sampling else "sampling=not recorded; ")
         owners=[]
         for key,label in (("candidate_ids","candidates"),("follow_up_ids","follow-ups"),("hypothesis_ids","hypotheses")):
@@ -284,6 +287,9 @@ def _docx(s,path):
     findings=list(s.get("findings",[]) or [])
     visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
     errors=list(s.get("source_errors",[]) or [])
+    sampled_outcomes=[item for item in s.get("search_outcomes",[]) or []
+        if isinstance(item,dict) and (item.get("capped") or
+            isinstance(item.get("sampling"),dict) and item["sampling"].get("strategy") not in {None,"exhaustive"})]
     confidence_order={"not assessed":0,"low":1,"moderate":2,"high":3}
     overall_confidence=max((str(item.get("confidence") or "low").lower() for item in findings),key=lambda value:confidence_order.get(value,0),default="low")
     if s.get("status")!="completed" or errors:
@@ -410,10 +416,13 @@ def _docx(s,path):
     coverage=s.get("coverage",{}) or {}
     for label,key in (("Host telemetry","host"),("Network telemetry","network")):
         cells=scope.add_row().cells; set_cell_text(cells[0],label,True); set_cell_text(cells[1],coverage.get(key) or "Not recorded")
-    if errors:
-        cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True); set_cell_text(cells[1],f"{len(errors)} source error(s) limited the investigation. See the technical TXT report for details.")
-    else:
-        cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True); set_cell_text(cells[1],"No source errors were recorded.")
+    limitations=[]
+    if errors: limitations.append(f"{len(errors)} source error(s) limited the investigation.")
+    if sampled_outcomes:
+        limitations.append(f"{len(sampled_outcomes)} search result set(s) used a bounded representative sample; capped searches remain incomplete coverage.")
+    if not limitations: limitations.append("No source errors or sampled-result limitations were recorded.")
+    cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True)
+    set_cell_text(cells[1]," ".join(limitations)+" See the technical TXT report for details.")
     format_table(scope)
     para("This assessment applies only to the specified time range and the telemetry listed above. No finding is not proof that the environment is free of malicious activity.")
 

@@ -136,7 +136,7 @@
 - Consumes: exact committed implementation from Tasks 1–5.
 - Produces: dependency-complete VM evidence, isolated hunt metrics, compact-retention proof, corpus comparison, and an attached GitHub pull request.
 
-- [ ] Run whole-branch review focused on the five Review Focus conditions; fix Critical/Important findings test-first.
+- [x] Run whole-branch review focused on the five Review Focus conditions; fix Critical/Important findings test-first.
 - [ ] Deploy an exact Git archive to the development VM; verify SHA-256, full no-skip suite, compilation, and `doctor`.
 - [ ] Run an isolated bounded live hunt with the same generic mission window and budgets used for the prior comparison. Prove sampled evidence spans the mission window before opening the external corpus.
 - [ ] Finalize compact, verify report reopening and hunt-scoped working-data cleanup, then compare stage-level recall against the external corpus without changing runtime behavior during that run.

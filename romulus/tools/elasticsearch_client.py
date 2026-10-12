@@ -78,10 +78,15 @@ class ElasticsearchAdapter:
                         if bounds is None: raise ValueError("matching time bounds unavailable")
                         allocations=allocate_cap(size,int(sampling.get("strata",self.settings.time_sampling_strata)))
                         strata=time_strata(bounds[0],bounds[1],len(allocations))
-                        sampled=[]; seen=set(); retained=[]; matched_by=[]; covered=0
+                        sampled=[]; seen=set(); retained=[]; matched_by=[]; covered=0; failed=0
                         for stratum,quota in zip(strata,allocations):
                             bounded_query=_with_time_stratum(query,timestamp,stratum)
-                            result=_pit_search(client,pit_id,bounded_query,quota,sort,self.settings.tool_timeout_seconds)
+                            try:
+                                result=_pit_search(client,pit_id,bounded_query,min(size,quota+min(len(seen),quota)),sort,
+                                    self.settings.tool_timeout_seconds)
+                            except Exception:
+                                failed+=1; retained.append(0); matched_by.append(None); continue
+                            covered+=1
                             timed_out=timed_out or result["timed_out"]
                             shard_failures+=result["shard_failures"]
                             stratum_total=_total_value(result["total"])
@@ -91,12 +96,16 @@ class ElasticsearchAdapter:
                                 identity=(str(hit.get("_index") or ""),str(hit.get("_id") or ""))
                                 if identity in seen: continue
                                 seen.add(identity); sampled.append(hit); accepted+=1
+                                if accepted>=quota: break
                             retained.append(accepted)
-                            if stratum_total or accepted: covered+=1
+                        if not covered: raise RuntimeError("all sampling strata failed")
                         rows=sampled[:size]
                         sampling_summary={"version":int(sampling.get("version",1)),"strategy":"time_stratified",
                             "bounds_source":bounds_source,"requested_strata":len(strata),"covered_strata":covered,
                             "retained_by_stratum":retained,"matched_by_stratum":matched_by}
+                        if failed:
+                            sampling_summary["failed_strata"]=failed
+                            sampling_summary["fallback_reason"]="stratum_error"
                     except Exception as exc:
                         sampling_summary={"version":int((sampling or {}).get("version",1)),"strategy":"earliest_fallback",
                             "requested_strata":int((sampling or {}).get("strata",1)),"covered_strata":1,

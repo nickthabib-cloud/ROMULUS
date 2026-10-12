@@ -393,6 +393,7 @@ class SchedulerOutcomeTests(unittest.TestCase):
             "sampling": {
                 "version": 1, "strategy": "rank_stratified", "requested_strata": 8,
                 "covered_strata": 7, "retained_by_stratum": [1] * 40,
+                "matched_by_stratum": [10, 20, None] + [30] * 30, "failed_strata": 1,
                 "fallback_reason": "offset limit", "windows": [{"request": "must not persist"}],
                 "query": {"secret": "must not persist"},
             },
@@ -400,7 +401,10 @@ class SchedulerOutcomeTests(unittest.TestCase):
 
         self.assertEqual(recorded["sampling"]["strategy"], "rank_stratified")
         self.assertEqual(recorded["sampling"]["covered_strata"], 7)
+        self.assertEqual(recorded["sampling"]["failed_strata"], 1)
         self.assertEqual(len(recorded["sampling"]["retained_by_stratum"]), 24)
+        self.assertEqual(recorded["sampling"]["matched_by_stratum"][:3], [10, 20, None])
+        self.assertEqual(len(recorded["sampling"]["matched_by_stratum"]), 24)
         self.assertNotIn("windows", recorded["sampling"])
         self.assertNotIn("query", recorded["sampling"])
         self.assertFalse(__import__("romulus.investigation.scheduler", fromlist=["outcome_resolves"]).outcome_resolves(recorded))
