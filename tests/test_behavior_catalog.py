@@ -56,6 +56,17 @@ class CatalogLoadingTests(unittest.TestCase):
             with self.assertRaisesRegex(CatalogValidationError, r"analytics\[0\]\.match\.all\[0\]\.operator"):
                 load_behavior_catalog(path)
 
+    def test_unknown_attack_technique_fails_closed(self):
+        from romulus.intelligence.behavior_catalog import CatalogValidationError, load_behavior_catalog
+
+        item = _analytic("BH-TEST-004")
+        item["attack_techniques"] = ["T9999"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            path.write_text(json.dumps({"catalog_version": "1.0.0", "analytics": [item]}), encoding="utf-8")
+            with self.assertRaisesRegex(CatalogValidationError, r"analytics\[0\]\.attack_techniques.*unknown"):
+                load_behavior_catalog(path)
+
     def test_missing_required_roles_make_analytic_inapplicable(self):
         from romulus.intelligence.behavior_catalog import applicable_analytics, resolve_semantic_fields
 
@@ -130,6 +141,24 @@ class CandidateRankingTests(unittest.TestCase):
             [{"range": {"@timestamp": {"gte": "2026-01-01T00:00:00Z", "lte": "2026-01-02T00:00:00Z"}}}],
         )
         self.assertIn("process.command_line", json.dumps(query))
+
+    def test_seed_query_rejects_uncompilable_required_predicate(self):
+        from romulus.intelligence.behavior_catalog import (
+            compile_elasticsearch_seed,
+            resolve_semantic_fields,
+        )
+
+        analytic = _analytic("BH-TEST-005")
+        analytic["match"]["all"].append(
+            {
+                "role": "process.command_line",
+                "operator": "regex",
+                "values": [r"powershell\\s+-enc"],
+            }
+        )
+        bindings = resolve_semantic_fields(["@timestamp", "process.command_line"])
+
+        self.assertIsNone(compile_elasticsearch_seed(analytic, bindings, "@timestamp", None))
 
     def test_temp_execution_stays_low_and_customer_hidden(self):
         from romulus.intelligence.behavior_catalog import build_candidate_queue

@@ -1423,7 +1423,7 @@
       "specificity": 84,
       "expected_noise": "low",
       "attack_techniques": [
-        "T1070.001"
+        "T1685.005"
       ],
       "benign_explanations": [
         "Authorized administration, installation, development, or security testing."
@@ -2411,7 +2411,8 @@
       "specificity": 79,
       "expected_noise": "low",
       "attack_techniques": [
-        "T1562.001"
+        "T1685",
+        "T1685.004"
       ],
       "benign_explanations": [
         "Authorized administration, installation, development, or security testing."
@@ -2476,7 +2477,7 @@
       "specificity": 80,
       "expected_noise": "low",
       "attack_techniques": [
-        "T1070.002"
+        "T1685.006"
       ],
       "benign_explanations": [
         "Authorized administration, installation, development, or security testing."

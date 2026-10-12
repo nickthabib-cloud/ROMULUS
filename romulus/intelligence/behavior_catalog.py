@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .attack_catalog import load_attack_catalog
+
 
 BEHAVIOR_CATALOG_PATH = Path(__file__).with_name("behavior_catalog.json")
 LOCAL_INDICATORS_PATH = Path(__file__).with_name("local_indicators.json")
@@ -25,6 +27,7 @@ ALLOWED_OPERATORS = {
 ALLOWED_SOURCES = {"elasticsearch", "aggregate"}
 PRIORITIES = {"informational", "low", "medium", "high", "critical"}
 NOISE_LEVELS = {"low", "medium", "high"}
+_ATTACK_TECHNIQUE_IDS: set[str] | None = None
 
 SEMANTIC_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
     "event.time": ("@timestamp", "timestamp", "event.created", "event.start", "winlog.time_created"),
@@ -147,6 +150,19 @@ def applicable_analytics(
     return applicable, unsupported
 
 
+def _valid_attack_technique_ids() -> set[str]:
+    global _ATTACK_TECHNIQUE_IDS
+    if _ATTACK_TECHNIQUE_IDS is None:
+        _ATTACK_TECHNIQUE_IDS = {
+            str(item.get("technique_id"))
+            for item in load_attack_catalog().get("techniques", [])
+            if isinstance(item, dict) and item.get("technique_id")
+        }
+        if not _ATTACK_TECHNIQUE_IDS:
+            raise CatalogValidationError("attack_catalog.json: pinned ATT&CK catalog is unavailable or invalid")
+    return _ATTACK_TECHNIQUE_IDS
+
+
 def _read_json(path: Path, label: str) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -186,6 +202,10 @@ def _validate_analytic(item: Any, index: int, seen: set[str]) -> None:
             raise CatalogValidationError(f"{prefix}.{field}: expected non-empty array")
         if not all(_nonempty_string(value) for value in values):
             raise CatalogValidationError(f"{prefix}.{field}: expected strings")
+    valid_attack_ids = _valid_attack_technique_ids()
+    for technique_id in item["attack_techniques"]:
+        if technique_id not in valid_attack_ids:
+            raise CatalogValidationError(f"{prefix}.attack_techniques: unknown pinned ATT&CK technique {technique_id}")
     known_roles = set(SEMANTIC_ROLE_ALIASES)
     for field in ("required_roles", "optional_roles"):
         for role in item[field]:
@@ -260,16 +280,18 @@ def compile_elasticsearch_seed(
     must_not = []
     for predicate in match.get("all", []):
         clause = _predicate_query(predicate, bindings)
-        if clause is not None:
-            must.append(clause)
+        if clause is None:
+            return None
+        must.append(clause)
     for predicate in match.get("any", []):
         clause = _predicate_query(predicate, bindings)
         if clause is not None:
             should.append(clause)
     for predicate in match.get("none", []):
         clause = _predicate_query(predicate, bindings)
-        if clause is not None:
-            must_not.append(clause)
+        if clause is None:
+            return None
+        must_not.append(clause)
     if not must and not should:
         return None
     body: dict[str, Any] = {}
