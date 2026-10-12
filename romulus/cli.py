@@ -1,5 +1,6 @@
 """Command line interface for deployment checks, hunting, resume, and offline demonstration."""
 import argparse, importlib.util, shutil, sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 from . import __version__
 from .config import Settings, safe_url
@@ -9,6 +10,11 @@ from .investigation.workflow import HuntEngine
 def doctor(settings: Settings) -> int:
     print(f"ROMULUS {__version__} deployment diagnostics (configured values; connectivity is checked now)")
     checks=[]
+    try:
+        ZoneInfo(settings.mission_timezone); checks.append(True)
+        print(f"OK mission timezone: {settings.mission_timezone}")
+    except ZoneInfoNotFoundError:
+        checks.append(False); print(f"FAILED mission timezone: {settings.mission_timezone}")
     for name in ("langgraph","langgraph.checkpoint.sqlite","elasticsearch","requests","docx","dotenv"):
         try: present=importlib.util.find_spec(name) is not None
         except (ImportError,ModuleNotFoundError): present=False

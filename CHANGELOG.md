@@ -2,6 +2,17 @@
 
 All notable ROMULUS changes are recorded here. Dates use the project maintainer's local date.
 
+## 0.4.2 — 2026-10-11
+
+### Time-scope and model-output reliability
+
+- Added `MISSION_TIMEZONE` so timestamps without an explicit offset are interpreted in the analyst display timezone and normalized consistently for Elasticsearch, Arkime, and TShark.
+- Added deployment diagnostics for the configured IANA timezone and made reported scope disclose how timezone-free values were interpreted.
+- Bounded the broad initial TShark filter before the mandatory packet-time clause is appended, preventing valid broad hunts from exceeding the adapter grammar limit.
+- Reduced the maximum initial model hypothesis batch to eight and increased its structured output allowance, avoiding the truncation observed with the local `qwen3:8b` model while deterministic ATT&CK seeds continue to supply broad coverage.
+- Added model-authored Elasticsearch Query DSL, Arkime expression, and TShark display-filter candidates. Each candidate is checked against a bounded read-only grammar and the discovered source fields; the mission time range is still enforced by code and rejected candidates fall back to structured selector compilation.
+- Fixed the native Elasticsearch validation helper wiring error found by the first 0.4.2 live validation attempt.
+
 ## 0.4.1 — 2026-10-11
 
 ### Controlled hunt validation

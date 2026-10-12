@@ -1,6 +1,7 @@
 """Bounded, iterative LangGraph hunt with read-only evidence collection and auditable decisions."""
 from typing import TypedDict, Any
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import ipaddress
 import json
 import hashlib
@@ -18,7 +19,9 @@ from ..intelligence.analytics import summarize_evidence, build_coverage_ledger
 from ..tools.elasticsearch_client import ElasticsearchAdapter
 from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
-from .search_planner import candidate_fields, validate_spec, fingerprint, compile_es, compile_arkime, compile_tshark, expand_anchor_selectors, anchor_time_range, SOURCE_FIELDS, TEXT_FIELDS
+from .search_planner import (candidate_fields, validate_spec, fingerprint, compile_es, compile_arkime, compile_tshark,
+    compile_native_es, validate_native_arkime, validate_native_tshark, expand_anchor_selectors, anchor_time_range,
+    SOURCE_FIELDS, TEXT_FIELDS)
 from .synthetic import sample_evidence
 
 
@@ -153,7 +156,7 @@ class HuntEngine:
 
     def _time_scope(self,s):
         explicit=_explicit_dates(s["objective"])
-        if explicit: return _time_filter(s["objective"],self.settings.es_default_hours), _date_scope(explicit)
+        if explicit: return _time_filter(s["objective"],self.settings.es_default_hours,self.settings.mission_timezone), _date_scope(explicit,self.settings.mission_timezone)
         if self.settings.historical_search: return None,"all retained indexed time"
         return _time_filter(s["objective"],self.settings.es_default_hours),f"last {self.settings.es_default_hours} hours"
 
@@ -198,7 +201,7 @@ class HuntEngine:
         return result
 
     def _plan(self,s):
-        _validate_explicit_date_order(s["objective"])
+        _validate_explicit_date_order(s["objective"],self.settings.mission_timezone)
         s["explicit_time_range"]=bool(_explicit_dates(s["objective"]))
         curated_seeds={tid:{"technique_id":tid,"name":v["name"],"tactic":v["tactic"],"tactics":v.get("tactics",[v["tactic"]]),"url":v["url"],
                 "expected_host":v["host"],"expected_network":v["network"],"benign_explanations":v["benign"],
@@ -377,7 +380,7 @@ class HuntEngine:
     def _collect_network(self,s):
         if self.offline:
             s["coverage"]["network_count"]=len(s.get("network",[])); return self._save(s)
-        explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"])
+        explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"],self.settings.mission_timezone)
         scope=self._time_scope(s)[1]; s["coverage"]["network_sources"]={}
         self._ensure_initial_plan(s)
         if self.settings.arkime_username and self.settings.arkime_password:
@@ -431,7 +434,7 @@ class HuntEngine:
 
         if self.settings.pcap_files:
             display_filter=_pcap_filter(s["hypotheses"])
-            date_filter=_pcap_time_filter(explicit)
+            date_filter=_pcap_time_filter(explicit,self.settings.mission_timezone)
             fields=["frame.number","frame.time_epoch","ip.src","ip.dst","ipv6.src","ipv6.dst","tcp.srcport","tcp.dstport","udp.srcport","udp.dstport","dns.qry.name","http.host","tls.handshake.extensions_server_name","smb2.cmd"]
             attempted=0; failed=0; returned_total=0; matched_total=0; cap_hits=0; output_cap=min(500,self.settings.max_results)
             for pcap in self.settings.pcap_files[:3]:
@@ -559,7 +562,8 @@ class HuntEngine:
         source=plan.get("source"); intent=plan.get("intent",""); fp=plan.get("fingerprint") or fingerprint(plan)
         mission_range,mission_scope=self._time_scope(s)
         effective_range=mission_range; anchor_scope=None; scope=mission_scope
-        result_count=0; status="skipped"; details={"intent":intent,"search_id":plan.get("id"),"hypothesis_id":plan.get("hypothesis_id"),"anchor_evidence_id":(plan.get("anchor_evidence_ids") or [None])[0]}
+        result_count=0; status="skipped"; details={"intent":intent,"search_id":plan.get("id"),"hypothesis_id":plan.get("hypothesis_id"),"anchor_evidence_id":(plan.get("anchor_evidence_ids") or [None])[0],
+            "native_query_language":plan.get("native_query_language","none"),"native_query_validation":plan.get("native_query_validation","not_proposed")}
         try:
             effective_range,anchor_scope=anchor_time_range(plan,_all_evidence(s),mission_range)
             scope=anchor_scope or mission_scope
@@ -582,7 +586,16 @@ class HuntEngine:
                     scoped_plan["fields"]=[f for f in TEXT_FIELDS if f in actual_fields][:4]
                 timestamp_field=next((f for f in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created") if f in actual_fields),None)
                 if effective_range and not timestamp_field: raise ValueError("No mapped timestamp field is available to enforce the search window")
-                query=compile_es(scoped_plan,actual_fields,timestamp_field or s.get("timestamp_field","@timestamp"),effective_range)
+                query=None
+                if plan.get("native_query_language")=="elasticsearch_dsl" and plan.get("native_query"):
+                    try:
+                        query=compile_native_es(plan["native_query"],actual_fields,timestamp_field or s.get("timestamp_field","@timestamp"),effective_range)
+                        details["native_query_execution"]="accepted"
+                    except (ValueError,TypeError,json.JSONDecodeError) as native_error:
+                        details["native_query_execution"]="rejected_fallback"
+                        details["native_query_error"]=_safe_error_reason(native_error)
+                if query is None:
+                    query=compile_es(scoped_plan,actual_fields,timestamp_field or s.get("timestamp_field","@timestamp"),effective_range)
                 size=min(self.settings.max_results,500)
                 details.update({"requested_index_class":requested_group,"effective_index_class":group})
                 found=self._call(s,"elasticsearch.search",stage,{**details,"source":"elasticsearch","indices":names,"query":query,"size":size},scope,
@@ -593,10 +606,20 @@ class HuntEngine:
                     for hit in rows: self._add_es_hit(s,hit,query,plan.get("id"))
                     details["matched_total"]=found.get("total")
                 s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"indices":names,
-                    "query":locals().get("query"),"time_range":scope,"returned":result_count,"status":status})
+                    "query":locals().get("query"),"time_range":scope,"returned":result_count,"status":status,
+                    "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
             elif source=="arkime":
                 if not self.settings.arkime_username or not self.settings.arkime_password: raise ValueError("Arkime API credentials are not configured")
-                expression=compile_arkime(plan); explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"])
+                expression=None
+                if plan.get("native_query_language")=="arkime" and plan.get("native_query"):
+                    try:
+                        expression=validate_native_arkime(plan["native_query"],list(SOURCE_FIELDS["arkime"]))
+                        details["native_query_execution"]="accepted"
+                    except ValueError as native_error:
+                        details["native_query_execution"]="rejected_fallback"
+                        details["native_query_error"]=_safe_error_reason(native_error)
+                if expression is None: expression=compile_arkime(plan)
+                explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"],self.settings.mission_timezone)
                 if anchor_scope and effective_range:
                     start_ms=_explicit_epoch(effective_range["gte"],scale=1000); stop_ms=_explicit_epoch(effective_range["lte"],scale=1000)
                 all_history=self.settings.historical_search and not explicit
@@ -606,11 +629,23 @@ class HuntEngine:
                     rows=found.get("sessions",[]); result_count=len(rows); status="partial" if found.get("capped") or found.get("failed") else "completed"
                     self._add_arkime_rows(s,rows,expression,scope,plan.get("id")); details["matched_total"]=found.get("total")
                 s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"expression":locals().get("expression"),
-                    "time_range":scope,"returned":result_count,"matched_total":found.get("total"),"pages":found.get("pages"),"capped":found.get("capped"),"status":status})
+                    "time_range":scope,"returned":result_count,"matched_total":found.get("total"),"pages":found.get("pages"),"capped":found.get("capped"),"status":status,
+                    "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
             elif source=="tshark":
                 if not self.settings.pcap_files: raise ValueError("No approved PCAPs are configured")
                 filter_spec={**plan,"ports":list(plan.get("ports",[]))}
-                display_filter,packet_fields=compile_tshark(filter_spec); date_filter=_pcap_time_filter(_explicit_dates(s["objective"]))
+                display_filter=None
+                packet_fields=list(dict.fromkeys(["frame.number","frame.time_epoch","ip.src","ip.dst","ipv6.src","ipv6.dst",
+                    "tcp.srcport","tcp.dstport","udp.srcport","udp.dstport",*[f for f in plan.get("fields",[]) if f in SOURCE_FIELDS["tshark"]]]))[:16]
+                if plan.get("native_query_language")=="tshark" and plan.get("native_query"):
+                    try:
+                        display_filter=validate_native_tshark(plan["native_query"],list(SOURCE_FIELDS["tshark"]))
+                        details["native_query_execution"]="accepted"
+                    except ValueError as native_error:
+                        details["native_query_execution"]="rejected_fallback"
+                        details["native_query_error"]=_safe_error_reason(native_error)
+                if display_filter is None: display_filter,packet_fields=compile_tshark(filter_spec)
+                date_filter=_pcap_time_filter(_explicit_dates(s["objective"]),self.settings.mission_timezone)
                 if anchor_scope and effective_range:
                     start_seconds=_explicit_epoch(effective_range["gte"],scale=1); stop_seconds=_explicit_epoch(effective_range["lte"],scale=1)
                     date_filter=f"frame.time_epoch >= {start_seconds:.3f} && frame.time_epoch <= {stop_seconds:.3f}"
@@ -633,7 +668,8 @@ class HuntEngine:
                 if status!="budget_limited": status="partial" if failed or cap_hits else ("completed" if attempted else "skipped")
                 s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"display_filter":locals().get("display_filter"),
                     "pcaps_attempted":attempted,"failed":failed,"cap_hits":cap_hits,"per_capture_output_cap":output_cap,
-                    "time_range":scope,"returned":result_count,"matched_total":matched_total,"status":status})
+                    "time_range":scope,"returned":result_count,"matched_total":matched_total,"status":status,
+                    "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
             else: raise ValueError("Unsupported search source")
         except Exception as exc:
             status="rejected_or_failed"; error_reason=_safe_error_reason(exc)
@@ -643,7 +679,8 @@ class HuntEngine:
                 "reason":error_reason,"status_code":status_code})
             selectors={k:plan.get(k) for k in ("terms","fields","ips","hostnames","ports","protocols","event_codes","index_class") if plan.get(k)}
             s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"selectors":selectors,
-                "time_range":scope,"returned":result_count,"status":status,"error":type(exc).__name__,"error_reason":error_reason})
+                "time_range":scope,"returned":result_count,"status":status,"error":type(exc).__name__,"error_reason":error_reason,
+                "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
         s.setdefault("coverage",{}).setdefault("model_search_results",[]).append({"search_id":plan.get("id"),"source":source,
             "hypothesis_id":plan.get("hypothesis_id"),"intent":intent,"returned":result_count,"status":status,"fingerprint":fp})
         self._stage(s,stage,status,{"search_id":plan.get("id"),"source":source,"intent":intent,"returned":result_count})
@@ -1160,7 +1197,7 @@ class HuntEngine:
             expression=_lead_network_expression(lead)
             ips=[ip for ip in lead.get("ips",[]) if isinstance(ip,str)]
             if ips: expression=f"({expression}) && ("+" || ".join(f"ip.src == {ip} || ip.dst == {ip}" for ip in ips[:4])+")"
-            explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"])
+            explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"],self.settings.mission_timezone)
             scope=self._time_scope(s)[1]; all_history=self.settings.historical_search and not explicit
             raw=self._call(s,"arkime.api.sessions","iterative_network_pivot",{"lead_id":lead["id"],"expression":expression,
                 "date":-1 if all_history else ("explicit" if explicit else self.settings.arkime_default_hours)},scope,
@@ -1172,7 +1209,7 @@ class HuntEngine:
         if self.settings.pcap_files:
             display_filter=_lead_pcap_filter(lead); ips=[ip for ip in lead.get("ips",[]) if isinstance(ip,str)]
             if ips: display_filter="("+display_filter+") && ("+" || ".join(f"ip.addr == {ip}" if ":" not in ip else f"ipv6.addr == {ip}" for ip in ips[:4])+")"
-            date_filter=_pcap_time_filter(_explicit_dates(s["objective"]))
+            date_filter=_pcap_time_filter(_explicit_dates(s["objective"]),self.settings.mission_timezone)
             for pcap in self.settings.pcap_files[:3]:
                 if not self._budget_ok(s): break
                 raw=self._call(s,"tshark.read_pcap","iterative_pcap_pivot",{"lead_id":lead["id"],"pcap":str(pcap),"display_filter":display_filter},
@@ -1552,14 +1589,11 @@ def _explicit_dates(objective):
     return re.findall(r"\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)?\b",objective)
 
 
-def _validate_explicit_date_order(objective):
+def _validate_explicit_date_order(objective,time_zone="UTC"):
     dates=_explicit_dates(objective)
     if len(dates)<2: return
-    def parse(value):
-        parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
-        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
-    try: start,end=parse(dates[0]),parse(dates[1])
-    except ValueError as exc: raise ValueError("Mission contains an invalid ISO date or time") from exc
+    try: start,end=_explicit_datetime(dates[0],False,time_zone),_explicit_datetime(dates[1],True,time_zone)
+    except (ValueError,ZoneInfoNotFoundError) as exc: raise ValueError("Mission contains an invalid ISO date, time, or configured timezone") from exc
     if end<start: raise ValueError(f"End of requested time range ({dates[1]}) precedes its start ({dates[0]}); correct the mission dates before starting the hunt")
 
 
@@ -1632,29 +1666,31 @@ def _indicator_query(terms,fields,timestamp_field=None,time_range=None):
     return query
 
 
-def _date_scope(dates): return f"{dates[0]} through {dates[1] if len(dates)>1 else 'current time'}"
+def _date_scope(dates,time_zone="UTC"):
+    suffix=f" ({time_zone} for timestamps without an offset)" if any(_is_naive_explicit(value) for value in dates) else ""
+    return f"{dates[0]} through {dates[1] if len(dates)>1 else 'current time'}{suffix}"
 
 
-def _time_filter(objective,lookback_hours):
+def _time_filter(objective,lookback_hours,time_zone="UTC"):
     found=_explicit_dates(objective)
-    if len(found)>=2: return {"gte":found[0],"lte":_inclusive_end(found[1])}
-    if found: return {"gte":found[0],"lte":"now"}
+    if len(found)>=2: return {"gte":_explicit_iso(found[0],False,time_zone),"lte":_explicit_iso(found[1],True,time_zone)}
+    if found: return {"gte":_explicit_iso(found[0],False,time_zone),"lte":"now"}
     return {"gte":f"now-{lookback_hours}h","lte":"now"}
 
 
-def _arkime_time_window(objective):
+def _arkime_time_window(objective,time_zone="UTC"):
     found=_explicit_dates(objective)
     if not found: return None,None
     try:
         now=int(datetime.now(timezone.utc).timestamp()*1000)
-        return _explicit_epoch(found[0],False,1000),_explicit_epoch(found[1],True,1000) if len(found)>1 else now
+        return _explicit_epoch(found[0],False,1000,time_zone),_explicit_epoch(found[1],True,1000,time_zone) if len(found)>1 else now
     except (ValueError,OverflowError): return None,None
 
 
-def _pcap_time_filter(dates):
+def _pcap_time_filter(dates,time_zone="UTC"):
     if not dates: return ""
     try:
-        start=_explicit_epoch(dates[0],False,1); end=_explicit_epoch(dates[1],True,1) if len(dates)>1 else time.time()
+        start=_explicit_epoch(dates[0],False,1,time_zone); end=_explicit_epoch(dates[1],True,1,time_zone) if len(dates)>1 else time.time()
         return f"frame.time_epoch >= {start:.3f} && frame.time_epoch <= {end:.3f}"
     except (ValueError,OverflowError): return ""
 
@@ -1688,18 +1724,26 @@ def _arkime_indicator_expressions(terms):
     return expressions or ["protocols == http"]
 
 
-def _inclusive_end(value):
-    """Treat a date-only mission end as the last millisecond of that UTC day."""
-    return f"{value}T23:59:59.999Z" if re.fullmatch(r"\d{4}-\d{2}-\d{2}",value) else value
+def _is_naive_explicit(value):
+    try: return datetime.fromisoformat(value.replace("Z","+00:00")).tzinfo is None
+    except ValueError: return False
 
 
-def _explicit_epoch(value,end_of_day=False,scale=1):
+def _explicit_datetime(value,end_of_day=False,time_zone="UTC"):
     if end_of_day and re.fullmatch(r"\d{4}-\d{2}-\d{2}",value):
-        dt=datetime.fromisoformat(value).replace(tzinfo=timezone.utc,hour=23,minute=59,second=59,microsecond=999000)
+        dt=datetime.fromisoformat(value).replace(hour=23,minute=59,second=59,microsecond=999000)
     else:
         dt=datetime.fromisoformat(value.replace("Z","+00:00"))
-        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()*scale
+    if dt.tzinfo is None: dt=dt.replace(tzinfo=ZoneInfo(time_zone))
+    return dt.astimezone(timezone.utc)
+
+
+def _explicit_iso(value,end_of_day=False,time_zone="UTC"):
+    return _explicit_datetime(value,end_of_day,time_zone).isoformat(timespec="milliseconds").replace("+00:00","Z")
+
+
+def _explicit_epoch(value,end_of_day=False,scale=1,time_zone="UTC"):
+    return _explicit_datetime(value,end_of_day,time_zone).timestamp()*scale
 
 
 def _pcap_filter(hypotheses):
@@ -1710,7 +1754,12 @@ def _pcap_filter(hypotheses):
         clauses.extend(f"tcp.port == {port} || udp.port == {port}" for port in meta.get("ports",[])[:8])
         clauses.extend(protocol_map.get(protocol,protocol) for protocol in meta.get("protocols",[])[:5]
             if protocol_map.get(protocol,protocol) in {"tcp","udp","icmp","dns","http","tls","smb2","dcerpc"})
-    return " || ".join(dict.fromkeys(clauses)) or "ip"
+    unique=list(dict.fromkeys(clauses)); selected=[]
+    for clause in unique:
+        candidate=" || ".join([*selected,clause])
+        if len(candidate)>400: break
+        selected.append(clause)
+    return " || ".join(selected) or "ip"
 
 
 def _lead_network_expression(lead):

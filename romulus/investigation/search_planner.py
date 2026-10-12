@@ -1,7 +1,8 @@
-"""Validate model-authored hunt intent and compile it into bounded source queries.
+"""Validate model-authored hunt intent and compile bounded source queries.
 
-The model can describe selectors (terms, entities, ports, protocols, event IDs),
-but never supplies Elasticsearch DSL, Arkime syntax, TShark filters, or commands.
+The model may supply selectors and an optional source-native query candidate.
+Native candidates pass a strict read-only grammar and live-field check before
+execution. Rejected candidates fall back to deterministic selector compilation.
 """
 from __future__ import annotations
 
@@ -40,6 +41,9 @@ TEXT_FIELDS = ("message", "event.original", "event.action", "event.dataset", "ev
     "host.http", "dns.host", "http.host",
     "tls.handshake.extensions_server_name", "smb2.filename")
 TIER_BY_SOURCE = {"elasticsearch": "elasticsearch", "arkime": "arkime", "tshark": "tshark"}
+NATIVE_LANGUAGE = {"elasticsearch": {"elasticsearch_dsl"}, "arkime": {"arkime"}, "tshark": {"tshark"}}
+TSHARK_PROTOCOL_ATOMS = {"ip", "ipv6", "tcp", "udp", "icmp", "dns", "http", "tls", "smb2", "dcerpc", "rdp", "ssh"}
+TSHARK_FILTER_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ .:=<>!&|()/-\"'[]*,")
 
 
 def candidate_fields(source: str, available: list[str] | set[str]) -> list[str]:
@@ -106,7 +110,8 @@ def validate_spec(raw: Any, *, allowed_sources: list[str], hypothesis_ids: set[s
     protocols = [x.lower() for x in _strings(raw.get("protocols"), lambda s: s.lower() in PROTOCOLS, 8, 16)]
     index_class = raw.get("index_class") if raw.get("index_class") in {"host", "network", "all"} else "all"
     anchors = _strings(raw.get("anchor_evidence_ids"), lambda x: x in evidence_ids, 1, 80)
-    if not (terms or ips or hosts or ports or event_codes or protocols):
+    native_query,native_language,native_validation=_native_candidate(raw,source,fields)
+    if not (terms or ips or hosts or ports or event_codes or protocols or native_query):
         return None
     if source == "elasticsearch" and not selected_fields:
         # In particular, never fall back to an unbounded query when the model
@@ -126,12 +131,101 @@ def validate_spec(raw: Any, *, allowed_sources: list[str], hypothesis_ids: set[s
     return {"source": source, "hypothesis_id": hypothesis_id, "intent": intent,
         "terms": terms, "fields": selected_fields, "ips": ips, "hostnames": hosts,
         "ports": ports, "protocols": protocols, "event_codes": event_codes,
-        "index_class": index_class if source == "elasticsearch" else "all", "anchor_evidence_ids": anchors}
+        "index_class": index_class if source == "elasticsearch" else "all", "anchor_evidence_ids": anchors,
+        "native_query":native_query,"native_query_language":native_language,"native_query_validation":native_validation}
 
 
 def fingerprint(spec: dict[str, Any]) -> str:
-    executable = {k: spec.get(k) for k in ("source", "terms", "fields", "ips", "hostnames", "ports", "protocols", "event_codes", "index_class", "anchor_evidence_ids")}
+    executable = {k: spec.get(k) for k in ("source", "terms", "fields", "ips", "hostnames", "ports", "protocols", "event_codes", "index_class", "anchor_evidence_ids", "native_query", "native_query_language")}
     return hashlib.sha256(json.dumps(executable, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:20]
+
+
+def _native_candidate(raw: dict[str,Any],source: str,fields: list[str]) -> tuple[str,str,str]:
+    query=raw.get("native_query")
+    language=str(raw.get("native_query_language") or "none").lower()
+    if not isinstance(query,str) or not query.strip() or language=="none": return "","none","not_proposed"
+    query=query.strip()
+    if language not in NATIVE_LANGUAGE[source]: return "","none","rejected_language_mismatch"
+    try:
+        if language=="elasticsearch_dsl": validate_native_es(query,fields)
+        elif language=="arkime": validate_native_arkime(query,fields)
+        elif language=="tshark": validate_native_tshark(query,fields)
+    except (ValueError,TypeError,json.JSONDecodeError): return "","none","rejected_validation"
+    return query,language,"accepted"
+
+
+def validate_native_arkime(expression: str,fields: list[str]) -> str:
+    if not 1<=len(expression)<=512 or any(ord(ch)<32 for ch in expression): raise ValueError("Arkime expression has invalid length or control characters")
+    if any(ch in expression for ch in (";","`","{","}","$")): raise ValueError("Arkime expression contains unsupported syntax")
+    if expression.count("(")!=expression.count(")") or expression.count('"')%2: raise ValueError("Arkime expression has unbalanced delimiters")
+    referenced=re.findall(r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_.-]*)\s*(?:==|!=|=~|<=|>=|<|>)",expression)
+    if not referenced or any(field not in fields or field not in SOURCE_FIELDS["arkime"] for field in referenced):
+        raise ValueError("Arkime expression references an unavailable field")
+    return expression
+
+
+def validate_native_tshark(expression: str,fields: list[str]) -> str:
+    if not 1<=len(expression)<=400 or any(ch not in TSHARK_FILTER_CHARS for ch in expression): raise ValueError("TShark expression has unsupported syntax or length")
+    if expression.count("(")!=expression.count(")") or expression.count('"')%2: raise ValueError("TShark expression has unbalanced delimiters")
+    structure=re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', '""', expression)
+    referenced=set(re.findall(r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_.-]*)\s*(?:==|!=|<=|>=|<|>|contains|matches)",structure))
+    dotted=set(re.findall(r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_-]*\.[A-Za-z0-9_.-]+)",structure))
+    if any(field not in fields or field not in SOURCE_FIELDS["tshark"] for field in referenced|dotted):
+        raise ValueError("TShark expression references an unavailable field")
+    atoms=set(re.findall(r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_-]*)(?![A-Za-z0-9_.-])",structure))
+    operators={"contains","matches","and","or","not","true","false"}
+    if any(atom.lower() not in TSHARK_PROTOCOL_ATOMS|operators for atom in atoms if atom not in {part for field in dotted for part in field.split(".")}):
+        raise ValueError("TShark expression contains an unsupported bare identifier")
+    return expression
+
+
+def validate_native_es(candidate: str,fields: list[str]) -> str:
+    parsed=json.loads(candidate)
+    clause=parsed.get("query") if isinstance(parsed,dict) and set(parsed)=={"query"} else parsed
+    _validate_es_clause(clause,set(fields))
+    return candidate
+
+
+def compile_native_es(candidate: str,fields: list[str],timestamp_field: str,time_range: dict[str,str] | None) -> dict[str,Any]:
+    validate_native_es(candidate,fields)
+    parsed=json.loads(candidate)
+    clause=parsed.get("query") if isinstance(parsed,dict) and set(parsed)=={"query"} else parsed
+    filters=[]
+    if time_range:
+        if timestamp_field not in fields: raise ValueError("No mapped timestamp field is available to enforce the hunt time window")
+        filters.append({"range":{timestamp_field:time_range}})
+    query={"bool":{"must":[clause],**({"filter":filters} if filters else {})}}
+    _limit_dsl(query)
+    return query
+
+
+def _validate_es_clause(clause: Any,fields: set[str],depth: int=0) -> None:
+    if depth>10 or not isinstance(clause,dict) or len(clause)!=1: raise ValueError("Elasticsearch DSL clause is malformed")
+    kind,value=next(iter(clause.items()))
+    if kind=="bool":
+        if not isinstance(value,dict) or set(value)-{"must","filter","should","must_not","minimum_should_match"}: raise ValueError("Elasticsearch bool clause is unsupported")
+        for key in ("must","filter","should","must_not"):
+            children=value.get(key,[]); children=children if isinstance(children,list) else [children]
+            if len(children)>24: raise ValueError("Elasticsearch bool clause is too large")
+            for child in children: _validate_es_clause(child,fields,depth+1)
+        minimum=value.get("minimum_should_match")
+        if minimum is not None and (not isinstance(minimum,int) or minimum<0 or minimum>24): raise ValueError("minimum_should_match is invalid")
+        return
+    if kind=="exists":
+        if not isinstance(value,dict) or set(value)!={"field"} or value.get("field") not in fields: raise ValueError("Elasticsearch exists field is unavailable")
+        return
+    if kind not in {"term","terms","match","match_phrase","range","wildcard","prefix"} or not isinstance(value,dict) or len(value)!=1:
+        raise ValueError("Elasticsearch query clause is unsupported")
+    field,operand=next(iter(value.items()))
+    if field not in fields: raise ValueError("Elasticsearch query references an unavailable field")
+    if kind=="terms":
+        if not isinstance(operand,list) or not 1<=len(operand)<=32 or any(not isinstance(x,(str,int,float,bool)) for x in operand): raise ValueError("Elasticsearch terms values are invalid")
+    elif kind=="range":
+        if not isinstance(operand,dict) or set(operand)-{"gt","gte","lt","lte"} or not operand: raise ValueError("Elasticsearch range is invalid")
+    elif isinstance(operand,dict):
+        if set(operand)-{"value","case_insensitive"} or "value" not in operand: raise ValueError("Elasticsearch query options are unsupported")
+    elif not isinstance(operand,(str,int,float,bool)):
+        raise ValueError("Elasticsearch query value is invalid")
 
 
 def expand_anchor_selectors(raw: Any, evidence: list[dict]) -> Any:

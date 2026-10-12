@@ -45,6 +45,7 @@ class Settings:
     arkime_password: str
     arkime_api_path: str
     arkime_default_hours: int
+    mission_timezone: str
     pcap_allowed_dirs: tuple[Path, ...]
     pcap_files: tuple[Path, ...]
     tshark_bin: str
@@ -79,6 +80,7 @@ class Settings:
             arkime_username=os.getenv("ARKIME_USERNAME", ""), arkime_password=os.getenv("ARKIME_PASSWORD", ""),
             arkime_api_path="/" + os.getenv("ARKIME_API_PATH", "/api/sessions").strip("/"),
             arkime_default_hours=_int("ARKIME_DATE_HOURS", 24, 1, 8760),
+            mission_timezone=os.getenv("MISSION_TIMEZONE", "UTC").strip() or "UTC",
             pcap_allowed_dirs=paths("PCAP_ALLOWED_DIRS"), pcap_files=paths("PCAP_FILES"), tshark_bin=os.getenv("TSHARK_BIN", "tshark"),
             max_tool_calls=_int("MAX_TOOL_CALLS", 160, 1, 200), max_depth=_int("MAX_DEPTH", 10, 1, 20),
             min_reasoning_rounds=_int("MIN_REASONING_ROUNDS", 3, 1, 10),
