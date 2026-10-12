@@ -230,7 +230,7 @@ class CoreTests(unittest.TestCase):
                 def mappings_many(self,indices): return {"ainception-hostlogs-a-b":{"mappings":{"properties":{
                     "@timestamp":{"type":"date"},"message":{"type":"text"},"event":{"properties":{"code":{"type":"long"}}},
                     "source":{"properties":{"ip":{"type":"ip"}}},"host":{"properties":{"name":{"type":"keyword"}}}}}}}
-                def search_many(self,indices,query,size):
+                def search_many(self,indices,query,size,**kwargs):
                     self.searches+=1
                     code=4624 if self.searches==1 else 7045
                     msg="successful 4624 logon" if code==4624 else "7045 service installation"

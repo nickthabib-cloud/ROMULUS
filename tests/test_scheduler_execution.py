@@ -109,8 +109,8 @@ class SchedulerExecutionTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def search_many(self, indices, query, size):
-                self.calls.append((indices, query, size))
+            def search_many(self, indices, query, size, **kwargs):
+                self.calls.append((indices, query, size, kwargs))
                 return {
                     "hits": [
                         {
@@ -125,6 +125,13 @@ class SchedulerExecutionTests(unittest.TestCase):
                     "capped": False,
                     "timed_out": False,
                     "shard_failures": 0,
+                    "sampling": {
+                        "version": 1,
+                        "strategy": "exhaustive",
+                        "requested_strata": 1,
+                        "covered_strata": 1,
+                        "retained_by_stratum": [1],
+                    },
                 }
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
@@ -140,10 +147,15 @@ class SchedulerExecutionTests(unittest.TestCase):
             outcome = engine._execute_search_task(state, task)
 
             self.assertEqual(len(elasticsearch.calls), 1)
-            indices, query, size = elasticsearch.calls[0]
+            indices, query, size, sampling_arguments = elasticsearch.calls[0]
             self.assertEqual(indices, ["host-events"])
             self.assertEqual(query, task["query_spec"]["query"])
             self.assertEqual(size, 5)
+            self.assertEqual(
+                sampling_arguments["time_range"],
+                {"gte": "2024-11-13T10:58:00Z", "lte": "2024-11-13T11:10:00Z"},
+            )
+            self.assertEqual(sampling_arguments["sampling"]["strategy"], "time_or_rank_stratified")
             self.assertEqual(len(state["host"]), 1)
             self.assertEqual(state["pivot_results"], pivots_before)
             self.assertEqual(outcome["task_id"], task["task_id"])
@@ -154,6 +166,7 @@ class SchedulerExecutionTests(unittest.TestCase):
             self.assertFalse(outcome["timed_out"])
             self.assertTrue(outcome["artifact_id"].startswith("SR-"))
             self.assertEqual(outcome["time_range"], task["time_range"])
+            self.assertEqual(outcome["sampling"]["strategy"], "exhaustive")
 
     def test_report_derives_resource_limit_from_scheduler_not_legacy_queue(self):
         from unittest.mock import patch
@@ -258,7 +271,7 @@ class _RecordingElasticsearch:
         self.order = order
         self.calls = []
 
-    def search_many(self, indices, query, size):
+    def search_many(self, indices, query, size, **kwargs):
         self.order.append("host")
         self.calls.append((indices, query, size))
         return {
@@ -434,7 +447,7 @@ class SchedulerDiscoveryWorkflowTests(unittest.TestCase):
             },"coverage_frontier")
             self.assertEqual(proposals[0]["source_targets"],["logs-suricata-events"])
             class NetworkElasticsearch(_RecordingElasticsearch):
-                def search_many(self,indices,query,size):
+                def search_many(self,indices,query,size,**kwargs):
                     self.order.append("network"); self.calls.append((indices,query,size))
                     return {"hits":[{"_index":"logs-suricata-events","_id":"net-1",
                         "@timestamp":"2024-11-13T11:00:00Z","source":{"ip":"10.0.0.8"},
@@ -1039,7 +1052,7 @@ class SchedulerExecutionAdditionalTests(unittest.TestCase):
 
         class Elasticsearch:
             def __init__(self): self.calls=[]
-            def search_many(self,indices,query,size):
+            def search_many(self,indices,query,size,**kwargs):
                 self.calls.append((indices,query,size))
                 return {"hits":[],"total":0,"capped":False,"timed_out":False,"shard_failures":0}
 
@@ -1174,7 +1187,7 @@ class SchedulerExecutionAdditionalTests(unittest.TestCase):
 
     def test_adapter_error_returns_bounded_failed_outcome(self):
         class FailingElasticsearch:
-            def search_many(self, indices, query, size):
+            def search_many(self, indices, query, size, **kwargs):
                 raise RuntimeError("source unavailable " + ("x" * 1000))
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:

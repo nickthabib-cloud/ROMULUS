@@ -31,6 +31,7 @@ from .search_planner import (candidate_fields, validate_spec, compile_es, compil
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
     record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
     recover_interrupted_tasks)
+from .sampling import sampling_policy
 from .synthetic import sample_evidence
 
 
@@ -946,7 +947,7 @@ class HuntEngine:
         before_runs=len(s.setdefault("tool_runs",[])); before_errors=len(s.setdefault("source_errors",[]))
         before_evidence={item.get("evidence_id") for item in s.get("host",[])+s.get("network",[]) if item.get("evidence_id")}
         returned=0; matched=None; capped=False; timed_out=False; shard_failures=0; incomplete=False
-        status="failed"; error_kind=None; reason=None; query_summary={}
+        status="failed"; error_kind=None; reason=None; query_summary={}; sampling_summary=None
         try:
             if not self._budget_ok(s):
                 status="budget_limited"; incomplete=True; reason=str(s.get("termination_reason") or "search_budget_exhausted")
@@ -961,9 +962,14 @@ class HuntEngine:
                 if not _query_enforces_scheduled_window(query,start_time,end_time):
                     raise ValueError("Scheduled Elasticsearch query does not enforce its time range")
                 size=max(1,min(int(query_spec.get("size",self.settings.max_results)),self.settings.max_results,500))
+                task_sampling=query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings)
+                adapter_time_range=({"gte":start_time.astimezone(timezone.utc).isoformat().replace("+00:00","Z"),
+                    "lte":end_time.astimezone(timezone.utc).isoformat().replace("+00:00","Z")}
+                    if start_time and end_time else None)
                 found=self._call(s,"elasticsearch.search",stage,
                     {"task_id":task_id,"indices":targets,"query":query,"size":size},scope,
-                    lambda:self.es.search_many(targets,query,size),lambda value:len(value.get("hits",[])))
+                    lambda:self.es.search_many(targets,query,size,time_range=adapter_time_range,
+                        sampling=task_sampling),lambda value:len(value.get("hits",[])))
                 if found is None:
                     incomplete=True
                     if s.get("termination_reason") in {"tool_call_budget","runtime_budget"}: status="budget_limited"; reason=str(s["termination_reason"])
@@ -976,8 +982,9 @@ class HuntEngine:
                     failures=found.get("shard_failures",0); shard_failures=len(failures) if isinstance(failures,list) else int(failures or 0)
                     incomplete=matched is None or capped or timed_out or bool(shard_failures)
                     status="partial" if incomplete else "completed"
+                    sampling_summary=found.get("sampling") if isinstance(found.get("sampling"),dict) else None
                     for hit in rows: self._add_es_hit(s,hit,query,task_id)
-                query_summary={"indices":targets,"query":query,"size":size}
+                query_summary={"indices":targets,"query":query,"size":size,**({"sampling":sampling_summary} if sampling_summary else {})}
             elif source=="arkime":
                 targets=list(task.get("source_targets") or [])
                 if targets!=[safe_url(self.settings.arkime_url)]: raise ValueError("Scheduled Arkime target is not the configured deployment")
@@ -1048,6 +1055,7 @@ class HuntEngine:
         outcome={"task_id":task_id,"status":status,"returned_total":returned,"matched_total":matched,
             "capped":capped,"timed_out":timed_out,"shard_failures":shard_failures,"incomplete":incomplete,
             "artifact_id":artifact_id,"evidence_ids":evidence_ids,"time_range":time_range}
+        if sampling_summary: outcome["sampling"]=sampling_summary
         if error_kind: outcome["error_kind"]=error_kind
         if reason: outcome["reason"]=str(reason)[:300]
         s.setdefault("queries",[]).append({"stage":stage,"source":source,"task_id":task_id,"intent":str(task.get("intent") or "")[:300],

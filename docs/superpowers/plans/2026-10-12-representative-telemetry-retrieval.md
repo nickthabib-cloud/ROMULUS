@@ -59,11 +59,11 @@
 - Produces: `ElasticsearchAdapter.search_many(..., timestamp_field: str | None = None, time_range: dict | None = None, sampling: dict | None = None) -> dict` with bounded `sampling` metadata.
 - Produces: scheduler outcomes containing the adapter sampling summary and evidence from multiple nonempty strata.
 
-- [ ] Write failing fake-client tests where capped earliest-first results omit synthetic middle/late records; assert representative retention, stable IDs, exact cap, deduplication, partial status, and uncapped compatibility.
-- [ ] Run the focused sampling and scheduler-execution tests; expect the new assertions to fail.
-- [ ] Implement PIT-scoped bound discovery, safe internal range intersection, per-stratum bounded retrieval, fallback disclosure, and workflow argument/provenance plumbing.
-- [ ] Run `python -m unittest tests.test_representative_sampling tests.test_scheduler_execution -v`; expect PASS.
-- [ ] Commit with `feat: sample capped elasticsearch windows`.
+- [x] Write failing fake-client tests where capped earliest-first results omit synthetic middle/late records; assert representative retention, stable IDs, exact cap, deduplication, partial status, and uncapped compatibility.
+- [x] Run the focused sampling and scheduler-execution tests; expect the new assertions to fail.
+- [x] Implement PIT-scoped bound discovery, safe internal range intersection, per-stratum bounded retrieval, fallback disclosure, and workflow argument/provenance plumbing.
+- [x] Run `python -m unittest tests.test_representative_sampling tests.test_scheduler_execution -v`; expect PASS.
+- [x] Commit with `feat: sample capped elasticsearch windows`.
 
 ### Task 3: Representative Arkime retrieval
 
@@ -146,4 +146,4 @@
 ## Execution status
 
 - Plan authorized for native execution by the operator on 2026-10-12; no additional approval checkpoint is required.
-- Task 1 is complete; Tasks 2–6 remain.
+- Tasks 1–2 are complete; Tasks 3–6 remain. The operator paused live-hunt validation until the expected attack telemetry is present in the dataset; Task 6 will use local/VM tests and ingestion-path diagnosis instead of another hunt.
