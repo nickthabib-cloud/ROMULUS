@@ -2,6 +2,35 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-12 — candidate-driven investigation loop
+
+### Implemented behavior
+
+- Broad, undirected missions now enter deterministic telemetry discovery with zero initial hypotheses and do not call the model until a deterministic candidate exists.
+- Focused missions may create initial hypotheses, but each records `operator_direction` as its basis.
+- Candidate-backed hypotheses record stable candidate IDs and cited evidence IDs. Model follow-up hypotheses are accepted only when their claimed basis is a visible evidence or candidate ID; model findings remain evidence-ID-only.
+- All 13 aggregate behavior-catalog signals have deterministic generators and a catalog-completeness regression test.
+- Candidate disposition and structured follow-up history survive repeated analysis, and actionable high-priority candidates or unfinished required follow-ups prevent clean closure.
+
+### Defects found by live validation
+
+- The first disposable live run revealed that `mission_mode` was not declared in the LangGraph state type. LangGraph therefore dropped the field at the node boundary, allowing undirected collection to reach model-generated initial searches. The run was stopped, `mission_mode` was added to the graph schema, and a dependency-complete graph-boundary regression test now proves that a candidate-free undirected hunt makes no model call.
+- The next isolated run reached candidates correctly but exposed an `AttributeError` because candidate-grounded reasoning expected `model_initial_search_plan` to be an object while undirected deferral recorded a status string. The adapter now normalizes either representation, and its model-context test covers the deferred status and candidate queue.
+
+### Development VM proof
+
+- The final deployed archive for commit `48c0631` matched SHA-256 `34c2e981c19c005f4bfbc7b9668ed8ba054accf4ea5e89743a32baeada78546d`.
+- Deployment diagnostics remained green for Ollama `qwen3:8b`, two allowlisted Elasticsearch indexes, Arkime with 19,068 sessions, TShark 4.2.2, three configured PCAPs, the pinned ATT&CK catalog, and writable runtime paths.
+- The complete VM suite passed all 48 tests with no skips. The local dependency-light suite also passed all available tests; dependency-backed adapter, LangGraph, and Word checks were then exercised on the VM.
+- Bounded live investigation `HUNT-2903D1FB0C` used isolated `/tmp` state, a twelve-minute 2024 telemetry window, 35-call/one-round limits, 50-record search caps, a 200-session Arkime cap, and no PCAP scan.
+- The live sequence was deterministic discovery first: seven behavior searches and one Arkime search produced 250 retained context records and 20 candidates before any model call. State contained eight hypotheses, all with `observed_candidate` basis. The audit contained exactly one model stage, `analyst_reasoning`; there was no `hypothesis_generation` or `initial_search_planning` call.
+- Candidate-grounded reasoning returned two accepted, bounded searches: an Arkime evidence-anchored outbound-connection pivot and an Elasticsearch evidence-anchored process/account pivot. Both executed read-only.
+- The hunt correctly remained `partial / incomplete_investigation` at the intentional depth and Arkime result caps. It did not publish a finding or claim the environment clean. Both Word and text reports reopened successfully.
+
+### Scope boundary
+
+This milestone does not yet build the temporal/entity attack-path graph or implement compact-on-finalization retention. Disposable validation data was isolated from operational state; the next reporting/retention milestone will implement the hunt-scoped cleanup policy rather than relying on manual validation cleanup.
+
 ## 2026-10-12 — super-hunter correctness foundation
 
 ### Defects and stale checks resolved

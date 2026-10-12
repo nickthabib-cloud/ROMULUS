@@ -11,6 +11,7 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 - Completed all 13 aggregate catalog generators, including privileged-logon/execution, authentication fan-out, remote-service/execution, DNS entropy and NXDOMAIN bursts, protocol/port mismatch, outbound-volume outliers, rare process/destination pairs, and staging followed by transfer.
 - Added persistent candidate dispositions and structured follow-up histories that survive analysis rounds, plus candidate IDs in bounded model context with deterministic citation validation.
 - Made coverage closure candidate-aware: actionable candidates, incomplete required follow-ups, unlinked corroboration, and unresolved leads without documented telemetry gaps prevent clean completion.
+- Preserved mission mode explicitly in the LangGraph state schema so the undirected-hunt guard survives node/checkpoint boundaries, and made candidate-grounded reasoning tolerate a deferred initial-plan status.
 
 ### Super-hunter correctness foundation
 
