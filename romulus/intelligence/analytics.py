@@ -103,21 +103,31 @@ def build_coverage_ledger(hypotheses: list[dict], lead_catalog: list[dict], comp
     for hypothesis in hypotheses:
         hid = hypothesis.get("hypothesis_id")
         planned = [x for x in lead_catalog if x.get("hypothesis_id") == hid]
-        executed = [x for x in planned if x.get("id") in completed]
-        sources = sorted({str(x.get("source")) for x in executed})
-        result_rows = [results_by_id[x.get("id")] for x in executed if x.get("id") in results_by_id]
+        attempted = [x for x in planned if x.get("id") in completed]
+        resolved = [x for x in attempted if _resolved_search_result(results_by_id.get(str(x.get("id"))))]
+        sources = sorted({str(x.get("source")) for x in attempted})
+        result_rows = [results_by_id[x.get("id")] for x in attempted if x.get("id") in results_by_id]
         returned = sum(int(x.get("returned", 0) or 0) for x in result_rows)
-        assessment = hypothesis.get("model_assessment") if isinstance(hypothesis.get("model_assessment"), dict) else {}
+        assessment = (hypothesis.get("model_assessment") if isinstance(hypothesis.get("model_assessment"), dict)
+            else hypothesis.get("deterministic_assessment") if isinstance(hypothesis.get("deterministic_assessment"), dict) else {})
         gaps = []
         needs_host = bool(hypothesis.get("expected_host")); needs_network = bool(hypothesis.get("expected_network"))
         if needs_host and not host_available: gaps.append("host telemetry unavailable")
         if needs_network and not network_available: gaps.append("network telemetry unavailable")
-        searched = bool(executed)
+        searched = bool(attempted)
         status = assessment.get("status") or ("searched_unassessed" if searched else "untested")
-        closed = status in {"supported", "contradicted", "inconclusive"} or (searched and bool(gaps))
+        assessment_cited = status in {"supported", "contradicted", "inconclusive"} and bool(assessment.get("evidence_ids"))
+        all_planned_resolved = bool(planned) and len(resolved) == len(planned)
+        unavailable_sources = ({"host"} if not host_available else set()) | ({"network"} if not network_available else set())
+        unresolved_ids = {lead.get("id") for lead in planned} - {lead.get("id") for lead in resolved}
+        unresolved = [lead for lead in planned if lead.get("id") in unresolved_ids]
+        explicit_gap_closure = bool(gaps) and bool(planned) and all(
+            str(lead.get("source")) in unavailable_sources for lead in unresolved)
+        closed = (all_planned_resolved and assessment_cited) or explicit_gap_closure
         rows.append({"hypothesis_id": hid, "technique_id": hypothesis.get("technique_id"),
                      "priority": hypothesis.get("priority", 3), "tactics": hypothesis.get("tactics", []),
-                     "planned_analytics": len(planned), "executed_analytics": len(executed), "sources": sources,
+                     "planned_analytics": len(planned), "executed_analytics": len(attempted),
+                     "resolved_analytics": len(resolved), "sources": sources,
                      "returned": returned, "assessment": status, "telemetry_gaps": gaps, "closed": closed})
     high = [x for x in rows if int(x.get("priority") or 3) >= 4]
     candidate_rows = []
@@ -141,7 +151,7 @@ def build_coverage_ledger(hypotheses: list[dict], lead_catalog: list[dict], comp
             "finding_ids": candidate.get("finding_ids", []), "telemetry_gaps": candidate.get("telemetry_gaps", []),
             "closed": closed})
     actionable_candidates = [item for item in candidate_rows if item["actionable"]]
-    hypothesis_ready = all(x["executed_analytics"] > 0 or bool(x["telemetry_gaps"]) for x in high)
+    hypothesis_ready = all(bool(x["closed"]) for x in high)
     candidate_ready = all(item["closed"] for item in actionable_candidates)
     return {"rows": rows, "high_priority_total": len(high),
             "high_priority_tested": sum(x["executed_analytics"] > 0 or bool(x["telemetry_gaps"]) for x in high),
@@ -151,6 +161,17 @@ def build_coverage_ledger(hypotheses: list[dict], lead_catalog: list[dict], comp
             "open_candidate_ids": [item["candidate_id"] for item in actionable_candidates if not item["closed"]],
             "hypothesis_closure_ready": hypothesis_ready, "candidate_closure_ready": candidate_ready,
             "closure_ready": hypothesis_ready and candidate_ready}
+
+
+def _resolved_search_result(result: dict | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    status = str(result.get("status") or "").lower()
+    if not status:
+        return False
+    return not any(token in status for token in (
+        "failed", "skipped", "budget", "no configured", "rejected", "error", "partial", "cap reached",
+    ))
 
 
 def _authentication_sequences(events: list[dict], limit: int) -> list[dict]:
@@ -167,13 +188,18 @@ def _authentication_sequences(events: list[dict], limit: int) -> list[dict]:
         grouped[(user, source)].append((stamp, outcome, str(event.get("evidence_id") or "")))
     out = []
     for (user, source), rows in grouped.items():
-        rows.sort(); failures = 0
+        rows.sort(); failures: list[tuple[datetime, str]] = []
         for stamp, outcome, ref in rows:
-            if outcome == "failure": failures += 1; continue
+            if outcome == "failure":
+                failures.append((stamp, ref)); continue
+            failures = [(failure_time, failure_ref) for failure_time, failure_ref in failures
+                if stamp - timedelta(minutes=15) <= failure_time <= stamp]
             if failures:
-                out.append({"user": user, "source": source, "failures_before_success": failures,
-                            "success_at": stamp.isoformat(), "sample_evidence_id": ref})
-            failures = 0
+                refs = [failure_ref for _, failure_ref in failures if failure_ref]
+                if ref: refs.append(ref)
+                out.append({"user": user, "source": source, "failures_before_success": len(failures),
+                            "success_at": stamp.isoformat(), "sample_evidence_ids": list(dict.fromkeys(refs))[:6]})
+            failures = []
     return sorted(out, key=lambda x: x["failures_before_success"], reverse=True)[:limit]
 
 
@@ -237,7 +263,8 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
             processes_by_asset[asset].append((stamp, event, process))
         is_execution = code in {"1", "4688"} or bool(_values(event, ("process.name", "process.executable", "process.command_line")))
         if is_execution:
-            executions.append((stamp, event, asset))
+            execution_source = next(iter(_values(event, ("source.ip", "winlog.event_data.IpAddress", "ip.src"))), "")
+            executions.append((stamp, event, asset, user, process, execution_source))
         success = code == "4624" or any(token in text for token in ("successful logon", "accepted password", "accepted publickey"))
         if code == "4672" or (success and user.lower() in {"root", "administrator", "admin", "system", "nt authority\\system"}):
             privileged.append((stamp, event, asset, user))
@@ -249,9 +276,11 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
             staging.append((stamp, event, asset))
 
     for login_time, login, asset, user in privileged:
-        match = next(((stamp, event) for stamp, event, target in sorted(executions, key=lambda row: row[0])
+        match = next(((stamp, event) for stamp, event, target, execution_user, process, _ in sorted(executions, key=lambda row: row[0])
                       if target == asset and login_time <= stamp <= login_time + timedelta(minutes=15)
-                      and event.get("evidence_id") != login.get("evidence_id")), None)
+                      and event.get("evidence_id") != login.get("evidence_id")
+                      and process and process_counts[process] <= 2
+                      and (not user or not execution_user or user.lower() == execution_user.lower())), None)
         if match:
             result["privileged_logon_then_execution"].append({"asset": asset, "user": user,
                 "sample_evidence_ids": _refs(login, match[1])})
@@ -269,9 +298,12 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
     for net_time, event in network_rows:
         port = next(iter(_values(event, ("destination.port", "dstPort", "dst_port", "tcp.dstport"))), "")
         destination = next(iter(_values(event, ("destination.ip", "dstIp", "dst_ip", "ip.dst"))), "")
+        initiator = next(iter(_values(event, ("source.ip", "srcIp", "src_ip", "ip.src"))), "")
         if port not in remote_ports or not destination: continue
-        match = next(((stamp, host) for stamp, host, asset in sorted(executions, key=lambda row: row[0])
-                      if _asset_matches(host, destination) and net_time <= stamp <= net_time + timedelta(minutes=15)), None)
+        match = next(((stamp, host) for stamp, host, asset, _, process, execution_source in sorted(executions, key=lambda row: row[0])
+                      if _asset_matches(host, destination) and net_time <= stamp <= net_time + timedelta(minutes=15)
+                      and process and process_counts[process] <= 2
+                      and (not execution_source or not initiator or execution_source == initiator)), None)
         if match:
             result["remote_service_then_execution"].append({"asset": destination, "port": port,
                 "sample_evidence_ids": _refs(event, match[1])})

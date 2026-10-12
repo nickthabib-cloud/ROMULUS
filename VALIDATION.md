@@ -16,6 +16,7 @@ This file records engineering validation performed against the development deplo
 
 - The first disposable live run revealed that `mission_mode` was not declared in the LangGraph state type. LangGraph therefore dropped the field at the node boundary, allowing undirected collection to reach model-generated initial searches. The run was stopped, `mission_mode` was added to the graph schema, and a dependency-complete graph-boundary regression test now proves that a candidate-free undirected hunt makes no model call.
 - The next isolated run reached candidates correctly but exposed an `AttributeError` because candidate-grounded reasoning expected `model_initial_search_plan` to be an object while undirected deferral recorded a status string. The adapter now normalizes either representation, and its model-context test covers the deferred status and candidate queue.
+- Final review found that legacy/offline mission state, artifact-ID grounding, candidate follow-up completion, aggregate evidence retention, and coverage closure were looser than the stated evidence contract. Each path now has a regression test. `pivot_results` was also added to the LangGraph schema after the VM suite showed that otherwise valid pivot outcomes were discarded at node boundaries.
 
 ### Development VM proof
 
@@ -26,6 +27,14 @@ This file records engineering validation performed against the development deplo
 - The live sequence was deterministic discovery first: seven behavior searches and one Arkime search produced 250 retained context records and 20 candidates before any model call. State contained eight hypotheses, all with `observed_candidate` basis. The audit contained exactly one model stage, `analyst_reasoning`; there was no `hypothesis_generation` or `initial_search_planning` call.
 - Candidate-grounded reasoning returned two accepted, bounded searches: an Arkime evidence-anchored outbound-connection pivot and an Elasticsearch evidence-anchored process/account pivot. Both executed read-only.
 - The hunt correctly remained `partial / incomplete_investigation` at the intentional depth and Arkime result caps. It did not publish a finding or claim the environment clean. Both Word and text reports reopened successfully.
+
+### Post-review proof
+
+- The complete VM suite passed all 57 tests with no skips after the final-review corrections; the local dependency-light suite passed the same 57 tests with five dependency-backed checks skipped and then exercised on the VM.
+- A second twelve-minute isolated live hunt, `HUNT-113777FD15`, again collected 250 telemetry records and 20 deterministic candidates before its only model call. It formed only candidate-backed hypotheses; no initial hypothesis-generation or search-planning model stage ran.
+- Both accepted model pivots cited visible evidence and used bounded evidence windows. The deterministic candidate fallback also compiled an entity-and-time-scoped Elasticsearch pivot even though its ATT&CK technique was unmapped; it returned 50 of 7,997 matches and correctly stayed unresolved because the result cap was reached.
+- The run remained `partial / incomplete_investigation` at its intentional one-round depth and source caps, published no unsupported finding, and generated structurally valid Word and nonempty text reports.
+- Both disposable live-hunt directories and the deployment transfer archive were deleted after verification. Operational reports, state, logs, and telemetry were not modified by validation cleanup.
 
 ### Scope boundary
 

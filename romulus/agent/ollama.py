@@ -80,7 +80,8 @@ class Ollama:
         def priority(h):
             try: rank=int(h.get("priority",3))
             except (TypeError,ValueError): rank=3
-            return (bool(h.get("model_assessment")), -rank, -len(h.get("candidate_evidence_ids") or []), str(h.get("hypothesis_id","")))
+            return (bool(h.get("model_assessment") or h.get("deterministic_assessment")), -rank,
+                -len(h.get("candidate_evidence_ids") or []), str(h.get("hypothesis_id","")))
         ordered_hypotheses=sorted(hypotheses,key=priority)
         selected_hypotheses=[]; selected_families=set()
         for hypothesis in ordered_hypotheses:
@@ -120,7 +121,7 @@ class Ollama:
             for key,value in hypothesis_results.items()}
         coverage_summary["hypotheses"]=[{"id":h.get("hypothesis_id"),"title":str(h.get("title",""))[:85],
             "technique_id":h.get("technique_id"),"status":h.get("status"),
-            "assessed":bool(h.get("model_assessment"))} for h in hypotheses[:20]]
+            "assessed":bool(h.get("model_assessment") or h.get("deterministic_assessment"))} for h in hypotheses[:20]]
         coverage_summary["existing_findings"]=(coverage.get("existing_findings",[]) or [])[-3:]
         coverage_summary["recent_search_plans"]=(coverage.get("model_search_planning",[]) or [])[-2:]
         coverage_summary["recent_search_artifacts"]=(coverage.get("recent_search_artifacts",[]) or [])[-12:]
@@ -133,9 +134,10 @@ class Ollama:
                 "expected_host":(h.get("expected_host") or [])[:2],"expected_network":(h.get("expected_network") or [])[:2],
                 "benign_explanations":(h.get("benign_explanations") or [])[:1],"priority":h.get("priority"),
                 "status":h.get("status"),"candidate_evidence_ids":(h.get("candidate_evidence_ids") or [])[:4],
-                "model_assessment":({"status":h.get("model_assessment",{}).get("status"),
-                    "evidence_ids":h.get("model_assessment",{}).get("evidence_ids",[])[:3]}
-                    if isinstance(h.get("model_assessment"),dict) else None)} for h in selected_hypotheses],
+                "evidence_assessment":({"status":(h.get("model_assessment") or h.get("deterministic_assessment",{})).get("status"),
+                    "evidence_ids":(h.get("model_assessment") or h.get("deterministic_assessment",{})).get("evidence_ids",[])[:3]}
+                    if isinstance(h.get("model_assessment") or h.get("deterministic_assessment"),dict) else None)}
+                for h in selected_hypotheses],
             "coverage": coverage_summary,
             "completed_searches": completed_searches[-20:],
             "analytic_summary": coverage.get("analytic_summary",{}),

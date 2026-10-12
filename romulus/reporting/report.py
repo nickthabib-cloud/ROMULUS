@@ -106,11 +106,12 @@ def _content(s):
     for h in s.get("hypotheses",[]):
         t=TECHNIQUES.get(h.get("technique_id"),{}); lines.append(f"- {h.get('title')} ({h.get('technique_id') or 'unmapped'} {t.get('name','')}): {h.get('status')}; confidence {h.get('confidence')}. {h.get('rationale')}")
         lines.append(f"  Expected host evidence: {_join_text(h.get('expected_host'))}; network: {_join_text(h.get('expected_network'))}. Benign explanations: {_join_text(h.get('benign_explanations'))}.")
-        if h.get("model_assessment"): lines.append(f"  Evidence assessment: {h['model_assessment'].get('status')}; rationale={h['model_assessment'].get('rationale')}; cited events={_join_text(h['model_assessment'].get('evidence_ids'))}.")
+        assessment=h.get("model_assessment") or h.get("deterministic_assessment")
+        if assessment: lines.append(f"  Evidence assessment: {assessment.get('status')}; rationale={assessment.get('rationale')}; cited events={_join_text(assessment.get('evidence_ids'))}.")
     lines += ["", "HYPOTHESIS AND ANALYTIC COVERAGE"]
     ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
     for row in ledger.get("rows",[]):
-        lines.append(f"- {row.get('hypothesis_id')} / {row.get('technique_id')}: priority={row.get('priority')}; analytics={row.get('executed_analytics')}/{row.get('planned_analytics')}; sources={_join_text(row.get('sources')) or 'none'}; returned={row.get('returned')}; assessment={row.get('assessment')}; gaps={_join_text(row.get('telemetry_gaps')) or 'none'}.")
+        lines.append(f"- {row.get('hypothesis_id')} / {row.get('technique_id')}: priority={row.get('priority')}; analytics attempted={row.get('executed_analytics')}/{row.get('planned_analytics')}; resolved={row.get('resolved_analytics')}; sources={_join_text(row.get('sources')) or 'none'}; returned={row.get('returned')}; assessment={row.get('assessment')}; gaps={_join_text(row.get('telemetry_gaps')) or 'none'}.")
     lines += ["", "DETERMINISTIC BEHAVIORAL ANALYTICS"]+(_analytic_lines(s.get("analytic_summary",{})) or ["No analytic summary was produced."])
     visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
     lines += ["", "PRIORITIZED CANDIDATE LEADS"]

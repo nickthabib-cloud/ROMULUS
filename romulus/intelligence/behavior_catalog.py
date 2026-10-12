@@ -407,11 +407,13 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
     """Merge fresh detections without erasing investigation decisions or follow-up history."""
     prior_by_id = {str(item.get("candidate_id")): item for item in previous if item.get("candidate_id")}
     merged = []
+    refreshed_ids = set()
     disposition_rank = {"observed": 0, "investigating": 1, "corroborated": 2}
     terminal = {"benign_likely", "dismissed", "unresolved"}
     for fresh in current:
         item = dict(fresh)
         prior = prior_by_id.get(str(item.get("candidate_id")))
+        refreshed_ids.add(str(item.get("candidate_id")))
         if prior:
             prior_disposition = str(prior.get("disposition") or "observed")
             fresh_disposition = str(item.get("disposition") or "observed")
@@ -429,10 +431,19 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
                 old = old_follow_ups.get(follow_up.get("follow_up_id"))
                 preserved.append(dict(follow_up, status=old.get("status", follow_up.get("status")),
                     history=list(old.get("history", []))) if old else follow_up)
+            refreshed_follow_up_ids = {entry.get("follow_up_id") for entry in preserved}
+            preserved.extend(dict(entry, history=list(entry.get("history", [])))
+                for entry in prior.get("follow_ups", []) if entry.get("follow_up_id") not in refreshed_follow_up_ids)
             item["follow_ups"] = preserved
             for field in ("disposition_history", "telemetry_gaps"):
                 if prior.get(field): item[field] = list(prior[field])
         merged.append(item)
+    # A bounded re-analysis may not reproduce a previously observed candidate
+    # (for example after context retention or source availability changes).
+    # Preserve it until an explicit analyst disposition closes it.
+    merged.extend(dict(item, follow_ups=[dict(entry, history=list(entry.get("history", [])))
+        for entry in item.get("follow_ups", [])]) for item in previous
+        if str(item.get("candidate_id")) not in refreshed_ids)
     return sorted(merged, key=lambda item: (-int(item.get("priority_score", 0)),
         0 if item.get("kind") == "trusted_indicator" else 1, str(item.get("candidate_id"))))
 
@@ -625,10 +636,12 @@ def _aggregate_events(summary: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _aggregate_event(signal: str, asset: Any, *evidence_ids: Any) -> dict[str, Any]:
+    supporting = list(dict.fromkeys(str(value) for value in evidence_ids if value))
     return {
-        "evidence_id": next((str(value) for value in evidence_ids if value), f"AGG-{signal}"),
+        "evidence_id": supporting[0] if supporting else f"AGG-{signal}",
         "source": "aggregate", "observed_at": "", "asset": str(asset or "unknown"),
-        "observation": signal, "raw": {"aggregate": {"signal": signal}},
+        "observation": signal, "supporting_evidence_ids": supporting,
+        "raw": {"aggregate": {"signal": signal, "supporting_evidence_ids": supporting}},
     }
 
 
@@ -646,7 +659,12 @@ def _follow_up_records(candidate_id: str, intents: list[str]) -> list[dict[str, 
 
 
 def _evidence_ids(rows: list[dict[str, Any]]) -> list[str]:
-    return sorted({str(row.get("evidence_id")) for row in rows if row.get("evidence_id")})
+    values = set()
+    for row in rows:
+        if row.get("evidence_id"):
+            values.add(str(row["evidence_id"]))
+        values.update(str(value) for value in row.get("supporting_evidence_ids", []) if value)
+    return sorted(values)
 
 
 def _observed_bounds(rows: list[dict[str, Any]]) -> tuple[str | None, str | None]:

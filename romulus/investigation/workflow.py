@@ -44,6 +44,7 @@ class HuntState(TypedDict, total=False):
     es_fields: list[str]; timestamp_field: str; explicit_time_range: bool
     analytic_summary: dict; search_artifacts: list[dict]; evidence_keys: list[str]
     candidate_leads: list[dict]; behavior_catalog_status: dict; behavior_seed_searches: list[dict]
+    pivot_results: list[dict]
 
 
 class HuntEngine:
@@ -68,6 +69,7 @@ class HuntEngine:
                 "lead_queue":[],"completed_leads":[],"reasoning_history":[],"stage_history":[],"reasoning_complete":False,
                 "search_fingerprints":[],"dynamic_plan_created":False,"dynamic_initial_queue":[],"es_fields_by_class":{},
                 "analytic_summary":{},"search_artifacts":[],"evidence_keys":[],"candidate_leads":[],
+                "pivot_results":[],
                 "behavior_seed_searches":[],"behavior_catalog_status":{
                     "catalog_version":self.behavior_catalog.get("catalog_version"),
                     "analytics":len(self.behavior_catalog.get("analytics",[])),
@@ -230,9 +232,15 @@ class HuntEngine:
         if self.offline:
             host,network=sample_evidence(); s["host"]=[encode(host[0])]; s["network"]=[encode(x) for x in network]
             for item in s["host"]+s["network"]: self._record_evidence(s,item)
-            offline_hypotheses=[encode(h) for h in hypotheses_for(s["objective"])]
-            smb_fixture=[h for h in offline_hypotheses if h.get("technique_id")=="T1021.002"]
-            s["hypotheses"]=(smb_fixture or offline_hypotheses)[:1]
+            if s["mission_mode"]=="directed":
+                offline_hypotheses=[encode(h) for h in hypotheses_for(s["objective"])]
+                smb_fixture=[h for h in offline_hypotheses if h.get("technique_id")=="T1021.002"]
+                s["hypotheses"]=(smb_fixture or offline_hypotheses)[:1]
+                for hypothesis in s["hypotheses"]:
+                    hypothesis["basis"]="operator_direction"
+                    hypothesis["basis_details"]="Offline validation hypothesis is constrained by the operator's explicit direction."
+            else:
+                s["hypotheses"]=[]
             s["coverage"]={"host":"synthetic fixture searched","network":"synthetic fixture searched","time_scope":"synthetic fixture timestamps",
                 "attack_knowledge":{"domain":ATTACK_DOMAIN,"release":ATTACK_RELEASE,"release_date":ATTACK_RELEASE_DATE,
                     "official_catalog_techniques":attack_catalog_metadata.get("technique_count",0)}}
@@ -570,6 +578,7 @@ class HuntEngine:
 
     def _ensure_initial_plan(self,s):
         if s.get("dynamic_plan_created") or self.offline: return
+        mission_mode=_state_mission_mode(s)
         source_fields={}
         if s.get("es_indices") and s.get("es_fields"):
             source_fields["elasticsearch"]=candidate_fields("elasticsearch",s["es_fields"])
@@ -581,7 +590,7 @@ class HuntEngine:
         field_classes=s.get("es_fields_by_class",{})
         s.setdefault("coverage",{})["search_field_classes"]={k:candidate_fields("elasticsearch",v) for k,v in field_classes.items() if v}
         s["dynamic_plan_created"]=True
-        if s.get("mission_mode")=="undirected" and not s.get("candidate_leads"):
+        if mission_mode=="undirected" and not s.get("candidate_leads"):
             s["coverage"]["model_initial_search_plan"]="deferred: undirected mission has no telemetry-backed candidate"
             return
         if not source_fields or not self.use_ollama or not self._budget_ok(s):
@@ -785,7 +794,7 @@ class HuntEngine:
         previous_candidates=list(s.get("candidate_leads",[]))
         fresh_candidates=build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
         s["candidate_leads"]=merge_candidate_queue(previous_candidates,fresh_candidates)
-        new_hypotheses=_candidate_hypotheses(s["candidate_leads"],s.get("hypotheses",[]))
+        new_hypotheses=_candidate_hypotheses(s["candidate_leads"],s.get("hypotheses",[]),all_e)
         if new_hypotheses:
             s.setdefault("hypotheses",[]).extend(new_hypotheses)
             known_leads={lead.get("id") for lead in s.setdefault("lead_catalog",[])}
@@ -804,7 +813,7 @@ class HuntEngine:
             # assessment. Only a cited analyst assessment may mark a hypothesis
             # supported or contradicted.
             hypothesis["candidate_evidence_ids"]=[e["evidence_id"] for e in relevant if e.get("evidence_id")][:40]
-            if not hypothesis.get("model_assessment"):
+            if not hypothesis.get("model_assessment") and not hypothesis.get("deterministic_assessment"):
                 hypothesis["evidence_ids"]=[]
                 hypothesis["status"]="candidate evidence found" if relevant else "not assessed"
                 hypothesis["confidence"]="not assessed"
@@ -853,6 +862,14 @@ class HuntEngine:
         else: event="created"
         encoded=encode(finding); findings.append(encoded); s["findings"]=findings
         self.store.upsert_finding(s["hunt_id"],encoded,event)
+        for hypothesis in s.get("hypotheses",[]):
+            if hypothesis.get("technique_id") not in {"T1021","T1021.002"}: continue
+            assessment={"status":"supported","rationale":finding.interpretation,
+                "evidence_ids":list(refs),"assessed_at":utc_now(),"method":"deterministic_smb_correlation"}
+            hypothesis["deterministic_assessment"]=assessment
+            hypothesis["evidence_ids"]=list(refs)
+            hypothesis["status"]="supported lead"
+            hypothesis["confidence"]="moderate" if len(relevant)>=2 else "low"
         print(f"[ROMULUS] evidence-backed lead published: {finding.finding_id}; evidence_refs={len(refs)}; shared_ips={len(ipset)}")
 
     def _publish_tooling_leads(self,s):
@@ -990,13 +1007,13 @@ class HuntEngine:
         s["coverage"]["runtime_seconds_remaining"]=max(0,round(self.settings.max_runtime_seconds-elapsed))
         s["coverage"]["reasoning_rounds_remaining"]=max(0,self.settings.max_depth-s.get("depth",0))
         s["coverage"]["recent_search_artifacts"]=s.get("search_artifacts",[])[-12:]
-        candidate_grounded=(s.get("mission_mode")!="undirected" or bool(s.get("candidate_leads")))
+        mission_mode=_state_mission_mode(s)
+        candidate_grounded=(mission_mode!="undirected" or bool(s.get("candidate_leads")))
         if not self.offline and self.use_ollama and source_fields and candidate_grounded and self._budget_ok(s):
             try:
                 from ..agent.ollama import Ollama, model_evidence_context
-                visible_model_ids={e.get("evidence_id") for e in model_evidence_context(_all_evidence(s),12) if e.get("evidence_id")}
-                visible_model_ids.update(x.get("artifact_id") for x in s.get("search_artifacts",[])[-12:] if x.get("artifact_id"))
-                visible_model_ids.update(x.get("candidate_id") for x in s.get("candidate_leads",[])[:12] if x.get("candidate_id"))
+                visible_evidence_ids={e.get("evidence_id") for e in model_evidence_context(_all_evidence(s),12) if e.get("evidence_id")}
+                visible_candidate_ids={x.get("candidate_id") for x in s.get("candidate_leads",[])[:12] if x.get("candidate_id")}
                 model_coverage=dict(s.get("coverage",{}))
                 model_coverage["candidate_queue"]=[{"candidate_id":c.get("candidate_id"),"title":str(c.get("title",""))[:120],
                     "priority_score":c.get("priority_score"),"priority_tier":c.get("priority_tier"),
@@ -1017,9 +1034,9 @@ class HuntEngine:
                     last_call=next((r for r in reversed(s.get("tool_runs",[])) if r.get("tool")=="ollama.api.chat" and r.get("reasoning_stage")=="analyst_reasoning"),{})
                     model_error=last_call.get("error_reason") or last_call.get("error") or "unavailable"
                 if isinstance(analysis,dict):
-                    created=self._append_model_hypotheses(s,analysis.get("new_hypotheses",[]),visible_model_ids)
-                    self._apply_model_assessments(s,analysis,visible_model_ids)
-                    self._publish_model_findings(s,analysis.get("findings",[]),visible_model_ids)
+                    created=self._append_model_hypotheses(s,analysis.get("new_hypotheses",[]),visible_evidence_ids|visible_candidate_ids)
+                    self._apply_model_assessments(s,analysis,visible_evidence_ids)
+                    self._publish_model_findings(s,analysis.get("findings",[]),visible_evidence_ids)
                     analysis["created_hypothesis_ids"]=created
                     basis="model assessed cited evidence and proposed fresh bounded searches"
             except Exception as exc:
@@ -1103,7 +1120,10 @@ class HuntEngine:
     def _append_model_hypotheses(self,s,proposals,visible_ids=None):
         if not isinstance(proposals,list): return []
         known={re.sub(r"[^a-z0-9]+","",str(h.get("title","")).lower()) for h in s.get("hypotheses",[])}
-        visible=set(visible_ids or {e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")})
+        candidate_ids={item.get("candidate_id") for item in s.get("candidate_leads",[]) if item.get("candidate_id")}
+        evidence_ids={item.get("evidence_id") for item in _all_evidence(s) if item.get("evidence_id")}
+        groundable_ids=candidate_ids|evidence_ids
+        visible=(set(visible_ids) & groundable_ids) if visible_ids is not None else groundable_ids
         added=[]; next_number=len(s.get("hypotheses",[]))+1
         for proposal in proposals[:3]:
             if len(s.get("hypotheses",[]))>=24: break
@@ -1116,8 +1136,6 @@ class HuntEngine:
             ident="H-FOLLOWUP-"+f"{next_number:02d}"
             while any(h.get("hypothesis_id")==ident for h in s.get("hypotheses",[])):
                 next_number+=1; ident="H-FOLLOWUP-"+f"{next_number:02d}"
-            candidate_ids={item.get("candidate_id") for item in s.get("candidate_leads",[]) if item.get("candidate_id")}
-            evidence_ids={item.get("evidence_id") for item in _all_evidence(s) if item.get("evidence_id")}
             hypothesis["hypothesis_id"]=ident; hypothesis["evidence_ids"]=[]
             hypothesis["basis_candidate_ids"]=[value for value in basis if value in candidate_ids]
             hypothesis["basis_evidence_ids"]=[value for value in basis if value in evidence_ids]
@@ -1264,9 +1282,16 @@ class HuntEngine:
         # with the first arbitrary IPs from a large evidence collection; the
         # dynamic model queries carry explicit, validated anchors when a pivot
         # really should be entity-scoped.
-        pivot_context=s if lead.get("anchor_evidence_ids") else {}
-        query=_lead_host_query(lead,fields,s.get("timestamp_field","@timestamp"),self._time_scope(s)[0],pivot_context)
-        scope=self._time_scope(s)[1]
+        mission_range,mission_scope=self._time_scope(s)
+        effective_range=mission_range; scope=mission_scope
+        try:
+            effective_range,anchor_scope=anchor_time_range(lead,_all_evidence(s),mission_range)
+            scope=anchor_scope or mission_scope
+        except ValueError as exc:
+            s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],
+                "status":f"skipped: {_safe_error_reason(exc)}","returned":0,"time_range":scope})
+            return
+        query=_lead_host_query(lead,fields,s.get("timestamp_field","@timestamp"),effective_range,{})
         if query is None:
             s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],
                 "status":"skipped: hypothesis has no mapped host selectors","returned":0,"time_range":scope})
@@ -1284,6 +1309,15 @@ class HuntEngine:
 
     def _network_pivot(self,s,lead):
         before=len(s.get("network",[])); details=[]
+        mission_range,mission_scope=self._time_scope(s)
+        effective_range=mission_range; scope=mission_scope
+        try:
+            effective_range,anchor_scope=anchor_time_range(lead,_all_evidence(s),mission_range)
+            scope=anchor_scope or mission_scope
+        except ValueError as exc:
+            s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],
+                "status":f"skipped: {_safe_error_reason(exc)}","returned":0,"sources":[]})
+            return
         if lead.get("technique_id")=="T1105" or lead["id"]=="network_transfer_context":
             network_indices=[name for name in s.get("es_indices",[]) if "network" in name.lower()]
             indicator_events=[]
@@ -1325,7 +1359,9 @@ class HuntEngine:
             ips=[ip for ip in lead.get("ips",[]) if isinstance(ip,str)]
             if ips: expression=f"({expression}) && ("+" || ".join(f"ip.src == {ip} || ip.dst == {ip}" for ip in ips[:4])+")"
             explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"],self.settings.mission_timezone)
-            scope=self._time_scope(s)[1]; all_history=self.settings.historical_search and not explicit
+            anchored_bounds=_epoch_range(effective_range,1000) if lead.get("anchor_evidence_ids") else None
+            if anchored_bounds: start_ms,stop_ms=anchored_bounds
+            all_history=self.settings.historical_search and not explicit and not anchored_bounds
             raw=self._call(s,"arkime.api.sessions","iterative_network_pivot",{"lead_id":lead["id"],"expression":expression,
                 "date":-1 if all_history else ("explicit" if explicit else self.settings.arkime_default_hours)},scope,
                 lambda:self.arkime.search_sessions(expression,start_ms=start_ms,stop_ms=stop_ms,length=min(100,self.settings.max_results),all_history=all_history),
@@ -1336,7 +1372,8 @@ class HuntEngine:
         if self.settings.pcap_files:
             display_filter=_lead_pcap_filter(lead); ips=[ip for ip in lead.get("ips",[]) if isinstance(ip,str)]
             if ips: display_filter="("+display_filter+") && ("+" || ".join(f"ip.addr == {ip}" if ":" not in ip else f"ipv6.addr == {ip}" for ip in ips[:4])+")"
-            date_filter=_pcap_time_filter(_explicit_dates(s["objective"]),self.settings.mission_timezone)
+            date_filter=(_pcap_range_filter(effective_range) if lead.get("anchor_evidence_ids")
+                else _pcap_time_filter(_explicit_dates(s["objective"]),self.settings.mission_timezone))
             for pcap in self.settings.pcap_files[:3]:
                 if not self._budget_ok(s): break
                 raw=self._call(s,"tshark.read_pcap","iterative_pcap_pivot",{"lead_id":lead["id"],"pcap":str(pcap),"display_filter":display_filter},
@@ -1351,7 +1388,11 @@ class HuntEngine:
                     "time_range":raw["provenance"]["time_range"]})
         count=len(s.get("network",[]))-before
         s.setdefault("coverage",{})["network_count"]=len(s.get("network",[]))
-        s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],"status":"queried configured network sources" if details else "no configured network source queried",
+        incomplete=any(bool(item.get("capped")) or (isinstance(item.get("matched_total"),(int,float))
+            and int(item.get("matched_total"))>int(item.get("returned",0) or 0)) for item in details)
+        pivot_status=("partial: configured network search reached a result cap" if incomplete else
+            "queried configured network sources" if details else "no configured network source queried")
+        s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],"status":pivot_status,
             "returned":count,"sources":details})
         s["queries"].append({"stage":"iterative_network_pivot","lead_id":lead["id"],"sources":details,"returned":count})
 
@@ -1477,7 +1518,16 @@ def _mission_is_directed(objective):
     return False
 
 
-def _candidate_hypotheses(candidates,existing):
+def _state_mission_mode(state):
+    """Recover legacy/checkpointed state without ever failing open to directed mode."""
+    mode=state.get("mission_mode")
+    if mode not in {"directed","undirected"}:
+        mode="directed" if _mission_is_directed(state.get("objective","")) else "undirected"
+        state["mission_mode"]=mode
+    return mode
+
+
+def _candidate_hypotheses(candidates,existing,evidence=None):
     """Create bounded hypotheses only from deterministic candidates with citations."""
     existing_candidates={candidate_id for hypothesis in existing for candidate_id in hypothesis.get("basis_candidate_ids",[])}
     out=[]
@@ -1490,6 +1540,19 @@ def _candidate_hypotheses(candidates,existing):
         technique=next((value for value in candidate.get("attack_techniques",[]) if value in TECHNIQUES),"unmapped")
         meta=TECHNIQUES.get(technique,{})
         asset=next(iter(candidate.get("assets",[]) or []),"unknown asset")
+        cited=set(evidence_ids)
+        cited_events=[event for event in (evidence or []) if event.get("evidence_id") in cited]
+        assets=[str(value) for value in candidate.get("assets",[]) if value and str(value)!="unknown"][:8]
+        for event in cited_events:
+            value=str(event.get("asset") or "")
+            if value and value!="unknown" and value not in assets: assets.append(value)
+        assets=assets[:8]
+        ips=[]; hostnames=[]
+        for value in assets:
+            try: ipaddress.ip_address(value); ips.append(value)
+            except ValueError: hostnames.append(value)
+        for value in _evidence_ips(cited_events):
+            if value not in ips: ips.append(value)
         priority=5 if score>=90 else (4 if score>=70 else 3)
         identifier="H-CAND-"+str(candidate_id).replace("CL-","")[:18]
         title=f"Investigate {candidate.get('title','observed behavior')} on {asset}"[:140]
@@ -1505,6 +1568,7 @@ def _candidate_hypotheses(candidates,existing):
         hypothesis.update({"basis":"observed_candidate","basis_candidate_ids":[candidate_id],
             "basis_evidence_ids":evidence_ids[:20],"candidate_evidence_ids":evidence_ids[:20],
             "candidate_id":candidate_id,"follow_ups":candidate.get("follow_ups",[]),
+            "candidate_assets":assets,"ips":ips,"hostnames":hostnames,
             "status":"untested","confidence":"not assessed"})
         out.append(hypothesis); existing_candidates.add(candidate_id)
         if len(out)>=8: break
@@ -1533,11 +1597,15 @@ def _lead_catalog(hypotheses):
             ident=_coverage_lead_id(hypothesis.get("hypothesis_id"),source)
             why=(hypothesis.get("analytic_goal") or meta.get("analytic_goal") or
                  f"Test {hypothesis.get('title','this hypothesis')} in available {source} telemetry.")
+            follow_up=follow_ups[min(source_index,len(follow_ups)-1)] if follow_ups else {}
+            intent=follow_up.get("intent") or why
             if ident not in seen:
                 seen.add(ident); out.append({"id":ident,"source":source,"title":hypothesis.get("title") or ident,
-                    "why":why,"intent":why,"hypothesis_id":hypothesis.get("hypothesis_id"),"technique_id":tid,
+                    "why":why,"intent":intent,"hypothesis_id":hypothesis.get("hypothesis_id"),"technique_id":tid,
                     "candidate_id":hypothesis.get("candidate_id"),
-                    "follow_up_id":(follow_ups[min(source_index,len(follow_ups)-1)].get("follow_up_id") if follow_ups else None),
+                    "follow_up_id":follow_up.get("follow_up_id"),
+                    "anchor_evidence_ids":list(hypothesis.get("basis_evidence_ids",[]))[:8],
+                    "ips":list(hypothesis.get("ips",[]))[:8],"hostnames":list(hypothesis.get("hostnames",[]))[:8],
                     "priority":hypothesis.get("priority",3),
                     "tactics":hypothesis.get("tactics") or meta.get("tactics",[])})
     return out
@@ -1559,7 +1627,8 @@ def _record_candidate_follow_up(s,lead,result):
     follow_up_id=lead.get("follow_up_id") if isinstance(lead,dict) else None
     if not candidate_id or not follow_up_id: return
     status=str(result.get("status") or "attempted")
-    failed=any(token in status.lower() for token in ("failed","skipped","budget prevented","no configured"))
+    failed=any(token in status.lower() for token in (
+        "failed","skipped","budget","no configured","rejected","error","partial","cap reached"))
     for candidate in s.get("candidate_leads",[]):
         if candidate.get("candidate_id")!=candidate_id: continue
         if candidate.get("disposition")=="observed": candidate["disposition"]="investigating"
@@ -1567,7 +1636,20 @@ def _record_candidate_follow_up(s,lead,result):
             if follow_up.get("follow_up_id")!=follow_up_id: continue
             follow_up.setdefault("history",[]).append({"timestamp":utc_now(),"search_id":lead.get("id"),
                 "status":status,"returned":result.get("returned",0)})
-            if not failed: follow_up["status"]="completed"
+            required={item.get("id") for item in s.get("lead_catalog",[])
+                if item.get("candidate_id")==candidate_id and item.get("follow_up_id")==follow_up_id and item.get("id")}
+            latest={}
+            for entry in follow_up.get("history",[]):
+                if entry.get("search_id") in required: latest[entry["search_id"]]=entry
+            successful={search_id for search_id,entry in latest.items()
+                if not any(token in str(entry.get("status","")).lower()
+                    for token in ("failed","skipped","budget","no configured","rejected","error","partial","cap reached"))}
+            if required and required <= successful:
+                follow_up["status"]="completed"
+            elif failed:
+                follow_up["status"]="blocked"
+            else:
+                follow_up["status"]="in_progress"
 
 
 def _query_terms(technique_ids):
@@ -1635,7 +1717,22 @@ def _lead_host_query(lead,fields,timestamp_field,time_range,state):
             "host_service_install":"T1543.003","host_transfer_tools":"T1105"}
     technique=lead.get("technique_id") if isinstance(lead,dict) else None
     hypothesis=[{"technique_id":technique or legacy.get(lead_id,"T1021.002")}]
-    return _host_query(hypothesis,fields,timestamp_field,time_range,"",lead_id,state)
+    query=_host_query(hypothesis,fields,timestamp_field,time_range,"",lead_id,state)
+    if not isinstance(lead,dict): return query
+    selectors=[]
+    ips=[value for value in lead.get("ips",[]) if isinstance(value,str)]
+    hostnames=[value for value in lead.get("hostnames",[]) if isinstance(value,str)]
+    ip_fields=[field for field in ("source.ip","destination.ip","host.ip","winlog.event_data.IpAddress") if field in fields]
+    host_fields=[field for field in ("host.name","host.hostname","computer_name","winlog.computer_name") if field in fields]
+    selectors.extend({"terms":{field:ips[:8]}} for field in ip_fields if ips)
+    selectors.extend({"terms":{field:hostnames[:8]}} for field in host_fields if hostnames)
+    if query is None and selectors:
+        query={"bool":{}}
+        if time_range: query["bool"]["filter"]=[{"range":{timestamp_field:time_range}}]
+    if query is None: return None
+    if selectors:
+        query["bool"].setdefault("filter",[]).append({"bool":{"should":selectors,"minimum_should_match":1}})
+    return query
 
 
 def _field_names(mapping):
@@ -1912,6 +2009,26 @@ def _pcap_time_filter(dates,time_zone="UTC"):
         start=_explicit_epoch(dates[0],False,1,time_zone); end=_explicit_epoch(dates[1],True,1,time_zone) if len(dates)>1 else time.time()
         return f"frame.time_epoch >= {start:.3f} && frame.time_epoch <= {end:.3f}"
     except (ValueError,OverflowError): return ""
+
+
+def _epoch_range(time_range,multiplier=1):
+    if not isinstance(time_range,dict): return None
+    try:
+        values=[]
+        for key in ("gte","lte"):
+            value=time_range.get(key)
+            if not isinstance(value,str) or value.startswith("now"): return None
+            parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
+            if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
+            values.append(parsed.astimezone(timezone.utc).timestamp()*multiplier)
+        return tuple(int(value) if multiplier!=1 else float(value) for value in values)
+    except (ValueError,TypeError,OverflowError): return None
+
+
+def _pcap_range_filter(time_range):
+    bounds=_epoch_range(time_range,1)
+    return (f"frame.time_epoch >= {bounds[0]:.3f} && frame.time_epoch <= {bounds[1]:.3f}"
+        if bounds else "")
 
 
 def _arkime_expression(objective,hypotheses):

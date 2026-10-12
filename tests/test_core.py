@@ -233,7 +233,8 @@ class CoreTests(unittest.TestCase):
             store=Store(cfg.data_dir,cfg.logs_dir); engine=HuntEngine(cfg,store,use_ollama=False)
             es=ES(); arkime=Arkime(); engine.es=es; engine.arkime=arkime
             state=engine.run("Hunt for SMB lateral movement")
-            self.assertEqual(state["status"],"completed")
+            self.assertEqual(state["status"],"partial")
+            self.assertFalse(state["coverage"]["hypothesis_coverage"]["closure_ready"])
             self.assertEqual(state["coverage"]["time_scope"],"all retained indexed time")
             self.assertTrue(any(lead.endswith("-HOST") for lead in state["completed_leads"]))
             self.assertTrue(any(lead.endswith("-NETWORK") for lead in state["completed_leads"]))

@@ -12,6 +12,10 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 - Added persistent candidate dispositions and structured follow-up histories that survive analysis rounds, plus candidate IDs in bounded model context with deterministic citation validation.
 - Made coverage closure candidate-aware: actionable candidates, incomplete required follow-ups, unlinked corroboration, and unresolved leads without documented telemetry gaps prevent clean completion.
 - Preserved mission mode explicitly in the LangGraph state schema so the undirected-hunt guard survives node/checkpoint boundaries, and made candidate-grounded reasoning tolerate a deferred initial-plan status.
+- Hardened legacy, offline, and resumed hunts so a missing mission mode fails closed to undirected discovery for generic objectives, and prevented search-artifact IDs from grounding model hypotheses or assessments.
+- Bound candidate pivots to their cited evidence, observed entities, and ±15-minute evidence window; a follow-up closes only after every bound search succeeds, while failed, skipped, partial, or capped searches remain open.
+- Tightened authentication and remote-execution correlations with bounded time, identity, prevalence, and initiator checks, while retaining every supporting evidence ID in aggregate candidates.
+- Required every planned high-priority analytic to resolve and have an evidence-cited assessment (or an explicit unavailable-source gap) before hypothesis closure; merely attempting a query no longer counts as resolution.
 
 ### Super-hunter correctness foundation
 

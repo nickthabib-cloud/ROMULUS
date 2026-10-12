@@ -43,6 +43,7 @@ class MissionModeTests(unittest.TestCase):
         from romulus.investigation.workflow import HuntState
 
         self.assertIn("mission_mode", HuntState.__annotations__)
+        self.assertIn("pivot_results", HuntState.__annotations__)
 
     def test_mission_classifier_distinguishes_direction_from_broad_discovery(self):
         from romulus.investigation.workflow import _mission_is_directed
@@ -85,6 +86,48 @@ class MissionModeTests(unittest.TestCase):
 
             self.assertEqual(result["hypotheses"], [])
             self.assertEqual(result["termination_reason"], "coverage_frontier_exhausted")
+
+    def test_missing_mission_mode_defaults_to_undirected_for_generic_objective(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            engine = _engine(Path(directory), use_ollama=True)
+            engine._call = lambda *args, **kwargs: self.fail("legacy generic state called a model")
+            state = _planning_state("Hunt for threats across all telemetry")
+            state.update({
+                "candidate_leads": [],
+                "search_artifacts": [],
+                "search_fingerprints": [],
+                "completed_leads": [],
+                "lead_queue": [],
+                "depth": 0,
+                "es_indices": ["host-events"],
+                "es_fields": ["process.name"],
+                "es_fields_by_class": {"host": ["process.name"]},
+                "coverage": {},
+            })
+
+            engine._ensure_initial_plan(state)
+            result = engine._reason(state)
+
+            self.assertEqual(result["mission_mode"], "undirected")
+            self.assertEqual(result["hypotheses"], [])
+            self.assertIn("deferred", result["coverage"]["model_initial_search_plan"])
+
+    def test_offline_undirected_plan_waits_for_a_deterministic_candidate(self):
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            settings = replace(Settings.from_env(), home=root, data_dir=root / "data",
+                logs_dir=root / "logs", reports_dir=root / "reports")
+            engine = HuntEngine(settings, Store(settings.data_dir, settings.logs_dir), offline=True)
+
+            result = engine._plan(_planning_state("Hunt for threats across all available telemetry"))
+
+            self.assertEqual(result["mission_mode"], "undirected")
+            self.assertEqual(result["hypotheses"], [])
+            self.assertEqual(result["lead_catalog"], [])
 
     def test_graph_preserves_undirected_guard_across_nodes(self):
         try:
@@ -178,6 +221,37 @@ class CandidateHypothesisTests(unittest.TestCase):
             self.assertTrue(all(item.get("basis_evidence_ids") for item in result["hypotheses"]))
             self.assertTrue(all(item.get("candidate_id") for item in result["lead_catalog"]))
 
+    def test_candidate_leads_preserve_the_observed_scope_and_follow_up_intent(self):
+        from romulus.investigation.workflow import _candidate_hypotheses, _lead_catalog, _lead_host_query
+
+        candidate = {
+            "candidate_id": "CL-SCOPED",
+            "kind": "behavior",
+            "title": "Remote service followed by execution",
+            "description": "Observed cross-source sequence",
+            "priority_score": 88,
+            "assets": ["10.0.0.20"],
+            "evidence_ids": ["EV-NET", "EV-HOST"],
+            "attack_techniques": ["T1021"],
+            "benign_explanations": ["Authorized administration"],
+            "follow_ups": [{"follow_up_id": "FU-SCOPED", "intent": "Validate the cited remote-service sequence.",
+                "status": "pending", "history": []}],
+        }
+
+        hypotheses = _candidate_hypotheses([candidate], [])
+        leads = _lead_catalog(hypotheses)
+
+        self.assertTrue(leads)
+        self.assertTrue(all(lead["anchor_evidence_ids"] == ["EV-NET", "EV-HOST"] for lead in leads))
+        self.assertTrue(all(lead["ips"] == ["10.0.0.20"] for lead in leads))
+        self.assertTrue(all(lead["intent"] == "Validate the cited remote-service sequence." for lead in leads))
+
+        unmapped = {**leads[0], "technique_id": "unmapped"}
+        query = _lead_host_query(unmapped, ["@timestamp", "host.ip", "source.ip"], "@timestamp",
+            {"gte": "2026-10-12T11:45:00Z", "lte": "2026-10-12T12:15:00Z"}, {})
+        filters = query["bool"]["filter"]
+        self.assertTrue(any("host.ip" in str(item) and "10.0.0.20" in str(item) for item in filters))
+
 
 class AggregateSignalTests(unittest.TestCase):
     def test_every_aggregate_catalog_analytic_has_a_reachable_signal(self):
@@ -203,6 +277,48 @@ class AggregateSignalTests(unittest.TestCase):
         aggregate_ids = {item["id"] for item in catalog["analytics"] if item["source"] == "aggregate"}
         matched_ids = {item.get("analytic_id") for item in candidates}
         self.assertEqual(aggregate_ids - matched_ids, set())
+
+    def test_authentication_sequence_is_time_bounded_and_cites_failure_and_success(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        fail = {"evidence_id": "EV-FAIL", "source": "elasticsearch", "observed_at": "2026-10-12T12:00:00Z",
+            "asset": "srv", "raw": {"event": {"code": "4625"}, "user": {"name": "alice"}, "source": {"ip": "10.0.0.8"}}}
+        near = {"evidence_id": "EV-NEAR", "source": "elasticsearch", "observed_at": "2026-10-12T12:10:00Z",
+            "asset": "srv", "raw": {"event": {"code": "4624"}, "user": {"name": "alice"}, "source": {"ip": "10.0.0.8"}}}
+        far = dict(near, evidence_id="EV-FAR", observed_at="2026-10-12T12:30:00Z")
+
+        rows = summarize_evidence([fail, near], [])["aggregate_signals"]["auth_failures_then_success"]
+        self.assertEqual(rows[0]["sample_evidence_ids"], ["EV-FAIL", "EV-NEAR"])
+        self.assertEqual(summarize_evidence([fail, far], [])["aggregate_signals"]["auth_failures_then_success"], [])
+
+    def test_common_execution_does_not_create_privileged_or_remote_service_sequence(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        login = {"evidence_id": "EV-LOGIN", "source": "elasticsearch", "observed_at": "2026-10-12T12:00:00Z",
+            "asset": "10.0.0.20", "raw": {"event": {"code": "4672"}, "user": {"name": "admin"}}}
+        executions = [{"evidence_id": f"EV-EXEC-{index}", "source": "elasticsearch",
+            "observed_at": f"2026-10-12T12:0{index + 1}:00Z", "asset": "10.0.0.20",
+            "raw": {"event": {"code": "4688"}, "user": {"name": "admin"}, "process": {"name": "common-agent"}}}
+            for index in range(3)]
+        network = [{"evidence_id": "EV-REMOTE", "source": "arkime", "observed_at": "2026-10-12T12:00:30Z",
+            "asset": "10.0.0.20", "raw": {"source": {"ip": "10.0.0.10"},
+                "destination": {"ip": "10.0.0.20", "port": 445}, "network": {"protocol": "smb"}}}]
+
+        signals = summarize_evidence([login] + executions, network)["aggregate_signals"]
+        self.assertEqual(signals["privileged_logon_then_execution"], [])
+        self.assertEqual(signals["remote_service_then_execution"], [])
+
+    def test_aggregate_candidate_preserves_all_supporting_evidence(self):
+        from romulus.intelligence.analytics import summarize_evidence
+        from romulus.intelligence.behavior_catalog import build_candidate_queue, load_behavior_catalog
+
+        host, network = _aggregate_fixture()
+        candidates = build_candidate_queue(host + network, load_behavior_catalog(), {"indicators": []},
+            summarize_evidence(host, network, limit=50))
+        remote = next(item for item in candidates if item.get("analytic_id") == "BH-AUTH-004")
+
+        self.assertIn("EV-REMOTE", remote["evidence_ids"])
+        self.assertIn("EV-EXEC", remote["evidence_ids"])
 
 
 class CandidateStateTests(unittest.TestCase):
@@ -236,6 +352,45 @@ class CandidateStateTests(unittest.TestCase):
         self.assertEqual(current["follow_ups"][0]["status"], "completed")
         self.assertEqual(current["follow_ups"][0]["history"][0]["search_id"], "C-1")
 
+    def test_candidate_merge_keeps_prior_only_candidates_and_follow_ups(self):
+        from romulus.intelligence.behavior_catalog import merge_candidate_queue
+
+        prior = [{"candidate_id": "CL-OLD", "kind": "behavior", "priority_score": 70,
+            "disposition": "investigating", "evidence_ids": ["EV-OLD"],
+            "follow_ups": [
+                {"follow_up_id": "FU-STILL", "intent": "still relevant", "status": "pending", "history": []},
+                {"follow_up_id": "FU-EXTRA", "intent": "added during investigation", "status": "completed",
+                    "history": [{"search_id": "C-OLD", "status": "completed"}]},
+            ]}]
+        refreshed = [{"candidate_id": "CL-NEW", "kind": "behavior", "priority_score": 40,
+            "disposition": "observed", "evidence_ids": ["EV-NEW"], "follow_ups": []}]
+
+        merged = merge_candidate_queue(prior, refreshed)
+
+        self.assertEqual({item["candidate_id"] for item in merged}, {"CL-OLD", "CL-NEW"})
+        old = next(item for item in merged if item["candidate_id"] == "CL-OLD")
+        self.assertEqual({item["follow_up_id"] for item in old["follow_ups"]}, {"FU-STILL", "FU-EXTRA"})
+
+    def test_candidate_follow_up_completes_only_after_all_bound_searches_succeed(self):
+        from romulus.investigation.workflow import _record_candidate_follow_up
+
+        state = {
+            "candidate_leads": [{"candidate_id": "CL-1", "disposition": "observed",
+                "follow_ups": [{"follow_up_id": "FU-1", "intent": "test both sources", "status": "pending", "history": []}]}],
+            "lead_catalog": [
+                {"id": "C-HOST", "candidate_id": "CL-1", "follow_up_id": "FU-1"},
+                {"id": "C-NET", "candidate_id": "CL-1", "follow_up_id": "FU-1"},
+            ],
+        }
+
+        _record_candidate_follow_up(state, state["lead_catalog"][0], {"status": "searched", "returned": 0})
+        follow_up = state["candidate_leads"][0]["follow_ups"][0]
+        self.assertEqual(follow_up["status"], "in_progress")
+        _record_candidate_follow_up(state, state["lead_catalog"][1], {"status": "failed query", "returned": 0})
+        self.assertEqual(follow_up["status"], "blocked")
+        _record_candidate_follow_up(state, state["lead_catalog"][1], {"status": "searched", "returned": 1})
+        self.assertEqual(follow_up["status"], "completed")
+
     def test_candidate_aware_closure_rejects_open_high_priority_lead(self):
         from romulus.intelligence.analytics import build_coverage_ledger
 
@@ -255,6 +410,27 @@ class CandidateStateTests(unittest.TestCase):
         candidate["follow_ups"][0]["status"] = "completed"
         closed_ledger = build_coverage_ledger([], [], [], [], True, True, [candidate])
         self.assertTrue(closed_ledger["closure_ready"])
+
+    def test_hypothesis_closure_requires_every_planned_analytic_and_an_assessment(self):
+        from romulus.intelligence.analytics import build_coverage_ledger
+
+        hypothesis = {"hypothesis_id": "H-1", "priority": 5, "expected_host": ["host"],
+            "expected_network": ["network"], "model_assessment": {"status": "supported", "evidence_ids": ["EV-1"]}}
+        leads = [{"id": "C-HOST", "hypothesis_id": "H-1", "source": "host"},
+            {"id": "C-NET", "hypothesis_id": "H-1", "source": "network"}]
+        partial = build_coverage_ledger([hypothesis], leads, ["C-HOST"],
+            [{"lead_id": "C-HOST", "status": "completed", "returned": 1}], True, True)
+        self.assertFalse(partial["hypothesis_closure_ready"])
+
+        complete = build_coverage_ledger([hypothesis], leads, ["C-HOST", "C-NET"],
+            [{"lead_id": "C-HOST", "status": "completed", "returned": 1},
+                {"lead_id": "C-NET", "status": "completed", "returned": 0}], True, True)
+        self.assertTrue(complete["hypothesis_closure_ready"])
+
+        failed = build_coverage_ledger([hypothesis], leads, ["C-HOST", "C-NET"],
+            [{"lead_id": "C-HOST", "status": "completed", "returned": 1},
+                {"lead_id": "C-NET", "status": "failed query", "returned": 0}], True, True)
+        self.assertFalse(failed["hypothesis_closure_ready"])
 
     def test_model_hypothesis_accepts_visible_candidate_id_and_rejects_unknown_id(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -278,6 +454,9 @@ class CandidateStateTests(unittest.TestCase):
 
             rejected = dict(proposal, title="Unsupported guess", basis_evidence_ids=["CL-INVENTED"])
             self.assertEqual(engine._append_model_hypotheses(state, [rejected], {"CL-VISIBLE"}), [])
+
+            artifact = dict(proposal, title="Artifact-only guess", basis_evidence_ids=["SR-SEARCH-ONLY"])
+            self.assertEqual(engine._append_model_hypotheses(state, [artifact], {"SR-SEARCH-ONLY"}), [])
 
 
 def _aggregate_fixture():
