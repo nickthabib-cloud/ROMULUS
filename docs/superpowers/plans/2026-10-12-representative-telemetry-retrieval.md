@@ -142,9 +142,9 @@
 - [x] Verify independently that the raw attack telemetry is already present, keep labels/oracle outside the runtime, and identify the single oracle technique without a labeled telemetry event.
 - [x] Record VM proof and the ingestion diagnosis in `VALIDATION.md`; remove exact disposable artifacts only.
 - [x] Resolve final-review findings for exact-result equality, fingerprinted-policy execution, canonical closure metadata, and conservative fallback wording with RED/GREEN regressions.
-- [ ] Run final local verification, push `codex/time-stratified-hunting`, create a PR against `main`, and attach it to this task.
+- [x] Run final local verification, push `codex/time-stratified-hunting`, create a PR against `main`, and attach it to this task.
 
 ## Execution status
 
 - Plan authorized for native execution by the operator on 2026-10-12; no additional approval checkpoint is required.
-- Tasks 1–5 are complete. Task 6 VM proof, read-only ingestion diagnosis, and final-review corrections are complete without another hunt. The diagnosis found that raw attack telemetry is already present and that only the ground-truth annotations are intentionally absent; exact-head verification and PR publication remain.
+- All tasks are complete. The exact runtime commit passed the local and dependency-complete VM gates without another hunt, the read-only diagnosis found that raw attack telemetry is already present while ground-truth annotations remain intentionally absent, and GitHub PR #2 is open against `main`.

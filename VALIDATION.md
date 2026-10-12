@@ -24,7 +24,9 @@ This file records engineering validation performed against the development deplo
 
 - The exact candidate tree passed all 152 dependency-complete VM tests with no skips and passed `compileall`. `doctor` confirmed the configured model, Elasticsearch, Arkime, TShark, and all three configured PCAPs without exposing credentials or changing service state.
 - The VM-only live-graph integration test exposed an incorrect test expectation: its fake Arkime source declared a one-result exhaustive response, but the test asserted that no source outcome could resolve. The assertion now proves the intended split: completeness-unknown host results do not resolve, while a declared exhaustive network result does. This correction changes no runtime behavior.
+- Final runtime commit `e6e8668ff367621adad406703bb7e53636fc0c4e` was archived with SHA-256 `B64391078A67D154104CD82912EF23B4022166679FF14D45FC4D9A90E8AF43E3`, which matched locally and on the VM. The exact archive passed all 159 dependency-complete tests with no skips, `compileall`, and fully green deployment diagnostics. Final review reported no remaining Critical or Important issues.
 - No new hunt was launched. The existing operational hunt data and telemetry indices were not modified.
+- The exact VM checkout, archive, test log, and diagnostic log plus the local transfer archive were removed after proof.
 
 ### Read-only ingestion diagnosis
 
