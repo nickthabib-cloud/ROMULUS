@@ -361,5 +361,3 @@ def _short_value(value, limit):
     if isinstance(value, list):
         return [_short_value(x, min(limit, 120)) for x in value[:6]]
     return str(value)[:limit]
-
-
