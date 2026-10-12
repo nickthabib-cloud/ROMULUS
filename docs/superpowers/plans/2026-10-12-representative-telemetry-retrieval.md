@@ -40,11 +40,11 @@
 - Produces: `time_strata(start: datetime, end: datetime, count: int) -> list[dict]`, `allocate_cap(cap: int, count: int) -> list[int]`, `rank_windows(total: int, cap: int, count: int) -> list[dict]`, and `sampling_policy(settings) -> dict`.
 - Produces: `Settings.time_sampling_strata: int`, loaded from `TIME_SAMPLING_STRATA`, default 8, constrained to 2–24.
 
-- [ ] Write synthetic failing tests for stable non-overlapping UTC strata, exact cap allocation, small caps, evenly distributed rank windows, invalid bounds, and configuration limits.
-- [ ] Run `python -m unittest tests.test_sampling -v`; expect missing-module/attribute failures.
-- [ ] Implement the minimal shared module and configuration field.
-- [ ] Run `python -m unittest tests.test_sampling tests.test_core -v`; expect PASS.
-- [ ] Commit with `feat: add deterministic sampling contract`.
+- [x] Write synthetic failing tests for stable non-overlapping UTC strata, exact cap allocation, small caps, evenly distributed rank windows, invalid bounds, and configuration limits.
+- [x] Run `python -m unittest tests.test_sampling -v`; expect missing-module/attribute failures.
+- [x] Implement the minimal shared module and configuration field.
+- [x] Run `python -m unittest tests.test_sampling tests.test_core -v`; expect PASS.
+- [x] Commit with `feat: add deterministic sampling contract`.
 
 ### Task 2: Representative Elasticsearch retrieval
 
@@ -146,4 +146,4 @@
 ## Execution status
 
 - Plan authorized for native execution by the operator on 2026-10-12; no additional approval checkpoint is required.
-- Implementation has not started.
+- Task 1 is complete; Tasks 2–6 remain.

@@ -59,6 +59,7 @@ class Settings:
     max_runtime_seconds: int
     max_results: int
     arkime_max_results: int
+    time_sampling_strata: int
     context_evidence_per_source: int
     tool_timeout_seconds: int
     max_retries: int
@@ -91,6 +92,7 @@ class Settings:
             min_reasoning_rounds=_int("MIN_REASONING_ROUNDS", 3, 1, 10),
             max_runtime_seconds=_int("MAX_RUNTIME_SECONDS", 600, 10, 7200), max_results=_int("MAX_RESULTS", 10000, 1, 20000),
             arkime_max_results=_int("ARKIME_MAX_RESULTS", 20000, 1, 100000),
+            time_sampling_strata=_int("TIME_SAMPLING_STRATA", 8, 2, 24),
             context_evidence_per_source=_int("CONTEXT_EVIDENCE_PER_SOURCE", 1000, 100, 5000),
             tool_timeout_seconds=_int("TOOL_TIMEOUT_SECONDS", 60, 1, 300), max_retries=_int("MAX_RETRIES", 2, 0, 5),
             retention_policy=_choice("RETENTION_POLICY","compact",{"compact","full"}),
