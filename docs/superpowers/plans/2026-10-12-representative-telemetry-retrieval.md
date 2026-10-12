@@ -137,13 +137,13 @@
 - Produces: dependency-complete VM evidence, isolated hunt metrics, compact-retention proof, corpus comparison, and an attached GitHub pull request.
 
 - [x] Run whole-branch review focused on the five Review Focus conditions; fix Critical/Important findings test-first.
-- [ ] Deploy an exact Git archive to the development VM; verify SHA-256, full no-skip suite, compilation, and `doctor`.
-- [ ] Run an isolated bounded live hunt with the same generic mission window and budgets used for the prior comparison. Prove sampled evidence spans the mission window before opening the external corpus.
-- [ ] Finalize compact, verify report reopening and hunt-scoped working-data cleanup, then compare stage-level recall against the external corpus without changing runtime behavior during that run.
-- [ ] Record supported matches, misses, false claims, sampling coverage, and the next capability gap in `VALIDATION.md`; remove exact disposable artifacts only.
+- [x] Deploy an exact Git archive to the development VM; verify SHA-256, full no-skip suite, compilation, and `doctor`.
+- [x] Do not run the planned live hunt after the operator paused it; use only read-only source/index/capture inventory and oracle-to-telemetry presence checks.
+- [x] Verify independently that the raw attack telemetry is already present, keep labels/oracle outside the runtime, and identify the single oracle technique without a labeled telemetry event.
+- [x] Record VM proof and the ingestion diagnosis in `VALIDATION.md`; remove exact disposable artifacts only.
 - [ ] Run final local verification, push `codex/time-stratified-hunting`, create a PR against `main`, and attach it to this task.
 
 ## Execution status
 
 - Plan authorized for native execution by the operator on 2026-10-12; no additional approval checkpoint is required.
-- Tasks 1–5 are complete; Task 6 remains. The operator paused live-hunt validation until the expected attack telemetry is present in the dataset; Task 6 will use local/VM tests and ingestion-path diagnosis instead of another hunt.
+- Tasks 1–5 are complete. Task 6 VM proof and read-only ingestion diagnosis are complete without another hunt. The diagnosis found that raw attack telemetry is already present and that only the ground-truth annotations are intentionally absent; final verification and PR publication remain.

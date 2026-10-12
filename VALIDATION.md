@@ -2,7 +2,7 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
-## 2026-10-12 — representative bounded retrieval (local proof; live hunt paused)
+## 2026-10-12 — representative bounded retrieval (local/VM proof; no new live hunt)
 
 ### Implemented behavior
 
@@ -17,8 +17,22 @@ This file records engineering validation performed against the development deplo
 - Generic synthetic regressions prove cross-window retention, stable repetition, duplicate suppression, conservative fallbacks, report audience separation, and compact aggregation without importing holdout identities, indicators, commands, tools, hostnames, or timestamps into runtime behavior.
 - The complete post-review local suite passed all 152 tests available in this environment, with six dependency-backed checks reserved for the development VM. The focused scheduler/report/retention suite passed 41 tests with one VM dependency skip. `compileall`, `git diff --check`, and a runtime/test corpus-identity scan were clean before the final review corrections and are rerun at the deployment gate.
 - Whole-branch review found that unbounded scheduled Elasticsearch calls did not pass their mapped timestamp explicitly, duplicate suppression could leave unused sample slots, and one failed Elasticsearch stratum discarded successful strata. Failing regressions reproduced all three conditions. The corrected adapters backfill only within a bounded two-times-cap read ceiling, retain successful strata with a disclosed failure count, and carry bounded matched/retained per-stratum counts through the technical report. The customer report receives only a plain-language sampled-coverage limitation.
-- The operator paused another live hunt after determining that the expected attack path is not currently present in the loaded telemetry dataset. No hunt will be used as detection proof until the dataset/ingestion path is diagnosed and the expected telemetry is confirmed present independently of ROMULUS.
-- The remaining deployment gate is therefore dependency-complete VM tests, compilation, diagnostics, and read-only ingestion-path diagnosis. A later live evaluation must start from a confirmed dataset and remain blind to the external oracle during execution.
+- The operator paused another live hunt on the working assumption that the expected attack path was absent. The requested read-only ingestion diagnosis was completed before any further hunt, and the evidence below shows that the raw observable telemetry is already loaded. The ground-truth labels and AttackMate timeline are not loaded, which is the correct blind-evaluation boundary.
+
+### Dependency-complete VM proof
+
+- The exact candidate tree passed all 152 dependency-complete VM tests with no skips and passed `compileall`. `doctor` confirmed the configured model, Elasticsearch, Arkime, TShark, and all three configured PCAPs without exposing credentials or changing service state.
+- The VM-only live-graph integration test exposed an incorrect test expectation: its fake Arkime source declared a one-result exhaustive response, but the test asserted that no source outcome could resolve. The assertion now proves the intended split: completeness-unknown host results do not resolve, while a declared exhaustive network result does. This correction changes no runtime behavior.
+- No new hunt was launched. The existing operational hunt data and telemetry indices were not modified.
+
+### Read-only ingestion diagnosis
+
+- The source archive contains the raw run, the labeled derivative, and the 53-action oracle. The operational Elasticsearch indices contain 840,850 host events from `2024-11-13T15:57:54.478Z` through `20:51:49Z` and 108,237 network events from `15:59:11.386Z` through `20:49:33.460Z`. The oracle interval, approximately `19:17` through `20:37Z`, is inside both ranges.
+- The oracle interval contains 202,092 indexed host records. The target server contributes 148,740 of them: 117,709 audit, 28,771 web access, 1,260 syslog, 907 application, and 93 authentication records.
+- The labeled derivative identifies 3,740 malicious audit records, four syslog records, and thirteen authentication records on the target server. All 3,740 audit records matched indexed records by timestamp and audit record type; every labeled syslog and authentication timestamp was also present in the matching indexed source. The live index intentionally contains raw telemetry rather than the `malicious`, description, or MITRE label fields.
+- The configured captures span the same source packet ranges. The labeled derivative contains 46,439 malicious packets in the later perimeter capture and 7,622 in the DNS capture; Arkime reports 8,353 sessions overlapping the oracle interval. The source archive's later perimeter PCAP ends with one incomplete packet, but both archive inspection and the configured readable capture report the same 575,045 complete packets and the same start/end times.
+- Across the target-host and network labeled telemetry there are 57,878 malicious records covering 31 of the oracle's 32 unique ATT&CK techniques. `T1498` has no labeled telemetry event, so a telemetry-only hunter must not be expected to prove that one action without another source.
+- Conclusion: loading the AttackMate or labeled files into the hunt indices would give ROMULUS the answer and invalidate the evaluation. The attack evidence is already present as raw host/network telemetry; the next proof should therefore evaluate retrieval, candidate promotion, correlation, and reporting against the confirmed interval, while keeping the oracle outside the runtime.
 
 ## 2026-10-12 — unified search scheduler (validated with a coverage limitation)
 
