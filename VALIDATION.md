@@ -24,6 +24,7 @@ This file records engineering validation performed against the development deplo
 - The complete local suite ran 127 tests successfully, with six expected checks skipped for LangGraph/SQLite resume, Arkime/Ollama adapters, and full offline-graph execution on the development VM.
 - `python -m compileall -q romulus tests` and `git diff --check` both completed successfully.
 - The dependency-complete VM suite ran all 127 tests successfully with no skips. This includes the real SQLite/LangGraph interrupted-task resume regression, full offline graph/report/retention execution, adapter checks, and the corrected live-graph source-health/false-closure regression.
+- The first exact-commit `doctor` run found that planner-supported `tcp.port` and `udp.port` were absent from the TShark adapter output-field allowlist. VM `tshark -G fields` confirmed both are valid fields. A focused planner/adapter subset regression failed before the fix and passed after the adapter allowlist was synchronized; the complete local suite remained 127/127 green with six dependency-gated skips. Exact-commit VM redeployment and a second `doctor` remain required.
 - The local runtime cannot honestly complete the dependency-backed end-to-end offline proof. That proof, `doctor`, a bounded isolated read-only live hunt, and the post-hunt AttackMate comparison remain open gates; no result is inferred here.
 
 ### Holdout isolation

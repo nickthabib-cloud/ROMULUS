@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 from ..config import Settings
 
-ALLOWED_FIELDS={"frame.time_epoch","frame.number","frame.len","ip.src","ip.dst","ipv6.src","ipv6.dst","ipv6.addr","ip.addr","tcp.srcport","tcp.dstport","tcp.stream","tcp.flags.syn","tcp.flags.ack","udp.srcport","udp.dstport","udp.stream","dns.qry.name","dns.a","http.host","http.request.uri","http.user_agent","tls.handshake.extensions_server_name","smb2.cmd","smb2.filename"}
+ALLOWED_FIELDS={"frame.time_epoch","frame.number","frame.len","ip.src","ip.dst","ipv6.src","ipv6.dst","ipv6.addr","ip.addr","tcp.srcport","tcp.dstport","tcp.port","tcp.stream","tcp.flags.syn","tcp.flags.ack","udp.srcport","udp.dstport","udp.port","udp.stream","dns.qry.name","dns.a","http.host","http.request.uri","http.user_agent","tls.handshake.extensions_server_name","smb2.cmd","smb2.filename"}
 FILTER_CHARS=set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ .:=<>!&|()/-\"'")
 
 class TSharkAdapter:

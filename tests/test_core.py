@@ -76,7 +76,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(api.search_many(["ainception-hostlogs-a-b"],{"match":{"message":"synthetic"}},100)["hits"]),1)
         with self.assertRaises(ValueError): api.search("unapproved-index",{"match":{"message":"x"}},10)
     def test_tshark_wrapper_uses_allowlist_and_no_shell(self):
+        from romulus.investigation.search_planner import SOURCE_FIELDS
         from romulus.tools.tshark_client import TSharkAdapter
+        self.assertLessEqual(SOURCE_FIELDS["tshark"],ALLOWED_FIELDS)
         adapter=TSharkAdapter(Settings.from_env())
         class Process:
             stdout=["1\t10.0.0.1\n"]
