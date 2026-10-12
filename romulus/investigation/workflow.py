@@ -8,41 +8,109 @@ import hashlib
 import re
 import time
 import uuid
+from pathlib import Path
 
-from ..config import Settings
+from ..config import Settings, safe_url
 from ..models import Evidence, Finding, Hypothesis, encode, utc_now
 from ..store import Store
 from ..intelligence.knowledge import hypotheses_for, TECHNIQUES, ATTACK_RELEASE, ATTACK_RELEASE_DATE, ATTACK_DOMAIN
-from ..intelligence.attack_catalog import load_attack_catalog, reference_seeds
+from ..intelligence.attack_catalog import load_attack_catalog
 from ..intelligence.correlate import correlate
+from ..intelligence.investigation_graph import build_investigation_graph, derive_finding_paths
 from ..intelligence.analytics import summarize_evidence, build_coverage_ledger
 from ..intelligence.behavior_catalog import (
     load_behavior_catalog, load_local_indicators, resolve_semantic_fields, applicable_analytics,
-    compile_elasticsearch_seed, compile_elasticsearch_indicator_seed, build_candidate_queue,
+    compile_elasticsearch_seed, compile_elasticsearch_indicator_seed, build_candidate_queue, merge_candidate_queue,
 )
-from ..tools.elasticsearch_client import ElasticsearchAdapter
+from ..tools.elasticsearch_client import ElasticsearchAdapter, validate_query
 from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
-from .search_planner import (candidate_fields, validate_spec, fingerprint, compile_es, compile_arkime, compile_tshark,
+from .search_planner import (candidate_fields, validate_spec, compile_es, compile_arkime, compile_tshark,
     compile_native_es, validate_native_arkime, validate_native_tshark, expand_anchor_selectors, anchor_time_range,
     SOURCE_FIELDS, TEXT_FIELDS)
+from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
+    record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
+    recover_interrupted_tasks)
+from .sampling import sampling_policy
 from .synthetic import sample_evidence
+
+
+def _scheduled_time_bounds(time_range):
+    if not isinstance(time_range,dict): return None,None
+    start=time_range.get("start",time_range.get("gte")); end=time_range.get("end",time_range.get("lte"))
+    if start is None and end is None: return None,None
+    if not isinstance(start,str) or not isinstance(end,str): raise ValueError("Scheduled time range requires string start and end bounds")
+    def parse(value):
+        parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
+        if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return parse(start),parse(end)
+
+
+def _query_enforces_scheduled_window(value,start,end):
+    if start is None and end is None: return True
+    if not isinstance(value,dict): return False
+    ranges=value.get("range")
+    if isinstance(ranges,dict):
+        for bounds in ranges.values():
+            if not isinstance(bounds,dict): continue
+            try:
+                lower,_=_scheduled_time_bounds({"start":bounds.get("gte"),"end":bounds.get("lte")})
+            except (TypeError,ValueError):
+                continue
+            try: _,upper=_scheduled_time_bounds({"start":bounds.get("gte"),"end":bounds.get("lte")})
+            except (TypeError,ValueError):
+                continue
+            if lower==start and upper==end: return True
+    for child in value.values():
+        if isinstance(child,dict) and _query_enforces_scheduled_window(child,start,end): return True
+        if isinstance(child,list) and any(_query_enforces_scheduled_window(item,start,end) for item in child): return True
+    return False
+
+
+def _scheduled_scope(time_range):
+    if isinstance(time_range,dict) and time_range.get("scope"): return str(time_range["scope"])[:300]
+    return json.dumps(time_range,sort_keys=True,default=str)[:300]
+
+
+def _materialize_time_range(time_range):
+    """Convert relative Elasticsearch-style bounds into one frozen UTC window."""
+    if not isinstance(time_range,dict): return None
+    now=datetime.now(timezone.utc)
+    def parse(value):
+        if value=="now": return now
+        match=re.fullmatch(r"now-(\d+)([smhd])",str(value or ""))
+        if match:
+            seconds=int(match.group(1))*{"s":1,"m":60,"h":3600,"d":86400}[match.group(2)]
+            return now-timedelta(seconds=seconds)
+        parsed=datetime.fromisoformat(str(value).replace("Z","+00:00"))
+        if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    start=parse(time_range.get("gte")); end=parse(time_range.get("lte"))
+    return {"gte":start.isoformat(timespec="seconds"),"lte":end.isoformat(timespec="seconds")}
 
 
 class HuntState(TypedDict, total=False):
     hunt_id: str; objective: str; status: str; outcome: str; termination_reason: str
+    mission_mode: str
     hypotheses: list[dict]; host: list[dict]; network: list[dict]; evidence: list[dict]
     findings: list[dict]; correlations: list[dict]; queries: list[dict]; coverage: dict
     started_at: str; started_epoch: float; finished_at: str; error: str; summary: str
     local_model_note: str; report_paths: list[str]; mapping_errors: list[dict]
     depth: int; tool_calls: int; mode: str; tool_runs: list[dict]
     source_errors: list[dict]; es_fields_by_class: dict[str,list[str]]
-    lead_catalog: list[dict]; lead_queue: list[str]; completed_leads: list[str]
-    search_fingerprints: list[str]; dynamic_plan_created: bool; dynamic_initial_queue: list[str]
-    reasoning_history: list[dict]; reasoning_complete: bool; stage_history: list[dict]; es_indices: list[str]
+    es_indices_by_class: dict[str,list[str]]
+    source_health: dict[str,bool]
+    lead_catalog: list[dict]; completed_leads: list[str]
+    search_tasks: dict[str,dict]; search_queue: list[str]; search_outcomes: list[dict]; scheduler_history: list[dict]
+    scheduler_mission_time_range: dict[str,str]
+    reasoning_history: list[dict]; stage_history: list[dict]; es_indices: list[str]
     es_fields: list[str]; timestamp_field: str; explicit_time_range: bool
     analytic_summary: dict; search_artifacts: list[dict]; evidence_keys: list[str]
-    candidate_leads: list[dict]; behavior_catalog_status: dict; behavior_seed_searches: list[dict]
+    candidate_leads: list[dict]; behavior_catalog_status: dict
+    pivot_results: list[dict]
+    investigation_graph: dict
+    retention_policy: str
 
 
 class HuntEngine:
@@ -58,26 +126,39 @@ class HuntEngine:
         self.settings.ensure_dirs(); hunt_id=hunt_id or "HUNT-"+uuid.uuid4().hex[:10].upper()
         prior=self.store.load_state(hunt_id) if _resume else None
         if prior:
-            state: HuntState=prior; state["status"]="running"; state["started_epoch"]=time.time(); state["resumed_at"]=utc_now(); state.pop("error",None)
+            state: HuntState=prior; state["status"]="running"; state["started_epoch"]=time.time(); state["resumed_at"]=utc_now(); state["retention_policy"]=self.settings.retention_policy; state.pop("error",None)
         else:
             state={"hunt_id":hunt_id,"objective":objective,"status":"running","outcome":"pending",
             "hypotheses":[],"host":[],"network":[],"evidence":[],"findings":[],"correlations":[],
                 "queries":[],"coverage":{},"source_errors":[],"started_at":utc_now(),"started_epoch":time.time(),"depth":0,
                 "tool_calls":0,"mode":"offline" if self.offline else "live","tool_runs":[],"lead_catalog":[],
-                "lead_queue":[],"completed_leads":[],"reasoning_history":[],"stage_history":[],"reasoning_complete":False,
-                "search_fingerprints":[],"dynamic_plan_created":False,"dynamic_initial_queue":[],"es_fields_by_class":{},
+                "completed_leads":[],"reasoning_history":[],"stage_history":[],"es_fields_by_class":{},
+                "es_indices_by_class":{},
                 "analytic_summary":{},"search_artifacts":[],"evidence_keys":[],"candidate_leads":[],
-                "behavior_seed_searches":[],"behavior_catalog_status":{
+                "pivot_results":[],
+                "investigation_graph":{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}},
+                "retention_policy":self.settings.retention_policy,
+                "behavior_catalog_status":{
                     "catalog_version":self.behavior_catalog.get("catalog_version"),
                     "analytics":len(self.behavior_catalog.get("analytics",[])),
                     "trusted_indicators":len(self.local_indicators.get("indicators",[]))}}
+        state.setdefault("sampling_policy",sampling_policy(self.settings))
+        initialize_scheduler(state)
+        if _resume:
+            migrate_legacy_search_state(state,compile_pending=lambda lead:
+                self._compile_investigation_proposals(state,lead,"coverage_frontier"))
+            requeued=recover_interrupted_tasks(state)
+            state.setdefault("coverage",{})["scheduler_resume"]={"requeued_task_ids":requeued,
+                "migration_version":state.get("scheduler_migration_version")}
         self.store.save_state(hunt_id,state)
         checkpoint_conn=None
         try:
             app,checkpoint_conn=self._graph()
             config={"configurable":{"thread_id":hunt_id},"recursion_limit":100}
             snapshot=app.get_state(config) if _resume else None
-            if snapshot and snapshot.next: result=app.invoke(None,config=config)
+            if snapshot and snapshot.next:
+                app.update_state(config,state)
+                result=app.invoke(None,config=config)
             else: result=app.invoke(state,config=config)
         except Exception as e:
             # LangGraph creates new state mappings between nodes. Recover the
@@ -96,32 +177,41 @@ class HuntEngine:
         finally:
             if checkpoint_conn is not None: checkpoint_conn.close()
         result["finished_at"]=utc_now(); result["duration_ms"]=round(max(0,time.time()-result.get("started_epoch",time.time()))*1000); self.store.save_state(hunt_id,result)
-        self.store.prune_checkpoints(hunt_id,keep=1,compact=True)
+        try:
+            from ..retention import RetentionError, apply_retention
+            result=apply_retention(self.store,result,policy=self.settings.retention_policy,automatic=True)
+        except RetentionError as exc:
+            result["retention"]={"policy":self.settings.retention_policy,"status":"incomplete",
+                "updated_at":utc_now(),"error_type":type(exc).__name__}
+            self.store.save_state(hunt_id,result)
+        if result.get("retention",{}).get("status")!="completed":
+            self.store.prune_checkpoints(hunt_id,keep=1,compact=True)
         return result
 
     def resume(self,hunt_id: str) -> dict[str, Any]:
         state=self.store.load_state(hunt_id)
         if not state: raise ValueError(f"Unknown investigation ID: {hunt_id}")
-        if state.get("status")=="completed": return state
+        from ..retention import is_retention_finalized
+        if state.get("status")=="completed" or is_retention_finalized(state): return state
         return self.run(state["objective"],hunt_id=hunt_id,_resume=True)
 
-    def _graph(self):
+    def _graph(self,*,interrupt_before=None):
         from langgraph.graph import StateGraph, END
         import sqlite3
         from langgraph.checkpoint.sqlite import SqliteSaver
         g=StateGraph(HuntState)
         for name,fn in (("plan",self._plan),("collect_host",self._collect_host),("collect_network",self._collect_network),
-                        ("analyze",self._analyze),("reason",self._reason),("pivot",self._pivot),("report",self._report)):
+                        ("discover",self._discover),("analyze",self._analyze),("reason",self._reason),("pivot",self._pivot),("report",self._report)):
             g.add_node(name,fn)
         g.set_entry_point("plan")
-        g.add_edge("plan","collect_host"); g.add_edge("collect_host","collect_network"); g.add_edge("collect_network","analyze")
+        g.add_edge("plan","collect_host"); g.add_edge("collect_host","collect_network"); g.add_edge("collect_network","discover"); g.add_edge("discover","analyze")
         g.add_conditional_edges("analyze",self._after_analyze,{"reason":"reason","pivot":"pivot","report":"report"})
         g.add_conditional_edges("reason",self._after_reason,{"pivot":"pivot","reason":"reason","report":"report"})
         g.add_edge("pivot","analyze"); g.add_edge("report",END)
         connection=sqlite3.connect(self.store.checkpoint_path,check_same_thread=False,timeout=30)
         connection.execute("PRAGMA busy_timeout=30000"); connection.execute("PRAGMA journal_mode=WAL")
         checkpoint=SqliteSaver(connection); checkpoint.setup()
-        return g.compile(checkpointer=checkpoint),connection
+        return g.compile(checkpointer=checkpoint,interrupt_before=interrupt_before or []),connection
 
     def _save(self,s):
         self.store.save_state(s["hunt_id"],s)
@@ -171,6 +261,17 @@ class HuntEngine:
         if self.settings.historical_search: return None,"all retained indexed time"
         return _time_filter(s["objective"],self.settings.es_default_hours),f"last {self.settings.es_default_hours} hours"
 
+    def _fixed_mission_time_scope(self,s):
+        """Return one persisted absolute mission window for every scheduled task."""
+        mission_range,scope=self._time_scope(s)
+        if not mission_range: return None,scope
+        cached=s.get("scheduler_mission_time_range")
+        if isinstance(cached,dict) and cached.get("gte") and cached.get("lte"):
+            return dict(cached),scope
+        fixed=_materialize_time_range(mission_range)
+        s["scheduler_mission_time_range"]=dict(fixed)
+        return fixed,scope
+
     def _budget_ok(self,s):
         if s.get("tool_calls",0)>=self.settings.max_tool_calls:
             s["termination_reason"]="tool_call_budget"; return False
@@ -214,203 +315,116 @@ class HuntEngine:
     def _plan(self,s):
         _validate_explicit_date_order(s["objective"],self.settings.mission_timezone)
         s["explicit_time_range"]=bool(_explicit_dates(s["objective"]))
-        curated_seeds={tid:{"technique_id":tid,"name":v["name"],"tactic":v["tactic"],"tactics":v.get("tactics",[v["tactic"]]),"url":v["url"],
-                "expected_host":v["host"],"expected_network":v["network"],"benign_explanations":v["benign"],
-                "detection_strategies":v.get("detection_strategies",[]),"data_components":v.get("data_components",[]),
-                "analytic_goal":v.get("analytic_goal"),"mutable_elements":v.get("mutable_elements",[])}
-               for tid,v in TECHNIQUES.items()}
-        seeds=[]
-        for reference in reference_seeds(s["objective"],36):
-            tid=reference.get("technique_id")
-            seeds.append({**reference,**curated_seeds.get(tid,{})})
-        if not seeds: seeds=list(curated_seeds.values())
         attack_catalog_metadata=load_attack_catalog().get("metadata",{})
+        s["mission_mode"]="directed" if _mission_is_directed(s["objective"]) else "undirected"
         if self.offline:
             host,network=sample_evidence(); s["host"]=[encode(host[0])]; s["network"]=[encode(x) for x in network]
             for item in s["host"]+s["network"]: self._record_evidence(s,item)
-            offline_hypotheses=[encode(h) for h in hypotheses_for(s["objective"])]
-            smb_fixture=[h for h in offline_hypotheses if h.get("technique_id")=="T1021.002"]
-            s["hypotheses"]=(smb_fixture or offline_hypotheses)[:1]
+            if s["mission_mode"]=="directed":
+                offline_hypotheses=[encode(h) for h in hypotheses_for(s["objective"])]
+                smb_fixture=[h for h in offline_hypotheses if h.get("technique_id")=="T1021.002"]
+                s["hypotheses"]=(smb_fixture or offline_hypotheses)[:1]
+                for hypothesis in s["hypotheses"]:
+                    hypothesis["basis"]="operator_direction"
+                    hypothesis["basis_details"]="Offline validation hypothesis is constrained by the operator's explicit direction."
+            else:
+                s["hypotheses"]=[]
             s["coverage"]={"host":"synthetic fixture searched","network":"synthetic fixture searched","time_scope":"synthetic fixture timestamps",
                 "attack_knowledge":{"domain":ATTACK_DOMAIN,"release":ATTACK_RELEASE,"release_date":ATTACK_RELEASE_DATE,
                     "official_catalog_techniques":attack_catalog_metadata.get("technique_count",0)}}
             offline_leads=_lead_catalog(s["hypotheses"])
             s["lead_catalog"]=[next((lead for lead in offline_leads if lead.get("source")=="host"),offline_leads[0])] if offline_leads else []
-            s["reasoning_complete"]=False
             self._stage(s,"plan","completed",{"hypotheses":len(s["hypotheses"]),"mode":"offline"})
             print(f"[ROMULUS] {s['hunt_id']} offline planning {len(s['hypotheses'])} hypotheses")
             return self._save(s)
-        planned=[]; basis="broad local ATT&CK seed set"
-        if self.use_ollama and self._budget_ok(s):
-            try:
-                from ..agent.ollama import Ollama
-                planned=self._call(s,"ollama.api.chat","hypothesis_generation",{"model":self.settings.ollama_model,"reference_seed_count":len(seeds)},
-                    "mission text; no telemetry",lambda:Ollama(self.settings).plan_hypotheses(s["objective"],seeds,12),len) or []
-                if planned: basis="local model generated a diverse hypothesis set from ATT&CK seeds and mission context"
-            except Exception: planned=[]
-        normalized=_normalize_hypotheses(planned) if planned else []
-        s["hypotheses"]=normalized if len(normalized)>=4 else [encode(h) for h in hypotheses_for(s["objective"])][:20]
-        s["coverage"]={"host":"pending","network":"pending","hypotheses_total":len(s["hypotheses"]),
+        common_coverage={"host":"pending","network":"pending","hypotheses_total":0,
             "attack_knowledge":{"domain":ATTACK_DOMAIN,"release":ATTACK_RELEASE,"release_date":ATTACK_RELEASE_DATE,
                 "model":"Technique -> Detection Strategy -> platform Analytic -> Data Component -> Mutable Element",
                 "official_catalog_techniques":attack_catalog_metadata.get("technique_count",0),
                 "official_catalog_sha256":attack_catalog_metadata.get("source_sha256")},
             "time_scope":self._time_scope(s)[1],"historical_search_enabled":self.settings.historical_search}
+        if s["mission_mode"]=="undirected":
+            s["hypotheses"]=[]; s["lead_catalog"]=[]; s["coverage"]=common_coverage
+            s["reasoning_history"].append({"stage":"mission_discovery_plan","basis":"deterministic_telemetry_discovery",
+                "hypotheses":[],"guardrail":"Hypotheses require an observed deterministic candidate or operator direction."})
+            self._stage(s,"plan","completed",{"hypotheses":0,"candidate_leads":0,
+                "basis":"deterministic_telemetry_discovery","time_scope":s["coverage"]["time_scope"]})
+            print(f"[ROMULUS] {s['hunt_id']} undirected planning: deterministic telemetry discovery before hypotheses; scope={s['coverage']['time_scope']}")
+            return self._save(s)
+        planning_basis="deterministic ATT&CK hypotheses constrained by operator direction; model reasoning deferred until after telemetry"
+        s["hypotheses"]=[encode(h) for h in hypotheses_for(s["objective"])][:20]
+        for hypothesis in s["hypotheses"]:
+            hypothesis["basis"]="operator_direction"
+            hypothesis["basis_details"]="Initial hypothesis is allowed because the operator supplied a specific behavior, technique, entity, or indicator."
+        s["coverage"]={**common_coverage,"hypotheses_total":len(s["hypotheses"])}
         s["lead_catalog"]=_lead_catalog(s["hypotheses"])
-        s["reasoning_history"].append({"stage":"mission_hypothesis_plan","basis":basis,"hypotheses":[{"id":h.get("hypothesis_id"),"title":h.get("title"),"technique_id":h.get("technique_id")} for h in s["hypotheses"]]})
-        self._stage(s,"plan","completed",{"hypotheses":len(s["hypotheses"]),"candidate_leads":len(s["lead_catalog"]),"basis":basis,"time_scope":s["coverage"]["time_scope"]})
-        print(f"[ROMULUS] {s['hunt_id']} planning {len(s['hypotheses'])} hypotheses; basis={basis}; scope={s['coverage']['time_scope']}")
+        s["reasoning_history"].append({"stage":"mission_hypothesis_plan","basis":"operator_direction","planning_method":planning_basis,
+            "hypotheses":[{"id":h.get("hypothesis_id"),"title":h.get("title"),"technique_id":h.get("technique_id")} for h in s["hypotheses"]]})
+        self._stage(s,"plan","completed",{"hypotheses":len(s["hypotheses"]),"candidate_leads":len(s["lead_catalog"]),
+            "basis":"operator_direction","time_scope":s["coverage"]["time_scope"]})
+        print(f"[ROMULUS] {s['hunt_id']} directed planning {len(s['hypotheses'])} hypotheses; basis=operator_direction; scope={s['coverage']['time_scope']}")
         return self._save(s)
 
     def _collect_host(self,s):
-        if self.offline: s["coverage"]["host_count"]=len(s.get("host",[])); return self._save(s)
-        if not self._budget_ok(s):
-            s["coverage"]["host"]="not searched: budget exhausted"; self._stage(s,"host_collection","incomplete",{"reason":s.get("termination_reason")}); return self._save(s)
-        indices=self._call(s,"elasticsearch.indices.get","host_discovery",{"patterns":list(self.settings.es_index_patterns)},
-            "configured allowlist",self.es.indices,len)
-        if indices is None:
-            s["coverage"]["host"]="telemetry retrieval failed during index discovery"; self._stage(s,"host_collection","failed"); return self._save(s)
-        names=[r["index"] for r in indices if r.get("index")]
-        s["es_indices"]=names; s["coverage"]["es_indices"]=names
-        if not names:
-            s["coverage"]["host"]="no configured Elasticsearch indices matched"; self._stage(s,"host_collection","unavailable",{"matched_indices":0}); return self._save(s)
-        mappings=self._call(s,"elasticsearch.indices.get_mapping","host_schema",{"indices":names},
-            "configured indices",lambda:self.es.mappings_many(names),lambda x:len(x))
-        if mappings is None:
-            s["coverage"]["host"]="indices discovered; mapping retrieval failed"; s["es_fields"]=[]; s["es_fields_by_class"]={}
-        else:
-            s["es_fields"]=_field_names(mappings); s["es_fields_by_class"]=_field_names_by_class(mappings)
-        fields=s.get("es_fields",[])
-        host_fields=s.get("es_fields_by_class",{}).get("host") or fields
-        timestamp=next((f for f in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created") if f in host_fields),None)
-        if not fields or (self._time_scope(s)[0] and not timestamp):
-            s["coverage"]["host"]="not searched: no usable mapped fields or timestamp field to enforce the configured time window"
-            self._stage(s,"host_collection","incomplete",{"mapped_fields":len(fields),"timestamp_field_available":bool(timestamp)})
-            self._ensure_initial_plan(s)
+        """Inventory Elasticsearch and mappings; evidence searches run in discover."""
+        if self.offline:
+            s.setdefault("coverage",{})["host_count"]=len(s.get("host",[]))
             return self._save(s)
-        s["timestamp_field"]=timestamp or "@timestamp"
-        timestamp=s["timestamp_field"]
-        mission_range,scope=self._time_scope(s)
-        bindings=resolve_semantic_fields(host_fields)
-        indicator_limit=min(12,max(1,self.settings.max_tool_calls//10))
-        indicator_seeds,indicator_unsupported=_indicator_seed_queries(
-            self.local_indicators,host_fields,timestamp,mission_range,indicator_limit)
-        behavior_limit=min(32,max(1,self.settings.max_tool_calls//5))
-        behavior_seeds,behavior_unsupported=_behavior_seed_queries(
-            self.behavior_catalog,host_fields,timestamp,mission_range,behavior_limit)
-        seed_returned=0
-        seed_executed=0
-        seed_failures=0
-        seed_size=min(25,self.settings.max_results)
-        for seed_kind,seeds in (("trusted_indicator",indicator_seeds),("behavior",behavior_seeds)):
-            for seed in seeds:
-                if not self._budget_ok(s):
-                    break
-                identifier=seed.get("indicator_id") or seed.get("analytic_id")
-                lead_id=f"{seed_kind}:{identifier}"
-                stage="trusted_indicator_seed_search" if seed_kind=="trusted_indicator" else "behavior_seed_search"
-                query=seed["query"]
-                found=self._call(
-                    s,"elasticsearch.search",stage,
-                    {"indices":names,"seed_kind":seed_kind,"seed_id":identifier,"query":query,"size":seed_size},
-                    scope,lambda q=query:self.es.search_many(names,q,seed_size),lambda x:len(x.get("hits",[])))
-                seed_executed+=1
-                if found is None:
-                    seed_failures+=1
-                    status="failed"
-                    returned=0
-                else:
-                    rows=found.get("hits",[])
-                    returned=len(rows)
-                    seed_returned+=returned
-                    status="partial" if found.get("capped") or found.get("timed_out") or found.get("shard_failures") else "completed"
-                    for hit in rows:
-                        self._add_es_hit(s,hit,query,lead_id)
-                if lead_id not in s.setdefault("completed_leads",[]):
-                    s["completed_leads"].append(lead_id)
-                record={"stage":stage,"seed_kind":seed_kind,"seed_id":identifier,
-                    "query":query,"time_range":scope,"returned":returned,"status":status}
-                s["queries"].append(record)
-                s.setdefault("behavior_seed_searches",[]).append(record)
-        s["behavior_catalog_status"]={
-            "catalog_version":self.behavior_catalog.get("catalog_version"),
-            "analytics":len(self.behavior_catalog.get("analytics",[])),
-            "trusted_indicators":len(self.local_indicators.get("indicators",[])),
-            "behavior_searches_planned":len(behavior_seeds),
-            "indicator_searches_planned":len(indicator_seeds),
-            "searches_executed":seed_executed,
-            "returned":seed_returned,
-            "failures":seed_failures,
-            "unsupported_analytics":behavior_unsupported,
-            "unsupported_indicators":indicator_unsupported,
-            "semantic_bindings":bindings,
-        }
-        s.setdefault("coverage",{})["behavior_catalog"]=s["behavior_catalog_status"]
-        surveys=_host_survey_queries(s["hypotheses"],host_fields,timestamp,mission_range,s["objective"],10)
-        survey_names=[name for name in names if "host" in name.lower()] or names
-        returned=0; survey_failures=0; cap_hits=0; survey_details=[]
-        per_survey=min(500,self.settings.max_results)
-        for survey in surveys:
-            query=survey["query"]
-            found=self._call(s,"elasticsearch.search","initial_host_survey",
-                {"indices":survey_names,"hypothesis_id":survey.get("hypothesis_id"),"technique_id":survey.get("technique_id"),"query":query,"size":per_survey},
-                scope,lambda q=query:self.es.search_many(survey_names,q,per_survey),lambda x:len(x.get("hits",[])))
-            if found is None:
-                survey_failures+=1; continue
-            rows=found.get("hits",[]); returned+=len(rows)
-            cap_hit=bool(found.get("capped") or found.get("timed_out") or found.get("shard_failures"))
-            cap_hits+=int(cap_hit)
-            for hit in rows: self._add_es_hit(s,hit,query,survey.get("lead_id"))
-            if survey.get("lead_id") and survey["lead_id"] not in s.setdefault("completed_leads",[]): s["completed_leads"].append(survey["lead_id"])
-            s.setdefault("pivot_results",[]).append({"lead_id":survey.get("lead_id"),"status":"initial host survey completed",
-                "returned":len(rows),"time_range":scope,"capped":cap_hit})
-            detail={"stage":"initial_host_survey","hypothesis_id":survey.get("hypothesis_id"),"technique_id":survey.get("technique_id"),
-                "query":query,"time_range":scope,"returned":len(rows),"matched_total":found.get("total"),"capped":found.get("capped"),
-                "timed_out":found.get("timed_out"),"shard_failures":found.get("shard_failures"),"pagination":found.get("pagination")}
-            s["queries"].append(detail); survey_details.append({k:detail.get(k) for k in ("hypothesis_id","technique_id","returned","matched_total","capped")})
-        if not survey_details:
-            s["coverage"]["host"]="telemetry retrieval failed during every host survey"; self._stage(s,"host_collection","failed"); return self._save(s)
-        s["coverage"]["host"]=(f"searched {scope} with {len(survey_details)} tactic-diverse behavioral surveys; returned {returned} records"+
-            (f"; {survey_failures} survey(s) failed" if survey_failures else "")+
-            (f"; {cap_hits} survey(s) were capped or partial" if cap_hits else ""))
-        s["coverage"]["host_surveys"]=survey_details
-        s["coverage"]["host_count"]=len(s["host"])
-        self._stage(s,"host_collection","partial" if survey_failures or cap_hits else "completed",
-            {"returned":returned,"surveys":len(survey_details),"failed":survey_failures,"partial":cap_hits,"time_scope":scope})
-        indicator_terms=_indicator_terms(s["objective"])
-        if indicator_terms:
-            text_fields=[f for f in ("message","event.original","winlog.event_data.CommandLine","process.name","process.command_line") if f in host_fields]
-            if not text_fields: text_fields=["message"]
-            total_returned=0; failed_terms=[]
-            for term in indicator_terms:
-                indicator_query=_indicator_query([term],text_fields,timestamp,self._time_scope(s)[0]); indicator_size=min(self.settings.max_results,50)
-                indicators=self._call(s,"elasticsearch.search","host_indicator_search",
-                    {"indices":names,"term":term,"fields":text_fields,"query":indicator_query,"size":indicator_size},
-                    scope,lambda q=indicator_query:self.es.search_many(names,q,indicator_size),lambda x:len(x.get("hits",[])))
-                if indicators is None:
-                    failed_terms.append(term); continue
-                total_returned+=len(indicators["hits"])
-                for hit in indicators["hits"]: self._add_es_hit(s,hit,indicator_query,"indicator_sweep")
-                s["queries"].append({"stage":"host_indicator_search","term":term,"fields":text_fields,
-                    "time_range":scope,"returned":len(indicators["hits"])})
-            s["coverage"]["indicator_sweep"]={"terms":indicator_terms,"returned":total_returned,"failed_terms":failed_terms,
-                "status":"partial" if failed_terms else "completed"}
-            self._stage(s,"host_indicator_sweep","partial" if failed_terms else "completed",
-                {"terms":indicator_terms,"returned":total_returned,"failed_terms":failed_terms})
-            s["coverage"]["host_count"]=len(s["host"])
-        self._ensure_initial_plan(s)
-        for search_id in list(s.get("dynamic_initial_queue", [])):
-            plan=next((p for p in s.get("lead_catalog",[]) if p.get("id")==search_id),None)
-            if plan and plan.get("source")=="elasticsearch" and search_id not in s.get("completed_leads",[]):
-                self._execute_model_search(s,plan,"initial_model_host_search")
-                s.setdefault("completed_leads",[]).append(search_id)
+        if not self._budget_ok(s):
+            s.setdefault("coverage",{})["host"]="not inventoried: budget exhausted"
+            self._stage(s,"host_inventory","incomplete",{"reason":s.get("termination_reason")})
+            return self._save(s)
+        indices=self._call(s,"elasticsearch.indices.get","host_discovery",
+            {"patterns":list(self.settings.es_index_patterns)},"configured allowlist",self.es.indices,len)
+        if indices is None:
+            s.setdefault("coverage",{})["host"]="telemetry retrieval failed during index discovery"
+            s.setdefault("source_health",{})["host"]=False
+            self._stage(s,"host_inventory","failed")
+            return self._save(s)
+        names=[row["index"] for row in indices if row.get("index")]
+        s["es_indices"]=names; s.setdefault("coverage",{})["es_indices"]=names
+        if not names:
+            s["coverage"]["host"]="no configured Elasticsearch indices matched"
+            s.setdefault("source_health",{})["host"]=False
+            self._stage(s,"host_inventory","unavailable",{"matched_indices":0})
+            return self._save(s)
+        mappings=self._call(s,"elasticsearch.indices.get_mapping","host_schema",{"indices":names},
+            "configured indices",lambda:self.es.mappings_many(names),lambda value:len(value))
+        if mappings is None:
+            s["coverage"]["host"]="indices discovered; mapping retrieval failed"
+            s["es_fields"]=[]; s["es_fields_by_class"]={}; s["es_indices_by_class"]={}
+            s.setdefault("source_health",{})["host"]=False
+            self._stage(s,"host_inventory","failed",{"matched_indices":len(names)})
+            return self._save(s)
+        s["es_fields"]=_field_names(mappings); s["es_fields_by_class"]=_field_names_by_class(mappings)
+        s["es_indices_by_class"]=_index_names_by_class(mappings)
+        fields=s.get("es_fields",[]); field_classes=s.get("es_fields_by_class",{})
+        index_classes=s.get("es_indices_by_class",{})
+        classified_fields=isinstance(field_classes,dict) and bool(field_classes)
+        classified_indices=isinstance(index_classes,dict) and bool(index_classes)
+        host_fields=list(field_classes.get("host",[])) if classified_fields else fields
+        host_indices=list(index_classes.get("host",[])) if classified_indices else names
+        timestamp=next((field for field in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
+            if field in host_fields),None)
+        ready=bool(host_indices and host_fields and (not self._time_scope(s)[0] or timestamp))
+        s.setdefault("source_health",{})["host"]=ready
+        if ready:
+            s["timestamp_field"]=timestamp or "@timestamp"
+            s["coverage"]["host"]="configured Elasticsearch inventory ready; deterministic discovery pending"
+        else:
+            s["coverage"]["host"]="not searched: no usable mapped fields or timestamp field to enforce the configured time window"
+        self._stage(s,"host_inventory","completed" if ready else "incomplete",
+            {"matched_indices":len(names),"mapped_fields":len(fields),"timestamp_field_available":bool(timestamp)})
         return self._save(s)
 
     def _add_es_hit(self,s,hit,query,lead_id=None):
         index=str(hit.get("_index", "")); document_id=hit.get("_id")
         category=str(_nested(hit,"event.category") or hit.get("event.category") or "").lower()
         module=str(_nested(hit,"event.module") or _nested(hit,"event.dataset") or hit.get("event.module") or "").lower()
-        if "host" in index.lower(): key="host"
+        index_classes=s.get("es_indices_by_class",{}) if isinstance(s.get("es_indices_by_class"),dict) else {}
+        if index in index_classes.get("network",[]): key="network"
+        elif index in index_classes.get("host",[]): key="host"
+        elif "host" in index.lower(): key="host"
         elif "network" in index.lower() or any(x in module for x in ("zeek","suricata","netflow","packetbeat","panw","network")) or "network" in category:
             key="network"
         else: key="host"
@@ -443,112 +457,232 @@ class HuntEngine:
             if session_id: known.add(str(session_id))
         return added
 
-    def _collect_network(self,s):
-        if self.offline:
-            s["coverage"]["network_count"]=len(s.get("network",[])); return self._save(s)
-        explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"],self.settings.mission_timezone)
-        scope=self._time_scope(s)[1]; s["coverage"]["network_sources"]={}
-        self._ensure_initial_plan(s)
-        if self.settings.arkime_username and self.settings.arkime_password:
-            expression=_arkime_expression(s["objective"],s["hypotheses"])
-            all_history=self.settings.historical_search and not explicit
-            result=self._search_arkime_pages(s,expression,"initial_network_search",scope,start_ms,stop_ms,
-                self.settings.arkime_max_results,all_history,{"source":"arkime"})
-            if result["failed"] and not result["sessions"]: s["coverage"]["network_sources"]["arkime"]="failed"
-            else:
-                sessions=result.get("sessions",[])
-                self._add_arkime_rows(s,sessions[:self.settings.arkime_max_results],expression,scope)
-                s["queries"].append({"stage":"initial_network_search","source":"arkime","expression":expression,"time_range":scope,
-                    "returned":len(sessions),"matched_total":result.get("total"),"pages":result.get("pages"),"capped":result.get("capped"),"failed":result.get("failed")})
-                coverage=f"searched {scope}; returned {len(sessions)} of {result.get('total','unknown')} matching sessions across {result.get('pages',0)} page(s)"
-                if result.get("capped"): coverage+="; configured result cap reached, more matching sessions remain"
-                if result.get("failed"): coverage+="; a later page failed, so this source is partial"
-                s["coverage"]["network_sources"]["arkime"]=coverage
-            indicator_terms=_indicator_terms(s["objective"])
+    def _register_discovery_tasks(self,s):
+        """Register bounded deterministic telemetry searches without executing them."""
+        initialize_scheduler(s)
+        registered=[]
+        mission_range,scope=self._fixed_mission_time_scope(s)
+        task_range={"scope":scope}
+        if mission_range:
+            task_range.update({"start":mission_range.get("gte"),"end":mission_range.get("lte")})
+        names=list(s.get("es_indices",[])); fields=list(s.get("es_fields",[]))
+        index_classes=s.get("es_indices_by_class",{})
+        classified_indices=isinstance(index_classes,dict) and bool(index_classes)
+        field_classes=s.get("es_fields_by_class",{})
+        classified_fields=isinstance(field_classes,dict) and bool(field_classes)
+        host_names=(list(index_classes.get("host",[])) if classified_indices else
+            ([name for name in names if "host" in name.lower()] or [name for name in names if "network" not in name.lower()] or names))
+        host_fields=list(field_classes.get("host",[])) if classified_fields else fields
+        timestamp=s.get("timestamp_field") or next((field for field in
+            ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
+            if field in host_fields),None)
+        host_ready=bool(names and host_fields and (not mission_range or timestamp))
+        s.setdefault("source_health",{})["host"]=host_ready
+        behavior_seeds=[]; indicator_seeds=[]; behavior_unsupported=[]; indicator_unsupported=[]
+        if host_ready:
+            indicator_limit=min(12,max(1,self.settings.max_tool_calls//10))
+            indicator_seeds,indicator_unsupported=_indicator_seed_queries(
+                self.local_indicators,host_fields,timestamp or "@timestamp",mission_range,indicator_limit)
+            behavior_limit=min(32,max(1,self.settings.max_tool_calls//5))
+            behavior_seeds,behavior_unsupported=_behavior_seed_queries(
+                self.behavior_catalog,host_fields,timestamp or "@timestamp",mission_range,behavior_limit)
+            seed_size=min(25,self.settings.max_results)
+            for origin,seeds,id_field in (("trusted_indicator",indicator_seeds,"indicator_id"),
+                                          ("behavior_catalog",behavior_seeds,"analytic_id")):
+                for seed in seeds:
+                    task_id,_=register_search_task(s,{"source":"elasticsearch","source_family":"host",
+                        "source_targets":host_names,"phase":"discovery","origin":origin,
+                        "intent":f"Deterministic {origin.replace('_',' ')} discovery: {seed.get(id_field)}",
+                        "query_spec":{"query":seed["query"],"size":seed_size},"time_range":task_range,
+                        "candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],"anchor_evidence_ids":[]})
+                    if task_id not in registered: registered.append(task_id)
+            surveys=_host_survey_queries(s.get("hypotheses",[]),host_fields,timestamp or "@timestamp",mission_range,
+                s.get("objective",""),10)
+            survey_names=host_names
+            for survey in surveys:
+                task_id,_=register_search_task(s,{"source":"elasticsearch","source_family":"host",
+                    "source_targets":survey_names,"phase":"discovery","origin":"directed_survey",
+                    "intent":survey.get("intent") or survey.get("why") or "Operator-directed host survey",
+                    "query_spec":{"query":survey["query"],"size":min(500,self.settings.max_results)},
+                    "time_range":task_range,"candidate_ids":[survey["candidate_id"]] if survey.get("candidate_id") else [],
+                    "follow_up_ids":[survey["follow_up_id"]] if survey.get("follow_up_id") else [],
+                    "hypothesis_ids":[survey["hypothesis_id"]] if survey.get("hypothesis_id") else [],
+                    "anchor_evidence_ids":list(survey.get("anchor_evidence_ids",[]))})
+                if task_id not in registered: registered.append(task_id)
+            indicator_terms=_indicator_terms(s.get("objective",""))
             if indicator_terms:
-                indicator_expressions=_arkime_indicator_expressions(indicator_terms)
-                indicator_size=min(self.settings.max_results,100)
-                returned=0; added=0; group_matches=0; failures=[]; cap_hit=False
-                for group_number,indicator_expression in enumerate(indicator_expressions,1):
-                    indicator_result=self._call(s,"arkime.api.sessions","arkime_indicator_search",
-                        {"terms":indicator_terms,"group":group_number,"expression":indicator_expression,"length":indicator_size,
-                         "date":-1 if all_history else ("explicit" if explicit else self.settings.arkime_default_hours)},scope,
-                        lambda expression=indicator_expression:self.arkime.search_sessions(expression,start_ms=start_ms,stop_ms=stop_ms,
-                            length=indicator_size,all_history=all_history),lambda x:len(x.get("sessions",[])))
-                    if indicator_result is None:
-                        failures.append(group_number); continue
-                    indicator_sessions=indicator_result.get("sessions",[])
-                    returned+=len(indicator_sessions); added+=self._add_arkime_rows(s,indicator_sessions,indicator_expression,scope,"arkime_indicator_sweep")
-                    total=indicator_result.get("total")
-                    if isinstance(total,(int,float)): group_matches+=int(total)
-                    cap_hit=cap_hit or len(indicator_sessions)>=indicator_size
-                    s["queries"].append({"stage":"arkime_indicator_search","source":"arkime","group":group_number,
-                        "terms":indicator_terms,"expression":indicator_expression,"time_range":scope,
-                        "returned":len(indicator_sessions),"matched_total":total})
-                if failures:
-                    s["coverage"]["network_sources"]["arkime_indicator_sweep"]=(
-                        f"partial; {len(failures)} query group(s) failed; returned {returned}, added {added} unique sessions; query-group matches {group_matches}")
-                else:
-                    cap_note="; result cap reached, additional matches may exist" if cap_hit else ""
-                    s["coverage"]["network_sources"]["arkime_indicator_sweep"]=(
-                        f"searched {scope}; returned {returned}, added {added} unique sessions; query-group matches {group_matches}{cap_note}")
-                self._stage(s,"arkime_indicator_sweep",
-                    "partial" if failures else "completed",
-                    {"terms":indicator_terms,"query_groups":len(indicator_expressions),"returned":returned,
-                     "added_unique_sessions":added,"query_group_matches":group_matches,"failed_groups":failures})
-        else: s["coverage"]["network_sources"]["arkime"]="not configured"
+                text_fields=[field for field in ("message","event.original","winlog.event_data.CommandLine",
+                    "process.name","process.command_line") if field in host_fields] or ["message"]
+                for term in indicator_terms:
+                    query=_indicator_query([term],text_fields,timestamp or "@timestamp",mission_range)
+                    task_id,_=register_search_task(s,{"source":"elasticsearch","source_family":"host",
+                        "source_targets":host_names,"phase":"discovery","origin":"directed_survey",
+                        "intent":f"Search operator-supplied indicator {term[:80]}",
+                        "query_spec":{"query":query,"size":min(self.settings.max_results,50)},"time_range":task_range,
+                        "candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],"anchor_evidence_ids":[]})
+                    if task_id not in registered: registered.append(task_id)
+        bindings=resolve_semantic_fields(host_fields) if host_fields else {}
+        s["behavior_catalog_status"]={"catalog_version":self.behavior_catalog.get("catalog_version"),
+            "analytics":len(self.behavior_catalog.get("analytics",[])),
+            "trusted_indicators":len(self.local_indicators.get("indicators",[])),
+            "behavior_searches_planned":len(behavior_seeds),"indicator_searches_planned":len(indicator_seeds),
+            "searches_executed":0,"returned":0,"failures":0,"unsupported_analytics":behavior_unsupported,
+            "unsupported_indicators":indicator_unsupported,"semantic_bindings":bindings}
+        s.setdefault("coverage",{})["behavior_catalog"]=s["behavior_catalog_status"]
 
+        network_fields=list(field_classes.get("network",[])) if classified_fields else []
+        network_indices=(list(index_classes.get("network",[])) if classified_indices else
+            [name for name in s.get("es_indices",[]) if "network" in name.lower()])
+        network_timestamp=next((field for field in
+            ("@timestamp","timestamp","event.created","event.ingested","event.start") if field in network_fields),None)
+        network_probe_fields=[field for field in ("source.ip","destination.ip","src_ip","dst_ip",
+            "source.port","destination.port","network.protocol","protocol") if field in network_fields]
+        if not network_probe_fields:
+            network_probe_fields=[field for field in network_fields if field!=network_timestamp][:4]
+        es_network_ready=bool(network_probe_fields and network_indices and (not mission_range or network_timestamp))
+        network_configured=es_network_ready
+        network_sources=s.setdefault("coverage",{}).setdefault("network_sources",{})
+        network_sources["elasticsearch"]=("configured network indices available; deterministic discovery queued"
+            if es_network_ready else "no mapped network index available")
+        if es_network_ready:
+            network_query={"bool":{"should":[{"exists":{"field":field}} for field in network_probe_fields[:8]],
+                "minimum_should_match":1}}
+            if mission_range:
+                network_query["bool"]["filter"]=[{"range":{network_timestamp:mission_range}}]
+            task_id,_=register_search_task(s,{"source":"elasticsearch","source_family":"network",
+                "source_targets":network_indices,"phase":"discovery","origin":"coverage_frontier",
+                "intent":"Deterministic Elasticsearch network-event discovery",
+                "query_spec":{"query":network_query,"size":min(500,self.settings.max_results)},
+                "time_range":task_range,"candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],
+                "anchor_evidence_ids":[]})
+            if task_id not in registered: registered.append(task_id)
+        if self.settings.arkime_username and self.settings.arkime_password:
+            network_configured=True; network_sources["arkime"]="configured; deterministic discovery queued"
+            expressions=[_arkime_expression(s.get("objective",""),s.get("hypotheses",[]))]
+            expressions.extend(_arkime_indicator_expressions(_indicator_terms(s.get("objective",""))))
+            for expression in expressions:
+                task_id,_=register_search_task(s,{"source":"arkime","source_family":"network",
+                    "source_targets":[safe_url(self.settings.arkime_url)],"phase":"discovery","origin":"coverage_frontier",
+                    "intent":"Deterministic Arkime session discovery","query_spec":{"expression":expression,
+                        "cap":self.settings.arkime_max_results},"time_range":task_range,
+                    "candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],"anchor_evidence_ids":[]})
+                if task_id not in registered: registered.append(task_id)
+        else: network_sources["arkime"]="not configured"
         if self.settings.pcap_files:
-            display_filter=_pcap_filter(s["hypotheses"])
-            date_filter=_pcap_time_filter(explicit,self.settings.mission_timezone)
-            fields=["frame.number","frame.time_epoch","ip.src","ip.dst","ipv6.src","ipv6.dst","tcp.srcport","tcp.dstport","udp.srcport","udp.dstport","dns.qry.name","http.host","tls.handshake.extensions_server_name","smb2.cmd"]
-            attempted=0; failed=0; returned_total=0; matched_total=0; cap_hits=0; output_cap=min(500,self.settings.max_results)
-            for pcap in self.settings.pcap_files[:3]:
-                if not self._budget_ok(s): break
-                result=self._call(s,"tshark.read_pcap","initial_pcap_search",{"pcap":str(pcap),"display_filter":display_filter,"fields":fields},
-                    "explicit mission dates; retained-match cap applies" if date_filter else "entire configured capture; retained-match cap applies",
-                    lambda pcap=pcap:self.tshark.inspect(pcap,display_filter=display_filter,fields=fields,limit=output_cap,time_filter=date_filter),
-                    lambda x:x.get("count",0))
-                attempted+=1
-                if result is None: failed+=1; continue
-                returned_total+=result["count"]
-                matched_total+=int(result.get("matched_count",result["count"]) or 0)
-                if result.get("output_capped"): cap_hits+=1
-                for row in result["packets"]:
-                    self._add_tshark_row(s,row,result["provenance"],result["provenance"]["display_filter"])
-                s["queries"].append({"stage":"initial_pcap_search","source":"tshark","pcap":str(pcap),"display_filter":display_filter,
-                    "time_range":result["provenance"]["time_range"],"returned":result["count"],
-                    "matched_packets":result.get("matched_count"),"retained_match_cap":output_cap,"capped":bool(result.get("output_capped"))})
-            s["coverage"]["network_sources"]["tshark"]=(f"searched {attempted} configured capture(s) completely under the per-call timeout; "
-                f"retained {returned_total} of {matched_total} matching packets; retained-match cap {output_cap} per capture reached by {cap_hits}"+
-                (f"; failed for {failed} capture(s)" if failed else ""))
-        else: s["coverage"]["network_sources"]["tshark"]="no PCAP files configured"
-        for search_id in list(s.get("dynamic_initial_queue", [])):
-            plan=next((p for p in s.get("lead_catalog",[]) if p.get("id")==search_id),None)
-            if plan and plan.get("source") in {"arkime","tshark"} and search_id not in s.get("completed_leads",[]):
-                self._execute_model_search(s,plan,"initial_model_network_search")
-                s.setdefault("completed_leads",[]).append(search_id)
-        statuses=list(s["coverage"]["network_sources"].values())
-        source_failed=any("failed" in str(x).lower() for x in statuses)
-        source_capped=any(("cap reached" in str(x).lower() or "reached by" in str(x).lower()) and
-            "reached by 0" not in str(x).lower() for x in statuses)
-        source_partial=any("partial" in str(x).lower() for x in statuses)
-        if source_failed:
-            s["coverage"]["network"]="partial: one or more configured sources failed"
-        elif source_capped:
-            s["coverage"]["network"]="partial: configured sources responded, but one or more result caps were reached"
-        elif source_partial:
-            s["coverage"]["network"]="partial: a configured network source returned incomplete coverage"
-        elif all(x=="not configured" or x=="no PCAP files configured" for x in statuses):
-            s["coverage"]["network"]="not configured: Arkime and PCAP sources unavailable"
-        else: s["coverage"]["network"]="configured Arkime and/or PCAP sources searched"
-        s["coverage"]["network_count"]=len(s["network"])
-        self._stage(s,"network_collection","partial" if s["coverage"]["network"].startswith("partial") else "completed",
-            {"returned":len(s["network"]),"sources":s["coverage"]["network_sources"],"time_scope":scope})
+            network_configured=True; network_sources["tshark"]="configured; deterministic discovery queued"
+            display_filter=_pcap_filter(s.get("hypotheses",[]))
+            packet_fields=["frame.number","frame.time_epoch","ip.src","ip.dst","ipv6.src","ipv6.dst",
+                "tcp.srcport","tcp.dstport","udp.srcport","udp.dstport","dns.qry.name","http.host",
+                "tls.handshake.extensions_server_name","smb2.cmd"]
+            for pcap in self.settings.pcap_files:
+                task_id,_=register_search_task(s,{"source":"tshark","source_family":"network",
+                    "source_targets":[str(pcap)],"phase":"discovery","origin":"coverage_frontier",
+                    "intent":"Deterministic configured-capture discovery","query_spec":{"display_filter":display_filter,
+                        "fields":packet_fields,"limit":min(500,self.settings.max_results)},"time_range":task_range,
+                    "candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],"anchor_evidence_ids":[]})
+                if task_id not in registered: registered.append(task_id)
+        else: network_sources["tshark"]="no PCAP files configured"
+        s.setdefault("source_health",{})["network"]=network_configured
+        return registered
+
+    def _drain_scheduled_tasks(self,s,*,phase,limit=None):
+        """Execute selected tasks in scheduler order and checkpoint every outcome."""
+        initialize_scheduler(s)
+        queued=[task_id for task_id in s.get("search_queue",[]) if task_id in s.get("search_tasks",{})
+            and s["search_tasks"][task_id].get("phase")==phase
+            and s["search_tasks"][task_id].get("status") in {"queued","interrupted"}]
+        remaining_calls=max(0,self.settings.max_tool_calls-int(s.get("tool_calls",0)))
+        selection_limit=min(len(queued),remaining_calls)
+        if limit is not None: selection_limit=min(selection_limit,max(0,int(limit)))
+        selected=select_search_tasks(s,phase=phase,limit=selection_limit) if selection_limit else []
+        if not selected and queued and remaining_calls<=0:
+            families=sorted({s["search_tasks"][task_id].get("source_family") for task_id in queued})
+            s.setdefault("scheduler_history",[]).append({"event":f"{phase}_budget_gap","phase":phase,
+                "limit":0,"unserved_families":families})
+        for selected_task in selected:
+            task=begin_search_task(s,selected_task["task_id"])
+            self._save(s)
+            outcome=self._execute_search_task(s,task)
+            record_search_outcome(s,task["task_id"],outcome)
+            self._save(s)
+            if outcome.get("status")=="budget_limited": break
+        pending=[task_id for task_id in s.get("search_queue",[]) if task_id in s.get("search_tasks",{})
+            and s["search_tasks"][task_id].get("phase")==phase
+            and s["search_tasks"][task_id].get("status") in {"queued","interrupted"}]
+        budget_limited=bool(pending and (limit is None) and
+            (s.get("termination_reason") in {"tool_call_budget","runtime_budget"} or
+             int(s.get("tool_calls",0))>=self.settings.max_tool_calls))
+        if budget_limited:
+            s["status"]="partial"
+            s.setdefault("termination_reason","tool_call_budget")
+            s.setdefault("coverage",{}).setdefault("scheduler_gaps",[]).append({"phase":phase,
+                "reason":str(s.get("termination_reason") or "tool_call_budget"),"queued_task_ids":pending[:100]})
+        return s
+
+    def _discover(self,s):
+        if self.offline:
+            s.setdefault("coverage",{})["host_count"]=len(s.get("host",[]))
+            s["coverage"]["network_count"]=len(s.get("network",[]))
+            return self._save(s)
+        self._register_discovery_tasks(s)
+        self._drain_scheduled_tasks(s,phase="discovery")
+        self._register_directed_initial_tasks(s)
+        outcomes=[item for item in s.get("search_outcomes",[]) if item.get("phase")=="discovery"]
+        host=[item for item in outcomes if item.get("source_family")=="host"]
+        network=[item for item in outcomes if item.get("source_family")=="network"]
+        def coverage_text(items,label):
+            if not items: return f"not searched: no executable {label} discovery tasks"
+            partial=sum(item.get("status")!="completed" for item in items)
+            returned=sum(int(item.get("returned_total") or 0) for item in items)
+            text=f"executed {len(items)} scheduled {label} discovery task(s); returned {returned} records"
+            return ("partial: "+text+f"; {partial} task(s) incomplete" if partial else text)
+        s.setdefault("coverage",{})["host"]=coverage_text(host,"host")
+        if not s.get("source_health",{}).get("network"):
+            s["coverage"]["network"]="not configured: configured network sources unavailable"
+        else: s["coverage"]["network"]=coverage_text(network,"network")
+        s["coverage"]["host_count"]=len(s.get("host",[])); s["coverage"]["network_count"]=len(s.get("network",[]))
+        behavior_outcomes=[item for item in outcomes if s.get("search_tasks",{}).get(item.get("task_id"),{}).get("origin")
+            in {"behavior_catalog","trusted_indicator"}]
+        if s.get("behavior_catalog_status") is not None:
+            s["behavior_catalog_status"]["searches_executed"]=len(behavior_outcomes)
+            s["behavior_catalog_status"]["returned"]=sum(int(item.get("returned_total") or 0) for item in behavior_outcomes)
+            s["behavior_catalog_status"]["failures"]=sum(item.get("status") not in {"completed","partial"} for item in behavior_outcomes)
+            s["coverage"]["behavior_catalog"]=s["behavior_catalog_status"]
+        self._stage(s,"discovery","partial" if any(item.get("status")!="completed" for item in outcomes) else "completed",
+            {"tasks":len(outcomes),"host_tasks":len(host),"network_tasks":len(network)})
+        return self._save(s)
+
+    def _collect_network(self,s):
+        """Inventory configured network sources and register all discovery work."""
+        if self.offline:
+            s.setdefault("coverage",{})["network_count"]=len(s.get("network",[]))
+            return self._save(s)
+        network_sources=s.setdefault("coverage",{}).setdefault("network_sources",{})
+        arkime_ready=bool(self.settings.arkime_username and self.settings.arkime_password)
+        tshark_ready=bool(self.settings.pcap_files)
+        index_classes=s.get("es_indices_by_class",{})
+        classified_indices=isinstance(index_classes,dict) and bool(index_classes)
+        network_indices=(list(index_classes.get("network",[])) if classified_indices else
+            [name for name in s.get("es_indices",[]) if "network" in name.lower()])
+        es_network_ready=bool(s.get("es_fields_by_class",{}).get("network") and network_indices)
+        network_sources["elasticsearch"]=("configured network indices available; deterministic discovery pending"
+            if es_network_ready else "no mapped network index available")
+        network_sources["arkime"]="configured; deterministic discovery pending" if arkime_ready else "not configured"
+        network_sources["tshark"]="configured; deterministic discovery pending" if tshark_ready else "no PCAP files configured"
+        s.setdefault("source_health",{})["network"]=es_network_ready or arkime_ready or tshark_ready
+        self._register_discovery_tasks(s)
+        if es_network_ready or arkime_ready or tshark_ready:
+            s["coverage"]["network"]="configured network inventory ready; deterministic discovery pending"
+            status="completed"
+        else:
+            s["coverage"]["network"]="not configured: configured network sources unavailable"
+            status="unavailable"
+        self._stage(s,"network_inventory",status,{"arkime_configured":arkime_ready,
+            "pcap_captures":len(self.settings.pcap_files),"registered_tasks":len(s.get("search_tasks",{}))})
         return self._save(s)
 
     def _ensure_initial_plan(self,s):
-        if s.get("dynamic_plan_created") or self.offline: return
+        """Expose validated source fields without creating a parallel execution queue."""
         source_fields={}
         if s.get("es_indices") and s.get("es_fields"):
             source_fields["elasticsearch"]=candidate_fields("elasticsearch",s["es_fields"])
@@ -556,210 +690,399 @@ class HuntEngine:
             source_fields["arkime"]=candidate_fields("arkime",list(SOURCE_FIELDS["arkime"]))
         if self.settings.pcap_files:
             source_fields["tshark"]=candidate_fields("tshark",list(SOURCE_FIELDS["tshark"]))
-        s.setdefault("coverage",{})["search_fields"]=source_fields
+        coverage=s.setdefault("coverage",{})
+        coverage["search_fields"]=source_fields
         field_classes=s.get("es_fields_by_class",{})
-        s.setdefault("coverage",{})["search_field_classes"]={k:candidate_fields("elasticsearch",v) for k,v in field_classes.items() if v}
-        s["dynamic_plan_created"]=True
-        if not source_fields or not self.use_ollama or not self._budget_ok(s):
-            s["coverage"]["model_initial_search_plan"]="not generated: no mapped source, Ollama disabled, or budget exhausted"
-            return
-        try:
-            from ..agent.ollama import Ollama
-            raw=self._call(s,"ollama.api.chat","initial_search_planning",
-                {"model":self.settings.ollama_model,"sources":list(source_fields),"field_counts":{k:len(v) for k,v in source_fields.items()}},
-                "mission, hypotheses, actual field catalogs; no raw telemetry",
-                lambda:Ollama(self.settings).propose_searches(s["objective"],s.get("hypotheses",[]),_all_evidence(s),source_fields,6,[],"initial",
-                    s.get("coverage",{}).get("search_field_classes",{})),len)
-        except Exception: raw=None
-        ids={h.get("hypothesis_id") for h in s.get("hypotheses",[]) if h.get("hypothesis_id")}
-        evidence_ids={e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")}
-        accepted=[]; rejected=0
-        for item in raw or []:
-            # Initial searches establish broad coverage across retained time.
-            # Evidence-anchored windows are reserved for later pivots after an
-            # analyst assessment identifies a concrete record worth following.
-            if isinstance(item,dict): item={**item,"anchor_evidence_ids":[]}
-            item=expand_anchor_selectors(item,_all_evidence(s))
-            spec=validate_spec(item,allowed_sources=list(source_fields),hypothesis_ids=ids,
-                fields_by_source=source_fields,evidence_ids=evidence_ids)
-            if not spec:
-                rejected+=1; continue
-            fp=fingerprint(spec)
-            if fp in s.setdefault("search_fingerprints",[]):
-                rejected+=1; continue
-            s["search_fingerprints"].append(fp)
-            search_id="Q-"+fp
-            entry={"id":search_id,"fingerprint":fp,"phase":"initial",**spec}
-            s.setdefault("lead_catalog",[]).append(entry); s.setdefault("dynamic_initial_queue",[]).append(search_id); accepted.append(search_id)
-        s["coverage"]["model_initial_search_plan"]={"status":"generated" if accepted else "empty_or_unavailable",
-            "accepted":len(accepted),"rejected_or_duplicate":rejected,"sources":list(source_fields)}
-        self._stage(s,"initial_search_planning","completed" if accepted else "no_searches",
-            {"accepted":len(accepted),"rejected_or_duplicate":rejected,"sources":list(source_fields)})
-        print(f"[ROMULUS] model initial search plan: accepted={len(accepted)} rejected_or_duplicate={rejected} sources={list(source_fields)}")
+        coverage["search_field_classes"]={key:candidate_fields("elasticsearch",value)
+            for key,value in field_classes.items() if value}
+        if _state_mission_mode(s)=="undirected" and not s.get("candidate_leads"):
+            coverage["model_initial_search_plan"]="deferred: undirected mission has no telemetry-backed candidate"
+        elif not source_fields:
+            coverage["model_initial_search_plan"]="not generated: no mapped source"
+        else:
+            coverage["model_initial_search_plan"]="deferred to unified investigation scheduler"
+        return source_fields
 
-    def _search_arkime_pages(self,s,expression,stage,scope,start_ms,stop_ms,cap,all_history,details=None):
-        """Page through an Arkime result set, but stop at the configured evidence cap."""
-        sessions=[]; total=None; offset=0; pages=0; failed=False; seen=set(); duplicates=0
-        page_size=min(2000,max(1,int(cap)),self.settings.arkime_max_results)
-        while len(sessions)<cap:
-            if not self._budget_ok(s): break
-            length=min(page_size,cap-len(sessions))
-            parameters={**(details or {}),"expression":expression,"start":offset,"length":length,
-                "date":-1 if all_history else ("explicit" if start_ms is not None else self.settings.arkime_default_hours)}
-            found=self._call(s,"arkime.api.sessions",stage,parameters,scope,
-                lambda offset=offset,length=length:self.arkime.search_sessions(expression,start_ms=start_ms,stop_ms=stop_ms,
-                    length=length,all_history=all_history,start=offset),lambda x:len(x.get("sessions",[])))
-            if found is None:
-                failed=True; break
-            rows=found.get("sessions",[]); pages+=1
-            for row in rows:
-                session_key=str(row.get("id") or (row.get("firstPacket"),row.get("source.ip",row.get("srcIp")),row.get("destination.ip",row.get("dstIp")),row.get("source.port",row.get("srcPort")),row.get("destination.port",row.get("dstPort"))))
-                if session_key in seen: duplicates+=1; continue
-                seen.add(session_key); sessions.append(row)
-            value=found.get("total")
-            if isinstance(value,(int,float)): total=int(value)
-            if not rows or len(rows)<length: break
-            offset+=len(rows)
-            if total is not None and offset>=total: break
-        capped=(total is not None and len(sessions)<total) or (not failed and len(sessions)>=cap and (total is None or len(sessions)<total))
-        return {"sessions":sessions,"total":total,"pages":pages,"failed":failed,"capped":capped,"duplicates_suppressed":duplicates}
+    def _effective_task_window(self,s,plan):
+        """Freeze the mission/anchor window used by one executable task."""
+        mission_range,mission_scope=self._fixed_mission_time_scope(s)
+        effective_range,anchor_scope=anchor_time_range(plan,_all_evidence(s),mission_range)
+        task_range={"scope":anchor_scope or mission_scope}
+        if effective_range:
+            task_range.update({"start":effective_range.get("gte"),"end":effective_range.get("lte")})
+        return effective_range,task_range
 
-    def _execute_model_search(self,s,plan,stage):
-        source=plan.get("source"); intent=plan.get("intent",""); fp=plan.get("fingerprint") or fingerprint(plan)
-        mission_range,mission_scope=self._time_scope(s)
-        effective_range=mission_range; anchor_scope=None; scope=mission_scope
-        result_count=0; status="skipped"; details={"intent":intent,"search_id":plan.get("id"),"hypothesis_id":plan.get("hypothesis_id"),"anchor_evidence_id":(plan.get("anchor_evidence_ids") or [None])[0],
-            "native_query_language":plan.get("native_query_language","none"),"native_query_validation":plan.get("native_query_validation","not_proposed")}
-        try:
-            effective_range,anchor_scope=anchor_time_range(plan,_all_evidence(s),mission_range)
-            scope=anchor_scope or mission_scope
+    def _task_owners(self,s,plan):
+        candidate_id=plan.get("candidate_id")
+        follow_up_id=plan.get("follow_up_id")
+        candidate=next((item for item in s.get("candidate_leads",[])
+            if item.get("candidate_id")==candidate_id),None)
+        if not candidate:
+            candidate_id=None; follow_up_id=None
+        elif follow_up_id and not any(item.get("follow_up_id")==follow_up_id
+                for item in candidate.get("follow_ups",[])):
+            follow_up_id=None
+        hypothesis_id=plan.get("hypothesis_id")
+        hypothesis_ids={item.get("hypothesis_id") for item in s.get("hypotheses",[])}
+        return {
+            "candidate_ids":[candidate_id] if candidate_id else [],
+            "follow_up_ids":[follow_up_id] if follow_up_id else [],
+            "hypothesis_ids":[hypothesis_id] if hypothesis_id in hypothesis_ids else [],
+            "anchor_evidence_ids":list(dict.fromkeys(plan.get("anchor_evidence_ids",[]) or []))[:8],
+            "candidate_priority":candidate.get("priority_tier") if candidate else None,
+            "trusted_indicator_match":bool(candidate and candidate.get("kind")=="trusted_indicator"),
+        }
+
+    def _compile_investigation_proposals(self,s,plan,origin):
+        """Compile one grounded lead/spec into exact source scheduler proposals."""
+        owners=self._task_owners(s,plan)
+        intent=str(plan.get("intent") or plan.get("why") or "Bounded investigation search")[:500]
+        if self.offline:
+            return [{"source":"elasticsearch","source_family":"host",
+                "source_targets":["offline-synthetic"],"phase":"investigation","origin":origin,
+                "intent":intent,"query_spec":{"query":{"bool":{"must":[{"exists":{"field":"message"}}]}},"size":1},
+                "time_range":{"scope":"synthetic fixture timestamps"},**owners}]
+
+        effective_range,task_range=self._effective_task_window(s,plan)
+        source=plan.get("source")
+        proposals=[]
+        if source in {"host","elasticsearch"}:
+            all_names=list(s.get("es_indices",[])); by_class=s.get("es_fields_by_class",{})
+            requested_group=plan.get("index_class","host" if source=="host" else "all")
+            group=requested_group
+            plan_fields=set(plan.get("fields",[]))
+            host_score=len(plan_fields & set(by_class.get("host",[])))
+            network_score=len(plan_fields & set(by_class.get("network",[])))
             if source=="elasticsearch":
-                all_names=list(s.get("es_indices",[])); requested_group=plan.get("index_class","all"); group=requested_group
-                by_class=s.get("es_fields_by_class",{}); plan_fields=set(plan.get("fields",[]))
-                host_score=len(plan_fields & set(by_class.get("host",[])))
-                network_score=len(plan_fields & set(by_class.get("network",[])))
                 if group=="all" and max(host_score,network_score)>0 and host_score!=network_score:
                     group="host" if host_score>network_score else "network"
                 elif group in {"host","network"}:
                     own_score=host_score if group=="host" else network_score
                     other_score=network_score if group=="host" else host_score
                     if other_score>own_score: group="network" if group=="host" else "host"
-                names=all_names if group=="all" else [x for x in all_names if group in x.lower()]
-                if not names: raise ValueError(f"No configured Elasticsearch index matched index_class={group}")
-                actual_fields=(by_class.get(group) if group in {"host","network"} else s.get("es_fields",[])) or s.get("es_fields",[])
-                scoped_plan={**plan,"index_class":group,"fields":[f for f in plan.get("fields",[]) if f in actual_fields]}
-                if scoped_plan.get("terms") and not scoped_plan["fields"]:
-                    scoped_plan["fields"]=[f for f in TEXT_FIELDS if f in actual_fields][:4]
-                timestamp_field=next((f for f in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created") if f in actual_fields),None)
-                if effective_range and not timestamp_field: raise ValueError("No mapped timestamp field is available to enforce the search window")
+            else: group="host"
+            index_classes=s.get("es_indices_by_class",{})
+            classified_indices=isinstance(index_classes,dict) and bool(index_classes)
+            names=all_names if group=="all" else (list(index_classes.get(group,[]))
+                if classified_indices else [name for name in all_names if group in name.lower()])
+            if not names and group=="host": names=[name for name in all_names if "network" not in name.lower()] or all_names
+            if not names: raise ValueError(f"No configured Elasticsearch index matched index_class={group}")
+            actual_fields=(by_class.get(group) if group in {"host","network"} else s.get("es_fields",[])) or s.get("es_fields",[])
+            timestamp=next((field for field in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
+                if field in actual_fields),None)
+            if effective_range and not timestamp: raise ValueError("No mapped timestamp field is available to enforce the search window")
+            if source=="host":
+                query=_lead_host_query(plan,actual_fields,timestamp or s.get("timestamp_field","@timestamp"),effective_range,{})
+            else:
+                scoped={**plan,"index_class":group,"fields":[field for field in plan.get("fields",[]) if field in actual_fields]}
+                if scoped.get("terms") and not scoped["fields"]:
+                    scoped["fields"]=[field for field in TEXT_FIELDS if field in actual_fields][:4]
                 query=None
                 if plan.get("native_query_language")=="elasticsearch_dsl" and plan.get("native_query"):
-                    try:
-                        query=compile_native_es(plan["native_query"],actual_fields,timestamp_field or s.get("timestamp_field","@timestamp"),effective_range)
-                        details["native_query_execution"]="accepted"
-                    except (ValueError,TypeError,json.JSONDecodeError) as native_error:
-                        details["native_query_execution"]="rejected_fallback"
-                        details["native_query_error"]=_safe_error_reason(native_error)
-                if query is None:
-                    query=compile_es(scoped_plan,actual_fields,timestamp_field or s.get("timestamp_field","@timestamp"),effective_range)
-                size=min(self.settings.max_results,500)
-                details.update({"requested_index_class":requested_group,"effective_index_class":group})
-                found=self._call(s,"elasticsearch.search",stage,{**details,"source":"elasticsearch","indices":names,"query":query,"size":size},scope,
-                    lambda:self.es.search_many(names,query,size),lambda x:len(x.get("hits",[])))
-                if found is None: status="failed_or_budget_limited"
-                else:
-                    rows=found.get("hits",[]); result_count=len(rows); status="completed"
-                    for hit in rows: self._add_es_hit(s,hit,query,plan.get("id"))
-                    details["matched_total"]=found.get("total")
-                s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"indices":names,
-                    "query":locals().get("query"),"time_range":scope,"returned":result_count,"status":status,
-                    "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
-            elif source=="arkime":
-                if not self.settings.arkime_username or not self.settings.arkime_password: raise ValueError("Arkime API credentials are not configured")
-                expression=None
-                if plan.get("native_query_language")=="arkime" and plan.get("native_query"):
-                    try:
-                        expression=validate_native_arkime(plan["native_query"],list(SOURCE_FIELDS["arkime"]))
-                        details["native_query_execution"]="accepted"
-                    except ValueError as native_error:
-                        details["native_query_execution"]="rejected_fallback"
-                        details["native_query_error"]=_safe_error_reason(native_error)
-                if expression is None: expression=compile_arkime(plan)
-                explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"],self.settings.mission_timezone)
-                if anchor_scope and effective_range:
-                    start_ms=_explicit_epoch(effective_range["gte"],scale=1000); stop_ms=_explicit_epoch(effective_range["lte"],scale=1000)
-                all_history=self.settings.historical_search and not explicit
-                found=self._search_arkime_pages(s,expression,stage,scope,start_ms,stop_ms,self.settings.arkime_max_results,all_history,details)
-                if found["failed"] and not found["sessions"]: status="failed_or_budget_limited"
-                else:
-                    rows=found.get("sessions",[]); result_count=len(rows); status="partial" if found.get("capped") or found.get("failed") else "completed"
-                    self._add_arkime_rows(s,rows,expression,scope,plan.get("id")); details["matched_total"]=found.get("total")
-                s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"expression":locals().get("expression"),
-                    "time_range":scope,"returned":result_count,"matched_total":found.get("total"),"pages":found.get("pages"),"capped":found.get("capped"),"status":status,
-                    "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
-            elif source=="tshark":
-                if not self.settings.pcap_files: raise ValueError("No approved PCAPs are configured")
-                filter_spec={**plan,"ports":list(plan.get("ports",[]))}
-                display_filter=None
+                    query=compile_native_es(plan["native_query"],actual_fields,timestamp or s.get("timestamp_field","@timestamp"),effective_range)
+                if query is None: query=compile_es(scoped,actual_fields,timestamp or s.get("timestamp_field","@timestamp"),effective_range)
+            if query is None: raise ValueError("Investigation lead has no mapped Elasticsearch selectors")
+            proposals.append({"source":"elasticsearch","source_family":"network" if group=="network" else "host",
+                "source_targets":names,"phase":"investigation","origin":origin,"intent":intent,
+                "query_spec":{"query":query,"size":min(500,self.settings.max_results)},
+                "time_range":task_range,**owners})
+            return proposals
+
+        if source not in {"network","arkime","tshark"}: raise ValueError("Unsupported investigation source")
+        if source in {"network","arkime"} and self.settings.arkime_username and self.settings.arkime_password:
+            expression=None
+            if source=="arkime" and plan.get("native_query_language")=="arkime" and plan.get("native_query"):
+                expression=validate_native_arkime(plan["native_query"],list(SOURCE_FIELDS["arkime"]))
+            if expression is None: expression=compile_arkime(plan) if source=="arkime" else _lead_network_expression(plan)
+            expression=validate_native_arkime(expression,list(SOURCE_FIELDS["arkime"]))
+            proposals.append({"source":"arkime","source_family":"network",
+                "source_targets":[safe_url(self.settings.arkime_url)],"phase":"investigation","origin":origin,
+                "intent":intent,"query_spec":{"expression":expression,"cap":self.settings.arkime_max_results},
+                "time_range":task_range,**owners})
+        # Arkime is the first-line session source for a generic network pivot.
+        # Re-running the same broad intent against every full PCAP is expensive
+        # and can starve evidence synthesis. Explicit TShark requests still use
+        # every configured capture, and PCAPs remain the generic fallback when
+        # Arkime is unavailable.
+        use_pcaps=(source=="tshark" or (source=="network" and not proposals))
+        if use_pcaps and self.settings.pcap_files:
+            display_filter=None; packet_fields=[]
+            if source=="tshark" and plan.get("native_query_language")=="tshark" and plan.get("native_query"):
+                display_filter=validate_native_tshark(plan["native_query"],list(SOURCE_FIELDS["tshark"]))
                 packet_fields=list(dict.fromkeys(["frame.number","frame.time_epoch","ip.src","ip.dst","ipv6.src","ipv6.dst",
-                    "tcp.srcport","tcp.dstport","udp.srcport","udp.dstport",*[f for f in plan.get("fields",[]) if f in SOURCE_FIELDS["tshark"]]]))[:16]
-                if plan.get("native_query_language")=="tshark" and plan.get("native_query"):
-                    try:
-                        display_filter=validate_native_tshark(plan["native_query"],list(SOURCE_FIELDS["tshark"]))
-                        details["native_query_execution"]="accepted"
-                    except ValueError as native_error:
-                        details["native_query_execution"]="rejected_fallback"
-                        details["native_query_error"]=_safe_error_reason(native_error)
-                if display_filter is None: display_filter,packet_fields=compile_tshark(filter_spec)
-                date_filter=_pcap_time_filter(_explicit_dates(s["objective"]),self.settings.mission_timezone)
-                if anchor_scope and effective_range:
-                    start_seconds=_explicit_epoch(effective_range["gte"],scale=1); stop_seconds=_explicit_epoch(effective_range["lte"],scale=1)
-                    date_filter=f"frame.time_epoch >= {start_seconds:.3f} && frame.time_epoch <= {stop_seconds:.3f}"
-                attempted=0; failed=0; cap_hits=0; matched_total=0; output_cap=min(500,self.settings.max_results)
-                for pcap in self.settings.pcap_files[:3]:
-                    if not self._budget_ok(s): status="budget_limited"; break
-                    found=self._call(s,"tshark.read_pcap",stage,{**details,"source":"tshark","pcap":str(pcap),"display_filter":display_filter,"fields":packet_fields},
-                        "explicit mission dates; retained-match cap applies" if date_filter else "entire configured capture; retained-match cap applies",
-                        lambda pcap=pcap:self.tshark.inspect(pcap,display_filter=display_filter,fields=packet_fields,
-                            limit=output_cap,time_filter=date_filter),lambda x:x.get("count",0))
-                    attempted+=1
-                    if found is None: failed+=1; continue
-                    result_count+=found.get("count",0)
-                    matched_total+=int(found.get("matched_count",found.get("count",0)) or 0)
-                    if found.get("output_capped"): cap_hits+=1
-                    for row in found.get("packets",[]):
-                        self._add_tshark_row(s,row,{**found["provenance"],"search_id":plan.get("id"),
-                            "hypothesis_id":plan.get("hypothesis_id"),"search_fingerprint":fp},
-                            found["provenance"]["display_filter"],plan.get("id"))
-                if status!="budget_limited": status="partial" if failed or cap_hits else ("completed" if attempted else "skipped")
-                s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"display_filter":locals().get("display_filter"),
-                    "pcaps_attempted":attempted,"failed":failed,"cap_hits":cap_hits,"per_capture_output_cap":output_cap,
-                    "time_range":scope,"returned":result_count,"matched_total":matched_total,"status":status,
-                    "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
-            else: raise ValueError("Unsupported search source")
+                    "tcp.srcport","tcp.dstport","udp.srcport","udp.dstport",
+                    *[field for field in plan.get("fields",[]) if field in SOURCE_FIELDS["tshark"]]]))[:16]
+            elif source=="tshark": display_filter,packet_fields=compile_tshark(plan)
+            else:
+                display_filter=_lead_pcap_filter(plan)
+                packet_fields=["frame.number","frame.time_epoch","ip.src","ip.dst","ipv6.src","ipv6.dst",
+                    "tcp.srcport","tcp.dstport","udp.srcport","udp.dstport","dns.qry.name","http.host",
+                    "tls.handshake.extensions_server_name","smb2.cmd"]
+            validate_native_tshark(display_filter,list(SOURCE_FIELDS["tshark"]))
+            for pcap in self.settings.pcap_files:
+                proposals.append({"source":"tshark","source_family":"network","source_targets":[str(pcap)],
+                    "phase":"investigation","origin":origin,"intent":intent,
+                    "query_spec":{"display_filter":display_filter,"fields":packet_fields,
+                        "limit":min(500,self.settings.max_results)},"time_range":task_range,**owners})
+        if not proposals: raise ValueError("No configured source can execute the investigation lead")
+        return proposals
+
+    def _register_investigation_tasks(self,s):
+        """Project deterministic candidate/directed/coverage leads into one queue."""
+        initialize_scheduler(s); registered=[]
+        hypotheses={item.get("hypothesis_id"):item for item in s.get("hypotheses",[])}
+        candidates={item.get("candidate_id"):item for item in s.get("candidate_leads",[])}
+        for lead in s.get("lead_catalog",[]):
+            if not isinstance(lead,dict): continue
+            candidate=candidates.get(lead.get("candidate_id"))
+            hypothesis=hypotheses.get(lead.get("hypothesis_id"),{})
+            if candidate and lead.get("follow_up_id"): origin="candidate_follow_up"
+            elif hypothesis.get("basis")=="operator_direction": origin="directed_survey"
+            else: origin="coverage_frontier"
+            try: proposals=self._compile_investigation_proposals(s,lead,origin)
+            except (ValueError,TypeError,json.JSONDecodeError) as exc:
+                family="host" if lead.get("source") in {"host","elasticsearch"} else "network"
+                if s.get("source_health",{}).get(family) is False and lead.get("candidate_id") and lead.get("follow_up_id"):
+                    reason=f"{family} telemetry unavailable"
+                    candidate=candidates.get(lead.get("candidate_id"))
+                    if candidate:
+                        gaps=candidate.setdefault("telemetry_gaps",[])
+                        if reason not in gaps: gaps.append(reason)
+                        follow_up=next((item for item in candidate.get("follow_ups",[])
+                            if item.get("follow_up_id")==lead.get("follow_up_id")),None)
+                        if follow_up:
+                            follow_up["status"]="skipped_due_gap"
+                            history=follow_up.setdefault("history",[])
+                            if not any(item.get("reason")==reason for item in history):
+                                history.append({"timestamp":utc_now(),"status":"skipped_due_gap","reason":reason,
+                                    "error_kind":type(exc).__name__})
+                continue
+            for proposal in proposals:
+                task_id,_=register_search_task(s,proposal)
+                if task_id not in registered: registered.append(task_id)
+        outcomes={item.get("task_id"):item for item in s.get("search_outcomes",[]) if item.get("task_id")}
+        for task_id in registered:
+            if task_id in outcomes: self._record_scheduled_followups(s,s["search_tasks"][task_id],outcomes[task_id])
+        return registered
+
+    def _register_directed_initial_tasks(self,s):
+        """Register operator-grounded work; never model-plan an undirected hunt."""
+        self._ensure_initial_plan(s)
+        registered=self._register_investigation_tasks(s) if _state_mission_mode(s)=="directed" else []
+        if _state_mission_mode(s)!="directed" or self.offline or not self.use_ollama: return registered
+        coverage=s.setdefault("coverage",{})
+        prior=coverage.get("model_initial_search_plan")
+        if isinstance(prior,dict) and prior.get("attempted"): return registered
+        source_fields=coverage.get("search_fields",{})
+        plan_status={"attempted":False,"status":"not generated","accepted":0,"rejected_or_duplicate":0}
+        coverage["model_initial_search_plan"]=plan_status
+        queued=sum(task.get("phase")=="investigation" and task.get("status") in {"queued","interrupted"}
+            for task in s.get("search_tasks",{}).values())
+        remaining=max(0,self.settings.max_tool_calls-int(s.get("tool_calls",0)))
+        if queued:
+            plan_status.update({"status":"deferred: execution capacity reserved for queued searches",
+                "queued_search_tasks":queued,"remaining_tool_calls":remaining})
+            return registered
+        if not source_fields or not self._budget_ok(s): return registered
+        plan_status["attempted"]=True
+        try:
+            from ..agent.ollama import Ollama, model_evidence_context
+            visible_evidence=model_evidence_context(_all_evidence(s),10)
+            searches=self._call(s,"ollama.api.chat","initial_search_planning",
+                {"model":self.settings.ollama_model,"hypotheses":len(s.get("hypotheses",[]))},
+                "operator-directed mission and completed deterministic discovery",
+                lambda:Ollama(self.settings).propose_searches(s.get("objective",""),s.get("hypotheses",[]),
+                    visible_evidence,source_fields,6,_search_history_summary(s),"initial",
+                    coverage.get("search_field_classes",{})),len) or []
         except Exception as exc:
-            status="rejected_or_failed"; error_reason=_safe_error_reason(exc)
+            plan_status["status"]="failed"; plan_status["error"]=type(exc).__name__; return registered
+        accepted=self._register_model_searches(s,searches,"initial",
+            visible_evidence_ids={item.get("evidence_id") for item in visible_evidence if item.get("evidence_id")})
+        for task in accepted:
+            if task["task_id"] not in registered: registered.append(task["task_id"])
+        planning=coverage.get("model_search_planning",[])
+        latest=planning[-1] if planning else {}
+        plan_status.update({"status":"completed","accepted":latest.get("accepted",0),
+            "rejected_or_duplicate":latest.get("rejected_or_duplicate",0)})
+        return registered
+
+    def _execute_search_task(self,s,task):
+        """Execute one validated scheduler task and return its exact bounded outcome."""
+        task_id=str(task.get("task_id") or "")
+        source=str(task.get("source") or "")
+        query_spec=task.get("query_spec")
+        time_range=task.get("time_range")
+        if not task_id.startswith("ST-") or source not in {"elasticsearch","arkime","tshark"} or not isinstance(query_spec,dict):
+            raise ValueError("Invalid scheduled search task")
+        start_time,end_time=_scheduled_time_bounds(time_range)
+        if start_time and end_time and start_time>end_time: raise ValueError("Scheduled time range is reversed")
+        scope=_scheduled_scope(time_range)
+        stage=f"scheduled_{task.get('phase','investigation')}_search"
+        before_runs=len(s.setdefault("tool_runs",[])); before_errors=len(s.setdefault("source_errors",[]))
+        before_evidence={item.get("evidence_id") for item in s.get("host",[])+s.get("network",[]) if item.get("evidence_id")}
+        returned=0; matched=None; total_relation=None; capped=False; timed_out=False; shard_failures=0; incomplete=False
+        status="failed"; error_kind=None; reason=None; query_summary={}; sampling_summary=None
+        try:
+            if not self._budget_ok(s):
+                status="budget_limited"; incomplete=True; reason=str(s.get("termination_reason") or "search_budget_exhausted")
+            elif source=="elasticsearch":
+                targets=list(task.get("source_targets") or [])
+                configured=set(s.get("es_indices",[]))
+                if not targets or any(name not in configured for name in targets):
+                    raise ValueError("Scheduled Elasticsearch target is outside discovered indices")
+                query=query_spec.get("query")
+                if not isinstance(query,dict): raise ValueError("Scheduled Elasticsearch query is missing")
+                validate_query(query)
+                if not _query_enforces_scheduled_window(query,start_time,end_time):
+                    raise ValueError("Scheduled Elasticsearch query does not enforce its time range")
+                size=max(1,min(int(query_spec.get("size",self.settings.max_results)),self.settings.max_results,500))
+                task_sampling=(query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else
+                    s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else sampling_policy(self.settings))
+                family_fields=(s.get("es_fields_by_class",{}).get(task.get("source_family"),[])
+                    if isinstance(s.get("es_fields_by_class"),dict) else [])
+                timestamp_field=next((field for field in
+                    ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
+                    if field in family_fields),None)
+                if timestamp_field is None and (not family_fields or s.get("timestamp_field") in family_fields):
+                    timestamp_field=s.get("timestamp_field")
+                adapter_time_range=({"gte":start_time.astimezone(timezone.utc).isoformat().replace("+00:00","Z"),
+                    "lte":end_time.astimezone(timezone.utc).isoformat().replace("+00:00","Z")}
+                    if start_time and end_time else None)
+                found=self._call(s,"elasticsearch.search",stage,
+                    {"task_id":task_id,"indices":targets,"query":query,"size":size},scope,
+                    lambda:self.es.search_many(targets,query,size,timestamp_field=timestamp_field,time_range=adapter_time_range,
+                        sampling=task_sampling),lambda value:len(value.get("hits",[])))
+                if found is None:
+                    incomplete=True
+                    if s.get("termination_reason") in {"tool_call_budget","runtime_budget"}: status="budget_limited"; reason=str(s["termination_reason"])
+                    else: status="failed"
+                else:
+                    rows=found.get("hits",[]); returned=len(rows); matched=found.get("total")
+                    if isinstance(matched,dict): matched=matched.get("value")
+                    matched=int(matched) if isinstance(matched,(int,float)) else None
+                    relation_value=found.get("total_relation")
+                    total_relation=str(relation_value).strip().lower() if isinstance(relation_value,str) and relation_value.strip() else None
+                    capped=bool(found.get("capped")); timed_out=bool(found.get("timed_out"))
+                    failures=found.get("shard_failures",0); shard_failures=len(failures) if isinstance(failures,list) else int(failures or 0)
+                    incomplete=(matched is None or returned!=matched or total_relation!="eq" or
+                        capped or timed_out or bool(shard_failures))
+                    status="partial" if incomplete else "completed"
+                    sampling_summary=found.get("sampling") if isinstance(found.get("sampling"),dict) else None
+                    for hit in rows: self._add_es_hit(s,hit,query,task_id)
+                query_summary={"indices":targets,"query":query,"size":size,**({"sampling":sampling_summary} if sampling_summary else {})}
+            elif source=="arkime":
+                targets=list(task.get("source_targets") or [])
+                if targets!=[safe_url(self.settings.arkime_url)]: raise ValueError("Scheduled Arkime target is not the configured deployment")
+                if not self.settings.arkime_username or not self.settings.arkime_password: raise ValueError("Arkime API credentials are not configured")
+                expression=validate_native_arkime(str(query_spec.get("expression") or ""),list(SOURCE_FIELDS["arkime"]))
+                cap=max(1,min(int(query_spec.get("cap",self.settings.arkime_max_results)),self.settings.arkime_max_results))
+                start_ms=int(start_time.timestamp()*1000) if start_time else None
+                stop_ms=int(end_time.timestamp()*1000) if end_time else None
+                all_history=bool(self.settings.historical_search and start_ms is None and stop_ms is None)
+                task_sampling=(query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else
+                    s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else sampling_policy(self.settings))
+                found=self._call(s,"arkime.api.sessions",stage,
+                    {"task_id":task_id,"source":"arkime","expression":expression,"limit":cap,
+                        "date":-1 if all_history else ("explicit" if start_ms is not None else self.settings.arkime_default_hours)},scope,
+                    lambda:self.arkime.search_sessions_sampled(expression,start_ms=start_ms,stop_ms=stop_ms,
+                        limit=cap,all_history=all_history,sampling=task_sampling),lambda value:len(value.get("sessions",[])))
+                if found is None:
+                    incomplete=True
+                    if s.get("termination_reason") in {"tool_call_budget","runtime_budget"}: status="budget_limited"; reason=str(s["termination_reason"])
+                    else: status="failed"
+                else:
+                    rows=found.get("sessions",[]); returned=len(rows); matched=found.get("total")
+                    matched=int(matched) if isinstance(matched,(int,float)) else None
+                    capped=bool(found.get("capped")); incomplete=capped or matched is None or returned!=matched
+                    status="partial" if incomplete else "completed"
+                    sampling_summary=found.get("sampling") if isinstance(found.get("sampling"),dict) else None
+                    self._add_arkime_rows(s,rows,expression,scope,task_id)
+                query_summary={"expression":expression,"cap":cap,"pages":found.get("pages") if found else 0,
+                    **({"sampling":sampling_summary} if sampling_summary else {})}
+            else:
+                targets=list(task.get("source_targets") or [])
+                configured={str(path.resolve()) for path in self.settings.pcap_files}
+                if len(targets)!=1 or str(Path(targets[0]).resolve()) not in configured:
+                    raise ValueError("Scheduled TShark target is outside configured captures")
+                display_filter=validate_native_tshark(str(query_spec.get("display_filter") or ""),
+                    list(SOURCE_FIELDS["tshark"]))
+                fields=list(dict.fromkeys(query_spec.get("fields") or ["frame.number","frame.time_epoch","ip.src","ip.dst"]))
+                if not fields or len(fields)>16 or any(field not in SOURCE_FIELDS["tshark"] for field in fields):
+                    raise ValueError("Scheduled TShark fields are not allowlisted")
+                limit=max(1,min(int(query_spec.get("limit",self.settings.max_results)),self.settings.max_results,500))
+                time_filter=""
+                if start_time and end_time:
+                    time_filter=f"frame.time_epoch >= {start_time.timestamp():.3f} && frame.time_epoch <= {end_time.timestamp():.3f}"
+                pcap=Path(targets[0]).resolve()
+                task_sampling=(query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else
+                    s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else sampling_policy(self.settings))
+                found=self._call(s,"tshark.read_pcap",stage,
+                    {"task_id":task_id,"pcap":str(pcap),"display_filter":display_filter,"fields":fields},scope,
+                    lambda:self.tshark.inspect(pcap,display_filter=display_filter,fields=fields,limit=limit,time_filter=time_filter,
+                        sample_start=start_time,sample_end=end_time,sampling=task_sampling),
+                    lambda value:value.get("count",0))
+                if found is None:
+                    incomplete=True
+                    if s.get("termination_reason") in {"tool_call_budget","runtime_budget"}: status="budget_limited"; reason=str(s["termination_reason"])
+                    else: status="failed"
+                else:
+                    rows=found.get("packets",[]); returned=int(found.get("count",len(rows)) or 0)
+                    matched_value=found.get("matched_count",returned); matched=int(matched_value) if isinstance(matched_value,(int,float)) else None
+                    capped=bool(found.get("output_capped")); incomplete=capped or matched is None or returned!=matched
+                    status="partial" if incomplete else "completed"
+                    sampling_summary=found.get("sampling") if isinstance(found.get("sampling"),dict) else None
+                    provenance=found.get("provenance",{}) if isinstance(found.get("provenance"),dict) else {}
+                    for row in rows: self._add_tshark_row(s,row,{**provenance,"search_task_id":task_id},display_filter,task_id)
+                query_summary={"pcap":str(pcap),"display_filter":display_filter,"fields":fields,"limit":limit,
+                    **({"sampling":sampling_summary} if sampling_summary else {})}
+        except Exception as exc:
+            status="failed"; incomplete=True; error_kind=type(exc).__name__; reason=_safe_error_reason(exc)
             status_code=getattr(getattr(exc,"meta",None),"status",None) or getattr(exc,"status_code",None)
-            details["error_type"]=type(exc).__name__; details["error_reason"]=error_reason
-            s.setdefault("source_errors",[]).append({"tool":str(source),"stage":stage,"error":type(exc).__name__,
-                "reason":error_reason,"status_code":status_code})
-            selectors={k:plan.get(k) for k in ("terms","fields","ips","hostnames","ports","protocols","event_codes","index_class") if plan.get(k)}
-            s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"selectors":selectors,
-                "time_range":scope,"returned":result_count,"status":status,"error":type(exc).__name__,"error_reason":error_reason,
-                "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
-        s.setdefault("coverage",{}).setdefault("model_search_results",[]).append({"search_id":plan.get("id"),"source":source,
-            "hypothesis_id":plan.get("hypothesis_id"),"intent":intent,"returned":result_count,"status":status,"fingerprint":fp})
-        self._stage(s,stage,status,{"search_id":plan.get("id"),"source":source,"intent":intent,"returned":result_count})
-        print(f"[ROMULUS] {stage}: {source} intent={intent[:110]} status={status} results={result_count}")
-        return result_count
+            s.setdefault("source_errors",[]).append({"tool":source,"stage":stage,"error":error_kind,
+                "reason":reason,"status_code":status_code,"task_id":task_id})
+        if len(s.get("source_errors",[]))>before_errors and error_kind is None:
+            latest_error=s["source_errors"][-1]; error_kind=latest_error.get("error"); reason=latest_error.get("reason")
+        new_runs=s.get("tool_runs",[])[before_runs:]
+        artifact_id=next((item.get("artifact_id") for item in reversed(new_runs) if item.get("artifact_id")),None)
+        if not artifact_id:
+            artifact_id="SR-"+hashlib.sha1(f"scheduler:{task_id}:{task.get('attempt_count',0)}".encode()).hexdigest()[:12].upper()
+            artifact={"artifact_id":artifact_id,"tool":source,"stage":stage,"scope":scope,
+                "result_status":"ok" if status in {"completed","partial"} else "error","returned":returned,
+                "matched_total":matched,"error":error_kind,"error_reason":reason,"adequate_negative":False,"timestamp":utc_now()}
+            if not any(item.get("artifact_id")==artifact_id for item in s.setdefault("search_artifacts",[])): s["search_artifacts"].append(artifact)
+        evidence_ids=[item.get("evidence_id") for item in s.get("host",[])+s.get("network",[])
+            if item.get("evidence_id") and item.get("evidence_id") not in before_evidence]
+        outcome={"task_id":task_id,"status":status,"returned_total":returned,"matched_total":matched,
+            "capped":capped,"timed_out":timed_out,"shard_failures":shard_failures,"incomplete":incomplete,
+            "artifact_id":artifact_id,"evidence_ids":evidence_ids,"time_range":time_range}
+        if total_relation is not None: outcome["total_relation"]=total_relation
+        if sampling_summary: outcome["sampling"]=sampling_summary
+        if error_kind: outcome["error_kind"]=error_kind
+        if reason: outcome["reason"]=str(reason)[:300]
+        s.setdefault("queries",[]).append({"stage":stage,"source":source,"task_id":task_id,"intent":str(task.get("intent") or "")[:300],
+            "time_range":time_range,"returned":returned,"matched_total":matched,"status":status,"capped":capped,
+            "timed_out":timed_out,"shard_failures":shard_failures,"artifact_id":artifact_id,**query_summary})
+        self._stage(s,stage,status,{"task_id":task_id,"source":source,"returned":returned,"matched_total":matched})
+        return outcome
 
     def _analyze(self,s):
         s["correlations"]=correlate(s.get("host",[]),s.get("network",[]))
         all_e=s.get("host",[])+s.get("network",[])
+        s["investigation_graph"]=build_investigation_graph(all_e,s["correlations"])
         s["analytic_summary"]=summarize_evidence(s.get("host",[]),s.get("network",[]))
         s.setdefault("coverage",{})["analytic_summary"]=s["analytic_summary"]
-        s["candidate_leads"]=build_candidate_queue(
-            all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        previous_candidates=list(s.get("candidate_leads",[]))
+        fresh_candidates=build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        s["candidate_leads"]=merge_candidate_queue(previous_candidates,fresh_candidates)
+        new_hypotheses=_candidate_hypotheses(s["candidate_leads"],s.get("hypotheses",[]),all_e)
+        if new_hypotheses:
+            s.setdefault("hypotheses",[]).extend(new_hypotheses)
+            known_leads={lead.get("id") for lead in s.setdefault("lead_catalog",[])}
+            s["lead_catalog"].extend(lead for lead in _lead_catalog(new_hypotheses) if lead.get("id") not in known_leads)
+            s.setdefault("coverage",{})["hypotheses_total"]=len(s["hypotheses"])
+            s.setdefault("reasoning_history",[]).append({"stage":"candidate_hypothesis_creation","basis":"observed_candidate",
+                "hypotheses":[{"id":h.get("hypothesis_id"),"candidate_ids":h.get("basis_candidate_ids"),
+                    "evidence_ids":h.get("basis_evidence_ids")} for h in new_hypotheses]})
         s["coverage"]["behavior_candidates"]={
             "total":len(s["candidate_leads"]),
             "customer_visible":sum(bool(item.get("customer_visible")) for item in s["candidate_leads"]),
@@ -770,17 +1093,18 @@ class HuntEngine:
             # assessment. Only a cited analyst assessment may mark a hypothesis
             # supported or contradicted.
             hypothesis["candidate_evidence_ids"]=[e["evidence_id"] for e in relevant if e.get("evidence_id")][:40]
-            if not hypothesis.get("model_assessment"):
+            if not hypothesis.get("model_assessment") and not hypothesis.get("deterministic_assessment"):
                 hypothesis["evidence_ids"]=[]
                 hypothesis["status"]="candidate evidence found" if relevant else "not assessed"
                 hypothesis["confidence"]="not assessed"
         if s["correlations"]: self._publish_smb_lead(s)
         self._publish_tooling_leads(s)
-        results=list(s.get("coverage",{}).get("model_search_results",[]))+list(s.get("pivot_results",[]))
-        host_available=bool(s.get("es_indices")) or self.offline
-        network_available=self.offline or str(s.get("coverage",{}).get("network","")).startswith(("configured","partial"))
-        ledger=build_coverage_ledger(s.get("hypotheses",[]),s.get("lead_catalog",[]),s.get("completed_leads",[]),
-            results,host_available,network_available)
+        _link_candidates_to_findings(s)
+        _attach_finding_paths(s)
+        host_available=self.offline or bool(s.get("source_health",{}).get("host"))
+        network_available=self.offline or bool(s.get("source_health",{}).get("network"))
+        ledger=build_coverage_ledger(s.get("hypotheses",[]),s.get("search_tasks",{}),s.get("search_outcomes",[]),
+            host_available,network_available,s.get("candidate_leads",[]))
         s["coverage"]["hypothesis_coverage"]=ledger
         signals=len(s["analytic_summary"].get("behavioral_observations",[]))
         self._stage(s,"evidence_analysis","completed",{"host_events":len(s.get("host",[])),"network_events":len(s.get("network",[])),
@@ -818,6 +1142,14 @@ class HuntEngine:
         else: event="created"
         encoded=encode(finding); findings.append(encoded); s["findings"]=findings
         self.store.upsert_finding(s["hunt_id"],encoded,event)
+        for hypothesis in s.get("hypotheses",[]):
+            if hypothesis.get("technique_id") not in {"T1021","T1021.002"}: continue
+            assessment={"status":"supported","rationale":finding.interpretation,
+                "evidence_ids":list(refs),"assessed_at":utc_now(),"method":"deterministic_smb_correlation"}
+            hypothesis["deterministic_assessment"]=assessment
+            hypothesis["evidence_ids"]=list(refs)
+            hypothesis["status"]="supported lead"
+            hypothesis["confidence"]="moderate" if len(relevant)>=2 else "low"
         print(f"[ROMULUS] evidence-backed lead published: {finding.finding_id}; evidence_refs={len(refs)}; shared_ips={len(ipset)}")
 
     def _publish_tooling_leads(self,s):
@@ -919,21 +1251,43 @@ class HuntEngine:
             print(f"[ROMULUS] command-line tooling lead published: {finding.finding_id}; evidence_refs={len(refs)}; confidence={confidence}")
 
     def _after_analyze(self,s):
-        if not s.get("reasoning_complete"): return "reason"
-        if s.get("lead_queue") and self._can_pivot(s): return "pivot"
-        if s.get("lead_queue") and not s.get("termination_reason"):
+        self._register_investigation_tasks(s)
+        queued=select_search_tasks(s,phase="investigation",limit=1)
+        grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
+        remaining_calls=max(0,self.settings.max_tool_calls-int(s.get("tool_calls",0)))
+        # Critical/high deterministic candidate work (tiers 1-2) remains ahead
+        # of the model. Once only model/coverage/medium breadth remains, admit a
+        # grounded reasoning turn while reserving at least one source call.
+        reason_before_breadth=bool(queued and self.use_ollama and grounded
+            and int(queued[0].get("priority_tier",99))>2 and remaining_calls>1
+            and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s))
+        if reason_before_breadth:
+            s.pop("termination_reason",None); self._save(s); return "reason"
+        if queued and self._can_pivot(s): s.pop("termination_reason",None); return "pivot"
+        if queued and not s.get("termination_reason"):
             s["termination_reason"]="tool_call_budget" if s.get("tool_calls",0)>=self.settings.max_tool_calls else "runtime_budget"
-        if not s.get("termination_reason"): s["termination_reason"]="lead_queue_exhausted"
+        if queued: self._save(s); return "report"
+        ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
+        if ledger.get("closure_ready"):
+            s.setdefault("termination_reason","lead_queue_exhausted"); self._save(s); return "report"
+        if grounded and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s):
+            s.pop("termination_reason",None); self._save(s); return "reason"
+        if not s.get("termination_reason"): s["termination_reason"]="coverage_frontier_exhausted"
         self._save(s)
         return "report"
 
     def _after_reason(self,s):
-        if s.get("lead_queue") and self._can_pivot(s): return "pivot"
-        if s.get("lead_queue") and not s.get("termination_reason"):
+        queued=select_search_tasks(s,phase="investigation",limit=1)
+        if queued and self._can_pivot(s): s.pop("termination_reason",None); return "pivot"
+        if queued and not s.get("termination_reason"):
             s["termination_reason"]="tool_call_budget" if s.get("tool_calls",0)>=self.settings.max_tool_calls else "runtime_budget"
-        if not s.get("lead_queue") and s.get("depth",0)<self.settings.min_reasoning_rounds and self._budget_ok(s):
+        if queued: self._save(s); return "report"
+        grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
+        if (grounded and s.get("depth",0)<self.settings.min_reasoning_rounds
+                and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s)):
             s.pop("termination_reason",None); self._save(s); return "reason"
-        if not s.get("lead_queue") and not s.get("termination_reason"): s["termination_reason"]="no_useful_leads"
+        if not s.get("termination_reason"):
+            s["termination_reason"]="lead_queue_exhausted" if self.offline else "no_useful_leads"
         self._save(s)
         return "report"
 
@@ -942,30 +1296,39 @@ class HuntEngine:
 
     def _reason(self,s):
         if s.get("depth",0)>=self.settings.max_depth:
-            s["termination_reason"]="depth_budget"; s["lead_queue"]=[]; s["reasoning_complete"]=True
+            s["termination_reason"]="depth_budget"
             self._stage(s,"analyst_reasoning","budget_exhausted",{"reasoning_rounds":s.get("depth",0)})
             return self._save(s)
         s.setdefault("depth",0); s["depth"]+=1
-        selected=[]; basis="bounded deterministic coverage fallback"; analysis=None; model_error=None
+        selected=[]; basis="deterministic scheduler coverage"; analysis=None; model_error=None
         source_fields=s.get("coverage",{}).get("search_fields",{})
         if not source_fields: self._ensure_initial_plan(s); source_fields=s.get("coverage",{}).get("search_fields",{})
+        self._register_investigation_tasks(s)
         elapsed=max(0,time.time()-s.get("started_epoch",time.time()))
         s.setdefault("coverage",{})["tool_calls_remaining"]=max(0,self.settings.max_tool_calls-s.get("tool_calls",0))
         s["coverage"]["runtime_seconds_remaining"]=max(0,round(self.settings.max_runtime_seconds-elapsed))
         s["coverage"]["reasoning_rounds_remaining"]=max(0,self.settings.max_depth-s.get("depth",0))
         s["coverage"]["recent_search_artifacts"]=s.get("search_artifacts",[])[-12:]
-        if not self.offline and self.use_ollama and source_fields and self._budget_ok(s):
+        mission_mode=_state_mission_mode(s)
+        candidate_grounded=(mission_mode!="undirected" or bool(s.get("candidate_leads")))
+        if not self.offline and self.use_ollama and source_fields and candidate_grounded and self._budget_ok(s):
             try:
                 from ..agent.ollama import Ollama, model_evidence_context
-                visible_model_ids={e.get("evidence_id") for e in model_evidence_context(_all_evidence(s),12) if e.get("evidence_id")}
-                visible_model_ids.update(x.get("artifact_id") for x in s.get("search_artifacts",[])[-12:] if x.get("artifact_id"))
+                visible_evidence_ids={e.get("evidence_id") for e in model_evidence_context(_all_evidence(s),12) if e.get("evidence_id")}
+                visible_candidate_ids={x.get("candidate_id") for x in s.get("candidate_leads",[])[:12] if x.get("candidate_id")}
                 model_coverage=dict(s.get("coverage",{}))
+                model_coverage["candidate_queue"]=[{"candidate_id":c.get("candidate_id"),"title":str(c.get("title",""))[:120],
+                    "priority_score":c.get("priority_score"),"priority_tier":c.get("priority_tier"),
+                    "disposition":c.get("disposition"),"evidence_ids":c.get("evidence_ids",[])[:5],
+                    "assets":c.get("assets",[])[:4],"attack_techniques":c.get("attack_techniques",[])[:4],
+                    "follow_ups":[{"follow_up_id":f.get("follow_up_id"),"intent":str(f.get("intent",""))[:140],"status":f.get("status")}
+                        for f in c.get("follow_ups",[])[:3]]} for c in s.get("candidate_leads",[])[:12]]
                 model_coverage["existing_findings"]=[{"title":str(f.get("title",""))[:100],
                     "technique_id":f.get("technique_id"),"evidence_ids":f.get("evidence_ids",[])[:5]}
                     for f in s.get("findings",[])[-5:]]
                 analysis=self._call(s,"ollama.api.chat","analyst_reasoning",
                     {"model":self.settings.ollama_model,"hypotheses":len(s.get("hypotheses",[])),
-                     "evidence_count":len(_all_evidence(s)),"completed_searches":len(s.get("search_fingerprints",[]))},
+                     "evidence_count":len(_all_evidence(s)),"completed_searches":len(s.get("search_outcomes",[]))},
                     "bounded mission, evidence excerpts, query coverage, and mapped source fields",
                     lambda:Ollama(self.settings).reason_hunt(s["objective"],s.get("hypotheses",[]),_all_evidence(s),
                         model_coverage,_search_history_summary(s),3),lambda x:len(x.get("searches",[])))
@@ -973,54 +1336,48 @@ class HuntEngine:
                     last_call=next((r for r in reversed(s.get("tool_runs",[])) if r.get("tool")=="ollama.api.chat" and r.get("reasoning_stage")=="analyst_reasoning"),{})
                     model_error=last_call.get("error_reason") or last_call.get("error") or "unavailable"
                 if isinstance(analysis,dict):
-                    created=self._append_model_hypotheses(s,analysis.get("new_hypotheses",[]),visible_model_ids)
-                    self._apply_model_assessments(s,analysis,visible_model_ids)
-                    self._publish_model_findings(s,analysis.get("findings",[]),visible_model_ids)
+                    # Every undirected hypothesis is instantiated deterministically
+                    # from an observed candidate. Model-created hypotheses added
+                    # risk without adding a stronger evidence boundary, so the
+                    # model may assess and search but may not invent another one.
+                    created=[]
+                    self._apply_model_assessments(s,analysis,visible_evidence_ids)
+                    self._publish_model_findings(s,analysis.get("findings",[]),visible_evidence_ids)
                     analysis["created_hypothesis_ids"]=created
                     basis="model assessed cited evidence and proposed fresh bounded searches"
             except Exception as exc:
                 analysis=None; model_error=type(exc).__name__
         if isinstance(analysis,dict):
             raw_searches=analysis.get("searches",[])
-            validated=self._register_model_searches(s,raw_searches,"iterative")
-            # Reserve one slot for the deterministic coverage frontier. The
-            # model retains creative freedom for two searches each round while
-            # code guarantees broad hypotheses are not silently abandoned.
-            selected=[x["id"] for x in validated[:2]]
-            frontier=_coverage_fallback(s,max(0,3-len(selected)),exclude=set(selected))
-            selected.extend(x for x in frontier if x not in selected)
+            validated=self._register_model_searches(s,raw_searches,"iterative",
+                visible_candidate_ids=visible_candidate_ids,visible_evidence_ids=visible_evidence_ids)
+            self._register_investigation_tasks(s)
             planning=s.get("coverage",{}).get("model_search_planning",[])
             planning=planning[-1] if planning else {"accepted":0,"rejected_or_duplicate":0}
             print(f"[ROMULUS] model follow-up plan: proposed={planning.get('proposed',len(raw_searches) if isinstance(raw_searches,list) else 0)} accepted={planning.get('accepted',0)} rejected_or_duplicate={planning.get('rejected_or_duplicate',0)} repeated_empty_anchor={planning.get('repeated_empty_anchor',0)}")
-            if not selected:
-                # Do not let an LLM proposal collapse the hunt onto one event
-                # cluster. When it has no fresh valid query, continue with
-                # untried hypothesis-backed host and network pivots, even after
-                # the minimum reasoning-round threshold has been met.
-                if source_fields:
-                    selected=_coverage_fallback(s,3)
-                    if selected: basis="breadth fallback: untried hypothesis-backed host/network pivots after no fresh model query"
-                if not selected:
-                    closure=s.get("coverage",{}).get("hypothesis_coverage",{}).get("closure_ready",False)
-                    if closure and not analysis.get("continue_investigation",True) and s["depth"]>=self.settings.min_reasoning_rounds:
-                        s["termination_reason"]="coverage_closure_reached"
-                    else:
-                        s["termination_reason"]="coverage_frontier_exhausted"
+        selected=[item["task_id"] for item in select_search_tasks(s,phase="investigation",limit=3)]
+        if selected:
+            s.pop("termination_reason",None)
+        elif isinstance(analysis,dict):
+            closure=s.get("coverage",{}).get("hypothesis_coverage",{}).get("closure_ready",False)
+            if closure and not analysis.get("continue_investigation",True): s["termination_reason"]="coverage_closure_reached"
+            else: s["termination_reason"]="coverage_frontier_exhausted"
         elif not self.offline:
-            selected=_coverage_fallback(s,3); basis="structured model output unavailable; deterministic ATT&CK coverage frontier used"
-            if not selected: s["termination_reason"]="model_unavailable_no_fallback_leads"
+            basis=("structured model output unavailable; deterministic ATT&CK coverage frontier used" if self.use_ollama and candidate_grounded
+                else "deterministic ATT&CK coverage frontier used")
+            s["termination_reason"]=("model_unavailable_no_fallback_leads" if self.use_ollama and candidate_grounded
+                else "coverage_frontier_exhausted")
         else:
-            selected=_coverage_fallback(s,3); basis="offline deterministic fixture pivot"
-            if not selected: s["termination_reason"]="lead_queue_exhausted"
-        s["reasoning_complete"]=bool(selected)
-        s["lead_queue"]=list(selected)
+            basis="offline deterministic fixture pivot"; s["termination_reason"]="lead_queue_exhausted"
         s["reasoning_history"].append({"stage":"analyst_reasoning","basis":basis,"round":s["depth"],
             "reasoning":str(analysis.get("reasoning",""))[:350] if isinstance(analysis,dict) else "",
             "model_error":model_error,
             "model_search_plan":s.get("coverage",{}).get("model_search_planning",[])[-1] if s.get("coverage",{}).get("model_search_planning") else None,
             "created_hypothesis_ids":analysis.get("created_hypothesis_ids",[]) if isinstance(analysis,dict) else [],
-            "selected_searches":[{"id":q["id"],"source":q.get("source"),"hypothesis_id":q.get("hypothesis_id"),"intent":q.get("intent")} for q in s.get("lead_catalog",[]) if q.get("id") in selected],
-            "evidence_count":len(_all_evidence(s)),"completed_search_count":len(s.get("search_fingerprints",[]))})
+            "selected_searches":[{"task_id":q["task_id"],"source":q.get("source"),
+                "hypothesis_ids":q.get("hypothesis_ids",[]),"intent":q.get("intent")} for q in
+                (s.get("search_tasks",{}).get(task_id,{}) for task_id in selected)],
+            "evidence_count":len(_all_evidence(s)),"completed_search_count":len(s.get("search_outcomes",[]))})
         self._stage(s,"analyst_reasoning","completed" if selected else "stopped",{"basis":basis,"round":s["depth"],"selected_searches":selected,
             "continue_investigation":analysis.get("continue_investigation") if isinstance(analysis,dict) else None,
             "reason":s.get("termination_reason")})
@@ -1029,12 +1386,17 @@ class HuntEngine:
 
     def _apply_model_assessments(self,s,analysis,visible_ids=None):
         hypotheses={h.get("hypothesis_id"):h for h in s.get("hypotheses",[])}
-        valid_evidence=set(visible_ids or {e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")})
+        evidence={e.get("evidence_id"):e for e in _all_evidence(s) if e.get("evidence_id")}
+        valid_evidence=set(visible_ids or evidence)
         for item in analysis.get("assessments",[]) if isinstance(analysis.get("assessments"),list) else []:
             if not isinstance(item,dict): continue
             hypothesis=hypotheses.get(item.get("hypothesis_id")); status=item.get("status")
             if not hypothesis or status not in {"supported","contradicted","inconclusive","not_tested"}: continue
             refs=list(dict.fromkeys(x for x in item.get("evidence_ids",[]) if isinstance(x,str) and x in valid_evidence))
+            if status in {"supported","contradicted"}:
+                anchors=_hypothesis_anchor_entities(s,hypothesis,evidence)
+                if anchors:
+                    refs=[ref for ref in refs if anchors & _event_entities(evidence[ref])]
             if status in {"supported","contradicted"} and not refs:
                 status="inconclusive"
             assessment={"status":status,"rationale":str(item.get("rationale",""))[:500],"evidence_ids":refs,
@@ -1052,47 +1414,51 @@ class HuntEngine:
             elif status=="inconclusive": hypothesis["status"]="inconclusive"
             else: hypothesis["status"]="not tested"
 
-    def _append_model_hypotheses(self,s,proposals,visible_ids=None):
-        if not isinstance(proposals,list): return []
-        known={re.sub(r"[^a-z0-9]+","",str(h.get("title","")).lower()) for h in s.get("hypotheses",[])}
-        visible=set(visible_ids or {e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")})
-        added=[]; next_number=len(s.get("hypotheses",[]))+1
-        for proposal in proposals[:3]:
-            if len(s.get("hypotheses",[]))>=24: break
-            if not isinstance(proposal,dict): continue
-            basis=list(dict.fromkeys(x for x in proposal.get("basis_evidence_ids",[]) if x in visible))
-            normalized=_normalize_hypotheses([proposal])
-            if not basis or not normalized: continue
-            hypothesis=normalized[0]; key=re.sub(r"[^a-z0-9]+","",hypothesis.get("title","").lower())
-            if not key or key in known: continue
-            ident="H-FOLLOWUP-"+f"{next_number:02d}"
-            while any(h.get("hypothesis_id")==ident for h in s.get("hypotheses",[])):
-                next_number+=1; ident="H-FOLLOWUP-"+f"{next_number:02d}"
-            hypothesis["hypothesis_id"]=ident; hypothesis["evidence_ids"]=basis
-            hypothesis["basis_evidence_ids"]=basis; hypothesis["status"]="untested"; hypothesis["confidence"]="low"
-            s.setdefault("hypotheses",[]).append(hypothesis); known.add(key); added.append(ident); next_number+=1
-        s.setdefault("coverage",{})["hypotheses_total"]=len(s.get("hypotheses",[]))
-        return added
-
     def _publish_model_findings(self,s,proposals,visible_ids=None):
         if not isinstance(proposals,list): return
         evidence={e.get("evidence_id"):e for e in _all_evidence(s) if e.get("evidence_id")}
         if visible_ids is not None: evidence={k:v for k,v in evidence.items() if k in visible_ids}
+        hypotheses={h.get("hypothesis_id"):h for h in s.get("hypotheses",[]) if h.get("hypothesis_id")}
         for proposal in proposals[:5]:
             if not isinstance(proposal,dict): continue
+            hypothesis=hypotheses.get(proposal.get("hypothesis_id"))
+            assessment=(hypothesis or {}).get("model_assessment") or (hypothesis or {}).get("deterministic_assessment")
+            if not hypothesis or not isinstance(assessment,dict) or assessment.get("status")!="supported": continue
             refs=list(dict.fromkeys(x for x in proposal.get("evidence_ids",[]) if x in evidence))
+            assessed_refs=set(assessment.get("evidence_ids",[]))
+            refs=[ref for ref in refs if ref in assessed_refs]
             if not refs: continue
-            title=str(proposal.get("title",""))[:140].strip(); observation=str(proposal.get("observation",""))[:700].strip()
-            interpretation=str(proposal.get("interpretation",""))[:800].strip()
-            if len(title)<8 or len(observation)<10 or len(interpretation)<10: continue
+            proposed_title=str(proposal.get("title",""))[:140].strip()
+            proposed_observation=str(proposal.get("observation",""))[:700].strip()
+            proposed_interpretation=str(proposal.get("interpretation",""))[:800].strip()
+            if len(proposed_title)<8 or len(proposed_observation)<10 or len(proposed_interpretation)<10: continue
             technique=proposal.get("technique_id")
             if technique not in TECHNIQUES: technique="unmapped"
+            expected_technique=hypothesis.get("technique_id")
+            if technique!="unmapped" and technique!=expected_technique: continue
+            claimed_ips=_text_ips(proposed_title+" "+proposed_observation+" "+proposed_interpretation)
+            if claimed_ips:
+                refs=[ref for ref in refs if claimed_ips <= _event_ips_set(evidence[ref])]
+            # A model-authored customer finding needs corroboration. A single
+            # record remains an investigative hypothesis/candidate, never a
+            # promoted finding, regardless of how confident the prose sounds.
+            if len(refs)<2: continue
             supporting=[evidence[x] for x in refs]
             assets=list(dict.fromkeys(str(e.get("asset")) for e in supporting if e.get("asset")))[:12]
             sources={e.get("source") for e in supporting}
             confidence=proposal.get("confidence") if proposal.get("confidence") in {"low","moderate","high"} else "low"
             if confidence=="high" and (len(refs)<3 or len(sources)<2): confidence="moderate" if len(refs)>1 else "low"
             if confidence=="moderate" and len(refs)<2: confidence="low"
+            hypothesis_title=str(hypothesis.get("title") or "telemetry-backed hypothesis")[:110]
+            title=("Evidence-supported lead: "+hypothesis_title)[:140]
+            source_names=", ".join(sorted(str(source) for source in sources if source)) or "configured telemetry"
+            observation=(f"{len(refs)} cited telemetry records from {source_names} passed deterministic entity checks "
+                f"for {hypothesis_title}.")[:700]
+            interpretation=("The cited records support continued investigation of the existing telemetry-backed hypothesis; "
+                "they do not by themselves confirm malicious activity or compromise.")
+            confidence_justification=(f"{len(refs)} matching cited record(s) across {len(sources)} source(s) passed the finding admission checks.")
+            alternatives=_clean_string_list(hypothesis.get("benign_explanations"),6,180) or ["benign administrative or expected application activity"]
+            follow_up=_clean_string_list([item.get("intent") for item in hypothesis.get("follow_ups",[]) if isinstance(item,dict)],6,180) or ["review cited evidence and validate the activity with the system owner"]
             def event_ips(events):
                 found=set(_evidence_ips(events))
                 for event in events:
@@ -1127,10 +1493,9 @@ class HuntEngine:
                 continue
             identifier="F-"+s["hunt_id"].replace("HUNT-","")+"-AI-"+hashlib.sha1((title+"|"+"|".join(sorted(refs))).encode()).hexdigest()[:8].upper()
             finding=Finding(identifier,title,"suspected",technique,assets,observation,interpretation,refs,confidence,
-                str(proposal.get("confidence_justification",""))[:500],
-                _clean_string_list(proposal.get("alternatives"),6,180) or ["benign administrative or expected application activity"],
-                _clean_string_list(proposal.get("follow_up"),6,180) or ["review cited evidence and validate the activity with the system owner"])
+                confidence_justification,alternatives,follow_up)
             encoded=encode(finding)
+            encoded["hypothesis_id"]=hypothesis.get("hypothesis_id")
             old=next((f for f in self.store.list_findings(s["hunt_id"]) if f.get("finding_id")==identifier),None)
             if old: encoded["created_at"]=old.get("created_at",encoded["created_at"]); encoded["updated_at"]=utc_now(); action="updated"
             else: action="created"
@@ -1138,170 +1503,120 @@ class HuntEngine:
             self.store.upsert_finding(s["hunt_id"],encoded,action)
             print(f"[ROMULUS] model-proposed evidence-cited lead: {identifier}; evidence_refs={len(refs)}; confidence={confidence}")
 
-    def _register_model_searches(self,s,raw_searches,phase):
+    def _register_model_searches(self,s,raw_searches,phase,*,visible_candidate_ids=None,visible_evidence_ids=None):
         source_fields=s.get("coverage",{}).get("search_fields",{})
         ids={h.get("hypothesis_id") for h in s.get("hypotheses",[]) if h.get("hypothesis_id")}
-        evidence_ids={e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")}
+        all_evidence_ids={e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")}
+        evidence_ids=all_evidence_ids if visible_evidence_ids is None else all_evidence_ids & set(visible_evidence_ids)
+        candidates={item.get("candidate_id"):item for item in s.get("candidate_leads",[]) if item.get("candidate_id")}
+        if visible_candidate_ids is not None:
+            candidates={key:value for key,value in candidates.items() if key in set(visible_candidate_ids)}
         accepted=[]; rejected=0; duplicate=0; repeated_empty_anchor=0
         proposed=raw_searches if isinstance(raw_searches,list) else []
-        for item in proposed:
-            item=expand_anchor_selectors(item,_all_evidence(s))
+        for raw in proposed:
+            if not isinstance(raw,dict): rejected+=1; continue
+            raw_candidate=raw.get("candidate_id"); raw_follow_up=raw.get("follow_up_id")
+            raw_anchors=raw.get("anchor_evidence_ids",[])
+            if raw_candidate and raw_candidate not in candidates: rejected+=1; continue
+            if raw_candidate and raw_follow_up and not any(item.get("follow_up_id")==raw_follow_up
+                    for item in candidates[raw_candidate].get("follow_ups",[])):
+                rejected+=1; continue
+            if not isinstance(raw_anchors,list) or any(anchor not in evidence_ids for anchor in raw_anchors):
+                rejected+=1; continue
+            if raw.get("hypothesis_id") not in ids|{"general"}: rejected+=1; continue
+            if _state_mission_mode(s)=="undirected" and not raw_candidate and not raw_anchors:
+                rejected+=1; continue
+            item=expand_anchor_selectors(raw,_all_evidence(s))
             spec=validate_spec(item,allowed_sources=list(source_fields),hypothesis_ids=ids,fields_by_source=source_fields,evidence_ids=evidence_ids)
             if not spec: rejected+=1; continue
-            if phase=="iterative" and self._anchor_exhausted_on_sources(s,spec):
-                rejected+=1; duplicate+=1; repeated_empty_anchor+=1; continue
-            fp=fingerprint(spec)
-            if fp in s.setdefault("search_fingerprints",[]): rejected+=1; duplicate+=1; continue
-            s["search_fingerprints"].append(fp)
-            entry={"id":"Q-"+fp,"fingerprint":fp,"phase":phase,**spec}
-            s.setdefault("lead_catalog",[]).append(entry); accepted.append(entry)
+            spec.update({"candidate_id":raw_candidate,"follow_up_id":raw_follow_up})
+            try: proposals=self._compile_investigation_proposals(s,spec,"model_proposal")
+            except (ValueError,TypeError,json.JSONDecodeError): rejected+=1; continue
+            proposal_tasks=[]
+            for proposal in proposals:
+                task_id,created=register_search_task(s,proposal)
+                if not created: duplicate+=1
+                task=s["search_tasks"][task_id]
+                if not any(existing.get("task_id")==task_id for existing in accepted): accepted.append(task)
+                proposal_tasks.append(task_id)
+                prior_outcome=next((item for item in reversed(s.get("search_outcomes",[]))
+                    if item.get("task_id")==task_id),None)
+                if prior_outcome: self._record_scheduled_followups(s,task,prior_outcome)
+            if not proposal_tasks: rejected+=1
         s.setdefault("coverage",{}).setdefault("model_search_planning",[]).append({"phase":phase,"proposed":len(proposed),
-            "accepted":len(accepted),"rejected_or_duplicate":rejected,"duplicate":duplicate,
-            "repeated_empty_anchor":repeated_empty_anchor,"invalid_or_unmappable":rejected-duplicate})
+            "accepted":len(accepted),"rejected_or_duplicate":rejected+duplicate,"duplicate":duplicate,
+            "repeated_empty_anchor":repeated_empty_anchor,"invalid_or_unmappable":rejected})
         return accepted
 
-    def _anchor_exhausted_on_sources(self,s,spec):
-        """Stop retrying a zero-result evidence anchor across already-tried sources."""
-        anchors=spec.get("anchor_evidence_ids") or []
-        if not anchors: return False
-        anchor=anchors[0]
-        plans={p.get("id"):p for p in s.get("lead_catalog",[]) if p.get("id")}
-        zero_sources=set()
-        for result in s.get("coverage",{}).get("model_search_results",[]):
-            plan=plans.get(result.get("search_id"),{})
-            if plan.get("phase")!="iterative": continue
-            if anchor not in (plan.get("anchor_evidence_ids") or []): continue
-            if result.get("status")=="completed" and result.get("returned")==0:
-                zero_sources.add(plan.get("source"))
-            elif result.get("status")=="completed" and result.get("returned",0)>0:
-                zero_sources.clear()
-        return len({source for source in zero_sources if source})>=2
+    def _record_scheduled_followups(self,s,task,outcome):
+        candidate_ids=set(task.get("candidate_ids",[])); follow_up_ids=set(task.get("follow_up_ids",[]))
+        if not candidate_ids or not follow_up_ids: return
+        terminal={"completed","partial","failed","skipped","budget_limited"}
+        outcomes={item.get("task_id"):item for item in s.get("search_outcomes",[]) if item.get("task_id")}
+        for candidate in s.get("candidate_leads",[]):
+            candidate_id=candidate.get("candidate_id")
+            if candidate_id not in candidate_ids: continue
+            if candidate.get("disposition")=="observed": candidate["disposition"]="investigating"
+            for follow_up in candidate.get("follow_ups",[]):
+                follow_up_id=follow_up.get("follow_up_id")
+                if follow_up_id not in follow_up_ids: continue
+                history=follow_up.setdefault("history",[])
+                if not any(item.get("task_id")==task.get("task_id") and
+                        item.get("attempt_count")==outcome.get("attempt_count") for item in history):
+                    history.append({"timestamp":utc_now(),"task_id":task.get("task_id"),
+                        "attempt_count":outcome.get("attempt_count"),"status":outcome.get("status","attempted"),
+                        "returned":int(outcome.get("returned_total") or 0)})
+                required=[item for item in s.get("search_tasks",{}).values()
+                    if candidate_id in (item.get("candidate_ids") or [])
+                    and follow_up_id in (item.get("follow_up_ids") or [])]
+                current=[outcomes.get(item.get("task_id")) for item in required]
+                if required and all(outcome_resolves(item) for item in current): follow_up["status"]="completed"
+                elif required and all(isinstance(item,dict) and item.get("status") in terminal for item in current):
+                    follow_up["status"]="blocked"
+                else: follow_up["status"]="in_progress"
 
     def _pivot(self,s):
-        queue=list(s.get("lead_queue",[]))
-        if not queue: return self._save(s)
-        lead_id=queue.pop(0); s["lead_queue"]=queue; s["completed_leads"].append(lead_id); s["reasoning_complete"]=bool(queue)
-        lead=next((x for x in s.get("lead_catalog",[]) if x["id"]==lead_id),None)
-        if not lead: return self._save(s)
-        print(f"[ROMULUS] investigation round {s['depth']}/{self.settings.max_depth}, search {lead_id}: {lead.get('intent',lead.get('why','follow-up lead'))}")
+        selected=select_search_tasks(s,phase="investigation",limit=1)
+        if not selected: return self._save(s)
+        task=begin_search_task(s,selected[0]["task_id"])
+        self._save(s)
+        print(f"[ROMULUS] investigation round {s.get('depth',0)}/{self.settings.max_depth}, task {task['task_id']}: {task.get('intent','follow-up search')}")
         if self.offline:
-            host,_=sample_evidence(); item=encode(host[1]); item["query"]="synthetic follow-up after SMB network evidence"
-            item["provenance"]={"fixture":"fixtures/synthetic_host.json","pivot":lead_id}
-            s["host"].append(item); self._record_evidence(s,item)
-            s.setdefault("pivot_results",[]).append({"lead_id":lead_id,"status":"synthetic fixture pivot completed","returned":1})
-            s["coverage"]["offline_pivot"]="completed: synthetic host service event retrieved after SMB lead"
-            s["queries"].append({"stage":"offline_synthetic_pivot","lead_id":lead_id,"returned":1})
-        elif lead.get("fingerprint"):
-            self._execute_model_search(s,lead,"iterative_model_search")
-        elif lead["source"]=="host": self._host_pivot(s,lead)
-        else: self._network_pivot(s,lead)
-        latest=s.get("pivot_results",[])[-1] if s.get("pivot_results") else {}
-        self._stage(s,"follow_up_pivot",latest.get("status","attempted"),{"lead_id":lead_id,"returned":latest.get("returned",0)})
+            host,_=sample_evidence(); item=encode(host[1]); item["query"]="synthetic scheduled follow-up"
+            item["provenance"]={"fixture":"fixtures/synthetic_host.json","lead_id":task["task_id"]}
+            compact=self._record_evidence(s,item)
+            if compact: s.setdefault("host",[]).append(compact)
+            outcome={"task_id":task["task_id"],"status":"completed","returned_total":1,"matched_total":1,
+                "total_relation":"eq",
+                "capped":False,"timed_out":False,"shard_failures":0,"incomplete":False,
+                "artifact_id":"SR-"+hashlib.sha1(("offline:"+task["task_id"]).encode()).hexdigest()[:12].upper(),
+                "evidence_ids":[compact["evidence_id"]] if compact else [],"time_range":task.get("time_range",{})}
+            s.setdefault("coverage",{})["offline_pivot"]="completed: synthetic host service event retrieved after scheduled lead"
+            s.setdefault("queries",[]).append({"stage":"offline_synthetic_pivot","task_id":task["task_id"],"returned":1})
+        else: outcome=self._execute_search_task(s,task)
+        recorded=record_search_outcome(s,task["task_id"],outcome)
+        if task["task_id"] not in s.setdefault("completed_leads",[]): s["completed_leads"].append(task["task_id"])
+        s.setdefault("pivot_results",[]).append({"lead_id":task["task_id"],"task_id":task["task_id"],
+            "status":recorded.get("status"),"returned":recorded.get("returned_total",0)})
+        self._record_scheduled_followups(s,s["search_tasks"][task["task_id"]],recorded)
+        self._stage(s,"follow_up_pivot",recorded.get("status","attempted"),
+            {"task_id":task["task_id"],"returned":recorded.get("returned_total",0)})
         return self._save(s)
 
-    def _host_pivot(self,s,lead):
-        indices=s.get("es_indices",[])
-        if not indices:
-            s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],"status":"skipped: Elasticsearch indices unavailable","returned":0})
-            return
-        indices=[name for name in indices if "host" in name.lower()] or indices
-        fields=s.get("es_fields_by_class",{}).get("host") or s.get("es_fields",[])
-        # Recipe fallbacks are hypothesis-wide searches. Do not constrain them
-        # with the first arbitrary IPs from a large evidence collection; the
-        # dynamic model queries carry explicit, validated anchors when a pivot
-        # really should be entity-scoped.
-        pivot_context=s if lead.get("anchor_evidence_ids") else {}
-        query=_lead_host_query(lead,fields,s.get("timestamp_field","@timestamp"),self._time_scope(s)[0],pivot_context)
-        scope=self._time_scope(s)[1]
-        if query is None:
-            s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],
-                "status":"skipped: hypothesis has no mapped host selectors","returned":0,"time_range":scope})
-            return
-        raw=self._call(s,"elasticsearch.search","iterative_host_pivot",{"lead_id":lead["id"],"indices":indices,"query":query,"size":min(500,self.settings.max_results)},
-            scope,lambda:self.es.search_many(indices,query,min(500,self.settings.max_results)),lambda x:len(x.get("hits",[])))
-        if raw is None:
-            status="failed or budget prevented query"; count=0
-        else:
-            count=len(raw["hits"])
-            for hit in raw["hits"]: self._add_es_hit(s,hit,query,lead["id"])
-            status=_search_coverage(count,min(500,self.settings.max_results),scope)
-        s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],"status":status,"returned":count,"time_range":scope})
-        s["queries"].append({"stage":"iterative_host_pivot","lead_id":lead["id"],"query":query,"time_range":scope,"returned":count})
-
-    def _network_pivot(self,s,lead):
-        before=len(s.get("network",[])); details=[]
-        if lead.get("technique_id")=="T1105" or lead["id"]=="network_transfer_context":
-            network_indices=[name for name in s.get("es_indices",[]) if "network" in name.lower()]
-            indicator_events=[]
-            for event in s.get("host",[]):
-                raw_event=event.get("raw",{}) if isinstance(event.get("raw",{}),dict) else {}
-                text=(event.get("observation","")+" "+json.dumps(raw_event,ensure_ascii=False)).lower()
-                transfer_command=bool(re.search(r'\ba0=["\']?(?:wget|curl)["\']?',text))
-                if any(x in text for x in ("linpeas","pwnkit","metadata.google.internal")) or (transfer_command and "motd.ubuntu.com" not in text):
-                    indicator_events.append(event)
-            windows_by_ip={}
-            for event in indicator_events:
-                for ip in _evidence_ips([event]): windows_by_ip.setdefault(ip,[]).append(event)
-            if network_indices and windows_by_ip:
-                fields=[f for f in ("message","source.ip","destination.ip","src_ip","dest_ip") if f in s.get("es_fields",[])] or ["message"]
-                timestamp=s.get("timestamp_field","@timestamp"); size=min(500,self.settings.max_results)
-                returned_total=0; failed_windows=[]; queried_windows=0; cap_hit=False
-                for ip,events in windows_by_ip.items():
-                    for cluster,bounds in _timestamp_clusters(events,gap_minutes=5,padding_minutes=2):
-                        time_range=f"{bounds[0]} through {bounds[1]}"
-                        ip_match={"bool":{"should":[{"match_phrase":{field:ip}} for field in fields],"minimum_should_match":1}}
-                        query={"bool":{"must":[ip_match],"filter":[{"range":{timestamp:{"gte":bounds[0],"lte":bounds[1]}}}]}}
-                        found=self._call(s,"elasticsearch.search","iterative_network_es_pivot",
-                            {"lead_id":lead["id"],"indices":network_indices,"ip":ip,"fields":fields,"query":query,"size":size},
-                            time_range,lambda q=query:self.es.search_many(network_indices,q,size),lambda x:len(x.get("hits",[])))
-                        queried_windows+=1
-                        if found is None: failed_windows.append(time_range); continue
-                        hits=found.get("hits",[]); returned_total+=len(hits); cap_hit=cap_hit or len(hits)>=size
-                        for hit in hits: self._add_es_hit(s,hit,query,lead["id"])
-                        details.append({"source":"elasticsearch.network_index","ip":ip,"returned":len(hits),"time_range":time_range})
-                        s["queries"].append({"stage":"iterative_network_es_pivot","lead_id":lead["id"],"ip":ip,
-                            "time_range":time_range,"returned":len(hits)})
-                coverage=f"searched {queried_windows} host-linked time window(s); returned {returned_total}"
-                if cap_hit: coverage+="; result cap reached, additional records may exist"
-                if failed_windows: coverage+=f"; {len(failed_windows)} window(s) failed"
-                s.setdefault("coverage",{}).setdefault("network_sources",{})["elasticsearch"]=coverage
-            else: details.append({"source":"elasticsearch.network_index","status":"skipped: no matching index, host IP, or event time"})
-        if self.settings.arkime_username and self.settings.arkime_password:
-            expression=_lead_network_expression(lead)
-            ips=[ip for ip in lead.get("ips",[]) if isinstance(ip,str)]
-            if ips: expression=f"({expression}) && ("+" || ".join(f"ip.src == {ip} || ip.dst == {ip}" for ip in ips[:4])+")"
-            explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"],self.settings.mission_timezone)
-            scope=self._time_scope(s)[1]; all_history=self.settings.historical_search and not explicit
-            raw=self._call(s,"arkime.api.sessions","iterative_network_pivot",{"lead_id":lead["id"],"expression":expression,
-                "date":-1 if all_history else ("explicit" if explicit else self.settings.arkime_default_hours)},scope,
-                lambda:self.arkime.search_sessions(expression,start_ms=start_ms,stop_ms=stop_ms,length=min(100,self.settings.max_results),all_history=all_history),
-                lambda x:len(x.get("sessions",[])))
-            if raw is not None:
-                added=self._add_arkime_rows(s,raw["sessions"],expression,scope,lead["id"])
-                details.append({"source":"arkime","returned":len(raw["sessions"]),"added":added,"matched_total":raw.get("total"),"time_range":scope})
-        if self.settings.pcap_files:
-            display_filter=_lead_pcap_filter(lead); ips=[ip for ip in lead.get("ips",[]) if isinstance(ip,str)]
-            if ips: display_filter="("+display_filter+") && ("+" || ".join(f"ip.addr == {ip}" if ":" not in ip else f"ipv6.addr == {ip}" for ip in ips[:4])+")"
-            date_filter=_pcap_time_filter(_explicit_dates(s["objective"]),self.settings.mission_timezone)
-            for pcap in self.settings.pcap_files[:3]:
-                if not self._budget_ok(s): break
-                raw=self._call(s,"tshark.read_pcap","iterative_pcap_pivot",{"lead_id":lead["id"],"pcap":str(pcap),"display_filter":display_filter},
-                    "explicit mission dates; retained-match cap applies" if date_filter else "entire configured capture; retained-match cap applies",
-                    lambda pcap=pcap:self.tshark.inspect(pcap,display_filter=display_filter,limit=min(500,self.settings.max_results),time_filter=date_filter),
-                    lambda x:x.get("count",0))
-                if raw is None: continue
-                for row in raw["packets"]:
-                    self._add_tshark_row(s,row,raw["provenance"],raw["provenance"]["display_filter"],lead["id"])
-                details.append({"source":"tshark","pcap":str(pcap),"returned":raw["count"],
-                    "matched_total":raw.get("matched_count"),"capped":bool(raw.get("output_capped")),
-                    "time_range":raw["provenance"]["time_range"]})
-        count=len(s.get("network",[]))-before
-        s.setdefault("coverage",{})["network_count"]=len(s.get("network",[]))
-        s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],"status":"queried configured network sources" if details else "no configured network source queried",
-            "returned":count,"sources":details})
-        s["queries"].append({"stage":"iterative_network_pivot","lead_id":lead["id"],"sources":details,"returned":count})
-
     def _report(self,s):
+        pending=[task for task in s.get("search_tasks",{}).values()
+            if task.get("status") in {"queued","interrupted"}]
+        if pending:
+            reason=str(s.get("termination_reason") or "resource_limit")
+            if not s.get("termination_reason"): s["termination_reason"]="resource_limit"
+            for task in sorted(pending,key=lambda item:(int(item.get("created_sequence",0)),item.get("task_id",""))):
+                outcome=record_unexecuted_outcome(s,task["task_id"],reason=reason)
+                self._record_scheduled_followups(s,s["search_tasks"][task["task_id"]],outcome)
+            gaps=s.setdefault("coverage",{}).setdefault("scheduler_gaps",[])
+            if not any(item.get("phase")=="report_finalization" for item in gaps):
+                gaps.append({"phase":"report_finalization","reason":reason,
+                    "budget_limited_task_count":len(pending),
+                    "budget_limited_task_ids":[task["task_id"] for task in pending][:100]})
         if s.get("started_epoch"):
             s["duration_ms"]=max(0,round((time.time()-s["started_epoch"])*1000))
         errors=s.get("source_errors",[])
@@ -1313,8 +1628,8 @@ class HuntEngine:
             "search_plans_accepted":sum(x.get("accepted",0) for x in planning),
             "search_plans_rejected_or_duplicate":sum(x.get("rejected_or_duplicate",0) for x in planning),
             "model_findings":sum(1 for f in s.get("findings",[]) if "-AI-" in str(f.get("finding_id","")))}
-        host_missing=not s.get("es_indices") and not self.offline
-        network_missing=s["coverage"].get("network")=="not configured: Arkime and PCAP sources unavailable"
+        host_missing=not self.offline and not bool(s.get("source_health",{}).get("host"))
+        network_missing=not self.offline and not bool(s.get("source_health",{}).get("network"))
         missing_sources=host_missing or network_missing
         host_coverage=str(s.get("coverage",{}).get("host","" )).lower()
         network_coverage=str(s.get("coverage",{}).get("network","" )).lower()
@@ -1325,7 +1640,8 @@ class HuntEngine:
         incomplete_coverage=coverage_limited or network_coverage.startswith("partial") or host_coverage.startswith("partial")
         ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
         coverage_frontier_incomplete=bool(ledger) and not ledger.get("closure_ready",False)
-        incomplete_coverage=incomplete_coverage or coverage_frontier_incomplete
+        scheduler_incomplete=bool(s.get("coverage",{}).get("scheduler_gaps"))
+        incomplete_coverage=incomplete_coverage or coverage_frontier_incomplete or scheduler_incomplete
         interrupted=s.get("termination_reason") in {"tool_call_budget","runtime_budget","depth_budget","workflow_error"}
         successful_search=any(r.get("result_status")=="ok" and any(x in str(r.get("reasoning_stage","")) for x in ("search","pivot")) for r in s.get("tool_runs",[]))
         if s.get("findings"):
@@ -1346,10 +1662,14 @@ class HuntEngine:
         else:
             s["outcome"]="insufficient_evidence"
             s["summary"]="The retrieved evidence was insufficient to support or reject the investigated hypotheses. No finding is not a clean bill of health; review source coverage, query scope, and follow-up needs."
-        if telemetry_errors or model_failures or interrupted or missing_sources or incomplete_coverage: s["status"]="partial"
-        else: s["status"]="completed"
+        coverage_closure_ready=not (
+            telemetry_errors or model_failures or interrupted or missing_sources or incomplete_coverage
+        )
+        s["status"]="completed" if coverage_closure_ready else "partial"
         if not s.get("termination_reason"):
-            s["termination_reason"]="lead_queue_exhausted" if not s.get("lead_queue") else "resource_limit"
+            pending=any(task.get("status") in {"queued","running","interrupted"}
+                for task in s.get("search_tasks",{}).values())
+            s["termination_reason"]="resource_limit" if pending else "lead_queue_exhausted"
         s["coverage"]["tool_calls_used"]=s.get("tool_calls",0)
         s["coverage"]["tool_call_limit"]=self.settings.max_tool_calls
         s["coverage"]["depth_used"]=s.get("depth",0)
@@ -1357,12 +1677,14 @@ class HuntEngine:
         s["coverage"]["minimum_reasoning_rounds"]=self.settings.min_reasoning_rounds
         s["coverage"]["termination_reason"]=s["termination_reason"]
         s["coverage"]["source_error_count"]=len(errors)
-        s["coverage"]["coverage_closure_ready"]=not coverage_frontier_incomplete
+        s["coverage"]["coverage_closure_ready"]=coverage_closure_ready
+        _attach_finding_paths(s)
         try:
             from ..reporting.report import generate_report
             s["report_paths"]=[str(p) for p in generate_report(s,self.settings.reports_dir)]
         except Exception as e:
             s["status"]="partial"; s["error"]=(s.get("error","")+f" Report generation failed: {type(e).__name__}: {str(e)[:150]}").strip()
+            s["coverage"]["coverage_closure_ready"]=False
         self._stage(s,"report","completed" if s.get("report_paths") else "failed",{"outcome":s.get("outcome"),"termination_reason":s.get("termination_reason")})
         print(f"[ROMULUS] termination={s['termination_reason']} outcome={s['outcome']} tools={s.get('tool_calls',0)}")
         return self._save(s)
@@ -1370,6 +1692,18 @@ class HuntEngine:
     def _summarize(self,objective,observations):
         from ..agent.ollama import Ollama
         return Ollama(self.settings).summarize(objective,observations)
+
+
+def _attach_finding_paths(state):
+    graph=state.setdefault("investigation_graph",{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}})
+    paths=derive_finding_paths(graph,state.get("findings",[]))
+    graph["paths"]=paths
+    path_ids_by_finding={}
+    for path in paths:
+        path_ids_by_finding.setdefault(path["finding_id"],[]).append(path["path_id"])
+    for finding in state.get("findings",[]):
+        finding["attack_path_ids"]=path_ids_by_finding.get(finding.get("finding_id"),[])
+    return state
 
 
 def _normalize_hypotheses(values):
@@ -1396,6 +1730,123 @@ def _normalize_hypotheses(values):
     return out
 
 
+def _mission_is_directed(objective):
+    """Return true only when the operator supplied a concrete hunt direction.
+
+    A time range or a generic request to find threats scopes discovery but is
+    not evidence for any attack hypothesis. Specific entities, indicators,
+    ATT&CK IDs, protocols, tools, event IDs, or technique language are valid
+    operator direction.
+    """
+    text=str(objective or "").strip().lower()
+    if not text: return False
+    if re.search(r"\bT\d{4}(?:\.\d{3})?\b",str(objective or ""),flags=re.IGNORECASE): return True
+    if re.search(r"(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w:])",text): return True
+    if re.search(r"\b[a-f0-9]{32}\b|\b[a-f0-9]{40}\b|\b[a-f0-9]{64}\b",text): return True
+    if re.search(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|mil|gov|io|co|local)\b",text): return True
+    explicit_terms={
+        "powershell","encoded command","command shell","smb","rdp","winrm","dcom","ssh","vnc",
+        "lateral movement","credential access","credential dumping","brute force","password spray",
+        "service creation","scheduled task","persistence","privilege escalation","defense evasion",
+        "data exfiltration","exfiltration","command and control","c2","dns tunneling","beaconing",
+        "port scan","port scanning","network scan","reconnaissance","remote execution","ransomware",
+        "mimikatz","psexec","wmi","certutil","bitsadmin","wget","curl","linpeas","pwnkit",
+    }
+    if any(re.search(r"(?<![a-z0-9_])"+re.escape(term)+r"(?![a-z0-9_])",text) for term in explicit_terms): return True
+    if _has_concrete_entity_direction(text): return True
+    return False
+
+
+def _has_concrete_entity_direction(text):
+    """Recognize typed targets without treating telemetry-scope prose as a target."""
+    entity_key=r"(?P<key>event(?:\s+id)?|port|process|user|account|host|hostname|hash|indicator|ioc)"
+    value=r"(?P<value>[\w./\\-]{2,})"
+    matches=list(re.finditer(rf"\b{entity_key}\s*(?:=|:)\s*{value}\b",text))
+    matches.extend(re.finditer(rf"\b{entity_key}\s+(?P<quote>['\"]){value}(?P=quote)",text))
+    directive=(r"(?:investigate|inspect|analy[sz]e|check|examine|review|target|find|"
+        r"focus(?:ing)?\s+on|look(?:ing)?\s+(?:at|into|for)|hunt(?:ing)?\s+for|search(?:ing)?(?:\s+for)?|involving|involves)")
+    target=rf"(?:activity\s+)?(?:(?:on|from|for|involving)\s+)?(?:the\s+)?{entity_key}\s+(?:is\s+)?{value}\b"
+    matches.extend(re.finditer(rf"\b{directive}\s+{target}",text))
+    matches.extend(re.finditer(rf"^{target}",text))
+    for match in re.finditer(rf"\b{entity_key}\s+(?:is\s+)?{value}\b",text):
+        candidate=match.group("value")
+        if any(character.isdigit() or character in "./\\-" for character in candidate):
+            matches.append(match)
+    scope_words={
+        "access","accounts","activity","all","and","are","available","behavior","behaviors",
+        "command","connected","connecting","connection","connections","data","environment","environments",
+        "events","execution","field","fields","for","from","internal","local","log","login","logins",
+        "logs","machines","malicious","monitored","network","networks","on","or","processes","remote",
+        "scanning","scope","suspicious","systems","telemetry","traffic","unknown","unusual","usage","was",
+        "with","without",
+    }
+    for match in matches:
+        key=" ".join(match.group("key").split())
+        candidate=match.group("value").lower()
+        if candidate in scope_words: continue
+        if key=="port" and (not candidate.isdigit() or not 1<=int(candidate)<=65535): continue
+        if key.startswith("event") and not any(character.isdigit() for character in candidate): continue
+        return True
+    return False
+
+
+def _state_mission_mode(state):
+    """Recover legacy/checkpointed state without ever failing open to directed mode."""
+    mode=state.get("mission_mode")
+    if mode not in {"directed","undirected"}:
+        mode="directed" if _mission_is_directed(state.get("objective","")) else "undirected"
+        state["mission_mode"]=mode
+    return mode
+
+
+def _candidate_hypotheses(candidates,existing,evidence=None):
+    """Create bounded hypotheses only from deterministic candidates with citations."""
+    existing_candidates={candidate_id for hypothesis in existing for candidate_id in hypothesis.get("basis_candidate_ids",[])}
+    out=[]
+    for candidate in candidates:
+        candidate_id=candidate.get("candidate_id")
+        evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
+        score=int(candidate.get("priority_score",0) or 0)
+        if not candidate_id or candidate_id in existing_candidates or not evidence_ids: continue
+        if score<40 and candidate.get("kind")!="trusted_indicator": continue
+        technique=next((value for value in candidate.get("attack_techniques",[]) if value in TECHNIQUES),"unmapped")
+        meta=TECHNIQUES.get(technique,{})
+        asset=next(iter(candidate.get("assets",[]) or []),"unknown asset")
+        cited=set(evidence_ids)
+        cited_events=[event for event in (evidence or []) if event.get("evidence_id") in cited]
+        assets=[str(value) for value in candidate.get("assets",[]) if value and str(value)!="unknown"][:8]
+        for event in cited_events:
+            value=str(event.get("asset") or "")
+            if value and value!="unknown" and value not in assets: assets.append(value)
+        assets=assets[:8]
+        ips=[]; hostnames=[]
+        for value in assets:
+            try: ipaddress.ip_address(value); ips.append(value)
+            except ValueError: hostnames.append(value)
+        for value in _evidence_ips(cited_events):
+            if value not in ips: ips.append(value)
+        priority=5 if score>=90 else (4 if score>=70 else 3)
+        identifier="H-CAND-"+str(candidate_id).replace("CL-","")[:18]
+        title=f"Investigate {candidate.get('title','observed behavior')} on {asset}"[:140]
+        rationale=(f"Deterministic candidate {candidate_id} scored {score}/100 and cites "
+            f"{len(evidence_ids)} retained telemetry record(s); the behavior still requires benign-alternative testing.")
+        hypothesis=encode(Hypothesis(identifier,title,technique,rationale,
+            meta.get("host",[]) or (["Review cited host behavior and adjacent process/account activity."] if candidate.get("kind")=="behavior" else []),
+            meta.get("network",[]) or ["Review cited entity across network telemetry and adjacent time windows."],
+            candidate.get("benign_explanations",[]) or ["authorized administration or expected application activity"],
+            tactics=meta.get("tactics",[]),detection_strategies=meta.get("detection_strategies",[]),
+            data_components=meta.get("data_components",[]),analytic_goal=meta.get("analytic_goal",candidate.get("description","")),
+            mutable_elements=meta.get("mutable_elements",[]),priority=priority))
+        hypothesis.update({"basis":"observed_candidate","basis_candidate_ids":[candidate_id],
+            "basis_evidence_ids":evidence_ids[:20],"candidate_evidence_ids":evidence_ids[:20],
+            "candidate_id":candidate_id,"follow_ups":candidate.get("follow_ups",[]),
+            "candidate_assets":assets,"ips":ips,"hostnames":hostnames,
+            "status":"untested","confidence":"not assessed"})
+        out.append(hypothesis); existing_candidates.add(candidate_id)
+        if len(out)>=8: break
+    return out
+
+
 def _clean_string(value,limit):
     return re.sub(r"\s+"," ",value).strip()[:limit] if isinstance(value,str) else ""
 
@@ -1413,15 +1864,34 @@ def _lead_catalog(hypotheses):
         if hypothesis.get("expected_host") or meta.get("host"): sources.append("host")
         if hypothesis.get("expected_network") or meta.get("network") or meta.get("ports") or meta.get("protocols"): sources.append("network")
         if not sources: sources=["host"]
-        for source in sources:
+        follow_ups=hypothesis.get("follow_ups",[]) or []
+        for source_index,source in enumerate(sources):
             ident=_coverage_lead_id(hypothesis.get("hypothesis_id"),source)
             why=(hypothesis.get("analytic_goal") or meta.get("analytic_goal") or
                  f"Test {hypothesis.get('title','this hypothesis')} in available {source} telemetry.")
+            follow_up=follow_ups[min(source_index,len(follow_ups)-1)] if follow_ups else {}
+            intent=follow_up.get("intent") or why
             if ident not in seen:
                 seen.add(ident); out.append({"id":ident,"source":source,"title":hypothesis.get("title") or ident,
-                    "why":why,"intent":why,"hypothesis_id":hypothesis.get("hypothesis_id"),"technique_id":tid,
-                    "priority":hypothesis.get("priority",3),"tactics":hypothesis.get("tactics") or meta.get("tactics",[])})
+                    "why":why,"intent":intent,"hypothesis_id":hypothesis.get("hypothesis_id"),"technique_id":tid,
+                    "candidate_id":hypothesis.get("candidate_id"),
+                    "follow_up_id":follow_up.get("follow_up_id"),
+                    "anchor_evidence_ids":list(hypothesis.get("basis_evidence_ids",[]))[:8],
+                    "ips":list(hypothesis.get("ips",[]))[:8],"hostnames":list(hypothesis.get("hostnames",[]))[:8],
+                    "priority":hypothesis.get("priority",3),
+                    "tactics":hypothesis.get("tactics") or meta.get("tactics",[])})
     return out
+
+
+def _link_candidates_to_findings(s):
+    findings=s.get("findings",[])
+    for candidate in s.get("candidate_leads",[]):
+        evidence_ids=set(candidate.get("evidence_ids",[]))
+        linked=[finding.get("finding_id") for finding in findings
+                if finding.get("finding_id") and evidence_ids.intersection(finding.get("evidence_ids",[]))]
+        if linked:
+            candidate["finding_ids"]=list(dict.fromkeys(candidate.get("finding_ids",[])+linked))
+            candidate["disposition"]="corroborated"
 
 
 def _query_terms(technique_ids):
@@ -1489,7 +1959,22 @@ def _lead_host_query(lead,fields,timestamp_field,time_range,state):
             "host_service_install":"T1543.003","host_transfer_tools":"T1105"}
     technique=lead.get("technique_id") if isinstance(lead,dict) else None
     hypothesis=[{"technique_id":technique or legacy.get(lead_id,"T1021.002")}]
-    return _host_query(hypothesis,fields,timestamp_field,time_range,"",lead_id,state)
+    query=_host_query(hypothesis,fields,timestamp_field,time_range,"",lead_id,state)
+    if not isinstance(lead,dict): return query
+    selectors=[]
+    ips=[value for value in lead.get("ips",[]) if isinstance(value,str)]
+    hostnames=[value for value in lead.get("hostnames",[]) if isinstance(value,str)]
+    ip_fields=[field for field in ("source.ip","destination.ip","host.ip","winlog.event_data.IpAddress") if field in fields]
+    host_fields=[field for field in ("host.name","host.hostname","computer_name","winlog.computer_name") if field in fields]
+    selectors.extend({"terms":{field:ips[:8]}} for field in ip_fields if ips)
+    selectors.extend({"terms":{field:hostnames[:8]}} for field in host_fields if hostnames)
+    if query is None and selectors:
+        query={"bool":{}}
+        if time_range: query["bool"]["filter"]=[{"range":{timestamp_field:time_range}}]
+    if query is None: return None
+    if selectors:
+        query["bool"].setdefault("filter",[]).append({"bool":{"should":selectors,"minimum_should_match":1}})
+    return query
 
 
 def _field_names(mapping):
@@ -1502,38 +1987,41 @@ def _field_names(mapping):
     return sorted(fields)
 
 
+def _mapping_category(name,entry):
+    lower=str(name).lower()
+    fields=set(_field_names({name:entry}))
+    host_score=sum(field in fields for field in ("process.name","process.command_line","winlog.event_id","event.code","user.name","host.name"))
+    network_score=sum(field in fields for field in ("source.ip","destination.ip","source.port","destination.port","network.protocol","dns.question.name","http.request.method"))
+    return "network" if "network" in lower else ("host" if "host" in lower else
+        ("network" if network_score>host_score else ("host" if host_score else "other")))
+
+
 def _field_names_by_class(mapping):
     grouped={"host":set(),"network":set(),"other":set()}
     for name,entry in mapping.items():
-        lower=str(name).lower()
-        fields=set(_field_names({name:entry}))
-        host_score=sum(field in fields for field in ("process.name","process.command_line","winlog.event_id","event.code","user.name","host.name"))
-        network_score=sum(field in fields for field in ("source.ip","destination.ip","source.port","destination.port","network.protocol","dns.question.name","http.request.method"))
-        category="network" if "network" in lower else ("host" if "host" in lower else
-            ("network" if network_score>host_score else ("host" if host_score else "other")))
-        grouped[category].update(fields)
+        grouped[_mapping_category(name,entry)].update(_field_names({name:entry}))
+    return {key:sorted(value) for key,value in grouped.items() if value}
+
+
+def _index_names_by_class(mapping):
+    grouped={"host":[],"network":[],"other":[]}
+    for name,entry in mapping.items():
+        grouped[_mapping_category(name,entry)].append(str(name))
     return {key:sorted(value) for key,value in grouped.items() if value}
 
 
 def _search_history_summary(s):
-    """Return query intent and outcomes, not opaque fingerprints or raw query DSL."""
-    completed=set(s.get("completed_leads",[]))
-    model_results={x.get("search_id"):x for x in s.get("coverage",{}).get("model_search_results",[]) if x.get("search_id")}
-    pivots={x.get("lead_id"):x for x in s.get("pivot_results",[]) if x.get("lead_id")}
+    """Return scheduler intent and exact outcomes without raw response bodies."""
+    tasks=s.get("search_tasks",{}) if isinstance(s.get("search_tasks"),dict) else {}
+    outcomes={item.get("task_id"):item for item in s.get("search_outcomes",[]) if item.get("task_id")}
     out=[]
-    for plan in s.get("lead_catalog",[]):
-        if plan.get("id") not in completed: continue
-        result=model_results.get(plan.get("id"),pivots.get(plan.get("id"),{}))
-        selectors={k:plan.get(k) for k in ("terms","ips","hostnames","ports","protocols","event_codes","index_class") if plan.get(k)}
-        out.append({"source":plan.get("source"),"intent":plan.get("intent") or plan.get("why"),"selectors":selectors,
-            "status":result.get("status"),"returned":result.get("returned",0)})
-    for query in s.get("queries",[]):
-        stage=str(query.get("stage",""))
-        if not stage.startswith(("initial_host_search","host_indicator_search","initial_network_search","arkime_indicator_search","initial_pcap_search")):
-            continue
-        out.append({"source":query.get("source") or ("elasticsearch" if "host" in stage else None),"intent":stage,
-            "selectors":{k:query.get(k) for k in ("term","terms","protocol","display_filter") if query.get(k)},
-            "status":query.get("status","completed"),"returned":query.get("returned",0)})
+    for task_id,task in tasks.items():
+        result=outcomes.get(task_id)
+        if not result: continue
+        out.append({"task_id":task_id,"source":task.get("source"),"intent":task.get("intent"),
+            "origins":task.get("origins",[]),"hypothesis_ids":task.get("hypothesis_ids",[]),
+            "status":result.get("status"),"returned":result.get("returned_total",0),
+            "matched_total":result.get("matched_total"),"time_range":task.get("time_range",{})})
     return out[-20:]
 
 
@@ -1541,36 +2029,6 @@ def _all_evidence(s):
     """Return the bounded graph context; complete evidence stays in Store."""
     combined=list(s.get("host",[]))+list(s.get("network",[]))
     return combined or list(s.get("evidence",[]))
-
-
-def _coverage_fallback(s,limit=3,exclude=None):
-    """Choose unexecuted hypothesis analytics by marginal coverage value."""
-    if limit<=0: return []
-    exclude=set(exclude or ())
-    completed=set(s.get("completed_leads",[])) | exclude
-    ledger={x.get("hypothesis_id"):x for x in s.get("coverage",{}).get("hypothesis_coverage",{}).get("rows",[])}
-    candidates=[]
-    for position,lead in enumerate(s.get("lead_catalog",[])):
-        if lead.get("fingerprint") or lead.get("id") in completed: continue
-        hid=lead.get("hypothesis_id"); row=ledger.get(hid,{})
-        tested=int(row.get("executed_analytics",0) or 0)
-        priority=int(lead.get("priority",3) or 3)
-        candidates.append((tested,-priority,position,lead))
-    candidates.sort(key=lambda item:item[:3])
-    selected=[]; used_tactics=set(); used_sources=set()
-    for _,_,_,lead in candidates:
-        tactics=tuple(lead.get("tactics") or ())
-        family=tactics[0] if tactics else lead.get("technique_id")
-        # First pass rewards a new tactic or source. A second pass below fills
-        # remaining slots, so systematic coverage never deadlocks on diversity.
-        if family in used_tactics and lead.get("source") in used_sources: continue
-        selected.append(lead["id"]); used_tactics.add(family); used_sources.add(lead.get("source"))
-        if len(selected)>=limit: return selected
-    for _,_,_,lead in candidates:
-        if lead["id"] not in selected:
-            selected.append(lead["id"])
-            if len(selected)>=limit: break
-    return selected
 
 
 def _safe_error_reason(exc):
@@ -1702,28 +2160,6 @@ def _timestamp_bounds(events,padding_minutes=0):
     if not stamps: return None
     pad=timedelta(minutes=padding_minutes)
     return (min(stamps)-pad).isoformat(timespec="seconds"),(max(stamps)+pad).isoformat(timespec="seconds")
-
-
-def _timestamp_clusters(events,gap_minutes=5,padding_minutes=2):
-    rows=[]
-    for event in events:
-        try:
-            value=event.get("observed_at")
-            if not value: continue
-            stamp=datetime.fromisoformat(str(value).replace("Z","+00:00"))
-            if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=timezone.utc)
-            rows.append((stamp.astimezone(timezone.utc),event))
-        except (ValueError,TypeError,OverflowError): continue
-    rows.sort(key=lambda item:item[0]); clusters=[]
-    for stamp,event in rows:
-        if not clusters or (stamp-clusters[-1][-1][0]).total_seconds()>gap_minutes*60: clusters.append([])
-        clusters[-1].append((stamp,event))
-    pad=timedelta(minutes=padding_minutes)
-    result=[]
-    for cluster in clusters:
-        bounds=((cluster[0][0]-pad).isoformat(timespec="seconds"),(cluster[-1][0]+pad).isoformat(timespec="seconds"))
-        result.append(([event for _,event in cluster],bounds))
-    return result
 
 
 def _event_text(event):
@@ -1881,9 +2317,53 @@ def _evidence_ips(events):
     return out[:8]
 
 
-def _search_coverage(returned,cap,scope):
-    suffix="; result cap reached, additional records may exist" if returned>=cap else ""
-    return f"searched {scope}; returned {returned}{suffix}"
+def _text_ips(value):
+    found=set()
+    for candidate in re.findall(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)",str(value)):
+        try:
+            address=ipaddress.ip_address(candidate)
+            if not address.is_unspecified and not address.is_multicast: found.add(str(address))
+        except ValueError:
+            pass
+    return found
+
+
+def _event_ips_set(event):
+    return _text_ips(str(event.get("observation",""))+" "+json.dumps(event.get("raw",{}),ensure_ascii=False,default=str))
+
+
+def _event_entities(event):
+    entities=set(_event_ips_set(event))
+    asset=str(event.get("asset") or "").strip().lower()
+    if asset: entities.add(asset)
+    raw=event.get("raw",{}) if isinstance(event.get("raw"),dict) else {}
+    for path in ("host.name","host.hostname","hostname","computer_name","source.domain","destination.domain"):
+        value=_nested(raw,path)
+        values=value if isinstance(value,list) else [value]
+        for candidate in values:
+            text=str(candidate or "").strip().lower()
+            if text: entities.add(text)
+    return entities
+
+
+def _hypothesis_anchor_entities(state,hypothesis,evidence):
+    entities=set()
+    for key in ("candidate_assets","ips","hostnames"):
+        for value in hypothesis.get(key,[]) or []:
+            text=str(value or "").strip().lower()
+            if text: entities.add(text)
+    anchor_ids=set(hypothesis.get("basis_evidence_ids",[]) or [])
+    candidate_ids=set(hypothesis.get("basis_candidate_ids",[]) or [])
+    if hypothesis.get("candidate_id"): candidate_ids.add(hypothesis["candidate_id"])
+    for candidate in state.get("candidate_leads",[]) or []:
+        if candidate.get("candidate_id") not in candidate_ids: continue
+        anchor_ids.update(candidate.get("evidence_ids",[]) or [])
+        for value in candidate.get("assets",[]) or []:
+            text=str(value or "").strip().lower()
+            if text: entities.add(text)
+    for evidence_id in anchor_ids:
+        if evidence_id in evidence: entities.update(_event_entities(evidence[evidence_id]))
+    return entities
 
 
 def _relevant(tid,e):

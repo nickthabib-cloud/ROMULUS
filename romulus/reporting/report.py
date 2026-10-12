@@ -86,6 +86,73 @@ def _candidate_line(candidate):
     )
 
 
+def _supported_paths(state):
+    paths=list((state.get("investigation_graph") or {}).get("paths",[]) or [])
+    referenced={
+        path_id for finding in state.get("findings",[]) or []
+        for path_id in (finding.get("attack_path_ids") or [])
+    }
+    if referenced:
+        paths=[path for path in paths if path.get("path_id") in referenced]
+    return sorted(paths,key=lambda path:(str(path.get("finding_id") or ""),int(path.get("segment_index") or 0),str(path.get("path_id") or "")))
+
+
+def _path_entities(step):
+    values=[]
+    for entity in step.get("entities",[]) or []:
+        value=entity.get("value")
+        if value: values.append(f"{entity.get('entity_type','entity')}={value}")
+    return _join_text(values)
+
+
+def _scheduler_lines(state):
+    tasks=list(state.get("search_tasks",{}).values()) if isinstance(state.get("search_tasks"),dict) else []
+    outcomes={item.get("task_id"):item for item in state.get("search_outcomes",[]) or []
+        if isinstance(item,dict) and item.get("task_id")}
+    lines=[]
+    terminal_resolved={"completed"}
+    ordered=sorted(tasks,key=lambda item:(
+        1 if (outcomes.get(item.get("task_id"),{}).get("status") or item.get("status")) in terminal_resolved else 0,
+        int(item.get("created_sequence",0)),str(item.get("task_id",""))))
+    selected=ordered[:250]
+    lines.append(f"Scheduler task appendix: shown={len(selected)}; total={len(tasks)}; omitted={max(0,len(tasks)-len(selected))}.")
+    for task in selected:
+        outcome=outcomes.get(task.get("task_id"),{})
+        sampling=outcome.get("sampling") if isinstance(outcome.get("sampling"),dict) else {}
+        retained=sampling.get("retained_by_stratum")
+        matched_by=sampling.get("matched_by_stratum")
+        retained_total=sum(value for value in retained if isinstance(value,int) and not isinstance(value,bool)) if isinstance(retained,list) else 0
+        sampling_text=(f"sampling={sampling.get('strategy')}; strata={sampling.get('covered_strata')}/{sampling.get('requested_strata')}; "
+            f"sampled_records={retained_total}; retained_by_stratum={_join_text(retained) or 'not recorded'}; "
+            f"matched_by_stratum={_join_text(matched_by) or 'not recorded'}; "
+            f"sampling_fallback={sampling.get('fallback_reason') or 'none'}; "
+            if sampling else "sampling=not recorded; ")
+        owners=[]
+        for key,label in (("candidate_ids","candidates"),("follow_up_ids","follow-ups"),("hypothesis_ids","hypotheses")):
+            if task.get(key): owners.append(f"{label}={_join_text(task.get(key))}")
+        scope=(outcome.get("time_range") or task.get("time_range") or {}).get("scope","not recorded")
+        lines.append(f"- {task.get('task_id')} {task.get('source')}/{task.get('source_family')} {task.get('phase')}; "
+            f"origins={_join_text(task.get('origins') or [task.get('origin')])}; intent={task.get('intent')}; "
+            f"owners={'; '.join(owners) or 'none'}; status={outcome.get('status') or task.get('status')}; "
+            f"returned={outcome.get('returned_total')}; matched={outcome.get('matched_total')}; scope={scope}; "
+            f"capped={bool(outcome.get('capped'))}; timed_out={bool(outcome.get('timed_out'))}; "
+            f"shard_failures={outcome.get('shard_failures',0)}; incomplete={bool(outcome.get('incomplete'))}; "
+            f"{sampling_text}error={outcome.get('error_kind') or outcome.get('reason') or 'none'}.")
+    gaps=[item for item in state.get("scheduler_history",[]) or []
+        if isinstance(item,dict) and "budget_gap" in str(item.get("event"))]
+    gaps.extend(state.get("coverage",{}).get("scheduler_gaps",[]) or [])
+    if gaps:
+        lines.append("Unresolved scheduler/source-fairness gaps:")
+        for gap in gaps[-40:]:
+            task_ids=gap.get("budget_limited_task_ids") or gap.get("queued_task_ids") or []
+            total=gap.get("budget_limited_task_count")
+            total=int(total) if isinstance(total,int) else len(task_ids)
+            lines.append(f"- phase={gap.get('phase')}; event={gap.get('event')}; reason={gap.get('reason')}; "
+                f"unserved={_join_text(gap.get('unserved_families')) or 'none'}; "
+                f"budget-limited={_join_text(task_ids) or 'none'}; total={total}; omitted={max(0,total-len(task_ids))}.")
+    return lines
+
+
 def _content(s):
     host_events=_bounded_report_events(s,"host"); network_events=_bounded_report_events(s,"network")
     lines=[f"ROMULUS INVESTIGATION REPORT — {s.get('status','partial').upper()}",f"Investigation: {s.get('hunt_id','')}",f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}","", "EXECUTIVE SUMMARY",s.get("summary") or "Investigation summary unavailable.",
@@ -106,11 +173,13 @@ def _content(s):
     for h in s.get("hypotheses",[]):
         t=TECHNIQUES.get(h.get("technique_id"),{}); lines.append(f"- {h.get('title')} ({h.get('technique_id') or 'unmapped'} {t.get('name','')}): {h.get('status')}; confidence {h.get('confidence')}. {h.get('rationale')}")
         lines.append(f"  Expected host evidence: {_join_text(h.get('expected_host'))}; network: {_join_text(h.get('expected_network'))}. Benign explanations: {_join_text(h.get('benign_explanations'))}.")
-        if h.get("model_assessment"): lines.append(f"  Evidence assessment: {h['model_assessment'].get('status')}; rationale={h['model_assessment'].get('rationale')}; cited events={_join_text(h['model_assessment'].get('evidence_ids'))}.")
+        assessment=h.get("model_assessment") or h.get("deterministic_assessment")
+        if assessment: lines.append(f"  Evidence assessment: {assessment.get('status')}; rationale={assessment.get('rationale')}; cited events={_join_text(assessment.get('evidence_ids'))}.")
     lines += ["", "HYPOTHESIS AND ANALYTIC COVERAGE"]
     ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
     for row in ledger.get("rows",[]):
-        lines.append(f"- {row.get('hypothesis_id')} / {row.get('technique_id')}: priority={row.get('priority')}; analytics={row.get('executed_analytics')}/{row.get('planned_analytics')}; sources={_join_text(row.get('sources')) or 'none'}; returned={row.get('returned')}; assessment={row.get('assessment')}; gaps={_join_text(row.get('telemetry_gaps')) or 'none'}.")
+        lines.append(f"- {row.get('hypothesis_id')} / {row.get('technique_id')}: priority={row.get('priority')}; analytics attempted={row.get('executed_analytics')}/{row.get('planned_analytics')}; resolved={row.get('resolved_analytics')}; sources={_join_text(row.get('sources')) or 'none'}; returned={row.get('returned')}; assessment={row.get('assessment')}; gaps={_join_text(row.get('telemetry_gaps')) or 'none'}.")
+    lines += ["", "UNIFIED SEARCH SCHEDULER"]+(_scheduler_lines(s) or ["No scheduler tasks were recorded."])
     lines += ["", "DETERMINISTIC BEHAVIORAL ANALYTICS"]+(_analytic_lines(s.get("analytic_summary",{})) or ["No analytic summary was produced."])
     visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
     lines += ["", "PRIORITIZED CANDIDATE LEADS"]
@@ -118,6 +187,17 @@ def _content(s):
     lines += ["", "SIGNIFICANT FINDINGS"]
     if not s.get("findings"): lines.append("No significant findings recorded.")
     for f in s.get("findings",[]): lines += [f"- {f.get('finding_id')} {f.get('title')} [{f.get('status')} / {f.get('confidence')}]: {f.get('observation')}","  Analysis: "+str(f.get("interpretation") or ""),"  Evidence: "+_join_text(f.get("evidence_ids")),"  Alternatives: "+_join_text(f.get("alternatives"),"; "),"  Follow-up: "+_join_text(f.get("follow_up"),"; ")]
+    paths=_supported_paths(s)
+    lines += ["", "SUPPORTED ATTACK PATHS"]
+    if not paths: lines.append("No evidence-supported multi-record path was derived from the cited findings.")
+    for path in paths:
+        lines.append(f"- {path.get('path_id')} {path.get('title')} — segment {path.get('segment_index',1)} of {path.get('segment_count',1)}; relationship confidence={path.get('confidence','not assessed')}.")
+        for step in path.get("steps",[]):
+            lines.append(f"  {step.get('sequence')}. {step.get('observed_at') or 'time unavailable'} {step.get('activity_type')}: {step.get('label')} Evidence={_join_text(step.get('evidence_ids'))}; entities={_path_entities(step) or 'none recorded'}.")
+        for relationship in path.get("relationships",[]):
+            lines.append(f"  Link {relationship.get('source_sequence')}→{relationship.get('target_sequence')}: {relationship.get('relationship')} [{relationship.get('basis')} / {relationship.get('confidence')}]; reasons={_join_text(relationship.get('reasons'), '; ') or 'not recorded'}.")
+        for caveat in path.get("caveats",[]): lines.append(f"  Caveat: {caveat}")
+        for gap in path.get("gaps",[]): lines.append(f"  Gap: {gap}")
     lines += ["", f"HOST ANALYSIS — {len(host_events)} representative/cited records of {len(s.get('host',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in host_events]
     lines += ["", f"NETWORK ANALYSIS — {len(network_events)} representative/cited records of {len(s.get('network',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in network_events]
     lines += ["", "CROSS-DOMAIN CORRELATION"]
@@ -134,7 +214,12 @@ def _content(s):
     if s.get("error"): lines.append(s["error"])
     lines += ["This assessment covers only the evidence sources and time period recorded above. Searches and reports are bounded; lack of findings does not establish that the environment is secure.","", "CONCLUSIONS AND RECOMMENDED FOLLOW-UP",s.get("summary") or "", "", "TECHNICAL CANDIDATE WORKING LIST"]
     lines += [_candidate_line(item) for item in s.get("candidate_leads",[])] or ["No catalog candidates were recorded."]
-    lines += ["", "TECHNICAL EVIDENCE APPENDIX", f"The human-readable evidence manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable citations and search-result IDs appear above. Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite."]
+    if s.get("retention_policy")=="compact" and (s.get("status")=="completed" or s.get("finalized_at")):
+        retention_note=("This finalized investigation uses compact retention. After both reports are verified, per-hunt working audit records and uncited raw evidence are scheduled for removal; "
+            "structured findings, supported paths, and their cited evidence remain in the compact investigation record.")
+    else:
+        retention_note="Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite unless the hunt is explicitly finalized with compact retention."
+    lines += ["", "TECHNICAL EVIDENCE APPENDIX", f"The human-readable evidence manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable citations and search-result IDs appear above. {retention_note}"]
     return "\n".join(lines)
 
 def _docx(s,path):
@@ -202,6 +287,14 @@ def _docx(s,path):
     findings=list(s.get("findings",[]) or [])
     visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
     errors=list(s.get("source_errors",[]) or [])
+    sampled_outcomes=[item for item in s.get("search_outcomes",[]) or []
+        if isinstance(item,dict) and (item.get("capped") or
+            isinstance(item.get("sampling"),dict) and item["sampling"].get("strategy") not in {None,"exhaustive"})]
+    representative_strategies={"time_stratified","rank_stratified","time_stratified_reservoir","deterministic_reservoir"}
+    representative_outcomes=[item for item in sampled_outcomes
+        if item.get("sampling",{}).get("strategy") in representative_strategies
+        and not item.get("sampling",{}).get("fallback_reason")]
+    fallback_outcomes=[item for item in sampled_outcomes if item not in representative_outcomes]
     confidence_order={"not assessed":0,"low":1,"moderate":2,"high":3}
     overall_confidence=max((str(item.get("confidence") or "low").lower() for item in findings),key=lambda value:confidence_order.get(value,0),default="low")
     if s.get("status")!="completed" or errors:
@@ -306,6 +399,21 @@ def _docx(s,path):
         reasons=_join_text(candidate.get("score_reasons"),"; ")
         if reasons: para("Why it matters: "+reasons)
 
+    heading("Supported Attack Path")
+    supported_paths=_supported_paths(s)
+    if not supported_paths:
+        para("No evidence-supported multi-record path was derived from the cited findings.")
+    for supported_path in supported_paths:
+        segment=f" — segment {supported_path.get('segment_index',1)} of {supported_path.get('segment_count',1)}" if int(supported_path.get("segment_count") or 1)>1 else ""
+        doc.add_heading(str(supported_path.get("title") or "Evidence-supported activity")+segment,level=2)
+        for step in supported_path.get("steps",[]):
+            entities=_path_entities(step)
+            detail=f"{step.get('sequence')}. {step.get('observed_at') or 'Time unavailable'} — {friendly(step.get('activity_type'))}: {step.get('label')}. Evidence: {_join_text(step.get('evidence_ids'))}."
+            if entities: detail+=f" Entities: {entities}."
+            para(detail)
+        caveats=list(supported_path.get("caveats",[]) or [])+list(supported_path.get("gaps",[]) or [])
+        if caveats: para("Limitations: "+_join_text(caveats," "))
+
     heading("Scope and Coverage")
     scope=doc.add_table(rows=1,cols=2); scope.style="Light Shading Accent 1"; scope.alignment=WD_TABLE_ALIGNMENT.CENTER
     set_cell_text(scope.rows[0].cells[0],"Telemetry",True,white); set_cell_text(scope.rows[0].cells[1],"Coverage result",True,white)
@@ -313,10 +421,15 @@ def _docx(s,path):
     coverage=s.get("coverage",{}) or {}
     for label,key in (("Host telemetry","host"),("Network telemetry","network")):
         cells=scope.add_row().cells; set_cell_text(cells[0],label,True); set_cell_text(cells[1],coverage.get(key) or "Not recorded")
-    if errors:
-        cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True); set_cell_text(cells[1],f"{len(errors)} source error(s) limited the investigation. See the technical TXT report for details.")
-    else:
-        cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True); set_cell_text(cells[1],"No source errors were recorded.")
+    limitations=[]
+    if errors: limitations.append(f"{len(errors)} source error(s) limited the investigation.")
+    if representative_outcomes:
+        limitations.append(f"{len(representative_outcomes)} search result set(s) used a bounded representative sample; capped searches remain incomplete coverage.")
+    if fallback_outcomes:
+        limitations.append(f"{len(fallback_outcomes)} search result set(s) used incomplete, nonrepresentative bounded retrieval because complete representative sampling was unavailable.")
+    if not limitations: limitations.append("No source errors or sampled-result limitations were recorded.")
+    cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True)
+    set_cell_text(cells[1]," ".join(limitations)+" See the technical TXT report for details.")
     format_table(scope)
     para("This assessment applies only to the specified time range and the telemetry listed above. No finding is not proof that the environment is free of malicious activity.")
 

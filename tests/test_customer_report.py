@@ -12,6 +12,7 @@ class CustomerWordReportTests(unittest.TestCase):
             "termination_reason": "lead_queue_exhausted",
             "objective": "Hunt for suspicious execution and lateral movement from 2026-10-10 to 2026-10-11.",
             "summary": "ROMULUS identified one suspicious execution chain that requires analyst validation.",
+            "retention_policy": "compact",
             "duration_ms": 42000,
             "tool_calls": 7,
             "depth": 3,
@@ -20,6 +21,9 @@ class CustomerWordReportTests(unittest.TestCase):
                 "host": "available; 123 events examined",
                 "network": "available; 18 sessions examined",
                 "tool_call_limit": 20,
+                "scheduler_gaps": [{"phase":"report_finalization","reason":"tool_call_budget",
+                    "budget_limited_task_count":3,
+                    "budget_limited_task_ids":["ST-BUDGET-001","ST-BUDGET-002"]}],
             },
             "findings": [
                 {
@@ -35,6 +39,7 @@ class CustomerWordReportTests(unittest.TestCase):
                     "evidence_ids": ["EV-RAW-001"],
                     "affected_assets": ["WS-17"],
                     "technique_id": "T1059.001",
+                    "attack_path_ids": ["PATH-001"],
                 }
             ],
             "hypotheses": [
@@ -83,10 +88,49 @@ class CustomerWordReportTests(unittest.TestCase):
             ],
             "network": [],
             "correlations": [],
+            "investigation_graph": {
+                "version": 1,
+                "nodes": [],
+                "edges": [],
+                "paths": [{
+                    "path_id": "PATH-001",
+                    "finding_id": "F-001",
+                    "title": "Suspicious PowerShell execution",
+                    "confidence": "moderate",
+                    "steps": [{
+                        "sequence": 1,
+                        "activity_type": "process_execution",
+                        "label": "PowerShell launched an encoded command on WS-17",
+                        "observed_at": "2026-10-10T12:00:00Z",
+                        "evidence_ids": ["EV-RAW-001"],
+                        "entities": [{"entity_type": "host", "value": "ws-17"}],
+                    }],
+                    "relationships": [],
+                    "caveats": ["A single observed step does not establish a complete intrusion chain."],
+                    "gaps": [],
+                }],
+            },
             "stage_history": [{"stage": "triage", "status": "completed", "details": "INTERNAL-STAGE-SENTINEL"}],
             "reasoning_history": [{"stage": "triage", "reasoning": "INTERNAL-REASONING-SENTINEL"}],
             "tool_runs": [{"tool": "INTERNAL-TOOL-SENTINEL", "result_status": "ok"}],
             "search_artifacts": [{"artifact_id": "INTERNAL-SEARCH-SENTINEL", "tool": "elastic.search"}],
+            "search_tasks": {"ST-INTERNAL-SENTINEL": {
+                "task_id": "ST-INTERNAL-SENTINEL", "source": "elasticsearch", "source_family": "host",
+                "phase": "investigation", "origins": ["candidate_follow_up"],
+                "intent": "Validate exact PowerShell context", "candidate_ids": ["CL-HIGH"],
+                "follow_up_ids": ["FU-HIGH"], "hypothesis_ids": ["H-POWER"],
+                "time_range": {"scope": "bounded test window"}, "status": "partial",
+                "query_spec": {"query": {"term": {"password": "DO-NOT-REPORT-SECRET"}}},
+            }},
+            "search_outcomes": [{"task_id": "ST-INTERNAL-SENTINEL", "status": "partial",
+                "returned_total": 5, "matched_total": 12, "capped": True, "timed_out": False,
+                "shard_failures": 0, "incomplete": True, "error_kind": "ResultCap",
+                "reason": "configured result cap reached", "sampling": {
+                    "version": 1, "strategy": "rank_stratified", "requested_strata": 8,
+                    "covered_strata": 7, "retained_by_stratum": [1, 1, 1, 1, 1, 1, 1],
+                    "matched_by_stratum": [3, 3, 3, 3, 3, 3, 3],
+                    "fallback_reason": "arkime_offset_limit"}}],
+            "scheduler_history": [{"event": "investigation_budget_gap", "unserved_families": ["network"]}],
             "source_errors": [],
         }
 
@@ -117,6 +161,9 @@ class CustomerWordReportTests(unittest.TestCase):
                 "Recommended Actions",
                 "Suspicious PowerShell execution",
                 "WS-17",
+                "Supported Attack Path",
+                "EV-RAW-001",
+                "incomplete, nonrepresentative bounded retrieval",
             ):
                 self.assertIn(expected, word_text)
 
@@ -128,13 +175,74 @@ class CustomerWordReportTests(unittest.TestCase):
                 "LOW-PRIORITY-INTERNAL-SENTINEL",
                 "RAW-HOST-EVENT-SENTINEL",
                 "TECHNICAL CANDIDATE WORKING LIST",
+                "ST-INTERNAL-SENTINEL",
+                "UNIFIED SEARCH SCHEDULER",
             ):
                 self.assertNotIn(internal, word_text)
                 self.assertIn(internal, technical_text)
 
+            self.assertIn("candidate_follow_up",technical_text)
+            self.assertIn("returned=5",technical_text)
+            self.assertIn("matched=12",technical_text)
+            self.assertIn("capped=True",technical_text)
+            self.assertIn("sampling=rank_stratified",technical_text)
+            self.assertIn("strata=7/8",technical_text)
+            self.assertIn("retained_by_stratum=1, 1, 1, 1, 1, 1, 1",technical_text)
+            self.assertIn("matched_by_stratum=3, 3, 3, 3, 3, 3, 3",technical_text)
+            self.assertNotIn("sampling=rank_stratified",word_text)
+            self.assertIn("CL-HIGH",technical_text)
+            self.assertIn("budget-limited=ST-BUDGET-001, ST-BUDGET-002",technical_text)
+            self.assertIn("total=3; omitted=1",technical_text)
+            self.assertNotIn("DO-NOT-REPORT-SECRET",technical_text)
+
             self.assertGreaterEqual(len(document.tables), 3)
             self.assertLess(len(word_text), len(technical_text))
             self.assertNotIn("3. Validate with the asset owner.", word_text)
+            self.assertIn("uncited raw evidence", technical_text)
+            self.assertNotIn("complete raw evidence remains in SQLite", technical_text)
+
+    def test_word_identifies_successful_stratified_sampling_as_representative(self):
+        try:
+            from docx import Document
+        except ImportError:
+            self.skipTest("Install requirements.txt for Word report verification")
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        state["search_outcomes"][0]["sampling"].pop("fallback_reason")
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths = generate_report(state, Path(directory))
+            document = Document(next(path for path in paths if path.suffix == ".docx"))
+            word_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            word_text += "\n" + "\n".join(
+                cell.text for table in document.tables for row in table.rows for cell in row.cells
+            )
+
+            self.assertIn("bounded representative sample", word_text)
+            self.assertNotIn("incomplete, nonrepresentative bounded retrieval", word_text)
+
+    def test_word_calls_fallback_retrieval_incomplete_and_nonrepresentative(self):
+        try:
+            from docx import Document
+        except ImportError:
+            self.skipTest("Install requirements.txt for Word report verification")
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        state["search_outcomes"][0]["sampling"].update({
+            "strategy": "earliest_fallback",
+            "fallback_reason": "unknown_total",
+        })
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths = generate_report(state, Path(directory))
+            document = Document(next(path for path in paths if path.suffix == ".docx"))
+            word_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            word_text += "\n" + "\n".join(
+                cell.text for table in document.tables for row in table.rows for cell in row.cells
+            )
+
+            self.assertIn("incomplete, nonrepresentative bounded retrieval", word_text)
+            self.assertNotIn("bounded representative sample", word_text)
 
 
 if __name__ == "__main__":

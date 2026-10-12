@@ -1,6 +1,8 @@
 """Read-only Elasticsearch adapter using the official Python client."""
+from datetime import datetime, timezone
 from typing import Any
 from ..config import Settings
+from ..investigation.sampling import allocate_cap, time_strata
 
 class ElasticsearchAdapter:
     def __init__(self, settings: Settings, client: Any = None):
@@ -35,14 +37,18 @@ class ElasticsearchAdapter:
         return self.connect().indices.get_mapping(index=",".join(approved))
     def search(self, index: str, query: dict[str, Any], size: int = 100) -> dict[str, Any]:
         return self.search_many([index],query,size)
-    def search_many(self, indices: list[str], query: dict[str, Any], size: int = 100) -> dict[str, Any]:
+    def search_many(self, indices: list[str], query: dict[str, Any], size: int = 100, *,
+                    timestamp_field: str | None = None, time_range: dict[str, Any] | None = None,
+                    sampling: dict[str, Any] | None = None) -> dict[str, Any]:
         approved=[self._validate_index(index) for index in indices]
         if not approved: return {"hits":[],"total":0}
         validate_query(query); size=max(1,min(int(size),self.settings.max_results))
         client=self.connect(); index_csv=",".join(approved); pit_id=None; rows=[]; total=None
         timed_out=False; shard_failures=0; used_pit=False
-        timestamp=_range_field(query)
-        sort=([{timestamp:{"order":"asc","unmapped_type":"date"}}] if timestamp else [])+["_shard_doc"]
+        timestamp=timestamp_field or _range_field(query)
+        sort=([{timestamp:{"order":"asc","unmapped_type":"date","format":"strict_date_optional_time_nanos"}}] if timestamp else [])+["_shard_doc"]
+        sampling_summary={"version":int((sampling or {}).get("version",1)),"strategy":"exhaustive",
+            "requested_strata":1,"covered_strata":1,"retained_by_stratum":[]}
         try:
             pit=client.open_point_in_time(index=index_csv,keep_alive="1m")
             pit_id=pit.get("id") if hasattr(pit,"get") else None
@@ -50,19 +56,62 @@ class ElasticsearchAdapter:
             pit_id=None
         try:
             if pit_id:
-                used_pit=True; search_after=None
-                while len(rows)<size:
-                    page_size=min(1000,size-len(rows))
-                    kwargs={"pit":{"id":pit_id,"keep_alive":"1m"},"query":query,"size":page_size,
-                            "sort":sort,"track_total_hits":True,"source":True,"timeout":f"{self.settings.tool_timeout_seconds}s"}
-                    if search_after is not None: kwargs["search_after"]=search_after
-                    result=client.search(**kwargs); page=result.get("hits",{}).get("hits",[])
-                    total=result.get("hits",{}).get("total",total); timed_out=timed_out or bool(result.get("timed_out"))
-                    shard_failures+=int(result.get("_shards",{}).get("failed",0) or 0)
-                    rows.extend(page)
-                    if not page or len(page)<page_size: break
-                    search_after=page[-1].get("sort")
-                    if not search_after: break
+                used_pit=True
+                initial=_pit_search(client,pit_id,query,size,sort,self.settings.tool_timeout_seconds)
+                rows=initial["rows"]; total=initial["total"]
+                timed_out=initial["timed_out"]; shard_failures=initial["shard_failures"]
+                total_value=_total_value(total)
+                should_sample=bool(timestamp and sampling and isinstance(total_value,(int,float)) and total_value>len(rows))
+                if should_sample:
+                    try:
+                        bounds=_sampling_bounds(time_range)
+                        bounds_source="task_time_range"
+                        if bounds is None:
+                            first_value=_hit_sort_time(rows[0]) if rows else None
+                            descending=[{timestamp:{"order":"desc","unmapped_type":"date","format":"strict_date_optional_time_nanos"}},"_shard_doc"]
+                            last_result=_pit_search(client,pit_id,query,1,descending,self.settings.tool_timeout_seconds)
+                            last_value=_hit_sort_time(last_result["rows"][0]) if last_result["rows"] else None
+                            bounds=_datetime_bounds(first_value,last_value)
+                            bounds_source="matching_extrema"
+                            timed_out=timed_out or last_result["timed_out"]
+                            shard_failures+=last_result["shard_failures"]
+                        if bounds is None: raise ValueError("matching time bounds unavailable")
+                        allocations=allocate_cap(size,int(sampling.get("strata",self.settings.time_sampling_strata)))
+                        strata=time_strata(bounds[0],bounds[1],len(allocations))
+                        sampled=[]; seen=set(); retained=[]; matched_by=[]; covered=0; failed=0
+                        for stratum,quota in zip(strata,allocations):
+                            bounded_query=_with_time_stratum(query,timestamp,stratum)
+                            try:
+                                result=_pit_search(client,pit_id,bounded_query,min(size,quota+min(len(seen),quota)),sort,
+                                    self.settings.tool_timeout_seconds)
+                            except Exception:
+                                failed+=1; retained.append(0); matched_by.append(None); continue
+                            covered+=1
+                            timed_out=timed_out or result["timed_out"]
+                            shard_failures+=result["shard_failures"]
+                            stratum_total=_total_value(result["total"])
+                            matched_by.append(int(stratum_total) if isinstance(stratum_total,(int,float)) else None)
+                            accepted=0
+                            for hit in result["rows"]:
+                                identity=(str(hit.get("_index") or ""),str(hit.get("_id") or ""))
+                                if identity in seen: continue
+                                seen.add(identity); sampled.append(hit); accepted+=1
+                                if accepted>=quota: break
+                            retained.append(accepted)
+                        if not covered: raise RuntimeError("all sampling strata failed")
+                        rows=sampled[:size]
+                        sampling_summary={"version":int(sampling.get("version",1)),"strategy":"time_stratified",
+                            "bounds_source":bounds_source,"requested_strata":len(strata),"covered_strata":covered,
+                            "retained_by_stratum":retained,"matched_by_stratum":matched_by}
+                        if failed:
+                            sampling_summary["failed_strata"]=failed
+                            sampling_summary["fallback_reason"]="stratum_error"
+                    except Exception as exc:
+                        sampling_summary={"version":int((sampling or {}).get("version",1)),"strategy":"earliest_fallback",
+                            "requested_strata":int((sampling or {}).get("strata",1)),"covered_strata":1,
+                            "retained_by_stratum":[len(rows)],"fallback_reason":type(exc).__name__}
+                else:
+                    sampling_summary["retained_by_stratum"]=[len(rows)]
             else:
                 # Older clusters or narrowly privileged users may not permit a
                 # PIT. Keep a bounded fallback and mark it so coverage cannot be
@@ -72,16 +121,20 @@ class ElasticsearchAdapter:
                                      timeout=f"{self.settings.tool_timeout_seconds}s")
                 rows=result.get("hits",{}).get("hits",[]); total=result.get("hits",{}).get("total")
                 timed_out=bool(result.get("timed_out")); shard_failures=int(result.get("_shards",{}).get("failed",0) or 0)
+                sampling_summary={"version":int((sampling or {}).get("version",1)),"strategy":"bounded_single_page",
+                    "requested_strata":int((sampling or {}).get("strata",1)),"covered_strata":1,
+                    "retained_by_stratum":[len(rows)],"fallback_reason":"point_in_time_unavailable"}
         finally:
             if pit_id:
                 try: client.close_point_in_time(id=pit_id)
                 except Exception: pass
-        total_value=total.get("value") if isinstance(total,dict) else total
+        total_value=_total_value(total)
         total_relation=total.get("relation") if isinstance(total,dict) else ("eq" if isinstance(total,(int,float)) else "unknown")
         capped=(isinstance(total_value,(int,float)) and total_value>len(rows)) or (not used_pit and len(rows)>=min(size,10000))
         return {"hits":[h.get("_source",{}) | {"_index":h.get("_index"),"_id":h.get("_id")} for h in rows[:size]],
                 "total":total_value,"total_relation":total_relation,"capped":capped,"timed_out":timed_out,
-                "shard_failures":shard_failures,"pagination":"pit_search_after" if used_pit else "bounded_single_page"}
+                "shard_failures":shard_failures,"pagination":"pit_search_after" if used_pit else "bounded_single_page",
+                "sampling":sampling_summary}
     def _validate_index(self,index: str,raise_error: bool=True):
         if not index or not any(index == p or (p.endswith("*") and index.startswith(p[:-1])) for p in self.settings.es_index_patterns):
             if not raise_error: return False
@@ -116,3 +169,67 @@ def _range_field(value: Any) -> str | None:
                 found=_range_field(child)
                 if found: return found
     return None
+
+
+def _pit_search(client: Any, pit_id: str, query: dict[str, Any], size: int, sort: list[Any], timeout: int) -> dict[str, Any]:
+    rows=[]; total=None; timed_out=False; shard_failures=0; search_after=None
+    while len(rows)<size:
+        page_size=min(1000,size-len(rows))
+        kwargs={"pit":{"id":pit_id,"keep_alive":"1m"},"query":query,"size":page_size,
+            "sort":sort,"track_total_hits":True,"source":True,"timeout":f"{timeout}s"}
+        if search_after is not None: kwargs["search_after"]=search_after
+        result=client.search(**kwargs); page=result.get("hits",{}).get("hits",[])
+        total=result.get("hits",{}).get("total",total); timed_out=timed_out or bool(result.get("timed_out"))
+        shard_failures+=int(result.get("_shards",{}).get("failed",0) or 0); rows.extend(page)
+        if not page or len(page)<page_size: break
+        search_after=page[-1].get("sort")
+        if not search_after: break
+    return {"rows":rows,"total":total,"timed_out":timed_out,"shard_failures":shard_failures}
+
+
+def _total_value(total: Any) -> int | float | None:
+    return total.get("value") if isinstance(total,dict) else total
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value,(int,float)) and not isinstance(value,bool):
+        seconds=float(value)/1000 if abs(float(value))>10_000_000_000 else float(value)
+        try: return datetime.fromtimestamp(seconds,tz=timezone.utc)
+        except (OverflowError,OSError,ValueError): return None
+    if not isinstance(value,str) or not value.strip(): return None
+    text=value.strip()
+    if text.endswith("Z"): text=text[:-1]+"+00:00"
+    try: parsed=datetime.fromisoformat(text)
+    except ValueError: return None
+    if parsed.tzinfo is None: return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _sampling_bounds(time_range: dict[str, Any] | None) -> tuple[datetime,datetime] | None:
+    if not isinstance(time_range,dict): return None
+    start=_parse_datetime(time_range.get("gte")); end=_parse_datetime(time_range.get("lte"))
+    return (start,end) if start and end and start<end else None
+
+
+def _hit_sort_time(hit: dict[str, Any]) -> Any:
+    values=hit.get("sort")
+    return values[0] if isinstance(values,list) and values else None
+
+
+def _datetime_bounds(first: Any,last: Any) -> tuple[datetime,datetime] | None:
+    start=_parse_datetime(first); end=_parse_datetime(last)
+    if not start or not end: return None
+    if start==end:
+        from datetime import timedelta
+        end=start+timedelta(microseconds=1)
+    return (start,end) if start<end else None
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00","Z")
+
+
+def _with_time_stratum(query: dict[str, Any],timestamp: str,stratum: dict[str, Any]) -> dict[str, Any]:
+    upper="lte" if stratum.get("include_end") else "lt"
+    bounds={"gte":_iso(stratum["start"]),upper:_iso(stratum["end"])}
+    return {"bool":{"filter":[query,{"range":{timestamp:bounds}}]}}
