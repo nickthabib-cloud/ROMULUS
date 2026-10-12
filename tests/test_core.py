@@ -137,7 +137,9 @@ class CoreTests(unittest.TestCase):
             from docx import Document
             doc=Document(next(p for p in paths if p.suffix==".docx"))
             body="\n".join(p.text for p in doc.paragraphs)+"\n"+"\n".join(cell.text for table in doc.tables for row in table.rows for cell in row.cells)
-            self.assertNotIn("\x01",body); self.assertNotIn("\x0b",body); self.assertIn("malformed telemetry",body)
+            self.assertNotIn("\x01",body); self.assertNotIn("\x0b",body)
+            self.assertNotIn("malformed telemetry",body)
+            self.assertIn("malformed telemetry",paths[1].read_text())
     def test_synthetic_full_investigation_and_reports(self):
         try:
             import langgraph,docx

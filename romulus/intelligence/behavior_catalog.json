@@ -1,0 +1,3661 @@
+{
+  "catalog_version": "1.0.0",
+  "generated_from": [
+    "MITRE ATT&CK",
+    "Sigma",
+    "Elastic",
+    "LOLBAS",
+    "GTFOBins"
+  ],
+  "analytics": [
+    {
+      "id": "BH-XPLAT-001",
+      "version": 1,
+      "title": "Executable launched from a temporary or shared-memory path",
+      "description": "Executable launched from a temporary or shared-memory path. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "execution"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.executable"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.executable",
+            "operator": "path_prefix_any",
+            "values": [
+              "%temp%\\",
+              "c:\\windows\\temp\\",
+              "c:\\users\\public\\",
+              "/tmp/",
+              "/var/tmp/",
+              "/dev/shm/",
+              "/run/shm/"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 22,
+      "specificity": 34,
+      "expected_noise": "high",
+      "attack_techniques": [
+        "T1204.002"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "temp_execution"
+    },
+    {
+      "id": "BH-XPLAT-002",
+      "version": 1,
+      "title": "Download followed by an execution-oriented command",
+      "description": "Download followed by an execution-oriented command. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "execution",
+        "command-and-control"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "curl ",
+              "wget ",
+              "invoke-webrequest",
+              "downloadfile",
+              "chmod +x",
+              "| bash",
+              "| sh"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 52,
+      "specificity": 64,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1105",
+        "T1059"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-XPLAT-002"
+    },
+    {
+      "id": "BH-XPLAT-003",
+      "version": 1,
+      "title": "Encoded or obfuscated interpreter command",
+      "description": "Encoded or obfuscated interpreter command. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "execution",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              " -enc ",
+              "-encodedcommand",
+              "frombase64string",
+              "base64 -d",
+              "base64 --decode",
+              "invoke-expression"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 48,
+      "specificity": 60,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1027",
+        "T1059"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-XPLAT-003"
+    },
+    {
+      "id": "BH-XPLAT-004",
+      "version": 1,
+      "title": "Shell spawned by a document or network-facing application",
+      "description": "Shell spawned by a document or network-facing application. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "execution"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.parent.name"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.parent.name",
+            "operator": "contains_any",
+            "values": [
+              "winword",
+              "excel",
+              "powerpnt",
+              "outlook",
+              "acrord",
+              "chrome",
+              "firefox",
+              "httpd",
+              "apache",
+              "nginx",
+              "postgres",
+              "mysqld"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 58,
+      "specificity": 70,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1059",
+        "T1204.002"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "unexpected_parent_shell"
+    },
+    {
+      "id": "BH-XPLAT-005",
+      "version": 1,
+      "title": "Lookalike common process name with path context",
+      "description": "Lookalike common process name with path context. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "execution",
+        "masquerading"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.name"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.name",
+            "operator": "lookalike_process",
+            "values": [
+              "svchost.exe",
+              "lsass.exe",
+              "services.exe",
+              "explorer.exe",
+              "systemd",
+              "sshd",
+              "cron",
+              "bash"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 24,
+      "specificity": 36,
+      "expected_noise": "high",
+      "attack_techniques": [
+        "T1036.005"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-XPLAT-005"
+    },
+    {
+      "id": "BH-XPLAT-006",
+      "version": 1,
+      "title": "Deleted or unlinked executable remains active",
+      "description": "Deleted or unlinked executable remains active. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "execution",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.executable"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.executable",
+            "operator": "contains_any",
+            "values": [
+              " (deleted)"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 60,
+      "specificity": 72,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1070.004"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-XPLAT-006"
+    },
+    {
+      "id": "BH-WIN-001",
+      "version": 1,
+      "title": "Windows system process name outside an expected system path",
+      "description": "Windows system process name outside an expected system path. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution",
+        "masquerading"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.name",
+        "process.executable"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "process.name",
+            "operator": "equals_any",
+            "values": [
+              "svchost.exe",
+              "lsass.exe",
+              "services.exe",
+              "winlogon.exe",
+              "csrss.exe",
+              "smss.exe"
+            ]
+          }
+        ],
+        "any": [],
+        "none": [
+          {
+            "role": "process.executable",
+            "operator": "path_prefix_any",
+            "values": [
+              "c:\\windows\\system32\\",
+              "c:\\windows\\syswow64\\"
+            ]
+          }
+        ]
+      },
+      "priority_tier": "medium",
+      "base_priority": 66,
+      "specificity": 78,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1036.005"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-001"
+    },
+    {
+      "id": "BH-WIN-002",
+      "version": 1,
+      "title": "Office application spawning a command interpreter",
+      "description": "Office application spawning a command interpreter. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.parent.name",
+        "process.name"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "process.parent.name",
+            "operator": "contains_any",
+            "values": [
+              "winword",
+              "excel",
+              "powerpnt",
+              "outlook"
+            ]
+          },
+          {
+            "role": "process.name",
+            "operator": "ends_with_any",
+            "values": [
+              "cmd.exe",
+              "powershell.exe",
+              "pwsh.exe",
+              "wscript.exe",
+              "cscript.exe",
+              "mshta.exe"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 68,
+      "specificity": 80,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1204.002",
+        "T1059"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "unexpected_parent_shell"
+    },
+    {
+      "id": "BH-WIN-003",
+      "version": 1,
+      "title": "Browser or PDF reader spawning a command interpreter",
+      "description": "Browser or PDF reader spawning a command interpreter. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.parent.name",
+        "process.name"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "process.parent.name",
+            "operator": "contains_any",
+            "values": [
+              "chrome",
+              "msedge",
+              "firefox",
+              "iexplore",
+              "acrord",
+              "foxit"
+            ]
+          },
+          {
+            "role": "process.name",
+            "operator": "ends_with_any",
+            "values": [
+              "cmd.exe",
+              "powershell.exe",
+              "pwsh.exe",
+              "wscript.exe",
+              "cscript.exe",
+              "mshta.exe"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 62,
+      "specificity": 74,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1203",
+        "T1059"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "unexpected_parent_shell"
+    },
+    {
+      "id": "BH-WIN-004",
+      "version": 1,
+      "title": "PowerShell encoded hidden or download execution",
+      "description": "PowerShell encoded hidden or download execution. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "-encodedcommand",
+              "-windowstyle hidden",
+              "-w hidden",
+              "downloadstring",
+              "invoke-expression",
+              "iex "
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 62,
+      "specificity": 74,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1059.001",
+        "T1027"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-004"
+    },
+    {
+      "id": "BH-WIN-005",
+      "version": 1,
+      "title": "Rundll32 unusual script or remote invocation",
+      "description": "Rundll32 unusual script or remote invocation. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "rundll32 javascript:",
+              "rundll32 vbscript:",
+              "rundll32 http",
+              "url.dll,fileprotocolhandler"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 62,
+      "specificity": 74,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1218.011"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-005"
+    },
+    {
+      "id": "BH-WIN-006",
+      "version": 1,
+      "title": "Regsvr32 proxy execution or remote content",
+      "description": "Regsvr32 proxy execution or remote content. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "regsvr32 /i:http",
+              "regsvr32 /s /n /u /i",
+              "scrobj.dll"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 67,
+      "specificity": 79,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1218.010"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-006"
+    },
+    {
+      "id": "BH-WIN-007",
+      "version": 1,
+      "title": "Mshta remote or script execution",
+      "description": "Mshta remote or script execution. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "mshta http",
+              "mshta javascript:",
+              "mshta vbscript:"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 66,
+      "specificity": 78,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1218.005"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-007"
+    },
+    {
+      "id": "BH-WIN-008",
+      "version": 1,
+      "title": "Certutil transfer or decoding behavior",
+      "description": "Certutil transfer or decoding behavior. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution",
+        "command-and-control"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "certutil -urlcache",
+              "certutil -decode",
+              "certutil -decodehex",
+              "certutil -verifyctl"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 54,
+      "specificity": 66,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1105",
+        "T1140"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-008"
+    },
+    {
+      "id": "BH-WIN-009",
+      "version": 1,
+      "title": "BITSAdmin transfer or execution behavior",
+      "description": "BITSAdmin transfer or execution behavior. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution",
+        "command-and-control"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "bitsadmin /transfer",
+              "bitsadmin /addfile",
+              "bitsadmin /setnotifycmdline"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 55,
+      "specificity": 67,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1197"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-009"
+    },
+    {
+      "id": "BH-WIN-010",
+      "version": 1,
+      "title": "Service creation with suspicious payload context",
+      "description": "Service creation with suspicious payload context. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "persistence",
+        "privilege-escalation"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "sc.exe create",
+              "new-service",
+              "binpath=",
+              "create service"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 68,
+      "specificity": 80,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1543.003"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-010"
+    },
+    {
+      "id": "BH-WIN-011",
+      "version": 1,
+      "title": "Scheduled task with suspicious payload context",
+      "description": "Scheduled task with suspicious payload context. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "persistence"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "schtasks /create",
+              "register-scheduledtask",
+              "schtasks.exe /create"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 55,
+      "specificity": 67,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1053.005"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-011"
+    },
+    {
+      "id": "BH-WIN-012",
+      "version": 1,
+      "title": "Registry run key or startup persistence change",
+      "description": "Registry run key or startup persistence change. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "persistence"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "registry.path"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "registry.path",
+            "operator": "contains_any",
+            "values": [
+              "\\currentversion\\run",
+              "\\currentversion\\runonce",
+              "\\winlogon",
+              "user shell folders"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 50,
+      "specificity": 62,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1547.001"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-012"
+    },
+    {
+      "id": "BH-WIN-013",
+      "version": 1,
+      "title": "LSASS access or dump command",
+      "description": "LSASS access or dump command. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "credential-access"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "comsvcs.dll",
+              "minidump",
+              "procdump -ma lsass",
+              "sekurlsa",
+              "dumpert"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 72,
+      "specificity": 84,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1003.001"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-013"
+    },
+    {
+      "id": "BH-WIN-014",
+      "version": 1,
+      "title": "SAM SECURITY or SYSTEM hive export",
+      "description": "SAM SECURITY or SYSTEM hive export. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "credential-access"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "reg save hklm\\sam",
+              "reg save hklm\\security",
+              "reg save hklm\\system"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 74,
+      "specificity": 86,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1003.002"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-014"
+    },
+    {
+      "id": "BH-WIN-015",
+      "version": 1,
+      "title": "Windows event log or audit clearing",
+      "description": "Windows event log or audit clearing. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "wevtutil cl",
+              "clear-eventlog",
+              "auditpol /clear",
+              "fsutil usn deletejournal"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 72,
+      "specificity": 84,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1685.005"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-015"
+    },
+    {
+      "id": "BH-WIN-016",
+      "version": 1,
+      "title": "Shadow copy or recovery deletion",
+      "description": "Shadow copy or recovery deletion. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "impact",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "vssadmin delete shadows",
+              "wmic shadowcopy delete",
+              "wbadmin delete catalog",
+              "reagentc /disable"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 65,
+      "specificity": 77,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1490"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-016"
+    },
+    {
+      "id": "BH-WIN-017",
+      "version": 1,
+      "title": "Alternate data stream execution",
+      "description": "Alternate data stream execution. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "regex",
+            "values": [
+              "[a-z]:\\\\[^\\s:]+:[^\\s]+"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 58,
+      "specificity": 70,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1564.004"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-017"
+    },
+    {
+      "id": "BH-WIN-018",
+      "version": 1,
+      "title": "New local administrator membership",
+      "description": "New local administrator membership. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "persistence",
+        "privilege-escalation"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "net localgroup administrators",
+              "add-localgroupmember",
+              "localgroup administrators /add"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 62,
+      "specificity": 74,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1098"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-018"
+    },
+    {
+      "id": "BH-LNX-001",
+      "version": 1,
+      "title": "Privileged execution from a temporary or shared-memory directory",
+      "description": "Privileged execution from a temporary or shared-memory directory. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "execution"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.executable"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.executable",
+            "operator": "path_prefix_any",
+            "values": [
+              "/tmp/",
+              "/var/tmp/",
+              "/dev/shm/",
+              "/run/shm/",
+              "/var/run/",
+              "/var/lock/"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 58,
+      "specificity": 70,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1059.004"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "temp_execution"
+    },
+    {
+      "id": "BH-LNX-002",
+      "version": 1,
+      "title": "Hidden directory executable",
+      "description": "Hidden directory executable. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "execution",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.executable"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.executable",
+            "operator": "regex",
+            "values": [
+              "/\\.[^/]+/[^/]+$"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 38,
+      "specificity": 50,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1564.001"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-002"
+    },
+    {
+      "id": "BH-LNX-003",
+      "version": 1,
+      "title": "Curl or wget piped directly to a shell",
+      "description": "Curl or wget piped directly to a shell. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "execution",
+        "command-and-control"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "| bash",
+              "| sh",
+              "| zsh",
+              "-qo- |"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 72,
+      "specificity": 84,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1105",
+        "T1059.004"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-003"
+    },
+    {
+      "id": "BH-LNX-004",
+      "version": 1,
+      "title": "Decode or decompress followed by shell execution",
+      "description": "Decode or decompress followed by shell execution. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "execution",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "base64 -d |",
+              "base64 --decode |",
+              "openssl enc -d",
+              "gzip -dc |"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 57,
+      "specificity": 69,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1140"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-004"
+    },
+    {
+      "id": "BH-LNX-005",
+      "version": 1,
+      "title": "Web or database daemon spawning a shell",
+      "description": "Web or database daemon spawning a shell. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "execution"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.parent.name",
+        "process.name"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "process.parent.name",
+            "operator": "contains_any",
+            "values": [
+              "nginx",
+              "apache",
+              "httpd",
+              "php-fpm",
+              "tomcat",
+              "postgres",
+              "mysqld",
+              "redis"
+            ]
+          },
+          {
+            "role": "process.name",
+            "operator": "ends_with_any",
+            "values": [
+              "sh",
+              "bash",
+              "dash",
+              "zsh"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 70,
+      "specificity": 82,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1059.004",
+        "T1505.003"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "unexpected_parent_shell"
+    },
+    {
+      "id": "BH-LNX-006",
+      "version": 1,
+      "title": "SSH authorized keys modification",
+      "description": "SSH authorized keys modification. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "persistence"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "file.path"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "file.path",
+            "operator": "ends_with_any",
+            "values": [
+              "/.ssh/authorized_keys",
+              "/authorized_keys"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 58,
+      "specificity": 70,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1098.004"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-006"
+    },
+    {
+      "id": "BH-LNX-007",
+      "version": 1,
+      "title": "Cron persistence modification",
+      "description": "Cron persistence modification. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "persistence"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "file.path"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/cron.",
+              "/var/spool/cron/",
+              "/etc/crontab"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 45,
+      "specificity": 57,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1053.003"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-007"
+    },
+    {
+      "id": "BH-LNX-008",
+      "version": 1,
+      "title": "Systemd service or timer persistence modification",
+      "description": "Systemd service or timer persistence modification. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "persistence"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "file.path"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/systemd/system/",
+              "/usr/lib/systemd/system/",
+              "/lib/systemd/system/"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 48,
+      "specificity": 60,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1543.002"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-008"
+    },
+    {
+      "id": "BH-LNX-009",
+      "version": 1,
+      "title": "Shell profile persistence modification",
+      "description": "Shell profile persistence modification. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "persistence"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "file.path"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "file.path",
+            "operator": "ends_with_any",
+            "values": [
+              "/.bashrc",
+              "/.profile",
+              "/.zshrc",
+              "/etc/profile"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 34,
+      "specificity": 46,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1546.004"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-009"
+    },
+    {
+      "id": "BH-LNX-010",
+      "version": 1,
+      "title": "PAM module or configuration modification",
+      "description": "PAM module or configuration modification. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "persistence",
+        "credential-access"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "file.path"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/pam.d/",
+              "/usr/lib/security/",
+              "/lib/security/"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 68,
+      "specificity": 80,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1556.003"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-010"
+    },
+    {
+      "id": "BH-LNX-011",
+      "version": 1,
+      "title": "Dynamic loader preload modification",
+      "description": "Dynamic loader preload modification. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "persistence",
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "file.path"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "file.path",
+            "operator": "equals_any",
+            "values": [
+              "/etc/ld.so.preload"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 75,
+      "specificity": 87,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1574.006"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-011"
+    },
+    {
+      "id": "BH-LNX-012",
+      "version": 1,
+      "title": "Audit or security service stopped",
+      "description": "Audit or security service stopped. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "systemctl stop auditd",
+              "service auditd stop",
+              "pkill auditd",
+              "systemctl stop falco",
+              "systemctl stop osqueryd"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 67,
+      "specificity": 79,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1685",
+        "T1685.004"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-012"
+    },
+    {
+      "id": "BH-LNX-013",
+      "version": 1,
+      "title": "Security log removal or truncation",
+      "description": "Security log removal or truncation. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "defense-evasion"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "> /var/log/",
+              "truncate -s 0 /var/log",
+              "rm /var/log/",
+              "shred /var/log"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 68,
+      "specificity": 80,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1685.006"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-013"
+    },
+    {
+      "id": "BH-LNX-014",
+      "version": 1,
+      "title": "SUID SGID or file capability change",
+      "description": "SUID SGID or file capability change. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "privilege-escalation",
+        "persistence"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "chmod u+s",
+              "chmod 4755",
+              "chmod 6755",
+              "setcap cap_setuid",
+              "setcap cap_sys_admin"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 62,
+      "specificity": 74,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1548.001"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-014"
+    },
+    {
+      "id": "BH-LNX-015",
+      "version": 1,
+      "title": "Elevated GTFOBins function pattern",
+      "description": "Elevated GTFOBins function pattern. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "privilege-escalation",
+        "execution"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "find . -exec",
+              "vim -c",
+              "tar --checkpoint-action",
+              "env /bin/sh"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 60,
+      "specificity": 72,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1548.003"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-015"
+    },
+    {
+      "id": "BH-LNX-016",
+      "version": 1,
+      "title": "Reverse shell construction",
+      "description": "Reverse shell construction. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "execution",
+        "command-and-control"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "/dev/tcp/",
+              "bash -i >&",
+              "nc -e ",
+              "ncat -e ",
+              "socat exec:",
+              "mkfifo /tmp/"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 78,
+      "specificity": 90,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1059.004",
+        "T1095"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-016"
+    },
+    {
+      "id": "BH-LNX-017",
+      "version": 1,
+      "title": "SSH or utility port forwarding",
+      "description": "SSH or utility port forwarding. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "command-and-control"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "ssh -r ",
+              "ssh -d ",
+              "ssh -l ",
+              "socat tcp-listen",
+              "chisel client",
+              "chisel server"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 48,
+      "specificity": 60,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1572"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-017"
+    },
+    {
+      "id": "BH-LNX-018",
+      "version": 1,
+      "title": "Container socket or namespace escape tooling",
+      "description": "Container socket or namespace escape tooling. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "privilege-escalation"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "/var/run/docker.sock",
+              "nsenter --target 1",
+              "nsenter -t 1",
+              "chroot /host"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 70,
+      "specificity": 82,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1611"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-018"
+    },
+    {
+      "id": "BH-AUTH-001",
+      "version": 1,
+      "title": "Authentication failures followed by success",
+      "description": "Authentication failures followed by success. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "authentication"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "auth_failures_then_success"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 48,
+      "specificity": 60,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1110",
+        "T1078"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-AUTH-001"
+    },
+    {
+      "id": "BH-AUTH-002",
+      "version": 1,
+      "title": "Privileged logon followed by unusual execution",
+      "description": "Privileged logon followed by unusual execution. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "authentication",
+        "execution"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "privileged_logon_then_execution"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 66,
+      "specificity": 78,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1078",
+        "T1059"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-AUTH-002"
+    },
+    {
+      "id": "BH-AUTH-003",
+      "version": 1,
+      "title": "One source authenticating to many internal hosts",
+      "description": "One source authenticating to many internal hosts. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "authentication",
+        "lateral-movement"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "authentication_fanout"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 60,
+      "specificity": 72,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1021"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-AUTH-003"
+    },
+    {
+      "id": "BH-AUTH-004",
+      "version": 1,
+      "title": "Remote service activity followed by host execution",
+      "description": "Remote service activity followed by host execution. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "authentication",
+        "lateral-movement"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "remote_service_then_execution"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 72,
+      "specificity": 84,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1021",
+        "T1047"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-AUTH-004"
+    },
+    {
+      "id": "BH-NET-001",
+      "version": 1,
+      "title": "High destination fan-out or scan",
+      "description": "High destination fan-out or scan. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "discovery"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "high_fanout"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 42,
+      "specificity": 54,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1046"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-001"
+    },
+    {
+      "id": "BH-NET-002",
+      "version": 1,
+      "title": "Periodic low-volume network beacon candidate",
+      "description": "Periodic low-volume network beacon candidate. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "command-and-control"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "periodic_edge"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 45,
+      "specificity": 57,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1071"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-002"
+    },
+    {
+      "id": "BH-NET-003",
+      "version": 1,
+      "title": "Rare external destination",
+      "description": "Rare external destination. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "command-and-control"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "rare_external_destination"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 20,
+      "specificity": 32,
+      "expected_noise": "high",
+      "attack_techniques": [
+        "T1071"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-003"
+    },
+    {
+      "id": "BH-NET-004",
+      "version": 1,
+      "title": "Long or high-entropy DNS label",
+      "description": "Long or high-entropy DNS label. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "dns",
+        "command-and-control"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "dns_high_entropy"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 38,
+      "specificity": 50,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1071.004"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-004"
+    },
+    {
+      "id": "BH-NET-005",
+      "version": 1,
+      "title": "High DNS NXDOMAIN rate",
+      "description": "High DNS NXDOMAIN rate. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "dns",
+        "command-and-control"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "dns_nxdomain_burst"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 35,
+      "specificity": 47,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1071.004"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-005"
+    },
+    {
+      "id": "BH-NET-006",
+      "version": 1,
+      "title": "Unusual protocol and destination-port pairing",
+      "description": "Unusual protocol and destination-port pairing. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "command-and-control"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "protocol_port_mismatch"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 32,
+      "specificity": 44,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1571"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-006"
+    },
+    {
+      "id": "BH-NET-007",
+      "version": 1,
+      "title": "Outbound byte-volume outlier",
+      "description": "Outbound byte-volume outlier. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "exfiltration"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "outbound_volume_outlier"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "low",
+      "base_priority": 34,
+      "specificity": 46,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1041"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-007"
+    },
+    {
+      "id": "BH-NET-008",
+      "version": 1,
+      "title": "Rare process and rare destination combination",
+      "description": "Rare process and rare destination combination. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "command-and-control"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "rare_process_rare_destination"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 56,
+      "specificity": 68,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1071"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-008"
+    },
+    {
+      "id": "BH-NET-009",
+      "version": 1,
+      "title": "Data staging followed by outbound transfer",
+      "description": "Data staging followed by outbound transfer. Treat this as an investigative lead until execution and benign context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "exfiltration"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "staging_then_outbound_transfer"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 68,
+      "specificity": 80,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1074",
+        "T1041"
+      ],
+      "benign_explanations": [
+        "Authorized administration, installation, development, or security testing."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence."
+      ],
+      "follow_up": [
+        "Review process ancestry, user, path, signature, prevalence, and nearby events."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-009"
+    }
+  ]
+}

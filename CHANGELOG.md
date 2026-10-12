@@ -2,6 +2,23 @@
 
 All notable ROMULUS changes are recorded here. Dates use the project maintainer's local date.
 
+## 0.4.4 — 2026-10-12
+
+### Customer Word report
+
+- Replaced the technical Word dump with a concise, styled customer report focused on the assessment, findings, scope, ATT&CK context, confidence, and recommended actions.
+- Kept internal reasoning, tool runs, search artifacts, raw evidence listings, and the full candidate working list in the plain-text technical report.
+- Added report-boundary tests that prevent technical-only material and low-priority candidates from leaking back into the customer Word report.
+
+## 0.4.3 — 2026-10-12
+
+### Behavioral hunt seed catalog
+
+- Added 55 cross-platform and platform-specific behavioral analytics to guide initial hunting across endpoint, authentication, DNS, and network telemetry.
+- Added exact trusted-indicator matching, candidate prioritization, corroboration, and separate customer-facing and technical lead lists.
+- Validate catalog ATT&CK references against the pinned offline Enterprise catalog and fail closed when required query predicates cannot be compiled safely.
+- Documented how to extend and maintain the behavioral analytics and trusted-indicator catalogs.
+
 ## 0.4.2 — 2026-10-11
 
 ### Time-scope and model-output reliability
