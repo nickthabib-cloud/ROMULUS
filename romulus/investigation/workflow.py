@@ -1001,9 +1001,11 @@ class HuntEngine:
                 if start_time and end_time:
                     time_filter=f"frame.time_epoch >= {start_time.timestamp():.3f} && frame.time_epoch <= {end_time.timestamp():.3f}"
                 pcap=Path(targets[0]).resolve()
+                task_sampling=query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings)
                 found=self._call(s,"tshark.read_pcap",stage,
                     {"task_id":task_id,"pcap":str(pcap),"display_filter":display_filter,"fields":fields},scope,
-                    lambda:self.tshark.inspect(pcap,display_filter=display_filter,fields=fields,limit=limit,time_filter=time_filter),
+                    lambda:self.tshark.inspect(pcap,display_filter=display_filter,fields=fields,limit=limit,time_filter=time_filter,
+                        sample_start=start_time,sample_end=end_time,sampling=task_sampling),
                     lambda value:value.get("count",0))
                 if found is None:
                     incomplete=True
@@ -1014,9 +1016,11 @@ class HuntEngine:
                     matched_value=found.get("matched_count",returned); matched=int(matched_value) if isinstance(matched_value,(int,float)) else None
                     capped=bool(found.get("output_capped")); incomplete=capped or matched is None
                     status="partial" if incomplete else "completed"
+                    sampling_summary=found.get("sampling") if isinstance(found.get("sampling"),dict) else None
                     provenance=found.get("provenance",{}) if isinstance(found.get("provenance"),dict) else {}
                     for row in rows: self._add_tshark_row(s,row,{**provenance,"search_task_id":task_id},display_filter,task_id)
-                query_summary={"pcap":str(pcap),"display_filter":display_filter,"fields":fields,"limit":limit}
+                query_summary={"pcap":str(pcap),"display_filter":display_filter,"fields":fields,"limit":limit,
+                    **({"sampling":sampling_summary} if sampling_summary else {})}
         except Exception as exc:
             status="failed"; incomplete=True; error_kind=type(exc).__name__; reason=_safe_error_reason(exc)
             status_code=getattr(getattr(exc,"meta",None),"status",None) or getattr(exc,"status_code",None)

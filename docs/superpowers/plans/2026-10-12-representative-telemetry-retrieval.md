@@ -97,11 +97,11 @@
 - Consumes: Task 1 time strata, cap allocation, and sampling policy.
 - Produces: `TSharkAdapter.inspect(..., sample_start: datetime | None = None, sample_end: datetime | None = None, sampling: dict | None = None) -> dict` with deterministic per-stratum or whole-stream reservoir metadata.
 
-- [ ] Write failing mocked-stream tests proving capped output spans early/middle/late intervals, repeated runs are identical, total matches remain exact, malformed timestamps fall back conservatively, and command safety is unchanged.
-- [ ] Run the focused tests; expect earliest-line retention failures.
-- [ ] Implement single-pass deterministic bounded reservoirs and route scheduled tasks through them.
-- [ ] Run `python -m unittest tests.test_representative_sampling tests.test_core tests.test_scheduler_execution -v`; expect PASS.
-- [ ] Commit with `feat: sample capped packet matches`.
+- [x] Write failing mocked-stream tests proving capped output spans early/middle/late intervals, repeated runs are identical, total matches remain exact, malformed timestamps fall back conservatively, and command safety is unchanged.
+- [x] Run the focused tests; expect earliest-line retention failures.
+- [x] Implement single-pass deterministic bounded reservoirs and route scheduled tasks through them.
+- [x] Run `python -m unittest tests.test_representative_sampling tests.test_core tests.test_scheduler_execution -v`; expect PASS.
+- [x] Commit with `feat: sample capped packet matches`.
 
 ### Task 5: Outcome, report, retention, and documentation integration
 
@@ -146,4 +146,4 @@
 ## Execution status
 
 - Plan authorized for native execution by the operator on 2026-10-12; no additional approval checkpoint is required.
-- Tasks 1–3 are complete; Tasks 4–6 remain. The operator paused live-hunt validation until the expected attack telemetry is present in the dataset; Task 6 will use local/VM tests and ingestion-path diagnosis instead of another hunt.
+- Tasks 1–4 are complete; Tasks 5–6 remain. The operator paused live-hunt validation until the expected attack telemetry is present in the dataset; Task 6 will use local/VM tests and ingestion-path diagnosis instead of another hunt.

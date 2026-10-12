@@ -1155,6 +1155,13 @@ class SchedulerExecutionAdditionalTests(unittest.TestCase):
                     "count": 1,
                     "matched_count": 2,
                     "output_capped": True,
+                    "sampling": {
+                        "version": 1,
+                        "strategy": "time_stratified_reservoir",
+                        "requested_strata": 1,
+                        "covered_strata": 1,
+                        "retained_by_stratum": [1],
+                    },
                     "provenance": {
                         "pcap": str(pcap),
                         "display_filter": kwargs["display_filter"],
@@ -1192,11 +1199,15 @@ class SchedulerExecutionAdditionalTests(unittest.TestCase):
             self.assertEqual(called_pcap, pcap)
             self.assertEqual(parameters["limit"], 1)
             self.assertIn("frame.time_epoch >=", parameters["time_filter"])
+            self.assertIsNotNone(parameters["sample_start"])
+            self.assertIsNotNone(parameters["sample_end"])
+            self.assertEqual(parameters["sampling"]["strategy"], "time_or_rank_stratified")
             self.assertEqual(len(state["network"]), 1)
             self.assertEqual(outcome["status"], "partial")
             self.assertEqual(outcome["returned_total"], 1)
             self.assertEqual(outcome["matched_total"], 2)
             self.assertTrue(outcome["capped"])
+            self.assertEqual(outcome["sampling"]["strategy"], "time_stratified_reservoir")
             self.assertTrue(outcome["artifact_id"].startswith("SR-"))
 
     def test_adapter_error_returns_bounded_failed_outcome(self):

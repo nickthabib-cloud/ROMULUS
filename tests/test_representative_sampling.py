@@ -2,10 +2,13 @@ import copy
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
 
 from romulus.config import Settings
 from romulus.tools.arkime_client import ArkimeAdapter
 from romulus.tools.elasticsearch_client import ElasticsearchAdapter
+from romulus.tools.tshark_client import TSharkAdapter
 
 
 class _Indices:
@@ -269,6 +272,87 @@ class ArkimeRepresentativeSamplingTests(unittest.TestCase):
         self.assertEqual(result["sessions"], rows)
         self.assertFalse(result["capped"])
         self.assertEqual(result["sampling"]["strategy"], "exhaustive")
+
+
+class _SyntheticTSharkProcess:
+    def __init__(self, lines):
+        self.stdout = list(lines)
+        self.stderr = []
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        return None
+
+
+class TSharkRepresentativeSamplingTests(unittest.TestCase):
+    def _inspect(self, lines, *, limit=4, malformed=False):
+        settings = replace(Settings.from_env(), max_results=100, time_sampling_strata=4)
+        adapter = TSharkAdapter(settings)
+        start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        end = start + timedelta(hours=8)
+        process = _SyntheticTSharkProcess(lines)
+        with patch.object(adapter, "_approved", return_value=Path("approved.pcap")), \
+                patch("romulus.tools.tshark_client.shutil.which", return_value="tshark"), \
+                patch("romulus.tools.tshark_client.subprocess.Popen", return_value=process) as popen:
+            result = adapter.inspect(
+                "approved.pcap",
+                fields=["frame.number", "frame.time_epoch", "ip.src"],
+                limit=limit,
+                sample_start=start,
+                sample_end=end,
+                sampling={"version": 1, "strategy": "time_or_rank_stratified", "strata": 4},
+            )
+        self.assertNotIn("shell", popen.call_args.kwargs)
+        return result
+
+    def test_capped_stream_retains_matches_from_each_time_stratum(self):
+        start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        lines = [
+            f'{index + 1}\t{(start + timedelta(minutes=30 * index)).timestamp()}\t192.0.2.{index + 1}\n'
+            for index in range(16)
+        ]
+
+        result = self._inspect(lines)
+
+        retained = [float(row["frame.time_epoch"]) for row in result["packets"]]
+        self.assertEqual(result["matched_count"], 16)
+        self.assertEqual(len(retained), 4)
+        self.assertEqual(result["sampling"]["strategy"], "time_stratified_reservoir")
+        self.assertEqual(result["sampling"]["covered_strata"], 4)
+        self.assertEqual(result["sampling"]["retained_by_stratum"], [1, 1, 1, 1])
+        self.assertLess(retained[0], (start + timedelta(hours=2)).timestamp())
+        self.assertGreaterEqual(retained[-1], (start + timedelta(hours=6)).timestamp())
+
+    def test_sampling_is_identical_for_repeated_complete_streams(self):
+        start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        lines = [
+            f'{index + 1}\t{(start + timedelta(minutes=20 * index)).timestamp()}\t198.51.100.{index + 1}\n'
+            for index in range(24)
+        ]
+
+        first = self._inspect(lines)
+        second = self._inspect(lines)
+
+        self.assertEqual(first["packets"], second["packets"])
+        self.assertEqual(first["sampling"], second["sampling"])
+
+    def test_malformed_timestamp_uses_disclosed_whole_stream_reservoir(self):
+        start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        lines = [
+            f'1\t{start.timestamp()}\t203.0.113.1\n',
+            '2\tnot-a-time\t203.0.113.2\n',
+            f'3\t{(start + timedelta(hours=4)).timestamp()}\t203.0.113.3\n',
+            f'4\t{(start + timedelta(hours=7)).timestamp()}\t203.0.113.4\n',
+        ]
+
+        result = self._inspect(lines, limit=2)
+
+        self.assertEqual(result["matched_count"], 4)
+        self.assertEqual(len(result["packets"]), 2)
+        self.assertEqual(result["sampling"]["strategy"], "deterministic_reservoir")
+        self.assertEqual(result["sampling"]["fallback_reason"], "malformed_or_missing_timestamp")
 
 
 if __name__ == "__main__":
