@@ -57,10 +57,24 @@ class RetentionTests(unittest.TestCase):
             "tool_runs": [{"large": "working data"}],
             "reasoning_history": [{"large": "working data"}],
             "search_artifacts": [{"large": "working data"}],
+            "search_tasks": {
+                "ST-DONE": {"task_id": "ST-DONE", "source": "elasticsearch", "source_family": "host",
+                    "origins": ["behavior_catalog", "candidate_follow_up"], "status": "completed"},
+                "ST-OPEN": {"task_id": "ST-OPEN", "source": "arkime", "source_family": "network",
+                    "origins": ["coverage_frontier"], "status": "queued"},
+            },
+            "search_queue": ["ST-OPEN"],
+            "search_outcomes": [{"task_id": "ST-DONE", "status": "completed", "matched_total": 0,
+                "returned_total": 0, "capped": False, "timed_out": False, "shard_failures": 0,
+                "incomplete": False}],
+            "scheduler_history": [{"event": "task_merged", "task_id": "ST-DONE"},
+                {"event": "discovery_budget_gap", "unserved_families": ["network"]}],
             "coverage": {
                 "time_scope": "all retained indexed time", "host": "available",
                 "network": "available", "tool_calls_used": 8, "tool_call_limit": 20,
                 "analytic_summary": {"large": ["working data"]},
+                "scheduler_gaps": [{"phase": "investigation", "reason": "tool_call_budget",
+                    "queued_task_ids": ["ST-OPEN"]}],
             },
             "investigation_graph": {
                 "version": 1,
@@ -125,6 +139,17 @@ class RetentionTests(unittest.TestCase):
             persisted = store.load_state("HUNT-ONE")
             self.assertNotIn("host", persisted)
             self.assertNotIn("tool_runs", persisted)
+            self.assertNotIn("search_tasks", persisted)
+            self.assertNotIn("search_queue", persisted)
+            self.assertNotIn("search_outcomes", persisted)
+            self.assertNotIn("scheduler_history", persisted)
+            scheduler=persisted["coverage"]["scheduler_summary"]
+            self.assertEqual(scheduler["tasks_total"],2)
+            self.assertEqual(scheduler["by_source"],{"arkime":1,"elasticsearch":1})
+            self.assertEqual(scheduler["by_status"],{"completed":1,"queued":1})
+            self.assertEqual(scheduler["duplicate_merges_avoided"],1)
+            self.assertEqual(scheduler["unresolved_task_count"],1)
+            self.assertTrue(scheduler["source_fairness_gaps"])
             self.assertEqual(len(persisted["candidate_leads"]), 1)
             self.assertFalse(any(node.get("evidence_id") == "EV-DROP" for node in persisted["investigation_graph"]["nodes"]))
             self.assertTrue(all(Path(path).exists() for path in persisted["report_paths"]))

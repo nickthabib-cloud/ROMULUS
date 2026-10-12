@@ -406,26 +406,6 @@ class CandidateStateTests(unittest.TestCase):
         old = next(item for item in merged if item["candidate_id"] == "CL-OLD")
         self.assertEqual({item["follow_up_id"] for item in old["follow_ups"]}, {"FU-STILL", "FU-EXTRA"})
 
-    def test_candidate_follow_up_completes_only_after_all_bound_searches_succeed(self):
-        from romulus.investigation.workflow import _record_candidate_follow_up
-
-        state = {
-            "candidate_leads": [{"candidate_id": "CL-1", "disposition": "observed",
-                "follow_ups": [{"follow_up_id": "FU-1", "intent": "test both sources", "status": "pending", "history": []}]}],
-            "lead_catalog": [
-                {"id": "C-HOST", "candidate_id": "CL-1", "follow_up_id": "FU-1"},
-                {"id": "C-NET", "candidate_id": "CL-1", "follow_up_id": "FU-1"},
-            ],
-        }
-
-        _record_candidate_follow_up(state, state["lead_catalog"][0], {"status": "searched", "returned": 0})
-        follow_up = state["candidate_leads"][0]["follow_ups"][0]
-        self.assertEqual(follow_up["status"], "in_progress")
-        _record_candidate_follow_up(state, state["lead_catalog"][1], {"status": "failed query", "returned": 0})
-        self.assertEqual(follow_up["status"], "blocked")
-        _record_candidate_follow_up(state, state["lead_catalog"][1], {"status": "searched", "returned": 1})
-        self.assertEqual(follow_up["status"], "completed")
-
     def test_candidate_aware_closure_rejects_open_high_priority_lead(self):
         from romulus.intelligence.analytics import build_coverage_ledger
 

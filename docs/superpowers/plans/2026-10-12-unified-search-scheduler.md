@@ -331,7 +331,7 @@ git commit -m "feat: unify candidate and coverage scheduling"
 - Consumes: Unified tasks/outcomes from Tasks 1–5 and legacy investigation state.
 - Produces: Resume-time migration invocation, technical scheduler appendix, compact scheduler summary, and durable validation evidence.
 
-- [ ] **Step 1: Write failing resume, report, and compact-state tests**
+- [x] **Step 1: Write failing resume, report, and compact-state tests**
 
 Add tests proving:
 
@@ -341,16 +341,16 @@ Add tests proving:
 - The customer report does not expose scheduler internals.
 - Compact retention drops full task/outcome/history bulk but keeps counts by origin/source/status, duplicate merges avoided, unresolved task count, and source-fairness gaps.
 
-- [ ] **Step 2: Run compatibility/report tests and verify RED**
+- [x] **Step 2: Run compatibility/report tests and verify RED**
 
 Run: `python -m unittest tests.test_scheduler tests.test_customer_report tests.test_retention -v`  
 Expected: FAIL on missing workflow migration/report/compact summary.
 
-- [ ] **Step 3: Integrate migration and bounded reporting**
+- [x] **Step 3: Integrate migration and bounded reporting**
 
 Call `initialize_scheduler`, `migrate_legacy_search_state`, and `recover_interrupted_tasks` before resuming the graph. Render bounded task/outcome summaries only in the technical report. Extend compact coverage with scheduler aggregate counts and gaps; do not retain complete queries, queues, or attempts after finalization.
 
-- [ ] **Step 4: Run focused and complete local proof**
+- [x] **Step 4: Run focused and complete local proof**
 
 Run: `python -m unittest tests.test_scheduler tests.test_scheduler_execution tests.test_candidate_loop tests.test_customer_report tests.test_retention -v`  
 Expected: PASS.  
@@ -371,11 +371,11 @@ Run a disposable offline hunt under an isolated temporary root and prove:
 - The cited path and reports remain valid.
 - Completed compact retention removes scheduler working bulk and preserves its summary.
 
-- [ ] **Step 6: Perform whole-branch review and one fix pass**
+- [x] **Step 6: Perform whole-branch review and one fix pass**
 
 Review against the spec and the five Review Focus conditions. Required focus: priority inversion, exact-execution collisions, false closure, resume retry loops, secret leakage, source starvation, and retention growth. Fix Critical/Important findings test-first; record deferred Minor findings in the execution ledger.
 
-- [ ] **Step 7: Commit implementation documentation**
+- [x] **Step 7: Commit implementation documentation**
 
 Update README architecture/operations, CHANGELOG behavior, VALIDATION measured local proof, and this plan's execution status/decision log.
 
@@ -420,3 +420,11 @@ Remove only exact disposable validation roots, scripts, and transfer archives af
 - AttackMate comparison occurs only after the generic hunt and never changes runtime behavior during this milestone.
 - Disposable artifacts are removed while operational and external ground-truth data remain untouched.
 - The execution ledger and this plan contain every ruling, proof, and remaining limitation needed to resume after context compaction.
+
+## Execution status and decisions
+
+- Tasks 1–5 are complete in commits `60b552c`, `aa472ab`, `893347c`, `19317b6`, and `ac5cb8a` respectively.
+- Task 6 steps 1–4 and 6–7 are complete. Focused scheduler/candidate/report/retention proof passed. Subsequent RED/GREEN review added mapping-consistent Elasticsearch family handling, removed nonexecuting labels from identity, canonicalized UTC bounds, persisted one absolute mission window, compiled pending legacy work, kept incomplete legacy results nonresolving, terminalized unrun tasks, propagated late-owner outcomes, and removed pre-telemetry/queued-work model priority inversions. The complete local result is 127 tests with six dependency-gated skips; compilation and diff checks passed. The reviewer found no remaining Critical scheduler defect; the dependency-backed real SQLite/LangGraph resume regression is added and must pass in Step 8.
+- The obsolete direct model, host-pivot, network-pivot, coverage-fallback, and legacy follow-up paths were removed only after caller searches and focused behavior-preservation tests. Legacy persisted fields remain migration inputs, but new hunts do not create the old scheduling authorities.
+- The dependency-light local runtime cannot execute the honest LangGraph/Word offline gate. Step 5 is deferred to the dependency-complete VM rather than being simulated or claimed.
+- Documentation is updated in the worktree; the implementation commit, VM/offline/live proof, post-hunt holdout comparison, cleanup, and final checkpoint remain open.

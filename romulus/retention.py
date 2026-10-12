@@ -181,6 +181,7 @@ def _compact_state(state: dict[str, Any], retained_ids: set[str]) -> dict[str, A
         if candidate.get("customer_visible")
     ]
     compact["coverage"]=_compact_coverage(state.get("coverage",{}))
+    compact["coverage"]["scheduler_summary"]=_scheduler_summary(state)
     compact["source_errors"]=[{
         key:error.get(key) for key in ("tool","stage","error","status_code") if error.get(key) is not None
     } for error in state.get("source_errors",[]) or []]
@@ -196,6 +197,31 @@ def _compact_coverage(coverage: Any) -> dict[str, Any]:
         "minimum_reasoning_rounds","termination_reason","behavior_candidates","analyst_model",
     )
     return {key:deepcopy(coverage[key]) for key in keys if key in coverage}
+
+
+def _scheduler_summary(state: dict[str, Any]) -> dict[str, Any]:
+    tasks=list(state.get("search_tasks",{}).values()) if isinstance(state.get("search_tasks"),dict) else []
+    outcomes={item.get("task_id"):item for item in state.get("search_outcomes",[]) or []
+        if isinstance(item,dict) and item.get("task_id")}
+    def counts(values):
+        result={}
+        for value in values:
+            key=str(value or "unknown"); result[key]=result.get(key,0)+1
+        return dict(sorted(result.items()))
+    def resolves(outcome):
+        return bool(isinstance(outcome,dict) and outcome.get("status")=="completed"
+            and isinstance(outcome.get("matched_total"),int) and not isinstance(outcome.get("matched_total"),bool)
+            and not any((outcome.get("capped"),outcome.get("timed_out"),outcome.get("shard_failures"),outcome.get("incomplete"))))
+    history=state.get("scheduler_history",[]) or []
+    fairness=[deepcopy(item) for item in history if isinstance(item,dict) and "budget_gap" in str(item.get("event"))][-20:]
+    fairness.extend(deepcopy(item) for item in (state.get("coverage",{}).get("scheduler_gaps",[]) or [])[-20:])
+    return {"tasks_total":len(tasks),
+        "by_origin":counts(origin for task in tasks for origin in (task.get("origins") or [task.get("origin")])),
+        "by_source":counts(task.get("source") for task in tasks),
+        "by_status":counts(task.get("status") for task in tasks),
+        "duplicate_merges_avoided":sum(item.get("event")=="task_merged" for item in history if isinstance(item,dict)),
+        "unresolved_task_count":sum(not resolves(outcomes.get(task.get("task_id"))) for task in tasks),
+        "source_fairness_gaps":fairness[:40]}
 
 
 def _compact_graph(graph: Any, retained_ids: set[str]) -> dict[str, Any]:

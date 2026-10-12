@@ -14,7 +14,7 @@ from ..config import Settings, safe_url
 from ..models import Evidence, Finding, Hypothesis, encode, utc_now
 from ..store import Store
 from ..intelligence.knowledge import hypotheses_for, TECHNIQUES, ATTACK_RELEASE, ATTACK_RELEASE_DATE, ATTACK_DOMAIN
-from ..intelligence.attack_catalog import load_attack_catalog, reference_seeds
+from ..intelligence.attack_catalog import load_attack_catalog
 from ..intelligence.correlate import correlate
 from ..intelligence.investigation_graph import build_investigation_graph, derive_finding_paths
 from ..intelligence.analytics import summarize_evidence, build_coverage_ledger
@@ -25,11 +25,12 @@ from ..intelligence.behavior_catalog import (
 from ..tools.elasticsearch_client import ElasticsearchAdapter, validate_query
 from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
-from .search_planner import (candidate_fields, validate_spec, fingerprint, compile_es, compile_arkime, compile_tshark,
+from .search_planner import (candidate_fields, validate_spec, compile_es, compile_arkime, compile_tshark,
     compile_native_es, validate_native_arkime, validate_native_tshark, expand_anchor_selectors, anchor_time_range,
     SOURCE_FIELDS, TEXT_FIELDS)
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
-    record_search_outcome, outcome_resolves)
+    record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
+    recover_interrupted_tasks)
 from .synthetic import sample_evidence
 
 
@@ -97,10 +98,11 @@ class HuntState(TypedDict, total=False):
     local_model_note: str; report_paths: list[str]; mapping_errors: list[dict]
     depth: int; tool_calls: int; mode: str; tool_runs: list[dict]
     source_errors: list[dict]; es_fields_by_class: dict[str,list[str]]
-    lead_catalog: list[dict]; lead_queue: list[str]; completed_leads: list[str]
-    search_fingerprints: list[str]
+    es_indices_by_class: dict[str,list[str]]
+    lead_catalog: list[dict]; completed_leads: list[str]
     search_tasks: dict[str,dict]; search_queue: list[str]; search_outcomes: list[dict]; scheduler_history: list[dict]
-    reasoning_history: list[dict]; reasoning_complete: bool; stage_history: list[dict]; es_indices: list[str]
+    scheduler_mission_time_range: dict[str,str]
+    reasoning_history: list[dict]; stage_history: list[dict]; es_indices: list[str]
     es_fields: list[str]; timestamp_field: str; explicit_time_range: bool
     analytic_summary: dict; search_artifacts: list[dict]; evidence_keys: list[str]
     candidate_leads: list[dict]; behavior_catalog_status: dict
@@ -128,8 +130,8 @@ class HuntEngine:
             "hypotheses":[],"host":[],"network":[],"evidence":[],"findings":[],"correlations":[],
                 "queries":[],"coverage":{},"source_errors":[],"started_at":utc_now(),"started_epoch":time.time(),"depth":0,
                 "tool_calls":0,"mode":"offline" if self.offline else "live","tool_runs":[],"lead_catalog":[],
-                "lead_queue":[],"completed_leads":[],"reasoning_history":[],"stage_history":[],"reasoning_complete":False,
-                "search_fingerprints":[],"es_fields_by_class":{},
+                "completed_leads":[],"reasoning_history":[],"stage_history":[],"es_fields_by_class":{},
+                "es_indices_by_class":{},
                 "analytic_summary":{},"search_artifacts":[],"evidence_keys":[],"candidate_leads":[],
                 "pivot_results":[],
                 "investigation_graph":{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}},
@@ -139,13 +141,21 @@ class HuntEngine:
                     "analytics":len(self.behavior_catalog.get("analytics",[])),
                     "trusted_indicators":len(self.local_indicators.get("indicators",[]))}}
         initialize_scheduler(state)
+        if _resume:
+            migrate_legacy_search_state(state,compile_pending=lambda lead:
+                self._compile_investigation_proposals(state,lead,"coverage_frontier"))
+            requeued=recover_interrupted_tasks(state)
+            state.setdefault("coverage",{})["scheduler_resume"]={"requeued_task_ids":requeued,
+                "migration_version":state.get("scheduler_migration_version")}
         self.store.save_state(hunt_id,state)
         checkpoint_conn=None
         try:
             app,checkpoint_conn=self._graph()
             config={"configurable":{"thread_id":hunt_id},"recursion_limit":100}
             snapshot=app.get_state(config) if _resume else None
-            if snapshot and snapshot.next: result=app.invoke(None,config=config)
+            if snapshot and snapshot.next:
+                app.update_state(config,state)
+                result=app.invoke(None,config=config)
             else: result=app.invoke(state,config=config)
         except Exception as e:
             # LangGraph creates new state mappings between nodes. Recover the
@@ -182,7 +192,7 @@ class HuntEngine:
         if state.get("status")=="completed" or is_retention_finalized(state): return state
         return self.run(state["objective"],hunt_id=hunt_id,_resume=True)
 
-    def _graph(self):
+    def _graph(self,*,interrupt_before=None):
         from langgraph.graph import StateGraph, END
         import sqlite3
         from langgraph.checkpoint.sqlite import SqliteSaver
@@ -198,7 +208,7 @@ class HuntEngine:
         connection=sqlite3.connect(self.store.checkpoint_path,check_same_thread=False,timeout=30)
         connection.execute("PRAGMA busy_timeout=30000"); connection.execute("PRAGMA journal_mode=WAL")
         checkpoint=SqliteSaver(connection); checkpoint.setup()
-        return g.compile(checkpointer=checkpoint),connection
+        return g.compile(checkpointer=checkpoint,interrupt_before=interrupt_before or []),connection
 
     def _save(self,s):
         self.store.save_state(s["hunt_id"],s)
@@ -248,6 +258,17 @@ class HuntEngine:
         if self.settings.historical_search: return None,"all retained indexed time"
         return _time_filter(s["objective"],self.settings.es_default_hours),f"last {self.settings.es_default_hours} hours"
 
+    def _fixed_mission_time_scope(self,s):
+        """Return one persisted absolute mission window for every scheduled task."""
+        mission_range,scope=self._time_scope(s)
+        if not mission_range: return None,scope
+        cached=s.get("scheduler_mission_time_range")
+        if isinstance(cached,dict) and cached.get("gte") and cached.get("lte"):
+            return dict(cached),scope
+        fixed=_materialize_time_range(mission_range)
+        s["scheduler_mission_time_range"]=dict(fixed)
+        return fixed,scope
+
     def _budget_ok(self,s):
         if s.get("tool_calls",0)>=self.settings.max_tool_calls:
             s["termination_reason"]="tool_call_budget"; return False
@@ -291,16 +312,6 @@ class HuntEngine:
     def _plan(self,s):
         _validate_explicit_date_order(s["objective"],self.settings.mission_timezone)
         s["explicit_time_range"]=bool(_explicit_dates(s["objective"]))
-        curated_seeds={tid:{"technique_id":tid,"name":v["name"],"tactic":v["tactic"],"tactics":v.get("tactics",[v["tactic"]]),"url":v["url"],
-                "expected_host":v["host"],"expected_network":v["network"],"benign_explanations":v["benign"],
-                "detection_strategies":v.get("detection_strategies",[]),"data_components":v.get("data_components",[]),
-                "analytic_goal":v.get("analytic_goal"),"mutable_elements":v.get("mutable_elements",[])}
-               for tid,v in TECHNIQUES.items()}
-        seeds=[]
-        for reference in reference_seeds(s["objective"],36):
-            tid=reference.get("technique_id")
-            seeds.append({**reference,**curated_seeds.get(tid,{})})
-        if not seeds: seeds=list(curated_seeds.values())
         attack_catalog_metadata=load_attack_catalog().get("metadata",{})
         s["mission_mode"]="directed" if _mission_is_directed(s["objective"]) else "undirected"
         if self.offline:
@@ -320,7 +331,6 @@ class HuntEngine:
                     "official_catalog_techniques":attack_catalog_metadata.get("technique_count",0)}}
             offline_leads=_lead_catalog(s["hypotheses"])
             s["lead_catalog"]=[next((lead for lead in offline_leads if lead.get("source")=="host"),offline_leads[0])] if offline_leads else []
-            s["reasoning_complete"]=False
             self._stage(s,"plan","completed",{"hypotheses":len(s["hypotheses"]),"mode":"offline"})
             print(f"[ROMULUS] {s['hunt_id']} offline planning {len(s['hypotheses'])} hypotheses")
             return self._save(s)
@@ -338,16 +348,8 @@ class HuntEngine:
                 "basis":"deterministic_telemetry_discovery","time_scope":s["coverage"]["time_scope"]})
             print(f"[ROMULUS] {s['hunt_id']} undirected planning: deterministic telemetry discovery before hypotheses; scope={s['coverage']['time_scope']}")
             return self._save(s)
-        planned=[]; planning_basis="local ATT&CK seeds constrained by operator direction"
-        if self.use_ollama and self._budget_ok(s):
-            try:
-                from ..agent.ollama import Ollama
-                planned=self._call(s,"ollama.api.chat","hypothesis_generation",{"model":self.settings.ollama_model,"reference_seed_count":len(seeds)},
-                    "mission text; no telemetry",lambda:Ollama(self.settings).plan_hypotheses(s["objective"],seeds,12),len) or []
-                if planned: planning_basis="local model generated hypotheses constrained by operator direction and ATT&CK seeds"
-            except Exception: planned=[]
-        normalized=_normalize_hypotheses(planned) if planned else []
-        s["hypotheses"]=normalized if len(normalized)>=4 else [encode(h) for h in hypotheses_for(s["objective"])][:20]
+        planning_basis="deterministic ATT&CK hypotheses constrained by operator direction; model reasoning deferred until after telemetry"
+        s["hypotheses"]=[encode(h) for h in hypotheses_for(s["objective"])][:20]
         for hypothesis in s["hypotheses"]:
             hypothesis["basis"]="operator_direction"
             hypothesis["basis_details"]="Initial hypothesis is allowed because the operator supplied a specific behavior, technique, entity, or indicator."
@@ -387,14 +389,21 @@ class HuntEngine:
             "configured indices",lambda:self.es.mappings_many(names),lambda value:len(value))
         if mappings is None:
             s["coverage"]["host"]="indices discovered; mapping retrieval failed"
-            s["es_fields"]=[]; s["es_fields_by_class"]={}; s.setdefault("source_health",{})["host"]=False
+            s["es_fields"]=[]; s["es_fields_by_class"]={}; s["es_indices_by_class"]={}
+            s.setdefault("source_health",{})["host"]=False
             self._stage(s,"host_inventory","failed",{"matched_indices":len(names)})
             return self._save(s)
         s["es_fields"]=_field_names(mappings); s["es_fields_by_class"]=_field_names_by_class(mappings)
-        fields=s.get("es_fields",[]); host_fields=s.get("es_fields_by_class",{}).get("host") or fields
+        s["es_indices_by_class"]=_index_names_by_class(mappings)
+        fields=s.get("es_fields",[]); field_classes=s.get("es_fields_by_class",{})
+        index_classes=s.get("es_indices_by_class",{})
+        classified_fields=isinstance(field_classes,dict) and bool(field_classes)
+        classified_indices=isinstance(index_classes,dict) and bool(index_classes)
+        host_fields=list(field_classes.get("host",[])) if classified_fields else fields
+        host_indices=list(index_classes.get("host",[])) if classified_indices else names
         timestamp=next((field for field in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
             if field in host_fields),None)
-        ready=bool(fields and (not self._time_scope(s)[0] or timestamp))
+        ready=bool(host_indices and host_fields and (not self._time_scope(s)[0] or timestamp))
         s.setdefault("source_health",{})["host"]=ready
         if ready:
             s["timestamp_field"]=timestamp or "@timestamp"
@@ -409,7 +418,10 @@ class HuntEngine:
         index=str(hit.get("_index", "")); document_id=hit.get("_id")
         category=str(_nested(hit,"event.category") or hit.get("event.category") or "").lower()
         module=str(_nested(hit,"event.module") or _nested(hit,"event.dataset") or hit.get("event.module") or "").lower()
-        if "host" in index.lower(): key="host"
+        index_classes=s.get("es_indices_by_class",{}) if isinstance(s.get("es_indices_by_class"),dict) else {}
+        if index in index_classes.get("network",[]): key="network"
+        elif index in index_classes.get("host",[]): key="host"
+        elif "host" in index.lower(): key="host"
         elif "network" in index.lower() or any(x in module for x in ("zeek","suricata","netflow","packetbeat","panw","network")) or "network" in category:
             key="network"
         else: key="host"
@@ -446,13 +458,18 @@ class HuntEngine:
         """Register bounded deterministic telemetry searches without executing them."""
         initialize_scheduler(s)
         registered=[]
-        mission_range,scope=self._time_scope(s)
-        mission_range=_materialize_time_range(mission_range)
+        mission_range,scope=self._fixed_mission_time_scope(s)
         task_range={"scope":scope}
         if mission_range:
             task_range.update({"start":mission_range.get("gte"),"end":mission_range.get("lte")})
         names=list(s.get("es_indices",[])); fields=list(s.get("es_fields",[]))
-        host_fields=s.get("es_fields_by_class",{}).get("host") or fields
+        index_classes=s.get("es_indices_by_class",{})
+        classified_indices=isinstance(index_classes,dict) and bool(index_classes)
+        field_classes=s.get("es_fields_by_class",{})
+        classified_fields=isinstance(field_classes,dict) and bool(field_classes)
+        host_names=(list(index_classes.get("host",[])) if classified_indices else
+            ([name for name in names if "host" in name.lower()] or [name for name in names if "network" not in name.lower()] or names))
+        host_fields=list(field_classes.get("host",[])) if classified_fields else fields
         timestamp=s.get("timestamp_field") or next((field for field in
             ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
             if field in host_fields),None)
@@ -471,14 +488,14 @@ class HuntEngine:
                                           ("behavior_catalog",behavior_seeds,"analytic_id")):
                 for seed in seeds:
                     task_id,_=register_search_task(s,{"source":"elasticsearch","source_family":"host",
-                        "source_targets":names,"phase":"discovery","origin":origin,
+                        "source_targets":host_names,"phase":"discovery","origin":origin,
                         "intent":f"Deterministic {origin.replace('_',' ')} discovery: {seed.get(id_field)}",
                         "query_spec":{"query":seed["query"],"size":seed_size},"time_range":task_range,
                         "candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],"anchor_evidence_ids":[]})
                     if task_id not in registered: registered.append(task_id)
             surveys=_host_survey_queries(s.get("hypotheses",[]),host_fields,timestamp or "@timestamp",mission_range,
                 s.get("objective",""),10)
-            survey_names=[name for name in names if "host" in name.lower()] or names
+            survey_names=host_names
             for survey in surveys:
                 task_id,_=register_search_task(s,{"source":"elasticsearch","source_family":"host",
                     "source_targets":survey_names,"phase":"discovery","origin":"directed_survey",
@@ -496,7 +513,7 @@ class HuntEngine:
                 for term in indicator_terms:
                     query=_indicator_query([term],text_fields,timestamp or "@timestamp",mission_range)
                     task_id,_=register_search_task(s,{"source":"elasticsearch","source_family":"host",
-                        "source_targets":names,"phase":"discovery","origin":"directed_survey",
+                        "source_targets":host_names,"phase":"discovery","origin":"directed_survey",
                         "intent":f"Search operator-supplied indicator {term[:80]}",
                         "query_spec":{"query":query,"size":min(self.settings.max_results,50)},"time_range":task_range,
                         "candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],"anchor_evidence_ids":[]})
@@ -510,13 +527,32 @@ class HuntEngine:
             "unsupported_indicators":indicator_unsupported,"semantic_bindings":bindings}
         s.setdefault("coverage",{})["behavior_catalog"]=s["behavior_catalog_status"]
 
-        network_fields=s.get("es_fields_by_class",{}).get("network",[])
-        network_indices=[name for name in s.get("es_indices",[]) if "network" in name.lower()]
-        es_network_ready=bool(network_fields and network_indices)
+        network_fields=list(field_classes.get("network",[])) if classified_fields else []
+        network_indices=(list(index_classes.get("network",[])) if classified_indices else
+            [name for name in s.get("es_indices",[]) if "network" in name.lower()])
+        network_timestamp=next((field for field in
+            ("@timestamp","timestamp","event.created","event.ingested","event.start") if field in network_fields),None)
+        network_probe_fields=[field for field in ("source.ip","destination.ip","src_ip","dst_ip",
+            "source.port","destination.port","network.protocol","protocol") if field in network_fields]
+        if not network_probe_fields:
+            network_probe_fields=[field for field in network_fields if field!=network_timestamp][:4]
+        es_network_ready=bool(network_probe_fields and network_indices and (not mission_range or network_timestamp))
         network_configured=es_network_ready
         network_sources=s.setdefault("coverage",{}).setdefault("network_sources",{})
-        network_sources["elasticsearch"]=("configured network indices available for bounded investigation pivots"
+        network_sources["elasticsearch"]=("configured network indices available; deterministic discovery queued"
             if es_network_ready else "no mapped network index available")
+        if es_network_ready:
+            network_query={"bool":{"should":[{"exists":{"field":field}} for field in network_probe_fields[:8]],
+                "minimum_should_match":1}}
+            if mission_range:
+                network_query["bool"]["filter"]=[{"range":{network_timestamp:mission_range}}]
+            task_id,_=register_search_task(s,{"source":"elasticsearch","source_family":"network",
+                "source_targets":network_indices,"phase":"discovery","origin":"coverage_frontier",
+                "intent":"Deterministic Elasticsearch network-event discovery",
+                "query_spec":{"query":network_query,"size":min(500,self.settings.max_results)},
+                "time_range":task_range,"candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],
+                "anchor_evidence_ids":[]})
+            if task_id not in registered: registered.append(task_id)
         if self.settings.arkime_username and self.settings.arkime_password:
             network_configured=True; network_sources["arkime"]="configured; deterministic discovery queued"
             expressions=[_arkime_expression(s.get("objective",""),s.get("hypotheses",[]))]
@@ -599,7 +635,7 @@ class HuntEngine:
             return ("partial: "+text+f"; {partial} task(s) incomplete" if partial else text)
         s.setdefault("coverage",{})["host"]=coverage_text(host,"host")
         if not s.get("source_health",{}).get("network"):
-            s["coverage"]["network"]="not configured: Arkime and PCAP sources unavailable"
+            s["coverage"]["network"]="not configured: configured network sources unavailable"
         else: s["coverage"]["network"]=coverage_text(network,"network")
         s["coverage"]["host_count"]=len(s.get("host",[])); s["coverage"]["network_count"]=len(s.get("network",[]))
         behavior_outcomes=[item for item in outcomes if s.get("search_tasks",{}).get(item.get("task_id"),{}).get("origin")
@@ -621,9 +657,12 @@ class HuntEngine:
         network_sources=s.setdefault("coverage",{}).setdefault("network_sources",{})
         arkime_ready=bool(self.settings.arkime_username and self.settings.arkime_password)
         tshark_ready=bool(self.settings.pcap_files)
-        es_network_ready=bool(s.get("es_fields_by_class",{}).get("network") and
-            any("network" in name.lower() for name in s.get("es_indices",[])))
-        network_sources["elasticsearch"]=("configured network indices available for bounded investigation pivots"
+        index_classes=s.get("es_indices_by_class",{})
+        classified_indices=isinstance(index_classes,dict) and bool(index_classes)
+        network_indices=(list(index_classes.get("network",[])) if classified_indices else
+            [name for name in s.get("es_indices",[]) if "network" in name.lower()])
+        es_network_ready=bool(s.get("es_fields_by_class",{}).get("network") and network_indices)
+        network_sources["elasticsearch"]=("configured network indices available; deterministic discovery pending"
             if es_network_ready else "no mapped network index available")
         network_sources["arkime"]="configured; deterministic discovery pending" if arkime_ready else "not configured"
         network_sources["tshark"]="configured; deterministic discovery pending" if tshark_ready else "no PCAP files configured"
@@ -633,7 +672,7 @@ class HuntEngine:
             s["coverage"]["network"]="configured network inventory ready; deterministic discovery pending"
             status="completed"
         else:
-            s["coverage"]["network"]="not configured: Arkime and PCAP sources unavailable"
+            s["coverage"]["network"]="not configured: configured network sources unavailable"
             status="unavailable"
         self._stage(s,"network_inventory",status,{"arkime_configured":arkime_ready,
             "pcap_captures":len(self.settings.pcap_files),"registered_tasks":len(s.get("search_tasks",{}))})
@@ -663,8 +702,7 @@ class HuntEngine:
 
     def _effective_task_window(self,s,plan):
         """Freeze the mission/anchor window used by one executable task."""
-        mission_range,mission_scope=self._time_scope(s)
-        mission_range=_materialize_time_range(mission_range)
+        mission_range,mission_scope=self._fixed_mission_time_scope(s)
         effective_range,anchor_scope=anchor_time_range(plan,_all_evidence(s),mission_range)
         task_range={"scope":anchor_scope or mission_scope}
         if effective_range:
@@ -720,7 +758,10 @@ class HuntEngine:
                     other_score=network_score if group=="host" else host_score
                     if other_score>own_score: group="network" if group=="host" else "host"
             else: group="host"
-            names=all_names if group=="all" else [name for name in all_names if group in name.lower()]
+            index_classes=s.get("es_indices_by_class",{})
+            classified_indices=isinstance(index_classes,dict) and bool(index_classes)
+            names=all_names if group=="all" else (list(index_classes.get(group,[]))
+                if classified_indices else [name for name in all_names if group in name.lower()])
             if not names and group=="host": names=[name for name in all_names if "network" not in name.lower()] or all_names
             if not names: raise ValueError(f"No configured Elasticsearch index matched index_class={group}")
             actual_fields=(by_class.get(group) if group in {"host","network"} else s.get("es_fields",[])) or s.get("es_fields",[])
@@ -824,9 +865,17 @@ class HuntEngine:
         prior=coverage.get("model_initial_search_plan")
         if isinstance(prior,dict) and prior.get("attempted"): return registered
         source_fields=coverage.get("search_fields",{})
-        plan_status={"attempted":True,"status":"not generated","accepted":0,"rejected_or_duplicate":0}
+        plan_status={"attempted":False,"status":"not generated","accepted":0,"rejected_or_duplicate":0}
         coverage["model_initial_search_plan"]=plan_status
+        queued=sum(task.get("phase")=="investigation" and task.get("status") in {"queued","interrupted"}
+            for task in s.get("search_tasks",{}).values())
+        remaining=max(0,self.settings.max_tool_calls-int(s.get("tool_calls",0)))
+        if queued:
+            plan_status.update({"status":"deferred: execution capacity reserved for queued searches",
+                "queued_search_tasks":queued,"remaining_tool_calls":remaining})
+            return registered
         if not source_fields or not self._budget_ok(s): return registered
+        plan_status["attempted"]=True
         try:
             from ..agent.ollama import Ollama, model_evidence_context
             visible_evidence=model_evidence_context(_all_evidence(s),10)
@@ -1000,135 +1049,6 @@ class HuntEngine:
         self._stage(s,stage,status,{"task_id":task_id,"source":source,"returned":returned,"matched_total":matched})
         return outcome
 
-    def _execute_model_search(self,s,plan,stage):
-        source=plan.get("source"); intent=plan.get("intent",""); fp=plan.get("fingerprint") or fingerprint(plan)
-        mission_range,mission_scope=self._time_scope(s)
-        effective_range=mission_range; anchor_scope=None; scope=mission_scope
-        result_count=0; status="skipped"; details={"intent":intent,"search_id":plan.get("id"),"hypothesis_id":plan.get("hypothesis_id"),"anchor_evidence_id":(plan.get("anchor_evidence_ids") or [None])[0],
-            "native_query_language":plan.get("native_query_language","none"),"native_query_validation":plan.get("native_query_validation","not_proposed")}
-        try:
-            effective_range,anchor_scope=anchor_time_range(plan,_all_evidence(s),mission_range)
-            scope=anchor_scope or mission_scope
-            if source=="elasticsearch":
-                all_names=list(s.get("es_indices",[])); requested_group=plan.get("index_class","all"); group=requested_group
-                by_class=s.get("es_fields_by_class",{}); plan_fields=set(plan.get("fields",[]))
-                host_score=len(plan_fields & set(by_class.get("host",[])))
-                network_score=len(plan_fields & set(by_class.get("network",[])))
-                if group=="all" and max(host_score,network_score)>0 and host_score!=network_score:
-                    group="host" if host_score>network_score else "network"
-                elif group in {"host","network"}:
-                    own_score=host_score if group=="host" else network_score
-                    other_score=network_score if group=="host" else host_score
-                    if other_score>own_score: group="network" if group=="host" else "host"
-                names=all_names if group=="all" else [x for x in all_names if group in x.lower()]
-                if not names: raise ValueError(f"No configured Elasticsearch index matched index_class={group}")
-                actual_fields=(by_class.get(group) if group in {"host","network"} else s.get("es_fields",[])) or s.get("es_fields",[])
-                scoped_plan={**plan,"index_class":group,"fields":[f for f in plan.get("fields",[]) if f in actual_fields]}
-                if scoped_plan.get("terms") and not scoped_plan["fields"]:
-                    scoped_plan["fields"]=[f for f in TEXT_FIELDS if f in actual_fields][:4]
-                timestamp_field=next((f for f in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created") if f in actual_fields),None)
-                if effective_range and not timestamp_field: raise ValueError("No mapped timestamp field is available to enforce the search window")
-                query=None
-                if plan.get("native_query_language")=="elasticsearch_dsl" and plan.get("native_query"):
-                    try:
-                        query=compile_native_es(plan["native_query"],actual_fields,timestamp_field or s.get("timestamp_field","@timestamp"),effective_range)
-                        details["native_query_execution"]="accepted"
-                    except (ValueError,TypeError,json.JSONDecodeError) as native_error:
-                        details["native_query_execution"]="rejected_fallback"
-                        details["native_query_error"]=_safe_error_reason(native_error)
-                if query is None:
-                    query=compile_es(scoped_plan,actual_fields,timestamp_field or s.get("timestamp_field","@timestamp"),effective_range)
-                size=min(self.settings.max_results,500)
-                details.update({"requested_index_class":requested_group,"effective_index_class":group})
-                found=self._call(s,"elasticsearch.search",stage,{**details,"source":"elasticsearch","indices":names,"query":query,"size":size},scope,
-                    lambda:self.es.search_many(names,query,size),lambda x:len(x.get("hits",[])))
-                if found is None: status="failed_or_budget_limited"
-                else:
-                    rows=found.get("hits",[]); result_count=len(rows); status="completed"
-                    for hit in rows: self._add_es_hit(s,hit,query,plan.get("id"))
-                    details["matched_total"]=found.get("total")
-                s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"indices":names,
-                    "query":locals().get("query"),"time_range":scope,"returned":result_count,"status":status,
-                    "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
-            elif source=="arkime":
-                if not self.settings.arkime_username or not self.settings.arkime_password: raise ValueError("Arkime API credentials are not configured")
-                expression=None
-                if plan.get("native_query_language")=="arkime" and plan.get("native_query"):
-                    try:
-                        expression=validate_native_arkime(plan["native_query"],list(SOURCE_FIELDS["arkime"]))
-                        details["native_query_execution"]="accepted"
-                    except ValueError as native_error:
-                        details["native_query_execution"]="rejected_fallback"
-                        details["native_query_error"]=_safe_error_reason(native_error)
-                if expression is None: expression=compile_arkime(plan)
-                explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"],self.settings.mission_timezone)
-                if anchor_scope and effective_range:
-                    start_ms=_explicit_epoch(effective_range["gte"],scale=1000); stop_ms=_explicit_epoch(effective_range["lte"],scale=1000)
-                all_history=self.settings.historical_search and not explicit
-                found=self._search_arkime_pages(s,expression,stage,scope,start_ms,stop_ms,self.settings.arkime_max_results,all_history,details)
-                if found["failed"] and not found["sessions"]: status="failed_or_budget_limited"
-                else:
-                    rows=found.get("sessions",[]); result_count=len(rows); status="partial" if found.get("capped") or found.get("failed") else "completed"
-                    self._add_arkime_rows(s,rows,expression,scope,plan.get("id")); details["matched_total"]=found.get("total")
-                s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"expression":locals().get("expression"),
-                    "time_range":scope,"returned":result_count,"matched_total":found.get("total"),"pages":found.get("pages"),"capped":found.get("capped"),"status":status,
-                    "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
-            elif source=="tshark":
-                if not self.settings.pcap_files: raise ValueError("No approved PCAPs are configured")
-                filter_spec={**plan,"ports":list(plan.get("ports",[]))}
-                display_filter=None
-                packet_fields=list(dict.fromkeys(["frame.number","frame.time_epoch","ip.src","ip.dst","ipv6.src","ipv6.dst",
-                    "tcp.srcport","tcp.dstport","udp.srcport","udp.dstport",*[f for f in plan.get("fields",[]) if f in SOURCE_FIELDS["tshark"]]]))[:16]
-                if plan.get("native_query_language")=="tshark" and plan.get("native_query"):
-                    try:
-                        display_filter=validate_native_tshark(plan["native_query"],list(SOURCE_FIELDS["tshark"]))
-                        details["native_query_execution"]="accepted"
-                    except ValueError as native_error:
-                        details["native_query_execution"]="rejected_fallback"
-                        details["native_query_error"]=_safe_error_reason(native_error)
-                if display_filter is None: display_filter,packet_fields=compile_tshark(filter_spec)
-                date_filter=_pcap_time_filter(_explicit_dates(s["objective"]),self.settings.mission_timezone)
-                if anchor_scope and effective_range:
-                    start_seconds=_explicit_epoch(effective_range["gte"],scale=1); stop_seconds=_explicit_epoch(effective_range["lte"],scale=1)
-                    date_filter=f"frame.time_epoch >= {start_seconds:.3f} && frame.time_epoch <= {stop_seconds:.3f}"
-                attempted=0; failed=0; cap_hits=0; matched_total=0; output_cap=min(500,self.settings.max_results)
-                for pcap in self.settings.pcap_files[:3]:
-                    if not self._budget_ok(s): status="budget_limited"; break
-                    found=self._call(s,"tshark.read_pcap",stage,{**details,"source":"tshark","pcap":str(pcap),"display_filter":display_filter,"fields":packet_fields},
-                        "explicit mission dates; retained-match cap applies" if date_filter else "entire configured capture; retained-match cap applies",
-                        lambda pcap=pcap:self.tshark.inspect(pcap,display_filter=display_filter,fields=packet_fields,
-                            limit=output_cap,time_filter=date_filter),lambda x:x.get("count",0))
-                    attempted+=1
-                    if found is None: failed+=1; continue
-                    result_count+=found.get("count",0)
-                    matched_total+=int(found.get("matched_count",found.get("count",0)) or 0)
-                    if found.get("output_capped"): cap_hits+=1
-                    for row in found.get("packets",[]):
-                        self._add_tshark_row(s,row,{**found["provenance"],"search_id":plan.get("id"),
-                            "hypothesis_id":plan.get("hypothesis_id"),"search_fingerprint":fp},
-                            found["provenance"]["display_filter"],plan.get("id"))
-                if status!="budget_limited": status="partial" if failed or cap_hits else ("completed" if attempted else "skipped")
-                s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"display_filter":locals().get("display_filter"),
-                    "pcaps_attempted":attempted,"failed":failed,"cap_hits":cap_hits,"per_capture_output_cap":output_cap,
-                    "time_range":scope,"returned":result_count,"matched_total":matched_total,"status":status,
-                    "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
-            else: raise ValueError("Unsupported search source")
-        except Exception as exc:
-            status="rejected_or_failed"; error_reason=_safe_error_reason(exc)
-            status_code=getattr(getattr(exc,"meta",None),"status",None) or getattr(exc,"status_code",None)
-            details["error_type"]=type(exc).__name__; details["error_reason"]=error_reason
-            s.setdefault("source_errors",[]).append({"tool":str(source),"stage":stage,"error":type(exc).__name__,
-                "reason":error_reason,"status_code":status_code})
-            selectors={k:plan.get(k) for k in ("terms","fields","ips","hostnames","ports","protocols","event_codes","index_class") if plan.get(k)}
-            s["queries"].append({"stage":stage,"source":source,"search_id":plan.get("id"),"intent":intent,"selectors":selectors,
-                "time_range":scope,"returned":result_count,"status":status,"error":type(exc).__name__,"error_reason":error_reason,
-                "native_query_language":details.get("native_query_language"),"native_query_execution":details.get("native_query_execution")})
-        s.setdefault("coverage",{}).setdefault("model_search_results",[]).append({"search_id":plan.get("id"),"source":source,
-            "hypothesis_id":plan.get("hypothesis_id"),"intent":intent,"returned":result_count,"status":status,"fingerprint":fp})
-        self._stage(s,stage,status,{"search_id":plan.get("id"),"source":source,"intent":intent,"returned":result_count})
-        print(f"[ROMULUS] {stage}: {source} intent={intent[:110]} status={status} results={result_count}")
-        return result_count
-
     def _analyze(self,s):
         s["correlations"]=correlate(s.get("host",[]),s.get("network",[]))
         all_e=s.get("host",[])+s.get("network",[])
@@ -1165,7 +1085,7 @@ class HuntEngine:
         self._publish_tooling_leads(s)
         _link_candidates_to_findings(s)
         _attach_finding_paths(s)
-        host_available=bool(s.get("es_indices")) or self.offline
+        host_available=self.offline or bool(s.get("source_health",{}).get("host"))
         network_available=self.offline or bool(s.get("source_health",{}).get("network"))
         ledger=build_coverage_ledger(s.get("hypotheses",[]),s.get("search_tasks",{}),s.get("search_outcomes",[]),
             host_available,network_available,s.get("candidate_leads",[]))
@@ -1592,28 +1512,14 @@ class HuntEngine:
                 task=s["search_tasks"][task_id]
                 if not any(existing.get("task_id")==task_id for existing in accepted): accepted.append(task)
                 proposal_tasks.append(task_id)
+                prior_outcome=next((item for item in reversed(s.get("search_outcomes",[]))
+                    if item.get("task_id")==task_id),None)
+                if prior_outcome: self._record_scheduled_followups(s,task,prior_outcome)
             if not proposal_tasks: rejected+=1
         s.setdefault("coverage",{}).setdefault("model_search_planning",[]).append({"phase":phase,"proposed":len(proposed),
             "accepted":len(accepted),"rejected_or_duplicate":rejected+duplicate,"duplicate":duplicate,
             "repeated_empty_anchor":repeated_empty_anchor,"invalid_or_unmappable":rejected})
         return accepted
-
-    def _anchor_exhausted_on_sources(self,s,spec):
-        """Stop retrying a zero-result evidence anchor across already-tried sources."""
-        anchors=spec.get("anchor_evidence_ids") or []
-        if not anchors: return False
-        anchor=anchors[0]
-        plans={p.get("id"):p for p in s.get("lead_catalog",[]) if p.get("id")}
-        zero_sources=set()
-        for result in s.get("coverage",{}).get("model_search_results",[]):
-            plan=plans.get(result.get("search_id"),{})
-            if plan.get("phase")!="iterative": continue
-            if anchor not in (plan.get("anchor_evidence_ids") or []): continue
-            if result.get("status")=="completed" and result.get("returned")==0:
-                zero_sources.add(plan.get("source"))
-            elif result.get("status")=="completed" and result.get("returned",0)>0:
-                zero_sources.clear()
-        return len({source for source in zero_sources if source})>=2
 
     def _record_scheduled_followups(self,s,task,outcome):
         candidate_ids=set(task.get("candidate_ids",[])); follow_up_ids=set(task.get("follow_up_ids",[]))
@@ -1669,132 +1575,20 @@ class HuntEngine:
             {"task_id":task["task_id"],"returned":recorded.get("returned_total",0)})
         return self._save(s)
 
-    def _host_pivot(self,s,lead):
-        indices=s.get("es_indices",[])
-        if not indices:
-            s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],"status":"skipped: Elasticsearch indices unavailable","returned":0})
-            return
-        indices=[name for name in indices if "host" in name.lower()] or indices
-        fields=s.get("es_fields_by_class",{}).get("host") or s.get("es_fields",[])
-        # Recipe fallbacks are hypothesis-wide searches. Do not constrain them
-        # with the first arbitrary IPs from a large evidence collection; the
-        # dynamic model queries carry explicit, validated anchors when a pivot
-        # really should be entity-scoped.
-        mission_range,mission_scope=self._time_scope(s)
-        effective_range=mission_range; scope=mission_scope
-        try:
-            effective_range,anchor_scope=anchor_time_range(lead,_all_evidence(s),mission_range)
-            scope=anchor_scope or mission_scope
-        except ValueError as exc:
-            s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],
-                "status":f"skipped: {_safe_error_reason(exc)}","returned":0,"time_range":scope})
-            return
-        query=_lead_host_query(lead,fields,s.get("timestamp_field","@timestamp"),effective_range,{})
-        if query is None:
-            s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],
-                "status":"skipped: hypothesis has no mapped host selectors","returned":0,"time_range":scope})
-            return
-        raw=self._call(s,"elasticsearch.search","iterative_host_pivot",{"lead_id":lead["id"],"indices":indices,"query":query,"size":min(500,self.settings.max_results)},
-            scope,lambda:self.es.search_many(indices,query,min(500,self.settings.max_results)),lambda x:len(x.get("hits",[])))
-        if raw is None:
-            status="failed or budget prevented query"; count=0
-        else:
-            count=len(raw["hits"])
-            for hit in raw["hits"]: self._add_es_hit(s,hit,query,lead["id"])
-            status=_search_coverage(count,min(500,self.settings.max_results),scope)
-        s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],"status":status,"returned":count,"time_range":scope})
-        s["queries"].append({"stage":"iterative_host_pivot","lead_id":lead["id"],"query":query,"time_range":scope,"returned":count})
-
-    def _network_pivot(self,s,lead):
-        before=len(s.get("network",[])); details=[]
-        mission_range,mission_scope=self._time_scope(s)
-        effective_range=mission_range; scope=mission_scope
-        try:
-            effective_range,anchor_scope=anchor_time_range(lead,_all_evidence(s),mission_range)
-            scope=anchor_scope or mission_scope
-        except ValueError as exc:
-            s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],
-                "status":f"skipped: {_safe_error_reason(exc)}","returned":0,"sources":[]})
-            return
-        if lead.get("technique_id")=="T1105" or lead["id"]=="network_transfer_context":
-            network_indices=[name for name in s.get("es_indices",[]) if "network" in name.lower()]
-            indicator_events=[]
-            for event in s.get("host",[]):
-                raw_event=event.get("raw",{}) if isinstance(event.get("raw",{}),dict) else {}
-                text=(event.get("observation","")+" "+json.dumps(raw_event,ensure_ascii=False)).lower()
-                transfer_command=bool(re.search(r'\ba0=["\']?(?:wget|curl)["\']?',text))
-                if any(x in text for x in ("linpeas","pwnkit","metadata.google.internal")) or (transfer_command and "motd.ubuntu.com" not in text):
-                    indicator_events.append(event)
-            windows_by_ip={}
-            for event in indicator_events:
-                for ip in _evidence_ips([event]): windows_by_ip.setdefault(ip,[]).append(event)
-            if network_indices and windows_by_ip:
-                fields=[f for f in ("message","source.ip","destination.ip","src_ip","dest_ip") if f in s.get("es_fields",[])] or ["message"]
-                timestamp=s.get("timestamp_field","@timestamp"); size=min(500,self.settings.max_results)
-                returned_total=0; failed_windows=[]; queried_windows=0; cap_hit=False
-                for ip,events in windows_by_ip.items():
-                    for cluster,bounds in _timestamp_clusters(events,gap_minutes=5,padding_minutes=2):
-                        time_range=f"{bounds[0]} through {bounds[1]}"
-                        ip_match={"bool":{"should":[{"match_phrase":{field:ip}} for field in fields],"minimum_should_match":1}}
-                        query={"bool":{"must":[ip_match],"filter":[{"range":{timestamp:{"gte":bounds[0],"lte":bounds[1]}}}]}}
-                        found=self._call(s,"elasticsearch.search","iterative_network_es_pivot",
-                            {"lead_id":lead["id"],"indices":network_indices,"ip":ip,"fields":fields,"query":query,"size":size},
-                            time_range,lambda q=query:self.es.search_many(network_indices,q,size),lambda x:len(x.get("hits",[])))
-                        queried_windows+=1
-                        if found is None: failed_windows.append(time_range); continue
-                        hits=found.get("hits",[]); returned_total+=len(hits); cap_hit=cap_hit or len(hits)>=size
-                        for hit in hits: self._add_es_hit(s,hit,query,lead["id"])
-                        details.append({"source":"elasticsearch.network_index","ip":ip,"returned":len(hits),"time_range":time_range})
-                        s["queries"].append({"stage":"iterative_network_es_pivot","lead_id":lead["id"],"ip":ip,
-                            "time_range":time_range,"returned":len(hits)})
-                coverage=f"searched {queried_windows} host-linked time window(s); returned {returned_total}"
-                if cap_hit: coverage+="; result cap reached, additional records may exist"
-                if failed_windows: coverage+=f"; {len(failed_windows)} window(s) failed"
-                s.setdefault("coverage",{}).setdefault("network_sources",{})["elasticsearch"]=coverage
-            else: details.append({"source":"elasticsearch.network_index","status":"skipped: no matching index, host IP, or event time"})
-        if self.settings.arkime_username and self.settings.arkime_password:
-            expression=_lead_network_expression(lead)
-            ips=[ip for ip in lead.get("ips",[]) if isinstance(ip,str)]
-            if ips: expression=f"({expression}) && ("+" || ".join(f"ip.src == {ip} || ip.dst == {ip}" for ip in ips[:4])+")"
-            explicit=_explicit_dates(s["objective"]); start_ms,stop_ms=_arkime_time_window(s["objective"],self.settings.mission_timezone)
-            anchored_bounds=_epoch_range(effective_range,1000) if lead.get("anchor_evidence_ids") else None
-            if anchored_bounds: start_ms,stop_ms=anchored_bounds
-            all_history=self.settings.historical_search and not explicit and not anchored_bounds
-            raw=self._call(s,"arkime.api.sessions","iterative_network_pivot",{"lead_id":lead["id"],"expression":expression,
-                "date":-1 if all_history else ("explicit" if explicit else self.settings.arkime_default_hours)},scope,
-                lambda:self.arkime.search_sessions(expression,start_ms=start_ms,stop_ms=stop_ms,length=min(100,self.settings.max_results),all_history=all_history),
-                lambda x:len(x.get("sessions",[])))
-            if raw is not None:
-                added=self._add_arkime_rows(s,raw["sessions"],expression,scope,lead["id"])
-                details.append({"source":"arkime","returned":len(raw["sessions"]),"added":added,"matched_total":raw.get("total"),"time_range":scope})
-        if self.settings.pcap_files:
-            display_filter=_lead_pcap_filter(lead); ips=[ip for ip in lead.get("ips",[]) if isinstance(ip,str)]
-            if ips: display_filter="("+display_filter+") && ("+" || ".join(f"ip.addr == {ip}" if ":" not in ip else f"ipv6.addr == {ip}" for ip in ips[:4])+")"
-            date_filter=(_pcap_range_filter(effective_range) if lead.get("anchor_evidence_ids")
-                else _pcap_time_filter(_explicit_dates(s["objective"]),self.settings.mission_timezone))
-            for pcap in self.settings.pcap_files[:3]:
-                if not self._budget_ok(s): break
-                raw=self._call(s,"tshark.read_pcap","iterative_pcap_pivot",{"lead_id":lead["id"],"pcap":str(pcap),"display_filter":display_filter},
-                    "explicit mission dates; retained-match cap applies" if date_filter else "entire configured capture; retained-match cap applies",
-                    lambda pcap=pcap:self.tshark.inspect(pcap,display_filter=display_filter,limit=min(500,self.settings.max_results),time_filter=date_filter),
-                    lambda x:x.get("count",0))
-                if raw is None: continue
-                for row in raw["packets"]:
-                    self._add_tshark_row(s,row,raw["provenance"],raw["provenance"]["display_filter"],lead["id"])
-                details.append({"source":"tshark","pcap":str(pcap),"returned":raw["count"],
-                    "matched_total":raw.get("matched_count"),"capped":bool(raw.get("output_capped")),
-                    "time_range":raw["provenance"]["time_range"]})
-        count=len(s.get("network",[]))-before
-        s.setdefault("coverage",{})["network_count"]=len(s.get("network",[]))
-        incomplete=any(bool(item.get("capped")) or (isinstance(item.get("matched_total"),(int,float))
-            and int(item.get("matched_total"))>int(item.get("returned",0) or 0)) for item in details)
-        pivot_status=("partial: configured network search reached a result cap" if incomplete else
-            "queried configured network sources" if details else "no configured network source queried")
-        s.setdefault("pivot_results",[]).append({"lead_id":lead["id"],"status":pivot_status,
-            "returned":count,"sources":details})
-        s["queries"].append({"stage":"iterative_network_pivot","lead_id":lead["id"],"sources":details,"returned":count})
-
     def _report(self,s):
+        pending=[task for task in s.get("search_tasks",{}).values()
+            if task.get("status") in {"queued","interrupted"}]
+        if pending:
+            reason=str(s.get("termination_reason") or "resource_limit")
+            if not s.get("termination_reason"): s["termination_reason"]="resource_limit"
+            for task in sorted(pending,key=lambda item:(int(item.get("created_sequence",0)),item.get("task_id",""))):
+                outcome=record_unexecuted_outcome(s,task["task_id"],reason=reason)
+                self._record_scheduled_followups(s,s["search_tasks"][task["task_id"]],outcome)
+            gaps=s.setdefault("coverage",{}).setdefault("scheduler_gaps",[])
+            if not any(item.get("phase")=="report_finalization" for item in gaps):
+                gaps.append({"phase":"report_finalization","reason":reason,
+                    "budget_limited_task_count":len(pending),
+                    "budget_limited_task_ids":[task["task_id"] for task in pending][:100]})
         if s.get("started_epoch"):
             s["duration_ms"]=max(0,round((time.time()-s["started_epoch"])*1000))
         errors=s.get("source_errors",[])
@@ -1806,8 +1600,8 @@ class HuntEngine:
             "search_plans_accepted":sum(x.get("accepted",0) for x in planning),
             "search_plans_rejected_or_duplicate":sum(x.get("rejected_or_duplicate",0) for x in planning),
             "model_findings":sum(1 for f in s.get("findings",[]) if "-AI-" in str(f.get("finding_id","")))}
-        host_missing=not s.get("es_indices") and not self.offline
-        network_missing=s["coverage"].get("network")=="not configured: Arkime and PCAP sources unavailable"
+        host_missing=not self.offline and not bool(s.get("source_health",{}).get("host"))
+        network_missing=not self.offline and not bool(s.get("source_health",{}).get("network"))
         missing_sources=host_missing or network_missing
         host_coverage=str(s.get("coverage",{}).get("host","" )).lower()
         network_coverage=str(s.get("coverage",{}).get("network","" )).lower()
@@ -1843,7 +1637,9 @@ class HuntEngine:
         if telemetry_errors or model_failures or interrupted or missing_sources or incomplete_coverage: s["status"]="partial"
         else: s["status"]="completed"
         if not s.get("termination_reason"):
-            s["termination_reason"]="lead_queue_exhausted" if not s.get("lead_queue") else "resource_limit"
+            pending=any(task.get("status") in {"queued","running","interrupted"}
+                for task in s.get("search_tasks",{}).values())
+            s["termination_reason"]="resource_limit" if pending else "lead_queue_exhausted"
         s["coverage"]["tool_calls_used"]=s.get("tool_calls",0)
         s["coverage"]["tool_call_limit"]=self.settings.max_tool_calls
         s["coverage"]["depth_used"]=s.get("depth",0)
@@ -2067,36 +1863,6 @@ def _link_candidates_to_findings(s):
             candidate["disposition"]="corroborated"
 
 
-def _record_candidate_follow_up(s,lead,result):
-    candidate_id=lead.get("candidate_id") if isinstance(lead,dict) else None
-    follow_up_id=lead.get("follow_up_id") if isinstance(lead,dict) else None
-    if not candidate_id or not follow_up_id: return
-    status=str(result.get("status") or "attempted")
-    failed=any(token in status.lower() for token in (
-        "failed","skipped","budget","no configured","rejected","error","partial","cap reached"))
-    for candidate in s.get("candidate_leads",[]):
-        if candidate.get("candidate_id")!=candidate_id: continue
-        if candidate.get("disposition")=="observed": candidate["disposition"]="investigating"
-        for follow_up in candidate.get("follow_ups",[]):
-            if follow_up.get("follow_up_id")!=follow_up_id: continue
-            follow_up.setdefault("history",[]).append({"timestamp":utc_now(),"search_id":lead.get("id"),
-                "status":status,"returned":result.get("returned",0)})
-            required={item.get("id") for item in s.get("lead_catalog",[])
-                if item.get("candidate_id")==candidate_id and item.get("follow_up_id")==follow_up_id and item.get("id")}
-            latest={}
-            for entry in follow_up.get("history",[]):
-                if entry.get("search_id") in required: latest[entry["search_id"]]=entry
-            successful={search_id for search_id,entry in latest.items()
-                if not any(token in str(entry.get("status","")).lower()
-                    for token in ("failed","skipped","budget","no configured","rejected","error","partial","cap reached"))}
-            if required and required <= successful:
-                follow_up["status"]="completed"
-            elif failed:
-                follow_up["status"]="blocked"
-            else:
-                follow_up["status"]="in_progress"
-
-
 def _query_terms(technique_ids):
     terms=[]; codes=[]
     for tid in technique_ids:
@@ -2190,16 +1956,26 @@ def _field_names(mapping):
     return sorted(fields)
 
 
+def _mapping_category(name,entry):
+    lower=str(name).lower()
+    fields=set(_field_names({name:entry}))
+    host_score=sum(field in fields for field in ("process.name","process.command_line","winlog.event_id","event.code","user.name","host.name"))
+    network_score=sum(field in fields for field in ("source.ip","destination.ip","source.port","destination.port","network.protocol","dns.question.name","http.request.method"))
+    return "network" if "network" in lower else ("host" if "host" in lower else
+        ("network" if network_score>host_score else ("host" if host_score else "other")))
+
+
 def _field_names_by_class(mapping):
     grouped={"host":set(),"network":set(),"other":set()}
     for name,entry in mapping.items():
-        lower=str(name).lower()
-        fields=set(_field_names({name:entry}))
-        host_score=sum(field in fields for field in ("process.name","process.command_line","winlog.event_id","event.code","user.name","host.name"))
-        network_score=sum(field in fields for field in ("source.ip","destination.ip","source.port","destination.port","network.protocol","dns.question.name","http.request.method"))
-        category="network" if "network" in lower else ("host" if "host" in lower else
-            ("network" if network_score>host_score else ("host" if host_score else "other")))
-        grouped[category].update(fields)
+        grouped[_mapping_category(name,entry)].update(_field_names({name:entry}))
+    return {key:sorted(value) for key,value in grouped.items() if value}
+
+
+def _index_names_by_class(mapping):
+    grouped={"host":[],"network":[],"other":[]}
+    for name,entry in mapping.items():
+        grouped[_mapping_category(name,entry)].append(str(name))
     return {key:sorted(value) for key,value in grouped.items() if value}
 
 
@@ -2222,36 +1998,6 @@ def _all_evidence(s):
     """Return the bounded graph context; complete evidence stays in Store."""
     combined=list(s.get("host",[]))+list(s.get("network",[]))
     return combined or list(s.get("evidence",[]))
-
-
-def _coverage_fallback(s,limit=3,exclude=None):
-    """Choose unexecuted hypothesis analytics by marginal coverage value."""
-    if limit<=0: return []
-    exclude=set(exclude or ())
-    completed=set(s.get("completed_leads",[])) | exclude
-    ledger={x.get("hypothesis_id"):x for x in s.get("coverage",{}).get("hypothesis_coverage",{}).get("rows",[])}
-    candidates=[]
-    for position,lead in enumerate(s.get("lead_catalog",[])):
-        if lead.get("fingerprint") or lead.get("id") in completed: continue
-        hid=lead.get("hypothesis_id"); row=ledger.get(hid,{})
-        tested=int(row.get("executed_analytics",0) or 0)
-        priority=int(lead.get("priority",3) or 3)
-        candidates.append((tested,-priority,position,lead))
-    candidates.sort(key=lambda item:item[:3])
-    selected=[]; used_tactics=set(); used_sources=set()
-    for _,_,_,lead in candidates:
-        tactics=tuple(lead.get("tactics") or ())
-        family=tactics[0] if tactics else lead.get("technique_id")
-        # First pass rewards a new tactic or source. A second pass below fills
-        # remaining slots, so systematic coverage never deadlocks on diversity.
-        if family in used_tactics and lead.get("source") in used_sources: continue
-        selected.append(lead["id"]); used_tactics.add(family); used_sources.add(lead.get("source"))
-        if len(selected)>=limit: return selected
-    for _,_,_,lead in candidates:
-        if lead["id"] not in selected:
-            selected.append(lead["id"])
-            if len(selected)>=limit: break
-    return selected
 
 
 def _safe_error_reason(exc):
@@ -2385,28 +2131,6 @@ def _timestamp_bounds(events,padding_minutes=0):
     return (min(stamps)-pad).isoformat(timespec="seconds"),(max(stamps)+pad).isoformat(timespec="seconds")
 
 
-def _timestamp_clusters(events,gap_minutes=5,padding_minutes=2):
-    rows=[]
-    for event in events:
-        try:
-            value=event.get("observed_at")
-            if not value: continue
-            stamp=datetime.fromisoformat(str(value).replace("Z","+00:00"))
-            if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=timezone.utc)
-            rows.append((stamp.astimezone(timezone.utc),event))
-        except (ValueError,TypeError,OverflowError): continue
-    rows.sort(key=lambda item:item[0]); clusters=[]
-    for stamp,event in rows:
-        if not clusters or (stamp-clusters[-1][-1][0]).total_seconds()>gap_minutes*60: clusters.append([])
-        clusters[-1].append((stamp,event))
-    pad=timedelta(minutes=padding_minutes)
-    result=[]
-    for cluster in clusters:
-        bounds=((cluster[0][0]-pad).isoformat(timespec="seconds"),(cluster[-1][0]+pad).isoformat(timespec="seconds"))
-        result.append(([event for _,event in cluster],bounds))
-    return result
-
-
 def _event_text(event):
     raw=event.get("raw",{}) if isinstance(event.get("raw",{}),dict) else {}
     parts=[str(event.get("observation","")),str(raw.get("message","")),json.dumps(raw,ensure_ascii=False)]
@@ -2447,26 +2171,6 @@ def _pcap_time_filter(dates,time_zone="UTC"):
         start=_explicit_epoch(dates[0],False,1,time_zone); end=_explicit_epoch(dates[1],True,1,time_zone) if len(dates)>1 else time.time()
         return f"frame.time_epoch >= {start:.3f} && frame.time_epoch <= {end:.3f}"
     except (ValueError,OverflowError): return ""
-
-
-def _epoch_range(time_range,multiplier=1):
-    if not isinstance(time_range,dict): return None
-    try:
-        values=[]
-        for key in ("gte","lte"):
-            value=time_range.get(key)
-            if not isinstance(value,str) or value.startswith("now"): return None
-            parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
-            if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
-            values.append(parsed.astimezone(timezone.utc).timestamp()*multiplier)
-        return tuple(int(value) if multiplier!=1 else float(value) for value in values)
-    except (ValueError,TypeError,OverflowError): return None
-
-
-def _pcap_range_filter(time_range):
-    bounds=_epoch_range(time_range,1)
-    return (f"frame.time_epoch >= {bounds[0]:.3f} && frame.time_epoch <= {bounds[1]:.3f}"
-        if bounds else "")
 
 
 def _arkime_expression(objective,hypotheses):
@@ -2580,11 +2284,6 @@ def _evidence_ips(events):
                     if not address.is_unspecified and not address.is_multicast and str(address) not in out: out.append(str(address))
                 except ValueError: pass
     return out[:8]
-
-
-def _search_coverage(returned,cap,scope):
-    suffix="; result cap reached, additional records may exist" if returned>=cap else ""
-    return f"searched {scope}; returned {returned}{suffix}"
 
 
 def _relevant(tid,e):

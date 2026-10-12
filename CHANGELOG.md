@@ -4,6 +4,26 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 
 ## Unreleased
 
+### Unified search scheduling and exact outcomes
+
+- Routed deterministic behavior/indicator discovery, operator-directed work, candidate follow-ups, grounded model proposals, and coverage-frontier work through one persisted scheduler instead of parallel host, network, model, and fallback queues.
+- Added stable execution fingerprints that deduplicate only exact source/target/query/window matches, merge all owners and origins, and retain code-derived priority that model output cannot override.
+- Added deterministic discovery fairness across healthy host/network telemetry families and fixed investigation tiers that favor required critical/high candidate work before model or breadth work.
+- Made task-specific outcomes authoritative for candidate and hypothesis closure. Only complete, uncapped searches with a confirmed matched total resolve work; failed, skipped, partial, timed-out, interrupted, capped, and budget-limited attempts remain visible gaps.
+- Preserved the evidence-first rule: an undirected hunt registers and runs deterministic telemetry searches without any model call until a real candidate exists; model proposals may reference only visible evidence/candidate identifiers.
+- Added conservative resume migration for legacy partial hunts and one-retry recovery for interrupted read-only searches, including explicit possible-duplicate disclosure.
+- Added a bounded unified-scheduler appendix to the technical text report while keeping scheduler internals out of the customer Word report and raw query bodies out of both.
+- Extended compact retention with scheduler counts by origin/source/status, duplicate merges avoided, unresolved-task count, and source-fairness gaps while deleting full task, queue, outcome, query, and scheduler-history bulk after verified final reporting.
+- Removed the obsolete direct model-search, host-pivot, network-pivot, coverage-fallback, legacy follow-up, and related dead helper paths. New hunts no longer initialize the former lead queue, reasoning-complete flag, or model-only fingerprint list.
+- Added deterministic Elasticsearch network-index discovery so a healthy network index receives a real discovery task even when Arkime and PCAP are unavailable; host discovery is constrained to effective host targets.
+- Canonicalized fingerprints to the actual source, targets, query, and fixed bounds, so source-family classification and prose-only scope labels cannot defeat exact-execution deduplication.
+- Persisted one absolute mission window across discovery, investigation, resume, and repeated registration so rolling `now-*` scopes cannot generate duplicate tasks as the clock advances.
+- Made legacy migration conservative: pending catalog work becomes queued scheduler work, and old attempts without explicit matched-total/cap/timeout/shard completeness remain nonresolving.
+- Classified Elasticsearch indices consistently from their mappings across inventory, discovery, follow-up compilation, evidence routing, coverage closure, and reporting; network-only deployments no longer claim host coverage merely because an index name lacks `network`.
+- Removed optional pre-telemetry model hypothesis generation. Directed missions start from deterministic operator-constrained ATT&CK hypotheses, while all model reasoning waits for telemetry and yields to already queued deterministic work.
+- Canonicalized fixed time bounds to UTC for execution identity, rejected invalid or half-bounded windows, compiled pending legacy leads into executable source queries, propagated prior terminal outcomes to late duplicate owners, and gave every unrun task an explicit report-time budget outcome without a source call.
+- Local verification currently runs 127 tests with six dependency-gated checks reserved for the development VM; compilation and diff validation are clean. Dependency-complete offline/live and post-hunt holdout results will be recorded after deployment.
+
 ### Cited attack paths and safe finalization
 
 - Added a deterministic evidence/entity/activity graph and finding-specific attack paths that include only cited evidence, preserve disconnected segments, and label shared-entity/time relationships as inference rather than causation.

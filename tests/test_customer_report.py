@@ -21,6 +21,9 @@ class CustomerWordReportTests(unittest.TestCase):
                 "host": "available; 123 events examined",
                 "network": "available; 18 sessions examined",
                 "tool_call_limit": 20,
+                "scheduler_gaps": [{"phase":"report_finalization","reason":"tool_call_budget",
+                    "budget_limited_task_count":3,
+                    "budget_limited_task_ids":["ST-BUDGET-001","ST-BUDGET-002"]}],
             },
             "findings": [
                 {
@@ -111,6 +114,19 @@ class CustomerWordReportTests(unittest.TestCase):
             "reasoning_history": [{"stage": "triage", "reasoning": "INTERNAL-REASONING-SENTINEL"}],
             "tool_runs": [{"tool": "INTERNAL-TOOL-SENTINEL", "result_status": "ok"}],
             "search_artifacts": [{"artifact_id": "INTERNAL-SEARCH-SENTINEL", "tool": "elastic.search"}],
+            "search_tasks": {"ST-INTERNAL-SENTINEL": {
+                "task_id": "ST-INTERNAL-SENTINEL", "source": "elasticsearch", "source_family": "host",
+                "phase": "investigation", "origins": ["candidate_follow_up"],
+                "intent": "Validate exact PowerShell context", "candidate_ids": ["CL-HIGH"],
+                "follow_up_ids": ["FU-HIGH"], "hypothesis_ids": ["H-POWER"],
+                "time_range": {"scope": "bounded test window"}, "status": "partial",
+                "query_spec": {"query": {"term": {"password": "DO-NOT-REPORT-SECRET"}}},
+            }},
+            "search_outcomes": [{"task_id": "ST-INTERNAL-SENTINEL", "status": "partial",
+                "returned_total": 5, "matched_total": 12, "capped": True, "timed_out": False,
+                "shard_failures": 0, "incomplete": True, "error_kind": "ResultCap",
+                "reason": "configured result cap reached"}],
+            "scheduler_history": [{"event": "investigation_budget_gap", "unserved_families": ["network"]}],
             "source_errors": [],
         }
 
@@ -154,9 +170,20 @@ class CustomerWordReportTests(unittest.TestCase):
                 "LOW-PRIORITY-INTERNAL-SENTINEL",
                 "RAW-HOST-EVENT-SENTINEL",
                 "TECHNICAL CANDIDATE WORKING LIST",
+                "ST-INTERNAL-SENTINEL",
+                "UNIFIED SEARCH SCHEDULER",
             ):
                 self.assertNotIn(internal, word_text)
                 self.assertIn(internal, technical_text)
+
+            self.assertIn("candidate_follow_up",technical_text)
+            self.assertIn("returned=5",technical_text)
+            self.assertIn("matched=12",technical_text)
+            self.assertIn("capped=True",technical_text)
+            self.assertIn("CL-HIGH",technical_text)
+            self.assertIn("budget-limited=ST-BUDGET-001, ST-BUDGET-002",technical_text)
+            self.assertIn("total=3; omitted=1",technical_text)
+            self.assertNotIn("DO-NOT-REPORT-SECRET",technical_text)
 
             self.assertGreaterEqual(len(document.tables), 3)
             self.assertLess(len(word_text), len(technical_text))

@@ -105,6 +105,45 @@ def _path_entities(step):
     return _join_text(values)
 
 
+def _scheduler_lines(state):
+    tasks=list(state.get("search_tasks",{}).values()) if isinstance(state.get("search_tasks"),dict) else []
+    outcomes={item.get("task_id"):item for item in state.get("search_outcomes",[]) or []
+        if isinstance(item,dict) and item.get("task_id")}
+    lines=[]
+    terminal_resolved={"completed"}
+    ordered=sorted(tasks,key=lambda item:(
+        1 if (outcomes.get(item.get("task_id"),{}).get("status") or item.get("status")) in terminal_resolved else 0,
+        int(item.get("created_sequence",0)),str(item.get("task_id",""))))
+    selected=ordered[:250]
+    lines.append(f"Scheduler task appendix: shown={len(selected)}; total={len(tasks)}; omitted={max(0,len(tasks)-len(selected))}.")
+    for task in selected:
+        outcome=outcomes.get(task.get("task_id"),{})
+        owners=[]
+        for key,label in (("candidate_ids","candidates"),("follow_up_ids","follow-ups"),("hypothesis_ids","hypotheses")):
+            if task.get(key): owners.append(f"{label}={_join_text(task.get(key))}")
+        scope=(outcome.get("time_range") or task.get("time_range") or {}).get("scope","not recorded")
+        lines.append(f"- {task.get('task_id')} {task.get('source')}/{task.get('source_family')} {task.get('phase')}; "
+            f"origins={_join_text(task.get('origins') or [task.get('origin')])}; intent={task.get('intent')}; "
+            f"owners={'; '.join(owners) or 'none'}; status={outcome.get('status') or task.get('status')}; "
+            f"returned={outcome.get('returned_total')}; matched={outcome.get('matched_total')}; scope={scope}; "
+            f"capped={bool(outcome.get('capped'))}; timed_out={bool(outcome.get('timed_out'))}; "
+            f"shard_failures={outcome.get('shard_failures',0)}; incomplete={bool(outcome.get('incomplete'))}; "
+            f"error={outcome.get('error_kind') or outcome.get('reason') or 'none'}.")
+    gaps=[item for item in state.get("scheduler_history",[]) or []
+        if isinstance(item,dict) and "budget_gap" in str(item.get("event"))]
+    gaps.extend(state.get("coverage",{}).get("scheduler_gaps",[]) or [])
+    if gaps:
+        lines.append("Unresolved scheduler/source-fairness gaps:")
+        for gap in gaps[-40:]:
+            task_ids=gap.get("budget_limited_task_ids") or gap.get("queued_task_ids") or []
+            total=gap.get("budget_limited_task_count")
+            total=int(total) if isinstance(total,int) else len(task_ids)
+            lines.append(f"- phase={gap.get('phase')}; event={gap.get('event')}; reason={gap.get('reason')}; "
+                f"unserved={_join_text(gap.get('unserved_families')) or 'none'}; "
+                f"budget-limited={_join_text(task_ids) or 'none'}; total={total}; omitted={max(0,total-len(task_ids))}.")
+    return lines
+
+
 def _content(s):
     host_events=_bounded_report_events(s,"host"); network_events=_bounded_report_events(s,"network")
     lines=[f"ROMULUS INVESTIGATION REPORT — {s.get('status','partial').upper()}",f"Investigation: {s.get('hunt_id','')}",f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}","", "EXECUTIVE SUMMARY",s.get("summary") or "Investigation summary unavailable.",
@@ -131,6 +170,7 @@ def _content(s):
     ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
     for row in ledger.get("rows",[]):
         lines.append(f"- {row.get('hypothesis_id')} / {row.get('technique_id')}: priority={row.get('priority')}; analytics attempted={row.get('executed_analytics')}/{row.get('planned_analytics')}; resolved={row.get('resolved_analytics')}; sources={_join_text(row.get('sources')) or 'none'}; returned={row.get('returned')}; assessment={row.get('assessment')}; gaps={_join_text(row.get('telemetry_gaps')) or 'none'}.")
+    lines += ["", "UNIFIED SEARCH SCHEDULER"]+(_scheduler_lines(s) or ["No scheduler tasks were recorded."])
     lines += ["", "DETERMINISTIC BEHAVIORAL ANALYTICS"]+(_analytic_lines(s.get("analytic_summary",{})) or ["No analytic summary was produced."])
     visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
     lines += ["", "PRIORITIZED CANDIDATE LEADS"]

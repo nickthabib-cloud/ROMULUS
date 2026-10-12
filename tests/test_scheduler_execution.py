@@ -155,6 +155,30 @@ class SchedulerExecutionTests(unittest.TestCase):
             self.assertTrue(outcome["artifact_id"].startswith("SR-"))
             self.assertEqual(outcome["time_range"], task["time_range"])
 
+    def test_report_derives_resource_limit_from_scheduler_not_legacy_queue(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            engine = _engine(root)
+            state = _state()
+            state.update({
+                "status": "running",
+                "outcome": "pending",
+                "hypotheses": [],
+                "findings": [],
+                "correlations": [],
+                "stage_history": [],
+                "source_health": {"host": True, "network": True},
+            })
+            state["coverage"].update({"host": "searched", "network": "searched"})
+            _task(state)
+
+            with patch("romulus.reporting.report.generate_report", return_value=[]):
+                engine._report(state)
+
+            self.assertEqual(state["termination_reason"], "resource_limit")
+
 
 def _analytic():
     return {
@@ -319,6 +343,48 @@ class SchedulerDiscoveryWorkflowTests(unittest.TestCase):
                 any(item["source"] == "tshark" and item["source_targets"] == [str(pcap)] for item in tasks)
             )
 
+    def test_tight_directed_budget_reaches_deterministic_search_before_model_reasoning(self):
+        import types
+        from unittest.mock import patch
+
+        fake_ollama=types.ModuleType("romulus.agent.ollama")
+        class Ollama:
+            def __init__(self,settings): pass
+            def plan_hypotheses(self,*args): return []
+        fake_ollama.Ollama=Ollama
+
+        class Elasticsearch(_RecordingElasticsearch):
+            def indices(self): return [{"index":"host-events"}]
+            def mappings_many(self,indices):
+                return {"host-events":{"mappings":{"properties":{
+                    "@timestamp":{"type":"date"},"message":{"type":"text"},
+                    "process":{"properties":{"name":{"type":"keyword"},
+                        "command_line":{"type":"text"}}},
+                    "host":{"properties":{"name":{"type":"keyword"}}},
+                }}}}
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); engine.use_ollama=True
+            engine.settings=replace(engine.settings,max_tool_calls=3,arkime_username="",
+                arkime_password="",pcap_files=())
+            _configure_discovery_catalogs(engine)
+            order=[]; elasticsearch=Elasticsearch(order); engine.es=elasticsearch
+            state=_state(); state.update({"objective":"Hunt PowerShell execution from 2024-11-13T10:58:00Z to 2024-11-13T11:10:00Z",
+                "status":"running","outcome":"pending","hypotheses":[],"findings":[],"correlations":[],
+                "lead_catalog":[],"completed_leads":[],"reasoning_history":[],"stage_history":[],
+                "candidate_leads":[],"analytic_summary":{},"behavior_catalog_status":{},
+                "investigation_graph":{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}}})
+
+            with patch.dict("sys.modules",{"romulus.agent.ollama":fake_ollama}):
+                engine._plan(state); engine._collect_host(state); engine._collect_network(state)
+                engine._discover(state)
+
+            self.assertFalse(any(item.get("tool")=="ollama.api.chat" for item in state["tool_runs"]))
+            self.assertEqual(state["tool_calls"],3)
+            self.assertEqual(len(elasticsearch.calls),1)
+            self.assertTrue(any(item.get("reasoning_stage")=="scheduled_discovery_search"
+                for item in state["tool_runs"]))
+
     def test_discovery_drain_executes_host_and_network_before_repeating_family(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             engine, state, _ = self._prepared(Path(directory))
@@ -335,6 +401,103 @@ class SchedulerDiscoveryWorkflowTests(unittest.TestCase):
                 {item["source_family"] for item in state["search_outcomes"][:2]},
                 {"host", "network"},
             )
+
+    def test_elasticsearch_network_index_gets_a_discovery_task_without_arkime_or_pcap(self):
+        from romulus.investigation.scheduler import register_search_task
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            engine = _engine(root)
+            engine.settings = replace(engine.settings, arkime_username="", arkime_password="", pcap_files=())
+            _configure_discovery_catalogs(engine)
+            state = _discovery_state()
+            state["es_indices"] = ["host-events", "logs-suricata-events"]
+            state["es_indices_by_class"] = {"host": ["host-events"], "network": ["logs-suricata-events"]}
+            state["es_fields_by_class"]["network"] = [
+                "@timestamp", "source.ip", "destination.ip", "source.port", "destination.port",
+            ]
+            state["es_fields"] = sorted(set(
+                state["es_fields_by_class"]["host"] + state["es_fields_by_class"]["network"]
+            ))
+
+            engine._register_discovery_tasks(state)
+
+            network_tasks = [task for task in state["search_tasks"].values()
+                if task["phase"] == "discovery" and task["source_family"] == "network"]
+            self.assertEqual(len(network_tasks), 1)
+            self.assertEqual(network_tasks[0]["source"], "elasticsearch")
+            self.assertEqual(network_tasks[0]["source_targets"], ["logs-suricata-events"])
+
+            proposals=engine._compile_investigation_proposals(state,{
+                "source":"elasticsearch","index_class":"network","intent":"Pivot on a network address",
+                "fields":["source.ip"],"ips":["10.0.0.8"],
+            },"coverage_frontier")
+            self.assertEqual(proposals[0]["source_targets"],["logs-suricata-events"])
+            class NetworkElasticsearch(_RecordingElasticsearch):
+                def search_many(self,indices,query,size):
+                    self.order.append("network"); self.calls.append((indices,query,size))
+                    return {"hits":[{"_index":"logs-suricata-events","_id":"net-1",
+                        "@timestamp":"2024-11-13T11:00:00Z","source":{"ip":"10.0.0.8"},
+                        "destination":{"ip":"10.0.0.9"}}],"total":1,"capped":False,
+                        "timed_out":False,"shard_failures":0}
+            order=[]; elasticsearch=NetworkElasticsearch(order); engine.es=elasticsearch
+            register_search_task(state,proposals[0])
+            engine._drain_scheduled_tasks(state,phase="investigation")
+            self.assertEqual(elasticsearch.calls[0][0],["logs-suricata-events"])
+            self.assertEqual(len(state["network"]),1)
+            self.assertEqual(state["host"],[])
+
+    def test_network_only_elasticsearch_mapping_does_not_claim_host_coverage(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); engine.settings=replace(engine.settings,
+                arkime_username="",arkime_password="",pcap_files=())
+            _configure_discovery_catalogs(engine)
+            state=_discovery_state(); state.update({
+                "es_indices":["logs-suricata-events"],
+                "es_indices_by_class":{"network":["logs-suricata-events"]},
+                "es_fields":["@timestamp","source.ip","destination.ip"],
+                "es_fields_by_class":{"network":["@timestamp","source.ip","destination.ip"]},
+                "hypotheses":[{"hypothesis_id":"H-HOST","technique_id":"T1059",
+                    "title":"Host command execution","priority":4,"expected_host":["process"],
+                    "expected_network":[],"status":"not assessed"}],
+            })
+
+            engine._register_discovery_tasks(state)
+
+            tasks=list(state["search_tasks"].values())
+            self.assertFalse(any(task["source_family"]=="host" for task in tasks))
+            self.assertTrue(any(task["source_family"]=="network" for task in tasks))
+            self.assertFalse(state["source_health"]["host"])
+
+            engine._analyze(state)
+            ledger=state["coverage"]["hypothesis_coverage"]
+            self.assertEqual(ledger["rows"][0]["telemetry_gaps"],["host telemetry unavailable"])
+
+    def test_repeated_registration_reuses_one_materialized_relative_window(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            engine = _engine(root)
+            engine.settings = replace(engine.settings, historical_search=False,
+                arkime_username="", arkime_password="", pcap_files=())
+            _configure_discovery_catalogs(engine)
+            state = _discovery_state()
+            state["objective"] = "Conduct a broad threat hunt"
+            first = {"gte": "2026-10-11T12:00:00+00:00", "lte": "2026-10-12T12:00:00+00:00"}
+            second = {"gte": "2026-10-11T12:00:01+00:00", "lte": "2026-10-12T12:00:01+00:00"}
+
+            with patch("romulus.investigation.workflow._materialize_time_range", side_effect=[first, second]) as materialize:
+                engine._register_discovery_tasks(state)
+                task_count = len(state["search_tasks"])
+                engine._register_discovery_tasks(state)
+                first_effective, first_scope = engine._effective_task_window(state, {})
+                second_effective, second_scope = engine._effective_task_window(state, {})
+
+            self.assertEqual(materialize.call_count, 1)
+            self.assertEqual(len(state["search_tasks"]), task_count)
+            self.assertEqual(first_effective, second_effective)
+            self.assertEqual(first_scope, second_scope)
 
     def test_duplicate_origins_execute_once_and_preserve_both_owners(self):
         from romulus.investigation.scheduler import register_search_task
@@ -448,6 +611,31 @@ class SchedulerDiscoveryWorkflowTests(unittest.TestCase):
                 any(item.get("event") == "discovery_budget_gap" for item in state["scheduler_history"])
             )
 
+    def test_report_terminalizes_every_unrun_task_without_remote_calls(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state,_=self._prepared(Path(directory))
+            engine.settings=replace(engine.settings,max_tool_calls=1)
+            order=[]; engine.es=_RecordingElasticsearch(order); engine.arkime=_RecordingArkime(order)
+            engine.tshark=_RecordingTShark(order)
+            engine._register_discovery_tasks(state)
+            engine._drain_scheduled_tasks(state,phase="discovery")
+            remote_calls=len(order); used_calls=state["tool_calls"]
+            registered=set(state["search_tasks"])
+
+            with patch("romulus.reporting.report.generate_report",return_value=[]):
+                engine._report(state)
+
+            self.assertEqual(len(order),remote_calls)
+            self.assertEqual(state["tool_calls"],used_calls)
+            self.assertEqual(state["search_queue"],[])
+            outcomes={item["task_id"]:item for item in state["search_outcomes"]}
+            self.assertEqual(set(outcomes),registered)
+            unrun=[item for item in outcomes.values() if item["status"]=="budget_limited"]
+            self.assertTrue(unrun)
+            self.assertTrue(all(item["attempt_count"]==0 for item in unrun))
+
 
 def _investigation_state():
     state = _discovery_state()
@@ -536,6 +724,65 @@ def _investigation_state():
 
 
 class SchedulerInvestigationWorkflowTests(unittest.TestCase):
+    def test_late_model_owner_receives_an_already_terminal_task_outcome(self):
+        from romulus.investigation.scheduler import register_search_task
+        from romulus.investigation.search_planner import expand_anchor_selectors
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); state=_investigation_state(); state["lead_catalog"]=[]
+            order=[]; engine.es=_RecordingElasticsearch(order)
+            base={"source":"elasticsearch","hypothesis_id":"H-CANDIDATE",
+                "intent":"Check exact anchored process context","fields":["process.name"],
+                "terms":["powershell.exe"],"anchor_evidence_ids":["EV-ANCHOR"]}
+            expanded=expand_anchor_selectors(base,state["host"])
+            proposal=engine._compile_investigation_proposals(state,expanded,"coverage_frontier")[0]
+            task_id,_=register_search_task(state,proposal)
+            engine._pivot(state)
+            self.assertEqual(state["candidate_leads"][0]["follow_ups"][0]["status"],"pending")
+
+            model={**base,"candidate_id":"CL-CRITICAL","follow_up_id":"FU-CRITICAL"}
+            accepted=engine._register_model_searches(state,[model],"iterative")
+
+            self.assertEqual(accepted[0]["task_id"],task_id)
+            follow_up=state["candidate_leads"][0]["follow_ups"][0]
+            self.assertEqual(follow_up["status"],"completed")
+            self.assertEqual(follow_up["history"][-1]["task_id"],task_id)
+            self.assertEqual(len(order),1)
+
+    def test_initial_model_planning_cannot_spend_the_last_call_before_queued_work(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); engine.use_ollama=True
+            engine.settings=replace(engine.settings,max_tool_calls=5)
+            state=_investigation_state(); state["mission_mode"]="directed"; state["tool_calls"]=4
+
+            registered=engine._register_directed_initial_tasks(state)
+
+            self.assertTrue(registered)
+            self.assertFalse(any(item.get("tool")=="ollama.api.chat" for item in state["tool_runs"]))
+            self.assertEqual(state["coverage"]["model_initial_search_plan"]["status"],
+                "deferred: execution capacity reserved for queued searches")
+
+    def test_initial_model_planning_defers_for_a_possible_multipage_arkime_task(self):
+        from romulus.investigation.scheduler import register_search_task
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); engine.use_ollama=True
+            engine.settings=replace(engine.settings,max_tool_calls=6,arkime_max_results=3000)
+            state=_investigation_state(); state.update({"mission_mode":"directed","tool_calls":4,
+                "lead_catalog":[]})
+            register_search_task(state,{"source":"arkime","source_family":"network",
+                "source_targets":[engine.settings.arkime_url],"phase":"investigation",
+                "origin":"directed_survey","intent":"Review a bounded Arkime result set",
+                "query_spec":{"expression":"protocols == tcp","cap":3000},
+                "time_range":{"start":"2024-11-13T10:58:00Z","end":"2024-11-13T11:10:00Z"}})
+
+            engine._register_directed_initial_tasks(state)
+
+            self.assertFalse(any(item.get("tool")=="ollama.api.chat" for item in state["tool_runs"]))
+            plan=state["coverage"]["model_initial_search_plan"]
+            self.assertEqual(plan["status"],"deferred: execution capacity reserved for queued searches")
+            self.assertEqual(plan["remaining_tool_calls"],2)
+
     def test_candidate_model_and_coverage_share_fixed_priority_queue(self):
         from romulus.investigation.scheduler import select_search_tasks
 
@@ -562,9 +809,12 @@ class SchedulerInvestigationWorkflowTests(unittest.TestCase):
             self.assertTrue(accepted)
             self.assertEqual(selected[0]["origin"], "candidate_follow_up")
             model_task = next(item for item in selected if item["origin"] == "model_proposal")
-            coverage_task = next(item for item in selected if item["origin"] == "coverage_frontier")
+            merged_task = selected[0]
+            self.assertEqual(merged_task["origins"], ["candidate_follow_up", "coverage_frontier"])
+            self.assertEqual(set(merged_task["hypothesis_ids"]), {"H-CANDIDATE", "H-COVERAGE"})
+            self.assertEqual(merged_task["priority_tier"], 1)
             self.assertEqual(model_task["priority_tier"], 3)
-            self.assertLess(selected.index(model_task), selected.index(coverage_task))
+            self.assertLess(selected.index(merged_task), selected.index(model_task))
 
     def test_model_search_with_invisible_candidate_or_evidence_is_rejected(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
@@ -657,6 +907,32 @@ class SchedulerInvestigationWorkflowTests(unittest.TestCase):
 
 
 class SchedulerExecutionAdditionalTests(unittest.TestCase):
+    def test_pending_legacy_lead_is_compiled_before_execution(self):
+        from romulus.investigation.scheduler import migrate_legacy_search_state
+
+        class Elasticsearch:
+            def __init__(self): self.calls=[]
+            def search_many(self,indices,query,size):
+                self.calls.append((indices,query,size))
+                return {"hits":[],"total":0,"capped":False,"timed_out":False,"shard_failures":0}
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); elasticsearch=Elasticsearch(); engine.es=elasticsearch
+            state=_state()
+            state.update({"completed_leads":[],"hypotheses":[{"hypothesis_id":"H-LEGACY"}],
+                "lead_catalog":[{"id":"C-LEGACY","source":"host","intent":"Find rundll32 execution",
+                    "terms":["rundll32"],"hypothesis_id":"H-LEGACY"}]})
+
+            migrate_legacy_search_state(state,compile_pending=lambda lead:
+                engine._compile_investigation_proposals(state,lead,"coverage_frontier"))
+            engine._drain_scheduled_tasks(state,phase="investigation")
+
+            self.assertEqual(len(elasticsearch.calls),1)
+            task=next(iter(state["search_tasks"].values()))
+            self.assertIn("query",task["query_spec"])
+            self.assertEqual(task["legacy_lead_id"],"C-LEGACY")
+            self.assertEqual(state["search_outcomes"][0]["status"],"completed")
+
     def test_arkime_task_uses_bounded_expression_and_adds_network_evidence(self):
         class Arkime:
             def __init__(self):

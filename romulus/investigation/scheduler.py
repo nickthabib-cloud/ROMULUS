@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -115,12 +115,36 @@ def _required_list_text(value: Any, field: str) -> str:
 
 def _fingerprint_payload(proposal: Mapping[str, Any]) -> dict[str, Any]:
     execution = _validated_execution(proposal)
+    time_range = execution["time_range"]
+    start = time_range.get("start", time_range.get("gte"))
+    end = time_range.get("end", time_range.get("lte"))
+    if (start is None) != (end is None):
+        raise ValueError("search task time range requires both start and end bounds")
+    if start is None:
+        effective_time = {"unbounded": True}
+    else:
+        def canonical(value: Any, field: str) -> tuple[datetime, str]:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"search task time range {field} must be an ISO-8601 string")
+            try:
+                parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"search task time range {field} is not valid ISO-8601") from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            utc = parsed.astimezone(timezone.utc)
+            return utc, utc.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+        start_value, canonical_start = canonical(start, "start")
+        end_value, canonical_end = canonical(end, "end")
+        if start_value > end_value:
+            raise ValueError("search task time range is reversed")
+        effective_time = {"start": canonical_start, "end": canonical_end}
     return {
         "source": execution["source"],
-        "source_family": execution["source_family"],
         "source_targets": execution["source_targets"],
         "query_spec": execution["query_spec"],
-        "time_range": execution["time_range"],
+        "time_range": effective_time,
     }
 
 
@@ -491,6 +515,44 @@ def record_search_outcome(
     return copy.deepcopy(normalized)
 
 
+def record_unexecuted_outcome(
+    state: MutableMapping[str, Any],
+    task_id: str,
+    *,
+    reason: str,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Terminalize queued work without pretending a source call was attempted."""
+
+    initialize_scheduler(state)
+    task = state["search_tasks"].get(task_id)
+    if task is None:
+        raise KeyError(f"unknown search task: {task_id}")
+    if task.get("status") in _TERMINAL_STATUSES:
+        prior = next((item for item in reversed(state["search_outcomes"])
+            if item.get("task_id") == task_id), None)
+        if prior is None:
+            raise ValueError(f"terminal search task {task_id} has no recorded outcome")
+        return copy.deepcopy(prior)
+    if task.get("status") not in {"queued", "interrupted"}:
+        raise ValueError(f"search task {task_id} cannot be finalized from {task.get('status')}")
+    normalized = _normalized_outcome(task, {
+        "status": "budget_limited",
+        "reason": str(reason or "resource_limit")[:300],
+        "matched_total": None,
+        "returned_total": None,
+        "incomplete": True,
+        "time_range": task.get("time_range", {}),
+    }, _timestamp(now))
+    _append_outcome(state, normalized)
+    task["status"] = normalized["status"]
+    task["last_outcome_id"] = normalized["outcome_id"]
+    state["search_queue"] = [queued for queued in state["search_queue"] if queued != task_id]
+    _append_history(state, {"event": "task_not_executed", "task_id": task_id,
+        "status": "budget_limited", "reason": normalized.get("reason")})
+    return copy.deepcopy(normalized)
+
+
 def recover_interrupted_tasks(state: MutableMapping[str, Any]) -> list[str]:
     """Requeue a persisted running task once, then stop rather than loop."""
 
@@ -609,7 +671,11 @@ def _legacy_proposal(state: Mapping[str, Any], lead: Mapping[str, Any]) -> dict[
     }
 
 
-def migrate_legacy_search_state(state: MutableMapping[str, Any]) -> None:
+def migrate_legacy_search_state(
+    state: MutableMapping[str, Any],
+    *,
+    compile_pending: Callable[[Mapping[str, Any]], list[Mapping[str, Any]]] | None = None,
+) -> None:
     """Convert legacy attempted-lead markers into conservative terminal outcomes."""
 
     initialize_scheduler(state)
@@ -622,13 +688,33 @@ def migrate_legacy_search_state(state: MutableMapping[str, Any]) -> None:
         if isinstance(item, Mapping) and item.get("id")
     }
     results = _legacy_result_by_id(state)
-    for legacy_id in sorted(completed):
-        lead = leads.get(legacy_id)
-        if lead is None:
-            lead = {"id": legacy_id, "source": "host", "intent": "unknown legacy search"}
+    for legacy_id in sorted(set(leads) | completed):
+        lead = leads.get(legacy_id) or {
+            "id": legacy_id, "source": "host", "intent": "unknown legacy search"
+        }
+        if legacy_id not in completed and compile_pending is not None:
+            try:
+                proposals = compile_pending(lead)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                proposals = []
+            if proposals:
+                for proposal in proposals:
+                    task_id, _ = register_search_task(state, proposal)
+                    state["search_tasks"][task_id]["legacy_lead_id"] = legacy_id
+                continue
         task_id, _ = register_search_task(state, _legacy_proposal(state, lead))
         task = state["search_tasks"][task_id]
         task["legacy_lead_id"] = legacy_id
+        if legacy_id not in completed:
+            begin_search_task(state, task_id)
+            record_search_outcome(state, task_id, {
+                "status": "skipped",
+                "reason": "legacy_pending_not_executable",
+                "matched_total": None,
+                "returned_total": None,
+                "incomplete": True,
+            })
+            continue
         if task.get("status") in _TERMINAL_STATUSES:
             continue
         begin_search_task(state, task_id)
@@ -652,7 +738,17 @@ def migrate_legacy_search_state(state: MutableMapping[str, Any]) -> None:
             else:
                 status = "completed"
             returned = legacy_result.get("returned_total", legacy_result.get("returned", 0))
-            matched = legacy_result.get("matched_total", returned)
+            matched = legacy_result.get("matched_total")
+            completeness_known=(isinstance(matched,int) and not isinstance(matched,bool)
+                and all(key in legacy_result for key in ("capped","timed_out","shard_failures")))
+            reason="legacy_result_migrated"
+            incomplete=False
+            if status=="completed" and (not completeness_known or legacy_result.get("timed_out")
+                    or legacy_result.get("shard_failures")):
+                status="partial"
+                reason=("legacy_completeness_unknown" if not completeness_known
+                    else "legacy_result_incomplete")
+                incomplete=True
             normalized = {
                 "status": status,
                 "matched_total": matched,
@@ -660,7 +756,8 @@ def migrate_legacy_search_state(state: MutableMapping[str, Any]) -> None:
                 "capped": bool(legacy_result.get("capped", False)),
                 "timed_out": bool(legacy_result.get("timed_out", False)),
                 "shard_failures": legacy_result.get("shard_failures", 0),
-                "reason": "legacy_result_migrated",
+                "incomplete": incomplete,
+                "reason": reason,
             }
         record_search_outcome(state, task_id, normalized)
     state["scheduler_migration_version"] = 1

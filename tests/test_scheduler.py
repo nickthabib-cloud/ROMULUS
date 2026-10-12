@@ -1,6 +1,10 @@
 import copy
 import json
+import tempfile
 import unittest
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
 
 
 def _proposal(**overrides):
@@ -118,6 +122,66 @@ class SchedulerRegistrationTests(unittest.TestCase):
         self.assertTrue(all(created for _, created in registrations))
         self.assertEqual(len({task_id for task_id, _ in registrations}), 4)
         self.assertEqual(len(state["search_queue"]), 4)
+
+    def test_nonexecuting_family_and_scope_labels_do_not_defeat_deduplication(self):
+        from romulus.investigation.scheduler import register_search_task
+
+        state = {}
+        first = _proposal(time_range={
+            "start": "2024-11-13T10:58:00-05:00",
+            "end": "2024-11-13T11:10:00-05:00",
+            "scope": "operator mission window",
+        })
+        duplicate = _proposal(
+            source_family="network",
+            origin="coverage_frontier",
+            time_range={
+                "scope": "same fixed UTC-compatible bounds described differently",
+                "end": "2024-11-13T11:10:00-05:00",
+                "start": "2024-11-13T10:58:00-05:00",
+            },
+        )
+
+        first_id, first_created = register_search_task(state, first)
+        duplicate_id, duplicate_created = register_search_task(state, duplicate)
+
+        self.assertTrue(first_created)
+        self.assertFalse(duplicate_created)
+        self.assertEqual(duplicate_id, first_id)
+        self.assertEqual(len(state["search_tasks"]), 1)
+
+    def test_equivalent_timezone_bounds_share_one_execution_fingerprint(self):
+        from romulus.investigation.scheduler import register_search_task
+
+        state = {}
+        first = _proposal(time_range={
+            "start": "2024-11-13T10:58:00-05:00",
+            "end": "2024-11-13T11:10:00-05:00",
+        })
+        duplicate = _proposal(time_range={
+            "start": "2024-11-13T15:58:00Z",
+            "end": "2024-11-13T16:10:00Z",
+        })
+
+        first_id, first_created = register_search_task(state, first)
+        duplicate_id, duplicate_created = register_search_task(state, duplicate)
+
+        self.assertTrue(first_created)
+        self.assertFalse(duplicate_created)
+        self.assertEqual(duplicate_id, first_id)
+
+    def test_invalid_or_half_bounded_time_ranges_are_rejected(self):
+        from romulus.investigation.scheduler import register_search_task
+
+        for time_range in (
+            {"start": "2024-11-13T10:58:00Z"},
+            {"end": "2024-11-13T11:10:00Z"},
+            {"start": "not-a-time", "end": "2024-11-13T11:10:00Z"},
+            {"start": "2024-11-13T11:10:00Z", "end": "2024-11-13T10:58:00Z"},
+        ):
+            with self.subTest(time_range=time_range):
+                with self.assertRaises(ValueError):
+                    register_search_task({}, _proposal(time_range=time_range))
 
     def test_model_origin_cannot_raise_deterministic_priority(self):
         from romulus.investigation.scheduler import register_search_task
@@ -413,7 +477,7 @@ class SchedulerOutcomeTests(unittest.TestCase):
         )
 
         state = {
-            "completed_leads": ["C-H-001", "C-N-002"],
+            "completed_leads": ["C-H-001", "C-N-002", "C-U-003", "C-T-005"],
             "lead_catalog": [
                 {
                     "id": "C-H-001",
@@ -429,6 +493,27 @@ class SchedulerOutcomeTests(unittest.TestCase):
                     "ips": ["10.0.0.8"],
                     "hypothesis_id": "H-002",
                 },
+                {
+                    "id": "C-U-003",
+                    "source": "host",
+                    "intent": "legacy search with unknown completeness",
+                    "terms": ["cmd"],
+                    "hypothesis_id": "H-003",
+                },
+                {
+                    "id": "C-P-004",
+                    "source": "host",
+                    "intent": "pending legacy search",
+                    "terms": ["rundll32"],
+                    "hypothesis_id": "H-004",
+                },
+                {
+                    "id": "C-T-005",
+                    "source": "host",
+                    "intent": "legacy timed-out search",
+                    "terms": ["wmic"],
+                    "hypothesis_id": "H-005",
+                },
             ],
             "pivot_results": [
                 {
@@ -437,30 +522,167 @@ class SchedulerOutcomeTests(unittest.TestCase):
                     "returned": 0,
                     "matched_total": 0,
                     "capped": False,
-                }
+                    "timed_out": False,
+                    "shard_failures": 0,
+                },
+                {
+                    "lead_id": "C-U-003",
+                    "status": "searched",
+                    "returned": 0,
+                    "capped": False,
+                },
+                {
+                    "lead_id": "C-T-005",
+                    "status": "searched",
+                    "returned": 0,
+                    "matched_total": 0,
+                    "capped": False,
+                    "timed_out": True,
+                    "shard_failures": 0,
+                },
             ],
             "coverage": {"model_search_results": []},
             "es_indices": ["logs-endpoint-*"],
         }
 
-        migrate_legacy_search_state(state)
+        def compile_pending(lead):
+            return [_proposal(
+                origin="coverage_frontier",
+                intent=lead["intent"],
+                hypothesis_ids=[lead["hypothesis_id"]],
+                query_spec={"query":{"term":{"process.name":lead["terms"][0]}}},
+            )]
+
+        migrate_legacy_search_state(state, compile_pending=compile_pending)
 
         by_legacy_id = {
             task["legacy_lead_id"]: task for task in state["search_tasks"].values()
         }
         completed = by_legacy_id["C-H-001"]
         unknown = by_legacy_id["C-N-002"]
+        unknown_completeness = by_legacy_id["C-U-003"]
+        timed_out = by_legacy_id["C-T-005"]
+        pending = by_legacy_id["C-P-004"]
         completed_outcome = next(
             item for item in state["search_outcomes"] if item["task_id"] == completed["task_id"]
         )
         unknown_outcome = next(
             item for item in state["search_outcomes"] if item["task_id"] == unknown["task_id"]
         )
+        unknown_completeness_outcome = next(item for item in state["search_outcomes"]
+            if item["task_id"] == unknown_completeness["task_id"])
+        timed_out_outcome = next(item for item in state["search_outcomes"]
+            if item["task_id"] == timed_out["task_id"])
         self.assertTrue(outcome_resolves(completed_outcome))
         self.assertEqual(unknown["status"], "skipped")
         self.assertEqual(unknown_outcome["reason"], "legacy_attempt_unknown")
         self.assertFalse(outcome_resolves(unknown_outcome))
-        self.assertEqual(select_search_tasks(state, phase="investigation", limit=10), [])
+        self.assertEqual(unknown_completeness_outcome["reason"], "legacy_completeness_unknown")
+        self.assertFalse(outcome_resolves(unknown_completeness_outcome))
+        self.assertEqual(timed_out_outcome["status"],"partial")
+        self.assertTrue(timed_out_outcome["incomplete"])
+        self.assertFalse(outcome_resolves(timed_out_outcome))
+        self.assertEqual(pending["status"], "queued")
+        self.assertEqual([item["task_id"] for item in
+            select_search_tasks(state, phase="investigation", limit=10)], [pending["task_id"]])
+
+
+class SchedulerResumeIntegrationTests(unittest.TestCase):
+    def test_real_sqlite_graph_resume_retries_running_task_once(self):
+        try:
+            import langgraph  # noqa: F401
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("Install requirements.txt for the real LangGraph/SQLite resume check")
+
+        from romulus.config import Settings
+        from romulus.investigation.scheduler import (begin_search_task, record_search_outcome,
+            register_search_task)
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root=Path(directory)
+            settings=replace(Settings.from_env(),home=root,data_dir=root/"data",logs_dir=root/"logs",
+                reports_dir=root/"reports",retention_policy="full",max_depth=1,
+                min_reasoning_rounds=0,max_tool_calls=20)
+            store=Store(settings.data_dir,settings.logs_dir)
+            engine=HuntEngine(settings,store,offline=True,use_ollama=False)
+            normal_graph=engine._graph
+            with patch.object(engine,"_graph",side_effect=lambda:normal_graph(interrupt_before=["pivot"])):
+                interrupted=engine.run("Hunt SMB lateral movement",hunt_id="HUNT-REAL-RESUME")
+
+            config={"configurable":{"thread_id":interrupted["hunt_id"]},"recursion_limit":100}
+            app,connection=normal_graph()
+            try:
+                snapshot=app.get_state(config)
+                self.assertIn("pivot",snapshot.next)
+                checkpoint=copy.deepcopy(snapshot.values)
+                running_id=checkpoint["search_queue"][0]
+                begin_search_task(checkpoint,running_id,now="2026-10-12T10:00:00Z")
+                terminal_id,_=register_search_task(checkpoint,_proposal(
+                    source_targets=["offline-synthetic"],
+                    query_spec={"query":{"term":{"case":"already-terminal"}},"size":1},
+                    time_range={"scope":"synthetic fixture timestamps"},
+                ))
+                begin_search_task(checkpoint,terminal_id,now="2026-10-12T10:00:01Z")
+                record_search_outcome(checkpoint,terminal_id,{"status":"completed","matched_total":0,
+                    "returned_total":0,"capped":False,"timed_out":False,"shard_failures":0},
+                    now="2026-10-12T10:00:02Z")
+                app.update_state(config,checkpoint)
+                store.save_state(checkpoint["hunt_id"],checkpoint)
+            finally:
+                connection.close()
+
+            resumed=engine.resume(checkpoint["hunt_id"])
+
+            self.assertEqual(resumed["search_tasks"][running_id]["attempt_count"],2)
+            self.assertEqual(resumed["search_tasks"][running_id]["interruption_count"],1)
+            self.assertEqual(resumed["search_tasks"][running_id]["status"],"completed")
+            self.assertEqual(resumed["search_tasks"][terminal_id]["attempt_count"],1)
+            terminal_outcomes=[item for item in resumed["search_outcomes"]
+                if item["task_id"]==terminal_id and item["status"]=="completed"]
+            self.assertEqual(len(terminal_outcomes),1)
+
+    def test_resume_migrates_and_recovers_before_checkpoint_execution(self):
+        from romulus.config import Settings
+        from romulus.investigation.scheduler import begin_search_task, register_search_task
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root=Path(directory)
+            settings=replace(Settings.from_env(),home=root,data_dir=root/"data",logs_dir=root/"logs",
+                reports_dir=root/"reports",retention_policy="full")
+            store=Store(settings.data_dir,settings.logs_dir)
+            state={"hunt_id":"HUNT-RESUME","objective":"Hunt PowerShell","status":"partial",
+                "started_epoch":0,"completed_leads":[],"lead_catalog":[],"coverage":{}}
+            first_id,_=register_search_task(state,_proposal(query_spec={"query":{"term":{"case":"first"}}}))
+            second_id,_=register_search_task(state,_proposal(query_spec={"query":{"term":{"case":"second"}}}))
+            begin_search_task(state,first_id,now="2026-10-12T10:00:00Z")
+            store.save_state(state["hunt_id"],state)
+
+            class Snapshot:
+                next=("pivot",)
+            class Connection:
+                def close(self): pass
+            class App:
+                def __init__(self): self.updated=None
+                def get_state(self,config): return Snapshot()
+                def update_state(self,config,value): self.updated=copy.deepcopy(value)
+                def invoke(self,value,config=None):
+                    self_test.assertIsNone(value)
+                    self_test.assertEqual(self.updated["scheduler_migration_version"],1)
+                    self_test.assertEqual(self.updated["search_queue"],[second_id,first_id])
+                    self_test.assertEqual(self.updated["search_tasks"][first_id]["status"],"interrupted")
+                    return copy.deepcopy(self.updated)
+            self_test=self; app=App(); engine=HuntEngine(settings,store,use_ollama=False)
+            with patch.object(engine,"_graph",return_value=(app,Connection())), \
+                    patch("romulus.retention.apply_retention",side_effect=lambda store,state,**kwargs:state):
+                result=engine.run(state["objective"],hunt_id=state["hunt_id"],_resume=True)
+
+            self.assertEqual(result["scheduler_migration_version"],1)
+            self.assertTrue(result["search_outcomes"][-1]["possible_duplicate_execution"])
 
 
 if __name__ == "__main__":

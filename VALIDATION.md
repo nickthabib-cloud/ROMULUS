@@ -2,6 +2,33 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-12 — unified search scheduler (validation in progress)
+
+### Implemented behavior
+
+- Every evidence search now enters one persisted task registry and queue. Exact source/target/query/window fingerprints merge duplicate origins and owners without treating registration as completion.
+- Discovery scheduling reserves capacity across healthy host and network telemetry families. Investigation ordering is code-derived from candidate severity, grounding, and remaining coverage; model output cannot choose its tier.
+- Candidate follow-ups and hypothesis coverage consume the exact outcome of their named task. A confirmed uncapped zero-result search may resolve its bounded question; partial, capped, failed, skipped, interrupted, timed-out, or budget-limited work cannot produce closure.
+- Broad undirected hunts remain deterministic until telemetry produces a candidate. Grounded model searches must cite visible candidate/evidence IDs and still pass source grammar, field, time, and read-only validation.
+- Resume migrates legacy partial state before graph continuation. A task interrupted during read-only execution is requeued once with possible-duplicate disclosure and cannot enter an infinite retry loop.
+- The technical text report records bounded task ownership and exact outcome metadata without query bodies. The customer Word report omits scheduler internals. Compact retention removes full scheduler working state and retains only aggregate counts and unresolved/fairness gaps.
+
+### Local proof
+
+- Registration, ordering, fairness, authoritative-outcome, resume, reporting, retention, candidate, and workflow changes were developed with focused RED/GREEN tests. A dedicated regression proves report termination consults scheduler task status rather than the obsolete legacy lead queue.
+- A source-fairness review found that Elasticsearch network indices were marked healthy without receiving an initial network task when Arkime/PCAP were absent. A failing regression reproduced the gap; deterministic network-index discovery and host-target scoping fixed it.
+- Exact-execution review also found that source-family and scope-description labels could create two tasks for the same source/targets/query/fixed bounds. A failing regression reproduced it; fingerprint identity now excludes those nonexecuting labels.
+- Resume review found that rolling mission windows could be rematerialized across registrations and that legacy migration omitted pending leads or treated completeness-unknown zero rows as resolving. Strengthened failing tests now prove one persisted absolute window, queued pending legacy work, and nonresolving completeness-unknown attempts.
+- Whole-branch review also found inconsistent mapping-based source classification, timezone-equivalent fingerprint duplication, nonexecutable pending legacy tasks, late-owner outcome loss, model-call priority inversions, and queued work without terminal outcomes. Each finding received a failing regression before its fix. Network-only Elasticsearch is now reported honestly, pre-telemetry model calls are eliminated, queued source searches outrank optional planning, and report finalization records every unrun task without contacting a source.
+- The complete local suite ran 127 tests successfully, with six expected checks skipped for LangGraph/SQLite resume, Arkime/Ollama adapters, and full offline-graph execution on the development VM.
+- `python -m compileall -q romulus tests` and `git diff --check` both completed successfully.
+- The local runtime cannot honestly complete the dependency-backed end-to-end offline proof. That proof, the full no-skip VM suite, `doctor`, a bounded isolated read-only live hunt, and the post-hunt AttackMate comparison remain open gates; no result is inferred here.
+
+### Holdout isolation
+
+- The external `attack_log.json` and `attackmate.json` files remain outside the repository and runtime. They have not been used to alter prompts, analytics, selectors, fixtures, or scheduler priority.
+- They will be read only after the generic VM hunt and report are closed, then used as a post-hunt oracle for supported matches, unsupported claims, observable misses, and unavailable telemetry. Commands and sensitive values will not be copied into the repository.
+
 ## 2026-10-12 — cited attack paths and safe retention
 
 ### Implemented behavior
