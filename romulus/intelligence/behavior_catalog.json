@@ -73,7 +73,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "temp_execution"
     },
     {
       "id": "BH-XPLAT-002",
@@ -142,7 +143,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-XPLAT-002"
     },
     {
       "id": "BH-XPLAT-003",
@@ -210,7 +212,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-XPLAT-003"
     },
     {
       "id": "BH-XPLAT-004",
@@ -283,7 +286,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "unexpected_parent_shell"
     },
     {
       "id": "BH-XPLAT-005",
@@ -352,7 +356,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-XPLAT-005"
     },
     {
       "id": "BH-XPLAT-006",
@@ -414,7 +419,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-XPLAT-006"
     },
     {
       "id": "BH-WIN-001",
@@ -431,15 +437,15 @@
       ],
       "source": "elasticsearch",
       "required_roles": [
-        "process.name"
+        "process.name",
+        "process.executable"
       ],
       "optional_roles": [
         "host.name",
         "user.name"
       ],
       "match": {
-        "all": [],
-        "any": [
+        "all": [
           {
             "role": "process.name",
             "operator": "equals_any",
@@ -453,7 +459,17 @@
             ]
           }
         ],
-        "none": []
+        "any": [],
+        "none": [
+          {
+            "role": "process.executable",
+            "operator": "path_prefix_any",
+            "values": [
+              "c:\\windows\\system32\\",
+              "c:\\windows\\syswow64\\"
+            ]
+          }
+        ]
       },
       "priority_tier": "medium",
       "base_priority": 66,
@@ -481,7 +497,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-001"
     },
     {
       "id": "BH-WIN-002",
@@ -497,15 +514,15 @@
       ],
       "source": "elasticsearch",
       "required_roles": [
-        "process.parent.name"
+        "process.parent.name",
+        "process.name"
       ],
       "optional_roles": [
         "host.name",
         "user.name"
       ],
       "match": {
-        "all": [],
-        "any": [
+        "all": [
           {
             "role": "process.parent.name",
             "operator": "contains_any",
@@ -515,8 +532,21 @@
               "powerpnt",
               "outlook"
             ]
+          },
+          {
+            "role": "process.name",
+            "operator": "ends_with_any",
+            "values": [
+              "cmd.exe",
+              "powershell.exe",
+              "pwsh.exe",
+              "wscript.exe",
+              "cscript.exe",
+              "mshta.exe"
+            ]
           }
         ],
+        "any": [],
         "none": []
       },
       "priority_tier": "medium",
@@ -546,7 +576,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "unexpected_parent_shell"
     },
     {
       "id": "BH-WIN-003",
@@ -562,15 +593,15 @@
       ],
       "source": "elasticsearch",
       "required_roles": [
-        "process.parent.name"
+        "process.parent.name",
+        "process.name"
       ],
       "optional_roles": [
         "host.name",
         "user.name"
       ],
       "match": {
-        "all": [],
-        "any": [
+        "all": [
           {
             "role": "process.parent.name",
             "operator": "contains_any",
@@ -582,8 +613,21 @@
               "acrord",
               "foxit"
             ]
+          },
+          {
+            "role": "process.name",
+            "operator": "ends_with_any",
+            "values": [
+              "cmd.exe",
+              "powershell.exe",
+              "pwsh.exe",
+              "wscript.exe",
+              "cscript.exe",
+              "mshta.exe"
+            ]
           }
         ],
+        "any": [],
         "none": []
       },
       "priority_tier": "medium",
@@ -613,7 +657,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "unexpected_parent_shell"
     },
     {
       "id": "BH-WIN-004",
@@ -681,7 +726,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-004"
     },
     {
       "id": "BH-WIN-005",
@@ -746,7 +792,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-005"
     },
     {
       "id": "BH-WIN-006",
@@ -810,7 +857,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-006"
     },
     {
       "id": "BH-WIN-007",
@@ -874,7 +922,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-007"
     },
     {
       "id": "BH-WIN-008",
@@ -940,7 +989,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-008"
     },
     {
       "id": "BH-WIN-009",
@@ -1004,7 +1054,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-009"
     },
     {
       "id": "BH-WIN-010",
@@ -1069,7 +1120,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-010"
     },
     {
       "id": "BH-WIN-011",
@@ -1132,7 +1184,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-011"
     },
     {
       "id": "BH-WIN-012",
@@ -1196,7 +1249,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-012"
     },
     {
       "id": "BH-WIN-013",
@@ -1261,7 +1315,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-013"
     },
     {
       "id": "BH-WIN-014",
@@ -1324,7 +1379,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-014"
     },
     {
       "id": "BH-WIN-015",
@@ -1388,7 +1444,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-015"
     },
     {
       "id": "BH-WIN-016",
@@ -1453,7 +1510,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-016"
     },
     {
       "id": "BH-WIN-017",
@@ -1515,7 +1573,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-017"
     },
     {
       "id": "BH-WIN-018",
@@ -1579,7 +1638,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-WIN-018"
     },
     {
       "id": "BH-LNX-001",
@@ -1645,7 +1705,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "temp_execution"
     },
     {
       "id": "BH-LNX-002",
@@ -1707,7 +1768,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-002"
     },
     {
       "id": "BH-LNX-003",
@@ -1773,7 +1835,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-003"
     },
     {
       "id": "BH-LNX-004",
@@ -1838,7 +1901,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-004"
     },
     {
       "id": "BH-LNX-005",
@@ -1854,15 +1918,15 @@
       ],
       "source": "elasticsearch",
       "required_roles": [
-        "process.parent.name"
+        "process.parent.name",
+        "process.name"
       ],
       "optional_roles": [
         "host.name",
         "user.name"
       ],
       "match": {
-        "all": [],
-        "any": [
+        "all": [
           {
             "role": "process.parent.name",
             "operator": "contains_any",
@@ -1876,8 +1940,19 @@
               "mysqld",
               "redis"
             ]
+          },
+          {
+            "role": "process.name",
+            "operator": "ends_with_any",
+            "values": [
+              "sh",
+              "bash",
+              "dash",
+              "zsh"
+            ]
           }
         ],
+        "any": [],
         "none": []
       },
       "priority_tier": "high",
@@ -1907,7 +1982,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "unexpected_parent_shell"
     },
     {
       "id": "BH-LNX-006",
@@ -1969,7 +2045,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-006"
     },
     {
       "id": "BH-LNX-007",
@@ -2032,7 +2109,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-007"
     },
     {
       "id": "BH-LNX-008",
@@ -2095,7 +2173,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-008"
     },
     {
       "id": "BH-LNX-009",
@@ -2159,7 +2238,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-009"
     },
     {
       "id": "BH-LNX-010",
@@ -2223,7 +2303,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-010"
     },
     {
       "id": "BH-LNX-011",
@@ -2285,7 +2366,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-011"
     },
     {
       "id": "BH-LNX-012",
@@ -2350,7 +2432,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-012"
     },
     {
       "id": "BH-LNX-013",
@@ -2414,7 +2497,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-013"
     },
     {
       "id": "BH-LNX-014",
@@ -2480,7 +2564,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-014"
     },
     {
       "id": "BH-LNX-015",
@@ -2545,7 +2630,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-015"
     },
     {
       "id": "BH-LNX-016",
@@ -2613,7 +2699,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-016"
     },
     {
       "id": "BH-LNX-017",
@@ -2679,7 +2766,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-017"
     },
     {
       "id": "BH-LNX-018",
@@ -2743,7 +2831,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-LNX-018"
     },
     {
       "id": "BH-AUTH-001",
@@ -2805,7 +2894,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-AUTH-001"
     },
     {
       "id": "BH-AUTH-002",
@@ -2868,7 +2958,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-AUTH-002"
     },
     {
       "id": "BH-AUTH-003",
@@ -2930,7 +3021,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-AUTH-003"
     },
     {
       "id": "BH-AUTH-004",
@@ -2993,7 +3085,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-AUTH-004"
     },
     {
       "id": "BH-NET-001",
@@ -3055,7 +3148,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-001"
     },
     {
       "id": "BH-NET-002",
@@ -3117,7 +3211,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-002"
     },
     {
       "id": "BH-NET-003",
@@ -3179,7 +3274,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-003"
     },
     {
       "id": "BH-NET-004",
@@ -3241,7 +3337,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-004"
     },
     {
       "id": "BH-NET-005",
@@ -3303,7 +3400,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-005"
     },
     {
       "id": "BH-NET-006",
@@ -3365,7 +3463,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-006"
     },
     {
       "id": "BH-NET-007",
@@ -3427,7 +3526,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-007"
     },
     {
       "id": "BH-NET-008",
@@ -3489,7 +3589,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-008"
     },
     {
       "id": "BH-NET-009",
@@ -3552,7 +3653,8 @@
           "url": "https://github.com/SigmaHQ/sigma"
         }
       ],
-      "review_date": "2026-10-12"
+      "review_date": "2026-10-12",
+      "corroboration_group": "BH-NET-009"
     }
   ]
 }

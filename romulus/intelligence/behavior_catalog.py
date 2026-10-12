@@ -7,7 +7,10 @@ sets when their fields can be resolved safely.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import ipaddress
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -238,3 +241,379 @@ def _parse_time(value: str, path: str) -> datetime:
 
 def _nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def compile_elasticsearch_seed(
+    analytic: dict[str, Any],
+    bindings: dict[str, list[str]],
+    timestamp_field: str,
+    time_range: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    """Compile a catalog entry into a bounded, validator-compatible ES query."""
+    match = analytic.get("match", {})
+    must = []
+    should = []
+    must_not = []
+    for predicate in match.get("all", []):
+        clause = _predicate_query(predicate, bindings)
+        if clause is not None:
+            must.append(clause)
+    for predicate in match.get("any", []):
+        clause = _predicate_query(predicate, bindings)
+        if clause is not None:
+            should.append(clause)
+    for predicate in match.get("none", []):
+        clause = _predicate_query(predicate, bindings)
+        if clause is not None:
+            must_not.append(clause)
+    if not must and not should:
+        return None
+    body: dict[str, Any] = {}
+    if must:
+        body["must"] = must
+    if should:
+        body["should"] = should
+        body["minimum_should_match"] = 1
+    if must_not:
+        body["must_not"] = must_not
+    if time_range:
+        body["filter"] = [{"range": {timestamp_field: dict(time_range)}}]
+    return {"bool": body}
+
+
+def build_candidate_queue(
+    evidence: list[dict[str, Any]],
+    catalog: dict[str, Any],
+    indicators: dict[str, Any],
+    analytic_summary: dict[str, Any] | None = None,
+    now: str | datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Match evidence and return a stable, explainable candidate queue."""
+    events = list(evidence) + _aggregate_events(analytic_summary or {})
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    matched_ids_by_asset: dict[str, set[str]] = {}
+    matched_groups_by_asset: dict[str, set[str]] = {}
+    analytics = [item for item in catalog.get("analytics", []) if item.get("enabled", True)]
+    for analytic in analytics:
+        for event in events:
+            if analytic.get("source") == "aggregate" and event.get("source") != "aggregate":
+                continue
+            if analytic.get("source") == "elasticsearch" and event.get("source") == "aggregate":
+                continue
+            if _analytic_matches(analytic, event):
+                asset = str(event.get("asset") or "unknown")
+                grouped.setdefault((analytic["id"], asset), []).append(event)
+                matched_ids_by_asset.setdefault(asset, set()).add(analytic["id"])
+                matched_groups_by_asset.setdefault(asset, set()).add(str(analytic.get("corroboration_group") or analytic["id"]))
+
+    candidates: list[dict[str, Any]] = []
+    for (analytic_id, asset), rows in grouped.items():
+        analytic = next(item for item in analytics if item["id"] == analytic_id)
+        independent = max(0, len(matched_groups_by_asset.get(asset, set())) - 1)
+        score = int(analytic["base_priority"]) + min(10, int(analytic["specificity"]) // 10)
+        reasons = [
+            f"base analytic priority {analytic['base_priority']}",
+            f"specificity contribution {min(10, int(analytic['specificity']) // 10)}",
+        ]
+        if len(rows) > 1:
+            repeat_bonus = min(9, (len(rows) - 1) * 3)
+            score += repeat_bonus
+            reasons.append(f"repeat observation contribution {repeat_bonus}")
+        if independent:
+            corroboration_bonus = min(30, independent * 15)
+            score += corroboration_bonus
+            reasons.append(f"independent behavior corroboration contribution {corroboration_bonus}")
+        score = min(100, score)
+        disposition = "corroborated" if score >= 70 and independent else "observed"
+        candidates.append(_behavior_candidate(analytic, asset, rows, score, disposition, reasons))
+
+    reference_time = _coerce_time(now) if now is not None else datetime.now(timezone.utc)
+    for indicator in indicators.get("indicators", []):
+        expires = indicator.get("expires_at")
+        if expires and _parse_time(expires, f"indicator {indicator.get('id')}.expires_at") <= reference_time:
+            continue
+        matched = [event for event in evidence if _indicator_matches(indicator, event)]
+        if not matched:
+            continue
+        by_asset: dict[str, list[dict[str, Any]]] = {}
+        for event in matched:
+            by_asset.setdefault(str(event.get("asset") or "unknown"), []).append(event)
+        for asset, rows in by_asset.items():
+            score = max(90, min(100, int(indicator.get("confidence", 0))))
+            identifier = str(indicator["id"])
+            candidates.append({
+                "candidate_id": _candidate_id("indicator", identifier, asset),
+                "kind": "trusted_indicator", "indicator_id": identifier,
+                "analytic_id": None, "title": f"Trusted indicator observed: {identifier}",
+                "description": f"An exact {indicator.get('type')} indicator supplied by {indicator.get('source')} was observed.",
+                "priority_score": score, "priority_tier": "critical",
+                "disposition": "observed", "customer_visible": True,
+                "evidence_ids": _evidence_ids(rows), "assets": [asset],
+                "first_observed": _observed_bounds(rows)[0], "last_observed": _observed_bounds(rows)[1],
+                "score_reasons": [
+                    f"trusted exact indicator confidence {indicator.get('confidence')}",
+                    "exact value match with current provenance",
+                ],
+                "attack_techniques": [], "benign_explanations": [],
+                "follow_up": ["Validate the indicator source and investigate the cited event and adjacent activity."],
+                "indicator_source": indicator.get("source"), "indicator_confidence": indicator.get("confidence"),
+                "indicator_type": indicator.get("type"), "indicator_value": indicator.get("value"),
+                "indicator_expires_at": indicator.get("expires_at"),
+            })
+    return sorted(
+        candidates,
+        key=lambda item: (
+            -int(item.get("priority_score", 0)),
+            0 if item.get("kind") == "trusted_indicator" else 1,
+            str(item.get("candidate_id")),
+        ),
+    )
+
+
+def customer_visible_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in candidates if item.get("customer_visible")]
+
+
+def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) -> dict[str, Any] | None:
+    fields = bindings.get(predicate.get("role"), [])
+    if not fields:
+        return None
+    operator = predicate.get("operator")
+    values = predicate.get("values", [])
+    clauses = []
+    for field in fields[:4]:
+        if operator == "exists":
+            clauses.append({"exists": {"field": field}})
+        elif operator == "equals_any":
+            clauses.append({"terms": {field: values[:20]}})
+        elif operator == "path_prefix_any":
+            clauses.extend({"prefix": {field: value}} for value in values[:12])
+        elif operator in {"contains_any", "ends_with_any"}:
+            clauses.extend({"match_phrase": {field: value}} for value in values[:12])
+        else:
+            continue
+    if not clauses:
+        return None
+    return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
+
+
+def _analytic_matches(analytic: dict[str, Any], event: dict[str, Any]) -> bool:
+    match = analytic.get("match", {})
+    all_results = [_predicate_matches(item, event) for item in match.get("all", [])]
+    any_results = [_predicate_matches(item, event) for item in match.get("any", [])]
+    none_results = [_predicate_matches(item, event) for item in match.get("none", [])]
+    return all(all_results) and (any(any_results) if any_results else True) and not any(none_results)
+
+
+def _predicate_matches(predicate: dict[str, Any], event: dict[str, Any]) -> bool:
+    role = str(predicate.get("role"))
+    operator = predicate.get("operator")
+    values = [str(value).lower() for value in predicate.get("values", [])]
+    observed = [value.lower() for value in _role_values(event, role)]
+    if operator == "exists":
+        return bool(observed)
+    if operator == "contains_any":
+        return any(needle in value for value in observed for needle in values)
+    if operator == "equals_any":
+        return any(value == needle for value in observed for needle in values)
+    if operator == "ends_with_any":
+        return any(value.endswith(needle) for value in observed for needle in values)
+    if operator == "path_prefix_any":
+        normalized_values = [_normalize_path(value) for value in values]
+        return any(_normalize_path(value).startswith(prefix) for value in observed for prefix in normalized_values)
+    if operator == "regex":
+        for pattern in predicate.get("values", []):
+            try:
+                if any(re.search(str(pattern), value, flags=re.IGNORECASE) for value in observed):
+                    return True
+            except re.error:
+                return False
+        return False
+    if operator == "lookalike_process":
+        paths = _role_values(event, "process.executable")
+        if not paths:
+            return False
+        for value in observed:
+            basename = _basename(value)
+            for expected in values:
+                if basename != expected and _edit_distance_at_most_one(basename, expected):
+                    return any(_basename(path).lower() == basename for path in paths)
+        return False
+    return False
+
+
+def _role_values(event: dict[str, Any], role: str) -> list[str]:
+    out: list[str] = []
+    for field in SEMANTIC_ROLE_ALIASES.get(role, ()):
+        value = _nested_value(event.get("raw", {}), field)
+        if value is None:
+            value = event.get("raw", {}).get(field) if isinstance(event.get("raw"), dict) else None
+        if value is None:
+            value = _nested_value(event, field)
+        for item in value if isinstance(value, list) else [value]:
+            if item is not None and str(item).strip() and str(item) not in out:
+                out.append(str(item))
+    if role == "host.name" and event.get("asset") and str(event["asset"]) not in out:
+        out.append(str(event["asset"]))
+    return out
+
+
+def _indicator_matches(indicator: dict[str, Any], event: dict[str, Any]) -> bool:
+    expected = _normalize_indicator(str(indicator.get("type")), str(indicator.get("value")))
+    if not expected:
+        return False
+    kind = str(indicator.get("type"))
+    values = _flatten_strings({
+        "observation": event.get("observation"),
+        "asset": event.get("asset"),
+        "raw": event.get("raw", {}),
+    })
+    observed: set[str] = set()
+    for value in values:
+        observed.update(_extract_indicator_values(kind, value))
+    return expected in observed
+
+
+def _normalize_indicator(kind: str, value: str) -> str:
+    value = value.strip().lower()
+    if kind == "path":
+        return _normalize_path(value)
+    if kind == "process":
+        return _basename(value)
+    if kind == "domain":
+        return value.rstrip(".")
+    return value
+
+
+def _extract_indicator_values(kind: str, value: str) -> set[str]:
+    text = str(value).strip().lower()
+    if not text:
+        return set()
+    if kind in {"sha256", "sha1", "md5"}:
+        lengths = {"sha256": 64, "sha1": 40, "md5": 32}
+        return set(re.findall(rf"(?<![0-9a-f])[0-9a-f]{{{lengths[kind]}}}(?![0-9a-f])", text))
+    if kind == "ip":
+        values = set()
+        for token in re.findall(r"(?<![0-9a-f:.])(?:[0-9a-f]*:[0-9a-f:.]+|(?:\d{1,3}\.){3}\d{1,3})(?![0-9a-f:.])", text):
+            try:
+                values.add(str(ipaddress.ip_address(token)))
+            except ValueError:
+                pass
+        return values
+    if kind == "domain":
+        return {value.rstrip(".") for value in re.findall(r"(?<![a-z0-9-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?![a-z0-9-])", text)}
+    if kind == "path":
+        return {_normalize_path(text)}
+    if kind == "process":
+        return {_basename(text)}
+    return {text}
+
+
+def _behavior_candidate(
+    analytic: dict[str, Any],
+    asset: str,
+    rows: list[dict[str, Any]],
+    score: int,
+    disposition: str,
+    reasons: list[str],
+) -> dict[str, Any]:
+    tier = "critical" if score >= 90 else ("high" if score >= 70 else ("medium" if score >= 40 else "low"))
+    return {
+        "candidate_id": _candidate_id("behavior", analytic["id"], asset),
+        "kind": "behavior", "analytic_id": analytic["id"], "indicator_id": None,
+        "title": analytic["title"], "description": analytic["description"],
+        "priority_score": score, "priority_tier": tier, "disposition": disposition,
+        "customer_visible": bool(score >= 70 and disposition == "corroborated"),
+        "evidence_ids": _evidence_ids(rows), "assets": [asset],
+        "first_observed": _observed_bounds(rows)[0], "last_observed": _observed_bounds(rows)[1],
+        "score_reasons": reasons, "attack_techniques": analytic.get("attack_techniques", []),
+        "benign_explanations": analytic.get("benign_explanations", []),
+        "follow_up": analytic.get("follow_up", []),
+    }
+
+
+def _aggregate_events(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    out = []
+    host_profile = summary.get("host_profile", {})
+    for row in host_profile.get("authentication_sequences", []) or []:
+        out.append(_aggregate_event("auth_failures_then_success", row.get("source") or row.get("user"), row.get("sample_evidence_id")))
+    network = summary.get("network_profile", {})
+    for row in network.get("high_fanout", []) or []:
+        out.append(_aggregate_event("high_fanout", row.get("source"), *(row.get("sample_evidence_ids") or [])))
+    for row in network.get("periodic_edge_candidates", []) or []:
+        out.append(_aggregate_event("periodic_edge", row.get("source"), *(row.get("sample_evidence_ids") or [])))
+    for row in network.get("low_frequency_external_destinations", []) or []:
+        out.append(_aggregate_event("rare_external_destination", row.get("destination"), *(row.get("sample_evidence_ids") or [])))
+    return out
+
+
+def _aggregate_event(signal: str, asset: Any, *evidence_ids: Any) -> dict[str, Any]:
+    return {
+        "evidence_id": next((str(value) for value in evidence_ids if value), f"AGG-{signal}"),
+        "source": "aggregate", "observed_at": "", "asset": str(asset or "unknown"),
+        "observation": signal, "raw": {"aggregate": {"signal": signal}},
+    }
+
+
+def _candidate_id(kind: str, identifier: str, asset: str) -> str:
+    digest = hashlib.sha1(f"{kind}|{identifier}|{asset}".encode("utf-8", errors="replace")).hexdigest()[:12].upper()
+    return f"CL-{digest}"
+
+
+def _evidence_ids(rows: list[dict[str, Any]]) -> list[str]:
+    return sorted({str(row.get("evidence_id")) for row in rows if row.get("evidence_id")})
+
+
+def _observed_bounds(rows: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    values = sorted(str(row.get("observed_at")) for row in rows if row.get("observed_at"))
+    return (values[0], values[-1]) if values else (None, None)
+
+
+def _nested_value(value: Any, path: str) -> Any:
+    for part in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def _flatten_strings(value: Any, depth: int = 0) -> list[str]:
+    if depth > 6:
+        return []
+    if isinstance(value, dict):
+        return [item for child in value.values() for item in _flatten_strings(child, depth + 1)]
+    if isinstance(value, list):
+        return [item for child in value[:100] for item in _flatten_strings(child, depth + 1)]
+    return [str(value)] if value is not None else []
+
+
+def _normalize_path(value: str) -> str:
+    return str(value).strip().lower().replace("\\", "/")
+
+
+def _basename(value: str) -> str:
+    return _normalize_path(value).rsplit("/", 1)[-1]
+
+
+def _edit_distance_at_most_one(left: str, right: str) -> bool:
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if left == right:
+        return True
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right)) <= 1
+    short, long = (left, right) if len(left) < len(right) else (right, left)
+    index = 0
+    for position, char in enumerate(long):
+        if index < len(short) and short[index] == char:
+            index += 1
+        elif position - index >= 1:
+            return False
+    return True
+
+
+def _coerce_time(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return _parse_time(value, "now")
+
