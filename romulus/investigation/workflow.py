@@ -931,7 +931,8 @@ class HuntEngine:
         if s.get("lead_queue") and self._can_pivot(s): return "pivot"
         if s.get("lead_queue") and not s.get("termination_reason"):
             s["termination_reason"]="tool_call_budget" if s.get("tool_calls",0)>=self.settings.max_tool_calls else "runtime_budget"
-        if not s.get("lead_queue") and s.get("depth",0)<self.settings.min_reasoning_rounds and self._budget_ok(s):
+        if (not s.get("lead_queue") and s.get("depth",0)<self.settings.min_reasoning_rounds
+                and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s)):
             s.pop("termination_reason",None); self._save(s); return "reason"
         if not s.get("lead_queue") and not s.get("termination_reason"): s["termination_reason"]="no_useful_leads"
         self._save(s)
@@ -1007,8 +1008,12 @@ class HuntEngine:
                     else:
                         s["termination_reason"]="coverage_frontier_exhausted"
         elif not self.offline:
-            selected=_coverage_fallback(s,3); basis="structured model output unavailable; deterministic ATT&CK coverage frontier used"
-            if not selected: s["termination_reason"]="model_unavailable_no_fallback_leads"
+            selected=_coverage_fallback(s,3)
+            basis=("structured model output unavailable; deterministic ATT&CK coverage frontier used" if self.use_ollama
+                else "deterministic ATT&CK coverage frontier used")
+            if not selected:
+                s["termination_reason"]=("model_unavailable_no_fallback_leads" if self.use_ollama
+                    else "coverage_frontier_exhausted")
         else:
             selected=_coverage_fallback(s,3); basis="offline deterministic fixture pivot"
             if not selected: s["termination_reason"]="lead_queue_exhausted"

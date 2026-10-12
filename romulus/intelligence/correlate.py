@@ -45,7 +45,7 @@ def correlate(host_events: list[dict[str, Any]], network_events: list[dict[str, 
 
 def _entities(event: dict) -> dict[str, set[str]]:
     return {
-        "host_ips": set(_values(event, "host.ip", "related.ip")),
+        "host_ips": set(_values(event, "host.ip", "related.ip", "ip")),
         "source_ips": set(_values(event, "source.ip", "srcIp", "src_ip", "ip.src", "ipSource")),
         "destination_ips": set(_values(event, "destination.ip", "dstIp", "dst_ip", "ip.dst", "ipDestination")),
         "hostnames": {x.lower() for x in _values(event, "host.name", "host.hostname", "computer_name", "hostname")},

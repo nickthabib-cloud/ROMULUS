@@ -43,6 +43,10 @@ ROMULUS validates the mission scope, time interpretation, configured sources, ma
 
 Hypotheses are ordered by mission relevance and telemetry support. Unsupported hypotheses remain visible as coverage gaps but do not consume search calls until another observation makes them actionable.
 
+An operator-directed mission may create initial hypotheses from the behavior, entity, indicator, or question the operator supplied; each such hypothesis records `operator_direction` as its basis. An undirected mission such as a general request to hunt for threats creates only coverage questions and deterministic discovery searches at this stage. It does not ask the model to invent initial hypotheses before telemetry exists.
+
+After discovery begins, every new hypothesis must cite at least one visible evidence ID or a deterministic candidate ID. Every model-proposed lead or finding must cite visible evidence IDs. ROMULUS rejects output whose claimed basis is absent, unknown, or outside the context supplied to the model. Prompt instructions reinforce this rule, but deterministic validation is the enforcement boundary.
+
 ### 2. Initial host, network, and intelligence discovery
 
 The logical analyst roles run through one guarded scheduler:

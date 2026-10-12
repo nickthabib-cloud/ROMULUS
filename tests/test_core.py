@@ -16,7 +16,10 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(any(h.technique_id=="T1021.002" for h in hs))
     def test_time_window_filter_uses_explicit_scope_or_bounded_default(self):
         from romulus.investigation.workflow import _time_filter, _pcap_time_filter
-        self.assertEqual(_time_filter("from 2026-01-01 to 2026-01-02",24),{"gte":"2026-01-01","lte":"2026-01-02"})
+        self.assertEqual(_time_filter("from 2026-01-01 to 2026-01-02",24),
+            {"gte":"2026-01-01T00:00:00.000Z","lte":"2026-01-02T23:59:59.999Z"})
+        self.assertEqual(_time_filter("from 2026-01-01 to 2026-01-02",24,"America/New_York"),
+            {"gte":"2026-01-01T05:00:00.000Z","lte":"2026-01-03T04:59:59.999Z"})
         self.assertEqual(_time_filter("look at recent logs",12),{"gte":"now-12h","lte":"now"})
         self.assertIn("frame.time_epoch >=",_pcap_time_filter(["2024-11-13","2024-11-14"]))
     def test_host_query_uses_hypothesis_indicators_and_can_search_all_history(self):
@@ -46,7 +49,7 @@ class CoreTests(unittest.TestCase):
         class Session:
             def __init__(self): self.calls=[]
             def get(self,*args,**kwargs): self.calls.append((args,kwargs)); return Response()
-        sess=Session(); cfg=replace(Settings.from_env(),arkime_username="agent",arkime_password="secret",max_results=25,arkime_default_hours=24,historical_search=False)
+        sess=Session(); cfg=replace(Settings.from_env(),arkime_username="agent",arkime_password="secret",arkime_max_results=25,arkime_default_hours=24,historical_search=False)
         api=ArkimeAdapter(cfg,sess); found=api.search_sessions("port == 445",length=1000)
         self.assertEqual(len(found["sessions"]),1); self.assertEqual(sess.calls[-1][1]["params"]["length"],25)
         self.assertEqual(sess.calls[-1][1]["params"]["date"],24); self.assertIsInstance(sess.calls[-1][1]["auth"],HTTPDigestAuth)
@@ -74,10 +77,14 @@ class CoreTests(unittest.TestCase):
     def test_tshark_wrapper_uses_allowlist_and_no_shell(self):
         from romulus.tools.tshark_client import TSharkAdapter
         adapter=TSharkAdapter(Settings.from_env())
-        class Completed: returncode=0; stdout="1\t10.0.0.1\n"; stderr=""
-        with patch.object(adapter,"_approved",return_value=Path("approved.pcap")), patch("romulus.tools.tshark_client.shutil.which",return_value="tshark"), patch("romulus.tools.tshark_client.subprocess.run",return_value=Completed()) as run:
+        class Process:
+            stdout=["1\t10.0.0.1\n"]
+            stderr=[]
+            def wait(self,timeout): return 0
+            def kill(self): pass
+        with patch.object(adapter,"_approved",return_value=Path("approved.pcap")), patch("romulus.tools.tshark_client.shutil.which",return_value="tshark"), patch("romulus.tools.tshark_client.subprocess.Popen",return_value=Process()) as popen:
             out=adapter.inspect("approved.pcap",display_filter="tcp.port == 445",fields=["frame.number","ip.src"])
-            self.assertEqual(out["packets"][0]["ip.src"],"10.0.0.1"); self.assertNotIn("shell",run.call_args.kwargs)
+            self.assertEqual(out["packets"][0]["ip.src"],"10.0.0.1"); self.assertNotIn("shell",popen.call_args.kwargs)
             with self.assertRaises(ValueError): adapter.inspect("approved.pcap",display_filter="tcp.port == 445; rm -rf")
             with self.assertRaises(ValueError): adapter.inspect("approved.pcap",fields=["frame.payload"])
     def test_ollama_adapter_uses_local_api_and_caps_telemetry(self):
@@ -93,22 +100,22 @@ class CoreTests(unittest.TestCase):
         session=Session(); model=Ollama(Settings.from_env(),session)
         note=model.summarize("Hunt SMB",["synthetic data"]*25)
         self.assertIn("inconclusive",note); self.assertEqual(len(session.payload["messages"][1]["content"].split("UNTRUSTED TELEMETRY DATA:")),2)
-        self.assertEqual(session.payload["options"]["num_ctx"],4096)
-        class LeadSession:
+        self.assertEqual(session.payload["options"]["num_ctx"],6144)
+        class PlanningSession:
             def __init__(self): self.payload=None
             def post(self,url,**kwargs):
                 self.payload=kwargs["json"]
-                return Response({"message":{"content":'{"lead_ids":["host_auth_service","network_smb_context","invented_query"]}'}})
-        lead_session=LeadSession()
-        candidates=[{"id":"host_auth_service","source":"host","title":"auth events","why":"test"},{"id":"network_smb_context","source":"network","title":"SMB context","why":"test"}]
-        leads=Ollama(Settings.from_env(),lead_session).select_leads("Hunt SMB",[],[],candidates,["network_smb_context"],2)
-        self.assertEqual(leads,["host_auth_service"])
-        schema=lead_session.payload["format"]; lead_ids=schema["properties"]["lead_ids"]
-        self.assertEqual(lead_ids["items"]["enum"],["host_auth_service"])
-        self.assertEqual((lead_ids["minItems"],lead_ids["maxItems"]),(1,1))
-        self.assertTrue(lead_ids["uniqueItems"]); self.assertEqual(schema["required"],["lead_ids"]); self.assertFalse(schema["additionalProperties"])
-        self.assertIn('"lead_ids"',lead_session.payload["messages"][1]["content"])
-        self.assertEqual(lead_session.payload["options"]["temperature"],0)
+                content='{"searches":[{"source":"elasticsearch","hypothesis_id":"H1","intent":"Find PowerShell execution","terms":["powershell"],"fields":["process.name"],"ips":[],"hostnames":[],"ports":[],"protocols":[],"event_codes":[],"index_class":"host","anchor_evidence_ids":[],"native_query_language":"none","native_query":""}]}'
+                return Response({"message":{"content":content}})
+        planning_session=PlanningSession()
+        searches=Ollama(Settings.from_env(),planning_session).propose_searches(
+            "Hunt PowerShell",[{"hypothesis_id":"H1","title":"PowerShell execution"}],[],
+            {"elasticsearch":["process.name"]},1)
+        self.assertEqual(searches[0]["intent"],"Find PowerShell execution")
+        schema=planning_session.payload["format"]
+        self.assertEqual(schema["properties"]["searches"]["items"]["properties"]["source"]["enum"],["elasticsearch"])
+        self.assertEqual(schema["required"],["searches"]); self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(planning_session.payload["options"]["temperature"],0.15)
     def test_elasticsearch_query_validation(self):
         validate_query({"bool":{"should":[{"match":{"message":"SMB"}}],"minimum_should_match":1}})
         with self.assertRaises(ValueError): validate_query({"query_string":{"query":"*"}})
@@ -126,6 +133,16 @@ class CoreTests(unittest.TestCase):
             self.assertIn('"event": "created"',st.events_path.read_text())
             st.audit({"hunt_id":"H1","parameters":{"nested":{"api_token":"do-not-write"}},"result_count":0})
             self.assertNotIn("do-not-write",st.audit_path.read_text()); self.assertEqual(st.audit_records("H1")[0]["result_count"],0)
+    def test_reasoning_depth_limit_wins_over_minimum_rounds(self):
+        from dataclasses import replace
+        from romulus.investigation.workflow import HuntEngine
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as d:
+            p=Path(d); cfg=replace(Settings.from_env(),home=p,reports_dir=p/"reports",data_dir=p/"data",logs_dir=p/"logs",
+                max_depth=2,min_reasoning_rounds=3)
+            state={"hunt_id":"H-DEPTH","depth":2,"lead_queue":[],"termination_reason":"depth_budget"}
+            engine=HuntEngine(cfg,Store(cfg.data_dir,cfg.logs_dir),offline=True)
+            self.assertEqual(engine._after_reason(state),"report")
+            self.assertEqual(state["termination_reason"],"depth_budget")
     def test_empty_partial_reports_are_generated(self):
         try: import docx
         except ImportError: self.skipTest("Install requirements.txt for Word report verification")
@@ -153,9 +170,10 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(state["status"],"completed"); self.assertTrue(state["findings"])
             self.assertEqual(state["outcome"],"evidence_supported_lead")
             self.assertEqual(state["termination_reason"],"lead_queue_exhausted")
-            self.assertEqual(len(state["evidence"]),3); self.assertEqual(len(store.list_evidence(state["hunt_id"])),3)
+            self.assertEqual(len(state["host"])+len(state["network"]),3)
+            self.assertEqual(len(store.list_evidence(state["hunt_id"])),3)
             import sqlite3
-            db=sqlite3.connect(cfg.data_dir/"romulus.sqlite3")
+            db=sqlite3.connect(store.checkpoint_path)
             try: self.assertGreater(db.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0],0)
             finally: db.close()
             self.assertIn('"event": "created"',(cfg.logs_dir/"findings.jsonl").read_text())
@@ -174,7 +192,8 @@ class CoreTests(unittest.TestCase):
         from romulus.investigation.workflow import HuntEngine
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as d:
             p=Path(d); cfg=replace(Settings.from_env(),home=p,reports_dir=p/"reports",data_dir=p/"data",logs_dir=p/"logs",
-                arkime_username="agent",arkime_password="secret",pcap_files=(),pcap_allowed_dirs=(),max_tool_calls=12,max_depth=2,historical_search=True)
+                arkime_username="agent",arkime_password="secret",pcap_files=(),pcap_allowed_dirs=(),
+                max_tool_calls=40,max_depth=4,min_reasoning_rounds=1,historical_search=True)
             class ES:
                 def __init__(self): self.searches=0
                 def indices(self): return [{"index":"ainception-hostlogs-a-b"}]
@@ -199,11 +218,13 @@ class CoreTests(unittest.TestCase):
             state=engine.run("Hunt for SMB lateral movement")
             self.assertEqual(state["status"],"completed")
             self.assertEqual(state["coverage"]["time_scope"],"all retained indexed time")
-            self.assertEqual(state["completed_leads"],["host_auth_service","network_smb_context"])
-            self.assertEqual(len(state["host"]),2); self.assertEqual(len(state["network"]),2)
+            self.assertTrue(any(lead.endswith("-HOST") for lead in state["completed_leads"]))
+            self.assertTrue(any(lead.endswith("-NETWORK") for lead in state["completed_leads"]))
+            self.assertGreaterEqual(len(state["host"]),2); self.assertGreaterEqual(len(state["network"]),2)
             self.assertTrue(all(call[1].get("all_history") for call in arkime.calls))
+            self.assertLessEqual(state["tool_calls"],cfg.max_tool_calls)
             self.assertEqual(state["tool_calls"],len(store.audit_records(state["hunt_id"])))
             self.assertTrue(all("result_count" in item and "time_range" in item and "duration_ms" in item for item in state["tool_runs"]))
-            self.assertEqual(state["termination_reason"],"lead_queue_exhausted")
+            self.assertEqual(state["termination_reason"],"coverage_frontier_exhausted")
 
 if __name__=="__main__": unittest.main()

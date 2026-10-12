@@ -2,6 +2,17 @@
 
 All notable ROMULUS changes are recorded here. Dates use the project maintainer's local date.
 
+## Unreleased
+
+### Super-hunter correctness foundation
+
+- Generalized host/network correlation so normalized host evidence that exposes a top-level `ip` can correlate with network source and destination roles when time and behavior also agree.
+- Prevented the reasoning router from re-entering an exhausted depth budget when the configured minimum reasoning rounds exceed the maximum depth.
+- Made deterministic-only runs report `coverage_frontier_exhausted` instead of incorrectly blaming an unavailable model.
+- Reconciled integration tests with the current Arkime-specific result cap, compact in-memory evidence model, streaming TShark adapter, normalized mission time bounds, and dedicated checkpoint database.
+- Recorded the evidence-basis contract for the next investigation-loop milestone: undirected hunts begin with deterministic discovery, and model hypotheses, leads, and findings must cite visible evidence or deterministic candidates.
+- Revalidated the development VM with 37 passing tests, fully green deployment diagnostics, and a disposable offline hunt whose Word and text reports were reopened successfully before all test artifacts were removed.
+
 ## 0.4.4 — 2026-10-12
 
 ### Customer Word report
