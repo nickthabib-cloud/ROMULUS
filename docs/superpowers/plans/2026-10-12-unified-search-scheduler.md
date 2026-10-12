@@ -63,7 +63,7 @@ def test_model_origin_cannot_raise_deterministic_priority(self):
 
 - [ ] **Step 2: Run the new tests and verify RED**
 
-Run: `python -m unittest tests.test_scheduler.SchedulerRegistrationTests -v`  
+Run: `python -m unittest tests.test_scheduler.SchedulerRegistrationTests -v`
 Expected: FAIL because `romulus.investigation.scheduler` does not exist.
 
 - [ ] **Step 3: Implement canonical identity and registration**
@@ -78,7 +78,7 @@ In `scheduler.py`:
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
-Run: `python -m unittest tests.test_scheduler.SchedulerRegistrationTests -v`  
+Run: `python -m unittest tests.test_scheduler.SchedulerRegistrationTests -v`
 Expected: PASS, 3 tests.
 
 - [ ] **Step 5: Commit**
@@ -112,7 +112,7 @@ Add tests asserting:
 
 - [ ] **Step 2: Run ordering tests and verify RED**
 
-Run: `python -m unittest tests.test_scheduler.SchedulerOrderingTests -v`  
+Run: `python -m unittest tests.test_scheduler.SchedulerOrderingTests -v`
 Expected: FAIL because selection functions are missing.
 
 - [ ] **Step 3: Implement ordering without a new configuration surface**
@@ -121,7 +121,7 @@ Use fixed priority ranks from the spec. Derive source-attempt counts from `searc
 
 - [ ] **Step 4: Run ordering tests and verify GREEN**
 
-Run: `python -m unittest tests.test_scheduler.SchedulerOrderingTests -v`  
+Run: `python -m unittest tests.test_scheduler.SchedulerOrderingTests -v`
 Expected: PASS.
 
 - [ ] **Step 5: Write failing outcome, retry, and legacy migration tests**
@@ -136,7 +136,7 @@ Add tests proving:
 
 - [ ] **Step 6: Run outcome tests and verify RED**
 
-Run: `python -m unittest tests.test_scheduler.SchedulerOutcomeTests -v`  
+Run: `python -m unittest tests.test_scheduler.SchedulerOutcomeTests -v`
 Expected: FAIL because outcome/recovery functions are missing.
 
 - [ ] **Step 7: Implement outcomes, recovery, and legacy normalization**
@@ -145,9 +145,9 @@ Keep `search_outcomes` append-only and bounded to concise attempt summaries. `re
 
 - [ ] **Step 8: Run the scheduler module and full suite**
 
-Run: `python -m unittest tests.test_scheduler -v`  
-Expected: PASS.  
-Run: `python -m unittest discover -s tests`  
+Run: `python -m unittest tests.test_scheduler -v`
+Expected: PASS.
+Run: `python -m unittest discover -s tests`
 Expected: Existing suite remains green.
 
 - [ ] **Step 9: Commit**
@@ -181,7 +181,7 @@ With existing adapter fakes, add tests for one Elasticsearch task, one Arkime ta
 
 - [ ] **Step 2: Run execution tests and verify RED**
 
-Run: `python -m unittest tests.test_scheduler_execution -v`  
+Run: `python -m unittest tests.test_scheduler_execution -v`
 Expected: FAIL because `_execute_search_task` is missing.
 
 - [ ] **Step 3: Extract the common execution boundary**
@@ -190,7 +190,7 @@ Move source dispatch and outcome construction behind `_execute_search_task`. Reu
 
 - [ ] **Step 4: Run execution and query-safety regressions**
 
-Run: `python -m unittest tests.test_scheduler_execution tests.test_core -v`  
+Run: `python -m unittest tests.test_scheduler_execution tests.test_core -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -227,7 +227,7 @@ Add tests proving:
 
 - [ ] **Step 2: Run workflow discovery tests and verify RED**
 
-Run: `python -m unittest tests.test_scheduler_execution.SchedulerDiscoveryWorkflowTests -v`  
+Run: `python -m unittest tests.test_scheduler_execution.SchedulerDiscoveryWorkflowTests -v`
 Expected: FAIL because discovery still executes inside source-specific collection loops.
 
 - [ ] **Step 3: Separate registration from execution**
@@ -238,7 +238,7 @@ Initialize new scheduler state for new hunts. Remove `dynamic_initial_queue` and
 
 - [ ] **Step 4: Run discovery and evidence-first regressions**
 
-Run: `python -m unittest tests.test_scheduler_execution tests.test_candidate_loop tests.test_core -v`  
+Run: `python -m unittest tests.test_scheduler_execution tests.test_candidate_loop tests.test_core -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -275,7 +275,7 @@ Add tests proving:
 
 - [ ] **Step 2: Run candidate/model scheduler tests and verify RED**
 
-Run: `python -m unittest tests.test_candidate_loop tests.test_scheduler_execution -v`  
+Run: `python -m unittest tests.test_candidate_loop tests.test_scheduler_execution -v`
 Expected: FAIL on missing unified investigation registration/outcome behavior.
 
 - [ ] **Step 3: Replace iterative queue selection**
@@ -290,7 +290,7 @@ Update coverage tests so a high-priority hypothesis/candidate closes only when e
 
 - [ ] **Step 5: Run closure tests and verify RED**
 
-Run: `python -m unittest tests.test_candidate_loop.CandidateStateTests.test_hypothesis_closure_requires_every_planned_analytic_and_an_assessment -v`  
+Run: `python -m unittest tests.test_candidate_loop.CandidateStateTests.test_hypothesis_closure_requires_every_planned_analytic_and_an_assessment -v`
 Expected: FAIL until `build_coverage_ledger` uses scheduler outcomes.
 
 - [ ] **Step 6: Make scheduler outcomes authoritative for coverage**
@@ -299,9 +299,9 @@ Implement the new `build_coverage_ledger` signature. Project legacy `completed_l
 
 - [ ] **Step 7: Run focused and complete suites**
 
-Run: `python -m unittest tests.test_scheduler tests.test_scheduler_execution tests.test_candidate_loop tests.test_core tests.test_behavior_catalog -v`  
-Expected: PASS.  
-Run: `python -m unittest discover -s tests`  
+Run: `python -m unittest tests.test_scheduler tests.test_scheduler_execution tests.test_candidate_loop tests.test_core tests.test_behavior_catalog -v`
+Expected: PASS.
+Run: `python -m unittest discover -s tests`
 Expected: Complete suite PASS, with only known dependency-gated local skips.
 
 - [ ] **Step 8: Commit**
@@ -343,7 +343,7 @@ Add tests proving:
 
 - [x] **Step 2: Run compatibility/report tests and verify RED**
 
-Run: `python -m unittest tests.test_scheduler tests.test_customer_report tests.test_retention -v`  
+Run: `python -m unittest tests.test_scheduler tests.test_customer_report tests.test_retention -v`
 Expected: FAIL on missing workflow migration/report/compact summary.
 
 - [x] **Step 3: Integrate migration and bounded reporting**
@@ -352,13 +352,13 @@ Call `initialize_scheduler`, `migrate_legacy_search_state`, and `recover_interru
 
 - [x] **Step 4: Run focused and complete local proof**
 
-Run: `python -m unittest tests.test_scheduler tests.test_scheduler_execution tests.test_candidate_loop tests.test_customer_report tests.test_retention -v`  
-Expected: PASS.  
-Run: `python -m unittest discover -s tests`  
-Expected: Complete suite PASS.  
-Run: `python -m compileall -q romulus tests`  
-Expected: Exit 0.  
-Run: `git diff --check`  
+Run: `python -m unittest tests.test_scheduler tests.test_scheduler_execution tests.test_candidate_loop tests.test_customer_report tests.test_retention -v`
+Expected: PASS.
+Run: `python -m unittest discover -s tests`
+Expected: Complete suite PASS.
+Run: `python -m compileall -q romulus tests`
+Expected: Exit 0.
+Run: `git diff --check`
 Expected: No output.
 
 - [x] **Step 5: Run an offline end-to-end proof**
@@ -403,7 +403,7 @@ After reports are closed, read external `attack_log.json` as 53 `actions` record
 
 Do not tune prompts, catalog entries, fixtures, selectors, or priority rules using this same holdout. Run:
 
-`rg -n "SL700|AttackMate|attack_a_b" romulus tests`  
+`rg -n "SL700|AttackMate|attack_a_b" romulus tests`
 Expected: no matches.
 
 - [x] **Step 10: Clean up and checkpoint**
