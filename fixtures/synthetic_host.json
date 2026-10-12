@@ -1,0 +1,7 @@
+{
+  "classification": "synthetic training data",
+  "events": [
+    {"timestamp":"2026-10-10T14:03:12Z","ip":"10.20.0.15","event_id":4624,"account":"LAB\\svc-backup","host":"LAB-WS02","logon_type":3},
+    {"timestamp":"2026-10-10T14:04:02Z","ip":"10.20.0.15","event_id":7045,"account":"LAB\\svc-backup","host":"LAB-WS02","service":"LabUpdateSvc"}
+  ]
+}

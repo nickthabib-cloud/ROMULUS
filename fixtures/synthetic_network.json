@@ -1,0 +1,7 @@
+{
+  "classification": "synthetic training data",
+  "sessions": [
+    {"timestamp":"2026-10-10T14:02:58Z","src_ip":"10.20.0.15","dst_ip":"10.20.0.22","dst_port":445,"protocol":"smb","established":true}
+  ],
+  "caveat": "This manufactured record does not represent real network telemetry or a real incident."
+}
