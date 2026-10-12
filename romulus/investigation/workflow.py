@@ -15,6 +15,7 @@ from ..store import Store
 from ..intelligence.knowledge import hypotheses_for, TECHNIQUES, ATTACK_RELEASE, ATTACK_RELEASE_DATE, ATTACK_DOMAIN
 from ..intelligence.attack_catalog import load_attack_catalog, reference_seeds
 from ..intelligence.correlate import correlate
+from ..intelligence.investigation_graph import build_investigation_graph, derive_finding_paths
 from ..intelligence.analytics import summarize_evidence, build_coverage_ledger
 from ..intelligence.behavior_catalog import (
     load_behavior_catalog, load_local_indicators, resolve_semantic_fields, applicable_analytics,
@@ -45,6 +46,8 @@ class HuntState(TypedDict, total=False):
     analytic_summary: dict; search_artifacts: list[dict]; evidence_keys: list[str]
     candidate_leads: list[dict]; behavior_catalog_status: dict; behavior_seed_searches: list[dict]
     pivot_results: list[dict]
+    investigation_graph: dict
+    retention_policy: str
 
 
 class HuntEngine:
@@ -60,7 +63,7 @@ class HuntEngine:
         self.settings.ensure_dirs(); hunt_id=hunt_id or "HUNT-"+uuid.uuid4().hex[:10].upper()
         prior=self.store.load_state(hunt_id) if _resume else None
         if prior:
-            state: HuntState=prior; state["status"]="running"; state["started_epoch"]=time.time(); state["resumed_at"]=utc_now(); state.pop("error",None)
+            state: HuntState=prior; state["status"]="running"; state["started_epoch"]=time.time(); state["resumed_at"]=utc_now(); state["retention_policy"]=self.settings.retention_policy; state.pop("error",None)
         else:
             state={"hunt_id":hunt_id,"objective":objective,"status":"running","outcome":"pending",
             "hypotheses":[],"host":[],"network":[],"evidence":[],"findings":[],"correlations":[],
@@ -70,6 +73,8 @@ class HuntEngine:
                 "search_fingerprints":[],"dynamic_plan_created":False,"dynamic_initial_queue":[],"es_fields_by_class":{},
                 "analytic_summary":{},"search_artifacts":[],"evidence_keys":[],"candidate_leads":[],
                 "pivot_results":[],
+                "investigation_graph":{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}},
+                "retention_policy":self.settings.retention_policy,
                 "behavior_seed_searches":[],"behavior_catalog_status":{
                     "catalog_version":self.behavior_catalog.get("catalog_version"),
                     "analytics":len(self.behavior_catalog.get("analytics",[])),
@@ -99,13 +104,21 @@ class HuntEngine:
         finally:
             if checkpoint_conn is not None: checkpoint_conn.close()
         result["finished_at"]=utc_now(); result["duration_ms"]=round(max(0,time.time()-result.get("started_epoch",time.time()))*1000); self.store.save_state(hunt_id,result)
-        self.store.prune_checkpoints(hunt_id,keep=1,compact=True)
+        try:
+            from ..retention import RetentionError, apply_retention
+            result=apply_retention(self.store,result,policy=self.settings.retention_policy,automatic=True)
+        except RetentionError as exc:
+            result["retention"]={"policy":self.settings.retention_policy,"status":"incomplete",
+                "updated_at":utc_now(),"error_type":type(exc).__name__}
+            self.store.save_state(hunt_id,result)
+        if result.get("retention",{}).get("status")!="completed":
+            self.store.prune_checkpoints(hunt_id,keep=1,compact=True)
         return result
 
     def resume(self,hunt_id: str) -> dict[str, Any]:
         state=self.store.load_state(hunt_id)
         if not state: raise ValueError(f"Unknown investigation ID: {hunt_id}")
-        if state.get("status")=="completed": return state
+        if state.get("status")=="completed" or state.get("retention",{}).get("status")=="completed": return state
         return self.run(state["objective"],hunt_id=hunt_id,_resume=True)
 
     def _graph(self):
@@ -789,6 +802,7 @@ class HuntEngine:
     def _analyze(self,s):
         s["correlations"]=correlate(s.get("host",[]),s.get("network",[]))
         all_e=s.get("host",[])+s.get("network",[])
+        s["investigation_graph"]=build_investigation_graph(all_e,s["correlations"])
         s["analytic_summary"]=summarize_evidence(s.get("host",[]),s.get("network",[]))
         s.setdefault("coverage",{})["analytic_summary"]=s["analytic_summary"]
         previous_candidates=list(s.get("candidate_leads",[]))
@@ -820,6 +834,7 @@ class HuntEngine:
         if s["correlations"]: self._publish_smb_lead(s)
         self._publish_tooling_leads(s)
         _link_candidates_to_findings(s)
+        _attach_finding_paths(s)
         results=list(s.get("coverage",{}).get("model_search_results",[]))+list(s.get("pivot_results",[]))
         host_available=bool(s.get("es_indices")) or self.offline
         network_available=self.offline or str(s.get("coverage",{}).get("network","")).startswith(("configured","partial"))
@@ -1453,6 +1468,7 @@ class HuntEngine:
         s["coverage"]["termination_reason"]=s["termination_reason"]
         s["coverage"]["source_error_count"]=len(errors)
         s["coverage"]["coverage_closure_ready"]=not coverage_frontier_incomplete
+        _attach_finding_paths(s)
         try:
             from ..reporting.report import generate_report
             s["report_paths"]=[str(p) for p in generate_report(s,self.settings.reports_dir)]
@@ -1465,6 +1481,18 @@ class HuntEngine:
     def _summarize(self,objective,observations):
         from ..agent.ollama import Ollama
         return Ollama(self.settings).summarize(objective,observations)
+
+
+def _attach_finding_paths(state):
+    graph=state.setdefault("investigation_graph",{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}})
+    paths=derive_finding_paths(graph,state.get("findings",[]))
+    graph["paths"]=paths
+    path_ids_by_finding={}
+    for path in paths:
+        path_ids_by_finding.setdefault(path["finding_id"],[]).append(path["path_id"])
+    for finding in state.get("findings",[]):
+        finding["attack_path_ids"]=path_ids_by_finding.get(finding.get("finding_id"),[])
+    return state
 
 
 def _normalize_hypotheses(values):

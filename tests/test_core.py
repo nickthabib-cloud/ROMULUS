@@ -33,6 +33,7 @@ class CoreTests(unittest.TestCase):
         cfg=Settings.from_env()
         self.assertTrue(cfg.historical_search)
         self.assertGreaterEqual(cfg.max_tool_calls,24)
+        self.assertEqual(cfg.retention_policy,"compact")
     def test_url_redaction(self):
         self.assertEqual(safe_url("http://alice:secret@example.test:8005/api?token=hide"),"http://example.test:8005/api")
     def test_arkime_adapter_uses_digest_and_bounded_documented_query(self):
@@ -187,19 +188,23 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(state["status"],"completed"); self.assertTrue(state["findings"])
             self.assertEqual(state["outcome"],"evidence_supported_lead")
             self.assertEqual(state["termination_reason"],"lead_queue_exhausted")
-            self.assertEqual(len(state["host"])+len(state["network"]),3)
-            self.assertEqual(len(store.list_evidence(state["hunt_id"])),3)
+            self.assertEqual(state["retention"]["status"],"completed")
+            self.assertNotIn("host",state); self.assertNotIn("network",state)
+            cited={evidence_id for finding in state["findings"] for evidence_id in finding.get("evidence_ids",[])}
+            self.assertEqual({item["evidence_id"] for item in store.list_evidence(state["hunt_id"])},cited)
             import sqlite3
             db=sqlite3.connect(store.checkpoint_path)
-            try: self.assertGreater(db.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0],0)
+            try: self.assertEqual(db.execute("SELECT COUNT(*) FROM checkpoints WHERE thread_id=?",(state["hunt_id"],)).fetchone()[0],0)
             finally: db.close()
-            self.assertIn('"event": "created"',(cfg.logs_dir/"findings.jsonl").read_text())
+            self.assertEqual(store.audit_records(state["hunt_id"]),[])
+            events=(cfg.logs_dir/"findings.jsonl").read_text() if (cfg.logs_dir/"findings.jsonl").exists() else ""
+            self.assertNotIn(state["hunt_id"],events)
             self.assertTrue(any(p.suffix==".docx" for p in map(Path,state["report_paths"])))
             self.assertTrue(any(p.suffix==".txt" for p in map(Path,state["report_paths"])))
             from docx import Document
             doc=Document(next(Path(p) for p in state["report_paths"] if p.endswith(".docx")))
             body="\n".join(p.text for p in doc.paragraphs)
-            self.assertIn("Executive Summary",body); self.assertIn("Correlated SMB",body)
+            self.assertIn("Executive Summary",body); self.assertIn("Correlated SMB",body); self.assertIn("Supported Attack Path",body)
 
     def test_live_workflow_runs_bounded_historical_pivots_and_audits_every_call(self):
         try: import langgraph,docx

@@ -86,6 +86,25 @@ def _candidate_line(candidate):
     )
 
 
+def _supported_paths(state):
+    paths=list((state.get("investigation_graph") or {}).get("paths",[]) or [])
+    referenced={
+        path_id for finding in state.get("findings",[]) or []
+        for path_id in (finding.get("attack_path_ids") or [])
+    }
+    if referenced:
+        paths=[path for path in paths if path.get("path_id") in referenced]
+    return sorted(paths,key=lambda path:(str(path.get("finding_id") or ""),int(path.get("segment_index") or 0),str(path.get("path_id") or "")))
+
+
+def _path_entities(step):
+    values=[]
+    for entity in step.get("entities",[]) or []:
+        value=entity.get("value")
+        if value: values.append(f"{entity.get('entity_type','entity')}={value}")
+    return _join_text(values)
+
+
 def _content(s):
     host_events=_bounded_report_events(s,"host"); network_events=_bounded_report_events(s,"network")
     lines=[f"ROMULUS INVESTIGATION REPORT — {s.get('status','partial').upper()}",f"Investigation: {s.get('hunt_id','')}",f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}","", "EXECUTIVE SUMMARY",s.get("summary") or "Investigation summary unavailable.",
@@ -119,6 +138,17 @@ def _content(s):
     lines += ["", "SIGNIFICANT FINDINGS"]
     if not s.get("findings"): lines.append("No significant findings recorded.")
     for f in s.get("findings",[]): lines += [f"- {f.get('finding_id')} {f.get('title')} [{f.get('status')} / {f.get('confidence')}]: {f.get('observation')}","  Analysis: "+str(f.get("interpretation") or ""),"  Evidence: "+_join_text(f.get("evidence_ids")),"  Alternatives: "+_join_text(f.get("alternatives"),"; "),"  Follow-up: "+_join_text(f.get("follow_up"),"; ")]
+    paths=_supported_paths(s)
+    lines += ["", "SUPPORTED ATTACK PATHS"]
+    if not paths: lines.append("No evidence-supported multi-record path was derived from the cited findings.")
+    for path in paths:
+        lines.append(f"- {path.get('path_id')} {path.get('title')} — segment {path.get('segment_index',1)} of {path.get('segment_count',1)}; relationship confidence={path.get('confidence','not assessed')}.")
+        for step in path.get("steps",[]):
+            lines.append(f"  {step.get('sequence')}. {step.get('observed_at') or 'time unavailable'} {step.get('activity_type')}: {step.get('label')} Evidence={_join_text(step.get('evidence_ids'))}; entities={_path_entities(step) or 'none recorded'}.")
+        for relationship in path.get("relationships",[]):
+            lines.append(f"  Link {relationship.get('source_sequence')}→{relationship.get('target_sequence')}: {relationship.get('relationship')} [{relationship.get('basis')} / {relationship.get('confidence')}]; reasons={_join_text(relationship.get('reasons'), '; ') or 'not recorded'}.")
+        for caveat in path.get("caveats",[]): lines.append(f"  Caveat: {caveat}")
+        for gap in path.get("gaps",[]): lines.append(f"  Gap: {gap}")
     lines += ["", f"HOST ANALYSIS — {len(host_events)} representative/cited records of {len(s.get('host',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in host_events]
     lines += ["", f"NETWORK ANALYSIS — {len(network_events)} representative/cited records of {len(s.get('network',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in network_events]
     lines += ["", "CROSS-DOMAIN CORRELATION"]
@@ -135,7 +165,12 @@ def _content(s):
     if s.get("error"): lines.append(s["error"])
     lines += ["This assessment covers only the evidence sources and time period recorded above. Searches and reports are bounded; lack of findings does not establish that the environment is secure.","", "CONCLUSIONS AND RECOMMENDED FOLLOW-UP",s.get("summary") or "", "", "TECHNICAL CANDIDATE WORKING LIST"]
     lines += [_candidate_line(item) for item in s.get("candidate_leads",[])] or ["No catalog candidates were recorded."]
-    lines += ["", "TECHNICAL EVIDENCE APPENDIX", f"The human-readable evidence manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable citations and search-result IDs appear above. Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite."]
+    if s.get("retention_policy")=="compact" and s.get("status")=="completed":
+        retention_note=("This completed hunt uses compact retention. After both reports are verified, per-hunt working audit records and uncited raw evidence are removed; "
+            "structured findings, supported paths, and their cited evidence remain in the compact investigation record.")
+    else:
+        retention_note="Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite unless the hunt is explicitly finalized with compact retention."
+    lines += ["", "TECHNICAL EVIDENCE APPENDIX", f"The human-readable evidence manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable citations and search-result IDs appear above. {retention_note}"]
     return "\n".join(lines)
 
 def _docx(s,path):
@@ -306,6 +341,21 @@ def _docx(s,path):
         para(f"Priority lead  •  {friendly(candidate.get('priority_tier'))} priority  •  {friendly(candidate.get('disposition'))}")
         reasons=_join_text(candidate.get("score_reasons"),"; ")
         if reasons: para("Why it matters: "+reasons)
+
+    heading("Supported Attack Path")
+    supported_paths=_supported_paths(s)
+    if not supported_paths:
+        para("No evidence-supported multi-record path was derived from the cited findings.")
+    for supported_path in supported_paths:
+        segment=f" — segment {supported_path.get('segment_index',1)} of {supported_path.get('segment_count',1)}" if int(supported_path.get("segment_count") or 1)>1 else ""
+        doc.add_heading(str(supported_path.get("title") or "Evidence-supported activity")+segment,level=2)
+        for step in supported_path.get("steps",[]):
+            entities=_path_entities(step)
+            detail=f"{step.get('sequence')}. {step.get('observed_at') or 'Time unavailable'} — {friendly(step.get('activity_type'))}: {step.get('label')}. Evidence: {_join_text(step.get('evidence_ids'))}."
+            if entities: detail+=f" Entities: {entities}."
+            para(detail)
+        caveats=list(supported_path.get("caveats",[]) or [])+list(supported_path.get("gaps",[]) or [])
+        if caveats: para("Limitations: "+_join_text(caveats," "))
 
     heading("Scope and Coverage")
     scope=doc.add_table(rows=1,cols=2); scope.style="Light Shading Accent 1"; scope.alignment=WD_TABLE_ALIGNMENT.CENTER

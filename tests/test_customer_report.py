@@ -12,6 +12,7 @@ class CustomerWordReportTests(unittest.TestCase):
             "termination_reason": "lead_queue_exhausted",
             "objective": "Hunt for suspicious execution and lateral movement from 2026-10-10 to 2026-10-11.",
             "summary": "ROMULUS identified one suspicious execution chain that requires analyst validation.",
+            "retention_policy": "compact",
             "duration_ms": 42000,
             "tool_calls": 7,
             "depth": 3,
@@ -35,6 +36,7 @@ class CustomerWordReportTests(unittest.TestCase):
                     "evidence_ids": ["EV-RAW-001"],
                     "affected_assets": ["WS-17"],
                     "technique_id": "T1059.001",
+                    "attack_path_ids": ["PATH-001"],
                 }
             ],
             "hypotheses": [
@@ -83,6 +85,28 @@ class CustomerWordReportTests(unittest.TestCase):
             ],
             "network": [],
             "correlations": [],
+            "investigation_graph": {
+                "version": 1,
+                "nodes": [],
+                "edges": [],
+                "paths": [{
+                    "path_id": "PATH-001",
+                    "finding_id": "F-001",
+                    "title": "Suspicious PowerShell execution",
+                    "confidence": "moderate",
+                    "steps": [{
+                        "sequence": 1,
+                        "activity_type": "process_execution",
+                        "label": "PowerShell launched an encoded command on WS-17",
+                        "observed_at": "2026-10-10T12:00:00Z",
+                        "evidence_ids": ["EV-RAW-001"],
+                        "entities": [{"entity_type": "host", "value": "ws-17"}],
+                    }],
+                    "relationships": [],
+                    "caveats": ["A single observed step does not establish a complete intrusion chain."],
+                    "gaps": [],
+                }],
+            },
             "stage_history": [{"stage": "triage", "status": "completed", "details": "INTERNAL-STAGE-SENTINEL"}],
             "reasoning_history": [{"stage": "triage", "reasoning": "INTERNAL-REASONING-SENTINEL"}],
             "tool_runs": [{"tool": "INTERNAL-TOOL-SENTINEL", "result_status": "ok"}],
@@ -117,6 +141,8 @@ class CustomerWordReportTests(unittest.TestCase):
                 "Recommended Actions",
                 "Suspicious PowerShell execution",
                 "WS-17",
+                "Supported Attack Path",
+                "EV-RAW-001",
             ):
                 self.assertIn(expected, word_text)
 
@@ -135,6 +161,8 @@ class CustomerWordReportTests(unittest.TestCase):
             self.assertGreaterEqual(len(document.tables), 3)
             self.assertLess(len(word_text), len(technical_text))
             self.assertNotIn("3. Validate with the asset owner.", word_text)
+            self.assertIn("uncited raw evidence", technical_text)
+            self.assertNotIn("complete raw evidence remains in SQLite", technical_text)
 
 
 if __name__ == "__main__":

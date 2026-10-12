@@ -1,10 +1,12 @@
 """Command line interface for deployment checks, hunting, resume, and offline demonstration."""
 import argparse, importlib.util, shutil, sys
+from dataclasses import replace
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 from . import __version__
 from .config import Settings, safe_url
 from .store import Store
+from .models import utc_now
 from .investigation.workflow import HuntEngine
 
 def doctor(settings: Settings) -> int:
@@ -84,11 +86,14 @@ def main(argv=None):
     sub=parser.add_subparsers(dest="command",required=True)
     sub.add_parser("doctor",help="check configured dependencies and deployment services")
     sub.add_parser("test",help="run local unit and synthetic integration tests")
-    hunt=sub.add_parser("hunt",help="start a bounded investigation"); hunt.add_argument("--objective",required=True); hunt.add_argument("--offline",action="store_true",help="run the synthetic demonstration without external services")
-    resume=sub.add_parser("resume",help="resume a persisted investigation"); resume.add_argument("--id",required=True); resume.add_argument("--offline",action="store_true")
+    hunt=sub.add_parser("hunt",help="start a bounded investigation"); hunt.add_argument("--objective",required=True); hunt.add_argument("--offline",action="store_true",help="run the synthetic demonstration without external services"); hunt.add_argument("--retention",choices=("compact","full"))
+    resume=sub.add_parser("resume",help="resume a persisted investigation"); resume.add_argument("--id",required=True); resume.add_argument("--offline",action="store_true"); resume.add_argument("--retention",choices=("compact","full"))
     inspect=sub.add_parser("inspect",help="show saved hunt outcome, tool counts, windows, and errors"); inspect.add_argument("--id",required=True)
-    demo=sub.add_parser("demo",help="run the synthetic offline demonstration")
+    demo=sub.add_parser("demo",help="run the synthetic offline demonstration"); demo.add_argument("--retention",choices=("compact","full"))
+    compact=sub.add_parser("compact",help="compact an existing completed hunt after verifying its reports"); compact.add_argument("--id",required=True)
+    finalize=sub.add_parser("finalize",help="generate final reports and close a partial hunt"); finalize.add_argument("--id",required=True); finalize.add_argument("--retention",choices=("compact","full"))
     args=parser.parse_args(argv); settings=Settings.from_env()
+    if getattr(args,"retention",None): settings=replace(settings,retention_policy=args.retention)
     if args.command=="doctor": return doctor(settings)
     if args.command=="test":
         import unittest
@@ -107,8 +112,31 @@ def main(argv=None):
         for call in state.get("tool_runs",[]):
             print(f"{call.get('timestamp')} {call.get('reasoning_stage')} {call.get('tool')} status={call.get('result_status')} results={call.get('result_count')} matched_total={call.get('source_total')} window={call.get('time_range')} duration_ms={call.get('duration_ms')} error={call.get('error') or 'none'} reason={call.get('error_reason') or 'none'} artifact={call.get('artifact_id') or 'none'}")
         for error in state.get("source_errors",[]): print(f"SOURCE ERROR {error.get('tool')} stage={error.get('stage')} error={error.get('error')} reason={error.get('reason') or 'none'}")
-        print(f"Audit log: {settings.logs_dir / 'tool_audit.jsonl'}")
+        retention=state.get("retention",{})
+        print(f"Retention: {retention.get('policy','legacy/full')} / {retention.get('status','not finalized')}")
+        if retention.get("status")=="completed": print("Per-hunt working audit records were removed after being captured in the technical report.")
+        else: print(f"Audit log: {settings.logs_dir / 'tool_audit.jsonl'}")
         return 0
+    if args.command in {"compact","finalize"}:
+        from .retention import RetentionError, apply_retention
+        store=Store(settings.data_dir,settings.logs_dir); state=store.load_state(args.id)
+        if not state: print(f"Unknown investigation ID: {args.id}"); return 1
+        if args.command=="compact" and state.get("status")!="completed":
+            print("Only completed hunts can use compact; use finalize for a partial hunt."); return 1
+        if args.command=="finalize" and state.get("retention",{}).get("status")!="completed":
+            try:
+                from .reporting.report import generate_report
+                state["finalized_at"]=utc_now()
+                state["report_paths"]=[str(path) for path in generate_report(state,settings.reports_dir)]
+                store.save_state(args.id,state)
+            except Exception as exc:
+                print(f"Final report generation failed: {type(exc).__name__}"); return 1
+        try:
+            result=apply_retention(store,state,policy="compact" if args.command=="compact" else settings.retention_policy,automatic=False)
+        except RetentionError as exc:
+            print(f"Retention precondition failed: {exc}"); return 1
+        print(f"Investigation {args.id} retention: {result.get('retention',{}).get('status','unknown')} ({result.get('retention',{}).get('policy','unknown')})")
+        return 0 if result.get("retention",{}).get("status") in {"completed","retained"} else 1
     offline=args.command=="demo" or getattr(args,"offline",False)
     store=Store(settings.data_dir,settings.logs_dir); engine=HuntEngine(settings,store,offline=offline)
     if args.command=="hunt": result=engine.run(args.objective)

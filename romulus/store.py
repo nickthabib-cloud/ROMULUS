@@ -1,5 +1,5 @@
 """SQLite persistence for resumable investigations and an append-only finding event stream."""
-import json, sqlite3
+import hashlib, json, os, sqlite3, uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -60,6 +60,32 @@ class Store:
             except json.JSONDecodeError: continue
             if item.get("hunt_id")==hunt_id: rows.append(item)
         return rows
+    def compact_investigation(self, hunt_id: str, state: dict[str, Any], retain_evidence_ids: set[str]) -> dict[str, Any]:
+        """Atomically replace hunt state and remove only its uncited evidence."""
+        with self._db() as db:
+            evidence_ids=[str(row[0]) for row in db.execute(
+                "SELECT id FROM evidence WHERE investigation_id=? ORDER BY id",(hunt_id,))]
+            retained=set(evidence_ids)&set(retain_evidence_ids)
+            removed=[evidence_id for evidence_id in evidence_ids if evidence_id not in retained]
+            if retained:
+                marks=",".join("?" for _ in retained)
+                db.execute(
+                    f"DELETE FROM evidence WHERE investigation_id=? AND id NOT IN ({marks})",
+                    (hunt_id,*sorted(retained)))
+            else:
+                db.execute("DELETE FROM evidence WHERE investigation_id=?",(hunt_id,))
+            db.execute(
+                "INSERT INTO investigations VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",
+                (hunt_id,json.dumps(state),utc_now()))
+        removed_hash=hashlib.sha256("\n".join(removed).encode("utf-8")).hexdigest() if removed else None
+        return {"evidence_before":len(evidence_ids),"evidence_retained":len(retained),
+            "evidence_removed":len(removed),"removed_evidence_ids_sha256":removed_hash}
+    def remove_hunt_log_records(self, hunt_id: str) -> dict[str, int]:
+        """Atomically filter this hunt from shared JSONL logs."""
+        return {
+            "audit_records_removed":_filter_jsonl(self.audit_path,"hunt_id",hunt_id),
+            "finding_events_removed":_filter_jsonl(self.events_path,"investigation_id",hunt_id),
+        }
     def prune_checkpoints(self, hunt_id: str, keep: int = 1, compact: bool = False) -> dict[str, int]:
         """Keep only the newest resumable checkpoint per namespace.
 
@@ -103,3 +129,23 @@ def _redact(value):
         return {str(k):("[REDACTED]" if any(s in str(k).lower() for s in sensitive) else _redact(v)) for k,v in value.items()}
     if isinstance(value,list): return [_redact(v) for v in value]
     return value
+
+
+def _filter_jsonl(path: Path, key: str, value: str) -> int:
+    if not path.exists(): return 0
+    kept=[]; removed=0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try: item=json.loads(line)
+        except json.JSONDecodeError:
+            kept.append(line); continue
+        if item.get(key)==value: removed+=1
+        else: kept.append(line)
+    temporary=path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
+    try:
+        with temporary.open("w",encoding="utf-8",newline="\n") as handle:
+            if kept: handle.write("\n".join(kept)+"\n")
+            handle.flush(); os.fsync(handle.fileno())
+        os.replace(temporary,path)
+    finally:
+        if temporary.exists(): temporary.unlink()
+    return removed

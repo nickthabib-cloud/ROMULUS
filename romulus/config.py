@@ -18,6 +18,10 @@ def _int(name: str, default: int, low: int, high: int) -> int:
     except ValueError: value = default
     return max(low, min(value, high))
 
+def _choice(name: str, default: str, allowed: set[str]) -> str:
+    value=os.getenv(name,default).strip().lower()
+    return value if value in allowed else default
+
 def safe_url(value: str) -> str:
     """Remove userinfo, query strings, and fragments before displaying or persisting endpoints."""
     try:
@@ -58,6 +62,7 @@ class Settings:
     context_evidence_per_source: int
     tool_timeout_seconds: int
     max_retries: int
+    retention_policy: str
     reports_dir: Path
     data_dir: Path
     logs_dir: Path
@@ -88,6 +93,7 @@ class Settings:
             arkime_max_results=_int("ARKIME_MAX_RESULTS", 20000, 1, 100000),
             context_evidence_per_source=_int("CONTEXT_EVIDENCE_PER_SOURCE", 1000, 100, 5000),
             tool_timeout_seconds=_int("TOOL_TIMEOUT_SECONDS", 60, 1, 300), max_retries=_int("MAX_RETRIES", 2, 0, 5),
+            retention_policy=_choice("RETENTION_POLICY","compact",{"compact","full"}),
             reports_dir=Path(os.getenv("REPORTS_DIR", str(home / "reports"))).expanduser(),
             data_dir=Path(os.getenv("DATA_DIR", str(home / "data"))).expanduser(),
             logs_dir=Path(os.getenv("LOGS_DIR", str(home / "logs"))).expanduser(),
