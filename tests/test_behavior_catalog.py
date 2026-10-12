@@ -274,3 +274,120 @@ def _event(
         "observation": "test event",
         "raw": raw,
     }
+
+
+class WorkflowIntegrationTests(unittest.TestCase):
+    def test_behavior_seed_plan_binds_fields_and_records_unsupported(self):
+        from romulus.intelligence.behavior_catalog import load_behavior_catalog
+        from romulus.investigation.workflow import _behavior_seed_queries
+
+        queries, unsupported = _behavior_seed_queries(
+            load_behavior_catalog(),
+            ["@timestamp", "process.command_line", "process.executable", "process.name", "host.name"],
+            "@timestamp",
+            {"gte": "2026-10-01T00:00:00Z", "lte": "2026-10-02T00:00:00Z"},
+            limit=60,
+        )
+        ids = {item["analytic_id"] for item in queries}
+        self.assertIn("BH-XPLAT-001", ids)
+        self.assertIn("BH-XPLAT-002", ids)
+        self.assertTrue(any(item["id"] == "BH-LNX-006" for item in unsupported))
+        self.assertTrue(all("range" in json.dumps(item["query"]) for item in queries))
+
+    def test_exact_indicator_seed_query_uses_semantic_roles_and_time(self):
+        from romulus.intelligence.behavior_catalog import (
+            compile_elasticsearch_indicator_seed,
+            resolve_semantic_fields,
+        )
+
+        bindings = resolve_semantic_fields(["@timestamp", "dns.question.name", "source.ip"])
+        query = compile_elasticsearch_indicator_seed(
+            {"id": "IOC-D", "type": "domain", "value": "evil.example"},
+            bindings,
+            "@timestamp",
+            {"gte": "2026-10-01T00:00:00Z", "lte": "2026-10-02T00:00:00Z"},
+        )
+        rendered = json.dumps(query)
+        self.assertIn("dns.question.name", rendered)
+        self.assertIn("evil.example", rendered)
+        self.assertIn("range", rendered)
+
+    def test_elasticsearch_evidence_retains_behavior_id(self):
+        from dataclasses import replace
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(),
+                home=root,
+                data_dir=root / "data",
+                logs_dir=root / "logs",
+                reports_dir=root / "reports",
+            )
+            engine = HuntEngine(settings, Store(settings.data_dir, settings.logs_dir), offline=True)
+            state = {
+                "hunt_id": "HUNT-BEHAVIOR",
+                "host": [],
+                "network": [],
+                "coverage": {},
+                "evidence_keys": [],
+            }
+            engine._add_es_hit(
+                state,
+                {
+                    "_index": "host-events",
+                    "_id": "1",
+                    "@timestamp": "2026-10-12T12:00:00Z",
+                    "host": {"name": "ws-01"},
+                    "process": {"executable": "/tmp/tool"},
+                },
+                {"match_phrase": {"process.executable": "/tmp/"}},
+                "behavior:BH-XPLAT-001",
+            )
+            self.assertEqual(
+                state["host"][0]["provenance"]["lead_id"],
+                "behavior:BH-XPLAT-001",
+            )
+
+    def test_analysis_builds_and_persists_candidate_queue(self):
+        from dataclasses import replace
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(),
+                home=root,
+                data_dir=root / "data",
+                logs_dir=root / "logs",
+                reports_dir=root / "reports",
+            )
+            store = Store(settings.data_dir, settings.logs_dir)
+            engine = HuntEngine(settings, store, offline=True)
+            state = {
+                "hunt_id": "HUNT-QUEUE",
+                "host": [_event("EV-TEMP", "ws-01", process_executable="/tmp/tool")],
+                "network": [],
+                "hypotheses": [],
+                "findings": [],
+                "coverage": {},
+                "lead_catalog": [],
+                "completed_leads": [],
+                "pivot_results": [],
+                "queries": [],
+                "tool_runs": [],
+                "stage_history": [],
+                "source_errors": [],
+            }
+            result = engine._analyze(state)
+            lead = next(item for item in result["candidate_leads"] if item["analytic_id"] == "BH-XPLAT-001")
+            self.assertFalse(lead["customer_visible"])
+            self.assertEqual(
+                store.load_state("HUNT-QUEUE")["candidate_leads"][0]["candidate_id"],
+                result["candidate_leads"][0]["candidate_id"],
+            )

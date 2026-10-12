@@ -53,6 +53,10 @@ SEMANTIC_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
     "dns.rcode": ("dns.response_code", "dns.header.response_code", "dns.flags.rcode", "rcode"),
     "url.full": ("url.full", "url.original", "http.request.uri", "http.uri", "uri"),
     "tls.server_name": ("tls.server.name", "tls.handshake.extensions_server_name", "server_name", "sni"),
+    "file.hash.sha256": ("file.hash.sha256", "hash.sha256", "sha256"),
+    "file.hash.sha1": ("file.hash.sha1", "hash.sha1", "sha1"),
+    "file.hash.md5": ("file.hash.md5", "hash.md5", "md5"),
+    "tls.certificate.fingerprint": ("tls.server.hash.sha256", "tls.certificate.fingerprint", "certificate.fingerprint"),
     "aggregate.signal": ("aggregate.signal",),
 }
 
@@ -617,3 +621,37 @@ def _coerce_time(value: str | datetime) -> datetime:
         return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
     return _parse_time(value, "now")
 
+
+
+def compile_elasticsearch_indicator_seed(
+    indicator: dict[str, Any],
+    bindings: dict[str, list[str]],
+    timestamp_field: str,
+    time_range: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    """Compile a trusted exact indicator into a strict field-bound query."""
+    roles_by_type = {
+        "domain": ("dns.question", "url.full", "tls.server_name"),
+        "ip": ("source.ip", "destination.ip"),
+        "path": ("file.path", "process.executable"),
+        "process": ("process.name", "process.executable"),
+        "sha256": ("file.hash.sha256",),
+        "sha1": ("file.hash.sha1",),
+        "md5": ("file.hash.md5",),
+        "certificate": ("tls.certificate.fingerprint",),
+    }
+    fields = [
+        field
+        for role in roles_by_type.get(str(indicator.get("type")), ())
+        for field in bindings.get(role, [])
+    ]
+    if not fields:
+        return None
+    value = str(indicator.get("value") or "").strip()
+    if not value:
+        return None
+    should = [{"term": {field: value}} for field in list(dict.fromkeys(fields))[:8]]
+    body: dict[str, Any] = {"should": should, "minimum_should_match": 1}
+    if time_range:
+        body["filter"] = [{"range": {timestamp_field: dict(time_range)}}]
+    return {"bool": body}

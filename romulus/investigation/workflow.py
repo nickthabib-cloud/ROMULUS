@@ -16,6 +16,10 @@ from ..intelligence.knowledge import hypotheses_for, TECHNIQUES, ATTACK_RELEASE,
 from ..intelligence.attack_catalog import load_attack_catalog, reference_seeds
 from ..intelligence.correlate import correlate
 from ..intelligence.analytics import summarize_evidence, build_coverage_ledger
+from ..intelligence.behavior_catalog import (
+    load_behavior_catalog, load_local_indicators, resolve_semantic_fields, applicable_analytics,
+    compile_elasticsearch_seed, compile_elasticsearch_indicator_seed, build_candidate_queue,
+)
 from ..tools.elasticsearch_client import ElasticsearchAdapter
 from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
@@ -38,6 +42,7 @@ class HuntState(TypedDict, total=False):
     reasoning_history: list[dict]; reasoning_complete: bool; stage_history: list[dict]; es_indices: list[str]
     es_fields: list[str]; timestamp_field: str; explicit_time_range: bool
     analytic_summary: dict; search_artifacts: list[dict]; evidence_keys: list[str]
+    candidate_leads: list[dict]; behavior_catalog_status: dict; behavior_seed_searches: list[dict]
 
 
 class HuntEngine:
@@ -45,6 +50,8 @@ class HuntEngine:
         self.settings=settings; self.store=store; self.offline=offline; self.use_ollama=use_ollama
         self.es=ElasticsearchAdapter(settings); self.arkime=ArkimeAdapter(settings); self.tshark=TSharkAdapter(settings)
         self._seen_evidence_keys: dict[str,set[str]]={}
+        self.behavior_catalog=load_behavior_catalog()
+        self.local_indicators=load_local_indicators()
 
     def run(self, objective: str, hunt_id: str | None=None, _resume: bool=False) -> dict[str, Any]:
         if not objective or len(objective)>2000: raise ValueError("Mission must contain 1 to 2000 characters")
@@ -59,7 +66,11 @@ class HuntEngine:
                 "tool_calls":0,"mode":"offline" if self.offline else "live","tool_runs":[],"lead_catalog":[],
                 "lead_queue":[],"completed_leads":[],"reasoning_history":[],"stage_history":[],"reasoning_complete":False,
                 "search_fingerprints":[],"dynamic_plan_created":False,"dynamic_initial_queue":[],"es_fields_by_class":{},
-                "analytic_summary":{},"search_artifacts":[],"evidence_keys":[]}
+                "analytic_summary":{},"search_artifacts":[],"evidence_keys":[],"candidate_leads":[],
+                "behavior_seed_searches":[],"behavior_catalog_status":{
+                    "catalog_version":self.behavior_catalog.get("catalog_version"),
+                    "analytics":len(self.behavior_catalog.get("analytics",[])),
+                    "trusted_indicators":len(self.local_indicators.get("indicators",[]))}}
         self.store.save_state(hunt_id,state)
         checkpoint_conn=None
         try:
@@ -279,8 +290,63 @@ class HuntEngine:
             return self._save(s)
         s["timestamp_field"]=timestamp or "@timestamp"
         timestamp=s["timestamp_field"]
-        scope=self._time_scope(s)[1]
-        surveys=_host_survey_queries(s["hypotheses"],host_fields,timestamp,self._time_scope(s)[0],s["objective"],10)
+        mission_range,scope=self._time_scope(s)
+        bindings=resolve_semantic_fields(host_fields)
+        indicator_limit=min(12,max(1,self.settings.max_tool_calls//10))
+        indicator_seeds,indicator_unsupported=_indicator_seed_queries(
+            self.local_indicators,host_fields,timestamp,mission_range,indicator_limit)
+        behavior_limit=min(32,max(1,self.settings.max_tool_calls//5))
+        behavior_seeds,behavior_unsupported=_behavior_seed_queries(
+            self.behavior_catalog,host_fields,timestamp,mission_range,behavior_limit)
+        seed_returned=0
+        seed_executed=0
+        seed_failures=0
+        seed_size=min(25,self.settings.max_results)
+        for seed_kind,seeds in (("trusted_indicator",indicator_seeds),("behavior",behavior_seeds)):
+            for seed in seeds:
+                if not self._budget_ok(s):
+                    break
+                identifier=seed.get("indicator_id") or seed.get("analytic_id")
+                lead_id=f"{seed_kind}:{identifier}"
+                stage="trusted_indicator_seed_search" if seed_kind=="trusted_indicator" else "behavior_seed_search"
+                query=seed["query"]
+                found=self._call(
+                    s,"elasticsearch.search",stage,
+                    {"indices":names,"seed_kind":seed_kind,"seed_id":identifier,"query":query,"size":seed_size},
+                    scope,lambda q=query:self.es.search_many(names,q,seed_size),lambda x:len(x.get("hits",[])))
+                seed_executed+=1
+                if found is None:
+                    seed_failures+=1
+                    status="failed"
+                    returned=0
+                else:
+                    rows=found.get("hits",[])
+                    returned=len(rows)
+                    seed_returned+=returned
+                    status="partial" if found.get("capped") or found.get("timed_out") or found.get("shard_failures") else "completed"
+                    for hit in rows:
+                        self._add_es_hit(s,hit,query,lead_id)
+                if lead_id not in s.setdefault("completed_leads",[]):
+                    s["completed_leads"].append(lead_id)
+                record={"stage":stage,"seed_kind":seed_kind,"seed_id":identifier,
+                    "query":query,"time_range":scope,"returned":returned,"status":status}
+                s["queries"].append(record)
+                s.setdefault("behavior_seed_searches",[]).append(record)
+        s["behavior_catalog_status"]={
+            "catalog_version":self.behavior_catalog.get("catalog_version"),
+            "analytics":len(self.behavior_catalog.get("analytics",[])),
+            "trusted_indicators":len(self.local_indicators.get("indicators",[])),
+            "behavior_searches_planned":len(behavior_seeds),
+            "indicator_searches_planned":len(indicator_seeds),
+            "searches_executed":seed_executed,
+            "returned":seed_returned,
+            "failures":seed_failures,
+            "unsupported_analytics":behavior_unsupported,
+            "unsupported_indicators":indicator_unsupported,
+            "semantic_bindings":bindings,
+        }
+        s.setdefault("coverage",{})["behavior_catalog"]=s["behavior_catalog_status"]
+        surveys=_host_survey_queries(s["hypotheses"],host_fields,timestamp,mission_range,s["objective"],10)
         survey_names=[name for name in names if "host" in name.lower()] or names
         returned=0; survey_failures=0; cap_hits=0; survey_details=[]
         per_survey=min(500,self.settings.max_results)
@@ -692,6 +758,12 @@ class HuntEngine:
         all_e=s.get("host",[])+s.get("network",[])
         s["analytic_summary"]=summarize_evidence(s.get("host",[]),s.get("network",[]))
         s.setdefault("coverage",{})["analytic_summary"]=s["analytic_summary"]
+        s["candidate_leads"]=build_candidate_queue(
+            all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        s["coverage"]["behavior_candidates"]={
+            "total":len(s["candidate_leads"]),
+            "customer_visible":sum(bool(item.get("customer_visible")) for item in s["candidate_leads"]),
+            "unresolved_low_priority":sum(item.get("priority_tier")=="low" and item.get("disposition")=="observed" for item in s["candidate_leads"])}
         for hypothesis in s.get("hypotheses",[]):
             relevant=[e for e in all_e if _relevant(hypothesis["technique_id"],e)]
             # Heuristic matches are candidate context for the model, not an
@@ -712,9 +784,10 @@ class HuntEngine:
         s["coverage"]["hypothesis_coverage"]=ledger
         signals=len(s["analytic_summary"].get("behavioral_observations",[]))
         self._stage(s,"evidence_analysis","completed",{"host_events":len(s.get("host",[])),"network_events":len(s.get("network",[])),
-            "correlations":len(s["correlations"]),"behavioral_observations":signals,"findings":len(s.get("findings",[])),
+            "correlations":len(s["correlations"]),"behavioral_observations":signals,
+            "behavior_candidates":len(s.get("candidate_leads",[])),"findings":len(s.get("findings",[])),
             "high_priority_tested":ledger.get("high_priority_tested"),"high_priority_total":ledger.get("high_priority_total")})
-        print(f"[ROMULUS] analysis stage: evidence={len(all_e)} analytic_observations={signals} correlations={len(s['correlations'])} findings={len(s.get('findings',[]))} high_priority_tested={ledger.get('high_priority_tested')}/{ledger.get('high_priority_total')}")
+        print(f"[ROMULUS] analysis stage: evidence={len(all_e)} analytic_observations={signals} behavior_candidates={len(s.get('candidate_leads',[]))} correlations={len(s['correlations'])} findings={len(s.get('findings',[]))} high_priority_tested={ledger.get('high_priority_tested')}/{ledger.get('high_priority_total')}")
         return self._save(s)
 
     def _publish_smb_lead(self,s):
@@ -1838,3 +1911,55 @@ def _relevant(tid,e):
 def _is_broad_objective(text):
     return any(phrase in text for phrase in ("broad threat hunt","broad defensive threat hunt","broad hunt",
         "malicious actors across all available","all available historical host and network","do not assume one technique"))
+
+
+def _behavior_seed_queries(catalog, fields, timestamp_field, time_range, limit=32):
+    """Build a bounded, priority-ordered set of portable behavior searches."""
+    bindings = resolve_semantic_fields(fields)
+    applicable, unsupported = applicable_analytics(catalog, bindings, "elasticsearch")
+    compiled = []
+    for analytic in applicable:
+        query = compile_elasticsearch_seed(analytic, bindings, timestamp_field, time_range)
+        if query is None:
+            unsupported.append({"id": analytic["id"], "missing_roles": [], "reason": "predicate requires post-collection evaluation"})
+            continue
+        compiled.append({
+            "analytic_id": analytic["id"], "title": analytic["title"],
+            "base_priority": analytic["base_priority"], "query": query,
+        })
+    compiled.sort(key=lambda item: (-int(item["base_priority"]), item["analytic_id"]))
+    selected = compiled[:max(0, int(limit))]
+    temp_seed = next((item for item in compiled if item["analytic_id"] == "BH-XPLAT-001"), None)
+    if temp_seed and temp_seed not in selected and selected:
+        selected[-1] = temp_seed
+        selected.sort(key=lambda item: (-int(item["base_priority"]), item["analytic_id"]))
+    return selected, sorted(unsupported, key=lambda item: item["id"])
+
+
+def _indicator_seed_queries(indicators, fields, timestamp_field, time_range, limit=12):
+    bindings = resolve_semantic_fields(fields)
+    compiled = []
+    unsupported = []
+    reference = datetime.now(timezone.utc)
+    for indicator in indicators.get("indicators", []):
+        expires = indicator.get("expires_at")
+        if expires:
+            try:
+                parsed = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
+                parsed = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+                if parsed <= reference:
+                    unsupported.append({"id": indicator.get("id"), "reason": "expired"})
+                    continue
+            except (TypeError, ValueError):
+                unsupported.append({"id": indicator.get("id"), "reason": "invalid expiration"})
+                continue
+        query = compile_elasticsearch_indicator_seed(indicator, bindings, timestamp_field, time_range)
+        if query is None:
+            unsupported.append({"id": indicator.get("id"), "reason": "required semantic fields unavailable"})
+            continue
+        compiled.append({
+            "indicator_id": indicator["id"], "confidence": int(indicator.get("confidence", 0)),
+            "query": query, "type": indicator.get("type"),
+        })
+    compiled.sort(key=lambda item: (-item["confidence"], item["indicator_id"]))
+    return compiled[:max(0, int(limit))], unsupported
