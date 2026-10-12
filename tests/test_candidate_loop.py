@@ -44,6 +44,10 @@ class MissionModeTests(unittest.TestCase):
 
         self.assertIn("mission_mode", HuntState.__annotations__)
         self.assertIn("pivot_results", HuntState.__annotations__)
+        for field in ("search_tasks", "search_queue", "search_outcomes", "scheduler_history"):
+            self.assertIn(field, HuntState.__annotations__)
+        self.assertNotIn("dynamic_plan_created", HuntState.__annotations__)
+        self.assertNotIn("dynamic_initial_queue", HuntState.__annotations__)
 
     def test_mission_classifier_distinguishes_direction_from_broad_discovery(self):
         from romulus.investigation.workflow import _mission_is_directed

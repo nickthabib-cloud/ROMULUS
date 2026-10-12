@@ -155,6 +155,301 @@ class SchedulerExecutionTests(unittest.TestCase):
             self.assertTrue(outcome["artifact_id"].startswith("SR-"))
             self.assertEqual(outcome["time_range"], task["time_range"])
 
+
+def _analytic():
+    return {
+        "id": "BH-TEST-DISCOVERY",
+        "version": 1,
+        "title": "Test command behavior",
+        "description": "Bounded discovery fixture.",
+        "enabled": True,
+        "platforms": ["cross-platform"],
+        "categories": ["execution"],
+        "source": "elasticsearch",
+        "required_roles": ["process.command_line"],
+        "optional_roles": [],
+        "match": {
+            "all": [
+                {
+                    "role": "process.command_line",
+                    "operator": "contains_any",
+                    "values": ["test-command"],
+                }
+            ],
+            "any": [],
+            "none": [],
+        },
+        "base_priority": 20,
+        "specificity": 30,
+        "expected_noise": "high",
+        "attack_techniques": ["T1059"],
+        "benign_explanations": ["Authorized testing."],
+        "required_corroboration": ["Independent suspicious behavior."],
+        "follow_up": ["Review process context."],
+        "provenance": [{"name": "test", "url": "https://example.test/rule"}],
+        "review_date": "2026-10-12",
+    }
+
+
+def _discovery_state():
+    state = _state()
+    state.update(
+        {
+            "status": "running",
+            "mission_mode": "undirected",
+            "hypotheses": [],
+            "timestamp_field": "@timestamp",
+            "es_fields": [
+                "@timestamp",
+                "message",
+                "process.name",
+                "process.executable",
+                "process.command_line",
+                "host.name",
+                "source.ip",
+                "destination.ip",
+            ],
+        }
+    )
+    state["es_fields_by_class"] = {"host": list(state["es_fields"]), "network": []}
+    return state
+
+
+def _configure_discovery_catalogs(engine):
+    engine.behavior_catalog = {"catalog_version": "test", "analytics": [_analytic()]}
+    engine.local_indicators = {
+        "indicators": [
+            {
+                "id": "IOC-TEST-PROCESS",
+                "type": "process",
+                "value": "powershell.exe",
+                "confidence": 95,
+            }
+        ]
+    }
+
+
+class _RecordingElasticsearch:
+    def __init__(self, order):
+        self.order = order
+        self.calls = []
+
+    def search_many(self, indices, query, size):
+        self.order.append("host")
+        self.calls.append((indices, query, size))
+        return {
+            "hits": [],
+            "total": 0,
+            "capped": False,
+            "timed_out": False,
+            "shard_failures": 0,
+        }
+
+
+class _RecordingArkime:
+    def __init__(self, order):
+        self.order = order
+        self.calls = []
+
+    def search_sessions(self, expression, **kwargs):
+        self.order.append("network")
+        self.calls.append((expression, kwargs))
+        return {"sessions": [], "total": 0}
+
+
+class _RecordingTShark:
+    def __init__(self, order):
+        self.order = order
+        self.calls = []
+
+    def inspect(self, pcap, **kwargs):
+        self.order.append("network")
+        self.calls.append((pcap, kwargs))
+        return {
+            "packets": [],
+            "count": 0,
+            "matched_count": 0,
+            "output_capped": False,
+            "provenance": {
+                "pcap": str(pcap),
+                "display_filter": kwargs["display_filter"],
+                "fields": kwargs["fields"],
+                "time_range": "explicit filter",
+            },
+        }
+
+
+class SchedulerDiscoveryWorkflowTests(unittest.TestCase):
+    def _prepared(self, root):
+        pcap = root / "discovery.pcap"
+        pcap.write_bytes(b"test fixture")
+        engine = _engine(root, pcap_files=(pcap,))
+        _configure_discovery_catalogs(engine)
+        state = _discovery_state()
+        return engine, state, pcap
+
+    def test_registration_precedes_all_deterministic_evidence_execution(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine, state, pcap = self._prepared(Path(directory))
+            state["mission_mode"] = "directed"
+            state["hypotheses"] = [
+                {
+                    "hypothesis_id": "H-DIRECTED",
+                    "technique_id": "T1059.001",
+                    "title": "PowerShell execution",
+                    "expected_host": True,
+                    "expected_network": False,
+                    "tactics": ["execution"],
+                    "priority": 5,
+                }
+            ]
+
+            registered = engine._register_discovery_tasks(state)
+
+            self.assertTrue(registered)
+            self.assertEqual(state["tool_calls"], 0)
+            self.assertEqual(state["host"], [])
+            self.assertEqual(state["network"], [])
+            tasks = list(state["search_tasks"].values())
+            self.assertTrue(any(item["origin"] == "behavior_catalog" for item in tasks))
+            self.assertTrue(any(item["origin"] == "trusted_indicator" for item in tasks))
+            self.assertTrue(any(item["origin"] == "directed_survey" for item in tasks))
+            self.assertTrue(any(item["source"] == "arkime" for item in tasks))
+            self.assertTrue(
+                any(item["source"] == "tshark" and item["source_targets"] == [str(pcap)] for item in tasks)
+            )
+
+    def test_discovery_drain_executes_host_and_network_before_repeating_family(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine, state, _ = self._prepared(Path(directory))
+            order = []
+            engine.es = _RecordingElasticsearch(order)
+            engine.arkime = _RecordingArkime(order)
+            engine.tshark = _RecordingTShark(order)
+            engine._register_discovery_tasks(state)
+
+            engine._drain_scheduled_tasks(state, phase="discovery", limit=3)
+
+            self.assertEqual(set(order[:2]), {"host", "network"})
+            self.assertEqual(
+                {item["source_family"] for item in state["search_outcomes"][:2]},
+                {"host", "network"},
+            )
+
+    def test_duplicate_origins_execute_once_and_preserve_both_owners(self):
+        from romulus.investigation.scheduler import register_search_task
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory))
+            calls = []
+            engine.es = _RecordingElasticsearch(calls)
+            state = _discovery_state()
+            proposal = {
+                "source": "elasticsearch",
+                "source_family": "host",
+                "source_targets": ["host-events"],
+                "phase": "discovery",
+                "origin": "behavior_catalog",
+                "intent": "first owner",
+                "query_spec": {
+                    "query": {
+                        "bool": {
+                            "filter": [
+                                {
+                                    "range": {
+                                        "@timestamp": {
+                                            "gte": "2024-11-13T10:58:00Z",
+                                            "lte": "2024-11-13T11:10:00Z",
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "size": 5,
+                },
+                "time_range": {
+                    "start": "2024-11-13T10:58:00Z",
+                    "end": "2024-11-13T11:10:00Z",
+                    "scope": "explicit mission range",
+                },
+                "hypothesis_ids": ["H-001"],
+            }
+            task_id, _ = register_search_task(state, proposal)
+            register_search_task(
+                state,
+                {
+                    **proposal,
+                    "origin": "directed_survey",
+                    "intent": "second owner",
+                    "candidate_ids": ["CL-001"],
+                },
+            )
+
+            engine._drain_scheduled_tasks(state, phase="discovery")
+
+            self.assertEqual(calls, ["host"])
+            task = state["search_tasks"][task_id]
+            self.assertEqual(task["origins"], ["behavior_catalog", "directed_survey"])
+            self.assertEqual(task["hypothesis_ids"], ["H-001"])
+            self.assertEqual(task["candidate_ids"], ["CL-001"])
+            self.assertEqual(len(state["search_outcomes"]), 1)
+
+    def test_every_registered_discovery_task_gets_one_authoritative_outcome(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine, state, _ = self._prepared(Path(directory))
+            order = []
+            engine.es = _RecordingElasticsearch(order)
+            engine.arkime = _RecordingArkime(order)
+            engine.tshark = _RecordingTShark(order)
+            engine._register_discovery_tasks(state)
+
+            engine._drain_scheduled_tasks(state, phase="discovery")
+
+            self.assertEqual(len(state["search_outcomes"]), len(state["search_tasks"]))
+            self.assertEqual(
+                {item["task_id"] for item in state["search_outcomes"]},
+                set(state["search_tasks"]),
+            )
+            fingerprints = [item["execution_fingerprint"] for item in state["search_tasks"].values()]
+            self.assertEqual(len(fingerprints), len(set(fingerprints)))
+
+    def test_undirected_candidate_free_discovery_never_calls_ollama(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine, state, _ = self._prepared(Path(directory))
+            engine.use_ollama = True
+            order = []
+            engine.es = _RecordingElasticsearch(order)
+            engine.arkime = _RecordingArkime(order)
+            engine.tshark = _RecordingTShark(order)
+
+            engine._register_discovery_tasks(state)
+            engine._drain_scheduled_tasks(state, phase="discovery")
+
+            self.assertFalse(any(item.get("tool") == "ollama.api.chat" for item in state["tool_runs"]))
+            self.assertEqual(state["hypotheses"], [])
+
+    def test_budget_exhaustion_keeps_queued_tasks_and_marks_hunt_partial(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine, state, _ = self._prepared(Path(directory))
+            engine.settings = replace(engine.settings, max_tool_calls=1)
+            order = []
+            engine.es = _RecordingElasticsearch(order)
+            engine.arkime = _RecordingArkime(order)
+            engine.tshark = _RecordingTShark(order)
+            engine._register_discovery_tasks(state)
+
+            engine._drain_scheduled_tasks(state, phase="discovery")
+
+            self.assertEqual(state["status"], "partial")
+            self.assertTrue(state["search_queue"])
+            self.assertTrue(state["coverage"]["scheduler_gaps"])
+            self.assertTrue(
+                any(item.get("event") == "discovery_budget_gap" for item in state["scheduler_history"])
+            )
+
+
+class SchedulerExecutionAdditionalTests(unittest.TestCase):
     def test_arkime_task_uses_bounded_expression_and_adds_network_evidence(self):
         class Arkime:
             def __init__(self):
