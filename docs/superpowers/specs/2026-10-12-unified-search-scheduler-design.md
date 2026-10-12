@@ -1,7 +1,7 @@
 # ROMULUS Unified Search Scheduler Design
 
-**Date:** 2026-10-12  
-**Status:** Conversational design approved; pending written-spec review  
+**Date:** 2026-10-12
+**Status:** Approved for implementation planning
 **Scope:** Search registration, prioritization, deduplication, execution outcomes, budgets, coverage, and resume behavior
 
 ## Purpose
@@ -194,6 +194,14 @@ Tests are written before production changes and prove:
 4. Deploy the exact committed code to the development VM and run the dependency-complete suite plus `doctor`.
 5. Run one bounded, isolated, read-only live hunt. Verify both host and network discovery occur, no duplicate execution fingerprint appears, every candidate follow-up points to its own outcome, and model work begins only after a valid basis exists.
 6. Remove only the disposable validation artifacts and update the durable plan, validation record, and changelog before pausing for the next greenlight.
+
+### Holdout dataset evaluation
+
+The `SL700_variant_a_b/run_a_b` README, human-readable `attackmate.log`, and structured `attackmate.json` are a post-hunt evaluation oracle, never hunt input. ROMULUS must finish its generic hunt before validation reads those files. Their storyline, indicators, entities, commands, timestamps, and technique labels must not enter prompts, behavior catalogs, local indicators, fixtures, scheduler priorities, or production code.
+
+After the report is fixed, validation compares its cited findings and supported path with the oracle at the technique, sequence, entity, and time-window levels. The validation record separates supported true positives, unsupported or incorrect claims, missed observable steps, and ground-truth steps that available telemetry could not expose. It attributes misses to coverage, scheduling/budget, query execution, candidate promotion, assessment, or reporting when evidence permits. This comparison measures transfer-capable hunting behavior; it does not tune the implementation to this dataset during the same milestone.
+
+The ground-truth files remain external and are not copied into the repository or deployment. If they are unavailable, scheduler implementation may proceed, but the holdout accuracy gate remains incomplete and must be reported rather than guessed.
 
 ## Acceptance Criteria
 
