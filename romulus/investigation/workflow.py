@@ -99,6 +99,7 @@ class HuntState(TypedDict, total=False):
     depth: int; tool_calls: int; mode: str; tool_runs: list[dict]
     source_errors: list[dict]; es_fields_by_class: dict[str,list[str]]
     es_indices_by_class: dict[str,list[str]]
+    source_health: dict[str,bool]
     lead_catalog: list[dict]; completed_leads: list[str]
     search_tasks: dict[str,dict]; search_queue: list[str]; search_outcomes: list[dict]; scheduler_history: list[dict]
     scheduler_mission_time_range: dict[str,str]

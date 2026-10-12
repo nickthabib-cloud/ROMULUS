@@ -241,10 +241,16 @@ class CoreTests(unittest.TestCase):
             es=ES(); arkime=Arkime(); engine.es=es; engine.arkime=arkime
             state=engine.run("Hunt for SMB lateral movement")
             self.assertEqual(state["status"],"partial")
-            self.assertFalse(state["coverage"]["hypothesis_coverage"]["closure_ready"])
+            self.assertFalse(state["coverage"]["hypothesis_coverage"]["closure_ready"],
+                state["coverage"]["hypothesis_coverage"])
             self.assertEqual(state["coverage"]["time_scope"],"all retained indexed time")
-            self.assertTrue(any(lead.endswith("-HOST") for lead in state["completed_leads"]))
-            self.assertTrue(any(lead.endswith("-NETWORK") for lead in state["completed_leads"]))
+            self.assertEqual(state["source_health"],{"host":True,"network":True})
+            executed_task_ids={outcome["task_id"] for outcome in state["search_outcomes"]}
+            self.assertTrue(state["completed_leads"])
+            self.assertTrue(set(state["completed_leads"])<=executed_task_ids)
+            self.assertEqual({"host","network"},{outcome["source_family"] for outcome in state["search_outcomes"]})
+            from romulus.investigation.scheduler import outcome_resolves
+            self.assertFalse(any(outcome_resolves(outcome) for outcome in state["search_outcomes"]))
             self.assertGreaterEqual(len(state["host"]),2); self.assertGreaterEqual(len(state["network"]),2)
             self.assertTrue(all(call[1].get("all_history") for call in arkime.calls))
             self.assertLessEqual(state["tool_calls"],cfg.max_tool_calls)
