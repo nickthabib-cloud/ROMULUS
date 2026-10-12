@@ -1,0 +1,5 @@
+{
+  "catalog_version": "1.0.0",
+  "description": "Operator-supplied trusted exact indicators. The repository intentionally ships empty.",
+  "indicators": []
+}

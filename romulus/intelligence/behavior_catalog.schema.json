@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://romulus.local/schemas/behavior_catalog.schema.json",
+  "title": "ROMULUS Behavioral Seed Catalog",
+  "type": "object",
+  "required": [
+    "catalog_version",
+    "analytics"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "catalog_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_from": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "analytics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "version",
+          "title",
+          "description",
+          "enabled",
+          "platforms",
+          "categories",
+          "source",
+          "required_roles",
+          "optional_roles",
+          "match",
+          "base_priority",
+          "specificity",
+          "expected_noise",
+          "attack_techniques",
+          "benign_explanations",
+          "required_corroboration",
+          "follow_up",
+          "provenance",
+          "review_date"
+        ]
+      }
+    }
+  }
+}
