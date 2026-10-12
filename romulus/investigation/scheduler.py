@@ -208,8 +208,14 @@ def register_search_task(
     """Register a search once, merging every owner of duplicate execution."""
 
     initialize_scheduler(state)
-    execution = _validated_execution(proposal)
-    fingerprint = execution_fingerprint(proposal)
+    effective_proposal = dict(proposal)
+    policy = state.get("sampling_policy")
+    if isinstance(policy, Mapping):
+        query_spec = dict(proposal.get("query_spec") or {})
+        query_spec["sampling"] = _normalized(policy)
+        effective_proposal["query_spec"] = query_spec
+    execution = _validated_execution(effective_proposal)
+    fingerprint = execution_fingerprint(effective_proposal)
     task_id = f"ST-{fingerprint[:16]}"
     owners = {field: _owners(proposal, field) for field in _OWNER_FIELDS}
     tier, score = _priority_for(proposal, execution["origin"])
@@ -415,6 +421,27 @@ def _bounded_outcome_value(value: Any, *, limit: int = 500) -> Any:
     return None
 
 
+def _normalized_sampling(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    result: dict[str, Any] = {}
+    for field in ("version", "requested_strata", "covered_strata", "backfilled"):
+        item = value.get(field)
+        if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+            result[field] = item
+    for field, limit in (("strategy", 64), ("fallback_reason", 120), ("bounds_source", 64)):
+        item = value.get(field)
+        if isinstance(item, str) and item.strip():
+            result[field] = item.strip()[:limit]
+    retained = value.get("retained_by_stratum")
+    if isinstance(retained, (list, tuple)):
+        result["retained_by_stratum"] = [
+            int(item) for item in retained[:24]
+            if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        ]
+    return result or None
+
+
 def _append_outcome(state: MutableMapping[str, Any], outcome: dict[str, Any]) -> None:
     state["search_outcomes"].append(outcome)
     if len(state["search_outcomes"]) > _OUTCOME_LIMIT:
@@ -465,6 +492,9 @@ def _normalized_outcome(
     time_range = outcome.get("time_range")
     if isinstance(time_range, Mapping):
         normalized["time_range"] = _normalized(time_range)
+    sampling = _normalized_sampling(outcome.get("sampling"))
+    if sampling is not None:
+        normalized["sampling"] = sampling
     if outcome.get("possible_duplicate_execution"):
         normalized["possible_duplicate_execution"] = True
     return normalized

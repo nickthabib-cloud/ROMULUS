@@ -2,6 +2,23 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-12 — representative bounded retrieval (local proof; live hunt paused)
+
+### Implemented behavior
+
+- Capped Elasticsearch results are retained across deterministic time strata within one PIT. When a mission window is absent, the adapter derives the matching time extent; inability to do so is explicitly reported as a fallback.
+- Capped Arkime results use deterministic ordered rank windows inside one logical scheduler operation. Duplicate session IDs are suppressed, and windows beyond Arkime's accepted offset are reported rather than silently replaced with early rows.
+- TShark still scans the complete filtered packet stream and reports the exact match count. Retained rows use deterministic per-time-stratum reservoirs; malformed or unavailable timestamps use a disclosed whole-stream reservoir.
+- Sampling policy is code-controlled and part of exact task identity. Bounded outcome metadata reaches the technical report and compact aggregate coverage, while raw queries, rank-window requests, and per-request history do not survive compact retention.
+- Capped work remains partial and cannot resolve candidate or hypothesis coverage.
+
+### Validation boundary
+
+- Generic synthetic regressions prove cross-window retention, stable repetition, duplicate suppression, conservative fallbacks, report audience separation, and compact aggregation without importing holdout identities, indicators, commands, tools, hostnames, or timestamps into runtime behavior.
+- The complete local suite passed all 151 tests available in this environment, with six dependency-backed checks reserved for the development VM. The focused scheduler/report/retention suite passed 41 tests with one VM dependency skip. `compileall`, `git diff --check`, and a runtime/test corpus-identity scan were clean.
+- The operator paused another live hunt after determining that the expected attack path is not currently present in the loaded telemetry dataset. No hunt will be used as detection proof until the dataset/ingestion path is diagnosed and the expected telemetry is confirmed present independently of ROMULUS.
+- The remaining deployment gate is therefore dependency-complete VM tests, compilation, diagnostics, and read-only ingestion-path diagnosis. A later live evaluation must start from a confirmed dataset and remain blind to the external oracle during execution.
+
 ## 2026-10-12 — unified search scheduler (validated with a coverage limitation)
 
 ### Implemented behavior

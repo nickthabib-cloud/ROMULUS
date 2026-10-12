@@ -120,11 +120,11 @@
 - Consumes: bounded adapter sampling summaries from Tasks 2–4.
 - Produces: normalized `search_outcomes[*].sampling`, bounded technical-report sampling lines, and compact `coverage.sampling_summary` aggregates.
 
-- [ ] Write failing tests for outcome normalization, technical/customer report separation, compact aggregation, and capped nonclosure.
-- [ ] Run the focused scheduler/report/retention tests; expect missing sampling metadata failures.
-- [ ] Implement bounded propagation and documentation without retaining queries or per-request history.
-- [ ] Run the focused tests, full suite, `compileall`, `git diff --check`, and corpus-identity scan; expect PASS/clean.
-- [ ] Commit with `feat: report representative search coverage`.
+- [x] Write failing tests for outcome normalization, technical/customer report separation, compact aggregation, and capped nonclosure.
+- [x] Run the focused scheduler/report/retention tests; expect missing sampling metadata failures.
+- [x] Implement bounded propagation and documentation without retaining queries or per-request history.
+- [x] Run the focused tests, full suite, `compileall`, `git diff --check`, and corpus-identity scan; expect PASS/clean.
+- [x] Commit with `feat: report representative search coverage`.
 
 ### Task 6: Exact deployment, live validation, corpus evaluation, and PR
 
@@ -146,4 +146,4 @@
 ## Execution status
 
 - Plan authorized for native execution by the operator on 2026-10-12; no additional approval checkpoint is required.
-- Tasks 1–4 are complete; Tasks 5–6 remain. The operator paused live-hunt validation until the expected attack telemetry is present in the dataset; Task 6 will use local/VM tests and ingestion-path diagnosis instead of another hunt.
+- Tasks 1–5 are complete; Task 6 remains. The operator paused live-hunt validation until the expected attack telemetry is present in the dataset; Task 6 will use local/VM tests and ingestion-path diagnosis instead of another hunt.

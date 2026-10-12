@@ -142,6 +142,7 @@ class HuntEngine:
                     "catalog_version":self.behavior_catalog.get("catalog_version"),
                     "analytics":len(self.behavior_catalog.get("analytics",[])),
                     "trusted_indicators":len(self.local_indicators.get("indicators",[]))}}
+        state.setdefault("sampling_policy",sampling_policy(self.settings))
         initialize_scheduler(state)
         if _resume:
             migrate_legacy_search_state(state,compile_pending=lambda lead:

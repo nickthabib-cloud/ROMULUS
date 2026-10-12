@@ -66,7 +66,9 @@ class RetentionTests(unittest.TestCase):
             "search_queue": ["ST-OPEN"],
             "search_outcomes": [{"task_id": "ST-DONE", "status": "completed", "matched_total": 0,
                 "returned_total": 0, "capped": False, "timed_out": False, "shard_failures": 0,
-                "incomplete": False}],
+                "incomplete": False, "sampling": {"version": 1, "strategy": "time_stratified",
+                    "requested_strata": 8, "covered_strata": 6,
+                    "retained_by_stratum": [2, 2, 2, 2, 2, 2], "fallback_reason": "sparse_strata"}}],
             "scheduler_history": [{"event": "task_merged", "task_id": "ST-DONE"},
                 {"event": "discovery_budget_gap", "unserved_families": ["network"]}],
             "coverage": {
@@ -150,6 +152,13 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(scheduler["duplicate_merges_avoided"],1)
             self.assertEqual(scheduler["unresolved_task_count"],1)
             self.assertTrue(scheduler["source_fairness_gaps"])
+            sampling=persisted["coverage"]["sampling_summary"]
+            self.assertEqual(sampling["tasks_with_sampling"],1)
+            self.assertEqual(sampling["by_strategy"],{"time_stratified":1})
+            self.assertEqual(sampling["requested_strata"],8)
+            self.assertEqual(sampling["covered_strata"],6)
+            self.assertEqual(sampling["retained_records"],12)
+            self.assertEqual(sampling["fallbacks"],{"sparse_strata":1})
             self.assertEqual(len(persisted["candidate_leads"]), 1)
             self.assertFalse(any(node.get("evidence_id") == "EV-DROP" for node in persisted["investigation_graph"]["nodes"]))
             self.assertTrue(all(Path(path).exists() for path in persisted["report_paths"]))

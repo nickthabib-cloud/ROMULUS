@@ -182,6 +182,7 @@ def _compact_state(state: dict[str, Any], retained_ids: set[str]) -> dict[str, A
     ]
     compact["coverage"]=_compact_coverage(state.get("coverage",{}))
     compact["coverage"]["scheduler_summary"]=_scheduler_summary(state)
+    compact["coverage"]["sampling_summary"]=_sampling_summary(state)
     compact["source_errors"]=[{
         key:error.get(key) for key in ("tool","stage","error","status_code") if error.get(key) is not None
     } for error in state.get("source_errors",[]) or []]
@@ -222,6 +223,27 @@ def _scheduler_summary(state: dict[str, Any]) -> dict[str, Any]:
         "duplicate_merges_avoided":sum(item.get("event")=="task_merged" for item in history if isinstance(item,dict)),
         "unresolved_task_count":sum(not resolves(outcomes.get(task.get("task_id"))) for task in tasks),
         "source_fairness_gaps":fairness[:40]}
+
+
+def _sampling_summary(state: dict[str, Any]) -> dict[str, Any]:
+    outcomes=[item for item in state.get("search_outcomes",[]) or [] if isinstance(item,dict)]
+    summaries=[item["sampling"] for item in outcomes if isinstance(item.get("sampling"),dict)]
+    def counts(values):
+        result={}
+        for value in values:
+            key=str(value or "unknown"); result[key]=result.get(key,0)+1
+        return dict(sorted(result.items()))
+    def integer_total(field):
+        return sum(int(item.get(field,0)) for item in summaries
+            if isinstance(item.get(field),int) and not isinstance(item.get(field),bool))
+    retained=sum(sum(int(value) for value in item.get("retained_by_stratum",[])[:24]
+        if isinstance(value,int) and not isinstance(value,bool) and value>=0) for item in summaries)
+    fallbacks=counts(item.get("fallback_reason") for item in summaries if item.get("fallback_reason"))
+    return {"tasks_with_sampling":len(summaries),
+        "by_strategy":counts(item.get("strategy") for item in summaries),
+        "requested_strata":integer_total("requested_strata"),
+        "covered_strata":integer_total("covered_strata"),
+        "retained_records":retained,"fallbacks":fallbacks}
 
 
 def _compact_graph(graph: Any, retained_ids: set[str]) -> dict[str, Any]:

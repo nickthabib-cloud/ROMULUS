@@ -125,7 +125,10 @@ class CustomerWordReportTests(unittest.TestCase):
             "search_outcomes": [{"task_id": "ST-INTERNAL-SENTINEL", "status": "partial",
                 "returned_total": 5, "matched_total": 12, "capped": True, "timed_out": False,
                 "shard_failures": 0, "incomplete": True, "error_kind": "ResultCap",
-                "reason": "configured result cap reached"}],
+                "reason": "configured result cap reached", "sampling": {
+                    "version": 1, "strategy": "rank_stratified", "requested_strata": 8,
+                    "covered_strata": 7, "retained_by_stratum": [1, 1, 1, 1, 1, 1, 1],
+                    "fallback_reason": "arkime_offset_limit"}}],
             "scheduler_history": [{"event": "investigation_budget_gap", "unserved_families": ["network"]}],
             "source_errors": [],
         }
@@ -180,6 +183,9 @@ class CustomerWordReportTests(unittest.TestCase):
             self.assertIn("returned=5",technical_text)
             self.assertIn("matched=12",technical_text)
             self.assertIn("capped=True",technical_text)
+            self.assertIn("sampling=rank_stratified",technical_text)
+            self.assertIn("strata=7/8",technical_text)
+            self.assertNotIn("sampling=rank_stratified",word_text)
             self.assertIn("CL-HIGH",technical_text)
             self.assertIn("budget-limited=ST-BUDGET-001, ST-BUDGET-002",technical_text)
             self.assertIn("total=3; omitted=1",technical_text)

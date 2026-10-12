@@ -4,6 +4,15 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 
 ## Unreleased
 
+### Representative bounded telemetry retrieval
+
+- Replaced earliest-only capped retention with source-native representative retrieval: Elasticsearch time strata inside one PIT, Arkime stable rank windows, and deterministic TShark reservoirs over the complete matching stream.
+- Added a code-controlled `TIME_SAMPLING_STRATA` policy (default 8, constrained to 2–24) to scheduler task identity. Model output cannot raise, lower, or otherwise replace the active policy.
+- Preserved exact matched totals where the source provides them, suppressed duplicate Elasticsearch documents and Arkime sessions across windows, and disclosed unknown totals, malformed timestamps, sparse coverage, and Arkime offset-limit fallbacks.
+- Kept every capped search partial and nonresolving. Representative samples improve what reaches analysis context; they do not support a complete-coverage or clean-environment claim.
+- Added bounded sampling metadata to exact outcomes and the technical report only. Compact retention keeps aggregate strategies, requested/covered strata, retained counts, and fallback counts while deleting task/query/request bulk.
+- Added synthetic early/middle/late, deterministic-repeat, deduplication, malformed-time, offset-limit, scheduler, report-boundary, and compact-retention regressions without embedding holdout identities or attack-specific indicators.
+
 ### Unified search scheduling and exact outcomes
 
 - Routed deterministic behavior/indicator discovery, operator-directed work, candidate follow-ups, grounded model proposals, and coverage-frontier work through one persisted scheduler instead of parallel host, network, model, and fallback queues.

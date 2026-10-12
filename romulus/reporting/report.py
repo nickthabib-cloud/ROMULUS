@@ -118,6 +118,12 @@ def _scheduler_lines(state):
     lines.append(f"Scheduler task appendix: shown={len(selected)}; total={len(tasks)}; omitted={max(0,len(tasks)-len(selected))}.")
     for task in selected:
         outcome=outcomes.get(task.get("task_id"),{})
+        sampling=outcome.get("sampling") if isinstance(outcome.get("sampling"),dict) else {}
+        retained=sampling.get("retained_by_stratum")
+        retained_total=sum(value for value in retained if isinstance(value,int) and not isinstance(value,bool)) if isinstance(retained,list) else 0
+        sampling_text=(f"sampling={sampling.get('strategy')}; strata={sampling.get('covered_strata')}/{sampling.get('requested_strata')}; "
+            f"sampled_records={retained_total}; sampling_fallback={sampling.get('fallback_reason') or 'none'}; "
+            if sampling else "sampling=not recorded; ")
         owners=[]
         for key,label in (("candidate_ids","candidates"),("follow_up_ids","follow-ups"),("hypothesis_ids","hypotheses")):
             if task.get(key): owners.append(f"{label}={_join_text(task.get(key))}")
@@ -128,7 +134,7 @@ def _scheduler_lines(state):
             f"returned={outcome.get('returned_total')}; matched={outcome.get('matched_total')}; scope={scope}; "
             f"capped={bool(outcome.get('capped'))}; timed_out={bool(outcome.get('timed_out'))}; "
             f"shard_failures={outcome.get('shard_failures',0)}; incomplete={bool(outcome.get('incomplete'))}; "
-            f"error={outcome.get('error_kind') or outcome.get('reason') or 'none'}.")
+            f"{sampling_text}error={outcome.get('error_kind') or outcome.get('reason') or 'none'}.")
     gaps=[item for item in state.get("scheduler_history",[]) or []
         if isinstance(item,dict) and "budget_gap" in str(item.get("event"))]
     gaps.extend(state.get("coverage",{}).get("scheduler_gaps",[]) or [])

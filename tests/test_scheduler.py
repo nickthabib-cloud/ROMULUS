@@ -40,6 +40,21 @@ def _proposal(**overrides):
 
 
 class SchedulerRegistrationTests(unittest.TestCase):
+    def test_state_sampling_policy_is_persisted_in_task_identity(self):
+        from romulus.investigation.scheduler import register_search_task
+
+        first_state = {"sampling_policy": {"version": 1, "strategy": "time_or_rank_stratified", "strata": 4}}
+        second_state = {"sampling_policy": {"version": 1, "strategy": "time_or_rank_stratified", "strata": 8}}
+        proposal = _proposal(query_spec={"query": {"match_all": {}},
+            "sampling": {"version": 99, "strategy": "caller_override", "strata": 24}})
+
+        first_id, _ = register_search_task(first_state, proposal)
+        second_id, _ = register_search_task(second_state, proposal)
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(first_state["search_tasks"][first_id]["query_spec"]["sampling"], first_state["sampling_policy"])
+        self.assertEqual(second_state["search_tasks"][second_id]["query_spec"]["sampling"], second_state["sampling_policy"])
+
     def test_exact_execution_duplicate_merges_all_owners(self):
         from romulus.investigation.scheduler import register_search_task
 
@@ -365,6 +380,31 @@ class SchedulerOrderingTests(unittest.TestCase):
 
 
 class SchedulerOutcomeTests(unittest.TestCase):
+    def test_outcome_preserves_only_bounded_sampling_summary(self):
+        from romulus.investigation.scheduler import begin_search_task, record_search_outcome, register_search_task
+
+        state = {}
+        task_id, _ = register_search_task(state, _proposal())
+        begin_search_task(state, task_id, now="2026-10-12T10:00:00Z")
+
+        recorded = record_search_outcome(state, task_id, {
+            "status": "partial", "matched_total": 100, "returned_total": 8,
+            "capped": True, "incomplete": True,
+            "sampling": {
+                "version": 1, "strategy": "rank_stratified", "requested_strata": 8,
+                "covered_strata": 7, "retained_by_stratum": [1] * 40,
+                "fallback_reason": "offset limit", "windows": [{"request": "must not persist"}],
+                "query": {"secret": "must not persist"},
+            },
+        }, now="2026-10-12T10:01:00Z")
+
+        self.assertEqual(recorded["sampling"]["strategy"], "rank_stratified")
+        self.assertEqual(recorded["sampling"]["covered_strata"], 7)
+        self.assertEqual(len(recorded["sampling"]["retained_by_stratum"]), 24)
+        self.assertNotIn("windows", recorded["sampling"])
+        self.assertNotIn("query", recorded["sampling"])
+        self.assertFalse(__import__("romulus.investigation.scheduler", fromlist=["outcome_resolves"]).outcome_resolves(recorded))
+
     def test_only_complete_uncapped_outcome_with_confirmed_total_resolves(self):
         from romulus.investigation.scheduler import outcome_resolves
 
