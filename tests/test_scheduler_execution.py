@@ -122,6 +122,7 @@ class SchedulerExecutionTests(unittest.TestCase):
                         }
                     ],
                     "total": 1,
+                    "total_relation": "eq",
                     "capped": False,
                     "timed_out": False,
                     "shard_failures": 0,
@@ -163,11 +164,64 @@ class SchedulerExecutionTests(unittest.TestCase):
             self.assertEqual(outcome["status"], "completed")
             self.assertEqual(outcome["returned_total"], 1)
             self.assertEqual(outcome["matched_total"], 1)
+            self.assertEqual(outcome["total_relation"], "eq")
             self.assertFalse(outcome["capped"])
             self.assertFalse(outcome["timed_out"])
             self.assertTrue(outcome["artifact_id"].startswith("SR-"))
             self.assertEqual(outcome["time_range"], task["time_range"])
             self.assertEqual(outcome["sampling"]["strategy"], "exhaustive")
+
+    def test_elasticsearch_non_exact_short_result_is_partial(self):
+        class Elasticsearch:
+            def search_many(self, indices, query, size, **kwargs):
+                return {
+                    "hits": [{"_index": "host-events", "_id": "doc-1", "@timestamp": "2024-11-13T11:00:00Z"}],
+                    "total": 2,
+                    "total_relation": "gte",
+                    "capped": False,
+                    "timed_out": False,
+                    "shard_failures": 0,
+                    "sampling": {"version": 1, "strategy": "exhaustive"},
+                }
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory))
+            engine.es = Elasticsearch()
+            state = _state()
+            task = _task(state)
+
+            outcome = engine._execute_search_task(state, task)
+
+            self.assertEqual(outcome["status"], "partial")
+            self.assertTrue(outcome["incomplete"])
+            self.assertEqual(outcome["returned_total"], 1)
+            self.assertEqual(outcome["matched_total"], 2)
+            self.assertEqual(outcome["total_relation"], "gte")
+
+    def test_task_embedded_sampling_policy_survives_state_policy_change(self):
+        class Elasticsearch:
+            def __init__(self):
+                self.sampling = None
+
+            def search_many(self, indices, query, size, **kwargs):
+                self.sampling = kwargs["sampling"]
+                return {"hits": [], "total": 0, "total_relation": "eq", "capped": False,
+                    "timed_out": False, "shard_failures": 0,
+                    "sampling": {"version": 1, "strategy": "exhaustive"}}
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory))
+            elasticsearch = Elasticsearch()
+            engine.es = elasticsearch
+            state = _state()
+            state["sampling_policy"] = {"version": 1, "strategy": "time_or_rank_stratified", "strata": 3}
+            task = _task(state)
+            state["sampling_policy"] = {"version": 1, "strategy": "time_or_rank_stratified", "strata": 9}
+
+            outcome = engine._execute_search_task(state, task)
+
+            self.assertEqual(outcome["status"], "completed")
+            self.assertEqual(elasticsearch.sampling["strata"], 3)
 
     def test_report_derives_resource_limit_from_scheduler_not_legacy_queue(self):
         from unittest.mock import patch
@@ -192,6 +246,24 @@ class SchedulerExecutionTests(unittest.TestCase):
                 engine._report(state)
 
             self.assertEqual(state["termination_reason"], "resource_limit")
+
+    def test_partial_report_never_claims_coverage_closure(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory))
+            state = _state()
+            state.update({"status": "running", "outcome": "pending", "hypotheses": [],
+                "findings": [], "correlations": [], "stage_history": [],
+                "source_health": {"host": True, "network": True},
+                "source_errors": [{"tool": "elasticsearch.search", "error": "TimeoutError"}]})
+            state["coverage"].update({"host": "searched", "network": "searched"})
+
+            with patch("romulus.reporting.report.generate_report", return_value=[]):
+                engine._report(state)
+
+            self.assertEqual(state["status"], "partial")
+            self.assertFalse(state["coverage"]["coverage_closure_ready"])
 
 
 def _analytic():
@@ -278,6 +350,7 @@ class _RecordingElasticsearch:
         return {
             "hits": [],
             "total": 0,
+            "total_relation": "eq",
             "capped": False,
             "timed_out": False,
             "shard_failures": 0,
@@ -455,7 +528,7 @@ class SchedulerDiscoveryWorkflowTests(unittest.TestCase):
                     return {"hits":[{"_index":"logs-suricata-events","_id":"net-1",
                         "@timestamp":"2024-11-13T11:00:00Z","source":{"ip":"10.0.0.8"},
                         "destination":{"ip":"10.0.0.9"}}],"total":1,"capped":False,
-                        "timed_out":False,"shard_failures":0}
+                        "total_relation":"eq","timed_out":False,"shard_failures":0}
             order=[]; elasticsearch=NetworkElasticsearch(order); engine.es=elasticsearch
             register_search_task(state,proposals[0])
             engine._drain_scheduled_tasks(state,phase="investigation")
@@ -1057,7 +1130,8 @@ class SchedulerExecutionAdditionalTests(unittest.TestCase):
             def __init__(self): self.calls=[]
             def search_many(self,indices,query,size,**kwargs):
                 self.calls.append((indices,query,size))
-                return {"hits":[],"total":0,"capped":False,"timed_out":False,"shard_failures":0}
+                return {"hits":[],"total":0,"total_relation":"eq","capped":False,
+                    "timed_out":False,"shard_failures":0}
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             engine=_engine(Path(directory)); elasticsearch=Elasticsearch(); engine.es=elasticsearch

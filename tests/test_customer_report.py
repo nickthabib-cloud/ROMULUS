@@ -163,7 +163,7 @@ class CustomerWordReportTests(unittest.TestCase):
                 "WS-17",
                 "Supported Attack Path",
                 "EV-RAW-001",
-                "bounded representative sample",
+                "incomplete, nonrepresentative bounded retrieval",
             ):
                 self.assertIn(expected, word_text)
 
@@ -200,6 +200,49 @@ class CustomerWordReportTests(unittest.TestCase):
             self.assertNotIn("3. Validate with the asset owner.", word_text)
             self.assertIn("uncited raw evidence", technical_text)
             self.assertNotIn("complete raw evidence remains in SQLite", technical_text)
+
+    def test_word_identifies_successful_stratified_sampling_as_representative(self):
+        try:
+            from docx import Document
+        except ImportError:
+            self.skipTest("Install requirements.txt for Word report verification")
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        state["search_outcomes"][0]["sampling"].pop("fallback_reason")
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths = generate_report(state, Path(directory))
+            document = Document(next(path for path in paths if path.suffix == ".docx"))
+            word_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            word_text += "\n" + "\n".join(
+                cell.text for table in document.tables for row in table.rows for cell in row.cells
+            )
+
+            self.assertIn("bounded representative sample", word_text)
+            self.assertNotIn("incomplete, nonrepresentative bounded retrieval", word_text)
+
+    def test_word_calls_fallback_retrieval_incomplete_and_nonrepresentative(self):
+        try:
+            from docx import Document
+        except ImportError:
+            self.skipTest("Install requirements.txt for Word report verification")
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        state["search_outcomes"][0]["sampling"].update({
+            "strategy": "earliest_fallback",
+            "fallback_reason": "unknown_total",
+        })
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths = generate_report(state, Path(directory))
+            document = Document(next(path for path in paths if path.suffix == ".docx"))
+            word_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            word_text += "\n" + "\n".join(
+                cell.text for table in document.tables for row in table.rows for cell in row.cells
+            )
+
+            self.assertIn("incomplete, nonrepresentative bounded retrieval", word_text)
+            self.assertNotIn("bounded representative sample", word_text)
 
 
 if __name__ == "__main__":

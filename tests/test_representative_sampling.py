@@ -305,6 +305,31 @@ class ArkimeRepresentativeSamplingTests(unittest.TestCase):
         self.assertFalse(result["capped"])
         self.assertEqual(result["sampling"]["strategy"], "exhaustive")
 
+    def test_uncapped_search_is_partial_when_second_page_does_not_match_probe(self):
+        class ChangingArkime(_SyntheticArkime):
+            def search_sessions(self, expression, **kwargs):
+                result = super().search_sessions(expression, **kwargs)
+                if len(self.calls) == 2:
+                    result["sessions"] = result["sessions"][:-1]
+                return result
+
+        settings = replace(Settings.from_env(), arkime_max_results=100, time_sampling_strata=4)
+        adapter = ChangingArkime(
+            settings,
+            rows=[{"id": f"session-{index:02d}", "firstPacket": index} for index in range(3)],
+        )
+
+        result = adapter.search_sessions_sampled(
+            "ip.protocol == tcp",
+            limit=5,
+            sampling={"version": 1, "strategy": "time_or_rank_stratified", "strata": 4},
+        )
+
+        self.assertEqual(len(result["sessions"]), 2)
+        self.assertTrue(result["capped"])
+        self.assertNotEqual(result["sampling"]["strategy"], "exhaustive")
+        self.assertEqual(result["sampling"]["fallback_reason"], "incomplete_exhaustive_page")
+
 
 class _SyntheticTSharkProcess:
     def __init__(self, lines):

@@ -15,6 +15,21 @@ from romulus.store import Store
 
 
 class RetentionTests(unittest.TestCase):
+    def test_compact_scheduler_summary_does_not_resolve_short_result(self):
+        from romulus.retention import _scheduler_summary
+
+        state = {
+            "search_tasks": {"ST-SHORT": {"task_id": "ST-SHORT", "source": "arkime",
+                "origin": "candidate_follow_up", "status": "completed"}},
+            "search_outcomes": [{"task_id": "ST-SHORT", "status": "completed",
+                "matched_total": 2, "returned_total": 1, "capped": False,
+                "timed_out": False, "shard_failures": 0, "incomplete": False}],
+            "scheduler_history": [],
+            "coverage": {},
+        }
+
+        self.assertEqual(_scheduler_summary(state)["unresolved_task_count"], 1)
+
     def _reports(self, root: Path, hunt_id: str):
         from docx import Document
 

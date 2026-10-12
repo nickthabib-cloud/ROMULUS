@@ -67,11 +67,16 @@ class ArkimeAdapter:
             result=self.search_sessions(expression,start_ms=start_ms,stop_ms=stop_ms,length=max(1,total),
                 all_history=all_history,start=0)
             rows=list(result.get("sessions",[]))[:cap]
-            return {"sessions":rows,"total":total,"requests":2,"pages":1,"capped":False,
+            retrieved_value=result.get("total")
+            retrieved_total=max(0,int(retrieved_value)) if isinstance(retrieved_value,(int,float)) else None
+            complete=(retrieved_total==total and len(rows)==retrieved_total)
+            summary={"version":1,"strategy":"exhaustive" if complete else "earliest_fallback",
+                "requested_strata":1,"covered_strata":1 if rows else 0,
+                "retained_by_stratum":[len(rows)],"matched_by_stratum":[len(rows)]}
+            if not complete: summary["fallback_reason"]="incomplete_exhaustive_page"
+            return {"sessions":rows,"total":retrieved_total,"requests":2,"pages":1,"capped":not complete,
                 "duplicates_suppressed":0,"provenance":result.get("provenance",provenance),
-                "sampling":{"version":1,"strategy":"exhaustive","requested_strata":1,
-                    "covered_strata":1 if total else 0,"retained_by_stratum":[len(rows)],
-                    "matched_by_stratum":[len(rows)]}}
+                "sampling":summary}
         windows=rank_windows(total,cap,requested)
         sessions=[]; seen=set(); duplicates=0; retained=[]; matched_by=[]; sampled_windows=[]; requests=1; offset_limited=False
         for window in windows:

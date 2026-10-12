@@ -290,6 +290,11 @@ def _docx(s,path):
     sampled_outcomes=[item for item in s.get("search_outcomes",[]) or []
         if isinstance(item,dict) and (item.get("capped") or
             isinstance(item.get("sampling"),dict) and item["sampling"].get("strategy") not in {None,"exhaustive"})]
+    representative_strategies={"time_stratified","rank_stratified","time_stratified_reservoir","deterministic_reservoir"}
+    representative_outcomes=[item for item in sampled_outcomes
+        if item.get("sampling",{}).get("strategy") in representative_strategies
+        and not item.get("sampling",{}).get("fallback_reason")]
+    fallback_outcomes=[item for item in sampled_outcomes if item not in representative_outcomes]
     confidence_order={"not assessed":0,"low":1,"moderate":2,"high":3}
     overall_confidence=max((str(item.get("confidence") or "low").lower() for item in findings),key=lambda value:confidence_order.get(value,0),default="low")
     if s.get("status")!="completed" or errors:
@@ -418,8 +423,10 @@ def _docx(s,path):
         cells=scope.add_row().cells; set_cell_text(cells[0],label,True); set_cell_text(cells[1],coverage.get(key) or "Not recorded")
     limitations=[]
     if errors: limitations.append(f"{len(errors)} source error(s) limited the investigation.")
-    if sampled_outcomes:
-        limitations.append(f"{len(sampled_outcomes)} search result set(s) used a bounded representative sample; capped searches remain incomplete coverage.")
+    if representative_outcomes:
+        limitations.append(f"{len(representative_outcomes)} search result set(s) used a bounded representative sample; capped searches remain incomplete coverage.")
+    if fallback_outcomes:
+        limitations.append(f"{len(fallback_outcomes)} search result set(s) used incomplete, nonrepresentative bounded retrieval because complete representative sampling was unavailable.")
     if not limitations: limitations.append("No source errors or sampled-result limitations were recorded.")
     cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True)
     set_cell_text(cells[1]," ".join(limitations)+" See the technical TXT report for details.")

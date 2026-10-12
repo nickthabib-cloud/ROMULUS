@@ -421,10 +421,14 @@ class SchedulerOutcomeTests(unittest.TestCase):
             "shard_failures": 0,
         }
         self.assertTrue(outcome_resolves(complete_zero))
+        self.assertFalse(outcome_resolves({**complete_zero, "source": "elasticsearch"}))
+        self.assertTrue(outcome_resolves({**complete_zero, "source": "elasticsearch", "total_relation": "eq"}))
         for change in (
             {"capped": True},
             {"timed_out": True},
             {"shard_failures": 1},
+            {"returned_total": 1},
+            {"total_relation": "gte"},
             {"status": "partial"},
             {"status": "failed"},
             {"status": "skipped"},
@@ -436,6 +440,9 @@ class SchedulerOutcomeTests(unittest.TestCase):
         missing_confirmation = dict(complete_zero)
         missing_confirmation.pop("matched_total")
         self.assertFalse(outcome_resolves(missing_confirmation))
+        missing_returned_total = dict(complete_zero)
+        missing_returned_total.pop("returned_total")
+        self.assertFalse(outcome_resolves(missing_returned_total))
 
     def test_recording_is_task_specific_idempotent_and_terminal(self):
         from romulus.investigation.scheduler import (
@@ -565,6 +572,7 @@ class SchedulerOutcomeTests(unittest.TestCase):
                     "status": "searched",
                     "returned": 0,
                     "matched_total": 0,
+                    "total_relation": "eq",
                     "capped": False,
                     "timed_out": False,
                     "shard_failures": 0,

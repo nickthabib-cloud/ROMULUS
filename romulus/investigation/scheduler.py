@@ -403,6 +403,17 @@ def outcome_resolves(outcome: Mapping[str, Any]) -> bool:
     matched_total = outcome.get("matched_total")
     if isinstance(matched_total, bool) or not isinstance(matched_total, int) or matched_total < 0:
         return False
+    returned_total = outcome.get("returned_total")
+    if isinstance(returned_total, bool) or not isinstance(returned_total, int) or returned_total < 0:
+        return False
+    if returned_total != matched_total:
+        return False
+    total_relation = outcome.get("total_relation")
+    normalized_relation = str(total_relation).strip().lower() if total_relation is not None else None
+    if outcome.get("source") == "elasticsearch" and normalized_relation != "eq":
+        return False
+    if normalized_relation is not None and normalized_relation != "eq":
+        return False
     return not any(
         (
             outcome.get("capped"),
@@ -486,6 +497,9 @@ def _normalized_outcome(
         ),
         "incomplete": bool(outcome.get("incomplete", False)),
     }
+    total_relation = outcome.get("total_relation")
+    if isinstance(total_relation, str) and total_relation.strip():
+        normalized["total_relation"] = total_relation.strip().lower()[:16]
     for field in ("artifact_id", "reason", "error_kind"):
         value = _bounded_outcome_value(outcome.get(field))
         if value is not None:
@@ -775,8 +789,11 @@ def migrate_legacy_search_state(
                 status = "completed"
             returned = legacy_result.get("returned_total", legacy_result.get("returned", 0))
             matched = legacy_result.get("matched_total")
+            total_relation=legacy_result.get("total_relation")
+            exact_total=(task.get("source")!="elasticsearch" or total_relation=="eq")
             completeness_known=(isinstance(matched,int) and not isinstance(matched,bool)
-                and all(key in legacy_result for key in ("capped","timed_out","shard_failures")))
+                and all(key in legacy_result for key in ("capped","timed_out","shard_failures"))
+                and exact_total)
             reason="legacy_result_migrated"
             incomplete=False
             if status=="completed" and (not completeness_known or legacy_result.get("timed_out")
@@ -795,5 +812,6 @@ def migrate_legacy_search_state(
                 "incomplete": incomplete,
                 "reason": reason,
             }
+            if isinstance(total_relation,str): normalized["total_relation"]=total_relation
         record_search_outcome(state, task_id, normalized)
     state["scheduler_migration_version"] = 1

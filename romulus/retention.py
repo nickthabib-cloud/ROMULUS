@@ -9,6 +9,7 @@ from typing import Any
 
 from .models import utc_now
 from .store import Store
+from .investigation.scheduler import outcome_resolves
 
 
 class RetentionError(RuntimeError):
@@ -209,10 +210,6 @@ def _scheduler_summary(state: dict[str, Any]) -> dict[str, Any]:
         for value in values:
             key=str(value or "unknown"); result[key]=result.get(key,0)+1
         return dict(sorted(result.items()))
-    def resolves(outcome):
-        return bool(isinstance(outcome,dict) and outcome.get("status")=="completed"
-            and isinstance(outcome.get("matched_total"),int) and not isinstance(outcome.get("matched_total"),bool)
-            and not any((outcome.get("capped"),outcome.get("timed_out"),outcome.get("shard_failures"),outcome.get("incomplete"))))
     history=state.get("scheduler_history",[]) or []
     fairness=[deepcopy(item) for item in history if isinstance(item,dict) and "budget_gap" in str(item.get("event"))][-20:]
     fairness.extend(deepcopy(item) for item in (state.get("coverage",{}).get("scheduler_gaps",[]) or [])[-20:])
@@ -221,7 +218,7 @@ def _scheduler_summary(state: dict[str, Any]) -> dict[str, Any]:
         "by_source":counts(task.get("source") for task in tasks),
         "by_status":counts(task.get("status") for task in tasks),
         "duplicate_merges_avoided":sum(item.get("event")=="task_merged" for item in history if isinstance(item,dict)),
-        "unresolved_task_count":sum(not resolves(outcomes.get(task.get("task_id"))) for task in tasks),
+        "unresolved_task_count":sum(not outcome_resolves(outcomes.get(task.get("task_id"),{})) for task in tasks),
         "source_fairness_gaps":fairness[:40]}
 
 

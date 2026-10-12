@@ -13,6 +13,8 @@ import math
 import re
 from typing import Any, Iterable
 
+from ..investigation.scheduler import outcome_resolves
+
 
 def summarize_evidence(host_events: list[dict], network_events: list[dict], limit: int = 12) -> dict[str, Any]:
     all_events = list(host_events) + list(network_events)
@@ -94,13 +96,7 @@ def summarize_evidence(host_events: list[dict], network_events: list[dict], limi
 
 
 def _task_outcome_resolves(outcome: dict | None) -> bool:
-    if not isinstance(outcome, dict) or outcome.get("status") != "completed":
-        return False
-    matched = outcome.get("matched_total")
-    if isinstance(matched, bool) or not isinstance(matched, int) or matched < 0:
-        return False
-    return not any((outcome.get("capped"), outcome.get("timed_out"),
-                    outcome.get("shard_failures"), outcome.get("incomplete")))
+    return outcome_resolves(outcome or {})
 
 
 def build_coverage_ledger(

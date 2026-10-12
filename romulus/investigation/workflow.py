@@ -920,7 +920,7 @@ class HuntEngine:
         stage=f"scheduled_{task.get('phase','investigation')}_search"
         before_runs=len(s.setdefault("tool_runs",[])); before_errors=len(s.setdefault("source_errors",[]))
         before_evidence={item.get("evidence_id") for item in s.get("host",[])+s.get("network",[]) if item.get("evidence_id")}
-        returned=0; matched=None; capped=False; timed_out=False; shard_failures=0; incomplete=False
+        returned=0; matched=None; total_relation=None; capped=False; timed_out=False; shard_failures=0; incomplete=False
         status="failed"; error_kind=None; reason=None; query_summary={}; sampling_summary=None
         try:
             if not self._budget_ok(s):
@@ -936,8 +936,8 @@ class HuntEngine:
                 if not _query_enforces_scheduled_window(query,start_time,end_time):
                     raise ValueError("Scheduled Elasticsearch query does not enforce its time range")
                 size=max(1,min(int(query_spec.get("size",self.settings.max_results)),self.settings.max_results,500))
-                task_sampling=(s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else
-                    query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings))
+                task_sampling=(query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else
+                    s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else sampling_policy(self.settings))
                 family_fields=(s.get("es_fields_by_class",{}).get(task.get("source_family"),[])
                     if isinstance(s.get("es_fields_by_class"),dict) else [])
                 timestamp_field=next((field for field in
@@ -960,9 +960,12 @@ class HuntEngine:
                     rows=found.get("hits",[]); returned=len(rows); matched=found.get("total")
                     if isinstance(matched,dict): matched=matched.get("value")
                     matched=int(matched) if isinstance(matched,(int,float)) else None
+                    relation_value=found.get("total_relation")
+                    total_relation=str(relation_value).strip().lower() if isinstance(relation_value,str) and relation_value.strip() else None
                     capped=bool(found.get("capped")); timed_out=bool(found.get("timed_out"))
                     failures=found.get("shard_failures",0); shard_failures=len(failures) if isinstance(failures,list) else int(failures or 0)
-                    incomplete=matched is None or capped or timed_out or bool(shard_failures)
+                    incomplete=(matched is None or returned!=matched or total_relation!="eq" or
+                        capped or timed_out or bool(shard_failures))
                     status="partial" if incomplete else "completed"
                     sampling_summary=found.get("sampling") if isinstance(found.get("sampling"),dict) else None
                     for hit in rows: self._add_es_hit(s,hit,query,task_id)
@@ -976,8 +979,8 @@ class HuntEngine:
                 start_ms=int(start_time.timestamp()*1000) if start_time else None
                 stop_ms=int(end_time.timestamp()*1000) if end_time else None
                 all_history=bool(self.settings.historical_search and start_ms is None and stop_ms is None)
-                task_sampling=(s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else
-                    query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings))
+                task_sampling=(query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else
+                    s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else sampling_policy(self.settings))
                 found=self._call(s,"arkime.api.sessions",stage,
                     {"task_id":task_id,"source":"arkime","expression":expression,"limit":cap,
                         "date":-1 if all_history else ("explicit" if start_ms is not None else self.settings.arkime_default_hours)},scope,
@@ -990,7 +993,7 @@ class HuntEngine:
                 else:
                     rows=found.get("sessions",[]); returned=len(rows); matched=found.get("total")
                     matched=int(matched) if isinstance(matched,(int,float)) else None
-                    capped=bool(found.get("capped")); incomplete=capped or matched is None
+                    capped=bool(found.get("capped")); incomplete=capped or matched is None or returned!=matched
                     status="partial" if incomplete else "completed"
                     sampling_summary=found.get("sampling") if isinstance(found.get("sampling"),dict) else None
                     self._add_arkime_rows(s,rows,expression,scope,task_id)
@@ -1011,8 +1014,8 @@ class HuntEngine:
                 if start_time and end_time:
                     time_filter=f"frame.time_epoch >= {start_time.timestamp():.3f} && frame.time_epoch <= {end_time.timestamp():.3f}"
                 pcap=Path(targets[0]).resolve()
-                task_sampling=(s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else
-                    query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings))
+                task_sampling=(query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else
+                    s.get("sampling_policy") if isinstance(s.get("sampling_policy"),dict) else sampling_policy(self.settings))
                 found=self._call(s,"tshark.read_pcap",stage,
                     {"task_id":task_id,"pcap":str(pcap),"display_filter":display_filter,"fields":fields},scope,
                     lambda:self.tshark.inspect(pcap,display_filter=display_filter,fields=fields,limit=limit,time_filter=time_filter,
@@ -1025,7 +1028,7 @@ class HuntEngine:
                 else:
                     rows=found.get("packets",[]); returned=int(found.get("count",len(rows)) or 0)
                     matched_value=found.get("matched_count",returned); matched=int(matched_value) if isinstance(matched_value,(int,float)) else None
-                    capped=bool(found.get("output_capped")); incomplete=capped or matched is None
+                    capped=bool(found.get("output_capped")); incomplete=capped or matched is None or returned!=matched
                     status="partial" if incomplete else "completed"
                     sampling_summary=found.get("sampling") if isinstance(found.get("sampling"),dict) else None
                     provenance=found.get("provenance",{}) if isinstance(found.get("provenance"),dict) else {}
@@ -1052,6 +1055,7 @@ class HuntEngine:
         outcome={"task_id":task_id,"status":status,"returned_total":returned,"matched_total":matched,
             "capped":capped,"timed_out":timed_out,"shard_failures":shard_failures,"incomplete":incomplete,
             "artifact_id":artifact_id,"evidence_ids":evidence_ids,"time_range":time_range}
+        if total_relation is not None: outcome["total_relation"]=total_relation
         if sampling_summary: outcome["sampling"]=sampling_summary
         if error_kind: outcome["error_kind"]=error_kind
         if reason: outcome["reason"]=str(reason)[:300]
@@ -1583,6 +1587,7 @@ class HuntEngine:
             compact=self._record_evidence(s,item)
             if compact: s.setdefault("host",[]).append(compact)
             outcome={"task_id":task["task_id"],"status":"completed","returned_total":1,"matched_total":1,
+                "total_relation":"eq",
                 "capped":False,"timed_out":False,"shard_failures":0,"incomplete":False,
                 "artifact_id":"SR-"+hashlib.sha1(("offline:"+task["task_id"]).encode()).hexdigest()[:12].upper(),
                 "evidence_ids":[compact["evidence_id"]] if compact else [],"time_range":task.get("time_range",{})}
@@ -1657,8 +1662,10 @@ class HuntEngine:
         else:
             s["outcome"]="insufficient_evidence"
             s["summary"]="The retrieved evidence was insufficient to support or reject the investigated hypotheses. No finding is not a clean bill of health; review source coverage, query scope, and follow-up needs."
-        if telemetry_errors or model_failures or interrupted or missing_sources or incomplete_coverage: s["status"]="partial"
-        else: s["status"]="completed"
+        coverage_closure_ready=not (
+            telemetry_errors or model_failures or interrupted or missing_sources or incomplete_coverage
+        )
+        s["status"]="completed" if coverage_closure_ready else "partial"
         if not s.get("termination_reason"):
             pending=any(task.get("status") in {"queued","running","interrupted"}
                 for task in s.get("search_tasks",{}).values())
@@ -1670,13 +1677,14 @@ class HuntEngine:
         s["coverage"]["minimum_reasoning_rounds"]=self.settings.min_reasoning_rounds
         s["coverage"]["termination_reason"]=s["termination_reason"]
         s["coverage"]["source_error_count"]=len(errors)
-        s["coverage"]["coverage_closure_ready"]=not coverage_frontier_incomplete
+        s["coverage"]["coverage_closure_ready"]=coverage_closure_ready
         _attach_finding_paths(s)
         try:
             from ..reporting.report import generate_report
             s["report_paths"]=[str(p) for p in generate_report(s,self.settings.reports_dir)]
         except Exception as e:
             s["status"]="partial"; s["error"]=(s.get("error","")+f" Report generation failed: {type(e).__name__}: {str(e)[:150]}").strip()
+            s["coverage"]["coverage_closure_ready"]=False
         self._stage(s,"report","completed" if s.get("report_paths") else "failed",{"outcome":s.get("outcome"),"termination_reason":s.get("termination_reason")})
         print(f"[ROMULUS] termination={s['termination_reason']} outcome={s['outcome']} tools={s.get('tool_calls',0)}")
         return self._save(s)

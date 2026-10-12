@@ -460,6 +460,18 @@ class CandidateStateTests(unittest.TestCase):
         )
         self.assertTrue(complete["hypothesis_closure_ready"])
 
+        short = build_coverage_ledger(
+            [hypothesis], tasks,
+            [
+                {"task_id": "ST-HOST", "status": "completed", "returned_total": 1,
+                 "matched_total": 1, "capped": False, "timed_out": False, "shard_failures": 0},
+                {"task_id": "ST-NET", "status": "completed", "returned_total": 0,
+                 "matched_total": 1, "capped": False, "timed_out": False, "shard_failures": 0},
+            ],
+            True, True,
+        )
+        self.assertFalse(short["hypothesis_closure_ready"])
+
         failed = build_coverage_ledger(
             [hypothesis], tasks,
             [
