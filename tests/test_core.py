@@ -116,6 +116,23 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["searches"]["items"]["properties"]["source"]["enum"],["elasticsearch"])
         self.assertEqual(schema["required"],["searches"]); self.assertFalse(schema["additionalProperties"])
         self.assertEqual(planning_session.payload["options"]["temperature"],0.15)
+        class ReasoningSession:
+            def __init__(self): self.payload=None
+            def post(self,url,**kwargs):
+                self.payload=kwargs["json"]
+                content='{"assessments":[],"findings":[],"new_hypotheses":[],"searches":[],"continue_investigation":false,"reasoning":"No supported expansion."}'
+                return Response({"message":{"content":content}})
+        reasoning_session=ReasoningSession()
+        result=Ollama(Settings.from_env(),reasoning_session).reason_hunt(
+            "Hunt for threats",[],[],{
+                "search_fields":{"elasticsearch":["process.name"]},
+                "model_initial_search_plan":"deferred: undirected mission has no telemetry-backed candidate",
+                "candidate_queue":[{"candidate_id":"CL-1","evidence_ids":["EV-1"]}],
+            },[],1)
+        self.assertFalse(result["continue_investigation"])
+        prompt=reasoning_session.payload["messages"][1]["content"]
+        self.assertIn("deferred: undirected mission",prompt)
+        self.assertIn("CL-1",prompt)
     def test_elasticsearch_query_validation(self):
         validate_query({"bool":{"should":[{"match":{"message":"SMB"}}],"minimum_should_match":1}})
         with self.assertRaises(ValueError): validate_query({"query_string":{"query":"*"}})

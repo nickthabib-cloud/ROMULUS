@@ -100,7 +100,11 @@ class Ollama:
         coverage_summary["counts"]={k:coverage.get(k) for k in ("host_count","network_count","hypotheses_total","source_error_count","tool_calls_used","tool_call_limit","depth_used","depth_limit") if k in coverage}
         coverage_summary["source_coverage"]={k:str(v)[:180] for k,v in coverage.get("network_sources",{}).items()}
         coverage_summary["model_status"]={k:coverage.get("analyst_model",{}).get(k) for k in ("calls","failed_calls","search_plans_accepted","search_plans_rejected_or_duplicate","model_findings")}
-        coverage_summary["initial_plan"]={k:coverage.get("model_initial_search_plan",{}).get(k) for k in ("status","accepted","rejected_or_duplicate","sources")}
+        initial_plan=coverage.get("model_initial_search_plan",{})
+        if isinstance(initial_plan,dict):
+            coverage_summary["initial_plan"]={k:initial_plan.get(k) for k in ("status","accepted","rejected_or_duplicate","sources")}
+        else:
+            coverage_summary["initial_plan"]={"status":str(initial_plan)[:180]}
         coverage_summary["recent_model_search_results"]=[{k:x.get(k) for k in ("source","intent","returned","status")}
             for x in coverage.get("model_search_results",[])[-4:]]
         hypothesis_results={}
