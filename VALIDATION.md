@@ -22,12 +22,18 @@ This file records engineering validation performed against the development deplo
 
 - The first bounded isolated live attempt, `HUNT-35466BAA8A`, was stopped when the broad phrase `host and network telemetry` was incorrectly classified as operator direction and triggered pre-telemetry hypothesis generation.
 - Root cause was an entity-selector regular expression whose separator was optional: ordinary prose was parsed as a `host=and` selector, while clear `host: srv-01` syntax was missed.
-- Typed selector validation now accepts concrete alphabetic or structured targets while rejecting connector/scope values such as `and`, `logs`, `telemetry`, `activity`, and `connected`. The exact failed live objective now has both classifier and no-pretelemetry-model regression coverage.
-- A fresh dependency-complete suite and bounded live rerun are required on the corrected VM deployment. The failed attempt used only isolated `/tmp` state and read-only source access.
+- Positive targeting grammar now accepts explicit, quoted, directive, anchored, or structured entity targets while rejecting ordinary scope prose such as `host and network telemetry`, `host was`, and `host endpoints`. The exact failed live objective has both classifier and no-pretelemetry-model regression coverage.
+- The corrected bounded live rerun collected deterministic telemetry and candidates before the only model reasoning stage. The failed and corrected attempts both used isolated `/tmp` state and read-only source access.
 
-### Deployment status
+### Development VM proof
 
-Dependency-complete VM tests and a disposable end-to-end compact-retention hunt remain pending. No operational hunt state or reports have been modified by this local validation.
+- The deployed archive for code commit `a08b3ed` matched SHA-256 `07622decace6b67726b81c6e7ed29ee44f8037b8cfb29f239ce7dd510cbb533f` locally and on the VM.
+- The complete dependency-backed VM suite passed all 86 tests with no skips, and `python -m compileall -q romulus tests` succeeded. `doctor` was fully green for America/New_York time handling, the Python dependencies, Enterprise ATT&CK v19.2 (697 techniques, 697 detection strategies, 1,745 analytics), Ollama `qwen3:8b`, two allowlisted Elasticsearch indexes, Arkime with 19,068 sessions, TShark 4.2.2, three configured PCAPs, and writable runtime paths.
+- Disposable offline hunt `HUNT-D83D7125ED` completed as `evidence_supported_lead`. Both reports reopened, one supported three-step path referenced exactly three real cited evidence records, compact state omitted the bulky host/network/tool-run collections, and the retained state preserved the finding, conclusion, cited evidence, compact graph/coverage, and source errors.
+- The offline hunt had zero remaining checkpoints and zero hunt-scoped audit/finding JSONL rows after retention, demonstrating report-gated hunt-scoped cleanup rather than broad log deletion.
+- Corrected bounded live hunt `HUNT-A4473617E3` used a twelve-minute historical window, compact policy, a 35-call ceiling, one reasoning round, depth one, 50-record search caps, a 200-session Arkime cap, and no PCAP scan. It accumulated 150 analysis-context records and 19 deterministic candidates before its first and only model stage, `analyst_reasoning`; neither `hypothesis_generation` nor `initial_search_planning` ran.
+- The live run made 14 calls, retained 300 evidence records durably, and based hypotheses only on `observed_candidate` or `model_proposal_from_visible_context`. It produced one cited finding and one supported path, then correctly remained `partial / evidence_supported_lead` and resumable at the intentional depth cap with its checkpoint and 14 audit rows retained.
+- All milestone validation roots, temporary validation scripts, and transfer archives were removed from `/tmp` after verification. Operational `/home/user/ROMULUS/data`, `logs`, `reports`, and `.env` were not modified or deleted.
 
 ## 2026-10-12 — candidate-driven investigation loop
 

@@ -16,8 +16,10 @@
 - The final local suite passes 86 tests with five dependency-backed checks skipped locally; compilation and whitespace checks pass.
 - Three independent review passes are complete. Their report-parsing, JSONL-concurrency, transition-integrity, legacy-state, nested-ECS, documentation, and CLI-observability findings are fixed and covered by regression tests. The final review found no remaining deployment blockers.
 - The default policy is `compact`; partial hunts remain resumable, full retention is explicit, and irreversible transitions are rejected before report or state mutation.
-- Remaining gates: deploy the exact committed archive to the development VM, run all dependency-backed tests, run a disposable offline completed hunt, verify report/path/retention invariants, and run a bounded read-only live check only if source health is green.
-- Validation uses isolated temporary runtime directories and must not modify or delete operational hunts, reports, telemetry, credentials, or configuration.
+- Commit `a08b3ed` is deployed on the development VM. All 86 dependency-complete tests pass there, compilation succeeds, and `doctor` is green for the model, ATT&CK catalog, Elasticsearch, Arkime, TShark, PCAP allowlist, and writable runtime paths.
+- Disposable offline hunt `HUNT-D83D7125ED` completed as `evidence_supported_lead`; its reports reopened, its one supported three-step path retained exactly three cited evidence records, and compact retention removed its checkpoint and hunt-scoped JSONL rows.
+- Corrected bounded live hunt `HUNT-A4473617E3` collected 150 deterministic context records and 19 candidates before its only model stage. It produced one cited finding and supported path, remained partial/resumable at the intentional depth cap, and did not run hypothesis-generation or initial-search-planning model stages.
+- All validation data was isolated under `/tmp` and has been removed. Operational hunts, reports, telemetry, credentials, configuration, and runtime directories were not modified or deleted. Milestone 3 is ready for operator review before scheduler consolidation.
 
 ### Decision log
 
@@ -27,7 +29,7 @@
 - Legacy compact states without a `finalized` field remain terminal and cannot be resumed.
 - A full-retained hunt may later be compacted only after regenerating a compact-policy report; compact data cannot be relabeled full.
 - Reports describe compact cleanup as policy intent because cleanup happens only after the reports have been written and verified.
-- The first bounded live validation was stopped after a broad phrase (`host and network telemetry`) exposed an optional-separator classifier bug that incorrectly treated `host and` as a concrete host selector. Typed value validation now accepts concrete targets such as `host webserver` and `user alice` while rejecting connector/scope phrases; the exact live objective is a no-model-before-telemetry regression case. VM redeployment and rerun remain required.
+- The first bounded live validation was stopped after a broad phrase (`host and network telemetry`) exposed an optional-separator classifier bug that incorrectly treated `host and` as a concrete host selector. Positive targeting grammar now accepts explicit, quoted, directive, anchored, or structured entity targets while rejecting ordinary scope prose; the exact live objective is a no-model-before-telemetry regression case, and the corrected VM rerun satisfied it.
 
 ---
 

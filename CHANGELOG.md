@@ -12,6 +12,7 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 - Kept partial hunts resumable by default and added explicit `compact --id` and `finalize --id` commands. Finalized hunts cannot be resumed or relabeled after irreversible compaction.
 - Serialized hunt-scoped JSONL append/rewrite operations to prevent concurrent cleanup from discarding another hunt's event, and made incomplete cleanup visible through a warning and distinct CLI exit status.
 - Rejected structured ECS containers as entity values so only usable leaf host, address, account, process, service, and task identities enter the investigation graph.
+- Revalidated the corrected VM with 86 passing tests, a completed disposable hunt proving three-step cited-path compaction, and a bounded live undirected hunt proving deterministic candidates precede the only model reasoning stage.
 
 ### Candidate-driven investigation loop
 
