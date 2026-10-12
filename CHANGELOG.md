@@ -2,6 +2,14 @@
 
 All notable ROMULUS changes are recorded here. Dates use the project maintainer's local date.
 
+## 0.4.4 — 2026-10-12
+
+### Customer Word report
+
+- Replaced the technical Word dump with a concise, styled customer report focused on the assessment, findings, scope, ATT&CK context, confidence, and recommended actions.
+- Kept internal reasoning, tool runs, search artifacts, raw evidence listings, and the full candidate working list in the plain-text technical report.
+- Added report-boundary tests that prevent technical-only material and low-priority candidates from leaking back into the customer Word report.
+
 ## 0.4.3 — 2026-10-12
 
 ### Behavioral hunt seed catalog

@@ -141,84 +141,210 @@ def _docx(s,path):
     from docx import Document
     from docx.shared import Inches,Pt,RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.section import WD_SECTION
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
-    host_events=_bounded_report_events(s,"host"); network_events=_bounded_report_events(s,"network")
-    doc=Document(); section=doc.sections[0]; section.header.paragraphs[0].text="ROMULUS | Defensive Threat Hunt"
-    footer=section.footer.paragraphs[0]; footer.add_run(f"Investigation {s.get('hunt_id','')} | Generated in UTC | Page ")
-    field=OxmlElement("w:fldSimple"); field.set(qn("w:instr"),"PAGE"); footer._p.append(field)
-    styles=doc.styles; styles["Normal"].font.name="Aptos"; styles["Normal"].font.size=Pt(9)
-    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; p.add_run("ROMULUS\n").bold=True
-    r=p.add_run("THREAT HUNT INVESTIGATION REPORT\n"); r.font.size=Pt(20); r.font.color.rgb=RGBColor(31,78,121)
-    p.add_run(f"\n{str(s.get('status','partial')).upper()}\n\nInvestigation {s.get('hunt_id','')}\n{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
-    doc.add_page_break()
-    def heading(title): doc.add_heading(title,level=1)
-    def para(value): doc.add_paragraph(str(value or "Not recorded."))
-    heading("Executive Summary"); para(s.get("summary")); para(f"Outcome: {s.get('outcome','not recorded')}. Termination: {s.get('termination_reason','not recorded')}. Elapsed: {s.get('duration_ms','not recorded')} ms. Tool calls: {s.get('tool_calls',0)} / {s.get('coverage',{}).get('tool_call_limit','not recorded')}. Analyst rounds: {s.get('depth',0)} / {s.get('coverage',{}).get('depth_limit','not recorded')}.")
-    para(f"ATT&CK knowledge baseline: {ATTACK_DOMAIN} {ATTACK_RELEASE} ({ATTACK_RELEASE_DATE}).")
-    heading("Investigation Objective and Scope"); para(s.get("objective"))
-    heading("Data Sources Examined")
-    table=doc.add_table(rows=1,cols=2); table.style="Light Shading Accent 1"; table.rows[0].cells[0].text="Source"; table.rows[0].cells[1].text="Coverage"
-    for k,v in s.get("coverage",{}).items():
-        if k in {"search_fields","analytic_summary","hypothesis_coverage","recent_search_artifacts"}: continue
-        row=table.add_row().cells; row[0].text=str(k); row[1].text=str(v)
-    heading("Reasoning and Investigation Stages")
-    for stage in s.get("stage_history",[]): para(f"{stage.get('timestamp')} {stage.get('stage')}: {stage.get('status')}; details: {stage.get('details')}.")
-    for stage in s.get("reasoning_history",[]):
-        searches=[x.get("intent",x.get("id","")) for x in stage.get("selected_searches",[]) if isinstance(x,dict)]
-        para(f"{stage.get('stage')}: {stage.get('basis')}; round {stage.get('round','n/a')}; next searches: {_join_text(searches, '; ') or _join_text(stage.get('selected_leads')) or 'none'}; evidence considered: {stage.get('evidence_count',0)}.")
-        if stage.get("reasoning"): para("Analyst reasoning: "+str(stage.get("reasoning")))
-        if stage.get("created_hypothesis_ids"): para("New follow-up hypotheses: "+_join_text(stage.get("created_hypothesis_ids")))
-    for run in s.get("tool_runs",[]): para(f"{run.get('reasoning_stage')} — {run.get('tool')} [{run.get('result_status')}], returned {run.get('result_count',0)}, matched total {run.get('source_total')}, window {run.get('time_range')}, duration {run.get('duration_ms')} ms, error {run.get('error') or 'none'}.")
-    heading("Methodology and Hypotheses")
-    for h in s.get("hypotheses",[]):
-        para(f"{h.get('title')} — {h.get('technique_id') or 'unmapped'} ({h.get('status')}, {h.get('confidence')} confidence). {h.get('rationale')} Expected host: {_join_text(h.get('expected_host'))}. Expected network: {_join_text(h.get('expected_network'))}. Benign alternatives: {_join_text(h.get('benign_explanations'))}.")
-        if h.get("model_assessment"): para(f"Evidence assessment: {h['model_assessment'].get('status')}. {h['model_assessment'].get('rationale')} Evidence IDs: {_join_text(h['model_assessment'].get('evidence_ids'))}.")
-    heading("Hypothesis and Analytic Coverage")
-    ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
-    for row in ledger.get("rows",[]):
-        para(f"{row.get('hypothesis_id')} / {row.get('technique_id')}: priority {row.get('priority')}; analytics {row.get('executed_analytics')}/{row.get('planned_analytics')}; sources {_join_text(row.get('sources')) or 'none'}; returned {row.get('returned')}; assessment {row.get('assessment')}; gaps {_join_text(row.get('telemetry_gaps')) or 'none'}.")
-    heading("Deterministic Behavioral Analytics")
-    for line in _analytic_lines(s.get("analytic_summary",{})) or ["No analytic summary was produced."]: para(line.removeprefix("- "))
-    heading("Prioritized Candidate Leads")
+    navy="18324A"; blue="245B83"; pale_blue="EAF2F8"; pale_gray="F3F5F7"; white="FFFFFF"; amber="C77800"; green="2F6B4F"
+
+    def shade(cell,fill):
+        properties=cell._tc.get_or_add_tcPr(); element=properties.find(qn("w:shd"))
+        if element is None:
+            element=OxmlElement("w:shd"); properties.append(element)
+        element.set(qn("w:fill"),fill)
+
+    def set_cell_text(cell,text,bold=False,color=None,size=9):
+        cell.text=""; paragraph=cell.paragraphs[0]; run=paragraph.add_run(str(text or "Not recorded"))
+        run.bold=bold; run.font.size=Pt(size)
+        if color: run.font.color.rgb=RGBColor.from_string(color)
+        cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+    def mark_header(row):
+        row._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
+
+    def format_table(table,header=True):
+        table.alignment=WD_TABLE_ALIGNMENT.CENTER
+        for row_index,row in enumerate(table.rows):
+            for cell in row.cells:
+                properties=cell._tc.get_or_add_tcPr()
+                borders=properties.find(qn("w:tcBorders"))
+                if borders is None:
+                    borders=OxmlElement("w:tcBorders"); properties.append(borders)
+                for edge in ("top","left","bottom","right","insideH","insideV"):
+                    border=borders.find(qn(f"w:{edge}"))
+                    if border is None:
+                        border=OxmlElement(f"w:{edge}"); borders.append(border)
+                    border.set(qn("w:val"),"single"); border.set(qn("w:sz"),"4"); border.set(qn("w:color"),"D9D9D9")
+                margins=properties.find(qn("w:tcMar"))
+                if margins is None:
+                    margins=OxmlElement("w:tcMar"); properties.append(margins)
+                for side in ("top","left","bottom","right"):
+                    margin=margins.find(qn(f"w:{side}"))
+                    if margin is None:
+                        margin=OxmlElement(f"w:{side}"); margins.append(margin)
+                    margin.set(qn("w:w"),"90"); margin.set(qn("w:type"),"dxa")
+                if header and row_index==0:
+                    shade(cell,navy)
+                elif row_index%2==0:
+                    shade(cell,pale_gray)
+
+    def heading(title):
+        paragraph=doc.add_heading(title,level=1); paragraph.paragraph_format.space_before=Pt(13); paragraph.paragraph_format.space_after=Pt(5)
+        return paragraph
+
+    def para(value,style=None):
+        paragraph=doc.add_paragraph(str(value or "Not recorded."),style=style)
+        paragraph.paragraph_format.space_after=Pt(5)
+        return paragraph
+
+    def friendly(value):
+        return str(value or "Not recorded").replace("_"," ").strip().capitalize()
+
+    findings=list(s.get("findings",[]) or [])
     visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
-    for item in visible_candidates: para(_candidate_line(item).removeprefix("- "))
-    if not visible_candidates: para("No trusted or corroborated high-priority catalog leads met the customer-report threshold.")
-    heading("Significant Findings")
-    if not s.get("findings"): para("No significant findings recorded in the evidence examined.")
-    for f in s.get("findings",[]):
-        para(f"{f.get('finding_id')} — {f.get('title')} [{f.get('status')}; confidence {f.get('confidence')}]")
-        para("Observed behavior: "+str(f.get("observation") or "")); para("Analysis: "+str(f.get("interpretation") or "")); para("Evidence references: "+_join_text(f.get("evidence_ids")))
-        para("Confidence basis: "+str(f.get("confidence_justification") or "")); para("Alternative explanations: "+_join_text(f.get("alternatives"),"; ")); para("Follow-up: "+_join_text(f.get("follow_up"),"; "))
-    for title,key,events in (("Host Analysis","host",host_events),("Network Analysis","network",network_events)):
-        heading(title)
-        para(f"Showing {len(events)} representative/cited records of {len(s.get(key,[]))} retained records.")
-        if not events: para("No events returned or source unavailable.")
-        for e in events: para(f"{e.get('evidence_id')} | {e.get('observed_at')} | {e.get('source')} | {e.get('asset')}\nObservation: {e.get('observation')}\nReference: {_event_reference(e)}")
-    heading("Cross-Domain Correlation")
-    for c in s.get("correlations",[]): para(f"{c.get('host_ref')} and {c.get('network_ref')} correlate within {c.get('delta_seconds')} seconds; reasons: {_join_text(c.get('reasons'), '; ') or ('shared IP '+str(c.get('ip')))}; direction {c.get('direction','unresolved')}; score {c.get('score','not scored')}. {c.get('caveat')}")
-    if not s.get("correlations"): para("No correlation was established.")
-    heading("Bounded Evidence Timeline")
-    for e in sorted(host_events+network_events,key=lambda x:x.get("observed_at","") or ""): para(f"{e.get('observed_at')} — {e.get('observation')} [{e.get('evidence_id')}]")
-    heading("ATT&CK Technique Mapping")
-    for h in s.get("hypotheses",[]):
-        t=TECHNIQUES.get(h.get("technique_id"),{}); para(f"{h.get('technique_id')} {t.get('name','')} ({t.get('tactic','')}); assessment: {h.get('status')}. Reference: {t.get('url','')}")
-    heading("Search Result Artifacts")
-    for artifact in s.get("search_artifacts",[])[:250]:
-        para(f"{artifact.get('artifact_id')} — {artifact.get('stage')} via {artifact.get('tool')}; status {artifact.get('result_status')}; returned {artifact.get('returned')}; matched {artifact.get('matched_total')}; scope {artifact.get('scope')}; error {artifact.get('error_reason') or 'none'}.")
-    heading("Source Errors, Confidence, Missing Telemetry, and Limitations")
-    errors=s.get("source_errors",[])
+    errors=list(s.get("source_errors",[]) or [])
+    confidence_order={"not assessed":0,"low":1,"moderate":2,"high":3}
+    overall_confidence=max((str(item.get("confidence") or "low").lower() for item in findings),key=lambda value:confidence_order.get(value,0),default="low")
+    if s.get("status")!="completed" or errors:
+        verdict="Inconclusive"
+    elif findings or visible_candidates:
+        verdict="Suspicious Activity Identified"
+    else:
+        verdict="No Significant Findings"
+    tiers=[str(item.get("priority_tier") or "").lower() for item in visible_candidates]
+    priority="Critical" if "critical" in tiers else "High" if "high" in tiers else "Moderate" if findings else "Informational"
+
+    cited_ids={evidence for finding in findings for evidence in (finding.get("evidence_ids") or [])}
+    assets=[]
+    for finding in findings:
+        for key in ("affected_assets","assets"):
+            value=finding.get(key) or []
+            if isinstance(value,str): value=[value]
+            assets.extend(str(item) for item in value if item)
+    for event in list(s.get("host",[]) or [])+list(s.get("network",[]) or []):
+        if event.get("evidence_id") in cited_ids and event.get("asset"): assets.append(str(event["asset"]))
+    assets=list(dict.fromkeys(assets))
+
+    represented_titles={str(item.get("title") or "").strip().lower() for item in findings}
+    action_items=findings+[item for item in visible_candidates if str(item.get("title") or "").strip().lower() not in represented_titles]
+    actions=[]
+    for item in action_items:
+        values=item.get("follow_up") or []
+        if isinstance(values,str): values=[values]
+        actions.extend(str(value).strip() for value in values if str(value).strip())
+    actions=list(dict.fromkeys(actions))[:6]
+    if not actions:
+        actions=["Review the hunt scope and retain the report with the investigation record."]
+
+    attack_rows=[]; seen_techniques=set()
+    technique_inputs=[]
+    for finding in findings:
+        technique_inputs.extend([finding.get("technique_id")]+list(finding.get("attack_techniques") or []))
+    for candidate in visible_candidates: technique_inputs.extend(candidate.get("attack_techniques") or [])
+    for hypothesis in s.get("hypotheses",[]) or []:
+        if str(hypothesis.get("status") or "").lower() in {"supported","suspected","observed"}:
+            technique_inputs.append(hypothesis.get("technique_id"))
+    for technique_id in technique_inputs:
+        if not technique_id or technique_id in seen_techniques or technique_id not in TECHNIQUES: continue
+        seen_techniques.add(technique_id); technique=TECHNIQUES[technique_id]
+        attack_rows.append((technique_id,technique.get("name") or "Not recorded",technique.get("tactic") or "Not recorded"))
+
+    doc=Document(); section=doc.sections[0]
+    section.top_margin=Inches(.6); section.bottom_margin=Inches(.6); section.left_margin=Inches(.72); section.right_margin=Inches(.72)
+    header=section.header.paragraphs[0]; header.text="ROMULUS  |  DEFENSIVE THREAT HUNT"; header.style=doc.styles["Header"]
+    header.runs[0].font.color.rgb=RGBColor(0,0,0); header.runs[0].font.size=Pt(8); header.runs[0].bold=True
+    footer=section.footer.paragraphs[0]; footer.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    footer.add_run(f"{s.get('hunt_id','UNKNOWN')}  •  UNMARKED  •  Page ").font.size=Pt(8)
+    field=OxmlElement("w:fldSimple"); field.set(qn("w:instr"),"PAGE"); footer._p.append(field)
+
+    styles=doc.styles; styles["Normal"].font.name="Aptos"; styles["Normal"].font.size=Pt(9.5); styles["Normal"].font.color.rgb=RGBColor.from_string(navy)
+    styles["Title"].font.name="Aptos Display"; styles["Title"].font.size=Pt(25); styles["Title"].font.bold=True; styles["Title"].font.color.rgb=RGBColor(0,0,0)
+    styles["Heading 1"].font.name="Aptos Display"; styles["Heading 1"].font.size=Pt(15); styles["Heading 1"].font.bold=True; styles["Heading 1"].font.color.rgb=RGBColor(0,0,0)
+    styles["Heading 2"].font.name="Aptos"; styles["Heading 2"].font.size=Pt(11); styles["Heading 2"].font.bold=True; styles["Heading 2"].font.color.rgb=RGBColor(0,0,0)
+
+    title_properties=styles["Title"].element.get_or_add_pPr(); title_border=title_properties.find(qn("w:pBdr"))
+    if title_border is not None: title_properties.remove(title_border)
+    title=doc.add_paragraph(style="Title"); title.alignment=WD_ALIGN_PARAGRAPH.LEFT; title.add_run("Threat Hunt Report")
+    subtitle=doc.add_paragraph(); subtitle.paragraph_format.space_after=Pt(12)
+    run=subtitle.add_run("ROMULUS autonomous investigation  •  "); run.bold=True; run.font.color.rgb=RGBColor.from_string(blue)
+    subtitle.add_run(f"{s.get('hunt_id','UNKNOWN')}  •  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+
+    assessment=doc.add_paragraph(); assessment.paragraph_format.space_after=Pt(12)
+    label=assessment.add_run("Assessment  "); label.bold=True
+    value=assessment.add_run(verdict); value.bold=True; value.font.color.rgb=RGBColor.from_string(amber if verdict!="No Significant Findings" else green)
+    assessment.add_run(f"    Confidence  {overall_confidence.title()}    Priority  {priority}")
+
+    heading("Executive Summary"); para(s.get("summary") or "No investigation summary was recorded.")
+    heading("Assessment at a Glance")
+    glance=doc.add_table(rows=0,cols=2); glance.style="Light Shading Accent 1"; glance.alignment=WD_TABLE_ALIGNMENT.CENTER
+    glance_items=(
+        ("Objective",s.get("objective") or "Not recorded"),
+        ("Hunt window",s.get("coverage",{}).get("time_scope") or "Not recorded"),
+        ("Affected assets",", ".join(assets) if assets else "No affected assets identified"),
+        ("Finding count",str(len(findings))),
+    )
+    for label,value in glance_items:
+        cells=glance.add_row().cells; set_cell_text(cells[0],label,True,navy); set_cell_text(cells[1],value)
+    format_table(glance,header=False)
+
+    heading("What We Found")
+    if not findings and not visible_candidates:
+        para("No reportable suspicious activity met the finding threshold in the telemetry and time range examined.")
+    finding_titles=set()
+    for finding in findings:
+        title_text=str(finding.get("title") or "Untitled finding"); finding_titles.add(title_text.lower())
+        p=doc.add_heading(title_text,level=2)
+        meta=doc.add_paragraph(f"{friendly(finding.get('status'))}  •  {friendly(finding.get('confidence'))} confidence")
+        meta.runs[0].bold=True; meta.runs[0].font.color.rgb=RGBColor.from_string(blue)
+        para(str(finding.get("observation") or "No observation was recorded."))
+        if finding.get("interpretation"): para(str(finding["interpretation"]))
+        alternatives=_join_text(finding.get("alternatives"),"; ")
+        if alternatives: para("Possible benign explanation: "+alternatives)
+    for candidate in visible_candidates:
+        if str(candidate.get("title") or "").lower() in finding_titles: continue
+        doc.add_heading(str(candidate.get("title") or "Priority lead"),level=2)
+        para(f"Priority lead  •  {friendly(candidate.get('priority_tier'))} priority  •  {friendly(candidate.get('disposition'))}")
+        reasons=_join_text(candidate.get("score_reasons"),"; ")
+        if reasons: para("Why it matters: "+reasons)
+
+    heading("Scope and Coverage")
+    scope=doc.add_table(rows=1,cols=2); scope.style="Light Shading Accent 1"; scope.alignment=WD_TABLE_ALIGNMENT.CENTER
+    set_cell_text(scope.rows[0].cells[0],"Telemetry",True,white); set_cell_text(scope.rows[0].cells[1],"Coverage result",True,white)
+    shade(scope.rows[0].cells[0],navy); shade(scope.rows[0].cells[1],navy); mark_header(scope.rows[0])
+    coverage=s.get("coverage",{}) or {}
+    for label,key in (("Host telemetry","host"),("Network telemetry","network")):
+        cells=scope.add_row().cells; set_cell_text(cells[0],label,True); set_cell_text(cells[1],coverage.get(key) or "Not recorded")
     if errors:
-        for error in errors: para(f"{error.get('tool')} at {error.get('stage')}: {error.get('error')}; {error.get('reason') or ''}"+(f" (HTTP {error.get('status_code')})" if error.get("status_code") else ""))
-    else: para("No source errors were recorded.")
-    para(s.get("error","")); para("Packet scans drain the complete filtered capture under a per-call timeout and retain a bounded number of matches; other search results also have configured result caps. IP/time proximity is a lead and does not by itself establish identity, process attribution, or maliciousness. Consider NAT, DHCP, and clock skew. An isolated SYN is not proof of a completed connection. Absence of findings does not prove absence of compromise.")
-    heading("Conclusions and Recommended Follow-up"); para(s.get("summary"))
-    heading("Technical Candidate Working List")
-    for item in s.get("candidate_leads",[]): para(_candidate_line(item).removeprefix("- "))
-    if not s.get("candidate_leads"): para("No catalog candidates were recorded.")
-    heading("Technical Evidence Appendix")
-    para(f"This readable manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable evidence and search-result references are listed above. Exact compiled queries remain in tool_audit.jsonl; complete raw evidence remains in SQLite.")
-    for sec in doc.sections:
-        sec.top_margin=Inches(.65); sec.bottom_margin=Inches(.65)
+        cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True); set_cell_text(cells[1],f"{len(errors)} source error(s) limited the investigation. See the technical TXT report for details.")
+    else:
+        cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True); set_cell_text(cells[1],"No source errors were recorded.")
+    format_table(scope)
+    para("This assessment applies only to the specified time range and the telemetry listed above. No finding is not proof that the environment is free of malicious activity.")
+
+    heading("MITRE ATT&CK Context")
+    if attack_rows:
+        attack=doc.add_table(rows=1,cols=3); attack.style="Light Shading Accent 1"; attack.alignment=WD_TABLE_ALIGNMENT.CENTER
+        for index,label in enumerate(("Technique","Name","Tactic")):
+            set_cell_text(attack.rows[0].cells[index],label,True,white); shade(attack.rows[0].cells[index],navy)
+        mark_header(attack.rows[0])
+        for technique_id,name,tactic in attack_rows:
+            cells=attack.add_row().cells
+            for index,value in enumerate((technique_id,name,tactic)): set_cell_text(cells[index],value,index==0)
+        format_table(attack)
+        para(f"Technique names are mapped to MITRE ATT&CK {ATTACK_RELEASE} ({ATTACK_RELEASE_DATE}).")
+    else:
+        para("No supported finding was mapped to a MITRE ATT&CK technique.")
+
+    assessment_heading=heading("Assessment and Confidence"); assessment_heading.paragraph_format.page_break_before=True
+    para(f"Overall assessment: {verdict}. Overall confidence: {overall_confidence.title()}.")
+    confidence_bases=[str(item.get("confidence_justification") or "").strip() for item in findings]
+    confidence_bases=[item for item in confidence_bases if item]
+    if confidence_bases: para("Confidence basis: "+" ".join(confidence_bases))
+    para("ROMULUS does not automatically declare activity confirmed malicious. Analyst validation is required before containment or remediation.")
+
+    heading("Recommended Actions")
+    for index,action in enumerate(actions,1): para(f"{index}. {action}")
+
+    divider=doc.add_paragraph(); divider.paragraph_format.space_before=Pt(12)
+    run=divider.add_run("Technical record"); run.bold=True; run.font.color.rgb=RGBColor.from_string(blue)
+    divider.add_run("  The corresponding TXT report contains search history, hypotheses, tool activity, evidence references, source errors, and the complete candidate working list.")
     doc.save(path)
