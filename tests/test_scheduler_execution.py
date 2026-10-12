@@ -724,6 +724,48 @@ def _investigation_state():
 
 
 class SchedulerInvestigationWorkflowTests(unittest.TestCase):
+    def test_generic_network_follow_up_prefers_arkime_and_uses_pcaps_only_as_fallback(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root=Path(directory); captures=(root/"one.pcap",root/"two.pcap")
+            engine=_engine(root,pcap_files=captures); state=_state()
+            lead={"source":"network","intent":"Review an anchored network candidate",
+                "ips":["10.0.0.8"],"ports":[445],"protocols":["tcp"]}
+
+            preferred=engine._compile_investigation_proposals(state,lead,"candidate_follow_up")
+
+            self.assertEqual([item["source"] for item in preferred],["arkime"])
+
+            engine.settings=replace(engine.settings,arkime_username="",arkime_password="")
+            fallback=engine._compile_investigation_proposals(state,lead,"candidate_follow_up")
+            self.assertEqual([item["source"] for item in fallback],["tshark","tshark"])
+            self.assertEqual({item["source_targets"][0] for item in fallback},{str(path) for path in captures})
+
+    def test_grounded_reasoning_runs_after_high_candidate_work_and_before_breadth(self):
+        from romulus.investigation.scheduler import register_search_task
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); engine.use_ollama=True
+            engine.settings=replace(engine.settings,max_tool_calls=10,max_depth=4)
+            state=_investigation_state(); state.update({"depth":0,"lead_catalog":[],"tool_calls":2})
+            base={"source":"elasticsearch","source_family":"host","source_targets":["host-events"],
+                "phase":"investigation","intent":"Test queued work",
+                "query_spec":{"query":{"match":{"process.name":"cmd.exe"}},"size":5},
+                "time_range":{"start":"2024-11-13T10:58:00Z","end":"2024-11-13T11:10:00Z"},
+                "candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],"anchor_evidence_ids":[]}
+            register_search_task(state,{**base,"origin":"coverage_frontier"})
+
+            self.assertEqual(engine._after_analyze(state),"reason")
+
+            high=_investigation_state(); high.update({"depth":0,"lead_catalog":[],"tool_calls":2})
+            register_search_task(high,{**base,"origin":"candidate_follow_up",
+                "candidate_ids":["CL-CRITICAL"],"follow_up_ids":["FU-CRITICAL"],
+                "candidate_priority":"high"})
+            self.assertEqual(engine._after_analyze(high),"pivot")
+
+            last_call=_investigation_state(); last_call.update({"depth":0,"lead_catalog":[],"tool_calls":9})
+            register_search_task(last_call,{**base,"origin":"coverage_frontier"})
+            self.assertEqual(engine._after_analyze(last_call),"pivot")
+
     def test_late_model_owner_receives_an_already_terminal_task_outcome(self):
         from romulus.investigation.scheduler import register_search_task
         from romulus.investigation.search_planner import expand_anchor_selectors

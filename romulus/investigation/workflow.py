@@ -797,7 +797,13 @@ class HuntEngine:
                 "source_targets":[safe_url(self.settings.arkime_url)],"phase":"investigation","origin":origin,
                 "intent":intent,"query_spec":{"expression":expression,"cap":self.settings.arkime_max_results},
                 "time_range":task_range,**owners})
-        if source in {"network","tshark"} and self.settings.pcap_files:
+        # Arkime is the first-line session source for a generic network pivot.
+        # Re-running the same broad intent against every full PCAP is expensive
+        # and can starve evidence synthesis. Explicit TShark requests still use
+        # every configured capture, and PCAPs remain the generic fallback when
+        # Arkime is unavailable.
+        use_pcaps=(source=="tshark" or (source=="network" and not proposals))
+        if use_pcaps and self.settings.pcap_files:
             display_filter=None; packet_fields=[]
             if source=="tshark" and plan.get("native_query_language")=="tshark" and plan.get("native_query"):
                 display_filter=validate_native_tshark(plan["native_query"],list(SOURCE_FIELDS["tshark"]))
@@ -1238,6 +1244,16 @@ class HuntEngine:
     def _after_analyze(self,s):
         self._register_investigation_tasks(s)
         queued=select_search_tasks(s,phase="investigation",limit=1)
+        grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
+        remaining_calls=max(0,self.settings.max_tool_calls-int(s.get("tool_calls",0)))
+        # Critical/high deterministic candidate work (tiers 1-2) remains ahead
+        # of the model. Once only model/coverage/medium breadth remains, admit a
+        # grounded reasoning turn while reserving at least one source call.
+        reason_before_breadth=bool(queued and self.use_ollama and grounded
+            and int(queued[0].get("priority_tier",99))>2 and remaining_calls>1
+            and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s))
+        if reason_before_breadth:
+            s.pop("termination_reason",None); self._save(s); return "reason"
         if queued and self._can_pivot(s): s.pop("termination_reason",None); return "pivot"
         if queued and not s.get("termination_reason"):
             s["termination_reason"]="tool_call_budget" if s.get("tool_calls",0)>=self.settings.max_tool_calls else "runtime_budget"
@@ -1245,7 +1261,6 @@ class HuntEngine:
         ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
         if ledger.get("closure_ready"):
             s.setdefault("termination_reason","lead_queue_exhausted"); self._save(s); return "report"
-        grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
         if grounded and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s):
             s.pop("termination_reason",None); self._save(s); return "reason"
         if not s.get("termination_reason"): s["termination_reason"]="coverage_frontier_exhausted"
