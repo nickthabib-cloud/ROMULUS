@@ -22,8 +22,8 @@ SOURCE_FIELDS = {
         "network.protocol", "network.transport", "network.application", "event.code", "event.id", "winlog.event_id",
         "winlog.event_data.CommandLine", "winlog.event_data.SubjectUserName", "dns.question.name"},
     "arkime": {"ip.src", "ip.dst", "port", "protocols", "http.uri", "http.user-agent", "host.http", "dns.host"},
-    "tshark": {"frame.number", "frame.time_epoch", "frame.len", "ip.src", "ip.dst", "ipv6.src", "ipv6.dst",
-        "tcp.srcport", "tcp.dstport", "tcp.stream", "udp.srcport", "udp.dstport", "udp.stream", "tcp.flags.syn", "tcp.flags.ack",
+    "tshark": {"frame.number", "frame.time_epoch", "frame.len", "ip.src", "ip.dst", "ip.addr", "ipv6.src", "ipv6.dst", "ipv6.addr",
+        "tcp.srcport", "tcp.dstport", "tcp.port", "tcp.stream", "udp.srcport", "udp.dstport", "udp.port", "udp.stream", "tcp.flags.syn", "tcp.flags.ack",
         "dns.qry.name", "dns.a", "http.host", "http.request.uri", "http.user_agent",
         "tls.handshake.extensions_server_name", "smb2.cmd", "smb2.filename"},
 }

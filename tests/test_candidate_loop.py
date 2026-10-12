@@ -436,14 +436,19 @@ class CandidateStateTests(unittest.TestCase):
             "finding_ids": [],
             "follow_ups": [{"follow_up_id": "FU-1", "intent": "Check context", "status": "pending", "history": []}],
         }
-        open_ledger = build_coverage_ledger([], [], [], [], True, True, [candidate])
+        tasks = {"ST-CANDIDATE": {"task_id": "ST-CANDIDATE", "candidate_ids": ["CL-OPEN"],
+            "follow_up_ids": ["FU-1"], "source_family": "host"}}
+        open_ledger = build_coverage_ledger([], tasks, [], True, True, [candidate])
         self.assertFalse(open_ledger["closure_ready"])
         self.assertEqual(open_ledger["open_candidate_ids"], ["CL-OPEN"])
 
         candidate["disposition"] = "corroborated"
         candidate["finding_ids"] = ["F-1"]
         candidate["follow_ups"][0]["status"] = "completed"
-        closed_ledger = build_coverage_ledger([], [], [], [], True, True, [candidate])
+        closed_ledger = build_coverage_ledger([], tasks, [
+            {"task_id": "ST-CANDIDATE", "status": "completed", "returned_total": 0,
+             "matched_total": 0, "capped": False, "timed_out": False, "shard_failures": 0}
+        ], True, True, [candidate])
         self.assertTrue(closed_ledger["closure_ready"])
 
     def test_hypothesis_closure_requires_every_planned_analytic_and_an_assessment(self):
@@ -451,21 +456,70 @@ class CandidateStateTests(unittest.TestCase):
 
         hypothesis = {"hypothesis_id": "H-1", "priority": 5, "expected_host": ["host"],
             "expected_network": ["network"], "model_assessment": {"status": "supported", "evidence_ids": ["EV-1"]}}
-        leads = [{"id": "C-HOST", "hypothesis_id": "H-1", "source": "host"},
-            {"id": "C-NET", "hypothesis_id": "H-1", "source": "network"}]
-        partial = build_coverage_ledger([hypothesis], leads, ["C-HOST"],
-            [{"lead_id": "C-HOST", "status": "completed", "returned": 1}], True, True)
+        tasks = {
+            "ST-HOST": {"task_id": "ST-HOST", "hypothesis_ids": ["H-1"], "source_family": "host"},
+            "ST-NET": {"task_id": "ST-NET", "hypothesis_ids": ["H-1"], "source_family": "network"},
+        }
+        partial = build_coverage_ledger(
+            [hypothesis], tasks,
+            [{"task_id": "ST-HOST", "status": "completed", "returned_total": 1,
+              "matched_total": 1, "capped": False, "timed_out": False, "shard_failures": 0}],
+            True, True,
+        )
         self.assertFalse(partial["hypothesis_closure_ready"])
 
-        complete = build_coverage_ledger([hypothesis], leads, ["C-HOST", "C-NET"],
-            [{"lead_id": "C-HOST", "status": "completed", "returned": 1},
-                {"lead_id": "C-NET", "status": "completed", "returned": 0}], True, True)
+        complete = build_coverage_ledger(
+            [hypothesis], tasks,
+            [
+                {"task_id": "ST-HOST", "status": "completed", "returned_total": 1,
+                 "matched_total": 1, "capped": False, "timed_out": False, "shard_failures": 0},
+                {"task_id": "ST-NET", "status": "completed", "returned_total": 0,
+                 "matched_total": 0, "capped": False, "timed_out": False, "shard_failures": 0},
+            ],
+            True, True,
+        )
         self.assertTrue(complete["hypothesis_closure_ready"])
 
-        failed = build_coverage_ledger([hypothesis], leads, ["C-HOST", "C-NET"],
-            [{"lead_id": "C-HOST", "status": "completed", "returned": 1},
-                {"lead_id": "C-NET", "status": "failed query", "returned": 0}], True, True)
+        failed = build_coverage_ledger(
+            [hypothesis], tasks,
+            [
+                {"task_id": "ST-HOST", "status": "completed", "returned_total": 1,
+                 "matched_total": 1, "capped": False, "timed_out": False, "shard_failures": 0},
+                {"task_id": "ST-NET", "status": "failed", "returned_total": 0,
+                 "matched_total": None, "capped": False, "timed_out": False, "shard_failures": 0},
+            ],
+            True, True,
+        )
         self.assertFalse(failed["hypothesis_closure_ready"])
+
+        capped = build_coverage_ledger(
+            [hypothesis], tasks,
+            [
+                {"task_id": "ST-HOST", "status": "completed", "returned_total": 1,
+                 "matched_total": 1, "capped": False, "timed_out": False, "shard_failures": 0},
+                {"task_id": "ST-NET", "status": "partial", "returned_total": 5,
+                 "matched_total": 10, "capped": True, "timed_out": False, "shard_failures": 0},
+            ],
+            True, True,
+        )
+        self.assertFalse(capped["hypothesis_closure_ready"])
+
+    def test_explicit_unavailable_source_gap_is_closed_but_remains_visible(self):
+        from romulus.intelligence.analytics import build_coverage_ledger
+
+        hypothesis = {"hypothesis_id": "H-NETWORK-GAP", "priority": 5,
+            "expected_host": [], "expected_network": ["network sessions"]}
+        candidate = {"candidate_id": "CL-NETWORK-GAP", "kind": "behavior",
+            "priority_tier": "critical", "disposition": "corroborated", "finding_ids": ["F-1"],
+            "telemetry_gaps": ["network telemetry unavailable"],
+            "follow_ups": [{"follow_up_id": "FU-NETWORK-GAP", "status": "skipped_due_gap",
+                "history": [{"status": "skipped_due_gap", "reason": "network telemetry unavailable"}]}]}
+
+        ledger = build_coverage_ledger([hypothesis], {}, [], True, False, [candidate])
+
+        self.assertTrue(ledger["hypothesis_closure_ready"])
+        self.assertTrue(ledger["candidate_closure_ready"])
+        self.assertEqual(ledger["rows"][0]["telemetry_gaps"], ["network telemetry unavailable"])
 
     def test_model_hypothesis_accepts_visible_candidate_id_and_rejects_unknown_id(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

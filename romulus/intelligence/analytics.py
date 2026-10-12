@@ -93,50 +93,90 @@ def summarize_evidence(host_events: list[dict], network_events: list[dict], limi
     }
 
 
-def build_coverage_ledger(hypotheses: list[dict], lead_catalog: list[dict], completed_leads: Iterable[str],
-                          search_results: list[dict], host_available: bool, network_available: bool,
-                          candidates: list[dict] | None = None) -> dict[str, Any]:
-    """Summarize closure status without letting queue exhaustion imply completion."""
-    completed = set(completed_leads)
-    results_by_id = {str(x.get("search_id") or x.get("lead_id")): x for x in search_results}
+def _task_outcome_resolves(outcome: dict | None) -> bool:
+    if not isinstance(outcome, dict) or outcome.get("status") != "completed":
+        return False
+    matched = outcome.get("matched_total")
+    if isinstance(matched, bool) or not isinstance(matched, int) or matched < 0:
+        return False
+    return not any((outcome.get("capped"), outcome.get("timed_out"),
+                    outcome.get("shard_failures"), outcome.get("incomplete")))
+
+
+def build_coverage_ledger(
+    hypotheses: list[dict],
+    search_tasks: dict[str, dict] | list[dict],
+    search_outcomes: list[dict],
+    host_available: bool,
+    network_available: bool,
+    candidates: list[dict] | None = None,
+) -> dict[str, Any]:
+    """Derive closure only from exact scheduler ownership and outcomes."""
+    tasks = list(search_tasks.values()) if isinstance(search_tasks, dict) else list(search_tasks or [])
+    outcomes_by_task: dict[str, dict] = {}
+    for outcome in search_outcomes or []:
+        if isinstance(outcome, dict) and outcome.get("task_id"):
+            outcomes_by_task[str(outcome["task_id"])] = outcome
+    unavailable_families = ({"host"} if not host_available else set()) | ({"network"} if not network_available else set())
+
     rows = []
     for hypothesis in hypotheses:
         hid = hypothesis.get("hypothesis_id")
-        planned = [x for x in lead_catalog if x.get("hypothesis_id") == hid]
-        attempted = [x for x in planned if x.get("id") in completed]
-        resolved = [x for x in attempted if _resolved_search_result(results_by_id.get(str(x.get("id"))))]
-        sources = sorted({str(x.get("source")) for x in attempted})
-        result_rows = [results_by_id[x.get("id")] for x in attempted if x.get("id") in results_by_id]
-        returned = sum(int(x.get("returned", 0) or 0) for x in result_rows)
+        planned = [task for task in tasks if hid and hid in (task.get("hypothesis_ids") or [])]
+        attempted = [task for task in planned if str(task.get("task_id")) in outcomes_by_task]
+        resolved = [task for task in attempted if _task_outcome_resolves(outcomes_by_task.get(str(task.get("task_id"))))]
+        sources = sorted({str(task.get("source_family")) for task in attempted if task.get("source_family")})
+        returned = sum(int(outcomes_by_task[str(task["task_id"])].get("returned_total") or 0)
+                       for task in attempted if str(task.get("task_id")) in outcomes_by_task)
         assessment = (hypothesis.get("model_assessment") if isinstance(hypothesis.get("model_assessment"), dict)
             else hypothesis.get("deterministic_assessment") if isinstance(hypothesis.get("deterministic_assessment"), dict) else {})
         gaps = []
-        needs_host = bool(hypothesis.get("expected_host")); needs_network = bool(hypothesis.get("expected_network"))
-        if needs_host and not host_available: gaps.append("host telemetry unavailable")
-        if needs_network and not network_available: gaps.append("network telemetry unavailable")
-        searched = bool(attempted)
-        status = assessment.get("status") or ("searched_unassessed" if searched else "untested")
+        if hypothesis.get("expected_host") and not host_available: gaps.append("host telemetry unavailable")
+        if hypothesis.get("expected_network") and not network_available: gaps.append("network telemetry unavailable")
+        required_families=({"host"} if hypothesis.get("expected_host") else set()) | ({"network"} if hypothesis.get("expected_network") else set())
+        status = assessment.get("status") or ("searched_unassessed" if attempted else "untested")
         assessment_cited = status in {"supported", "contradicted", "inconclusive"} and bool(assessment.get("evidence_ids"))
         all_planned_resolved = bool(planned) and len(resolved) == len(planned)
-        unavailable_sources = ({"host"} if not host_available else set()) | ({"network"} if not network_available else set())
-        unresolved_ids = {lead.get("id") for lead in planned} - {lead.get("id") for lead in resolved}
-        unresolved = [lead for lead in planned if lead.get("id") in unresolved_ids]
-        explicit_gap_closure = bool(gaps) and bool(planned) and all(
-            str(lead.get("source")) in unavailable_sources for lead in unresolved)
+        unresolved = [task for task in planned if task not in resolved]
+        available_required=required_families-unavailable_families
+        available_requirements_tested=all(any(str(task.get("source_family"))==family for task in resolved)
+            for family in available_required)
+        explicit_gap_closure = bool(gaps) and available_requirements_tested and all(
+            str(task.get("source_family")) in unavailable_families for task in unresolved)
         closed = (all_planned_resolved and assessment_cited) or explicit_gap_closure
-        rows.append({"hypothesis_id": hid, "technique_id": hypothesis.get("technique_id"),
-                     "priority": hypothesis.get("priority", 3), "tactics": hypothesis.get("tactics", []),
-                     "planned_analytics": len(planned), "executed_analytics": len(attempted),
-                     "resolved_analytics": len(resolved), "sources": sources,
-                     "returned": returned, "assessment": status, "telemetry_gaps": gaps, "closed": closed})
-    high = [x for x in rows if int(x.get("priority") or 3) >= 4]
+        rows.append({"hypothesis_id":hid,"technique_id":hypothesis.get("technique_id"),
+            "priority":hypothesis.get("priority",3),"tactics":hypothesis.get("tactics",[]),
+            "planned_analytics":len(planned),"executed_analytics":len(attempted),
+            "resolved_analytics":len(resolved),"sources":sources,"returned":returned,
+            "assessment":status,"telemetry_gaps":gaps,
+            "unresolved_task_ids":[task.get("task_id") for task in unresolved],"closed":closed})
+
+    high = [row for row in rows if int(row.get("priority") or 3) >= 4]
     candidate_rows = []
     for candidate in candidates or []:
+        candidate_id = candidate.get("candidate_id")
         actionable = (candidate.get("priority_tier") in {"high", "critical"}
             or candidate.get("kind") == "trusted_indicator" or bool(candidate.get("customer_visible")))
-        follow_ups = candidate.get("follow_ups", []) or []
-        unfinished = [item.get("follow_up_id") for item in follow_ups
-                      if item.get("status") not in {"completed", "skipped_due_gap", "not_applicable"}]
+        unfinished = []
+        unresolved_task_ids = []
+        for follow_up in candidate.get("follow_ups", []) or []:
+            follow_up_id = follow_up.get("follow_up_id")
+            owned = [task for task in tasks
+                if candidate_id in (task.get("candidate_ids") or [])
+                and follow_up_id in (task.get("follow_up_ids") or [])]
+            resolved_owned = [task for task in owned
+                if _task_outcome_resolves(outcomes_by_task.get(str(task.get("task_id"))))]
+            unresolved_owned = [task for task in owned if task not in resolved_owned]
+            source_gap = bool(unresolved_owned) and all(
+                str(task.get("source_family")) in unavailable_families for task in unresolved_owned
+            )
+            explicitly_not_applicable = follow_up.get("status") == "not_applicable"
+            explicit_telemetry_gap=(follow_up.get("status")=="skipped_due_gap"
+                and bool(candidate.get("telemetry_gaps")))
+            if not ((owned and len(resolved_owned) == len(owned)) or source_gap
+                    or explicitly_not_applicable or explicit_telemetry_gap):
+                unfinished.append(follow_up_id)
+                unresolved_task_ids.extend(task.get("task_id") for task in unresolved_owned)
         disposition = str(candidate.get("disposition") or "observed")
         if disposition in {"benign_likely", "dismissed"}:
             closed = not unfinished
@@ -146,32 +186,23 @@ def build_coverage_ledger(hypotheses: list[dict], lead_catalog: list[dict], comp
             closed = bool(candidate.get("finding_ids")) and not unfinished
         else:
             closed = False
-        candidate_rows.append({"candidate_id": candidate.get("candidate_id"), "priority_tier": candidate.get("priority_tier"),
-            "disposition": disposition, "actionable": actionable, "unfinished_follow_up_ids": unfinished,
-            "finding_ids": candidate.get("finding_ids", []), "telemetry_gaps": candidate.get("telemetry_gaps", []),
-            "closed": closed})
+        candidate_rows.append({"candidate_id":candidate_id,"priority_tier":candidate.get("priority_tier"),
+            "disposition":disposition,"actionable":actionable,"unfinished_follow_up_ids":unfinished,
+            "unresolved_task_ids":list(dict.fromkeys(unresolved_task_ids)),
+            "finding_ids":candidate.get("finding_ids",[]),"telemetry_gaps":candidate.get("telemetry_gaps",[]),
+            "closed":closed})
     actionable_candidates = [item for item in candidate_rows if item["actionable"]]
-    hypothesis_ready = all(bool(x["closed"]) for x in high)
+    hypothesis_ready = all(bool(item["closed"]) for item in high)
     candidate_ready = all(item["closed"] for item in actionable_candidates)
-    return {"rows": rows, "high_priority_total": len(high),
-            "high_priority_tested": sum(x["executed_analytics"] > 0 or bool(x["telemetry_gaps"]) for x in high),
-            "high_priority_closed": sum(bool(x["closed"]) for x in high),
-            "untested_hypotheses": [x["hypothesis_id"] for x in rows if not x["executed_analytics"] and not x["telemetry_gaps"]],
-            "candidate_rows": candidate_rows, "actionable_candidates": len(actionable_candidates),
-            "open_candidate_ids": [item["candidate_id"] for item in actionable_candidates if not item["closed"]],
-            "hypothesis_closure_ready": hypothesis_ready, "candidate_closure_ready": candidate_ready,
-            "closure_ready": hypothesis_ready and candidate_ready}
-
-
-def _resolved_search_result(result: dict | None) -> bool:
-    if not isinstance(result, dict):
-        return False
-    status = str(result.get("status") or "").lower()
-    if not status:
-        return False
-    return not any(token in status for token in (
-        "failed", "skipped", "budget", "no configured", "rejected", "error", "partial", "cap reached",
-    ))
+    return {"rows":rows,"high_priority_total":len(high),
+        "high_priority_tested":sum(item["executed_analytics"]>0 or bool(item["telemetry_gaps"]) for item in high),
+        "high_priority_closed":sum(bool(item["closed"]) for item in high),
+        "untested_hypotheses":[item["hypothesis_id"] for item in rows
+            if not item["executed_analytics"] and not item["telemetry_gaps"]],
+        "candidate_rows":candidate_rows,"actionable_candidates":len(actionable_candidates),
+        "open_candidate_ids":[item["candidate_id"] for item in actionable_candidates if not item["closed"]],
+        "hypothesis_closure_ready":hypothesis_ready,"candidate_closure_ready":candidate_ready,
+        "closure_ready":hypothesis_ready and candidate_ready}
 
 
 def _authentication_sequences(events: list[dict], limit: int) -> list[dict]:

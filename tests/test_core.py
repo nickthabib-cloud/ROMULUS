@@ -115,6 +115,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(searches[0]["intent"],"Find PowerShell execution")
         schema=planning_session.payload["format"]
         self.assertEqual(schema["properties"]["searches"]["items"]["properties"]["source"]["enum"],["elasticsearch"])
+        self.assertIn("candidate_id",schema["properties"]["searches"]["items"]["properties"])
+        self.assertIn("follow_up_id",schema["properties"]["searches"]["items"]["properties"])
         self.assertEqual(schema["required"],["searches"]); self.assertFalse(schema["additionalProperties"])
         self.assertEqual(planning_session.payload["options"]["temperature"],0.15)
         class ReasoningSession:

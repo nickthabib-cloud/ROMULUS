@@ -29,7 +29,7 @@ from .search_planner import (candidate_fields, validate_spec, fingerprint, compi
     compile_native_es, validate_native_arkime, validate_native_tshark, expand_anchor_selectors, anchor_time_range,
     SOURCE_FIELDS, TEXT_FIELDS)
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
-    record_search_outcome)
+    record_search_outcome, outcome_resolves)
 from .synthetic import sample_evidence
 
 
@@ -69,6 +69,23 @@ def _query_enforces_scheduled_window(value,start,end):
 def _scheduled_scope(time_range):
     if isinstance(time_range,dict) and time_range.get("scope"): return str(time_range["scope"])[:300]
     return json.dumps(time_range,sort_keys=True,default=str)[:300]
+
+
+def _materialize_time_range(time_range):
+    """Convert relative Elasticsearch-style bounds into one frozen UTC window."""
+    if not isinstance(time_range,dict): return None
+    now=datetime.now(timezone.utc)
+    def parse(value):
+        if value=="now": return now
+        match=re.fullmatch(r"now-(\d+)([smhd])",str(value or ""))
+        if match:
+            seconds=int(match.group(1))*{"s":1,"m":60,"h":3600,"d":86400}[match.group(2)]
+            return now-timedelta(seconds=seconds)
+        parsed=datetime.fromisoformat(str(value).replace("Z","+00:00"))
+        if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    start=parse(time_range.get("gte")); end=parse(time_range.get("lte"))
+    return {"gte":start.isoformat(timespec="seconds"),"lte":end.isoformat(timespec="seconds")}
 
 
 class HuntState(TypedDict, total=False):
@@ -430,6 +447,7 @@ class HuntEngine:
         initialize_scheduler(s)
         registered=[]
         mission_range,scope=self._time_scope(s)
+        mission_range=_materialize_time_range(mission_range)
         task_range={"scope":scope}
         if mission_range:
             task_range.update({"start":mission_range.get("gte"),"end":mission_range.get("lte")})
@@ -492,8 +510,13 @@ class HuntEngine:
             "unsupported_indicators":indicator_unsupported,"semantic_bindings":bindings}
         s.setdefault("coverage",{})["behavior_catalog"]=s["behavior_catalog_status"]
 
-        network_configured=False
+        network_fields=s.get("es_fields_by_class",{}).get("network",[])
+        network_indices=[name for name in s.get("es_indices",[]) if "network" in name.lower()]
+        es_network_ready=bool(network_fields and network_indices)
+        network_configured=es_network_ready
         network_sources=s.setdefault("coverage",{}).setdefault("network_sources",{})
+        network_sources["elasticsearch"]=("configured network indices available for bounded investigation pivots"
+            if es_network_ready else "no mapped network index available")
         if self.settings.arkime_username and self.settings.arkime_password:
             network_configured=True; network_sources["arkime"]="configured; deterministic discovery queued"
             expressions=[_arkime_expression(s.get("objective",""),s.get("hypotheses",[]))]
@@ -564,6 +587,7 @@ class HuntEngine:
             return self._save(s)
         self._register_discovery_tasks(s)
         self._drain_scheduled_tasks(s,phase="discovery")
+        self._register_directed_initial_tasks(s)
         outcomes=[item for item in s.get("search_outcomes",[]) if item.get("phase")=="discovery"]
         host=[item for item in outcomes if item.get("source_family")=="host"]
         network=[item for item in outcomes if item.get("source_family")=="network"]
@@ -597,11 +621,15 @@ class HuntEngine:
         network_sources=s.setdefault("coverage",{}).setdefault("network_sources",{})
         arkime_ready=bool(self.settings.arkime_username and self.settings.arkime_password)
         tshark_ready=bool(self.settings.pcap_files)
+        es_network_ready=bool(s.get("es_fields_by_class",{}).get("network") and
+            any("network" in name.lower() for name in s.get("es_indices",[])))
+        network_sources["elasticsearch"]=("configured network indices available for bounded investigation pivots"
+            if es_network_ready else "no mapped network index available")
         network_sources["arkime"]="configured; deterministic discovery pending" if arkime_ready else "not configured"
         network_sources["tshark"]="configured; deterministic discovery pending" if tshark_ready else "no PCAP files configured"
-        s.setdefault("source_health",{})["network"]=arkime_ready or tshark_ready
+        s.setdefault("source_health",{})["network"]=es_network_ready or arkime_ready or tshark_ready
         self._register_discovery_tasks(s)
-        if arkime_ready or tshark_ready:
+        if es_network_ready or arkime_ready or tshark_ready:
             s["coverage"]["network"]="configured network inventory ready; deterministic discovery pending"
             status="completed"
         else:
@@ -632,6 +660,193 @@ class HuntEngine:
         else:
             coverage["model_initial_search_plan"]="deferred to unified investigation scheduler"
         return source_fields
+
+    def _effective_task_window(self,s,plan):
+        """Freeze the mission/anchor window used by one executable task."""
+        mission_range,mission_scope=self._time_scope(s)
+        mission_range=_materialize_time_range(mission_range)
+        effective_range,anchor_scope=anchor_time_range(plan,_all_evidence(s),mission_range)
+        task_range={"scope":anchor_scope or mission_scope}
+        if effective_range:
+            task_range.update({"start":effective_range.get("gte"),"end":effective_range.get("lte")})
+        return effective_range,task_range
+
+    def _task_owners(self,s,plan):
+        candidate_id=plan.get("candidate_id")
+        follow_up_id=plan.get("follow_up_id")
+        candidate=next((item for item in s.get("candidate_leads",[])
+            if item.get("candidate_id")==candidate_id),None)
+        if not candidate:
+            candidate_id=None; follow_up_id=None
+        elif follow_up_id and not any(item.get("follow_up_id")==follow_up_id
+                for item in candidate.get("follow_ups",[])):
+            follow_up_id=None
+        hypothesis_id=plan.get("hypothesis_id")
+        hypothesis_ids={item.get("hypothesis_id") for item in s.get("hypotheses",[])}
+        return {
+            "candidate_ids":[candidate_id] if candidate_id else [],
+            "follow_up_ids":[follow_up_id] if follow_up_id else [],
+            "hypothesis_ids":[hypothesis_id] if hypothesis_id in hypothesis_ids else [],
+            "anchor_evidence_ids":list(dict.fromkeys(plan.get("anchor_evidence_ids",[]) or []))[:8],
+            "candidate_priority":candidate.get("priority_tier") if candidate else None,
+            "trusted_indicator_match":bool(candidate and candidate.get("kind")=="trusted_indicator"),
+        }
+
+    def _compile_investigation_proposals(self,s,plan,origin):
+        """Compile one grounded lead/spec into exact source scheduler proposals."""
+        owners=self._task_owners(s,plan)
+        intent=str(plan.get("intent") or plan.get("why") or "Bounded investigation search")[:500]
+        if self.offline:
+            return [{"source":"elasticsearch","source_family":"host",
+                "source_targets":["offline-synthetic"],"phase":"investigation","origin":origin,
+                "intent":intent,"query_spec":{"query":{"bool":{"must":[{"exists":{"field":"message"}}]}},"size":1},
+                "time_range":{"scope":"synthetic fixture timestamps"},**owners}]
+
+        effective_range,task_range=self._effective_task_window(s,plan)
+        source=plan.get("source")
+        proposals=[]
+        if source in {"host","elasticsearch"}:
+            all_names=list(s.get("es_indices",[])); by_class=s.get("es_fields_by_class",{})
+            requested_group=plan.get("index_class","host" if source=="host" else "all")
+            group=requested_group
+            plan_fields=set(plan.get("fields",[]))
+            host_score=len(plan_fields & set(by_class.get("host",[])))
+            network_score=len(plan_fields & set(by_class.get("network",[])))
+            if source=="elasticsearch":
+                if group=="all" and max(host_score,network_score)>0 and host_score!=network_score:
+                    group="host" if host_score>network_score else "network"
+                elif group in {"host","network"}:
+                    own_score=host_score if group=="host" else network_score
+                    other_score=network_score if group=="host" else host_score
+                    if other_score>own_score: group="network" if group=="host" else "host"
+            else: group="host"
+            names=all_names if group=="all" else [name for name in all_names if group in name.lower()]
+            if not names and group=="host": names=[name for name in all_names if "network" not in name.lower()] or all_names
+            if not names: raise ValueError(f"No configured Elasticsearch index matched index_class={group}")
+            actual_fields=(by_class.get(group) if group in {"host","network"} else s.get("es_fields",[])) or s.get("es_fields",[])
+            timestamp=next((field for field in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
+                if field in actual_fields),None)
+            if effective_range and not timestamp: raise ValueError("No mapped timestamp field is available to enforce the search window")
+            if source=="host":
+                query=_lead_host_query(plan,actual_fields,timestamp or s.get("timestamp_field","@timestamp"),effective_range,{})
+            else:
+                scoped={**plan,"index_class":group,"fields":[field for field in plan.get("fields",[]) if field in actual_fields]}
+                if scoped.get("terms") and not scoped["fields"]:
+                    scoped["fields"]=[field for field in TEXT_FIELDS if field in actual_fields][:4]
+                query=None
+                if plan.get("native_query_language")=="elasticsearch_dsl" and plan.get("native_query"):
+                    query=compile_native_es(plan["native_query"],actual_fields,timestamp or s.get("timestamp_field","@timestamp"),effective_range)
+                if query is None: query=compile_es(scoped,actual_fields,timestamp or s.get("timestamp_field","@timestamp"),effective_range)
+            if query is None: raise ValueError("Investigation lead has no mapped Elasticsearch selectors")
+            proposals.append({"source":"elasticsearch","source_family":"network" if group=="network" else "host",
+                "source_targets":names,"phase":"investigation","origin":origin,"intent":intent,
+                "query_spec":{"query":query,"size":min(500,self.settings.max_results)},
+                "time_range":task_range,**owners})
+            return proposals
+
+        if source not in {"network","arkime","tshark"}: raise ValueError("Unsupported investigation source")
+        if source in {"network","arkime"} and self.settings.arkime_username and self.settings.arkime_password:
+            expression=None
+            if source=="arkime" and plan.get("native_query_language")=="arkime" and plan.get("native_query"):
+                expression=validate_native_arkime(plan["native_query"],list(SOURCE_FIELDS["arkime"]))
+            if expression is None: expression=compile_arkime(plan) if source=="arkime" else _lead_network_expression(plan)
+            expression=validate_native_arkime(expression,list(SOURCE_FIELDS["arkime"]))
+            proposals.append({"source":"arkime","source_family":"network",
+                "source_targets":[safe_url(self.settings.arkime_url)],"phase":"investigation","origin":origin,
+                "intent":intent,"query_spec":{"expression":expression,"cap":self.settings.arkime_max_results},
+                "time_range":task_range,**owners})
+        if source in {"network","tshark"} and self.settings.pcap_files:
+            display_filter=None; packet_fields=[]
+            if source=="tshark" and plan.get("native_query_language")=="tshark" and plan.get("native_query"):
+                display_filter=validate_native_tshark(plan["native_query"],list(SOURCE_FIELDS["tshark"]))
+                packet_fields=list(dict.fromkeys(["frame.number","frame.time_epoch","ip.src","ip.dst","ipv6.src","ipv6.dst",
+                    "tcp.srcport","tcp.dstport","udp.srcport","udp.dstport",
+                    *[field for field in plan.get("fields",[]) if field in SOURCE_FIELDS["tshark"]]]))[:16]
+            elif source=="tshark": display_filter,packet_fields=compile_tshark(plan)
+            else:
+                display_filter=_lead_pcap_filter(plan)
+                packet_fields=["frame.number","frame.time_epoch","ip.src","ip.dst","ipv6.src","ipv6.dst",
+                    "tcp.srcport","tcp.dstport","udp.srcport","udp.dstport","dns.qry.name","http.host",
+                    "tls.handshake.extensions_server_name","smb2.cmd"]
+            validate_native_tshark(display_filter,list(SOURCE_FIELDS["tshark"]))
+            for pcap in self.settings.pcap_files:
+                proposals.append({"source":"tshark","source_family":"network","source_targets":[str(pcap)],
+                    "phase":"investigation","origin":origin,"intent":intent,
+                    "query_spec":{"display_filter":display_filter,"fields":packet_fields,
+                        "limit":min(500,self.settings.max_results)},"time_range":task_range,**owners})
+        if not proposals: raise ValueError("No configured source can execute the investigation lead")
+        return proposals
+
+    def _register_investigation_tasks(self,s):
+        """Project deterministic candidate/directed/coverage leads into one queue."""
+        initialize_scheduler(s); registered=[]
+        hypotheses={item.get("hypothesis_id"):item for item in s.get("hypotheses",[])}
+        candidates={item.get("candidate_id"):item for item in s.get("candidate_leads",[])}
+        for lead in s.get("lead_catalog",[]):
+            if not isinstance(lead,dict): continue
+            candidate=candidates.get(lead.get("candidate_id"))
+            hypothesis=hypotheses.get(lead.get("hypothesis_id"),{})
+            if candidate and lead.get("follow_up_id"): origin="candidate_follow_up"
+            elif hypothesis.get("basis")=="operator_direction": origin="directed_survey"
+            else: origin="coverage_frontier"
+            try: proposals=self._compile_investigation_proposals(s,lead,origin)
+            except (ValueError,TypeError,json.JSONDecodeError) as exc:
+                family="host" if lead.get("source") in {"host","elasticsearch"} else "network"
+                if s.get("source_health",{}).get(family) is False and lead.get("candidate_id") and lead.get("follow_up_id"):
+                    reason=f"{family} telemetry unavailable"
+                    candidate=candidates.get(lead.get("candidate_id"))
+                    if candidate:
+                        gaps=candidate.setdefault("telemetry_gaps",[])
+                        if reason not in gaps: gaps.append(reason)
+                        follow_up=next((item for item in candidate.get("follow_ups",[])
+                            if item.get("follow_up_id")==lead.get("follow_up_id")),None)
+                        if follow_up:
+                            follow_up["status"]="skipped_due_gap"
+                            history=follow_up.setdefault("history",[])
+                            if not any(item.get("reason")==reason for item in history):
+                                history.append({"timestamp":utc_now(),"status":"skipped_due_gap","reason":reason,
+                                    "error_kind":type(exc).__name__})
+                continue
+            for proposal in proposals:
+                task_id,_=register_search_task(s,proposal)
+                if task_id not in registered: registered.append(task_id)
+        outcomes={item.get("task_id"):item for item in s.get("search_outcomes",[]) if item.get("task_id")}
+        for task_id in registered:
+            if task_id in outcomes: self._record_scheduled_followups(s,s["search_tasks"][task_id],outcomes[task_id])
+        return registered
+
+    def _register_directed_initial_tasks(self,s):
+        """Register operator-grounded work; never model-plan an undirected hunt."""
+        self._ensure_initial_plan(s)
+        registered=self._register_investigation_tasks(s) if _state_mission_mode(s)=="directed" else []
+        if _state_mission_mode(s)!="directed" or self.offline or not self.use_ollama: return registered
+        coverage=s.setdefault("coverage",{})
+        prior=coverage.get("model_initial_search_plan")
+        if isinstance(prior,dict) and prior.get("attempted"): return registered
+        source_fields=coverage.get("search_fields",{})
+        plan_status={"attempted":True,"status":"not generated","accepted":0,"rejected_or_duplicate":0}
+        coverage["model_initial_search_plan"]=plan_status
+        if not source_fields or not self._budget_ok(s): return registered
+        try:
+            from ..agent.ollama import Ollama, model_evidence_context
+            visible_evidence=model_evidence_context(_all_evidence(s),10)
+            searches=self._call(s,"ollama.api.chat","initial_search_planning",
+                {"model":self.settings.ollama_model,"hypotheses":len(s.get("hypotheses",[]))},
+                "operator-directed mission and completed deterministic discovery",
+                lambda:Ollama(self.settings).propose_searches(s.get("objective",""),s.get("hypotheses",[]),
+                    visible_evidence,source_fields,6,_search_history_summary(s),"initial",
+                    coverage.get("search_field_classes",{})),len) or []
+        except Exception as exc:
+            plan_status["status"]="failed"; plan_status["error"]=type(exc).__name__; return registered
+        accepted=self._register_model_searches(s,searches,"initial",
+            visible_evidence_ids={item.get("evidence_id") for item in visible_evidence if item.get("evidence_id")})
+        for task in accepted:
+            if task["task_id"] not in registered: registered.append(task["task_id"])
+        planning=coverage.get("model_search_planning",[])
+        latest=planning[-1] if planning else {}
+        plan_status.update({"status":"completed","accepted":latest.get("accepted",0),
+            "rejected_or_duplicate":latest.get("rejected_or_duplicate",0)})
+        return registered
 
     def _search_arkime_pages(self,s,expression,stage,scope,start_ms,stop_ms,cap,all_history,details=None):
         """Page through an Arkime result set, but stop at the configured evidence cap."""
@@ -732,7 +947,7 @@ class HuntEngine:
                 if len(targets)!=1 or str(Path(targets[0]).resolve()) not in configured:
                     raise ValueError("Scheduled TShark target is outside configured captures")
                 display_filter=validate_native_tshark(str(query_spec.get("display_filter") or ""),
-                    list(query_spec.get("fields") or SOURCE_FIELDS["tshark"]))
+                    list(SOURCE_FIELDS["tshark"]))
                 fields=list(dict.fromkeys(query_spec.get("fields") or ["frame.number","frame.time_epoch","ip.src","ip.dst"]))
                 if not fields or len(fields)>16 or any(field not in SOURCE_FIELDS["tshark"] for field in fields):
                     raise ValueError("Scheduled TShark fields are not allowlisted")
@@ -950,11 +1165,10 @@ class HuntEngine:
         self._publish_tooling_leads(s)
         _link_candidates_to_findings(s)
         _attach_finding_paths(s)
-        results=list(s.get("coverage",{}).get("model_search_results",[]))+list(s.get("pivot_results",[]))
         host_available=bool(s.get("es_indices")) or self.offline
-        network_available=self.offline or str(s.get("coverage",{}).get("network","")).startswith(("configured","partial"))
-        ledger=build_coverage_ledger(s.get("hypotheses",[]),s.get("lead_catalog",[]),s.get("completed_leads",[]),
-            results,host_available,network_available,s.get("candidate_leads",[]))
+        network_available=self.offline or bool(s.get("source_health",{}).get("network"))
+        ledger=build_coverage_ledger(s.get("hypotheses",[]),s.get("search_tasks",{}),s.get("search_outcomes",[]),
+            host_available,network_available,s.get("candidate_leads",[]))
         s["coverage"]["hypothesis_coverage"]=ledger
         signals=len(s["analytic_summary"].get("behavioral_observations",[]))
         self._stage(s,"evidence_analysis","completed",{"host_events":len(s.get("host",[])),"network_events":len(s.get("network",[])),
@@ -1101,22 +1315,34 @@ class HuntEngine:
             print(f"[ROMULUS] command-line tooling lead published: {finding.finding_id}; evidence_refs={len(refs)}; confidence={confidence}")
 
     def _after_analyze(self,s):
-        if not s.get("reasoning_complete"): return "reason"
-        if s.get("lead_queue") and self._can_pivot(s): return "pivot"
-        if s.get("lead_queue") and not s.get("termination_reason"):
+        self._register_investigation_tasks(s)
+        queued=select_search_tasks(s,phase="investigation",limit=1)
+        if queued and self._can_pivot(s): s.pop("termination_reason",None); return "pivot"
+        if queued and not s.get("termination_reason"):
             s["termination_reason"]="tool_call_budget" if s.get("tool_calls",0)>=self.settings.max_tool_calls else "runtime_budget"
-        if not s.get("termination_reason"): s["termination_reason"]="lead_queue_exhausted"
+        if queued: self._save(s); return "report"
+        ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
+        if ledger.get("closure_ready"):
+            s.setdefault("termination_reason","lead_queue_exhausted"); self._save(s); return "report"
+        grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
+        if grounded and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s):
+            s.pop("termination_reason",None); self._save(s); return "reason"
+        if not s.get("termination_reason"): s["termination_reason"]="coverage_frontier_exhausted"
         self._save(s)
         return "report"
 
     def _after_reason(self,s):
-        if s.get("lead_queue") and self._can_pivot(s): return "pivot"
-        if s.get("lead_queue") and not s.get("termination_reason"):
+        queued=select_search_tasks(s,phase="investigation",limit=1)
+        if queued and self._can_pivot(s): s.pop("termination_reason",None); return "pivot"
+        if queued and not s.get("termination_reason"):
             s["termination_reason"]="tool_call_budget" if s.get("tool_calls",0)>=self.settings.max_tool_calls else "runtime_budget"
-        if (not s.get("lead_queue") and s.get("depth",0)<self.settings.min_reasoning_rounds
+        if queued: self._save(s); return "report"
+        grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
+        if (grounded and s.get("depth",0)<self.settings.min_reasoning_rounds
                 and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s)):
             s.pop("termination_reason",None); self._save(s); return "reason"
-        if not s.get("lead_queue") and not s.get("termination_reason"): s["termination_reason"]="no_useful_leads"
+        if not s.get("termination_reason"):
+            s["termination_reason"]="lead_queue_exhausted" if self.offline else "no_useful_leads"
         self._save(s)
         return "report"
 
@@ -1125,13 +1351,14 @@ class HuntEngine:
 
     def _reason(self,s):
         if s.get("depth",0)>=self.settings.max_depth:
-            s["termination_reason"]="depth_budget"; s["lead_queue"]=[]; s["reasoning_complete"]=True
+            s["termination_reason"]="depth_budget"
             self._stage(s,"analyst_reasoning","budget_exhausted",{"reasoning_rounds":s.get("depth",0)})
             return self._save(s)
         s.setdefault("depth",0); s["depth"]+=1
-        selected=[]; basis="bounded deterministic coverage fallback"; analysis=None; model_error=None
+        selected=[]; basis="deterministic scheduler coverage"; analysis=None; model_error=None
         source_fields=s.get("coverage",{}).get("search_fields",{})
         if not source_fields: self._ensure_initial_plan(s); source_fields=s.get("coverage",{}).get("search_fields",{})
+        self._register_investigation_tasks(s)
         elapsed=max(0,time.time()-s.get("started_epoch",time.time()))
         s.setdefault("coverage",{})["tool_calls_remaining"]=max(0,self.settings.max_tool_calls-s.get("tool_calls",0))
         s["coverage"]["runtime_seconds_remaining"]=max(0,round(self.settings.max_runtime_seconds-elapsed))
@@ -1156,7 +1383,7 @@ class HuntEngine:
                     for f in s.get("findings",[])[-5:]]
                 analysis=self._call(s,"ollama.api.chat","analyst_reasoning",
                     {"model":self.settings.ollama_model,"hypotheses":len(s.get("hypotheses",[])),
-                     "evidence_count":len(_all_evidence(s)),"completed_searches":len(s.get("search_fingerprints",[]))},
+                     "evidence_count":len(_all_evidence(s)),"completed_searches":len(s.get("search_outcomes",[]))},
                     "bounded mission, evidence excerpts, query coverage, and mapped source fields",
                     lambda:Ollama(self.settings).reason_hunt(s["objective"],s.get("hypotheses",[]),_all_evidence(s),
                         model_coverage,_search_history_summary(s),3),lambda x:len(x.get("searches",[])))
@@ -1165,6 +1392,10 @@ class HuntEngine:
                     model_error=last_call.get("error_reason") or last_call.get("error") or "unavailable"
                 if isinstance(analysis,dict):
                     created=self._append_model_hypotheses(s,analysis.get("new_hypotheses",[]),visible_evidence_ids|visible_candidate_ids)
+                    if created:
+                        created_set=set(created); known={lead.get("id") for lead in s.setdefault("lead_catalog",[])}
+                        additions=_lead_catalog([item for item in s.get("hypotheses",[]) if item.get("hypothesis_id") in created_set])
+                        s["lead_catalog"].extend(item for item in additions if item.get("id") not in known)
                     self._apply_model_assessments(s,analysis,visible_evidence_ids)
                     self._publish_model_findings(s,analysis.get("findings",[]),visible_evidence_ids)
                     analysis["created_hypothesis_ids"]=created
@@ -1173,49 +1404,35 @@ class HuntEngine:
                 analysis=None; model_error=type(exc).__name__
         if isinstance(analysis,dict):
             raw_searches=analysis.get("searches",[])
-            validated=self._register_model_searches(s,raw_searches,"iterative")
-            # Reserve one slot for the deterministic coverage frontier. The
-            # model retains creative freedom for two searches each round while
-            # code guarantees broad hypotheses are not silently abandoned.
-            selected=[x["id"] for x in validated[:2]]
-            frontier=_coverage_fallback(s,max(0,3-len(selected)),exclude=set(selected))
-            selected.extend(x for x in frontier if x not in selected)
+            validated=self._register_model_searches(s,raw_searches,"iterative",
+                visible_candidate_ids=visible_candidate_ids,visible_evidence_ids=visible_evidence_ids)
+            self._register_investigation_tasks(s)
             planning=s.get("coverage",{}).get("model_search_planning",[])
             planning=planning[-1] if planning else {"accepted":0,"rejected_or_duplicate":0}
             print(f"[ROMULUS] model follow-up plan: proposed={planning.get('proposed',len(raw_searches) if isinstance(raw_searches,list) else 0)} accepted={planning.get('accepted',0)} rejected_or_duplicate={planning.get('rejected_or_duplicate',0)} repeated_empty_anchor={planning.get('repeated_empty_anchor',0)}")
-            if not selected:
-                # Do not let an LLM proposal collapse the hunt onto one event
-                # cluster. When it has no fresh valid query, continue with
-                # untried hypothesis-backed host and network pivots, even after
-                # the minimum reasoning-round threshold has been met.
-                if source_fields:
-                    selected=_coverage_fallback(s,3)
-                    if selected: basis="breadth fallback: untried hypothesis-backed host/network pivots after no fresh model query"
-                if not selected:
-                    closure=s.get("coverage",{}).get("hypothesis_coverage",{}).get("closure_ready",False)
-                    if closure and not analysis.get("continue_investigation",True) and s["depth"]>=self.settings.min_reasoning_rounds:
-                        s["termination_reason"]="coverage_closure_reached"
-                    else:
-                        s["termination_reason"]="coverage_frontier_exhausted"
+        selected=[item["task_id"] for item in select_search_tasks(s,phase="investigation",limit=3)]
+        if selected:
+            s.pop("termination_reason",None)
+        elif isinstance(analysis,dict):
+            closure=s.get("coverage",{}).get("hypothesis_coverage",{}).get("closure_ready",False)
+            if closure and not analysis.get("continue_investigation",True): s["termination_reason"]="coverage_closure_reached"
+            else: s["termination_reason"]="coverage_frontier_exhausted"
         elif not self.offline:
-            selected=_coverage_fallback(s,3)
             basis=("structured model output unavailable; deterministic ATT&CK coverage frontier used" if self.use_ollama and candidate_grounded
                 else "deterministic ATT&CK coverage frontier used")
-            if not selected:
-                s["termination_reason"]=("model_unavailable_no_fallback_leads" if self.use_ollama and candidate_grounded
-                    else "coverage_frontier_exhausted")
+            s["termination_reason"]=("model_unavailable_no_fallback_leads" if self.use_ollama and candidate_grounded
+                else "coverage_frontier_exhausted")
         else:
-            selected=_coverage_fallback(s,3); basis="offline deterministic fixture pivot"
-            if not selected: s["termination_reason"]="lead_queue_exhausted"
-        s["reasoning_complete"]=bool(selected)
-        s["lead_queue"]=list(selected)
+            basis="offline deterministic fixture pivot"; s["termination_reason"]="lead_queue_exhausted"
         s["reasoning_history"].append({"stage":"analyst_reasoning","basis":basis,"round":s["depth"],
             "reasoning":str(analysis.get("reasoning",""))[:350] if isinstance(analysis,dict) else "",
             "model_error":model_error,
             "model_search_plan":s.get("coverage",{}).get("model_search_planning",[])[-1] if s.get("coverage",{}).get("model_search_planning") else None,
             "created_hypothesis_ids":analysis.get("created_hypothesis_ids",[]) if isinstance(analysis,dict) else [],
-            "selected_searches":[{"id":q["id"],"source":q.get("source"),"hypothesis_id":q.get("hypothesis_id"),"intent":q.get("intent")} for q in s.get("lead_catalog",[]) if q.get("id") in selected],
-            "evidence_count":len(_all_evidence(s)),"completed_search_count":len(s.get("search_fingerprints",[]))})
+            "selected_searches":[{"task_id":q["task_id"],"source":q.get("source"),
+                "hypothesis_ids":q.get("hypothesis_ids",[]),"intent":q.get("intent")} for q in
+                (s.get("search_tasks",{}).get(task_id,{}) for task_id in selected)],
+            "evidence_count":len(_all_evidence(s)),"completed_search_count":len(s.get("search_outcomes",[]))})
         self._stage(s,"analyst_reasoning","completed" if selected else "stopped",{"basis":basis,"round":s["depth"],"selected_searches":selected,
             "continue_investigation":analysis.get("continue_investigation") if isinstance(analysis,dict) else None,
             "reason":s.get("termination_reason")})
@@ -1339,26 +1556,46 @@ class HuntEngine:
             self.store.upsert_finding(s["hunt_id"],encoded,action)
             print(f"[ROMULUS] model-proposed evidence-cited lead: {identifier}; evidence_refs={len(refs)}; confidence={confidence}")
 
-    def _register_model_searches(self,s,raw_searches,phase):
+    def _register_model_searches(self,s,raw_searches,phase,*,visible_candidate_ids=None,visible_evidence_ids=None):
         source_fields=s.get("coverage",{}).get("search_fields",{})
         ids={h.get("hypothesis_id") for h in s.get("hypotheses",[]) if h.get("hypothesis_id")}
-        evidence_ids={e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")}
+        all_evidence_ids={e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")}
+        evidence_ids=all_evidence_ids if visible_evidence_ids is None else all_evidence_ids & set(visible_evidence_ids)
+        candidates={item.get("candidate_id"):item for item in s.get("candidate_leads",[]) if item.get("candidate_id")}
+        if visible_candidate_ids is not None:
+            candidates={key:value for key,value in candidates.items() if key in set(visible_candidate_ids)}
         accepted=[]; rejected=0; duplicate=0; repeated_empty_anchor=0
         proposed=raw_searches if isinstance(raw_searches,list) else []
-        for item in proposed:
-            item=expand_anchor_selectors(item,_all_evidence(s))
+        for raw in proposed:
+            if not isinstance(raw,dict): rejected+=1; continue
+            raw_candidate=raw.get("candidate_id"); raw_follow_up=raw.get("follow_up_id")
+            raw_anchors=raw.get("anchor_evidence_ids",[])
+            if raw_candidate and raw_candidate not in candidates: rejected+=1; continue
+            if raw_candidate and raw_follow_up and not any(item.get("follow_up_id")==raw_follow_up
+                    for item in candidates[raw_candidate].get("follow_ups",[])):
+                rejected+=1; continue
+            if not isinstance(raw_anchors,list) or any(anchor not in evidence_ids for anchor in raw_anchors):
+                rejected+=1; continue
+            if raw.get("hypothesis_id") not in ids|{"general"}: rejected+=1; continue
+            if _state_mission_mode(s)=="undirected" and not raw_candidate and not raw_anchors:
+                rejected+=1; continue
+            item=expand_anchor_selectors(raw,_all_evidence(s))
             spec=validate_spec(item,allowed_sources=list(source_fields),hypothesis_ids=ids,fields_by_source=source_fields,evidence_ids=evidence_ids)
             if not spec: rejected+=1; continue
-            if phase=="iterative" and self._anchor_exhausted_on_sources(s,spec):
-                rejected+=1; duplicate+=1; repeated_empty_anchor+=1; continue
-            fp=fingerprint(spec)
-            if fp in s.setdefault("search_fingerprints",[]): rejected+=1; duplicate+=1; continue
-            s["search_fingerprints"].append(fp)
-            entry={"id":"Q-"+fp,"fingerprint":fp,"phase":phase,**spec}
-            s.setdefault("lead_catalog",[]).append(entry); accepted.append(entry)
+            spec.update({"candidate_id":raw_candidate,"follow_up_id":raw_follow_up})
+            try: proposals=self._compile_investigation_proposals(s,spec,"model_proposal")
+            except (ValueError,TypeError,json.JSONDecodeError): rejected+=1; continue
+            proposal_tasks=[]
+            for proposal in proposals:
+                task_id,created=register_search_task(s,proposal)
+                if not created: duplicate+=1
+                task=s["search_tasks"][task_id]
+                if not any(existing.get("task_id")==task_id for existing in accepted): accepted.append(task)
+                proposal_tasks.append(task_id)
+            if not proposal_tasks: rejected+=1
         s.setdefault("coverage",{}).setdefault("model_search_planning",[]).append({"phase":phase,"proposed":len(proposed),
-            "accepted":len(accepted),"rejected_or_duplicate":rejected,"duplicate":duplicate,
-            "repeated_empty_anchor":repeated_empty_anchor,"invalid_or_unmappable":rejected-duplicate})
+            "accepted":len(accepted),"rejected_or_duplicate":rejected+duplicate,"duplicate":duplicate,
+            "repeated_empty_anchor":repeated_empty_anchor,"invalid_or_unmappable":rejected})
         return accepted
 
     def _anchor_exhausted_on_sources(self,s,spec):
@@ -1378,27 +1615,58 @@ class HuntEngine:
                 zero_sources.clear()
         return len({source for source in zero_sources if source})>=2
 
+    def _record_scheduled_followups(self,s,task,outcome):
+        candidate_ids=set(task.get("candidate_ids",[])); follow_up_ids=set(task.get("follow_up_ids",[]))
+        if not candidate_ids or not follow_up_ids: return
+        terminal={"completed","partial","failed","skipped","budget_limited"}
+        outcomes={item.get("task_id"):item for item in s.get("search_outcomes",[]) if item.get("task_id")}
+        for candidate in s.get("candidate_leads",[]):
+            candidate_id=candidate.get("candidate_id")
+            if candidate_id not in candidate_ids: continue
+            if candidate.get("disposition")=="observed": candidate["disposition"]="investigating"
+            for follow_up in candidate.get("follow_ups",[]):
+                follow_up_id=follow_up.get("follow_up_id")
+                if follow_up_id not in follow_up_ids: continue
+                history=follow_up.setdefault("history",[])
+                if not any(item.get("task_id")==task.get("task_id") and
+                        item.get("attempt_count")==outcome.get("attempt_count") for item in history):
+                    history.append({"timestamp":utc_now(),"task_id":task.get("task_id"),
+                        "attempt_count":outcome.get("attempt_count"),"status":outcome.get("status","attempted"),
+                        "returned":int(outcome.get("returned_total") or 0)})
+                required=[item for item in s.get("search_tasks",{}).values()
+                    if candidate_id in (item.get("candidate_ids") or [])
+                    and follow_up_id in (item.get("follow_up_ids") or [])]
+                current=[outcomes.get(item.get("task_id")) for item in required]
+                if required and all(outcome_resolves(item) for item in current): follow_up["status"]="completed"
+                elif required and all(isinstance(item,dict) and item.get("status") in terminal for item in current):
+                    follow_up["status"]="blocked"
+                else: follow_up["status"]="in_progress"
+
     def _pivot(self,s):
-        queue=list(s.get("lead_queue",[]))
-        if not queue: return self._save(s)
-        lead_id=queue.pop(0); s["lead_queue"]=queue; s["completed_leads"].append(lead_id); s["reasoning_complete"]=bool(queue)
-        lead=next((x for x in s.get("lead_catalog",[]) if x["id"]==lead_id),None)
-        if not lead: return self._save(s)
-        print(f"[ROMULUS] investigation round {s['depth']}/{self.settings.max_depth}, search {lead_id}: {lead.get('intent',lead.get('why','follow-up lead'))}")
+        selected=select_search_tasks(s,phase="investigation",limit=1)
+        if not selected: return self._save(s)
+        task=begin_search_task(s,selected[0]["task_id"])
+        self._save(s)
+        print(f"[ROMULUS] investigation round {s.get('depth',0)}/{self.settings.max_depth}, task {task['task_id']}: {task.get('intent','follow-up search')}")
         if self.offline:
-            host,_=sample_evidence(); item=encode(host[1]); item["query"]="synthetic follow-up after SMB network evidence"
-            item["provenance"]={"fixture":"fixtures/synthetic_host.json","pivot":lead_id}
-            s["host"].append(item); self._record_evidence(s,item)
-            s.setdefault("pivot_results",[]).append({"lead_id":lead_id,"status":"synthetic fixture pivot completed","returned":1})
-            s["coverage"]["offline_pivot"]="completed: synthetic host service event retrieved after SMB lead"
-            s["queries"].append({"stage":"offline_synthetic_pivot","lead_id":lead_id,"returned":1})
-        elif lead.get("fingerprint"):
-            self._execute_model_search(s,lead,"iterative_model_search")
-        elif lead["source"]=="host": self._host_pivot(s,lead)
-        else: self._network_pivot(s,lead)
-        latest=s.get("pivot_results",[])[-1] if s.get("pivot_results") else {}
-        _record_candidate_follow_up(s,lead,latest)
-        self._stage(s,"follow_up_pivot",latest.get("status","attempted"),{"lead_id":lead_id,"returned":latest.get("returned",0)})
+            host,_=sample_evidence(); item=encode(host[1]); item["query"]="synthetic scheduled follow-up"
+            item["provenance"]={"fixture":"fixtures/synthetic_host.json","lead_id":task["task_id"]}
+            compact=self._record_evidence(s,item)
+            if compact: s.setdefault("host",[]).append(compact)
+            outcome={"task_id":task["task_id"],"status":"completed","returned_total":1,"matched_total":1,
+                "capped":False,"timed_out":False,"shard_failures":0,"incomplete":False,
+                "artifact_id":"SR-"+hashlib.sha1(("offline:"+task["task_id"]).encode()).hexdigest()[:12].upper(),
+                "evidence_ids":[compact["evidence_id"]] if compact else [],"time_range":task.get("time_range",{})}
+            s.setdefault("coverage",{})["offline_pivot"]="completed: synthetic host service event retrieved after scheduled lead"
+            s.setdefault("queries",[]).append({"stage":"offline_synthetic_pivot","task_id":task["task_id"],"returned":1})
+        else: outcome=self._execute_search_task(s,task)
+        recorded=record_search_outcome(s,task["task_id"],outcome)
+        if task["task_id"] not in s.setdefault("completed_leads",[]): s["completed_leads"].append(task["task_id"])
+        s.setdefault("pivot_results",[]).append({"lead_id":task["task_id"],"task_id":task["task_id"],
+            "status":recorded.get("status"),"returned":recorded.get("returned_total",0)})
+        self._record_scheduled_followups(s,s["search_tasks"][task["task_id"]],recorded)
+        self._stage(s,"follow_up_pivot",recorded.get("status","attempted"),
+            {"task_id":task["task_id"],"returned":recorded.get("returned_total",0)})
         return self._save(s)
 
     def _host_pivot(self,s,lead):
@@ -1936,24 +2204,17 @@ def _field_names_by_class(mapping):
 
 
 def _search_history_summary(s):
-    """Return query intent and outcomes, not opaque fingerprints or raw query DSL."""
-    completed=set(s.get("completed_leads",[]))
-    model_results={x.get("search_id"):x for x in s.get("coverage",{}).get("model_search_results",[]) if x.get("search_id")}
-    pivots={x.get("lead_id"):x for x in s.get("pivot_results",[]) if x.get("lead_id")}
+    """Return scheduler intent and exact outcomes without raw response bodies."""
+    tasks=s.get("search_tasks",{}) if isinstance(s.get("search_tasks"),dict) else {}
+    outcomes={item.get("task_id"):item for item in s.get("search_outcomes",[]) if item.get("task_id")}
     out=[]
-    for plan in s.get("lead_catalog",[]):
-        if plan.get("id") not in completed: continue
-        result=model_results.get(plan.get("id"),pivots.get(plan.get("id"),{}))
-        selectors={k:plan.get(k) for k in ("terms","ips","hostnames","ports","protocols","event_codes","index_class") if plan.get(k)}
-        out.append({"source":plan.get("source"),"intent":plan.get("intent") or plan.get("why"),"selectors":selectors,
-            "status":result.get("status"),"returned":result.get("returned",0)})
-    for query in s.get("queries",[]):
-        stage=str(query.get("stage",""))
-        if not stage.startswith(("initial_host_search","host_indicator_search","initial_network_search","arkime_indicator_search","initial_pcap_search")):
-            continue
-        out.append({"source":query.get("source") or ("elasticsearch" if "host" in stage else None),"intent":stage,
-            "selectors":{k:query.get(k) for k in ("term","terms","protocol","display_filter") if query.get(k)},
-            "status":query.get("status","completed"),"returned":query.get("returned",0)})
+    for task_id,task in tasks.items():
+        result=outcomes.get(task_id)
+        if not result: continue
+        out.append({"task_id":task_id,"source":task.get("source"),"intent":task.get("intent"),
+            "origins":task.get("origins",[]),"hypothesis_ids":task.get("hypothesis_ids",[]),
+            "status":result.get("status"),"returned":result.get("returned_total",0),
+            "matched_total":result.get("matched_total"),"time_range":task.get("time_range",{})})
     return out[-20:]
 
 

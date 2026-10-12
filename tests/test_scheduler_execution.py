@@ -449,6 +449,213 @@ class SchedulerDiscoveryWorkflowTests(unittest.TestCase):
             )
 
 
+def _investigation_state():
+    state = _discovery_state()
+    state.update(
+        {
+            "mission_mode": "undirected",
+            "depth": 1,
+            "hypotheses": [
+                {
+                    "hypothesis_id": "H-CANDIDATE",
+                    "technique_id": "T1059.001",
+                    "title": "Candidate-backed execution",
+                    "priority": 5,
+                    "basis": "observed_candidate",
+                    "basis_candidate_ids": ["CL-CRITICAL"],
+                    "basis_evidence_ids": ["EV-ANCHOR"],
+                    "expected_host": ["process execution"],
+                    "expected_network": [],
+                },
+                {
+                    "hypothesis_id": "H-COVERAGE",
+                    "technique_id": "T1059",
+                    "title": "Remaining execution coverage",
+                    "priority": 3,
+                    "basis": "coverage_frontier",
+                    "expected_host": ["process execution"],
+                    "expected_network": [],
+                },
+            ],
+            "host": [
+                {
+                    "evidence_id": "EV-ANCHOR",
+                    "source": "elasticsearch",
+                    "observed_at": "2024-11-13T11:00:00Z",
+                    "asset": "ws-01",
+                    "observation": "candidate process",
+                    "raw": {"process": {"name": "powershell.exe"}, "host": {"name": "ws-01"}},
+                }
+            ],
+            "candidate_leads": [
+                {
+                    "candidate_id": "CL-CRITICAL",
+                    "kind": "behavior",
+                    "title": "Critical candidate",
+                    "priority_tier": "critical",
+                    "priority_score": 99,
+                    "disposition": "observed",
+                    "evidence_ids": ["EV-ANCHOR"],
+                    "follow_ups": [
+                        {
+                            "follow_up_id": "FU-CRITICAL",
+                            "intent": "Validate exact process context",
+                            "status": "pending",
+                            "history": [],
+                        }
+                    ],
+                }
+            ],
+            "lead_catalog": [
+                {
+                    "id": "C-CANDIDATE-HOST",
+                    "source": "host",
+                    "intent": "Validate exact process context",
+                    "hypothesis_id": "H-CANDIDATE",
+                    "candidate_id": "CL-CRITICAL",
+                    "follow_up_id": "FU-CRITICAL",
+                    "anchor_evidence_ids": ["EV-ANCHOR"],
+                    "terms": ["powershell.exe"],
+                    "priority": 5,
+                },
+                {
+                    "id": "C-COVERAGE-HOST",
+                    "source": "host",
+                    "intent": "Test remaining command execution coverage",
+                    "hypothesis_id": "H-COVERAGE",
+                    "terms": ["cmd.exe"],
+                    "priority": 3,
+                },
+            ],
+        }
+    )
+    state["coverage"]["search_fields"] = {
+        "elasticsearch": ["process.name", "process.command_line", "@timestamp"]
+    }
+    return state
+
+
+class SchedulerInvestigationWorkflowTests(unittest.TestCase):
+    def test_candidate_model_and_coverage_share_fixed_priority_queue(self):
+        from romulus.investigation.scheduler import select_search_tasks
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory))
+            state = _investigation_state()
+            model = {
+                "source": "elasticsearch",
+                "hypothesis_id": "H-CANDIDATE",
+                "candidate_id": "CL-CRITICAL",
+                "follow_up_id": "FU-CRITICAL",
+                "intent": "Check anchored sibling execution",
+                "fields": ["process.name"],
+                "terms": ["wscript.exe"],
+                "anchor_evidence_ids": ["EV-ANCHOR"],
+                "priority_tier": -100,
+                "priority_score": 999999,
+            }
+
+            accepted = engine._register_model_searches(state, [model], "iterative")
+            engine._register_investigation_tasks(state)
+            selected = select_search_tasks(state, phase="investigation", limit=10)
+
+            self.assertTrue(accepted)
+            self.assertEqual(selected[0]["origin"], "candidate_follow_up")
+            model_task = next(item for item in selected if item["origin"] == "model_proposal")
+            coverage_task = next(item for item in selected if item["origin"] == "coverage_frontier")
+            self.assertEqual(model_task["priority_tier"], 3)
+            self.assertLess(selected.index(model_task), selected.index(coverage_task))
+
+    def test_model_search_with_invisible_candidate_or_evidence_is_rejected(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory))
+            state = _investigation_state()
+            proposal = {
+                "source": "elasticsearch",
+                "hypothesis_id": "H-CANDIDATE",
+                "candidate_id": "CL-INVISIBLE",
+                "intent": "Search an ungrounded entity",
+                "fields": ["process.name"],
+                "terms": ["rundll32.exe"],
+                "anchor_evidence_ids": ["EV-INVISIBLE"],
+            }
+
+            accepted = engine._register_model_searches(state, [proposal], "iterative")
+
+            self.assertEqual(accepted, [])
+            self.assertFalse(
+                any(task.get("origin") == "model_proposal" for task in state.get("search_tasks", {}).values())
+            )
+
+    def test_merged_candidate_owners_receive_the_same_exact_outcome(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory))
+            state = _investigation_state()
+            second = copy.deepcopy(state["candidate_leads"][0])
+            second["candidate_id"] = "CL-SECOND"
+            second["follow_ups"][0]["follow_up_id"] = "FU-SECOND"
+            state["candidate_leads"].append(second)
+            duplicate = copy.deepcopy(state["lead_catalog"][0])
+            duplicate.update(
+                {
+                    "id": "C-SECOND-HOST",
+                    "candidate_id": "CL-SECOND",
+                    "follow_up_id": "FU-SECOND",
+                }
+            )
+            state["lead_catalog"].append(duplicate)
+            calls = []
+            engine.es = _RecordingElasticsearch(calls)
+
+            engine._register_investigation_tasks(state)
+            candidate_tasks = [
+                item
+                for item in state["search_tasks"].values()
+                if item.get("origin") == "candidate_follow_up"
+            ]
+            self.assertEqual(len(candidate_tasks), 1)
+            task_id = candidate_tasks[0]["task_id"]
+
+            engine._pivot(state)
+
+            self.assertEqual(calls, ["host"])
+            for candidate in state["candidate_leads"]:
+                follow_up = candidate["follow_ups"][0]
+                self.assertEqual(follow_up["status"], "completed")
+                self.assertEqual(follow_up["history"][-1]["task_id"], task_id)
+                self.assertEqual(follow_up["history"][-1]["returned"], 0)
+
+    def test_model_task_uses_its_own_outcome_not_an_older_pivot_row(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory))
+            state = _investigation_state()
+            state["lead_catalog"] = []
+            state["pivot_results"] = [
+                {"lead_id": "OLD-STATIC", "status": "failed query", "returned": 77}
+            ]
+            calls = []
+            engine.es = _RecordingElasticsearch(calls)
+            proposal = {
+                "source": "elasticsearch",
+                "hypothesis_id": "H-CANDIDATE",
+                "candidate_id": "CL-CRITICAL",
+                "follow_up_id": "FU-CRITICAL",
+                "intent": "Check exact anchored process context",
+                "fields": ["process.name"],
+                "terms": ["powershell.exe"],
+                "anchor_evidence_ids": ["EV-ANCHOR"],
+            }
+            engine._register_model_searches(state, [proposal], "iterative")
+
+            engine._pivot(state)
+
+            follow_up = state["candidate_leads"][0]["follow_ups"][0]
+            self.assertEqual(follow_up["status"], "completed")
+            self.assertEqual(follow_up["history"][-1]["returned"], 0)
+            self.assertTrue(follow_up["history"][-1]["task_id"].startswith("ST-"))
+            self.assertEqual(state["pivot_results"][0]["returned"], 77)
+
+
 class SchedulerExecutionAdditionalTests(unittest.TestCase):
     def test_arkime_task_uses_bounded_expression_and_adds_network_evidence(self):
         class Arkime:

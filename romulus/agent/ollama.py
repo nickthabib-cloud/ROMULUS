@@ -156,6 +156,7 @@ class Ollama:
             "unassessed hypotheses, capped sources, or useful evidence pivots remain; stop only when none remain. Prefer unsearched sources, "
             "entities, and hypotheses. You may propose a validated native Elasticsearch Query DSL clause, Arkime expression, or TShark display filter when it better expresses the analytic idea. Always also provide selector fields as a deterministic fallback. Never emit code or commands. In a search, put only the literal indicator in terms (for example, "
             "'wget'); put its mapped field in fields separately (for example, 'process.name'). Never put a field name, schema label, or field:value syntax in terms. "
+            "When a search satisfies a listed candidate follow-up, copy its exact candidate_id and follow_up_id into the search; otherwise leave both empty. "
             "For a native proposal, set native_query_language to elasticsearch_dsl, arkime, or tshark and native_query to the candidate; Elasticsearch DSL is a JSON query clause using only bool, term, terms, match, match_phrase, range, exists, wildcard, or prefix. Otherwise set native_query_language to none and native_query to an empty string. "
             "For Elasticsearch, choose host for process/account/endpoint events and network for flow/Suricata/network events; use only fields "
             "from that class. For a candidate finding, use only provided evidence IDs, state an "
@@ -296,6 +297,8 @@ def _search_item_schema(sources: list[str]) -> dict:
     return {"type": "object", "properties": {
         "source": {"type": "string", "enum": sources or ["elasticsearch"]},
         "hypothesis_id": {"type": "string", "maxLength": 80}, "intent": {"type": "string", "minLength": 6, "maxLength": 180},
+        "candidate_id": {"type": "string", "maxLength": 80},
+        "follow_up_id": {"type": "string", "maxLength": 80},
         "terms": {"type": "array", "maxItems": 4, "items": {"type": "string", "maxLength": 80}},
         "fields": {"type": "array", "maxItems": 8, "items": {"type": "string", "maxLength": 160}},
         "ips": {"type": "array", "maxItems": 4, "items": {"type": "string", "maxLength": 64}},
