@@ -13,7 +13,7 @@
 ## Execution status — 2026-10-12
 
 - Tasks 1–4 are implemented in commits `f2008b1`, `b2fe2d7`, and `56c4da8`.
-- The final local suite passes 85 tests with five dependency-backed checks skipped locally; compilation and whitespace checks pass.
+- The final local suite passes 86 tests with five dependency-backed checks skipped locally; compilation and whitespace checks pass.
 - Three independent review passes are complete. Their report-parsing, JSONL-concurrency, transition-integrity, legacy-state, nested-ECS, documentation, and CLI-observability findings are fixed and covered by regression tests. The final review found no remaining deployment blockers.
 - The default policy is `compact`; partial hunts remain resumable, full retention is explicit, and irreversible transitions are rejected before report or state mutation.
 - Remaining gates: deploy the exact committed archive to the development VM, run all dependency-backed tests, run a disposable offline completed hunt, verify report/path/retention invariants, and run a bounded read-only live check only if source health is green.
@@ -27,6 +27,7 @@
 - Legacy compact states without a `finalized` field remain terminal and cannot be resumed.
 - A full-retained hunt may later be compacted only after regenerating a compact-policy report; compact data cannot be relabeled full.
 - Reports describe compact cleanup as policy intent because cleanup happens only after the reports have been written and verified.
+- The first bounded live validation was stopped after a broad phrase (`host and network telemetry`) exposed an optional-separator classifier bug that incorrectly treated `host and` as a concrete host selector. Typed value validation now accepts concrete targets such as `host webserver` and `user alice` while rejecting connector/scope phrases; the exact live objective is a no-model-before-telemetry regression case. VM redeployment and rerun remain required.
 
 ---
 

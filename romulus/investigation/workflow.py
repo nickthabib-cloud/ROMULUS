@@ -1543,7 +1543,40 @@ def _mission_is_directed(objective):
         "mimikatz","psexec","wmi","certutil","bitsadmin","wget","curl","linpeas","pwnkit",
     }
     if any(re.search(r"(?<![a-z0-9_])"+re.escape(term)+r"(?![a-z0-9_])",text) for term in explicit_terms): return True
-    if re.search(r"\b(?:event(?:\s+id)?|port|process|user|account|host|hostname|hash|indicator|ioc)\s*(?:=|:|is\s+)?[\w./\\-]{2,}\b",text): return True
+    if _has_concrete_entity_direction(text): return True
+    return False
+
+
+def _has_concrete_entity_direction(text):
+    """Recognize typed targets without treating telemetry-scope prose as a target."""
+    entity_key=r"(?P<key>event(?:\s+id)?|port|process|user|account|host|hostname|hash|indicator|ioc)"
+    value=r"(?P<value>[\w./\\-]{2,})"
+    matches=list(re.finditer(rf"\b{entity_key}\s*(?:=|:)\s*{value}\b",text))
+    matches.extend(re.finditer(rf"\b{entity_key}\s+(?P<quote>['\"]){value}(?P=quote)",text))
+    directive=(r"(?:investigate|inspect|analy[sz]e|check|examine|review|target|find|"
+        r"focus(?:ing)?\s+on|look(?:ing)?\s+(?:at|into|for)|hunt(?:ing)?\s+for|search(?:ing)?(?:\s+for)?|involving|involves)")
+    target=rf"(?:activity\s+)?(?:(?:on|from|for|involving)\s+)?(?:the\s+)?{entity_key}\s+(?:is\s+)?{value}\b"
+    matches.extend(re.finditer(rf"\b{directive}\s+{target}",text))
+    matches.extend(re.finditer(rf"^{target}",text))
+    for match in re.finditer(rf"\b{entity_key}\s+(?:is\s+)?{value}\b",text):
+        candidate=match.group("value")
+        if any(character.isdigit() or character in "./\\-" for character in candidate):
+            matches.append(match)
+    scope_words={
+        "access","accounts","activity","all","and","are","available","behavior","behaviors",
+        "command","connected","connecting","connection","connections","data","environment","environments",
+        "events","execution","field","fields","for","from","internal","local","log","login","logins",
+        "logs","machines","malicious","monitored","network","networks","on","or","processes","remote",
+        "scanning","scope","suspicious","systems","telemetry","traffic","unknown","unusual","usage","was",
+        "with","without",
+    }
+    for match in matches:
+        key=" ".join(match.group("key").split())
+        candidate=match.group("value").lower()
+        if candidate in scope_words: continue
+        if key=="port" and (not candidate.isdigit() or not 1<=int(candidate)<=65535): continue
+        if key.startswith("event") and not any(character.isdigit() for character in candidate): continue
+        return True
     return False
 
 

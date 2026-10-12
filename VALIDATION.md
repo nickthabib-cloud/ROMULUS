@@ -15,8 +15,15 @@ This file records engineering validation performed against the development deplo
 ### Local proof
 
 - The focused graph, customer-report, and retention suite passed 25 tests before the upgrade-compatibility review; added legacy-state and full-to-compact truth tests were then exercised red/green.
-- The final complete local suite passed all 85 tests available in this environment, with five dependency-backed checks skipped for execution on the VM.
+- The final complete local suite passed all 86 tests available in this environment, with five dependency-backed checks skipped for execution on the VM.
 - `python -m compileall -q romulus tests` and `git diff --check` completed successfully on the final local tree.
+
+### Live-validation defect and remediation
+
+- The first bounded isolated live attempt, `HUNT-35466BAA8A`, was stopped when the broad phrase `host and network telemetry` was incorrectly classified as operator direction and triggered pre-telemetry hypothesis generation.
+- Root cause was an entity-selector regular expression whose separator was optional: ordinary prose was parsed as a `host=and` selector, while clear `host: srv-01` syntax was missed.
+- Typed selector validation now accepts concrete alphabetic or structured targets while rejecting connector/scope values such as `and`, `logs`, `telemetry`, `activity`, and `connected`. The exact failed live objective now has both classifier and no-pretelemetry-model regression coverage.
+- A fresh dependency-complete suite and bounded live rerun are required on the corrected VM deployment. The failed attempt used only isolated `/tmp` state and read-only source access.
 
 ### Deployment status
 

@@ -50,9 +50,40 @@ class MissionModeTests(unittest.TestCase):
 
         self.assertFalse(_mission_is_directed("Hunt for threats across all available telemetry"))
         self.assertFalse(_mission_is_directed("Find malicious actors on the mission partner network"))
+        self.assertFalse(_mission_is_directed("Hunt across host and network telemetry"))
+        self.assertFalse(_mission_is_directed("Hunt across host logs and user activity"))
+        self.assertFalse(_mission_is_directed("The host is connected to the network"))
+        self.assertFalse(_mission_is_directed("The host was connected to the network"))
+        self.assertFalse(_mission_is_directed("Hunt across host endpoints and network devices"))
+        self.assertFalse(_mission_is_directed(
+            "Conduct an undirected threat hunt across available host and network telemetry "
+            "from 2024-11-13T10:58:00-05:00 through 2024-11-13T11:10:00-05:00. "
+            "Do not assume a technique; begin with deterministic discovery."
+        ))
         self.assertTrue(_mission_is_directed("Hunt for SMB lateral movement"))
         self.assertTrue(_mission_is_directed("Investigate activity involving 10.20.30.40"))
         self.assertTrue(_mission_is_directed("Look for PowerShell encoded commands"))
+        self.assertTrue(_mission_is_directed("Investigate host: srv-01"))
+        self.assertTrue(_mission_is_directed("Investigate host webserver"))
+        self.assertTrue(_mission_is_directed("Investigate user alice"))
+        self.assertTrue(_mission_is_directed("Investigate account svcbackup"))
+        self.assertTrue(_mission_is_directed("Investigate event ID 4624"))
+
+    def test_broad_host_network_scope_never_calls_pretelemetry_model(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            engine = _engine(Path(directory), use_ollama=True)
+            engine._call = lambda *args, **kwargs: self.fail("broad host/network scope called a model")
+            objective = (
+                "Conduct an undirected threat hunt across available host and network telemetry "
+                "from 2024-11-13T10:58:00-05:00 through 2024-11-13T11:10:00-05:00. "
+                "Do not assume a technique; begin with deterministic discovery."
+            )
+
+            result = engine._plan(_planning_state(objective))
+
+            self.assertEqual(result["mission_mode"], "undirected")
+            self.assertEqual(result["hypotheses"], [])
+            self.assertEqual(result["reasoning_history"][0]["basis"], "deterministic_telemetry_discovery")
 
     def test_undirected_plan_creates_no_hypothesis_or_model_call(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

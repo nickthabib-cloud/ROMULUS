@@ -25,6 +25,7 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 - Bound candidate pivots to their cited evidence, observed entities, and ±15-minute evidence window; a follow-up closes only after every bound search succeeds, while failed, skipped, partial, or capped searches remain open.
 - Tightened authentication and remote-execution correlations with bounded time, identity, prevalence, and initiator checks, while retaining every supporting evidence ID in aggregate candidates.
 - Required every planned high-priority analytic to resolve and have an evidence-cited assessment (or an explicit unavailable-source gap) before hypothesis closure; merely attempting a query no longer counts as resolution.
+- Fixed mission classification so broad phrases such as `host and network telemetry` cannot be misread as concrete entity selectors and trigger model hypotheses before deterministic discovery; typed validation still recognizes concrete alphabetic and structured targets.
 
 ### Super-hunter correctness foundation
 
