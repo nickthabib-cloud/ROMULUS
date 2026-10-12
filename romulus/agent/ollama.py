@@ -121,6 +121,7 @@ class Ollama:
         coverage_summary["recent_search_plans"]=(coverage.get("model_search_planning",[]) or [])[-2:]
         coverage_summary["recent_search_artifacts"]=(coverage.get("recent_search_artifacts",[]) or [])[-12:]
         coverage_summary["hypothesis_coverage"]=coverage.get("hypothesis_coverage",{})
+        coverage_summary["candidate_queue"]=(coverage.get("candidate_queue",[]) or [])[:12]
         coverage_summary["remaining_budget"]={k:coverage.get(k) for k in ("tool_calls_remaining","runtime_seconds_remaining","reasoning_rounds_remaining")}
         data = {"mission": objective[:1400],
             "hypotheses": [{"hypothesis_id":h.get("hypothesis_id"),"title":str(h.get("title",""))[:100],
@@ -138,8 +139,8 @@ class Ollama:
         prompt = ("Reason as an experienced host and network analyst. Assess the supplied hypotheses against the evidence and coverage, "
             "separate what was observed from interpretation, and preserve benign alternatives. Then propose up to " + str(max_searches) +
             " new read-only searches that would discriminate among explanations or follow evidence across host/network sources. "
-            "Add a new testable follow-up hypothesis when evidence reveals a distinct path not represented in the list; cite at least one "
-            "visible evidence ID as its basis, avoid restating an existing hypothesis, and use hypothesis_id general for a search tied to a new hypothesis in this same response. "
+            "Never invent a lead or hypothesis. Add a new testable follow-up hypothesis only when a supplied deterministic candidate or evidence record reveals a distinct path not represented in the list; cite at least one "
+            "visible evidence ID or candidate ID as its basis. An unsupported ID or a plausible-sounding guess is invalid. Avoid restating an existing hypothesis, and use hypothesis_id general for a search tied to a new hypothesis in this same response. "
             "For a cross-source pivot, you may cite one anchor_evidence_id; ROMULUS will derive one validated entity family and a bounded ±15 minute window. "
             "Use the deterministic analytic summary to reason about distributions, rarity, fan-out, cadence, authentication sequences, and telemetry quality. "
             "Explore different plausible mechanisms instead of repeating a narrow indicator. Use the full hypothesis and search-coverage "
@@ -271,7 +272,9 @@ def _reason_schema(sources: list[str], hypotheses: list[dict], limit: int) -> di
         "expected_network": {"type": "array", "maxItems": 2, "items": {"type": "string", "maxLength": 90}},
         "benign_explanations": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"type": "string", "maxLength": 100}},
         "priority": {"type": "integer", "minimum": 1, "maximum": 5},
-        "basis_evidence_ids": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "string", "maxLength": 80}}},
+        "basis_evidence_ids": {"type": "array", "minItems": 1, "maxItems": 3,
+            "description": "IDs from visible evidence records or deterministic candidates only.",
+            "items": {"type": "string", "maxLength": 80}}},
         "required": ["title", "technique_id", "rationale", "expected_host", "expected_network", "benign_explanations", "priority", "basis_evidence_ids"],
         "additionalProperties": False}
     return {"type": "object", "properties": {

@@ -367,8 +367,10 @@ def build_candidate_queue(
         for asset, rows in by_asset.items():
             score = max(90, min(100, int(indicator.get("confidence", 0))))
             identifier = str(indicator["id"])
+            candidate_id = _candidate_id("indicator", identifier, asset)
+            follow_up = ["Validate the indicator source and investigate the cited event and adjacent activity."]
             candidates.append({
-                "candidate_id": _candidate_id("indicator", identifier, asset),
+                "candidate_id": candidate_id,
                 "kind": "trusted_indicator", "indicator_id": identifier,
                 "analytic_id": None, "title": f"Trusted indicator observed: {identifier}",
                 "description": f"An exact {indicator.get('type')} indicator supplied by {indicator.get('source')} was observed.",
@@ -381,7 +383,8 @@ def build_candidate_queue(
                     "exact value match with current provenance",
                 ],
                 "attack_techniques": [], "benign_explanations": [],
-                "follow_up": ["Validate the indicator source and investigate the cited event and adjacent activity."],
+                "follow_up": follow_up, "follow_ups": _follow_up_records(candidate_id, follow_up),
+                "finding_ids": [],
                 "indicator_source": indicator.get("source"), "indicator_confidence": indicator.get("confidence"),
                 "indicator_type": indicator.get("type"), "indicator_value": indicator.get("value"),
                 "indicator_expires_at": indicator.get("expires_at"),
@@ -398,6 +401,40 @@ def build_candidate_queue(
 
 def customer_visible_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [item for item in candidates if item.get("customer_visible")]
+
+
+def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge fresh detections without erasing investigation decisions or follow-up history."""
+    prior_by_id = {str(item.get("candidate_id")): item for item in previous if item.get("candidate_id")}
+    merged = []
+    disposition_rank = {"observed": 0, "investigating": 1, "corroborated": 2}
+    terminal = {"benign_likely", "dismissed", "unresolved"}
+    for fresh in current:
+        item = dict(fresh)
+        prior = prior_by_id.get(str(item.get("candidate_id")))
+        if prior:
+            prior_disposition = str(prior.get("disposition") or "observed")
+            fresh_disposition = str(item.get("disposition") or "observed")
+            if prior_disposition in terminal or disposition_rank.get(prior_disposition, 0) > disposition_rank.get(fresh_disposition, 0):
+                item["disposition"] = prior_disposition
+            item["evidence_ids"] = sorted(set(prior.get("evidence_ids", [])) | set(item.get("evidence_ids", [])))
+            observed = [value for value in (prior.get("first_observed"), item.get("first_observed")) if value]
+            item["first_observed"] = min(observed) if observed else None
+            observed = [value for value in (prior.get("last_observed"), item.get("last_observed")) if value]
+            item["last_observed"] = max(observed) if observed else None
+            item["finding_ids"] = list(dict.fromkeys(prior.get("finding_ids", []) + item.get("finding_ids", [])))
+            old_follow_ups = {entry.get("follow_up_id"): entry for entry in prior.get("follow_ups", [])}
+            preserved = []
+            for follow_up in item.get("follow_ups", []):
+                old = old_follow_ups.get(follow_up.get("follow_up_id"))
+                preserved.append(dict(follow_up, status=old.get("status", follow_up.get("status")),
+                    history=list(old.get("history", []))) if old else follow_up)
+            item["follow_ups"] = preserved
+            for field in ("disposition_history", "telemetry_gaps"):
+                if prior.get(field): item[field] = list(prior[field])
+        merged.append(item)
+    return sorted(merged, key=lambda item: (-int(item.get("priority_score", 0)),
+        0 if item.get("kind") == "trusted_indicator" else 1, str(item.get("candidate_id"))))
 
 
 def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) -> dict[str, Any] | None:
@@ -544,8 +581,10 @@ def _behavior_candidate(
     reasons: list[str],
 ) -> dict[str, Any]:
     tier = "critical" if score >= 90 else ("high" if score >= 70 else ("medium" if score >= 40 else "low"))
+    candidate_id = _candidate_id("behavior", analytic["id"], asset)
+    follow_up = analytic.get("follow_up", [])
     return {
-        "candidate_id": _candidate_id("behavior", analytic["id"], asset),
+        "candidate_id": candidate_id,
         "kind": "behavior", "analytic_id": analytic["id"], "indicator_id": None,
         "title": analytic["title"], "description": analytic["description"],
         "priority_score": score, "priority_tier": tier, "disposition": disposition,
@@ -554,12 +593,24 @@ def _behavior_candidate(
         "first_observed": _observed_bounds(rows)[0], "last_observed": _observed_bounds(rows)[1],
         "score_reasons": reasons, "attack_techniques": analytic.get("attack_techniques", []),
         "benign_explanations": analytic.get("benign_explanations", []),
-        "follow_up": analytic.get("follow_up", []),
+        "follow_up": follow_up, "follow_ups": _follow_up_records(candidate_id, follow_up),
+        "finding_ids": [],
     }
 
 
 def _aggregate_events(summary: dict[str, Any]) -> list[dict[str, Any]]:
     out = []
+    aggregate_signals = summary.get("aggregate_signals")
+    if isinstance(aggregate_signals, dict):
+        for signal, rows in aggregate_signals.items():
+            for row in rows or []:
+                refs = list(row.get("sample_evidence_ids") or [])
+                if row.get("sample_evidence_id"):
+                    refs.append(row["sample_evidence_id"])
+                asset = (row.get("asset") or row.get("source") or row.get("destination")
+                    or row.get("user") or "unknown")
+                out.append(_aggregate_event(str(signal), asset, *refs))
+        return out
     host_profile = summary.get("host_profile", {})
     for row in host_profile.get("authentication_sequences", []) or []:
         out.append(_aggregate_event("auth_failures_then_success", row.get("source") or row.get("user"), row.get("sample_evidence_id")))
@@ -584,6 +635,14 @@ def _aggregate_event(signal: str, asset: Any, *evidence_ids: Any) -> dict[str, A
 def _candidate_id(kind: str, identifier: str, asset: str) -> str:
     digest = hashlib.sha1(f"{kind}|{identifier}|{asset}".encode("utf-8", errors="replace")).hexdigest()[:12].upper()
     return f"CL-{digest}"
+
+
+def _follow_up_records(candidate_id: str, intents: list[str]) -> list[dict[str, Any]]:
+    out = []
+    for intent in intents:
+        digest = hashlib.sha1(f"{candidate_id}|{intent}".encode("utf-8", errors="replace")).hexdigest()[:10].upper()
+        out.append({"follow_up_id": f"FU-{digest}", "intent": str(intent), "status": "pending", "history": []})
+    return out
 
 
 def _evidence_ids(rows: list[dict[str, Any]]) -> list[str]:

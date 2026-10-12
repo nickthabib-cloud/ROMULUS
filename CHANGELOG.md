@@ -4,6 +4,14 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 
 ## Unreleased
 
+### Candidate-driven investigation loop
+
+- Made broad, undirected missions start with deterministic host/network discovery and explicitly prohibited pre-telemetry model hypothesis generation; focused missions retain initial hypotheses with an `operator_direction` basis.
+- Added deterministic candidate-backed hypotheses with stable candidate and evidence citations, and blocked model reasoning entirely when an undirected hunt has no candidate.
+- Completed all 13 aggregate catalog generators, including privileged-logon/execution, authentication fan-out, remote-service/execution, DNS entropy and NXDOMAIN bursts, protocol/port mismatch, outbound-volume outliers, rare process/destination pairs, and staging followed by transfer.
+- Added persistent candidate dispositions and structured follow-up histories that survive analysis rounds, plus candidate IDs in bounded model context with deterministic citation validation.
+- Made coverage closure candidate-aware: actionable candidates, incomplete required follow-ups, unlinked corroboration, and unresolved leads without documented telemetry gaps prevent clean completion.
+
 ### Super-hunter correctness foundation
 
 - Generalized host/network correlation so normalized host evidence that exposes a top-level `ip` can correlate with network source and destination roles when time and behavior also agree.

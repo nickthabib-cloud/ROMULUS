@@ -18,7 +18,7 @@ from ..intelligence.correlate import correlate
 from ..intelligence.analytics import summarize_evidence, build_coverage_ledger
 from ..intelligence.behavior_catalog import (
     load_behavior_catalog, load_local_indicators, resolve_semantic_fields, applicable_analytics,
-    compile_elasticsearch_seed, compile_elasticsearch_indicator_seed, build_candidate_queue,
+    compile_elasticsearch_seed, compile_elasticsearch_indicator_seed, build_candidate_queue, merge_candidate_queue,
 )
 from ..tools.elasticsearch_client import ElasticsearchAdapter
 from ..tools.arkime_client import ArkimeAdapter
@@ -225,6 +225,7 @@ class HuntEngine:
             seeds.append({**reference,**curated_seeds.get(tid,{})})
         if not seeds: seeds=list(curated_seeds.values())
         attack_catalog_metadata=load_attack_catalog().get("metadata",{})
+        s["mission_mode"]="directed" if _mission_is_directed(s["objective"]) else "undirected"
         if self.offline:
             host,network=sample_evidence(); s["host"]=[encode(host[0])]; s["network"]=[encode(x) for x in network]
             for item in s["host"]+s["network"]: self._record_evidence(s,item)
@@ -240,26 +241,40 @@ class HuntEngine:
             self._stage(s,"plan","completed",{"hypotheses":len(s["hypotheses"]),"mode":"offline"})
             print(f"[ROMULUS] {s['hunt_id']} offline planning {len(s['hypotheses'])} hypotheses")
             return self._save(s)
-        planned=[]; basis="broad local ATT&CK seed set"
-        if self.use_ollama and self._budget_ok(s):
-            try:
-                from ..agent.ollama import Ollama
-                planned=self._call(s,"ollama.api.chat","hypothesis_generation",{"model":self.settings.ollama_model,"reference_seed_count":len(seeds)},
-                    "mission text; no telemetry",lambda:Ollama(self.settings).plan_hypotheses(s["objective"],seeds,12),len) or []
-                if planned: basis="local model generated a diverse hypothesis set from ATT&CK seeds and mission context"
-            except Exception: planned=[]
-        normalized=_normalize_hypotheses(planned) if planned else []
-        s["hypotheses"]=normalized if len(normalized)>=4 else [encode(h) for h in hypotheses_for(s["objective"])][:20]
-        s["coverage"]={"host":"pending","network":"pending","hypotheses_total":len(s["hypotheses"]),
+        common_coverage={"host":"pending","network":"pending","hypotheses_total":0,
             "attack_knowledge":{"domain":ATTACK_DOMAIN,"release":ATTACK_RELEASE,"release_date":ATTACK_RELEASE_DATE,
                 "model":"Technique -> Detection Strategy -> platform Analytic -> Data Component -> Mutable Element",
                 "official_catalog_techniques":attack_catalog_metadata.get("technique_count",0),
                 "official_catalog_sha256":attack_catalog_metadata.get("source_sha256")},
             "time_scope":self._time_scope(s)[1],"historical_search_enabled":self.settings.historical_search}
+        if s["mission_mode"]=="undirected":
+            s["hypotheses"]=[]; s["lead_catalog"]=[]; s["coverage"]=common_coverage
+            s["reasoning_history"].append({"stage":"mission_discovery_plan","basis":"deterministic_telemetry_discovery",
+                "hypotheses":[],"guardrail":"Hypotheses require an observed deterministic candidate or operator direction."})
+            self._stage(s,"plan","completed",{"hypotheses":0,"candidate_leads":0,
+                "basis":"deterministic_telemetry_discovery","time_scope":s["coverage"]["time_scope"]})
+            print(f"[ROMULUS] {s['hunt_id']} undirected planning: deterministic telemetry discovery before hypotheses; scope={s['coverage']['time_scope']}")
+            return self._save(s)
+        planned=[]; planning_basis="local ATT&CK seeds constrained by operator direction"
+        if self.use_ollama and self._budget_ok(s):
+            try:
+                from ..agent.ollama import Ollama
+                planned=self._call(s,"ollama.api.chat","hypothesis_generation",{"model":self.settings.ollama_model,"reference_seed_count":len(seeds)},
+                    "mission text; no telemetry",lambda:Ollama(self.settings).plan_hypotheses(s["objective"],seeds,12),len) or []
+                if planned: planning_basis="local model generated hypotheses constrained by operator direction and ATT&CK seeds"
+            except Exception: planned=[]
+        normalized=_normalize_hypotheses(planned) if planned else []
+        s["hypotheses"]=normalized if len(normalized)>=4 else [encode(h) for h in hypotheses_for(s["objective"])][:20]
+        for hypothesis in s["hypotheses"]:
+            hypothesis["basis"]="operator_direction"
+            hypothesis["basis_details"]="Initial hypothesis is allowed because the operator supplied a specific behavior, technique, entity, or indicator."
+        s["coverage"]={**common_coverage,"hypotheses_total":len(s["hypotheses"])}
         s["lead_catalog"]=_lead_catalog(s["hypotheses"])
-        s["reasoning_history"].append({"stage":"mission_hypothesis_plan","basis":basis,"hypotheses":[{"id":h.get("hypothesis_id"),"title":h.get("title"),"technique_id":h.get("technique_id")} for h in s["hypotheses"]]})
-        self._stage(s,"plan","completed",{"hypotheses":len(s["hypotheses"]),"candidate_leads":len(s["lead_catalog"]),"basis":basis,"time_scope":s["coverage"]["time_scope"]})
-        print(f"[ROMULUS] {s['hunt_id']} planning {len(s['hypotheses'])} hypotheses; basis={basis}; scope={s['coverage']['time_scope']}")
+        s["reasoning_history"].append({"stage":"mission_hypothesis_plan","basis":"operator_direction","planning_method":planning_basis,
+            "hypotheses":[{"id":h.get("hypothesis_id"),"title":h.get("title"),"technique_id":h.get("technique_id")} for h in s["hypotheses"]]})
+        self._stage(s,"plan","completed",{"hypotheses":len(s["hypotheses"]),"candidate_leads":len(s["lead_catalog"]),
+            "basis":"operator_direction","time_scope":s["coverage"]["time_scope"]})
+        print(f"[ROMULUS] {s['hunt_id']} directed planning {len(s['hypotheses'])} hypotheses; basis=operator_direction; scope={s['coverage']['time_scope']}")
         return self._save(s)
 
     def _collect_host(self,s):
@@ -368,11 +383,16 @@ class HuntEngine:
                 "query":query,"time_range":scope,"returned":len(rows),"matched_total":found.get("total"),"capped":found.get("capped"),
                 "timed_out":found.get("timed_out"),"shard_failures":found.get("shard_failures"),"pagination":found.get("pagination")}
             s["queries"].append(detail); survey_details.append({k:detail.get(k) for k in ("hypothesis_id","technique_id","returned","matched_total","capped")})
-        if not survey_details:
-            s["coverage"]["host"]="telemetry retrieval failed during every host survey"; self._stage(s,"host_collection","failed"); return self._save(s)
-        s["coverage"]["host"]=(f"searched {scope} with {len(survey_details)} tactic-diverse behavioral surveys; returned {returned} records"+
-            (f"; {survey_failures} survey(s) failed" if survey_failures else "")+
-            (f"; {cap_hits} survey(s) were capped or partial" if cap_hits else ""))
+        if not survey_details and seed_executed:
+            s["coverage"]["host"]=(f"searched {scope} with {seed_executed} deterministic behavior/indicator discovery searches; "
+                f"returned {seed_returned} records"+(f"; {seed_failures} search(es) failed" if seed_failures else ""))
+        elif not survey_details:
+            s["coverage"]["host"]="not searched: no applicable deterministic discovery or directed survey queries"
+            self._stage(s,"host_collection","incomplete"); return self._save(s)
+        else:
+            s["coverage"]["host"]=(f"searched {scope} with {len(survey_details)} tactic-diverse behavioral surveys; returned {returned} records"+
+                (f"; {survey_failures} survey(s) failed" if survey_failures else "")+
+                (f"; {cap_hits} survey(s) were capped or partial" if cap_hits else ""))
         s["coverage"]["host_surveys"]=survey_details
         s["coverage"]["host_count"]=len(s["host"])
         self._stage(s,"host_collection","partial" if survey_failures or cap_hits else "completed",
@@ -560,6 +580,9 @@ class HuntEngine:
         field_classes=s.get("es_fields_by_class",{})
         s.setdefault("coverage",{})["search_field_classes"]={k:candidate_fields("elasticsearch",v) for k,v in field_classes.items() if v}
         s["dynamic_plan_created"]=True
+        if s.get("mission_mode")=="undirected" and not s.get("candidate_leads"):
+            s["coverage"]["model_initial_search_plan"]="deferred: undirected mission has no telemetry-backed candidate"
+            return
         if not source_fields or not self.use_ollama or not self._budget_ok(s):
             s["coverage"]["model_initial_search_plan"]="not generated: no mapped source, Ollama disabled, or budget exhausted"
             return
@@ -758,8 +781,18 @@ class HuntEngine:
         all_e=s.get("host",[])+s.get("network",[])
         s["analytic_summary"]=summarize_evidence(s.get("host",[]),s.get("network",[]))
         s.setdefault("coverage",{})["analytic_summary"]=s["analytic_summary"]
-        s["candidate_leads"]=build_candidate_queue(
-            all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        previous_candidates=list(s.get("candidate_leads",[]))
+        fresh_candidates=build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        s["candidate_leads"]=merge_candidate_queue(previous_candidates,fresh_candidates)
+        new_hypotheses=_candidate_hypotheses(s["candidate_leads"],s.get("hypotheses",[]))
+        if new_hypotheses:
+            s.setdefault("hypotheses",[]).extend(new_hypotheses)
+            known_leads={lead.get("id") for lead in s.setdefault("lead_catalog",[])}
+            s["lead_catalog"].extend(lead for lead in _lead_catalog(new_hypotheses) if lead.get("id") not in known_leads)
+            s.setdefault("coverage",{})["hypotheses_total"]=len(s["hypotheses"])
+            s.setdefault("reasoning_history",[]).append({"stage":"candidate_hypothesis_creation","basis":"observed_candidate",
+                "hypotheses":[{"id":h.get("hypothesis_id"),"candidate_ids":h.get("basis_candidate_ids"),
+                    "evidence_ids":h.get("basis_evidence_ids")} for h in new_hypotheses]})
         s["coverage"]["behavior_candidates"]={
             "total":len(s["candidate_leads"]),
             "customer_visible":sum(bool(item.get("customer_visible")) for item in s["candidate_leads"]),
@@ -776,11 +809,12 @@ class HuntEngine:
                 hypothesis["confidence"]="not assessed"
         if s["correlations"]: self._publish_smb_lead(s)
         self._publish_tooling_leads(s)
+        _link_candidates_to_findings(s)
         results=list(s.get("coverage",{}).get("model_search_results",[]))+list(s.get("pivot_results",[]))
         host_available=bool(s.get("es_indices")) or self.offline
         network_available=self.offline or str(s.get("coverage",{}).get("network","")).startswith(("configured","partial"))
         ledger=build_coverage_ledger(s.get("hypotheses",[]),s.get("lead_catalog",[]),s.get("completed_leads",[]),
-            results,host_available,network_available)
+            results,host_available,network_available,s.get("candidate_leads",[]))
         s["coverage"]["hypothesis_coverage"]=ledger
         signals=len(s["analytic_summary"].get("behavioral_observations",[]))
         self._stage(s,"evidence_analysis","completed",{"host_events":len(s.get("host",[])),"network_events":len(s.get("network",[])),
@@ -955,12 +989,20 @@ class HuntEngine:
         s["coverage"]["runtime_seconds_remaining"]=max(0,round(self.settings.max_runtime_seconds-elapsed))
         s["coverage"]["reasoning_rounds_remaining"]=max(0,self.settings.max_depth-s.get("depth",0))
         s["coverage"]["recent_search_artifacts"]=s.get("search_artifacts",[])[-12:]
-        if not self.offline and self.use_ollama and source_fields and self._budget_ok(s):
+        candidate_grounded=(s.get("mission_mode")!="undirected" or bool(s.get("candidate_leads")))
+        if not self.offline and self.use_ollama and source_fields and candidate_grounded and self._budget_ok(s):
             try:
                 from ..agent.ollama import Ollama, model_evidence_context
                 visible_model_ids={e.get("evidence_id") for e in model_evidence_context(_all_evidence(s),12) if e.get("evidence_id")}
                 visible_model_ids.update(x.get("artifact_id") for x in s.get("search_artifacts",[])[-12:] if x.get("artifact_id"))
+                visible_model_ids.update(x.get("candidate_id") for x in s.get("candidate_leads",[])[:12] if x.get("candidate_id"))
                 model_coverage=dict(s.get("coverage",{}))
+                model_coverage["candidate_queue"]=[{"candidate_id":c.get("candidate_id"),"title":str(c.get("title",""))[:120],
+                    "priority_score":c.get("priority_score"),"priority_tier":c.get("priority_tier"),
+                    "disposition":c.get("disposition"),"evidence_ids":c.get("evidence_ids",[])[:5],
+                    "assets":c.get("assets",[])[:4],"attack_techniques":c.get("attack_techniques",[])[:4],
+                    "follow_ups":[{"follow_up_id":f.get("follow_up_id"),"intent":str(f.get("intent",""))[:140],"status":f.get("status")}
+                        for f in c.get("follow_ups",[])[:3]]} for c in s.get("candidate_leads",[])[:12]]
                 model_coverage["existing_findings"]=[{"title":str(f.get("title",""))[:100],
                     "technique_id":f.get("technique_id"),"evidence_ids":f.get("evidence_ids",[])[:5]}
                     for f in s.get("findings",[])[-5:]]
@@ -1009,10 +1051,10 @@ class HuntEngine:
                         s["termination_reason"]="coverage_frontier_exhausted"
         elif not self.offline:
             selected=_coverage_fallback(s,3)
-            basis=("structured model output unavailable; deterministic ATT&CK coverage frontier used" if self.use_ollama
+            basis=("structured model output unavailable; deterministic ATT&CK coverage frontier used" if self.use_ollama and candidate_grounded
                 else "deterministic ATT&CK coverage frontier used")
             if not selected:
-                s["termination_reason"]=("model_unavailable_no_fallback_leads" if self.use_ollama
+                s["termination_reason"]=("model_unavailable_no_fallback_leads" if self.use_ollama and candidate_grounded
                     else "coverage_frontier_exhausted")
         else:
             selected=_coverage_fallback(s,3); basis="offline deterministic fixture pivot"
@@ -1073,8 +1115,13 @@ class HuntEngine:
             ident="H-FOLLOWUP-"+f"{next_number:02d}"
             while any(h.get("hypothesis_id")==ident for h in s.get("hypotheses",[])):
                 next_number+=1; ident="H-FOLLOWUP-"+f"{next_number:02d}"
-            hypothesis["hypothesis_id"]=ident; hypothesis["evidence_ids"]=basis
-            hypothesis["basis_evidence_ids"]=basis; hypothesis["status"]="untested"; hypothesis["confidence"]="low"
+            candidate_ids={item.get("candidate_id") for item in s.get("candidate_leads",[]) if item.get("candidate_id")}
+            evidence_ids={item.get("evidence_id") for item in _all_evidence(s) if item.get("evidence_id")}
+            hypothesis["hypothesis_id"]=ident; hypothesis["evidence_ids"]=[]
+            hypothesis["basis_candidate_ids"]=[value for value in basis if value in candidate_ids]
+            hypothesis["basis_evidence_ids"]=[value for value in basis if value in evidence_ids]
+            hypothesis["basis"]="model_proposal_from_visible_context"
+            hypothesis["status"]="untested"; hypothesis["confidence"]="low"
             s.setdefault("hypotheses",[]).append(hypothesis); known.add(key); added.append(ident); next_number+=1
         s.setdefault("coverage",{})["hypotheses_total"]=len(s.get("hypotheses",[]))
         return added
@@ -1201,6 +1248,7 @@ class HuntEngine:
         elif lead["source"]=="host": self._host_pivot(s,lead)
         else: self._network_pivot(s,lead)
         latest=s.get("pivot_results",[])[-1] if s.get("pivot_results") else {}
+        _record_candidate_follow_up(s,lead,latest)
         self._stage(s,"follow_up_pivot",latest.get("status","attempted"),{"lead_id":lead_id,"returned":latest.get("returned",0)})
         return self._save(s)
 
@@ -1401,6 +1449,67 @@ def _normalize_hypotheses(values):
     return out
 
 
+def _mission_is_directed(objective):
+    """Return true only when the operator supplied a concrete hunt direction.
+
+    A time range or a generic request to find threats scopes discovery but is
+    not evidence for any attack hypothesis. Specific entities, indicators,
+    ATT&CK IDs, protocols, tools, event IDs, or technique language are valid
+    operator direction.
+    """
+    text=str(objective or "").strip().lower()
+    if not text: return False
+    if re.search(r"\bT\d{4}(?:\.\d{3})?\b",str(objective or ""),flags=re.IGNORECASE): return True
+    if re.search(r"(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w:])",text): return True
+    if re.search(r"\b[a-f0-9]{32}\b|\b[a-f0-9]{40}\b|\b[a-f0-9]{64}\b",text): return True
+    if re.search(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|mil|gov|io|co|local)\b",text): return True
+    explicit_terms={
+        "powershell","encoded command","command shell","smb","rdp","winrm","dcom","ssh","vnc",
+        "lateral movement","credential access","credential dumping","brute force","password spray",
+        "service creation","scheduled task","persistence","privilege escalation","defense evasion",
+        "data exfiltration","exfiltration","command and control","c2","dns tunneling","beaconing",
+        "port scan","port scanning","network scan","reconnaissance","remote execution","ransomware",
+        "mimikatz","psexec","wmi","certutil","bitsadmin","wget","curl","linpeas","pwnkit",
+    }
+    if any(re.search(r"(?<![a-z0-9_])"+re.escape(term)+r"(?![a-z0-9_])",text) for term in explicit_terms): return True
+    if re.search(r"\b(?:event(?:\s+id)?|port|process|user|account|host|hostname|hash|indicator|ioc)\s*(?:=|:|is\s+)?[\w./\\-]{2,}\b",text): return True
+    return False
+
+
+def _candidate_hypotheses(candidates,existing):
+    """Create bounded hypotheses only from deterministic candidates with citations."""
+    existing_candidates={candidate_id for hypothesis in existing for candidate_id in hypothesis.get("basis_candidate_ids",[])}
+    out=[]
+    for candidate in candidates:
+        candidate_id=candidate.get("candidate_id")
+        evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
+        score=int(candidate.get("priority_score",0) or 0)
+        if not candidate_id or candidate_id in existing_candidates or not evidence_ids: continue
+        if score<40 and candidate.get("kind")!="trusted_indicator": continue
+        technique=next((value for value in candidate.get("attack_techniques",[]) if value in TECHNIQUES),"unmapped")
+        meta=TECHNIQUES.get(technique,{})
+        asset=next(iter(candidate.get("assets",[]) or []),"unknown asset")
+        priority=5 if score>=90 else (4 if score>=70 else 3)
+        identifier="H-CAND-"+str(candidate_id).replace("CL-","")[:18]
+        title=f"Investigate {candidate.get('title','observed behavior')} on {asset}"[:140]
+        rationale=(f"Deterministic candidate {candidate_id} scored {score}/100 and cites "
+            f"{len(evidence_ids)} retained telemetry record(s); the behavior still requires benign-alternative testing.")
+        hypothesis=encode(Hypothesis(identifier,title,technique,rationale,
+            meta.get("host",[]) or (["Review cited host behavior and adjacent process/account activity."] if candidate.get("kind")=="behavior" else []),
+            meta.get("network",[]) or ["Review cited entity across network telemetry and adjacent time windows."],
+            candidate.get("benign_explanations",[]) or ["authorized administration or expected application activity"],
+            tactics=meta.get("tactics",[]),detection_strategies=meta.get("detection_strategies",[]),
+            data_components=meta.get("data_components",[]),analytic_goal=meta.get("analytic_goal",candidate.get("description","")),
+            mutable_elements=meta.get("mutable_elements",[]),priority=priority))
+        hypothesis.update({"basis":"observed_candidate","basis_candidate_ids":[candidate_id],
+            "basis_evidence_ids":evidence_ids[:20],"candidate_evidence_ids":evidence_ids[:20],
+            "candidate_id":candidate_id,"follow_ups":candidate.get("follow_ups",[]),
+            "status":"untested","confidence":"not assessed"})
+        out.append(hypothesis); existing_candidates.add(candidate_id)
+        if len(out)>=8: break
+    return out
+
+
 def _clean_string(value,limit):
     return re.sub(r"\s+"," ",value).strip()[:limit] if isinstance(value,str) else ""
 
@@ -1418,15 +1527,46 @@ def _lead_catalog(hypotheses):
         if hypothesis.get("expected_host") or meta.get("host"): sources.append("host")
         if hypothesis.get("expected_network") or meta.get("network") or meta.get("ports") or meta.get("protocols"): sources.append("network")
         if not sources: sources=["host"]
-        for source in sources:
+        follow_ups=hypothesis.get("follow_ups",[]) or []
+        for source_index,source in enumerate(sources):
             ident=_coverage_lead_id(hypothesis.get("hypothesis_id"),source)
             why=(hypothesis.get("analytic_goal") or meta.get("analytic_goal") or
                  f"Test {hypothesis.get('title','this hypothesis')} in available {source} telemetry.")
             if ident not in seen:
                 seen.add(ident); out.append({"id":ident,"source":source,"title":hypothesis.get("title") or ident,
                     "why":why,"intent":why,"hypothesis_id":hypothesis.get("hypothesis_id"),"technique_id":tid,
-                    "priority":hypothesis.get("priority",3),"tactics":hypothesis.get("tactics") or meta.get("tactics",[])})
+                    "candidate_id":hypothesis.get("candidate_id"),
+                    "follow_up_id":(follow_ups[min(source_index,len(follow_ups)-1)].get("follow_up_id") if follow_ups else None),
+                    "priority":hypothesis.get("priority",3),
+                    "tactics":hypothesis.get("tactics") or meta.get("tactics",[])})
     return out
+
+
+def _link_candidates_to_findings(s):
+    findings=s.get("findings",[])
+    for candidate in s.get("candidate_leads",[]):
+        evidence_ids=set(candidate.get("evidence_ids",[]))
+        linked=[finding.get("finding_id") for finding in findings
+                if finding.get("finding_id") and evidence_ids.intersection(finding.get("evidence_ids",[]))]
+        if linked:
+            candidate["finding_ids"]=list(dict.fromkeys(candidate.get("finding_ids",[])+linked))
+            candidate["disposition"]="corroborated"
+
+
+def _record_candidate_follow_up(s,lead,result):
+    candidate_id=lead.get("candidate_id") if isinstance(lead,dict) else None
+    follow_up_id=lead.get("follow_up_id") if isinstance(lead,dict) else None
+    if not candidate_id or not follow_up_id: return
+    status=str(result.get("status") or "attempted")
+    failed=any(token in status.lower() for token in ("failed","skipped","budget prevented","no configured"))
+    for candidate in s.get("candidate_leads",[]):
+        if candidate.get("candidate_id")!=candidate_id: continue
+        if candidate.get("disposition")=="observed": candidate["disposition"]="investigating"
+        for follow_up in candidate.get("follow_ups",[]):
+            if follow_up.get("follow_up_id")!=follow_up_id: continue
+            follow_up.setdefault("history",[]).append({"timestamp":utc_now(),"search_id":lead.get("id"),
+                "status":status,"returned":result.get("returned",0)})
+            if not failed: follow_up["status"]="completed"
 
 
 def _query_terms(technique_ids):
