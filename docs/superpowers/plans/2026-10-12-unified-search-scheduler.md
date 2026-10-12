@@ -406,7 +406,7 @@ Do not tune prompts, catalog entries, fixtures, selectors, or priority rules usi
 `rg -n "SL700|AttackMate|attack_a_b" romulus tests`  
 Expected: no matches.
 
-- [ ] **Step 10: Clean up and checkpoint**
+- [x] **Step 10: Clean up and checkpoint**
 
 Remove only exact disposable validation roots, scripts, and transfer archives after read-only path verification. Do not remove operational VM data, logs, reports, `.env`, telemetry, or external ground-truth files. Update the plan and `VALIDATION.md`, sync those records to the VM, verify hashes, run the final local suite, and pause for operator greenlight.
 
@@ -434,4 +434,4 @@ Remove only exact disposable validation roots, scripts, and transfer archives af
 - No code, prompt, catalog, selector, fixture, or priority change was made from this holdout. The next proposed milestone is generic time-stratified bounded retrieval, developed against synthetic or independent data and evaluated on a different holdout.
 - The obsolete direct model, host-pivot, network-pivot, coverage-fallback, and legacy follow-up paths were removed only after caller searches and focused behavior-preservation tests. Legacy persisted fields remain migration inputs, but new hunts do not create the old scheduling authorities.
 - The dependency-light local runtime could not execute the honest LangGraph/Word offline gate, so Step 5 was completed on the dependency-complete VM rather than simulated locally. The isolated proof preserved valid reports and compact scheduler aggregates while removing scheduler working bulk.
-- Implementation and validation documentation is current through exact code commit `3ded319`. VM proof and the post-hunt holdout comparison are complete; exact disposable-artifact cleanup, record synchronization, final verification, and operator checkpoint remain open under Step 10.
+- Implementation and validation documentation is current through exact code commit `3ded319` and documentation checkpoint `0fc008b`. VM proof, post-hunt holdout comparison, record synchronization, and exact disposable-artifact cleanup are complete. The VM's operational `.env`, data, logs, and reports and the external ground-truth files were preserved. Final verification and this operator checkpoint close Step 10; the coverage limitation is intentionally deferred for a separately greenlit, holdout-independent milestone.
