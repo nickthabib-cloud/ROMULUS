@@ -1,6 +1,6 @@
 # ROMULUS
 
-ROMULUS is a single-agent defensive threat-hunting application. It accepts a broad or focused mission, inspects configured telemetry schemas, creates source-specific search plans, interprets and correlates evidence, then keeps proposing new searches until the evidence, candidate dispositions, source coverage, or hunt budget says to stop. A focused mission may create operator-directed hypotheses immediately. A broad mission first runs deterministic discovery and creates hypotheses only after a telemetry-backed candidate exists. It records provenance in SQLite, publishes live finding events to JSONL, and writes Word and plain-text reports. The offline demonstration uses synthetic events.
+ROMULUS is a single-agent defensive threat-hunting application. It accepts a broad or focused mission, inspects configured telemetry schemas, creates source-specific search plans, interprets and correlates evidence, then keeps proposing new searches until the evidence, candidate dispositions, source coverage, or hunt budget says to stop. A focused mission may create operator-directed hypotheses immediately. A broad mission first runs deterministic discovery and creates hypotheses only after a telemetry-backed candidate exists. It records provenance, builds cited attack paths, and writes Word and plain-text reports. The offline demonstration uses synthetic events.
 
 ## What is implemented
 
@@ -14,9 +14,11 @@ ROMULUS is a single-agent defensive threat-hunting application. It accepts a bro
 - TShark offline PCAP wrapper with an explicit configured path allowlist, a shared planner/adapter field contract, display-filter character restrictions, no shell, and a timeout. It scans the complete approved capture or explicit time slice and bounds retained matching output, so a display-filter hit later in a PCAP is not hidden by an early packet-read cap.
 - A pinned, offline Enterprise ATT&CK v19.2 catalog generated from MITRE's official STIX bundle: 697 active techniques/sub-techniques, 697 Detection Strategy links, and 1,745 platform Analytic links. ROMULUS selects a bounded mission-relevant and tactic-diverse planning view, then enriches the 39 most operationally useful techniques with local search selectors and benign alternatives. The model can create unmapped behavioral hypotheses, so ATT&CK guides the hunt without defining its boundary.
 - Typed cross-domain entity/time leads with direction, scored reasons, and explicit NAT, DHCP, clock-skew, and attribution caveats.
-- Persistent investigation state, bounded resumable checkpoints, durable unique evidence, append-only finding events, and per-call audit JSONL with stage, count, time scope, duration, status, and error class. Full evidence is stored once; graph context is capped per source and baseline/pivot phase.
-- Automatic reports with separate audiences: the styled `.docx` is a concise customer deliverable covering the assessment, findings, scope, ATT&CK context, limitations, and recommended actions; the `.txt` preserves investigation stages, hypotheses, behavioral analytics, search artifacts, evidence references, source errors, and the complete candidate working list. Full raw evidence and exact queries stay in SQLite and the audit log.
-- CLI commands: `doctor`, `test`, `hunt`, `resume`, and synthetic `demo`.
+- A deterministic investigation graph connects observed entities and activities to evidence. Finding paths use only evidence IDs cited by that finding; temporal or shared-entity relationships are labeled inferred, never causation, and disconnected evidence remains separate with explicit gaps.
+- Persistent working state, bounded resumable checkpoints, durable unique evidence, append-only finding events, and per-call audit JSONL while a hunt is active. Graph context is capped per source and baseline/pivot phase.
+- Automatic reports with separate audiences: the styled `.docx` is a concise customer deliverable covering the assessment, findings, supported attack path, scope, ATT&CK context, limitations, and recommended actions; the `.txt` preserves technical investigation detail and cited path provenance.
+- Default `compact` retention runs only after a completed hunt's matching Word and text reports can both be reopened and identified as belonging to that hunt. It keeps the reports, conclusions, findings, cited evidence, supported path, compact coverage, and source-error summary, while removing uncited raw evidence, hunt-scoped JSONL working records, and checkpoints. Partial hunts remain resumable until explicitly finalized. `full` retention preserves all working data.
+- CLI commands: `doctor`, `test`, `hunt`, `resume`, `inspect`, `compact`, `finalize`, and synthetic `demo`.
 
 The agent does not need the user to name every TTP or write a query. A focused lateral-movement mission can expand into SMB, RDP, SSH, WinRM, DCOM/WMI, authentication patterns, service/task execution, and nearby post-access behavior because the operator supplied that direction. A broad mission does not guess an attacker path: it starts with repeatable artifact and telemetry discovery, promotes observed behavior into candidates, and only then forms a cited hypothesis. Each round can pivot to a different source, entity, time cluster, or competing explanation. Search results are capped and the report records where coverage stopped. No finding is never a claim that the environment is clean. ROMULUS does not perform active scans, endpoint changes, or other disruptive actions.
 
@@ -75,6 +77,7 @@ Review the defaults and set values confirmed on the VM:
 - `PCAP_ALLOWED_DIRS`, `PCAP_FILES`: list only approved existing PCAP directories/files. ROMULUS rejects paths outside the configured directories.
 - `TSHARK_BIN`: use the executable name or an absolute path available to the service user.
 - `MAX_TOOL_CALLS`, `MIN_REASONING_ROUNDS`, `MAX_DEPTH`, `MAX_RUNTIME_SECONDS`, `MAX_RESULTS`, `ARKIME_MAX_RESULTS`, `CONTEXT_EVIDENCE_PER_SOURCE`, `TOOL_TIMEOUT_SECONDS`, `MAX_RETRIES`: adjust investigation bounds to suit the VM. Defaults are 160 tool calls, at least 3 and at most 10 analyst reasoning rounds, 10 minutes, up to 10,000 Elasticsearch results per query, 500 returned packets per TShark query, up to 20,000 Arkime sessions per query, and 1,000 graph-context records per source/phase bucket. Existing `.env` files are preserved during archive extraction, so change these values there if you want different bounds.
+- `RETENTION_POLICY`: `compact` (default) safely removes nonessential hunt working data after successful final reporting; `full` preserves all evidence, checkpoints, and hunt-scoped JSONL records.
 
 Protect `.env` (`chmod 600 .env`) and do not copy it into the ZIP. The default ES index patterns are exactly the two reported names. `doctor` prints availability and error classes/statuses, never password values.
 
@@ -88,6 +91,7 @@ python main.py test
 python main.py demo
 python main.py hunt --objective "Conduct a broad threat hunt for malicious activity across available host logs and network traffic. Develop and pursue multiple hypotheses, correlate evidence, and keep exploring distinct leads until no useful read-only searches remain or a configured limit is reached."
 python main.py hunt --objective "Investigate possible lateral movement and consider alternate remote execution paths and related authentication, service, and scheduled-task evidence."
+python main.py hunt --retention full --objective "Investigate a case that requires complete working-data retention."
 ```
 
 Offline demo needs no live services and creates a synthetic investigation, JSONL events, SQLite state, and `.docx`/`.txt` report. To repeat a hunt with only the sample sources, use `python main.py hunt --offline --objective "Hunt for SMB lateral movement"`.
@@ -97,9 +101,11 @@ For a live hunt, run `doctor` first and review every unconfigured/failed source.
 ```bash
 python main.py resume --id HUNT-XXXXXXXXXX
 python main.py inspect --id HUNT-XXXXXXXXXX
+python main.py finalize --id HUNT-XXXXXXXXXX
+python main.py compact --id HUNT-XXXXXXXXXX
 ```
 
-Runtime files: `data/romulus.sqlite3` stores investigations and unique evidence; `data/checkpoints.sqlite3` stores only the newest resumable graph checkpoint per namespace; `logs/findings.jsonl` is an append-only finding event stream; `logs/tool_audit.jsonl` stores non-secret per-call metadata; `reports/` contains generated Word/text reports. Use `inspect --id HUNT-...` to see context and persisted evidence counts, time scopes, reasoning stages, termination reason, and source error classes. The audit omits credentials and raw event dumps. Back these files up according to local operational policy.
+Runtime files: `data/romulus.sqlite3` stores investigations and evidence; `data/checkpoints.sqlite3` stores the newest resumable graph checkpoint per namespace; `logs/findings.jsonl` is the working finding event stream; `logs/tool_audit.jsonl` stores non-secret per-call metadata; `reports/` contains generated Word/text reports. Under the default compact policy, completed hunts retain only cited evidence and compact investigation state, and their checkpoint and JSONL working records are removed after report verification. Partial hunts retain their working data for `resume`; `finalize --id` deliberately closes and applies the configured retention policy. Use `compact --id` to retry or apply compact retention to an already completed legacy/full hunt. A retention cleanup failure is reported as a warning and a distinct exit status while leaving the reports and conclusion intact. Use `inspect --id HUNT-...` to see the retained outcome and retention status. Back retained files up according to local operational policy.
 
 Releases before 0.4.1 stored every graph snapshot in `romulus.sqlite3`. With no hunt running, rebuild that legacy file and remove superseded checkpoint bulk with:
 

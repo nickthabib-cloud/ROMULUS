@@ -4,6 +4,15 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 
 ## Unreleased
 
+### Cited attack paths and safe finalization
+
+- Added a deterministic evidence/entity/activity graph and finding-specific attack paths that include only cited evidence, preserve disconnected segments, and label shared-entity/time relationships as inference rather than causation.
+- Added supported attack paths, evidence citations, relationship reasons, caveats, and gaps to the technical report, with a concise supported-path section in the customer Word report.
+- Added `compact` (default) and `full` retention policies. Compact retention verifies and reopens a matching DOCX/TXT report pair before keeping conclusions, findings, cited evidence, compact graph/coverage, and source errors while removing uncited evidence, hunt-scoped JSONL records, and checkpoints.
+- Kept partial hunts resumable by default and added explicit `compact --id` and `finalize --id` commands. Finalized hunts cannot be resumed or relabeled after irreversible compaction.
+- Serialized hunt-scoped JSONL append/rewrite operations to prevent concurrent cleanup from discarding another hunt's event, and made incomplete cleanup visible through a warning and distinct CLI exit status.
+- Rejected structured ECS containers as entity values so only usable leaf host, address, account, process, service, and task identities enter the investigation graph.
+
 ### Candidate-driven investigation loop
 
 - Made broad, undirected missions start with deterministic host/network discovery and explicitly prohibited pre-telemetry model hypothesis generation; focused missions retain initial hypotheses with an `operator_direction` basis.

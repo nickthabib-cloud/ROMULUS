@@ -123,16 +123,20 @@ def main(argv=None):
         if not state: print(f"Unknown investigation ID: {args.id}"); return 1
         if args.command=="compact" and state.get("status")!="completed":
             print("Only completed hunts can use compact; use finalize for a partial hunt."); return 1
-        if args.command=="finalize" and state.get("retention",{}).get("status")!="completed":
+        if args.command=="finalize" and state.get("status") not in {"completed","partial"}:
+            print("Only completed or partial hunts can be finalized."); return 1
+        if args.command=="finalize" and state.get("retention",{}).get("finalized") is not True:
             try:
                 from .reporting.report import generate_report
                 state["finalized_at"]=utc_now()
+                state["retention_policy"]=settings.retention_policy
                 state["report_paths"]=[str(path) for path in generate_report(state,settings.reports_dir)]
                 store.save_state(args.id,state)
             except Exception as exc:
                 print(f"Final report generation failed: {type(exc).__name__}"); return 1
         try:
-            result=apply_retention(store,state,policy="compact" if args.command=="compact" else settings.retention_policy,automatic=False)
+            result=apply_retention(store,state,policy="compact" if args.command=="compact" else settings.retention_policy,
+                automatic=False,finalize=args.command=="finalize")
         except RetentionError as exc:
             print(f"Retention precondition failed: {exc}"); return 1
         print(f"Investigation {args.id} retention: {result.get('retention',{}).get('status','unknown')} ({result.get('retention',{}).get('policy','unknown')})")
@@ -146,4 +150,11 @@ def main(argv=None):
     print(f"Termination: {result.get('termination_reason','not recorded')}; external calls={result.get('tool_calls',0)}/{settings.max_tool_calls}; analyst rounds={result.get('depth',0)}/{settings.max_depth}")
     for p in result.get("report_paths",[]): print(f"Report: {p}")
     if result.get("error"): print(f"Limitations: {result['error']}")
+    retention=result.get("retention",{}) if isinstance(result.get("retention"),dict) else {}
+    if retention.get("status")=="incomplete":
+        print(
+            "RETENTION WARNING: compact cleanup is incomplete "
+            f"({retention.get('error_type','unknown error')}); reports and the investigation conclusion were preserved."
+        )
+        return 3
     return 0 if result.get("status")=="completed" else 2

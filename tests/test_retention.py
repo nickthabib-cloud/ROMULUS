@@ -1,11 +1,14 @@
 import json
+import io
 import sqlite3
 import tempfile
+import threading
 import unittest
 import zipfile
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+from contextlib import redirect_stdout
 
 from romulus.config import Settings
 from romulus.store import Store
@@ -13,14 +16,16 @@ from romulus.store import Store
 
 class RetentionTests(unittest.TestCase):
     def _reports(self, root: Path, hunt_id: str):
+        from docx import Document
+
         reports = root / "reports"
-        reports.mkdir()
+        reports.mkdir(exist_ok=True)
         text_path = reports / f"{hunt_id}-report.txt"
-        text_path.write_text("ROMULUS completed technical report", encoding="utf-8")
+        text_path.write_text(f"ROMULUS completed technical report\nInvestigation: {hunt_id}\n", encoding="utf-8")
         docx_path = reports / f"{hunt_id}-report.docx"
-        with zipfile.ZipFile(docx_path, "w") as package:
-            package.writestr("[Content_Types].xml", "<Types />")
-            package.writestr("word/document.xml", "<document />")
+        document = Document()
+        document.add_paragraph(f"Investigation: {hunt_id}")
+        document.save(docx_path)
         return [str(docx_path), str(text_path)]
 
     def _state(self, report_paths, status="completed"):
@@ -150,6 +155,79 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
             self.assertIn("host", store.load_state("HUNT-ONE"))
 
+    def test_malformed_or_wrong_hunt_reports_never_authorize_compaction(self):
+        from romulus.retention import RetentionError, apply_retention
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            text_path = reports / "HUNT-ONE-report.txt"
+            text_path.write_text("Investigation: HUNT-ONE\n", encoding="utf-8")
+            docx_path = reports / "HUNT-ONE-report.docx"
+            with zipfile.ZipFile(docx_path, "w") as package:
+                package.writestr("[Content_Types].xml", "<Types />")
+                package.writestr("word/document.xml", "<document />")
+            store = Store(root / "data", root / "logs")
+            state = self._state([str(docx_path), str(text_path)])
+            store.save_state("HUNT-ONE", state)
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"preserve": True}})
+
+            with self.assertRaises(RetentionError):
+                apply_retention(store, state, policy="compact", automatic=True)
+
+            self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
+
+            wrong_paths = self._reports(root, "HUNT-ONE-OTHER")
+            state["report_paths"] = wrong_paths
+            with self.assertRaises(RetentionError):
+                apply_retention(store, state, policy="compact", automatic=True)
+            self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
+
+    def test_jsonl_rewrite_serializes_concurrent_unrelated_append(self):
+        import romulus.store as store_module
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            store = Store(root / "data", root / "logs")
+            store.audit({"hunt_id": "HUNT-ONE", "result_count": 1})
+            entered = threading.Event()
+            release = threading.Event()
+            append_done = threading.Event()
+            failures = []
+            original_filter = store_module._filter_jsonl
+
+            def slow_filter(path, key, value):
+                if path == store.audit_path:
+                    entered.set()
+                    if not release.wait(2):
+                        raise TimeoutError("test did not release JSONL rewrite")
+                return original_filter(path, key, value)
+
+            def rewrite():
+                try: store.remove_hunt_log_records("HUNT-ONE")
+                except Exception as exc: failures.append(exc)
+
+            def append():
+                try: store.audit({"hunt_id": "HUNT-TWO", "result_count": 2})
+                except Exception as exc: failures.append(exc)
+                finally: append_done.set()
+
+            with patch("romulus.store._filter_jsonl", side_effect=slow_filter):
+                rewrite_thread = threading.Thread(target=rewrite)
+                rewrite_thread.start()
+                self.assertTrue(entered.wait(2))
+                append_thread = threading.Thread(target=append)
+                append_thread.start()
+                self.assertFalse(append_done.wait(0.1))
+                release.set()
+                rewrite_thread.join(2)
+                append_thread.join(2)
+
+            self.assertFalse(failures)
+            self.assertEqual(store.audit_records("HUNT-ONE"), [])
+            self.assertEqual(store.audit_records("HUNT-TWO")[0]["result_count"], 2)
+
     def test_partial_hunt_remains_resumable_during_automatic_retention(self):
         from romulus.retention import apply_retention
 
@@ -177,7 +255,7 @@ class RetentionTests(unittest.TestCase):
             store.add_evidence("HUNT-ONE", {"evidence_id": "EV-KEEP", "raw": {"keep": True}})
             store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"large": "discard"}})
 
-            compacted = apply_retention(store, state, policy="compact", automatic=False)
+            compacted = apply_retention(store, state, policy="compact", automatic=False, finalize=True)
 
             self.assertEqual(compacted["status"], "partial")
             self.assertEqual(compacted["retention"]["status"], "completed")
@@ -189,7 +267,7 @@ class RetentionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             root = Path(directory)
             store = Store(root / "data", root / "logs")
-            state = self._state([])
+            state = self._state(self._reports(root, "HUNT-ONE"))
             store.save_state("HUNT-ONE", state)
             store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"large": "preserve"}})
 
@@ -289,6 +367,38 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(finalized["retention"]["status"], "completed")
             self.assertTrue(all(Path(path).exists() for path in finalized["report_paths"]))
 
+    def test_finalize_cli_full_policy_reports_truthfully_and_preserves_data(self):
+        try:
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("Install python-docx for explicit finalization verification")
+        from romulus.cli import main
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(), home=root, reports_dir=root / "reports",
+                data_dir=root / "data", logs_dir=root / "logs", retention_policy="compact",
+            )
+            store = Store(settings.data_dir, settings.logs_dir)
+            state = self._state([], status="partial")
+            store.save_state("HUNT-ONE", state)
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-KEEP", "raw": {"keep": True}})
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"preserve": True}})
+
+            with patch("romulus.cli.Settings.from_env", return_value=settings):
+                result = main(["finalize", "--id", "HUNT-ONE", "--retention", "full"])
+
+            finalized = store.load_state("HUNT-ONE")
+            text_report = next(Path(path) for path in finalized["report_paths"] if path.endswith(".txt"))
+            self.assertEqual(result, 0)
+            self.assertEqual(finalized["retention_policy"], "full")
+            self.assertEqual(finalized["retention"]["policy"], "full")
+            self.assertTrue(finalized["retention"]["finalized"])
+            self.assertEqual(store.evidence_count("HUNT-ONE"), 2)
+            self.assertIn("complete raw evidence remains in SQLite", text_report.read_text(encoding="utf-8"))
+            self.assertNotIn("uncited raw evidence are removed", text_report.read_text(encoding="utf-8"))
+
     def test_explicitly_finalized_partial_hunt_is_not_resumed(self):
         from romulus.investigation.workflow import HuntEngine
 
@@ -300,7 +410,7 @@ class RetentionTests(unittest.TestCase):
             )
             store = Store(settings.data_dir, settings.logs_dir)
             state = self._state(self._reports(root, "HUNT-ONE"), status="partial")
-            state["retention"] = {"policy": "compact", "status": "completed"}
+            state["retention"] = {"policy": "compact", "status": "completed", "finalized": True}
             store.save_state("HUNT-ONE", state)
             engine = HuntEngine(settings, store, offline=True, use_ollama=False)
             engine.run = lambda *args, **kwargs: self.fail("A finalized hunt must not resume")
@@ -308,6 +418,105 @@ class RetentionTests(unittest.TestCase):
             resumed = engine.resume("HUNT-ONE")
 
             self.assertEqual(resumed["retention"]["status"], "completed")
+
+    def test_running_hunt_cannot_be_finalized_or_compacted(self):
+        from romulus.retention import RetentionError, apply_retention
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            store = Store(root / "data", root / "logs")
+            state = self._state(self._reports(root, "HUNT-ONE"), status="running")
+            store.save_state("HUNT-ONE", state)
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"preserve": True}})
+
+            with self.assertRaises(RetentionError):
+                apply_retention(store, state, policy="compact", automatic=False, finalize=True)
+
+            self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
+            self.assertEqual(store.load_state("HUNT-ONE")["status"], "running")
+
+    def test_completed_compaction_cannot_be_relabelled_full(self):
+        from romulus.retention import RetentionError, apply_retention
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            store = Store(root / "data", root / "logs")
+            state = self._state(self._reports(root, "HUNT-ONE"))
+            store.save_state("HUNT-ONE", state)
+            compacted = apply_retention(store, state, policy="compact", automatic=True)
+
+            with self.assertRaises(RetentionError):
+                apply_retention(store, compacted, policy="full", automatic=False)
+
+            self.assertEqual(store.load_state("HUNT-ONE")["retention"]["policy"], "compact")
+
+    def test_full_finalized_partial_hunt_is_not_resumed(self):
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.retention import apply_retention
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(), home=root, reports_dir=root / "reports",
+                data_dir=root / "data", logs_dir=root / "logs", retention_policy="full",
+            )
+            store = Store(settings.data_dir, settings.logs_dir)
+            state = self._state(self._reports(root, "HUNT-ONE"), status="partial")
+            store.save_state("HUNT-ONE", state)
+            finalized = apply_retention(store, state, policy="full", automatic=False, finalize=True)
+            engine = HuntEngine(settings, store, offline=True, use_ollama=False)
+            engine.run = lambda *args, **kwargs: self.fail("A full-policy finalized hunt must not resume")
+
+            resumed = engine.resume("HUNT-ONE")
+
+            self.assertTrue(finalized["retention"]["finalized"])
+            self.assertEqual(resumed["retention"]["status"], "retained")
+
+    def test_finalize_cli_rejects_running_hunt_before_report_generation(self):
+        from romulus.cli import main
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(), home=root, reports_dir=root / "reports",
+                data_dir=root / "data", logs_dir=root / "logs",
+            )
+            store = Store(settings.data_dir, settings.logs_dir)
+            state = self._state([], status="running")
+            store.save_state("HUNT-ONE", state)
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"preserve": True}})
+
+            with patch("romulus.cli.Settings.from_env", return_value=settings):
+                result = main(["finalize", "--id", "HUNT-ONE"])
+
+            self.assertEqual(result, 1)
+            self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
+            self.assertEqual(store.load_state("HUNT-ONE").get("report_paths"), [])
+
+    def test_cli_surfaces_completed_hunt_retention_failure(self):
+        from romulus.cli import main
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(), home=root, reports_dir=root / "reports",
+                data_dir=root / "data", logs_dir=root / "logs",
+            )
+            class Engine:
+                def __init__(self, *args, **kwargs): pass
+                def run(self, objective):
+                    return {
+                        "hunt_id": "HUNT-WARN", "status": "completed", "outcome": "insufficient_evidence",
+                        "summary": "Completed hunt.", "termination_reason": "lead_queue_exhausted",
+                        "tool_calls": 1, "depth": 1, "report_paths": [],
+                        "retention": {"policy": "compact", "status": "incomplete", "error_type": "OSError"},
+                    }
+            output = io.StringIO()
+            with patch("romulus.cli.Settings.from_env", return_value=settings), patch("romulus.cli.HuntEngine", Engine), redirect_stdout(output):
+                result = main(["hunt", "--objective", "Hunt for suspicious activity"])
+
+            self.assertEqual(result, 3)
+            self.assertIn("RETENTION WARNING", output.getvalue())
 
 
 if __name__ == "__main__":

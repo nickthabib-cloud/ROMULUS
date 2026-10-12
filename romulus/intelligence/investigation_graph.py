@@ -375,7 +375,7 @@ def _entity_id(entity_type: str, normalized_value: str) -> str:
 
 
 def _normalize(entity_type: str, value: Any) -> str:
-    if value is None or not str(value).strip():
+    if value is None or isinstance(value,(dict,list,tuple,set)) or not str(value).strip():
         return ""
     text = str(value).strip()
     if entity_type == "ip":

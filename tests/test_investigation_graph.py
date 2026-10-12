@@ -117,6 +117,27 @@ class InvestigationGraphTests(unittest.TestCase):
             self.assertGreaterEqual(len(edge["evidence_ids"]), 2)
             self.assertIn("not causation", " ".join(edge.get("caveats", [])).lower())
 
+    def test_nested_ecs_containers_never_become_entity_values(self):
+        from romulus.intelligence.investigation_graph import build_investigation_graph
+
+        event = {
+            "evidence_id": "EV-ECS", "source": "elasticsearch",
+            "observed_at": "2026-10-10T12:00:00Z", "observation": "Nested ECS event",
+            "raw": {
+                "host": {"name": "WS-01", "ip": ["10.0.0.4"]},
+                "user": {"name": "ALICE"},
+                "service": {"name": "Updater"},
+                "task": {"name": "DailyCheck"},
+            },
+        }
+
+        graph = build_investigation_graph([event])
+        entities = [node for node in graph["nodes"] if node["node_type"] == "entity"]
+        values = {node["normalized_value"] for node in entities}
+
+        self.assertTrue({"ws-01", "10.0.0.4", "alice", "updater", "dailycheck"} <= values)
+        self.assertFalse(any("{" in value or "}" in value for value in values))
+
     def test_analysis_persists_graph_in_declared_hunt_state(self):
         from romulus.config import Settings
         from romulus.investigation.workflow import HuntEngine, HuntState

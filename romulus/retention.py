@@ -4,8 +4,8 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 from pathlib import Path
+import re
 from typing import Any
-import zipfile
 
 from .models import utc_now
 from .store import Store
@@ -17,10 +17,11 @@ class RetentionError(RuntimeError):
 
 def apply_retention(
     store: Store, state: dict[str, Any], policy: str = "compact", *, automatic: bool = False,
+    finalize: bool = False,
 ) -> dict[str, Any]:
     """Apply a retention policy without changing the investigation conclusion.
 
-    Automatic compaction is limited to completed hunts.  Calling this function
+    Automatic finalization is limited to completed hunts.  Calling this function
     explicitly with ``automatic=False`` finalizes a reported partial hunt.
     """
     if policy not in {"compact", "full"}:
@@ -29,27 +30,39 @@ def apply_retention(
     hunt_id = str(working.get("hunt_id") or "")
     if not hunt_id:
         raise RetentionError("Investigation ID is required for retention")
+    hunt_status=str(working.get("status") or "")
+    if hunt_status not in {"completed","partial"}:
+        raise RetentionError("Only completed or partial hunts can enter retention")
     existing = working.get("retention") if isinstance(working.get("retention"), dict) else {}
+    compact_started=(existing.get("policy")=="compact" and existing.get("status") in {"in_progress","incomplete","completed"})
+    if compact_started and policy!="compact":
+        raise RetentionError("Compact retention is irreversible and cannot be relabelled full")
     if policy == "compact" and existing.get("status") == "completed":
         _verify_reports(hunt_id, working.get("report_paths", []))
         return working
-    if policy == "full":
-        working["retention"] = {"policy":"full","status":"retained","updated_at":utc_now()}
+    if hunt_status=="partial" and automatic:
+        working["retention"] = {
+            "policy":policy,"status":"resumable","finalized":False,"updated_at":utc_now(),
+            "reason":"Automatic finalization is limited to completed hunts.",
+        }
         store.save_state(hunt_id,working)
         return working
-    if automatic and working.get("status") != "completed":
+    if hunt_status=="partial" and not finalize:
+        raise RetentionError("A partial hunt must be explicitly finalized before retention")
+
+    reports = _verify_reports(hunt_id, working.get("report_paths", []))
+    if policy == "full":
         working["retention"] = {
-            "policy":"compact","status":"resumable","updated_at":utc_now(),
-            "reason":"Automatic compaction is limited to completed hunts.",
+            "policy":"full","status":"retained","finalized":True,"updated_at":utc_now(),
+            "reports_verified":reports,
         }
         store.save_state(hunt_id,working)
         return working
 
-    reports = _verify_reports(hunt_id, working.get("report_paths", []))
     retained_ids = _cited_evidence_ids(working)
     compact_state = _compact_state(working, retained_ids)
     compact_state["retention"] = {
-        "policy":"compact","status":"in_progress","finalized_at":utc_now(),
+        "policy":"compact","status":"in_progress","finalized":True,"finalized_at":utc_now(),
         "reports_verified":reports,
     }
     database_stats: dict[str, Any] = {}
@@ -68,7 +81,7 @@ def apply_retention(
         # incomplete marker allows a later retry without changing the outcome.
         fallback = compact_state if database_stats else working
         fallback["retention"] = {
-            "policy":"compact","status":"incomplete","finalized_at":utc_now(),
+            "policy":"compact","status":"incomplete","finalized":True,"finalized_at":utc_now(),
             "reports_verified":reports,"error_type":type(exc).__name__,**database_stats,
         }
         store.save_state(hunt_id,fallback)
@@ -79,22 +92,38 @@ def _verify_reports(hunt_id: str, report_paths: Any) -> list[dict[str, Any]]:
     paths=[Path(str(value)) for value in report_paths or []]
     docx_paths=[path for path in paths if path.suffix.lower()==".docx"]
     text_paths=[path for path in paths if path.suffix.lower()==".txt"]
-    if not docx_paths or not text_paths:
-        raise RetentionError("Both DOCX and TXT reports are required before compaction")
+    if len(docx_paths)!=1 or len(text_paths)!=1:
+        raise RetentionError("Exactly one DOCX and one TXT report are required before compaction")
+    docx_path,text_path=docx_paths[0],text_paths[0]
+    if docx_path.stem!=text_path.stem:
+        raise RetentionError("The DOCX and TXT reports do not belong to the same generation")
     verified=[]
-    for path in docx_paths[:1]+text_paths[:1]:
-        if hunt_id not in path.name or not path.is_file() or path.stat().st_size<=0:
+    for path in (docx_path,text_path):
+        if not path.name.startswith(f"{hunt_id}-") or not path.is_file() or path.stat().st_size<=0:
             raise RetentionError("A hunt-scoped report is missing or empty")
         if path.suffix.lower()==".docx":
-            if not zipfile.is_zipfile(path):
-                raise RetentionError("The DOCX report cannot be reopened")
-            with zipfile.ZipFile(path) as package:
-                if "word/document.xml" not in package.namelist():
-                    raise RetentionError("The DOCX report has no document body")
-                package.read("word/document.xml")
+            try:
+                from docx import Document
+                document=Document(path)
+                text="\n".join(
+                    [paragraph.text for paragraph in document.paragraphs]
+                    +[cell.text for table in document.tables for row in table.rows for cell in row.cells]
+                    +[paragraph.text for section in document.sections for paragraph in section.header.paragraphs]
+                    +[paragraph.text for section in document.sections for paragraph in section.footer.paragraphs]
+                )
+            except Exception as exc:
+                raise RetentionError("The DOCX report cannot be reopened by the Word parser") from exc
+            identity=re.compile(rf"(?<![A-Za-z0-9-]){re.escape(hunt_id)}(?![A-Za-z0-9-])")
+            if not identity.search(text):
+                raise RetentionError("The DOCX report does not identify this hunt")
         else:
-            if not path.read_text(encoding="utf-8").strip():
+            try: text=path.read_text(encoding="utf-8")
+            except (OSError,UnicodeError) as exc:
+                raise RetentionError("The TXT report cannot be reopened") from exc
+            if not text.strip():
                 raise RetentionError("The TXT report cannot be reopened")
+            if f"Investigation: {hunt_id}" not in {line.strip() for line in text.splitlines()}:
+                raise RetentionError("The TXT report does not identify this hunt")
         verified.append({
             "path":str(path),"size_bytes":path.stat().st_size,
             "sha256":hashlib.sha256(path.read_bytes()).hexdigest(),
