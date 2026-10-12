@@ -238,11 +238,13 @@ class CoreTests(unittest.TestCase):
                         "message":msg,"event":{"code":code},"source":{"ip":"10.0.0.5"},"host":{"name":"ws-01"}}]}
             class Arkime:
                 def __init__(self): self.calls=[]
-                def search_sessions(self,expression,**kwargs):
+                def search_sessions_sampled(self,expression,**kwargs):
                     self.calls.append((expression,kwargs))
                     stamp=datetime(2024,11,13,10,0,tzinfo=timezone.utc).timestamp()
                     return {"sessions":[{"id":f"session-{len(self.calls)}","source.ip":"10.0.0.5","destination.ip":"10.0.0.9",
-                        "destination.port":445,"firstPacket":stamp}],"provenance":{"expression":expression}}
+                        "destination.port":445,"firstPacket":stamp}],"total":1,"capped":False,
+                        "sampling":{"version":1,"strategy":"exhaustive","requested_strata":1,
+                            "covered_strata":1,"retained_by_stratum":[1]},"provenance":{"expression":expression}}
             store=Store(cfg.data_dir,cfg.logs_dir); engine=HuntEngine(cfg,store,use_ollama=False)
             es=ES(); arkime=Arkime(); engine.es=es; engine.arkime=arkime
             state=engine.run("Hunt for SMB lateral movement")

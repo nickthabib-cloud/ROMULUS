@@ -78,11 +78,11 @@
 - Consumes: Task 1 rank windows and sampling policy.
 - Produces: `ArkimeAdapter.search_sessions_sampled(...) -> dict` returning deduplicated sessions, matched total, request count, cap state, and rank-window sampling metadata.
 
-- [ ] Write failing tests proving early/middle/late rank retrieval, stable request offsets, duplicate suppression, offset-limit fallback, exact cap, and unchanged uncapped results.
-- [ ] Run the focused tests; expect missing-method and earliest-only failures.
-- [ ] Implement one bounded adapter operation and route scheduled Arkime tasks through it without increasing scheduler task count.
-- [ ] Run `python -m unittest tests.test_representative_sampling tests.test_core tests.test_scheduler_execution -v`; expect PASS.
-- [ ] Commit with `feat: sample capped arkime sessions`.
+- [x] Write failing tests proving early/middle/late rank retrieval, stable request offsets, duplicate suppression, offset-limit fallback, exact cap, and unchanged uncapped results.
+- [x] Run the focused tests; expect missing-method and earliest-only failures.
+- [x] Implement one bounded adapter operation and route scheduled Arkime tasks through it without increasing scheduler task count.
+- [x] Run `python -m unittest tests.test_representative_sampling tests.test_core tests.test_scheduler_execution -v`; expect PASS.
+- [x] Commit with `feat: sample capped arkime sessions`.
 
 ### Task 4: Representative TShark retention
 
@@ -146,4 +146,4 @@
 ## Execution status
 
 - Plan authorized for native execution by the operator on 2026-10-12; no additional approval checkpoint is required.
-- Tasks 1–2 are complete; Tasks 3–6 remain. The operator paused live-hunt validation until the expected attack telemetry is present in the dataset; Task 6 will use local/VM tests and ingestion-path diagnosis instead of another hunt.
+- Tasks 1–3 are complete; Tasks 4–6 remain. The operator paused live-hunt validation until the expected attack telemetry is present in the dataset; Task 6 will use local/VM tests and ingestion-path diagnosis instead of another hunt.

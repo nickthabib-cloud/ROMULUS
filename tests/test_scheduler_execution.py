@@ -288,10 +288,12 @@ class _RecordingArkime:
         self.order = order
         self.calls = []
 
-    def search_sessions(self, expression, **kwargs):
+    def search_sessions_sampled(self, expression, **kwargs):
         self.order.append("network")
         self.calls.append((expression, kwargs))
-        return {"sessions": [], "total": 0}
+        return {"sessions": [], "total": 0, "capped": False,
+            "sampling": {"version": 1, "strategy": "exhaustive", "requested_strata": 1,
+                "covered_strata": 0, "retained_by_stratum": [0]}}
 
 
 class _RecordingTShark:
@@ -1078,7 +1080,7 @@ class SchedulerExecutionAdditionalTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def search_sessions(self, expression, **kwargs):
+            def search_sessions_sampled(self, expression, **kwargs):
                 self.calls.append((expression, kwargs))
                 return {
                     "sessions": [
@@ -1091,6 +1093,16 @@ class SchedulerExecutionAdditionalTests(unittest.TestCase):
                         }
                     ],
                     "total": 1,
+                    "capped": False,
+                    "requests": 2,
+                    "pages": 1,
+                    "sampling": {
+                        "version": 1,
+                        "strategy": "exhaustive",
+                        "requested_strata": 1,
+                        "covered_strata": 1,
+                        "retained_by_stratum": [1],
+                    },
                 }
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
@@ -1113,13 +1125,15 @@ class SchedulerExecutionAdditionalTests(unittest.TestCase):
             self.assertEqual(len(arkime.calls), 1)
             expression, parameters = arkime.calls[0]
             self.assertEqual(expression, "ip.dst == 10.0.0.8")
-            self.assertEqual(parameters["length"], 5)
+            self.assertEqual(parameters["limit"], 5)
             self.assertIsNotNone(parameters["start_ms"])
             self.assertIsNotNone(parameters["stop_ms"])
+            self.assertEqual(parameters["sampling"]["strategy"], "time_or_rank_stratified")
             self.assertEqual(len(state["network"]), 1)
             self.assertEqual(outcome["task_id"], task["task_id"])
             self.assertEqual(outcome["status"], "completed")
             self.assertEqual(outcome["matched_total"], 1)
+            self.assertEqual(outcome["sampling"]["strategy"], "exhaustive")
             self.assertTrue(outcome["artifact_id"].startswith("SR-"))
 
     def test_one_capture_tshark_task_reports_cap_as_partial(self):

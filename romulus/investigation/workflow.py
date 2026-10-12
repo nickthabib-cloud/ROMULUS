@@ -905,33 +905,6 @@ class HuntEngine:
             "rejected_or_duplicate":latest.get("rejected_or_duplicate",0)})
         return registered
 
-    def _search_arkime_pages(self,s,expression,stage,scope,start_ms,stop_ms,cap,all_history,details=None):
-        """Page through an Arkime result set, but stop at the configured evidence cap."""
-        sessions=[]; total=None; offset=0; pages=0; failed=False; seen=set(); duplicates=0
-        page_size=min(2000,max(1,int(cap)),self.settings.arkime_max_results)
-        while len(sessions)<cap:
-            if not self._budget_ok(s): break
-            length=min(page_size,cap-len(sessions))
-            parameters={**(details or {}),"expression":expression,"start":offset,"length":length,
-                "date":-1 if all_history else ("explicit" if start_ms is not None else self.settings.arkime_default_hours)}
-            found=self._call(s,"arkime.api.sessions",stage,parameters,scope,
-                lambda offset=offset,length=length:self.arkime.search_sessions(expression,start_ms=start_ms,stop_ms=stop_ms,
-                    length=length,all_history=all_history,start=offset),lambda x:len(x.get("sessions",[])))
-            if found is None:
-                failed=True; break
-            rows=found.get("sessions",[]); pages+=1
-            for row in rows:
-                session_key=str(row.get("id") or (row.get("firstPacket"),row.get("source.ip",row.get("srcIp")),row.get("destination.ip",row.get("dstIp")),row.get("source.port",row.get("srcPort")),row.get("destination.port",row.get("dstPort"))))
-                if session_key in seen: duplicates+=1; continue
-                seen.add(session_key); sessions.append(row)
-            value=found.get("total")
-            if isinstance(value,(int,float)): total=int(value)
-            if not rows or len(rows)<length: break
-            offset+=len(rows)
-            if total is not None and offset>=total: break
-        capped=(total is not None and len(sessions)<total) or (not failed and len(sessions)>=cap and (total is None or len(sessions)<total))
-        return {"sessions":sessions,"total":total,"pages":pages,"failed":failed,"capped":capped,"duplicates_suppressed":duplicates}
-
     def _execute_search_task(self,s,task):
         """Execute one validated scheduler task and return its exact bounded outcome."""
         task_id=str(task.get("task_id") or "")
@@ -994,16 +967,25 @@ class HuntEngine:
                 start_ms=int(start_time.timestamp()*1000) if start_time else None
                 stop_ms=int(end_time.timestamp()*1000) if end_time else None
                 all_history=bool(self.settings.historical_search and start_ms is None and stop_ms is None)
-                found=self._search_arkime_pages(s,expression,stage,scope,start_ms,stop_ms,cap,all_history,
-                    {"task_id":task_id,"source":"arkime"})
-                rows=found.get("sessions",[]); returned=len(rows); matched=found.get("total")
-                matched=int(matched) if isinstance(matched,(int,float)) else None
-                capped=bool(found.get("capped")); incomplete=bool(found.get("failed")) or capped or matched is None
-                if found.get("failed") and not rows:
-                    status="budget_limited" if s.get("termination_reason") in {"tool_call_budget","runtime_budget"} else "failed"
-                else: status="partial" if incomplete else "completed"
-                self._add_arkime_rows(s,rows,expression,scope,task_id)
-                query_summary={"expression":expression,"cap":cap,"pages":found.get("pages")}
+                task_sampling=query_spec.get("sampling") if isinstance(query_spec.get("sampling"),dict) else sampling_policy(self.settings)
+                found=self._call(s,"arkime.api.sessions",stage,
+                    {"task_id":task_id,"source":"arkime","expression":expression,"limit":cap,
+                        "date":-1 if all_history else ("explicit" if start_ms is not None else self.settings.arkime_default_hours)},scope,
+                    lambda:self.arkime.search_sessions_sampled(expression,start_ms=start_ms,stop_ms=stop_ms,
+                        limit=cap,all_history=all_history,sampling=task_sampling),lambda value:len(value.get("sessions",[])))
+                if found is None:
+                    incomplete=True
+                    if s.get("termination_reason") in {"tool_call_budget","runtime_budget"}: status="budget_limited"; reason=str(s["termination_reason"])
+                    else: status="failed"
+                else:
+                    rows=found.get("sessions",[]); returned=len(rows); matched=found.get("total")
+                    matched=int(matched) if isinstance(matched,(int,float)) else None
+                    capped=bool(found.get("capped")); incomplete=capped or matched is None
+                    status="partial" if incomplete else "completed"
+                    sampling_summary=found.get("sampling") if isinstance(found.get("sampling"),dict) else None
+                    self._add_arkime_rows(s,rows,expression,scope,task_id)
+                query_summary={"expression":expression,"cap":cap,"pages":found.get("pages") if found else 0,
+                    **({"sampling":sampling_summary} if sampling_summary else {})}
             else:
                 targets=list(task.get("source_targets") or [])
                 configured={str(path.resolve()) for path in self.settings.pcap_files}

@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from romulus.config import Settings
+from romulus.tools.arkime_client import ArkimeAdapter
 from romulus.tools.elasticsearch_client import ElasticsearchAdapter
 
 
@@ -184,6 +185,90 @@ class ElasticsearchRepresentativeSamplingTests(unittest.TestCase):
         self.assertEqual(len(first["hits"]), 3)
         self.assertFalse(first["capped"])
         self.assertEqual(first["sampling"]["strategy"], "exhaustive")
+
+
+class _SyntheticArkime(ArkimeAdapter):
+    def __init__(self, settings, rows=None, total=None):
+        self.settings = settings
+        self.rows = copy.deepcopy(rows) if rows is not None else None
+        self.total = len(rows) if total is None and rows is not None else int(total or 0)
+        self.calls = []
+
+    def search_sessions(self, expression, **kwargs):
+        start = int(kwargs.get("start", 0))
+        length = int(kwargs.get("length", 100))
+        self.calls.append({"expression": expression, "start": start, "length": length})
+        if self.rows is None:
+            rows = [{"id": f"session-{index:08d}", "firstPacket": index} for index in range(start, min(start + length, self.total))]
+        else:
+            rows = copy.deepcopy(self.rows[start : start + length])
+        return {"sessions": rows, "total": self.total, "provenance": {"expression": expression}}
+
+
+class ArkimeRepresentativeSamplingTests(unittest.TestCase):
+    def _adapter(self, rows=None, total=None):
+        settings = replace(Settings.from_env(), arkime_max_results=100, time_sampling_strata=4)
+        return _SyntheticArkime(settings, rows=rows, total=total)
+
+    def test_capped_search_reads_stable_windows_across_the_ordered_result_set(self):
+        adapter = self._adapter(total=100)
+
+        result = adapter.search_sessions_sampled(
+            "ip.protocol == tcp",
+            limit=12,
+            sampling={"version": 1, "strategy": "time_or_rank_stratified", "strata": 4},
+        )
+
+        self.assertEqual([call["start"] for call in adapter.calls], [0, 0, 32, 65, 97])
+        self.assertEqual(len(result["sessions"]), 12)
+        self.assertEqual(result["total"], 100)
+        self.assertTrue(result["capped"])
+        self.assertEqual(result["sampling"]["strategy"], "rank_stratified")
+        self.assertEqual(result["sampling"]["covered_strata"], 4)
+        self.assertEqual(result["sampling"]["retained_by_stratum"], [3, 3, 3, 3])
+
+    def test_rank_sampling_suppresses_duplicate_session_ids(self):
+        rows = [{"id": f"session-{index:02d}", "firstPacket": index} for index in range(20)]
+        rows[13]["id"] = rows[0]["id"]
+        adapter = self._adapter(rows=rows)
+
+        result = adapter.search_sessions_sampled(
+            "ip.protocol == tcp",
+            limit=8,
+            sampling={"version": 1, "strategy": "time_or_rank_stratified", "strata": 4},
+        )
+
+        retained = [row["id"] for row in result["sessions"]]
+        self.assertEqual(len(retained), len(set(retained)))
+        self.assertEqual(result["duplicates_suppressed"], 1)
+
+    def test_offset_limit_is_disclosed_as_incomplete_sampling(self):
+        adapter = self._adapter(total=20_000_000)
+
+        result = adapter.search_sessions_sampled(
+            "ip.protocol == tcp",
+            limit=8,
+            sampling={"version": 1, "strategy": "time_or_rank_stratified", "strata": 4},
+        )
+
+        self.assertTrue(result["capped"])
+        self.assertLess(result["sampling"]["covered_strata"], result["sampling"]["requested_strata"])
+        self.assertEqual(result["sampling"]["fallback_reason"], "arkime_offset_limit")
+        self.assertTrue(all(call["start"] <= 10_000_000 for call in adapter.calls))
+
+    def test_uncapped_search_returns_every_session_in_order(self):
+        rows = [{"id": f"session-{index:02d}", "firstPacket": index} for index in range(3)]
+        adapter = self._adapter(rows=rows)
+
+        result = adapter.search_sessions_sampled(
+            "ip.protocol == tcp",
+            limit=5,
+            sampling={"version": 1, "strategy": "time_or_rank_stratified", "strata": 4},
+        )
+
+        self.assertEqual(result["sessions"], rows)
+        self.assertFalse(result["capped"])
+        self.assertEqual(result["sampling"]["strategy"], "exhaustive")
 
 
 if __name__ == "__main__":
