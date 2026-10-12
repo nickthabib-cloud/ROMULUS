@@ -74,6 +74,18 @@ def _analytic_lines(summary):
         lines.append(f"- Periodicity candidate {periodic.get('source')} → {periodic.get('destination')}:{periodic.get('port')}: {periodic.get('observations')} observations, mean {periodic.get('mean_interval_seconds')}s, CV {periodic.get('interval_cv')}; sample={_join_text(periodic.get('sample_evidence_ids'))}.")
     return lines
 
+def _candidate_line(candidate):
+    return (
+        f"- {candidate.get('candidate_id')} {candidate.get('title')} "
+        f"[{candidate.get('priority_tier')} / score {candidate.get('priority_score')} / {candidate.get('disposition')}]; "
+        f"kind={candidate.get('kind')}; evidence={_join_text(candidate.get('evidence_ids')) or 'none'}; "
+        f"ATT&CK={_join_text(candidate.get('attack_techniques')) or 'unmapped'}; "
+        f"score basis={_join_text(candidate.get('score_reasons'), '; ') or 'not recorded'}; "
+        f"benign context={_join_text(candidate.get('benign_explanations'), '; ') or 'none supplied'}; "
+        f"follow-up={_join_text(candidate.get('follow_up'), '; ') or 'none supplied'}."
+    )
+
+
 def _content(s):
     host_events=_bounded_report_events(s,"host"); network_events=_bounded_report_events(s,"network")
     lines=[f"ROMULUS INVESTIGATION REPORT — {s.get('status','partial').upper()}",f"Investigation: {s.get('hunt_id','')}",f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}","", "EXECUTIVE SUMMARY",s.get("summary") or "Investigation summary unavailable.",
@@ -100,6 +112,9 @@ def _content(s):
     for row in ledger.get("rows",[]):
         lines.append(f"- {row.get('hypothesis_id')} / {row.get('technique_id')}: priority={row.get('priority')}; analytics={row.get('executed_analytics')}/{row.get('planned_analytics')}; sources={_join_text(row.get('sources')) or 'none'}; returned={row.get('returned')}; assessment={row.get('assessment')}; gaps={_join_text(row.get('telemetry_gaps')) or 'none'}.")
     lines += ["", "DETERMINISTIC BEHAVIORAL ANALYTICS"]+(_analytic_lines(s.get("analytic_summary",{})) or ["No analytic summary was produced."])
+    visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
+    lines += ["", "PRIORITIZED CANDIDATE LEADS"]
+    lines += [_candidate_line(item) for item in visible_candidates] or ["No trusted or corroborated high-priority catalog leads met the customer-report threshold."]
     lines += ["", "SIGNIFICANT FINDINGS"]
     if not s.get("findings"): lines.append("No significant findings recorded.")
     for f in s.get("findings",[]): lines += [f"- {f.get('finding_id')} {f.get('title')} [{f.get('status')} / {f.get('confidence')}]: {f.get('observation')}","  Analysis: "+str(f.get("interpretation") or ""),"  Evidence: "+_join_text(f.get("evidence_ids")),"  Alternatives: "+_join_text(f.get("alternatives"),"; "),"  Follow-up: "+_join_text(f.get("follow_up"),"; ")]
@@ -117,7 +132,9 @@ def _content(s):
     errors=s.get("source_errors",[])
     lines += [f"- {e.get('tool')} at {e.get('stage')}: {e.get('error')}; {e.get('reason')} (HTTP {e.get('status_code')})" if e.get("status_code") else f"- {e.get('tool')} at {e.get('stage')}: {e.get('error')}; {e.get('reason') or 'no additional detail'}" for e in errors] or ["No source errors were recorded."]
     if s.get("error"): lines.append(s["error"])
-    lines += ["This assessment covers only the evidence sources and time period recorded above. Searches and reports are bounded; lack of findings does not establish that the environment is secure.","", "CONCLUSIONS AND RECOMMENDED FOLLOW-UP",s.get("summary") or "", "", "TECHNICAL EVIDENCE APPENDIX", f"The human-readable evidence manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable citations and search-result IDs appear above. Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite."]
+    lines += ["This assessment covers only the evidence sources and time period recorded above. Searches and reports are bounded; lack of findings does not establish that the environment is secure.","", "CONCLUSIONS AND RECOMMENDED FOLLOW-UP",s.get("summary") or "", "", "TECHNICAL CANDIDATE WORKING LIST"]
+    lines += [_candidate_line(item) for item in s.get("candidate_leads",[])] or ["No catalog candidates were recorded."]
+    lines += ["", "TECHNICAL EVIDENCE APPENDIX", f"The human-readable evidence manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable citations and search-result IDs appear above. Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite."]
     return "\n".join(lines)
 
 def _docx(s,path):
@@ -164,6 +181,10 @@ def _docx(s,path):
         para(f"{row.get('hypothesis_id')} / {row.get('technique_id')}: priority {row.get('priority')}; analytics {row.get('executed_analytics')}/{row.get('planned_analytics')}; sources {_join_text(row.get('sources')) or 'none'}; returned {row.get('returned')}; assessment {row.get('assessment')}; gaps {_join_text(row.get('telemetry_gaps')) or 'none'}.")
     heading("Deterministic Behavioral Analytics")
     for line in _analytic_lines(s.get("analytic_summary",{})) or ["No analytic summary was produced."]: para(line.removeprefix("- "))
+    heading("Prioritized Candidate Leads")
+    visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
+    for item in visible_candidates: para(_candidate_line(item).removeprefix("- "))
+    if not visible_candidates: para("No trusted or corroborated high-priority catalog leads met the customer-report threshold.")
     heading("Significant Findings")
     if not s.get("findings"): para("No significant findings recorded in the evidence examined.")
     for f in s.get("findings",[]):
@@ -193,6 +214,9 @@ def _docx(s,path):
     else: para("No source errors were recorded.")
     para(s.get("error","")); para("Packet scans drain the complete filtered capture under a per-call timeout and retain a bounded number of matches; other search results also have configured result caps. IP/time proximity is a lead and does not by itself establish identity, process attribution, or maliciousness. Consider NAT, DHCP, and clock skew. An isolated SYN is not proof of a completed connection. Absence of findings does not prove absence of compromise.")
     heading("Conclusions and Recommended Follow-up"); para(s.get("summary"))
+    heading("Technical Candidate Working List")
+    for item in s.get("candidate_leads",[]): para(_candidate_line(item).removeprefix("- "))
+    if not s.get("candidate_leads"): para("No catalog candidates were recorded.")
     heading("Technical Evidence Appendix")
     para(f"This readable manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable evidence and search-result references are listed above. Exact compiled queries remain in tool_audit.jsonl; complete raw evidence remains in SQLite.")
     for sec in doc.sections:

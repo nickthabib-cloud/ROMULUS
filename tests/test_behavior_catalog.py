@@ -391,3 +391,69 @@ class WorkflowIntegrationTests(unittest.TestCase):
                 store.load_state("HUNT-QUEUE")["candidate_leads"][0]["candidate_id"],
                 result["candidate_leads"][0]["candidate_id"],
             )
+
+
+class CandidateReportingTests(unittest.TestCase):
+    def test_customer_report_shows_high_lead_and_keeps_low_lead_technical(self):
+        from romulus.reporting.report import _content
+
+        state = {
+            "hunt_id": "HUNT-REPORT",
+            "status": "completed",
+            "outcome": "evidence_supported_lead",
+            "termination_reason": "lead_queue_exhausted",
+            "objective": "Review bounded telemetry",
+            "summary": "One trusted indicator was observed.",
+            "coverage": {},
+            "hypotheses": [],
+            "findings": [],
+            "host": [],
+            "network": [],
+            "correlations": [],
+            "search_artifacts": [],
+            "source_errors": [],
+            "candidate_leads": [
+                {
+                    "candidate_id": "CL-HIGH",
+                    "kind": "trusted_indicator",
+                    "title": "Trusted indicator observed: IOC-1",
+                    "priority_score": 95,
+                    "priority_tier": "critical",
+                    "disposition": "observed",
+                    "customer_visible": True,
+                    "evidence_ids": ["EV-1"],
+                    "score_reasons": ["trusted exact match"],
+                    "attack_techniques": [],
+                    "benign_explanations": [],
+                    "follow_up": ["Investigate EV-1."],
+                },
+                {
+                    "candidate_id": "CL-LOW",
+                    "kind": "behavior",
+                    "title": "Executable launched from a temporary path",
+                    "priority_score": 25,
+                    "priority_tier": "low",
+                    "disposition": "observed",
+                    "customer_visible": False,
+                    "evidence_ids": ["EV-2"],
+                    "score_reasons": ["weak path anomaly"],
+                    "attack_techniques": ["T1204.002"],
+                    "benign_explanations": ["Installer activity."],
+                    "follow_up": ["Review at hunt close."],
+                },
+            ],
+        }
+        text = _content(state)
+        customer, technical = text.split("TECHNICAL CANDIDATE WORKING LIST", 1)
+        self.assertIn("PRIORITIZED CANDIDATE LEADS", customer)
+        self.assertIn("Trusted indicator observed: IOC-1", customer)
+        self.assertNotIn("Executable launched from a temporary path", customer)
+        self.assertIn("Executable launched from a temporary path", technical)
+        self.assertIn("weak path anomaly", technical)
+
+    def test_operator_guide_points_to_editable_catalogs(self):
+        guide = Path("docs/behavior-analytics.md").read_text(encoding="utf-8")
+        readme = Path("README.md").read_text(encoding="utf-8")
+        self.assertIn("romulus/intelligence/behavior_catalog.json", guide)
+        self.assertIn("romulus/intelligence/local_indicators.json", guide)
+        self.assertIn("behavior-analytics.md", readme)

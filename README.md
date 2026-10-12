@@ -24,6 +24,10 @@ Arkime integration follows the [official v3–v6 API reference](https://arkime.c
 
 The reported Arkime `pcapDir=/dev/shm/arkime-raw` expiry error is a separate storage issue from `/api/appinfo` authentication. Arkime documents `pcapDir` as storage for saved raw PCAP files and notes that session metadata may remain after raw PCAP files are removed. If this Viewer is expected to retain or serve captured packets across restarts, configure an existing persistent directory with the required ownership/write access and free space. Arkime advises keeping `pcapDir` off the same filesystem as its Elasticsearch/OpenSearch data directory. If ROMULUS only reads existing sessions and scans the explicitly configured AInception PCAP files with TShark, that path is not required for ROMULUS's direct PCAP reads. See [Arkime PCAP storage settings](https://arkime.com/settings).
 
+## Behavioral hunt catalog
+
+The editable starting behavior list, trusted IOC file, scoring policy, and extension instructions are documented in [docs/behavior-analytics.md](docs/behavior-analytics.md).
+
 ## Project components
 
 `romulus/agent/` contains the local model interface. `romulus/investigation/` owns the single-agent graph, safe selector validation, source-query compilers, evidence state, and budgets. `romulus/tools/` contains deterministic read-only source adapters. `romulus/intelligence/` holds the pinned official ATT&CK catalog, curated query-enrichment layer, behavioral analytics, and deterministic correlation. `romulus/store.py` persists state and events. `romulus/reporting/` creates reports. The model assesses evidence and proposes findings/searches; code verifies evidence references, query parameters, and source constraints before acting.
