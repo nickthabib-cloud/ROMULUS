@@ -39,6 +39,11 @@ def _planning_state(objective: str):
 
 
 class MissionModeTests(unittest.TestCase):
+    def test_mission_mode_is_declared_in_graph_state_schema(self):
+        from romulus.investigation.workflow import HuntState
+
+        self.assertIn("mission_mode", HuntState.__annotations__)
+
     def test_mission_classifier_distinguishes_direction_from_broad_discovery(self):
         from romulus.investigation.workflow import _mission_is_directed
 
@@ -80,6 +85,49 @@ class MissionModeTests(unittest.TestCase):
 
             self.assertEqual(result["hypotheses"], [])
             self.assertEqual(result["termination_reason"], "coverage_frontier_exhausted")
+
+    def test_graph_preserves_undirected_guard_across_nodes(self):
+        try:
+            import langgraph  # noqa: F401
+        except ImportError:
+            self.skipTest("Install requirements.txt for the LangGraph state-boundary check")
+        from dataclasses import replace
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(), home=root, data_dir=root / "data", logs_dir=root / "logs", reports_dir=root / "reports",
+                max_tool_calls=30, max_depth=1, min_reasoning_rounds=1, max_runtime_seconds=30,
+                arkime_username="", arkime_password="", pcap_files=(),
+            )
+            engine = HuntEngine(settings, Store(settings.data_dir, settings.logs_dir), offline=False, use_ollama=True)
+            engine.es.indices = lambda: [{"index": "host-events"}]
+            engine.es.mappings_many = lambda names: {"host-events": {"mappings": {"properties": {
+                "@timestamp": {"type": "date"},
+                "host": {"properties": {"name": {"type": "keyword"}}},
+                "process": {"properties": {"name": {"type": "keyword"}}},
+            }}}}
+            engine.es.search_many = lambda indices, query, size: {
+                "hits": [], "total": 0, "capped": False, "timed_out": False, "shard_failures": 0,
+            }
+            model_stages = []
+            real_call = engine._call
+
+            def guarded_call(state, tool, stage, parameters, time_range, fn, count):
+                if tool == "ollama.api.chat":
+                    model_stages.append(stage)
+                    return None
+                return real_call(state, tool, stage, parameters, time_range, fn, count)
+
+            engine._call = guarded_call
+            result = engine.run("Hunt for threats across all available telemetry")
+
+            self.assertEqual(result["mission_mode"], "undirected")
+            self.assertEqual(model_stages, [])
+            self.assertEqual(result["hypotheses"], [])
 
     def test_directed_plan_labels_operator_direction_basis(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

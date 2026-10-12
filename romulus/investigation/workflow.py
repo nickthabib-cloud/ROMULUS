@@ -31,6 +31,7 @@ from .synthetic import sample_evidence
 
 class HuntState(TypedDict, total=False):
     hunt_id: str; objective: str; status: str; outcome: str; termination_reason: str
+    mission_mode: str
     hypotheses: list[dict]; host: list[dict]; network: list[dict]; evidence: list[dict]
     findings: list[dict]; correlations: list[dict]; queries: list[dict]; coverage: dict
     started_at: str; started_epoch: float; finished_at: str; error: str; summary: str
