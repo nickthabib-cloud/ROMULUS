@@ -10,6 +10,24 @@
 
 **Non-goals:** This milestone does not unify the remaining baseline/model/pivot scheduling paths, broaden telemetry collection, or let model output create graph facts. Scheduler consolidation remains a separate milestone so graph correctness and destructive retention behavior can be reviewed independently.
 
+## Execution status — 2026-10-12
+
+- Tasks 1–4 are implemented in commits `f2008b1`, `b2fe2d7`, and `56c4da8`.
+- The final local suite passes 85 tests with five dependency-backed checks skipped locally; compilation and whitespace checks pass.
+- Three independent review passes are complete. Their report-parsing, JSONL-concurrency, transition-integrity, legacy-state, nested-ECS, documentation, and CLI-observability findings are fixed and covered by regression tests. The final review found no remaining deployment blockers.
+- The default policy is `compact`; partial hunts remain resumable, full retention is explicit, and irreversible transitions are rejected before report or state mutation.
+- Remaining gates: deploy the exact committed archive to the development VM, run all dependency-backed tests, run a disposable offline completed hunt, verify report/path/retention invariants, and run a bounded read-only live check only if source health is green.
+- Validation uses isolated temporary runtime directories and must not modify or delete operational hunts, reports, telemetry, credentials, or configuration.
+
+### Decision log
+
+- Report files must be reopened with the real Word parser and match one hunt/report generation before deletion is authorized.
+- Finding paths may contain only finding-cited evidence; cross-event links remain explicitly inferred and non-causal.
+- Shared JSONL mutation is serialized across processes so one hunt's cleanup cannot erase another hunt's event.
+- Legacy compact states without a `finalized` field remain terminal and cannot be resumed.
+- A full-retained hunt may later be compacted only after regenerating a compact-policy report; compact data cannot be relabeled full.
+- Reports describe compact cleanup as policy intent because cleanup happens only after the reports have been written and verified.
+
 ---
 
 ## Task 1: Build the deterministic investigation graph
