@@ -361,7 +361,7 @@ Expected: Exit 0.
 Run: `git diff --check`  
 Expected: No output.
 
-- [ ] **Step 5: Run an offline end-to-end proof**
+- [x] **Step 5: Run an offline end-to-end proof**
 
 Run a disposable offline hunt under an isolated temporary root and prove:
 
@@ -384,11 +384,11 @@ git add romulus tests README.md CHANGELOG.md VALIDATION.md docs/superpowers/plan
 git commit -m "docs: record unified scheduler behavior"
 ```
 
-- [ ] **Step 8: Deploy and run dependency-complete VM proof**
+- [x] **Step 8: Deploy and run dependency-complete VM proof**
 
 Deploy the exact committed code without copying credentials or local runtime data. On the VM run the complete suite, `compileall`, and `doctor`; then run one disposable offline proof and one bounded isolated read-only live hunt only if source health is green. Verify host/network discovery fairness, unique executed fingerprints, correct owner outcomes, and no model call before a valid basis.
 
-- [ ] **Step 9: Evaluate against the external AttackMate holdout after the hunt**
+- [x] **Step 9: Evaluate against the external AttackMate holdout after the hunt**
 
 Use the external files `C:/Users/nthca/Desktop/attack_log.json` and `C:/Users/nthca/Desktop/attackmate.json`. Do not expose either file to the ROMULUS process or copy it to the repository or VM.
 
@@ -429,6 +429,9 @@ Remove only exact disposable validation roots, scripts, and transfer archives af
 - The subsequent exact-commit `doctor` exposed a planner/adapter TShark allowlist mismatch for valid `tcp.port` and `udp.port` fields. A focused subset-contract test failed RED and passed GREEN after synchronizing the execution allowlist; exact-commit redeployment and the remaining Step 8 gates are still open.
 - Exact commit `ae382ec` passed a fully green doctor and isolated offline report/compaction proof. The first holdout-blind live hunt then revealed that generic network candidate follow-ups fanned across Arkime plus every PCAP and that any queued breadth task prevented grounded model reasoning. Two RED/GREEN regressions now enforce Arkime-first generic follow-up and graph-level ordering of high candidate work before model reasoning before lower-value breadth, with the final call reserved for queued source work. Local proof is 129 tests with six dependency skips; redeployment and a replacement live run remain open.
 - Exact commit `36db042` passed 129/129 VM tests and a fully green doctor. Its replacement live hunt proved the intended high-candidate → grounded-model → breadth transition, but its only finding failed manual citation review: the claimed connection appeared in one of three citations, the ATT&CK `T1110` label was unsupported, and a follow-up intent contained a malformed IPv4 value. RED/GREEN safety tests now require candidate-entity-grounded assessments, an existing supported hypothesis plus exact mapping and two claim-matching records for findings, deterministic published finding prose, and valid IPv4-like intent text. Model-authored hypothesis creation is removed because deterministic candidate/operator hypotheses already supply the valid basis. Local proof is 133 tests with six dependency skips; exact patched VM proof and a corrected isolated live rerun remain open.
+- Exact commit `3ded319` passed all 133 VM tests without skips, `compileall`, and fully green diagnostics. Corrected isolated hunt `HUNT-B30F91BFF5` used both telemetry families, created 26 deterministic candidates, tested all seven high-priority candidates before four successful grounded model calls, and completed 49 unique task/outcome fingerprints without publishing a finding. Explicit finalization retained 28 of 5,667 evidence rows and aggregate scheduler coverage while removing hunt working bulk.
+- The post-finalization oracle comparison found no false reported compromise but also no ground-truth detection. Retained hunt context covered roughly 16:04–16:05 UTC while the oracle attack ran roughly 19:17–20:37 UTC. Full-day capped searches therefore failed to admit later-window evidence into candidate analysis. This is a major coverage/query-execution limitation; it is not a successful clean result and not primarily a reasoning failure because the attack evidence never reached the model.
+- No code, prompt, catalog, selector, fixture, or priority change was made from this holdout. The next proposed milestone is generic time-stratified bounded retrieval, developed against synthetic or independent data and evaluated on a different holdout.
 - The obsolete direct model, host-pivot, network-pivot, coverage-fallback, and legacy follow-up paths were removed only after caller searches and focused behavior-preservation tests. Legacy persisted fields remain migration inputs, but new hunts do not create the old scheduling authorities.
-- The dependency-light local runtime cannot execute the honest LangGraph/Word offline gate. Step 5 is deferred to the dependency-complete VM rather than being simulated or claimed.
-- Implementation documentation is committed through `e8fb95f`; the source-health regression fix is pending its own commit. Exact-commit redeployment, VM offline/live proof, post-hunt holdout comparison, cleanup, and final checkpoint remain open.
+- The dependency-light local runtime could not execute the honest LangGraph/Word offline gate, so Step 5 was completed on the dependency-complete VM rather than simulated locally. The isolated proof preserved valid reports and compact scheduler aggregates while removing scheduler working bulk.
+- Implementation and validation documentation is current through exact code commit `3ded319`. VM proof and the post-hunt holdout comparison are complete; exact disposable-artifact cleanup, record synchronization, final verification, and operator checkpoint remain open under Step 10.
