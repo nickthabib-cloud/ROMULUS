@@ -8,8 +8,9 @@ import hashlib
 import re
 import time
 import uuid
+from pathlib import Path
 
-from ..config import Settings
+from ..config import Settings, safe_url
 from ..models import Evidence, Finding, Hypothesis, encode, utc_now
 from ..store import Store
 from ..intelligence.knowledge import hypotheses_for, TECHNIQUES, ATTACK_RELEASE, ATTACK_RELEASE_DATE, ATTACK_DOMAIN
@@ -21,13 +22,51 @@ from ..intelligence.behavior_catalog import (
     load_behavior_catalog, load_local_indicators, resolve_semantic_fields, applicable_analytics,
     compile_elasticsearch_seed, compile_elasticsearch_indicator_seed, build_candidate_queue, merge_candidate_queue,
 )
-from ..tools.elasticsearch_client import ElasticsearchAdapter
+from ..tools.elasticsearch_client import ElasticsearchAdapter, validate_query
 from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
 from .search_planner import (candidate_fields, validate_spec, fingerprint, compile_es, compile_arkime, compile_tshark,
     compile_native_es, validate_native_arkime, validate_native_tshark, expand_anchor_selectors, anchor_time_range,
     SOURCE_FIELDS, TEXT_FIELDS)
 from .synthetic import sample_evidence
+
+
+def _scheduled_time_bounds(time_range):
+    if not isinstance(time_range,dict): return None,None
+    start=time_range.get("start",time_range.get("gte")); end=time_range.get("end",time_range.get("lte"))
+    if start is None and end is None: return None,None
+    if not isinstance(start,str) or not isinstance(end,str): raise ValueError("Scheduled time range requires string start and end bounds")
+    def parse(value):
+        parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
+        if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return parse(start),parse(end)
+
+
+def _query_enforces_scheduled_window(value,start,end):
+    if start is None and end is None: return True
+    if not isinstance(value,dict): return False
+    ranges=value.get("range")
+    if isinstance(ranges,dict):
+        for bounds in ranges.values():
+            if not isinstance(bounds,dict): continue
+            try:
+                lower,_=_scheduled_time_bounds({"start":bounds.get("gte"),"end":bounds.get("lte")})
+            except (TypeError,ValueError):
+                continue
+            try: _,upper=_scheduled_time_bounds({"start":bounds.get("gte"),"end":bounds.get("lte")})
+            except (TypeError,ValueError):
+                continue
+            if lower==start and upper==end: return True
+    for child in value.values():
+        if isinstance(child,dict) and _query_enforces_scheduled_window(child,start,end): return True
+        if isinstance(child,list) and any(_query_enforces_scheduled_window(item,start,end) for item in child): return True
+    return False
+
+
+def _scheduled_scope(time_range):
+    if isinstance(time_range,dict) and time_range.get("scope"): return str(time_range["scope"])[:300]
+    return json.dumps(time_range,sort_keys=True,default=str)[:300]
 
 
 class HuntState(TypedDict, total=False):
@@ -670,6 +709,131 @@ class HuntEngine:
             if total is not None and offset>=total: break
         capped=(total is not None and len(sessions)<total) or (not failed and len(sessions)>=cap and (total is None or len(sessions)<total))
         return {"sessions":sessions,"total":total,"pages":pages,"failed":failed,"capped":capped,"duplicates_suppressed":duplicates}
+
+    def _execute_search_task(self,s,task):
+        """Execute one validated scheduler task and return its exact bounded outcome."""
+        task_id=str(task.get("task_id") or "")
+        source=str(task.get("source") or "")
+        query_spec=task.get("query_spec")
+        time_range=task.get("time_range")
+        if not task_id.startswith("ST-") or source not in {"elasticsearch","arkime","tshark"} or not isinstance(query_spec,dict):
+            raise ValueError("Invalid scheduled search task")
+        start_time,end_time=_scheduled_time_bounds(time_range)
+        if start_time and end_time and start_time>end_time: raise ValueError("Scheduled time range is reversed")
+        scope=_scheduled_scope(time_range)
+        stage=f"scheduled_{task.get('phase','investigation')}_search"
+        before_runs=len(s.setdefault("tool_runs",[])); before_errors=len(s.setdefault("source_errors",[]))
+        before_evidence={item.get("evidence_id") for item in s.get("host",[])+s.get("network",[]) if item.get("evidence_id")}
+        returned=0; matched=None; capped=False; timed_out=False; shard_failures=0; incomplete=False
+        status="failed"; error_kind=None; reason=None; query_summary={}
+        try:
+            if not self._budget_ok(s):
+                status="budget_limited"; incomplete=True; reason=str(s.get("termination_reason") or "search_budget_exhausted")
+            elif source=="elasticsearch":
+                targets=list(task.get("source_targets") or [])
+                configured=set(s.get("es_indices",[]))
+                if not targets or any(name not in configured for name in targets):
+                    raise ValueError("Scheduled Elasticsearch target is outside discovered indices")
+                query=query_spec.get("query")
+                if not isinstance(query,dict): raise ValueError("Scheduled Elasticsearch query is missing")
+                validate_query(query)
+                if not _query_enforces_scheduled_window(query,start_time,end_time):
+                    raise ValueError("Scheduled Elasticsearch query does not enforce its time range")
+                size=max(1,min(int(query_spec.get("size",self.settings.max_results)),self.settings.max_results,500))
+                found=self._call(s,"elasticsearch.search",stage,
+                    {"task_id":task_id,"indices":targets,"query":query,"size":size},scope,
+                    lambda:self.es.search_many(targets,query,size),lambda value:len(value.get("hits",[])))
+                if found is None:
+                    incomplete=True
+                    if s.get("termination_reason") in {"tool_call_budget","runtime_budget"}: status="budget_limited"; reason=str(s["termination_reason"])
+                    else: status="failed"
+                else:
+                    rows=found.get("hits",[]); returned=len(rows); matched=found.get("total")
+                    if isinstance(matched,dict): matched=matched.get("value")
+                    matched=int(matched) if isinstance(matched,(int,float)) else None
+                    capped=bool(found.get("capped")); timed_out=bool(found.get("timed_out"))
+                    failures=found.get("shard_failures",0); shard_failures=len(failures) if isinstance(failures,list) else int(failures or 0)
+                    incomplete=matched is None or capped or timed_out or bool(shard_failures)
+                    status="partial" if incomplete else "completed"
+                    for hit in rows: self._add_es_hit(s,hit,query,task_id)
+                query_summary={"indices":targets,"query":query,"size":size}
+            elif source=="arkime":
+                targets=list(task.get("source_targets") or [])
+                if targets!=[safe_url(self.settings.arkime_url)]: raise ValueError("Scheduled Arkime target is not the configured deployment")
+                if not self.settings.arkime_username or not self.settings.arkime_password: raise ValueError("Arkime API credentials are not configured")
+                expression=validate_native_arkime(str(query_spec.get("expression") or ""),list(SOURCE_FIELDS["arkime"]))
+                cap=max(1,min(int(query_spec.get("cap",self.settings.arkime_max_results)),self.settings.arkime_max_results))
+                start_ms=int(start_time.timestamp()*1000) if start_time else None
+                stop_ms=int(end_time.timestamp()*1000) if end_time else None
+                all_history=bool(self.settings.historical_search and start_ms is None and stop_ms is None)
+                found=self._search_arkime_pages(s,expression,stage,scope,start_ms,stop_ms,cap,all_history,
+                    {"task_id":task_id,"source":"arkime"})
+                rows=found.get("sessions",[]); returned=len(rows); matched=found.get("total")
+                matched=int(matched) if isinstance(matched,(int,float)) else None
+                capped=bool(found.get("capped")); incomplete=bool(found.get("failed")) or capped or matched is None
+                if found.get("failed") and not rows:
+                    status="budget_limited" if s.get("termination_reason") in {"tool_call_budget","runtime_budget"} else "failed"
+                else: status="partial" if incomplete else "completed"
+                self._add_arkime_rows(s,rows,expression,scope,task_id)
+                query_summary={"expression":expression,"cap":cap,"pages":found.get("pages")}
+            else:
+                targets=list(task.get("source_targets") or [])
+                configured={str(path.resolve()) for path in self.settings.pcap_files}
+                if len(targets)!=1 or str(Path(targets[0]).resolve()) not in configured:
+                    raise ValueError("Scheduled TShark target is outside configured captures")
+                display_filter=validate_native_tshark(str(query_spec.get("display_filter") or ""),
+                    list(query_spec.get("fields") or SOURCE_FIELDS["tshark"]))
+                fields=list(dict.fromkeys(query_spec.get("fields") or ["frame.number","frame.time_epoch","ip.src","ip.dst"]))
+                if not fields or len(fields)>16 or any(field not in SOURCE_FIELDS["tshark"] for field in fields):
+                    raise ValueError("Scheduled TShark fields are not allowlisted")
+                limit=max(1,min(int(query_spec.get("limit",self.settings.max_results)),self.settings.max_results,500))
+                time_filter=""
+                if start_time and end_time:
+                    time_filter=f"frame.time_epoch >= {start_time.timestamp():.3f} && frame.time_epoch <= {end_time.timestamp():.3f}"
+                pcap=Path(targets[0]).resolve()
+                found=self._call(s,"tshark.read_pcap",stage,
+                    {"task_id":task_id,"pcap":str(pcap),"display_filter":display_filter,"fields":fields},scope,
+                    lambda:self.tshark.inspect(pcap,display_filter=display_filter,fields=fields,limit=limit,time_filter=time_filter),
+                    lambda value:value.get("count",0))
+                if found is None:
+                    incomplete=True
+                    if s.get("termination_reason") in {"tool_call_budget","runtime_budget"}: status="budget_limited"; reason=str(s["termination_reason"])
+                    else: status="failed"
+                else:
+                    rows=found.get("packets",[]); returned=int(found.get("count",len(rows)) or 0)
+                    matched_value=found.get("matched_count",returned); matched=int(matched_value) if isinstance(matched_value,(int,float)) else None
+                    capped=bool(found.get("output_capped")); incomplete=capped or matched is None
+                    status="partial" if incomplete else "completed"
+                    provenance=found.get("provenance",{}) if isinstance(found.get("provenance"),dict) else {}
+                    for row in rows: self._add_tshark_row(s,row,{**provenance,"search_task_id":task_id},display_filter,task_id)
+                query_summary={"pcap":str(pcap),"display_filter":display_filter,"fields":fields,"limit":limit}
+        except Exception as exc:
+            status="failed"; incomplete=True; error_kind=type(exc).__name__; reason=_safe_error_reason(exc)
+            status_code=getattr(getattr(exc,"meta",None),"status",None) or getattr(exc,"status_code",None)
+            s.setdefault("source_errors",[]).append({"tool":source,"stage":stage,"error":error_kind,
+                "reason":reason,"status_code":status_code,"task_id":task_id})
+        if len(s.get("source_errors",[]))>before_errors and error_kind is None:
+            latest_error=s["source_errors"][-1]; error_kind=latest_error.get("error"); reason=latest_error.get("reason")
+        new_runs=s.get("tool_runs",[])[before_runs:]
+        artifact_id=next((item.get("artifact_id") for item in reversed(new_runs) if item.get("artifact_id")),None)
+        if not artifact_id:
+            artifact_id="SR-"+hashlib.sha1(f"scheduler:{task_id}:{task.get('attempt_count',0)}".encode()).hexdigest()[:12].upper()
+            artifact={"artifact_id":artifact_id,"tool":source,"stage":stage,"scope":scope,
+                "result_status":"ok" if status in {"completed","partial"} else "error","returned":returned,
+                "matched_total":matched,"error":error_kind,"error_reason":reason,"adequate_negative":False,"timestamp":utc_now()}
+            if not any(item.get("artifact_id")==artifact_id for item in s.setdefault("search_artifacts",[])): s["search_artifacts"].append(artifact)
+        evidence_ids=[item.get("evidence_id") for item in s.get("host",[])+s.get("network",[])
+            if item.get("evidence_id") and item.get("evidence_id") not in before_evidence]
+        outcome={"task_id":task_id,"status":status,"returned_total":returned,"matched_total":matched,
+            "capped":capped,"timed_out":timed_out,"shard_failures":shard_failures,"incomplete":incomplete,
+            "artifact_id":artifact_id,"evidence_ids":evidence_ids,"time_range":time_range}
+        if error_kind: outcome["error_kind"]=error_kind
+        if reason: outcome["reason"]=str(reason)[:300]
+        s.setdefault("queries",[]).append({"stage":stage,"source":source,"task_id":task_id,"intent":str(task.get("intent") or "")[:300],
+            "time_range":time_range,"returned":returned,"matched_total":matched,"status":status,"capped":capped,
+            "timed_out":timed_out,"shard_failures":shard_failures,"artifact_id":artifact_id,**query_summary})
+        self._stage(s,stage,status,{"task_id":task_id,"source":source,"returned":returned,"matched_total":matched})
+        return outcome
 
     def _execute_model_search(self,s,plan,stage):
         source=plan.get("source"); intent=plan.get("intent",""); fp=plan.get("fingerprint") or fingerprint(plan)
