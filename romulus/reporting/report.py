@@ -165,8 +165,8 @@ def _content(s):
     if s.get("error"): lines.append(s["error"])
     lines += ["This assessment covers only the evidence sources and time period recorded above. Searches and reports are bounded; lack of findings does not establish that the environment is secure.","", "CONCLUSIONS AND RECOMMENDED FOLLOW-UP",s.get("summary") or "", "", "TECHNICAL CANDIDATE WORKING LIST"]
     lines += [_candidate_line(item) for item in s.get("candidate_leads",[])] or ["No catalog candidates were recorded."]
-    if s.get("retention_policy")=="compact" and s.get("status")=="completed":
-        retention_note=("This completed hunt uses compact retention. After both reports are verified, per-hunt working audit records and uncited raw evidence are removed; "
+    if s.get("retention_policy")=="compact" and (s.get("status")=="completed" or s.get("finalized_at")):
+        retention_note=("This finalized investigation uses compact retention. After both reports are verified, per-hunt working audit records and uncited raw evidence are scheduled for removal; "
             "structured findings, supported paths, and their cited evidence remain in the compact investigation record.")
     else:
         retention_note="Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite unless the hunt is explicitly finalized with compact retention."

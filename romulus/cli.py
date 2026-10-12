@@ -118,24 +118,32 @@ def main(argv=None):
         else: print(f"Audit log: {settings.logs_dir / 'tool_audit.jsonl'}")
         return 0
     if args.command in {"compact","finalize"}:
-        from .retention import RetentionError, apply_retention
+        from .retention import RetentionError, apply_retention, is_retention_finalized, validate_retention_transition
         store=Store(settings.data_dir,settings.logs_dir); state=store.load_state(args.id)
         if not state: print(f"Unknown investigation ID: {args.id}"); return 1
-        if args.command=="compact" and state.get("status")!="completed":
+        finalized=is_retention_finalized(state)
+        if args.command=="compact" and state.get("status")!="completed" and not finalized:
             print("Only completed hunts can use compact; use finalize for a partial hunt."); return 1
         if args.command=="finalize" and state.get("status") not in {"completed","partial"}:
             print("Only completed or partial hunts can be finalized."); return 1
-        if args.command=="finalize" and state.get("retention",{}).get("finalized") is not True:
+        target_policy="compact" if args.command=="compact" else settings.retention_policy
+        try:
+            validate_retention_transition(
+                state,target_policy,automatic=False,finalize=args.command=="finalize" or finalized)
+        except RetentionError as exc:
+            print(f"Retention precondition failed: {exc}"); return 1
+        needs_report=(args.command=="finalize" and not finalized) or state.get("retention_policy")!=target_policy
+        if needs_report:
             try:
                 from .reporting.report import generate_report
                 state["finalized_at"]=utc_now()
-                state["retention_policy"]=settings.retention_policy
+                state["retention_policy"]=target_policy
                 state["report_paths"]=[str(path) for path in generate_report(state,settings.reports_dir)]
                 store.save_state(args.id,state)
             except Exception as exc:
                 print(f"Final report generation failed: {type(exc).__name__}"); return 1
         try:
-            result=apply_retention(store,state,policy="compact" if args.command=="compact" else settings.retention_policy,
+            result=apply_retention(store,state,policy=target_policy,
                 automatic=False,finalize=args.command=="finalize")
         except RetentionError as exc:
             print(f"Retention precondition failed: {exc}"); return 1

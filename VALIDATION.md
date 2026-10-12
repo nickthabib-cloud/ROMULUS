@@ -2,6 +2,26 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-12 — cited attack paths and safe retention
+
+### Implemented behavior
+
+- ROMULUS builds a deterministic evidence/entity/activity graph and derives finding paths only from evidence IDs cited by that finding. Cross-event time/entity relationships are labeled inferred, include their reasons and confidence, and explicitly do not claim causation.
+- Word and text reports include supported attack paths. The technical report preserves path steps, citations, relationship basis, caveats, and disconnected-evidence gaps.
+- `compact` retention is the default. It reopens and hunt-matches exactly one DOCX/TXT report pair before removing uncited evidence, hunt-scoped JSONL working records, and checkpoints. Reports, conclusions, findings, cited evidence, compact coverage, source errors, and supported paths remain.
+- Partial hunts remain resumable until explicit finalization. `full` retains all working data; irreversible compact transitions, legacy compact-finalized states, and full-to-compact report/policy truth are guarded by regression tests.
+- JSONL append and rewrite operations share an interprocess lock so one hunt's cleanup cannot discard another hunt's concurrent event.
+
+### Local proof
+
+- The focused graph, customer-report, and retention suite passed 25 tests before the upgrade-compatibility review; added legacy-state and full-to-compact truth tests were then exercised red/green.
+- The final complete local suite passed all 85 tests available in this environment, with five dependency-backed checks skipped for execution on the VM.
+- `python -m compileall -q romulus tests` and `git diff --check` completed successfully on the final local tree.
+
+### Deployment status
+
+Dependency-complete VM tests and a disposable end-to-end compact-retention hunt remain pending. No operational hunt state or reports have been modified by this local validation.
+
 ## 2026-10-12 — candidate-driven investigation loop
 
 ### Implemented behavior

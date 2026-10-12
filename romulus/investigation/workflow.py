@@ -118,7 +118,8 @@ class HuntEngine:
     def resume(self,hunt_id: str) -> dict[str, Any]:
         state=self.store.load_state(hunt_id)
         if not state: raise ValueError(f"Unknown investigation ID: {hunt_id}")
-        if state.get("status")=="completed" or state.get("retention",{}).get("finalized") is True: return state
+        from ..retention import is_retention_finalized
+        if state.get("status")=="completed" or is_retention_finalized(state): return state
         return self.run(state["objective"],hunt_id=hunt_id,_resume=True)
 
     def _graph(self):

@@ -121,7 +121,7 @@ Only use ROMULUS against systems/data you are authorized to investigate. Elastic
 
 ## Local development and verification
 
-`python main.py test` runs the repository's unit/synthetic suite; `python main.py demo` is the offline demonstration. The agent stores each model reasoning round, accepted/rejected search plan, completed query fingerprint, source result count, and evidence-linked model assessment. Version 0.4.2 has passed compilation, deployment diagnostics, focused planner/analytics smoke checks, and controlled live hunts on the development VM. The validation remains an engineering exercise rather than operational authorization; observed query-quality and storage findings are recorded in [CHANGELOG.md](CHANGELOG.md).
+`python main.py test` runs the repository's unit/synthetic suite; `python main.py demo` is the offline demonstration. During an active or resumable hunt, the agent stores each model reasoning round, accepted/rejected search plan, completed query fingerprint, source result count, and evidence-linked model assessment. Prior releases passed deployment diagnostics and controlled live hunts on the development VM; the current unreleased attack-path and retention milestone has local verification recorded in [VALIDATION.md](VALIDATION.md) and still requires its dependency-complete VM proof before release. Validation remains an engineering exercise rather than operational authorization.
 
 Development history, verification evidence, and known limitations are maintained in [CHANGELOG.md](CHANGELOG.md). Security assumptions and reporting guidance are in [SECURITY.md](SECURITY.md).
 

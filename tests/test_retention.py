@@ -399,7 +399,7 @@ class RetentionTests(unittest.TestCase):
             self.assertIn("complete raw evidence remains in SQLite", text_report.read_text(encoding="utf-8"))
             self.assertNotIn("uncited raw evidence are removed", text_report.read_text(encoding="utf-8"))
 
-    def test_explicitly_finalized_partial_hunt_is_not_resumed(self):
+    def test_legacy_compacted_partial_hunt_is_not_resumed(self):
         from romulus.investigation.workflow import HuntEngine
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
@@ -410,7 +410,8 @@ class RetentionTests(unittest.TestCase):
             )
             store = Store(settings.data_dir, settings.logs_dir)
             state = self._state(self._reports(root, "HUNT-ONE"), status="partial")
-            state["retention"] = {"policy": "compact", "status": "completed", "finalized": True}
+            # f2008b1 persisted compact completion without a separate finalized flag.
+            state["retention"] = {"policy": "compact", "status": "completed"}
             store.save_state("HUNT-ONE", state)
             engine = HuntEngine(settings, store, offline=True, use_ollama=False)
             engine.run = lambda *args, **kwargs: self.fail("A finalized hunt must not resume")
@@ -418,6 +419,106 @@ class RetentionTests(unittest.TestCase):
             resumed = engine.resume("HUNT-ONE")
 
             self.assertEqual(resumed["retention"]["status"], "completed")
+
+    def test_full_retained_hunt_can_be_truthfully_recompacted(self):
+        from romulus.cli import main
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(), home=root, reports_dir=root / "reports",
+                data_dir=root / "data", logs_dir=root / "logs", retention_policy="full",
+            )
+            store = Store(settings.data_dir, settings.logs_dir)
+            state = self._state([], status="partial")
+            store.save_state("HUNT-ONE", state)
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-KEEP", "raw": {"keep": True}})
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"drop": True}})
+
+            with patch("romulus.cli.Settings.from_env", return_value=settings):
+                self.assertEqual(main(["finalize", "--id", "HUNT-ONE", "--retention", "full"]), 0)
+                self.assertEqual(main(["compact", "--id", "HUNT-ONE"]), 0)
+
+            compacted = store.load_state("HUNT-ONE")
+            text_report = next(Path(path) for path in compacted["report_paths"] if path.endswith(".txt"))
+            self.assertEqual(compacted["retention_policy"], "compact")
+            self.assertEqual(compacted["retention"]["policy"], "compact")
+            self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
+            self.assertIn("uncited raw evidence are scheduled for removal", text_report.read_text(encoding="utf-8"))
+            self.assertIn("This finalized investigation uses compact retention", text_report.read_text(encoding="utf-8"))
+            self.assertNotIn("complete raw evidence remains in SQLite", text_report.read_text(encoding="utf-8"))
+
+    def test_cli_rejects_compact_to_full_before_changing_reports_or_state(self):
+        from romulus.cli import main
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(), home=root, reports_dir=root / "reports",
+                data_dir=root / "data", logs_dir=root / "logs", retention_policy="compact",
+            )
+            store = Store(settings.data_dir, settings.logs_dir)
+            state = self._state(self._reports(root, "HUNT-ONE"), status="partial")
+            state["retention_policy"] = "compact"
+            state["retention"] = {"policy": "compact", "status": "completed", "finalized": True}
+            store.save_state("HUNT-ONE", state)
+            before_state = store.load_state("HUNT-ONE")
+            before_files = {path.name: path.read_bytes() for path in settings.reports_dir.iterdir()}
+
+            with patch("romulus.cli.Settings.from_env", return_value=settings):
+                result = main(["finalize", "--id", "HUNT-ONE", "--retention", "full"])
+
+            self.assertEqual(result, 1)
+            self.assertEqual(store.load_state("HUNT-ONE"), before_state)
+            self.assertEqual({path.name: path.read_bytes() for path in settings.reports_dir.iterdir()}, before_files)
+
+    def test_compact_cli_recognizes_legacy_finalized_partial_hunt(self):
+        from romulus.cli import main
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(), home=root, reports_dir=root / "reports",
+                data_dir=root / "data", logs_dir=root / "logs", retention_policy="compact",
+            )
+            store = Store(settings.data_dir, settings.logs_dir)
+            state = self._state(self._reports(root, "HUNT-ONE"), status="partial")
+            state["retention_policy"] = "compact"
+            state["retention"] = {"policy": "compact", "status": "completed"}
+            store.save_state("HUNT-ONE", state)
+
+            with patch("romulus.cli.Settings.from_env", return_value=settings):
+                result = main(["compact", "--id", "HUNT-ONE"])
+
+            self.assertEqual(result, 0)
+            self.assertTrue(store.load_state("HUNT-ONE")["retention"]["finalized"])
+
+    def test_incomplete_compaction_report_describes_policy_intent_not_completed_cleanup(self):
+        from romulus.cli import main
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(), home=root, reports_dir=root / "reports",
+                data_dir=root / "data", logs_dir=root / "logs", retention_policy="full",
+            )
+            store = Store(settings.data_dir, settings.logs_dir)
+            state = self._state([], status="partial")
+            store.save_state("HUNT-ONE", state)
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-KEEP", "raw": {"keep": True}})
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"drop": True}})
+
+            with patch("romulus.cli.Settings.from_env", return_value=settings):
+                self.assertEqual(main(["finalize", "--id", "HUNT-ONE", "--retention", "full"]), 0)
+                with patch("romulus.store.Store.remove_hunt_log_records", side_effect=OSError("locked")):
+                    self.assertEqual(main(["compact", "--id", "HUNT-ONE"]), 1)
+
+            failed = store.load_state("HUNT-ONE")
+            text_report = next(Path(path) for path in failed["report_paths"] if path.endswith(".txt"))
+            report_text = text_report.read_text(encoding="utf-8")
+            self.assertEqual(failed["retention"]["status"], "incomplete")
+            self.assertIn("scheduled for removal", report_text)
+            self.assertNotIn("working audit records and uncited raw evidence are removed", report_text)
 
     def test_running_hunt_cannot_be_finalized_or_compacted(self):
         from romulus.retention import RetentionError, apply_retention

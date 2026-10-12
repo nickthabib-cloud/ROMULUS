@@ -15,6 +15,33 @@ class RetentionError(RuntimeError):
     """Raised before cleanup when retention preconditions are not satisfied."""
 
 
+def is_retention_finalized(state: dict[str, Any]) -> bool:
+    """Recognize both current and pre-finalized-field terminal retention states."""
+    existing=state.get("retention") if isinstance(state.get("retention"),dict) else {}
+    return existing.get("finalized") is True or (
+        existing.get("policy")=="compact" and existing.get("status")=="completed"
+    )
+
+
+def validate_retention_transition(
+    state: dict[str, Any], policy: str, *, automatic: bool = False, finalize: bool = False,
+) -> None:
+    """Fail before reports or retained state can be rewritten by an illegal transition."""
+    if policy not in {"compact", "full"}:
+        raise RetentionError(f"Unsupported retention policy: {policy}")
+    if not str(state.get("hunt_id") or ""):
+        raise RetentionError("Investigation ID is required for retention")
+    hunt_status=str(state.get("status") or "")
+    if hunt_status not in {"completed","partial"}:
+        raise RetentionError("Only completed or partial hunts can enter retention")
+    existing=state.get("retention") if isinstance(state.get("retention"),dict) else {}
+    compact_started=(existing.get("policy")=="compact" and existing.get("status") in {"in_progress","incomplete","completed"})
+    if compact_started and policy!="compact":
+        raise RetentionError("Compact retention is irreversible and cannot be relabelled full")
+    if hunt_status=="partial" and not automatic and not finalize and not is_retention_finalized(state):
+        raise RetentionError("A partial hunt must be explicitly finalized before retention")
+
+
 def apply_retention(
     store: Store, state: dict[str, Any], policy: str = "compact", *, automatic: bool = False,
     finalize: bool = False,
@@ -24,22 +51,18 @@ def apply_retention(
     Automatic finalization is limited to completed hunts.  Calling this function
     explicitly with ``automatic=False`` finalizes a reported partial hunt.
     """
-    if policy not in {"compact", "full"}:
-        raise RetentionError(f"Unsupported retention policy: {policy}")
     working = deepcopy(state)
+    validate_retention_transition(working,policy,automatic=automatic,finalize=finalize)
     hunt_id = str(working.get("hunt_id") or "")
-    if not hunt_id:
-        raise RetentionError("Investigation ID is required for retention")
     hunt_status=str(working.get("status") or "")
-    if hunt_status not in {"completed","partial"}:
-        raise RetentionError("Only completed or partial hunts can enter retention")
     existing = working.get("retention") if isinstance(working.get("retention"), dict) else {}
-    compact_started=(existing.get("policy")=="compact" and existing.get("status") in {"in_progress","incomplete","completed"})
-    if compact_started and policy!="compact":
-        raise RetentionError("Compact retention is irreversible and cannot be relabelled full")
     if policy == "compact" and existing.get("status") == "completed":
         _verify_reports(hunt_id, working.get("report_paths", []))
+        working["retention_policy"]="compact"
+        working["retention"]["finalized"]=True
+        store.save_state(hunt_id,working)
         return working
+    working["retention_policy"]=policy
     if hunt_status=="partial" and automatic:
         working["retention"] = {
             "policy":policy,"status":"resumable","finalized":False,"updated_at":utc_now(),
@@ -47,9 +70,6 @@ def apply_retention(
         }
         store.save_state(hunt_id,working)
         return working
-    if hunt_status=="partial" and not finalize:
-        raise RetentionError("A partial hunt must be explicitly finalized before retention")
-
     reports = _verify_reports(hunt_id, working.get("report_paths", []))
     if policy == "full":
         working["retention"] = {
