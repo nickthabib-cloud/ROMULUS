@@ -1327,11 +1327,11 @@ class HuntEngine:
                     last_call=next((r for r in reversed(s.get("tool_runs",[])) if r.get("tool")=="ollama.api.chat" and r.get("reasoning_stage")=="analyst_reasoning"),{})
                     model_error=last_call.get("error_reason") or last_call.get("error") or "unavailable"
                 if isinstance(analysis,dict):
-                    created=self._append_model_hypotheses(s,analysis.get("new_hypotheses",[]),visible_evidence_ids|visible_candidate_ids)
-                    if created:
-                        created_set=set(created); known={lead.get("id") for lead in s.setdefault("lead_catalog",[])}
-                        additions=_lead_catalog([item for item in s.get("hypotheses",[]) if item.get("hypothesis_id") in created_set])
-                        s["lead_catalog"].extend(item for item in additions if item.get("id") not in known)
+                    # Every undirected hypothesis is instantiated deterministically
+                    # from an observed candidate. Model-created hypotheses added
+                    # risk without adding a stronger evidence boundary, so the
+                    # model may assess and search but may not invent another one.
+                    created=[]
                     self._apply_model_assessments(s,analysis,visible_evidence_ids)
                     self._publish_model_findings(s,analysis.get("findings",[]),visible_evidence_ids)
                     analysis["created_hypothesis_ids"]=created
@@ -1377,12 +1377,17 @@ class HuntEngine:
 
     def _apply_model_assessments(self,s,analysis,visible_ids=None):
         hypotheses={h.get("hypothesis_id"):h for h in s.get("hypotheses",[])}
-        valid_evidence=set(visible_ids or {e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")})
+        evidence={e.get("evidence_id"):e for e in _all_evidence(s) if e.get("evidence_id")}
+        valid_evidence=set(visible_ids or evidence)
         for item in analysis.get("assessments",[]) if isinstance(analysis.get("assessments"),list) else []:
             if not isinstance(item,dict): continue
             hypothesis=hypotheses.get(item.get("hypothesis_id")); status=item.get("status")
             if not hypothesis or status not in {"supported","contradicted","inconclusive","not_tested"}: continue
             refs=list(dict.fromkeys(x for x in item.get("evidence_ids",[]) if isinstance(x,str) and x in valid_evidence))
+            if status in {"supported","contradicted"}:
+                anchors=_hypothesis_anchor_entities(s,hypothesis,evidence)
+                if anchors:
+                    refs=[ref for ref in refs if anchors & _event_entities(evidence[ref])]
             if status in {"supported","contradicted"} and not refs:
                 status="inconclusive"
             assessment={"status":status,"rationale":str(item.get("rationale",""))[:500],"evidence_ids":refs,
@@ -1400,53 +1405,51 @@ class HuntEngine:
             elif status=="inconclusive": hypothesis["status"]="inconclusive"
             else: hypothesis["status"]="not tested"
 
-    def _append_model_hypotheses(self,s,proposals,visible_ids=None):
-        if not isinstance(proposals,list): return []
-        known={re.sub(r"[^a-z0-9]+","",str(h.get("title","")).lower()) for h in s.get("hypotheses",[])}
-        candidate_ids={item.get("candidate_id") for item in s.get("candidate_leads",[]) if item.get("candidate_id")}
-        evidence_ids={item.get("evidence_id") for item in _all_evidence(s) if item.get("evidence_id")}
-        groundable_ids=candidate_ids|evidence_ids
-        visible=(set(visible_ids) & groundable_ids) if visible_ids is not None else groundable_ids
-        added=[]; next_number=len(s.get("hypotheses",[]))+1
-        for proposal in proposals[:3]:
-            if len(s.get("hypotheses",[]))>=24: break
-            if not isinstance(proposal,dict): continue
-            basis=list(dict.fromkeys(x for x in proposal.get("basis_evidence_ids",[]) if x in visible))
-            normalized=_normalize_hypotheses([proposal])
-            if not basis or not normalized: continue
-            hypothesis=normalized[0]; key=re.sub(r"[^a-z0-9]+","",hypothesis.get("title","").lower())
-            if not key or key in known: continue
-            ident="H-FOLLOWUP-"+f"{next_number:02d}"
-            while any(h.get("hypothesis_id")==ident for h in s.get("hypotheses",[])):
-                next_number+=1; ident="H-FOLLOWUP-"+f"{next_number:02d}"
-            hypothesis["hypothesis_id"]=ident; hypothesis["evidence_ids"]=[]
-            hypothesis["basis_candidate_ids"]=[value for value in basis if value in candidate_ids]
-            hypothesis["basis_evidence_ids"]=[value for value in basis if value in evidence_ids]
-            hypothesis["basis"]="model_proposal_from_visible_context"
-            hypothesis["status"]="untested"; hypothesis["confidence"]="low"
-            s.setdefault("hypotheses",[]).append(hypothesis); known.add(key); added.append(ident); next_number+=1
-        s.setdefault("coverage",{})["hypotheses_total"]=len(s.get("hypotheses",[]))
-        return added
-
     def _publish_model_findings(self,s,proposals,visible_ids=None):
         if not isinstance(proposals,list): return
         evidence={e.get("evidence_id"):e for e in _all_evidence(s) if e.get("evidence_id")}
         if visible_ids is not None: evidence={k:v for k,v in evidence.items() if k in visible_ids}
+        hypotheses={h.get("hypothesis_id"):h for h in s.get("hypotheses",[]) if h.get("hypothesis_id")}
         for proposal in proposals[:5]:
             if not isinstance(proposal,dict): continue
+            hypothesis=hypotheses.get(proposal.get("hypothesis_id"))
+            assessment=(hypothesis or {}).get("model_assessment") or (hypothesis or {}).get("deterministic_assessment")
+            if not hypothesis or not isinstance(assessment,dict) or assessment.get("status")!="supported": continue
             refs=list(dict.fromkeys(x for x in proposal.get("evidence_ids",[]) if x in evidence))
+            assessed_refs=set(assessment.get("evidence_ids",[]))
+            refs=[ref for ref in refs if ref in assessed_refs]
             if not refs: continue
-            title=str(proposal.get("title",""))[:140].strip(); observation=str(proposal.get("observation",""))[:700].strip()
-            interpretation=str(proposal.get("interpretation",""))[:800].strip()
-            if len(title)<8 or len(observation)<10 or len(interpretation)<10: continue
+            proposed_title=str(proposal.get("title",""))[:140].strip()
+            proposed_observation=str(proposal.get("observation",""))[:700].strip()
+            proposed_interpretation=str(proposal.get("interpretation",""))[:800].strip()
+            if len(proposed_title)<8 or len(proposed_observation)<10 or len(proposed_interpretation)<10: continue
             technique=proposal.get("technique_id")
             if technique not in TECHNIQUES: technique="unmapped"
+            expected_technique=hypothesis.get("technique_id")
+            if technique!="unmapped" and technique!=expected_technique: continue
+            claimed_ips=_text_ips(proposed_title+" "+proposed_observation+" "+proposed_interpretation)
+            if claimed_ips:
+                refs=[ref for ref in refs if claimed_ips <= _event_ips_set(evidence[ref])]
+            # A model-authored customer finding needs corroboration. A single
+            # record remains an investigative hypothesis/candidate, never a
+            # promoted finding, regardless of how confident the prose sounds.
+            if len(refs)<2: continue
             supporting=[evidence[x] for x in refs]
             assets=list(dict.fromkeys(str(e.get("asset")) for e in supporting if e.get("asset")))[:12]
             sources={e.get("source") for e in supporting}
             confidence=proposal.get("confidence") if proposal.get("confidence") in {"low","moderate","high"} else "low"
             if confidence=="high" and (len(refs)<3 or len(sources)<2): confidence="moderate" if len(refs)>1 else "low"
             if confidence=="moderate" and len(refs)<2: confidence="low"
+            hypothesis_title=str(hypothesis.get("title") or "telemetry-backed hypothesis")[:110]
+            title=("Evidence-supported lead: "+hypothesis_title)[:140]
+            source_names=", ".join(sorted(str(source) for source in sources if source)) or "configured telemetry"
+            observation=(f"{len(refs)} cited telemetry records from {source_names} passed deterministic entity checks "
+                f"for {hypothesis_title}.")[:700]
+            interpretation=("The cited records support continued investigation of the existing telemetry-backed hypothesis; "
+                "they do not by themselves confirm malicious activity or compromise.")
+            confidence_justification=(f"{len(refs)} matching cited record(s) across {len(sources)} source(s) passed the finding admission checks.")
+            alternatives=_clean_string_list(hypothesis.get("benign_explanations"),6,180) or ["benign administrative or expected application activity"]
+            follow_up=_clean_string_list([item.get("intent") for item in hypothesis.get("follow_ups",[]) if isinstance(item,dict)],6,180) or ["review cited evidence and validate the activity with the system owner"]
             def event_ips(events):
                 found=set(_evidence_ips(events))
                 for event in events:
@@ -1481,10 +1484,9 @@ class HuntEngine:
                 continue
             identifier="F-"+s["hunt_id"].replace("HUNT-","")+"-AI-"+hashlib.sha1((title+"|"+"|".join(sorted(refs))).encode()).hexdigest()[:8].upper()
             finding=Finding(identifier,title,"suspected",technique,assets,observation,interpretation,refs,confidence,
-                str(proposal.get("confidence_justification",""))[:500],
-                _clean_string_list(proposal.get("alternatives"),6,180) or ["benign administrative or expected application activity"],
-                _clean_string_list(proposal.get("follow_up"),6,180) or ["review cited evidence and validate the activity with the system owner"])
+                confidence_justification,alternatives,follow_up)
             encoded=encode(finding)
+            encoded["hypothesis_id"]=hypothesis.get("hypothesis_id")
             old=next((f for f in self.store.list_findings(s["hunt_id"]) if f.get("finding_id")==identifier),None)
             if old: encoded["created_at"]=old.get("created_at",encoded["created_at"]); encoded["updated_at"]=utc_now(); action="updated"
             else: action="created"
@@ -2300,6 +2302,55 @@ def _evidence_ips(events):
                     if not address.is_unspecified and not address.is_multicast and str(address) not in out: out.append(str(address))
                 except ValueError: pass
     return out[:8]
+
+
+def _text_ips(value):
+    found=set()
+    for candidate in re.findall(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)",str(value)):
+        try:
+            address=ipaddress.ip_address(candidate)
+            if not address.is_unspecified and not address.is_multicast: found.add(str(address))
+        except ValueError:
+            pass
+    return found
+
+
+def _event_ips_set(event):
+    return _text_ips(str(event.get("observation",""))+" "+json.dumps(event.get("raw",{}),ensure_ascii=False,default=str))
+
+
+def _event_entities(event):
+    entities=set(_event_ips_set(event))
+    asset=str(event.get("asset") or "").strip().lower()
+    if asset: entities.add(asset)
+    raw=event.get("raw",{}) if isinstance(event.get("raw"),dict) else {}
+    for path in ("host.name","host.hostname","hostname","computer_name","source.domain","destination.domain"):
+        value=_nested(raw,path)
+        values=value if isinstance(value,list) else [value]
+        for candidate in values:
+            text=str(candidate or "").strip().lower()
+            if text: entities.add(text)
+    return entities
+
+
+def _hypothesis_anchor_entities(state,hypothesis,evidence):
+    entities=set()
+    for key in ("candidate_assets","ips","hostnames"):
+        for value in hypothesis.get(key,[]) or []:
+            text=str(value or "").strip().lower()
+            if text: entities.add(text)
+    anchor_ids=set(hypothesis.get("basis_evidence_ids",[]) or [])
+    candidate_ids=set(hypothesis.get("basis_candidate_ids",[]) or [])
+    if hypothesis.get("candidate_id"): candidate_ids.add(hypothesis["candidate_id"])
+    for candidate in state.get("candidate_leads",[]) or []:
+        if candidate.get("candidate_id") not in candidate_ids: continue
+        anchor_ids.update(candidate.get("evidence_ids",[]) or [])
+        for value in candidate.get("assets",[]) or []:
+            text=str(value or "").strip().lower()
+            if text: entities.add(text)
+    for evidence_id in anchor_ids:
+        if evidence_id in evidence: entities.update(_event_entities(evidence[evidence_id]))
+    return entities
 
 
 def _relevant(tid,e):

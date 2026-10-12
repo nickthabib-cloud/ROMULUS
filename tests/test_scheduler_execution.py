@@ -724,6 +724,91 @@ def _investigation_state():
 
 
 class SchedulerInvestigationWorkflowTests(unittest.TestCase):
+    def test_model_finding_requires_a_supported_hypothesis_and_two_matching_records(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); state=_investigation_state()
+            state["findings"]=[]
+            state["network"]=[
+                {"evidence_id":"EV-FLOW-1","source":"tshark","observed_at":"2024-11-13T11:00:00Z",
+                    "raw":{"ip.src":"172.17.100.252","ip.dst":"185.125.190.81","tcp.dstport":"80"}},
+                {"evidence_id":"EV-OTHER","source":"arkime","observed_at":"2024-11-13T11:00:01Z",
+                    "raw":{"source":{"ip":"172.17.100.252"},"destination":{"ip":"18.239.236.88","port":443}}},
+                {"evidence_id":"EV-FLOW-2","source":"elasticsearch","observed_at":"2024-11-13T11:00:02Z",
+                    "raw":{"source":{"ip":"172.17.100.252"},"destination":{"ip":"185.125.190.81","port":80}}},
+            ]
+            hypothesis=state["hypotheses"][0]
+            hypothesis.update({"technique_id":"T1046","status":"supported lead",
+                "model_assessment":{"status":"supported","evidence_ids":["EV-FLOW-1","EV-OTHER","EV-FLOW-2"]}})
+            proposal={"hypothesis_id":hypothesis["hypothesis_id"],
+                "title":"Outbound traffic to 185.125.190.81","technique_id":"T1046",
+                "observation":"172.17.100.252 connected to 185.125.190.81 on port 80.",
+                "interpretation":"This repeated flow warrants benign-alternative review.",
+                "evidence_ids":["EV-FLOW-1","EV-OTHER","EV-FLOW-2"],"confidence":"high",
+                "confidence_justification":"Three records were cited.",
+                "alternatives":["Expected software update traffic."],"follow_up":["Identify the owning process."]}
+
+            engine._publish_model_findings(state,[proposal],set(proposal["evidence_ids"]))
+
+            self.assertEqual(len(state["findings"]),1)
+            self.assertEqual(state["findings"][0]["evidence_ids"],["EV-FLOW-1","EV-FLOW-2"])
+            self.assertEqual(state["findings"][0]["confidence"],"moderate")
+            self.assertNotIn("172.17.100.252 connected",state["findings"][0]["observation"])
+            self.assertIn(hypothesis["title"],state["findings"][0]["observation"])
+
+    def test_model_finding_rejects_unsupported_attack_mapping_and_single_record_claim(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); state=_investigation_state()
+            state["findings"]=[]
+            state["network"]=[
+                {"evidence_id":"EV-FLOW","source":"tshark","observed_at":"2024-11-13T11:00:00Z",
+                    "raw":{"ip.src":"172.17.100.252","ip.dst":"185.125.190.81","tcp.dstport":"80"}},
+                {"evidence_id":"EV-DNS","source":"elasticsearch","observed_at":"2024-11-13T11:00:01Z",
+                    "raw":{"source":{"ip":"172.17.100.252"},"destination":{"ip":"172.17.100.254","port":53}}},
+            ]
+            hypothesis=state["hypotheses"][0]
+            hypothesis.update({"technique_id":"T1046","status":"supported lead",
+                "model_assessment":{"status":"supported","evidence_ids":["EV-FLOW","EV-DNS"]}})
+            base={"hypothesis_id":hypothesis["hypothesis_id"],
+                "title":"Outbound traffic to 185.125.190.81",
+                "observation":"172.17.100.252 connected to 185.125.190.81 on port 80.",
+                "interpretation":"This flow may merit further review.","evidence_ids":["EV-FLOW","EV-DNS"],
+                "confidence":"high","confidence_justification":"Two records were cited.",
+                "alternatives":["Expected software update traffic."],"follow_up":["Identify the owning process."]}
+
+            engine._publish_model_findings(state,[{**base,"technique_id":"T1110"}],set(base["evidence_ids"]))
+            engine._publish_model_findings(state,[{**base,"technique_id":"T1046"}],set(base["evidence_ids"]))
+
+            self.assertEqual(state["findings"],[])
+
+    def test_supported_model_assessment_is_downgraded_when_citations_miss_candidate_entity(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); state=_investigation_state()
+            state["network"]=[{"evidence_id":"EV-UNRELATED","source":"arkime",
+                "raw":{"source":{"ip":"10.0.0.50"},"destination":{"ip":"10.0.0.60"}}}]
+
+            engine._apply_model_assessments(state,{"assessments":[{
+                "hypothesis_id":"H-CANDIDATE","status":"supported",
+                "evidence_ids":["EV-UNRELATED"],"rationale":"This proves the candidate."}]},{"EV-UNRELATED"})
+
+            self.assertEqual(state["hypotheses"][0]["model_assessment"]["status"],"inconclusive")
+            self.assertEqual(state["hypotheses"][0]["model_assessment"]["evidence_ids"],[])
+
+    def test_model_search_with_malformed_ipv4_in_intent_is_rejected(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory)); state=_investigation_state()
+            raw={"source":"elasticsearch","hypothesis_id":"H-CANDIDATE",
+                "candidate_id":"CL-CRITICAL","follow_up_id":"FU-CRITICAL",
+                "intent":"Correlate 172.17.10,0.252 with 185.125.190.81",
+                "fields":["process.name"],"terms":[],"ips":["185.125.190.81"],
+                "hostnames":[],"ports":[],"protocols":[],"event_codes":[],
+                "index_class":"host","anchor_evidence_ids":["EV-ANCHOR"],
+                "native_query_language":"none","native_query":""}
+
+            accepted=engine._register_model_searches(state,[raw],"iterative")
+
+            self.assertEqual(accepted,[])
+            self.assertEqual(state["coverage"]["model_search_planning"][-1]["invalid_or_unmappable"],1)
+
     def test_generic_network_follow_up_prefers_arkime_and_uses_pcaps_only_as_fallback(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             root=Path(directory); captures=(root/"one.pcap",root/"two.pcap")

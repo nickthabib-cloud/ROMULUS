@@ -501,31 +501,10 @@ class CandidateStateTests(unittest.TestCase):
         self.assertTrue(ledger["candidate_closure_ready"])
         self.assertEqual(ledger["rows"][0]["telemetry_gaps"], ["network telemetry unavailable"])
 
-    def test_model_hypothesis_accepts_visible_candidate_id_and_rejects_unknown_id(self):
+    def test_model_hypothesis_creation_is_disabled_after_candidate_instantiation(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
-            engine = _engine(Path(directory))
-            state = _planning_state("Hunt for threats")
-            state["candidate_leads"] = [{"candidate_id": "CL-VISIBLE", "evidence_ids": ["EV-1"]}]
-            proposal = {
-                "title": "Follow visible candidate",
-                "technique_id": "T1059",
-                "rationale": "The visible deterministic candidate warrants a bounded execution-context test.",
-                "expected_host": ["Process execution context"],
-                "expected_network": [],
-                "benign_explanations": ["Authorized administration"],
-                "priority": 4,
-                "basis_evidence_ids": ["CL-VISIBLE"],
-            }
-            added = engine._append_model_hypotheses(state, [proposal], {"CL-VISIBLE"})
-            self.assertEqual(len(added), 1)
-            self.assertEqual(state["hypotheses"][0]["basis_candidate_ids"], ["CL-VISIBLE"])
-            self.assertEqual(state["hypotheses"][0]["basis_evidence_ids"], [])
-
-            rejected = dict(proposal, title="Unsupported guess", basis_evidence_ids=["CL-INVENTED"])
-            self.assertEqual(engine._append_model_hypotheses(state, [rejected], {"CL-VISIBLE"}), [])
-
-            artifact = dict(proposal, title="Artifact-only guess", basis_evidence_ids=["SR-SEARCH-ONLY"])
-            self.assertEqual(engine._append_model_hypotheses(state, [artifact], {"SR-SEARCH-ONLY"}), [])
+            engine=_engine(Path(directory))
+            self.assertFalse(hasattr(engine,"_append_model_hypotheses"))
 
 
 def _aggregate_fixture():

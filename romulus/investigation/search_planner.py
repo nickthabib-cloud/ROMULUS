@@ -69,6 +69,11 @@ def validate_spec(raw: Any, *, allowed_sources: list[str], hypothesis_ids: set[s
     intent = _clean_text(raw.get("intent"), 180)
     if not intent:
         return None
+    # The intent is displayed to analysts and persisted with the task. Reject
+    # IPv4-looking typos instead of allowing a valid selector plus a fabricated
+    # address in the human-readable explanation.
+    if _contains_malformed_ipv4_token(intent):
+        return None
     intent_key=re.sub(r"[^a-z0-9]+"," ",intent.lower()).strip()
     if intent_key in {"network","host","traffic","activity","events","search","query","network flow","network traffic","host process","file transfer"}:
         return None
@@ -553,6 +558,13 @@ def _safe_ip(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _contains_malformed_ipv4_token(value: str) -> bool:
+    for candidate in re.findall(r"(?<![0-9])(?:[0-9]{1,3}[.,]){3}[0-9]{1,3}(?![0-9])", value):
+        if not _safe_ip(candidate):
+            return True
+    return False
 
 
 def _safe_host(value: str) -> bool:

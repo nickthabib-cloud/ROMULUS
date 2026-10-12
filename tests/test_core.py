@@ -138,6 +138,10 @@ class CoreTests(unittest.TestCase):
         prompt=reasoning_session.payload["messages"][1]["content"]
         self.assertIn("deferred: undirected mission",prompt)
         self.assertIn("CL-1",prompt)
+        reason_schema=reasoning_session.payload["format"]
+        self.assertEqual(reason_schema["properties"]["new_hypotheses"]["maxItems"],0)
+        finding_schema=reason_schema["properties"]["findings"]["items"]
+        self.assertIn("hypothesis_id",finding_schema["required"])
     def test_elasticsearch_query_validation(self):
         validate_query({"bool":{"should":[{"match":{"message":"SMB"}}],"minimum_should_match":1}})
         with self.assertRaises(ValueError): validate_query({"query_string":{"query":"*"}})
