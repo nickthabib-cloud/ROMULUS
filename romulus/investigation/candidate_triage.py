@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import ipaddress
-from typing import Any, Mapping, Sequence
+from typing import Any, Collection, Mapping, Sequence
 
 
 RELATIONSHIP_CAVEAT = "Temporal or entity association is an investigative lead, not causation."
@@ -142,6 +142,72 @@ def relate_candidates(
     return sorted(items, key=_candidate_sort_key)
 
 
+def select_candidate_frontier(
+    candidates: Sequence[Mapping[str, Any]],
+    limit: int = 8,
+    exploration_slots: int = 2,
+    max_per_group: int = 2,
+    preferred_ids: Collection[str] | None = None,
+    minimum_score: int = 40,
+) -> list[dict[str, Any]]:
+    """Select a stable, evidence-backed, behavior-diverse candidate frontier.
+
+    Critical and trusted candidates lead the primary pool, then preferred
+    candidates, then ordinary candidates.  Up to ``exploration_slots`` are
+    reserved for the strongest cited candidates below ``minimum_score``.
+    Excluded candidates are not mutated or closed and remain eligible later.
+    """
+    limit = max(0, int(limit))
+    exploration_slots = max(0, min(max(0, limit - 1), int(exploration_slots)))
+    max_per_group = max(1, int(max_per_group))
+    minimum_score = max(0, min(100, int(minimum_score)))
+    if not limit:
+        return []
+
+    preferred = {str(value) for value in preferred_ids or () if value}
+    unique: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        evidence_ids = [value for value in candidate.get("evidence_ids", []) if value]
+        if not candidate_id or not evidence_ids or candidate_id in unique:
+            continue
+        unique[candidate_id] = copy.deepcopy(dict(candidate))
+
+    ordered = sorted(unique.values(), key=lambda item: _frontier_sort_key(item, preferred))
+    primary = [
+        item for item in ordered
+        if _bounded_int(item.get("priority_score"), 0, 100) >= minimum_score
+        or item.get("kind") == "trusted_indicator"
+        or str(item.get("priority_tier") or "").lower() == "critical"
+    ]
+    exploratory = [item for item in ordered if item not in primary]
+    protected = [item for item in primary if _is_protected(item)]
+    ordinary_primary = [item for item in primary if not _is_protected(item)]
+    selected: list[dict[str, Any]] = []
+    selected_ids: set[str] = set()
+    group_counts: dict[str, int] = {}
+
+    def take(pool: Sequence[dict[str, Any]], capacity: int) -> None:
+        for item in pool:
+            if capacity <= 0 or len(selected) >= limit:
+                break
+            candidate_id = str(item.get("candidate_id") or "")
+            group = _frontier_group(item)
+            if candidate_id in selected_ids or group_counts.get(group, 0) >= max_per_group:
+                continue
+            selected.append(item)
+            selected_ids.add(candidate_id)
+            group_counts[group] = group_counts.get(group, 0) + 1
+            capacity -= 1
+
+    take(protected, limit)
+    reserved = min(exploration_slots, max(0, limit - len(selected)))
+    take(ordinary_primary, max(0, limit - len(selected) - reserved))
+    take(exploratory, reserved)
+    take(ordinary_primary, limit - len(selected))
+    return selected
+
+
 def _best_relationship(
     left: Mapping[str, Any],
     right: Mapping[str, Any],
@@ -254,6 +320,16 @@ def _candidate_group(candidate: Mapping[str, Any]) -> str:
     return str(candidate.get("corroboration_group") or candidate.get("analytic_id") or "").strip()
 
 
+def _frontier_group(candidate: Mapping[str, Any]) -> str:
+    return str(
+        candidate.get("corroboration_group")
+        or candidate.get("analytic_id")
+        or candidate.get("indicator_id")
+        or candidate.get("candidate_id")
+        or "unknown"
+    ).strip()
+
+
 def _group_for_id(candidates: Sequence[Mapping[str, Any]], candidate_id: str) -> str:
     for candidate in candidates:
         if str(candidate.get("candidate_id") or "") == candidate_id:
@@ -278,6 +354,28 @@ def _candidate_sort_key(candidate: Mapping[str, Any]) -> tuple[int, int, str]:
         -_bounded_int(candidate.get("priority_score"), 0, 100),
         0 if candidate.get("kind") == "trusted_indicator" else 1,
         str(candidate.get("candidate_id") or ""),
+    )
+
+
+def _frontier_sort_key(
+    candidate: Mapping[str, Any], preferred_ids: set[str],
+) -> tuple[int, int, int, int, str]:
+    protected = _is_protected(candidate)
+    candidate_id = str(candidate.get("candidate_id") or "")
+    return (
+        0 if protected else 1,
+        0 if candidate_id in preferred_ids else 1,
+        -_bounded_int(candidate.get("priority_score"), 0, 100),
+        0 if candidate.get("kind") == "trusted_indicator" else 1,
+        candidate_id,
+    )
+
+
+def _is_protected(candidate: Mapping[str, Any]) -> bool:
+    return bool(
+        candidate.get("kind") == "trusted_indicator"
+        or str(candidate.get("priority_tier") or "").lower() == "critical"
+        or _bounded_int(candidate.get("priority_score"), 0, 100) >= 90
     )
 
 

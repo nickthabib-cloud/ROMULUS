@@ -184,6 +184,72 @@ def _state():
 
 
 class CaseFileTests(unittest.TestCase):
+    def test_preferred_large_candidate_keeps_bounded_visible_ownership(self):
+        from romulus.investigation.casefile import build_case_file, visible_case_ids
+
+        evidence_ids = [f"EV-BULK-{index:02d}" for index in range(30)]
+        state = {
+            "hunt_id": "HUNT-BOUNDED",
+            "objective": "Hunt for evidence-backed suspicious behavior.",
+            "mission_mode": "undirected",
+            "candidate_leads": [
+                {
+                    "candidate_id": "CL-ORDINARY",
+                    "kind": "behavior",
+                    "corroboration_group": "ordinary",
+                    "priority_tier": "high",
+                    "priority_score": 85,
+                    "disposition": "observed",
+                    "evidence_ids": ["EV-ORDINARY"],
+                    "follow_ups": [],
+                },
+                {
+                    "candidate_id": "CL-BULK",
+                    "kind": "behavior",
+                    "corroboration_group": "bulk",
+                    "priority_tier": "medium",
+                    "priority_score": 55,
+                    "disposition": "observed",
+                    "evidence_ids": list(reversed(evidence_ids)),
+                    "follow_ups": [],
+                },
+            ],
+            "hypotheses": [{
+                "hypothesis_id": "H-BULK",
+                "candidate_id": "CL-BULK",
+                "basis_candidate_ids": ["CL-BULK"],
+                "status": "untested",
+                "candidate_evidence_ids": evidence_ids,
+            }],
+            "host": [
+                {
+                    "evidence_id": identifier,
+                    "source": "elasticsearch",
+                    "observed_at": f"2026-09-01T10:{index:02d}:00Z",
+                    "observation": "bounded synthetic record",
+                }
+                for index, identifier in enumerate(evidence_ids)
+            ] + [{
+                "evidence_id": "EV-ORDINARY",
+                "source": "elasticsearch",
+                "observed_at": "2026-09-01T11:00:00Z",
+                "observation": "ordinary record",
+            }],
+            "network": [],
+        }
+
+        case = build_case_file(state, candidate_limit=1, evidence_limit=24)
+        candidate = case["candidates"][0]
+        visible = visible_case_ids(case)
+
+        self.assertEqual(candidate["candidate_id"], "CL-BULK")
+        self.assertEqual(candidate["evidence_ids"], evidence_ids[:6])
+        self.assertEqual(candidate["evidence_total"], 30)
+        self.assertEqual(case["hypotheses"][0]["evidence_ids"], evidence_ids[:6])
+        self.assertEqual(visible["candidate"], {"CL-BULK"})
+        self.assertTrue(set(evidence_ids[:6]).issubset(visible["evidence"]))
+        self.assertTrue(set(evidence_ids[6:]).isdisjoint(visible["evidence"]))
+
     def test_candidate_anchor_evidence_is_prioritized_and_state_is_unchanged(self):
         from romulus.investigation.casefile import build_case_file, visible_case_ids
 

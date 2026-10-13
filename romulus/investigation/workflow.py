@@ -36,7 +36,7 @@ from .progress import decide_next_action, initialize_progress, record_progress, 
 from .sampling import sampling_policy
 from .synthetic import sample_evidence
 from .casefile import build_case_file, visible_case_ids
-from .candidate_triage import relate_candidates
+from .candidate_triage import relate_candidates, select_candidate_frontier
 from .reasoning import admit_reasoning
 
 
@@ -2009,13 +2009,15 @@ def _state_mission_mode(state):
 def _candidate_hypotheses(candidates,existing,evidence=None):
     """Create bounded hypotheses only from deterministic candidates with citations."""
     existing_candidates={candidate_id for hypothesis in existing for candidate_id in hypothesis.get("basis_candidate_ids",[])}
+    existing_candidates.update(hypothesis.get("candidate_id") for hypothesis in existing if hypothesis.get("candidate_id"))
     out=[]
-    for candidate in candidates:
+    remaining=[candidate for candidate in candidates
+        if candidate.get("candidate_id") not in existing_candidates]
+    for candidate in select_candidate_frontier(remaining):
         candidate_id=candidate.get("candidate_id")
         evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
         score=int(candidate.get("priority_score",0) or 0)
-        if not candidate_id or candidate_id in existing_candidates or not evidence_ids: continue
-        if score<40 and candidate.get("kind")!="trusted_indicator": continue
+        if not candidate_id or not evidence_ids: continue
         technique=next((value for value in candidate.get("attack_techniques",[]) if value in TECHNIQUES),"unmapped")
         meta=TECHNIQUES.get(technique,{})
         asset=next(iter(candidate.get("assets",[]) or []),"unknown asset")

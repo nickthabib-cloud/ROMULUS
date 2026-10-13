@@ -139,7 +139,7 @@ git commit -m "feat: relate candidates with cited evidence"
 - Consumes: `_candidate_hypotheses` selects from candidates not already represented by a hypothesis.
 - Consumes: `build_case_file` prefers unresolved-hypothesis candidates and exposes at most six evidence IDs per candidate plus `evidence_total`.
 
-- [ ] **Step 1: Write failing frontier and case-file tests**
+- [x] **Step 1: Write failing frontier and case-file tests**
 
 Add tests proving:
 
@@ -151,23 +151,23 @@ Add tests proving:
 - a candidate owning thirty evidence IDs appears with six deterministic visible IDs and `evidence_total == 30` rather than disappearing;
 - visible-case ownership excludes the other twenty-four IDs, so reasoning admission cannot cite them.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `python -m unittest tests.test_attack_discovery.CandidateFrontierTests tests.test_casefile tests.test_candidate_loop.CandidateHypothesisTests -v`
 
 Expected: FAIL because selection is score-only and large candidates are currently skipped when they exceed the evidence budget.
 
-- [ ] **Step 3: Implement shared diverse selection**
+- [x] **Step 3: Implement shared diverse selection**
 
 Implement `select_candidate_frontier` with stable sort keys, preferred-ID precedence, trusted/critical precedence, a two-per-group pass, and the two-slot exploration reserve. Filter already represented candidates before calling it in `_candidate_hypotheses`. In `build_case_file`, derive preferred IDs from unresolved hypotheses, select candidates through the shared frontier, then expose at most six sorted owned evidence IDs per candidate while recording the full owned count.
 
-- [ ] **Step 4: Run focused frontier, admission, and case-file tests**
+- [x] **Step 4: Run focused frontier, admission, and case-file tests**
 
 Run: `python -m unittest tests.test_attack_discovery.CandidateFrontierTests tests.test_casefile tests.test_candidate_loop tests.test_reasoning_admission -v`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```text
 git add romulus/investigation/candidate_triage.py romulus/investigation/workflow.py romulus/investigation/casefile.py tests/test_attack_discovery.py tests/test_casefile.py tests/test_candidate_loop.py

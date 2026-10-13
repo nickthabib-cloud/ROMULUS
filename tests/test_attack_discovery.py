@@ -234,5 +234,114 @@ class CandidateRelationshipTests(unittest.TestCase):
         self.assertEqual(recalculated, related)
 
 
+class CandidateFrontierTests(unittest.TestCase):
+    @staticmethod
+    def _candidate(identifier, group, score, *, kind="behavior"):
+        return {
+            "candidate_id": identifier,
+            "kind": kind,
+            "indicator_id": identifier if kind == "trusted_indicator" else None,
+            "analytic_id": f"AN-{group}",
+            "corroboration_group": group,
+            "priority_score": score,
+            "priority_tier": "critical" if score >= 90 else ("high" if score >= 70 else ("medium" if score >= 40 else "low")),
+            "disposition": "observed",
+            "customer_visible": kind == "trusted_indicator",
+            "evidence_ids": [f"EV-{identifier}"],
+            "assets": [f"host-{identifier.lower()}"],
+            "attack_techniques": ["T1046"],
+            "benign_explanations": ["Authorized testing"],
+            "follow_ups": [],
+            "finding_ids": [],
+            "title": f"Candidate {identifier}",
+            "description": "Synthetic evidence-backed behavior.",
+        }
+
+    def test_repetitive_high_scores_do_not_crowd_distinct_groups(self):
+        from romulus.investigation.candidate_triage import select_candidate_frontier
+
+        scans = [self._candidate(f"CL-SCAN-{index}", "scan", 98 - index) for index in range(8)]
+        distinct = [
+            self._candidate("CL-DNS", "dns", 72),
+            self._candidate("CL-AUTH", "auth", 68),
+            self._candidate("CL-EXEC", "execution", 64),
+        ]
+
+        selected = select_candidate_frontier(scans + distinct)
+        groups = [item["corroboration_group"] for item in selected]
+
+        self.assertLessEqual(groups.count("scan"), 2)
+        self.assertTrue({"dns", "auth", "execution"}.issubset(groups))
+
+    def test_two_strongest_subthreshold_candidates_use_exploration_reserve(self):
+        from romulus.investigation.candidate_triage import select_candidate_frontier
+
+        primary = [self._candidate(f"CL-HIGH-{index}", f"high-{index}", 80 - index) for index in range(6)]
+        exploratory = [
+            self._candidate("CL-LOW-A", "low-a", 39),
+            self._candidate("CL-LOW-B", "low-b", 35),
+            self._candidate("CL-LOW-C", "low-c", 30),
+        ]
+
+        selected = select_candidate_frontier(primary + exploratory)
+        selected_ids = [item["candidate_id"] for item in selected]
+
+        self.assertEqual(len(selected), 8)
+        self.assertIn("CL-LOW-A", selected_ids)
+        self.assertIn("CL-LOW-B", selected_ids)
+        self.assertNotIn("CL-LOW-C", selected_ids)
+
+    def test_trusted_critical_then_preferred_candidates_precede_ordinary(self):
+        from romulus.investigation.candidate_triage import select_candidate_frontier
+
+        candidates = [
+            self._candidate("CL-ORDINARY", "ordinary", 85),
+            self._candidate("CL-PREFERRED", "preferred", 55),
+            self._candidate("CL-CRITICAL", "critical", 92),
+            self._candidate("CL-TRUSTED", "trusted", 95, kind="trusted_indicator"),
+        ]
+
+        selected = select_candidate_frontier(candidates, preferred_ids={"CL-PREFERRED"})
+        selected_ids = [item["candidate_id"] for item in selected]
+
+        self.assertEqual(set(selected_ids[:2]), {"CL-TRUSTED", "CL-CRITICAL"})
+        self.assertLess(selected_ids.index("CL-PREFERRED"), selected_ids.index("CL-ORDINARY"))
+
+    def test_exploration_never_displaces_critical_candidates(self):
+        from romulus.investigation.candidate_triage import select_candidate_frontier
+
+        critical = [
+            self._candidate(f"CL-CRITICAL-{index}", f"critical-{index}", 99 - index)
+            for index in range(8)
+        ]
+        exploratory = [self._candidate("CL-LOW-A", "low-a", 39), self._candidate("CL-LOW-B", "low-b", 38)]
+
+        selected = select_candidate_frontier(critical + exploratory)
+
+        self.assertEqual(
+            {item["candidate_id"] for item in selected},
+            {item["candidate_id"] for item in critical},
+        )
+
+    def test_represented_candidates_leave_excluded_candidates_for_later_pass(self):
+        from romulus.investigation.workflow import _candidate_hypotheses
+
+        candidates = [self._candidate(f"CL-SCAN-{index}", "scan", 90 - index) for index in range(5)]
+        candidates.extend(self._candidate(f"CL-GROUP-{index}", f"group-{index}", 70 - index) for index in range(3))
+
+        first = _candidate_hypotheses(candidates, [])
+        second = _candidate_hypotheses(candidates, first)
+        third = _candidate_hypotheses(candidates, first + second)
+        first_ids = {item["candidate_id"] for item in first}
+        second_ids = {item["candidate_id"] for item in second}
+        third_ids = {item["candidate_id"] for item in third}
+
+        self.assertTrue(first_ids)
+        self.assertTrue(second_ids)
+        self.assertTrue(first_ids.isdisjoint(second_ids))
+        self.assertTrue((first_ids | second_ids).isdisjoint(third_ids))
+        self.assertEqual(first_ids | second_ids | third_ids, {item["candidate_id"] for item in candidates})
+
+
 if __name__ == "__main__":
     unittest.main()
