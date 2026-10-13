@@ -295,6 +295,108 @@ class CustomerWordReportTests(unittest.TestCase):
         self.assertNotIn("LOW-PRIORITY-INTERNAL-SENTINEL", primary)
         self.assertIn("LOW-PRIORITY-INTERNAL-SENTINEL", technical)
 
+    def test_finalized_anomaly_report_is_separate_bounded_and_analyst_readable(self):
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        state["findings"] = []
+        state["candidate_leads"] = [{
+            "candidate_id": "CL-ANOMALOUS",
+            "title": "Unusual temporary execution",
+            "description": "A process executed from a temporary path.",
+            "classification": "anomalous",
+            "classification_reason": "The behavior is unusual but needs independent evidence.",
+            "investigation_status": "follow_up_exhausted",
+            "evidence_ids": ["EV-ANOMALOUS"],
+            "benign_explanations": ["A software installer may use a temporary path."],
+            "telemetry_gaps": ["Parent process telemetry was unavailable."],
+            "follow_ups": [{
+                "follow_up_id": "FU-ANOMALOUS",
+                "intent": "Review the parent process and signer.",
+                "status": "blocked",
+                "history": [{"task_id": "ST-ANOMALOUS", "status": "failed", "returned": 0}],
+            }],
+            "finding_ids": [],
+        }]
+        state["host"] = [{
+            "evidence_id": "EV-ANOMALOUS",
+            "source": "elasticsearch",
+            "observed_at": "2026-10-10T12:34:56Z",
+            "asset": "WS-22",
+            "observation": "Unsigned process launched from a temporary directory.",
+            "provenance": {"search_id": "ST-ANOMALOUS", "index": "host-events", "query": "RAW-QUERY-SECRET"},
+            "raw": {"packet_payload": "RAW-PACKET-SECRET", "password": "CREDENTIAL-SECRET"},
+        }]
+        state["search_tasks"] = {"ST-ANOMALOUS": {
+            "task_id": "ST-ANOMALOUS", "candidate_ids": ["CL-ANOMALOUS"],
+            "follow_up_ids": ["FU-ANOMALOUS"], "intent": "Review signer context.",
+            "query_spec": {"password": "TASK-QUERY-SECRET"},
+        }}
+        state["search_outcomes"] = [{
+            "task_id": "ST-ANOMALOUS", "status": "failed", "returned_total": 0,
+            "matched_total": 0, "reason": "source unavailable",
+        }]
+        state["reasoning_history"] = [{"private": "MODEL-INTERNAL-SECRET"}]
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths = generate_report(state, Path(directory))
+            anomaly_path = next(path for path in paths if path.parent.name == "anomalous")
+            anomaly = anomaly_path.read_text(encoding="utf-8")
+
+        self.assertEqual(len(paths), 3)
+        self.assertTrue(state["report_manifest"]["anomaly_expected"])
+        self.assertIn(state["report_manifest"]["generation_stamp"], anomaly_path.name)
+        for expected in (
+            "Investigation: HUNT-CUSTOMER",
+            "Hunt window: 2026-10-10T00:00:00Z through 2026-10-11T00:00:00Z",
+            "CL-ANOMALOUS",
+            "EV-ANOMALOUS",
+            "Unsigned process launched from a temporary directory.",
+            "Why unusual",
+            "Performed searches and outcomes",
+            "A software installer may use a temporary path.",
+            "Parent process telemetry was unavailable.",
+            "Review the parent process and signer.",
+            "lead, not a conclusion",
+        ):
+            self.assertIn(expected, anomaly)
+        for forbidden in (
+            "RAW-QUERY-SECRET", "RAW-PACKET-SECRET", "CREDENTIAL-SECRET",
+            "TASK-QUERY-SECRET", "MODEL-INTERNAL-SECRET", "query_spec",
+        ):
+            self.assertNotIn(forbidden, anomaly)
+
+    def test_anomaly_report_requires_finalization_and_unresolved_anomalies(self):
+        from romulus.reporting.report import generate_report
+
+        base = self._state()
+        base["findings"] = []
+        base["candidate_leads"] = [{
+            "candidate_id": "CL-ANOMALOUS", "classification": "anomalous",
+            "investigation_status": "new", "title": "Unresolved anomaly",
+            "evidence_ids": ["EV-RAW-001"], "finding_ids": [],
+        }]
+
+        cases = []
+        partial = dict(base, status="partial")
+        cases.append(("resumable partial", partial, False))
+        finalized = dict(base, status="partial", finalized_at="2026-10-13T00:00:00Z")
+        cases.append(("finalized partial", finalized, True))
+        resolved = dict(base, candidate_leads=[dict(base["candidate_leads"][0], investigation_status="resolved")])
+        cases.append(("resolved anomaly", resolved, False))
+        reportable = dict(base, candidate_leads=[dict(
+            base["candidate_leads"][0], classification="suspicious"
+        )])
+        cases.append(("reportable only", reportable, False))
+
+        for label, state, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory(
+                dir=Path(__file__).resolve().parent
+            ) as directory:
+                paths = generate_report(state, Path(directory))
+                self.assertEqual(len(paths), 3 if expected else 2)
+                self.assertEqual(state["report_manifest"]["anomaly_expected"], expected)
+
     def test_technical_report_records_reasoning_admission_and_critic_gap_aggregates(self):
         from romulus.reporting.report import _content
 

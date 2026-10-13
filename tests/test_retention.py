@@ -73,6 +73,25 @@ class RetentionTests(unittest.TestCase):
         document.save(docx_path)
         return [str(docx_path), str(text_path)]
 
+    def _reports_with_anomaly(self, root: Path, hunt_id: str, stamp="20261013T000000Z"):
+        from docx import Document
+
+        reports = root / "reports"
+        anomaly_dir = reports / "anomalous"
+        anomaly_dir.mkdir(parents=True, exist_ok=True)
+        text_path = reports / f"{hunt_id}-{stamp}.txt"
+        text_path.write_text(f"ROMULUS technical report\nInvestigation: {hunt_id}\n", encoding="utf-8")
+        docx_path = reports / f"{hunt_id}-{stamp}.docx"
+        document = Document()
+        document.add_paragraph(f"Investigation: {hunt_id}")
+        document.save(docx_path)
+        anomaly_path = anomaly_dir / f"{hunt_id}-anomalous-leads-{stamp}.txt"
+        anomaly_path.write_text(
+            f"ROMULUS ANOMALOUS LEAD QUEUE\nInvestigation: {hunt_id}\n",
+            encoding="utf-8",
+        )
+        return [str(docx_path), str(text_path), str(anomaly_path)]
+
     def _state(self, report_paths, status="completed"):
         return {
             "hunt_id": "HUNT-ONE",
@@ -91,9 +110,11 @@ class RetentionTests(unittest.TestCase):
             }],
             "candidate_leads": [{
                 "candidate_id": "CL-ONE", "title": "Cited lead", "customer_visible": True,
+                "classification": "suspicious", "investigation_status": "resolved",
                 "evidence_ids": ["EV-KEEP"], "disposition": "corroborated",
             }, {
                 "candidate_id": "CL-INTERNAL", "title": "Working lead", "customer_visible": False,
+                "classification": "anomalous", "investigation_status": "new",
                 "evidence_ids": ["EV-DROP"], "disposition": "unresolved",
             }],
             "host": [{"evidence_id": "EV-KEEP"}, {"evidence_id": "EV-DROP"}],
@@ -159,6 +180,86 @@ class RetentionTests(unittest.TestCase):
                 }],
             },
         }
+
+    def test_anomaly_report_is_verified_preserved_and_does_not_retain_working_evidence(self):
+        from romulus.retention import apply_retention
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            store = Store(root / "data", root / "logs")
+            paths = self._reports_with_anomaly(root, "HUNT-ONE")
+            state = self._state(paths)
+            state["report_manifest"] = {
+                "generation_stamp": "20261013T000000Z", "anomaly_expected": True,
+            }
+            store.save_state("HUNT-ONE", state)
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-KEEP", "raw": {"keep": True}})
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"discard": True}})
+
+            compacted = apply_retention(store, state, policy="compact", automatic=True)
+
+            self.assertEqual(compacted["report_manifest"], state["report_manifest"])
+            self.assertEqual(len(compacted["retention"]["reports_verified"]), 3)
+            self.assertTrue(all(row["sha256"] for row in compacted["retention"]["reports_verified"]))
+            self.assertTrue(all(Path(path).is_file() for path in compacted["report_paths"]))
+            self.assertEqual(
+                [row["evidence_id"] for row in store.list_evidence("HUNT-ONE")],
+                ["EV-KEEP"],
+            )
+            self.assertEqual(
+                [row["candidate_id"] for row in compacted["candidate_leads"]],
+                ["CL-ONE"],
+            )
+
+    def test_anomaly_report_contract_failures_preserve_prior_state_and_evidence(self):
+        from romulus.retention import RetentionError, apply_retention
+
+        mutations = {}
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            valid = self._reports_with_anomaly(root, "HUNT-ONE")
+            anomaly = Path(valid[2])
+            empty = anomaly.with_name("HUNT-ONE-anomalous-leads-20261013T000001Z.txt")
+            empty.write_text("", encoding="utf-8")
+            wrong_hunt = anomaly.with_name("HUNT-TWO-anomalous-leads-20261013T000000Z.txt")
+            wrong_hunt.write_text("Investigation: HUNT-TWO\n", encoding="utf-8")
+            wrong_dir = root / "reports" / "HUNT-ONE-anomalous-leads-20261013T000000Z.txt"
+            wrong_dir.write_text("Investigation: HUNT-ONE\n", encoding="utf-8")
+            wrong_generation = anomaly.with_name("HUNT-ONE-anomalous-leads-20261013T000002Z.txt")
+            wrong_generation.write_text("Investigation: HUNT-ONE\n", encoding="utf-8")
+            mutations = {
+                "missing or undeclared": valid[:2],
+                "empty": valid[:2] + [str(empty)],
+                "wrong hunt": valid[:2] + [str(wrong_hunt)],
+                "wrong directory": valid[:2] + [str(wrong_dir)],
+                "duplicate": valid + [valid[2]],
+                "wrong generation": valid[:2] + [str(wrong_generation)],
+            }
+            for label, paths in mutations.items():
+                with self.subTest(label=label):
+                    store = Store(root / f"data-{label}", root / f"logs-{label}")
+                    state = self._state(paths)
+                    state["report_manifest"] = {
+                        "generation_stamp": "20261013T000000Z", "anomaly_expected": True,
+                    }
+                    store.save_state("HUNT-ONE", state)
+                    store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"preserve": True}})
+                    with self.assertRaises(RetentionError):
+                        apply_retention(store, state, policy="compact", automatic=True)
+                    self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
+                    self.assertIn("host", store.load_state("HUNT-ONE"))
+
+            store = Store(root / "data-unexpected", root / "logs-unexpected")
+            state = self._state(valid)
+            state["report_manifest"] = {
+                "generation_stamp": "20261013T000000Z", "anomaly_expected": False,
+            }
+            store.save_state("HUNT-ONE", state)
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP", "raw": {"preserve": True}})
+            with self.assertRaises(RetentionError):
+                apply_retention(store, state, policy="compact", automatic=True)
+            self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
+            self.assertIn("host", store.load_state("HUNT-ONE"))
 
     def _checkpoint_rows(self, store: Store):
         db=sqlite3.connect(store.checkpoint_path)

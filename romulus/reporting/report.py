@@ -3,18 +3,30 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 from ..intelligence.knowledge import TECHNIQUES, ATTACK_RELEASE, ATTACK_RELEASE_DATE, ATTACK_DOMAIN
+from ..investigation.classification import unresolved_anomalous_candidates
 from .report_items import build_report_items
 
 def generate_report(state: dict[str, Any], output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True,exist_ok=True)
-    state=_xml_safe(state)
     hid=state.get("hunt_id","UNKNOWN"); stamp=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    anomalies=unresolved_anomalous_candidates(state.get("candidate_leads",[]) or [])
+    finalized=state.get("status")=="completed" or bool(state.get("finalized_at"))
+    anomaly_expected=bool(finalized and anomalies)
+    state["report_manifest"]={"generation_stamp":stamp,"anomaly_expected":anomaly_expected}
+    state=_xml_safe(state)
     text_path=output_dir/f"{hid}-{stamp}.txt"; docx_path=output_dir/f"{hid}-{stamp}.docx"
     content=_content(state)
     text_path.write_text(content,encoding="utf-8")
     try: _docx(state,docx_path)
     except ImportError as e: raise RuntimeError("python-docx is required to generate the Word deliverable") from e
-    return [docx_path,text_path]
+    paths=[docx_path,text_path]
+    if anomaly_expected:
+        anomaly_dir=output_dir/"anomalous"; anomaly_dir.mkdir(parents=True,exist_ok=True)
+        anomaly_path=anomaly_dir/f"{hid}-anomalous-leads-{stamp}.txt"
+        anomaly_path.write_text(_anomaly_content(state,unresolved_anomalous_candidates(
+            state.get("candidate_leads",[]) or [])),encoding="utf-8")
+        paths.append(anomaly_path)
+    return paths
 
 def _xml_safe(value):
     """Remove characters forbidden by XML 1.0 from telemetry-derived text."""
@@ -105,6 +117,92 @@ def _report_item_lines(item):
         f"  Recommended actions: {_join_text(item.get('recommended_actions'), '; ') or 'analyst review'}",
     ]
     return lines
+
+
+def _anomaly_content(state, candidates):
+    hunt_id=str(state.get("hunt_id") or "UNKNOWN")
+    coverage=state.get("coverage",{}) if isinstance(state.get("coverage"),dict) else {}
+    evidence_index={
+        str(row.get("evidence_id")):row
+        for row in list(state.get("host",[]) or [])+list(state.get("network",[]) or [])
+        if isinstance(row,dict) and row.get("evidence_id")
+    }
+    tasks=state.get("search_tasks",{}) if isinstance(state.get("search_tasks"),dict) else {}
+    outcomes={
+        str(row.get("task_id")):row for row in state.get("search_outcomes",[]) or []
+        if isinstance(row,dict) and row.get("task_id")
+    }
+    lines=[
+        "ROMULUS ANOMALOUS LEAD QUEUE",
+        f"Investigation: {hunt_id}",
+        f"Hunt window: {coverage.get('time_scope') or 'not recorded'}",
+        "Warning: Each entry is an anomalous lead, not a conclusion. Validate it before escalation or action.",
+    ]
+    for candidate in candidates:
+        candidate_id=str(candidate.get("candidate_id") or "unknown")
+        owned=list(dict.fromkeys(str(value) for value in candidate.get("evidence_ids",[]) if value))[:12]
+        lines += [
+            "",
+            f"LEAD {candidate_id}: {_bounded_text(candidate.get('title'),240) or 'Untitled anomaly'}",
+            f"Status: {candidate.get('investigation_status') or 'new'}",
+            "Why unusual: "+(_bounded_text(candidate.get("classification_reason"),500)
+                or _bounded_text(candidate.get("description"),500)
+                or "The deterministic behavior did not meet the suspicious-report policy without additional context."),
+            "Observed facts:",
+        ]
+        facts=0
+        for evidence_id in owned:
+            event=evidence_index.get(evidence_id,{})
+            provenance=event.get("provenance",{}) if isinstance(event.get("provenance"),dict) else {}
+            provenance_bits=[
+                f"{key}={_bounded_text(provenance.get(key),160)}"
+                for key in ("search_id","lead_id","index","document_id","session_id","pcap")
+                if provenance.get(key) is not None
+            ]
+            lines.append(
+                f"- {evidence_id}: {_bounded_text(event.get('observation'),500) or 'Owned evidence record'}; "
+                f"source={_bounded_text(event.get('source'),80) or 'unknown'}; "
+                f"time={_bounded_text(event.get('observed_at'),80) or 'not recorded'}; "
+                f"asset={_bounded_text(event.get('asset'),160) or 'not recorded'}; "
+                f"provenance={'; '.join(provenance_bits) or 'compact provenance unavailable'}."
+            )
+            facts+=1
+        if not facts: lines.append("- No owned evidence fact was available in the bounded retained state.")
+        lines.append("Performed searches and outcomes:")
+        relevant=[]
+        for task_id,task in sorted(tasks.items()):
+            if not isinstance(task,dict) or candidate_id not in (task.get("candidate_ids") or []): continue
+            outcome=outcomes.get(str(task_id),{})
+            relevant.append(
+                f"- {task_id}: intent={_bounded_text(task.get('intent'),300) or 'not recorded'}; "
+                f"status={outcome.get('status') or task.get('status') or 'not recorded'}; "
+                f"returned={outcome.get('returned_total','not recorded')}; matched={outcome.get('matched_total','not recorded')}; "
+                f"capped={bool(outcome.get('capped'))}; timed_out={bool(outcome.get('timed_out'))}; "
+                f"result={_bounded_text(outcome.get('reason') or outcome.get('error_kind'),240) or 'no additional detail'}."
+            )
+        lines += relevant or ["- No candidate-owned search outcome was recorded."]
+        lines.append("Benign alternatives: "+(
+            _join_text(_bounded_values(candidate.get("benign_explanations"),300),"; ")
+            or "none recorded"))
+        lines.append("Coverage gaps: "+(
+            _join_text(_bounded_values(candidate.get("telemetry_gaps"),300),"; ")
+            or "none recorded"))
+        pivots=[
+            _bounded_text(row.get("intent"),300) for row in candidate.get("follow_ups",[]) or []
+            if isinstance(row,dict) and row.get("intent")
+        ] or _bounded_values(candidate.get("follow_up"),300)
+        lines.append("Next pivot: "+(_join_text(pivots,"; ") or "Analyst review of the cited evidence and adjacent activity."))
+    return "\n".join(lines)+"\n"
+
+
+def _bounded_text(value,limit):
+    if value is None: return ""
+    return " ".join(str(value).split())[:max(0,int(limit))]
+
+
+def _bounded_values(value,limit):
+    values=value if isinstance(value,(list,tuple,set)) else [value]
+    return [_bounded_text(item,limit) for item in values if _bounded_text(item,limit)]
 
 
 def _supported_paths(state):
