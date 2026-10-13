@@ -143,6 +143,44 @@ def _rejection_reasons(result, proposal_id):
 
 
 class ReasoningAdmissionTests(unittest.TestCase):
+    def test_existing_hypothesis_search_cannot_borrow_another_candidate_or_unseen_entity(self):
+        from romulus.investigation.reasoning import admit_reasoning
+
+        borrowed = _search("P-BORROW", "H-BASE", candidate_id="", follow_up_id="",
+            anchor_evidence_ids=["EV-OTHER"], ips=["203.0.113.5"], hostnames=[])
+        invented = _search("P-INVENT", "H-BASE", follow_up_id="",
+            ips=["198.51.100.99"], hostnames=[])
+
+        result = admit_reasoning(_case_file(), _investigator(searches=[borrowed, invented]),
+            _critic("P-BORROW", "P-INVENT"), _case_file()["hypotheses"])
+
+        self.assertEqual(result["searches"], [])
+        borrowed_reasons = _rejection_reasons(result, "P-BORROW")
+        self.assertTrue({"cross_candidate_citation", "search_anchor_mismatch"} & borrowed_reasons)
+        self.assertIn("search_entity_mismatch", _rejection_reasons(result, "P-INVENT"))
+
+    def test_mapped_hypothesis_cannot_publish_an_unmapped_finding(self):
+        from romulus.investigation.reasoning import admit_reasoning
+
+        case_file = _case_file()
+        case_file["hypotheses"][0]["status"] = "supported"
+        finding = {
+            "proposal_id": "P-FIND", "hypothesis_id": "H-BASE",
+            "title": "Shell activity", "technique_id": "unmapped",
+            "observation": "Two records support review of the shell activity.",
+            "interpretation": "The sequence remains an investigative lead.",
+            "evidence_ids": ["EV-ONE", "EV-TWO"], "confidence": "moderate",
+            "confidence_justification": "Two cited records.",
+            "alternatives": ["Authorized maintenance"],
+            "follow_up": ["Validate with the system owner."],
+        }
+
+        result = admit_reasoning(case_file, _investigator(findings=[finding]),
+            _critic("P-FIND"), case_file["hypotheses"])
+
+        self.assertEqual(result["findings"], [])
+        self.assertIn("unsupported_attack_mapping", _rejection_reasons(result, "P-FIND"))
+
     def test_admits_critic_approved_competing_hypothesis_owned_by_visible_candidate(self):
         from romulus.investigation.reasoning import admit_reasoning
 

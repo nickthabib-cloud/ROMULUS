@@ -1421,72 +1421,74 @@ class HuntEngine:
             return working
 
         admission=admit_reasoning(case_file,investigator,critic,s.get("hypotheses",[]))
-        working["admission"]=admission
-        prior_hypotheses=list(s.get("hypotheses",[]))
+        cycle=copy.deepcopy(s)
+        prior_hypotheses=list(cycle.get("hypotheses",[]))
         tentative=list(admission.get("new_hypotheses",[]))
         tentative_ids={row.get("hypothesis_id") for row in tentative if row.get("hypothesis_id")}
-        scheduler_snapshot={key:copy.deepcopy(s.get(key)) for key in
-            ("search_tasks","search_queue","scheduler_history","candidate_leads")}
-        coverage=s.setdefault("coverage",{})
-        had_planning="model_search_planning" in coverage
-        planning_snapshot=copy.deepcopy(coverage.get("model_search_planning"))
-        s["hypotheses"]=prior_hypotheses+tentative
+        cycle["hypotheses"]=prior_hypotheses+tentative
         try:
-            accepted_tasks=self._register_model_searches(s,admission.get("searches",[]),"grounded",
+            planning=cycle.setdefault("coverage",{}).setdefault("model_search_planning",[])
+            planning_before=len(planning)
+            accepted_tasks=self._register_model_searches(cycle,admission.get("searches",[]),"grounded",
                 visible_candidate_ids=visible.get("candidate",set()),
                 visible_evidence_ids=visible.get("evidence",set()),
                 new_hypothesis_ids=tentative_ids)
-        except Exception as exc:
-            accepted_tasks=[]
-            for key,value in scheduler_snapshot.items():
-                if value is None: s.pop(key,None)
-                else: s[key]=value
-            if had_planning: coverage["model_search_planning"]=planning_snapshot
-            else: coverage.pop("model_search_planning",None)
-            working["model_error"]="search_registration_"+type(exc).__name__
-        planning=s.get("coverage",{}).get("model_search_planning",[])
-        last_plan=planning[-1] if planning else {}
-        accepted_proposal_ids=set(last_plan.get("accepted_proposal_ids",[]) or [])
-        admitted_searches=[row for row in admission.get("searches",[])
-            if row.get("proposal_id") in accepted_proposal_ids]
-        committed_ids={row.get("hypothesis_id") for row in admitted_searches
-            if row.get("hypothesis_id") in tentative_ids}
-        committed_hypotheses=[row for row in tentative if row.get("hypothesis_id") in committed_ids]
-        dropped_hypotheses=[row for row in tentative if row.get("hypothesis_id") not in committed_ids]
-        s["hypotheses"]=prior_hypotheses+committed_hypotheses
-        for row in admission.get("searches",[]):
-            if row.get("proposal_id") not in accepted_proposal_ids:
+            planning=cycle.get("coverage",{}).get("model_search_planning",[])
+            if len(planning)!=planning_before+1:
+                raise RuntimeError("model search registration did not return current-cycle metadata")
+            current_plan=planning[planning_before]
+            accepted_proposal_ids=set(current_plan.get("accepted_proposal_ids",[]) or [])
+            admitted_searches=[row for row in admission.get("searches",[])
+                if row.get("proposal_id") in accepted_proposal_ids]
+            committed_ids={row.get("hypothesis_id") for row in admitted_searches
+                if row.get("hypothesis_id") in tentative_ids}
+            committed_hypotheses=[row for row in tentative if row.get("hypothesis_id") in committed_ids]
+            dropped_hypotheses=[row for row in tentative if row.get("hypothesis_id") not in committed_ids]
+            cycle["hypotheses"]=prior_hypotheses+committed_hypotheses
+            for row in admission.get("searches",[]):
+                if row.get("proposal_id") not in accepted_proposal_ids:
+                    admission.setdefault("rejections",[]).append({"proposal_id":row.get("proposal_id"),
+                        "kind":"search","reason_codes":["existing_validation_or_deduplication"]})
+            for row in dropped_hypotheses:
                 admission.setdefault("rejections",[]).append({"proposal_id":row.get("proposal_id"),
-                    "kind":"search","reason_codes":["existing_validation_or_deduplication"]})
-        for row in dropped_hypotheses:
-            admission.setdefault("rejections",[]).append({"proposal_id":row.get("proposal_id"),
-                "kind":"new_hypothesis","reason_codes":["no_registered_scheduler_task"]})
-        admission["new_hypotheses"]=committed_hypotheses
-        admission["searches"]=admitted_searches
-        admission_summary=admission.setdefault("summary",{})
-        admission_summary["new_hypotheses_admitted"]=len(committed_hypotheses)
-        admission_summary["searches_admitted"]=len(admitted_searches)
-        admission_summary["rejections"]=len(admission.get("rejections",[]))
+                    "kind":"new_hypothesis","reason_codes":["no_registered_scheduler_task"]})
+            admission["new_hypotheses"]=committed_hypotheses
+            admission["searches"]=admitted_searches
+            admission_summary=admission.setdefault("summary",{})
+            admission_summary["new_hypotheses_admitted"]=len(committed_hypotheses)
+            admission_summary["searches_admitted"]=len(admitted_searches)
+            admission_summary["rejections"]=len(admission.get("rejections",[]))
+
+            self._apply_model_assessments(cycle,{"assessments":admission.get("assessments",[])},
+                visible.get("evidence",set()))
+            findings_before=len(cycle.get("findings",[]))
+            self._publish_model_findings(cycle,admission.get("findings",[]),visible.get("evidence",set()))
+            findings_admitted=max(0,len(cycle.get("findings",[]))-findings_before)
+            cycle.setdefault("coverage",{})["hypotheses_total"]=len(cycle.get("hypotheses",[]))
+
+            admitted_counts={
+                "hypotheses":len(committed_hypotheses),
+                "assessments":len(admission.get("assessments",[])),
+                "searches":len(admitted_searches),
+                "findings":findings_admitted,
+            }
+            cycle_summary=self._reasoning_summary(cycle)
+            for kind,count in admitted_counts.items():
+                cycle_summary[f"admitted_{kind}"]+=count
+                cycle_summary[f"rejected_{kind}"]+=max(0,proposed[kind]-count)
+            cycle_summary["last_gap"]=None
+        except Exception as exc:
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="reasoning_commit_"+type(exc).__name__
+            for kind,count in proposed.items(): summary[f"rejected_{kind}"]+=count
+            working["admission"]=None
+            working["model_error"]="reasoning_commit_"+type(exc).__name__
+            return working
+
+        working["admission"]=admission
         working["registered_task_ids"]=[row.get("task_id") for row in accepted_tasks if row.get("task_id")]
         working["created_hypothesis_ids"]=[row.get("hypothesis_id") for row in committed_hypotheses]
-
-        self._apply_model_assessments(s,{"assessments":admission.get("assessments",[])},
-            visible.get("evidence",set()))
-        findings_before=len(s.get("findings",[]))
-        self._publish_model_findings(s,admission.get("findings",[]),visible.get("evidence",set()))
-        findings_admitted=max(0,len(s.get("findings",[]))-findings_before)
-        s.setdefault("coverage",{})["hypotheses_total"]=len(s.get("hypotheses",[]))
-
-        admitted_counts={
-            "hypotheses":len(committed_hypotheses),
-            "assessments":len(admission.get("assessments",[])),
-            "searches":len(admitted_searches),
-            "findings":findings_admitted,
-        }
-        for kind,count in admitted_counts.items():
-            summary[f"admitted_{kind}"]+=count
-            summary[f"rejected_{kind}"]+=max(0,proposed[kind]-count)
-        summary["last_gap"]=None
+        s.clear(); s.update(cycle)
         return working
 
     def _reasoning_call_error(self,s,stage):
@@ -1569,8 +1571,7 @@ class HuntEngine:
             refs=list(dict.fromkeys(x for x in item.get("evidence_ids",[]) if isinstance(x,str) and x in valid_evidence))
             if status in {"supported","contradicted"}:
                 anchors=_hypothesis_anchor_entities(s,hypothesis,evidence)
-                if anchors:
-                    refs=[ref for ref in refs if anchors & _event_entities(evidence[ref])]
+                refs=[ref for ref in refs if anchors and anchors & _event_entities(evidence[ref])]
             if status in {"supported","contradicted"} and not refs:
                 status="inconclusive"
             assessment={"status":status,"rationale":str(item.get("rationale",""))[:500],"evidence_ids":refs,
@@ -1606,10 +1607,11 @@ class HuntEngine:
             proposed_observation=str(proposal.get("observation",""))[:700].strip()
             proposed_interpretation=str(proposal.get("interpretation",""))[:800].strip()
             if len(proposed_title)<8 or len(proposed_observation)<10 or len(proposed_interpretation)<10: continue
-            technique=proposal.get("technique_id")
-            if technique not in TECHNIQUES: technique="unmapped"
             expected_technique=hypothesis.get("technique_id")
-            if technique!="unmapped" and technique!=expected_technique: continue
+            if expected_technique in TECHNIQUES: technique=expected_technique
+            elif expected_technique=="unmapped": technique="unmapped"
+            else: continue
+            if proposal.get("technique_id")!=technique: continue
             claimed_ips=_text_ips(proposed_title+" "+proposed_observation+" "+proposed_interpretation)
             if claimed_ips:
                 refs=[ref for ref in refs if claimed_ips <= _event_ips_set(evidence[ref])]

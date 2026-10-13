@@ -275,12 +275,15 @@ def _hypotheses(
     for raw in _rows(raw_hypotheses):
         hypothesis_id = _text(raw.get("hypothesis_id"), 120)
         candidate_id = _text(raw.get("candidate_id"), 120)
+        if not candidate_id:
+            candidate_id = next(iter(_strings(raw.get("basis_candidate_ids"), 120, 4)), "")
         if not hypothesis_id or hypothesis_id in seen:
             continue
         if candidate_id and candidate_id not in visible_candidate_ids:
             continue
         cited = _strings(
-            raw.get("candidate_evidence_ids") or raw.get("evidence_ids"), 120, 100
+            raw.get("candidate_evidence_ids") or raw.get("basis_evidence_ids")
+            or raw.get("evidence_ids"), 120, 100
         )
         if cited and not set(cited).issubset(visible_evidence_ids):
             continue
@@ -310,6 +313,10 @@ def _hypotheses(
             "falsifying_observations": _strings(raw.get("falsifying_observations"), 240, 8),
             "benign_explanations": _strings(raw.get("benign_explanations"), 240, 8),
             "analytic_goal": _text(raw.get("analytic_goal"), 360),
+            "anchor_entities": _strings(raw.get("anchor_entities"), 200, 24),
+            "candidate_assets": _strings(raw.get("candidate_assets"), 160, 20),
+            "ips": _strings(raw.get("ips"), 80, 8),
+            "hostnames": _strings(raw.get("hostnames"), 255, 8),
             "assessment": compact_assessment,
         })
         seen.add(hypothesis_id)

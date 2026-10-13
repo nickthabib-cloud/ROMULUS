@@ -1129,6 +1129,103 @@ def _grounded_model_module(investigator, critic, calls, *, critic_error=None):
 
 
 class SchedulerInvestigationWorkflowTests(unittest.TestCase):
+    def test_directed_hypothesis_without_entity_scope_cannot_be_supported_or_published(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); state = _investigation_state()
+            hypothesis = next(row for row in state["hypotheses"]
+                if row["hypothesis_id"] == "H-COVERAGE")
+            state["network"] = [
+                {"evidence_id": "EV-DNS-1", "source": "arkime", "asset": "dns-01",
+                    "raw": {"source": {"ip": "10.0.0.10"}, "destination": {"ip": "10.0.0.53"}}},
+                {"evidence_id": "EV-DNS-2", "source": "arkime", "asset": "dns-02",
+                    "raw": {"source": {"ip": "10.0.0.11"}, "destination": {"ip": "10.0.0.53"}}},
+            ]
+            refs = {"EV-DNS-1", "EV-DNS-2"}
+
+            engine._apply_model_assessments(state, {"assessments": [{
+                "hypothesis_id": "H-COVERAGE", "status": "supported",
+                "evidence_ids": sorted(refs), "rationale": "Unrelated DNS proves execution."}]}, refs)
+            engine._publish_model_findings(state, [{
+                "hypothesis_id": "H-COVERAGE", "title": "PowerShell activity",
+                "technique_id": hypothesis["technique_id"],
+                "observation": "Two DNS records supposedly prove PowerShell activity.",
+                "interpretation": "This should not survive deterministic entity admission.",
+                "evidence_ids": sorted(refs), "confidence": "moderate",
+                "alternatives": ["Routine DNS"], "follow_up": ["Review the host."],
+            }], refs)
+
+            self.assertEqual(hypothesis["model_assessment"]["status"], "inconclusive")
+            self.assertEqual(hypothesis["model_assessment"]["evidence_ids"], [])
+            self.assertEqual(state.get("findings", []), [])
+
+    def test_reasoning_commit_failure_leaves_no_partial_model_state_or_stale_plan_admission(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state(); state["lead_catalog"] = []
+            state["coverage"]["model_search_planning"] = [{
+                "phase": "prior", "accepted_proposal_ids": ["P-SEARCH"],
+                "accepted": 1, "proposed": 1, "rejected_or_duplicate": 0,
+            }]
+            investigator = _grounded_investigator(); calls = []
+            before = copy.deepcopy({key: state.get(key) for key in
+                ("hypotheses", "search_tasks", "search_queue", "candidate_leads", "findings")})
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator, _grounded_critic(investigator), calls)
+            }), patch.object(engine, "_register_model_searches",
+                side_effect=RuntimeError("registration failed")):
+                working = engine._run_grounded_reasoning(
+                    state, state["coverage"]["search_fields"])
+
+            after = {key: state.get(key) for key in
+                ("hypotheses", "search_tasks", "search_queue", "candidate_leads", "findings")}
+            self.assertEqual(after, before)
+            self.assertEqual(calls, ["investigator", "critic"])
+            self.assertIsNone(working["admission"])
+            self.assertEqual(working["registered_task_ids"], [])
+            self.assertIn("reasoning_commit_RuntimeError", working["model_error"])
+
+    def test_finding_persistence_failure_rolls_back_assessment_and_finding_state(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state(); state["lead_catalog"] = []
+            second = copy.deepcopy(state["host"][0]); second["evidence_id"] = "EV-ANCHOR-2"
+            second["observed_at"] = "2024-11-13T11:00:01Z"
+            state["host"].append(second)
+            state["candidate_leads"][0]["evidence_ids"].append("EV-ANCHOR-2")
+            investigator = {
+                "assessments": [{"proposal_id": "P-ASSESS", "hypothesis_id": "H-CANDIDATE",
+                    "status": "supported", "evidence_ids": ["EV-ANCHOR", "EV-ANCHOR-2"],
+                    "observation": "Two candidate-owned process records.",
+                    "interpretation": "The existing hypothesis remains testable.",
+                    "benign_alternatives": ["Authorized administration"],
+                    "rationale": "Both records share the candidate host."}],
+                "new_hypotheses": [], "searches": [],
+                "findings": [{"proposal_id": "P-FIND", "hypothesis_id": "H-CANDIDATE",
+                    "title": "Candidate-backed PowerShell activity", "technique_id": "T1059.001",
+                    "observation": "Two candidate records support continued review.",
+                    "interpretation": "The activity remains a suspected lead.",
+                    "evidence_ids": ["EV-ANCHOR", "EV-ANCHOR-2"], "confidence": "moderate",
+                    "confidence_justification": "Two matching records.",
+                    "alternatives": ["Authorized administration"],
+                    "follow_up": ["Validate with the asset owner."]}],
+                "summary": "Candidate-owned evidence was reviewed.",
+            }
+            calls = []; before_hypotheses = copy.deepcopy(state["hypotheses"])
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator, _grounded_critic(investigator), calls)
+            }), patch.object(engine.store, "upsert_finding", side_effect=OSError("disk full")):
+                working = engine._run_grounded_reasoning(
+                    state, state["coverage"]["search_fields"])
+
+            self.assertEqual(state["hypotheses"], before_hypotheses)
+            self.assertEqual(state["findings"], [])
+            self.assertIsNone(working["admission"])
+            self.assertIn("reasoning_commit_OSError", working["model_error"])
+
     def test_grounded_reasoning_runs_investigator_then_critic_and_admits_only_approved_items(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             engine = _engine(Path(directory)); engine.use_ollama = True
@@ -1362,6 +1459,7 @@ class SchedulerInvestigationWorkflowTests(unittest.TestCase):
                 "alternatives":["Expected software update traffic."],"follow_up":["Identify the owning process."]}
 
             engine._publish_model_findings(state,[{**base,"technique_id":"T1110"}],set(base["evidence_ids"]))
+            engine._publish_model_findings(state,[{**base,"technique_id":"unmapped"}],set(base["evidence_ids"]))
             engine._publish_model_findings(state,[{**base,"technique_id":"T1046"}],set(base["evidence_ids"]))
 
             self.assertEqual(state["findings"],[])

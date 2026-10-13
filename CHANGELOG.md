@@ -13,6 +13,7 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 - Added technical-only aggregate reasoning coverage for calls, admissions, rejections, rejection reasons, and availability gaps. Customer Word reports omit case files, proposals, critic payloads, identifiers, and internal role terminology.
 - Extended report-gated compact retention to keep only the aggregate reasoning summary while removing the detailed reasoning history and complete investigator/critic working payloads.
 - Added synthetic adversarial tests without embedding knowledge from the newly authorized Russell Mitchell holdout. That telemetry remains reserved for the next blind read-only evaluation milestone.
+- Final review made candidate ownership authoritative for existing-hypothesis searches, rejected explicit entities not present in cited evidence or deterministic scope, prevented scope-free directed hypotheses from being supported by unrelated records, required findings to inherit the validated hypothesis mapping, and made reasoning admission an all-or-nothing state commit with current-cycle scheduler metadata.
 
 ### Adaptive evidence-grounded stopping
 

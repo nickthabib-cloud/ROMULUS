@@ -95,8 +95,19 @@ def admit_reasoning(
         proposal_id = _text(row.get("proposal_id"), 120)
         if not proposal_id or proposal_id not in approved:
             continue
+        hypothesis_ref = _text(row.get("hypothesis_ref"), 120)
+        hypothesis = case_hypotheses.get(hypothesis_ref, {})
+        expected_candidate = _hypothesis_candidate_id(hypothesis)
+        allowed_entities = _hypothesis_scope_entities(
+            hypothesis, candidate_rows, candidate_evidence, evidence_rows
+        ) if hypothesis else set()
+        anchor_rows = [evidence_rows[item] for item in
+            _strings(row.get("anchor_evidence_ids"), 120, 8) if item in evidence_rows]
+        allowed_entities.update(_anchors(anchor_rows)["entities"])
         search_checks[proposal_id] = _validate_search(
-            row, visible, candidate_rows, candidate_evidence, candidate_follow_ups
+            row, visible, candidate_rows, candidate_evidence, candidate_follow_ups,
+            expected_candidate_id=expected_candidate,
+            allowed_entities=allowed_entities,
         )
 
     existing_fingerprints: dict[str, str] = {}
@@ -174,7 +185,8 @@ def admit_reasoning(
         if not proposal_id or proposal_id not in approved:
             continue
         normalized, reasons = _validate_assessment(
-            row, visible_existing_ids, case_hypotheses, candidate_evidence, evidence_rows
+            row, visible_existing_ids, case_hypotheses, candidate_rows,
+            candidate_evidence, evidence_rows
         )
         if reasons or normalized is None:
             _reject(rejections, proposal_id, "assessment", reasons or ["malformed"])
@@ -388,6 +400,9 @@ def _validate_search(
     candidate_rows: Mapping[str, Mapping[str, Any]],
     candidate_evidence: Mapping[str, set[str]],
     candidate_follow_ups: Mapping[str, set[str]],
+    *,
+    expected_candidate_id: str = "",
+    allowed_entities: set[str] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     reasons = []
     source = _text(row.get("source"), 80).lower()
@@ -401,6 +416,10 @@ def _validate_search(
         reasons.append("malformed_direction")
     if not _text(row.get("intent"), 300) or not _text(row.get("discriminating_goal"), 300):
         reasons.append("missing_discriminating_search")
+    if expected_candidate_id:
+        if candidate_id and candidate_id != expected_candidate_id:
+            reasons.append("search_candidate_mismatch")
+        candidate_id = expected_candidate_id
     if candidate_id and candidate_id not in candidate_rows:
         reasons.append("unknown_candidate")
     if follow_up_id:
@@ -416,6 +435,13 @@ def _validate_search(
         for identifier in anchors
     ):
         reasons.append("cross_candidate_citation")
+    explicit_entities = {
+        normalized for value in [*_strings(row.get("ips"), 80, 8),
+            *_strings(row.get("hostnames"), 255, 8)]
+        if (normalized := _normalize_entity(value))
+    }
+    if explicit_entities and not explicit_entities.issubset(set(allowed_entities or set())):
+        reasons.append("search_entity_mismatch")
     native_language = _text(row.get("native_query_language"), 40).lower() or "none"
     native_query = _text(row.get("native_query"), 1600)
     if native_language not in _NATIVE_LANGUAGES:
@@ -468,6 +494,15 @@ def _new_hypothesis_search_reasons(
     anchors = set(_strings(search.get("anchor_evidence_ids"), 120, 8))
     if anchors and not anchors.issubset(cited):
         reasons.append("search_anchor_mismatch")
+    selectors = {
+        normalized for value in [*_strings(search.get("ips"), 80, 8),
+            *_strings(search.get("hostnames"), 255, 8)]
+        if (normalized := _normalize_entity(value))
+    }
+    allowed = {_normalize_entity(value) for value in hypothesis.get("anchor_entities", [])}
+    allowed.discard("")
+    if selectors and not selectors.issubset(allowed):
+        reasons.append("search_entity_mismatch")
     return reasons
 
 
@@ -475,6 +510,7 @@ def _validate_assessment(
     row: Mapping[str, Any],
     visible_existing_ids: set[str],
     case_hypotheses: Mapping[str, Mapping[str, Any]],
+    candidate_rows: Mapping[str, Mapping[str, Any]],
     candidate_evidence: Mapping[str, set[str]],
     evidence_rows: Mapping[str, Mapping[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[str]]:
@@ -497,6 +533,15 @@ def _validate_assessment(
         reasons.append("cross_candidate_citation")
     if status in {"supported", "contradicted"} and not evidence_ids:
         reasons.append("missing_evidence_citation")
+    if status in {"supported", "contradicted"} and evidence_ids:
+        scope = _hypothesis_scope_entities(
+            hypothesis, candidate_rows, candidate_evidence, evidence_rows
+        )
+        if not scope:
+            reasons.append("missing_hypothesis_entity_scope")
+        elif any(not scope.intersection(_anchors([evidence_rows[identifier]])["entities"])
+                for identifier in evidence_ids if identifier in evidence_rows):
+            reasons.append("citation_entity_mismatch")
     if reasons:
         return None, _unique(reasons)
     return {
@@ -531,8 +576,10 @@ def _validate_finding(
     hypothesis = existing_rows.get(hypothesis_id, case_hypotheses.get(hypothesis_id, {}))
     technique_id = _text(row.get("technique_id"), 60)
     expected_technique = _text(hypothesis.get("technique_id"), 60)
-    if technique_id != "unmapped" and (
-        technique_id not in TECHNIQUES or (expected_technique and technique_id != expected_technique)
+    if (expected_technique == "unmapped" and technique_id != "unmapped") or (
+        expected_technique != "unmapped" and (
+            expected_technique not in TECHNIQUES or technique_id != expected_technique
+        )
     ):
         reasons.append("unsupported_attack_mapping")
     assessment = hypothesis.get("model_assessment") or hypothesis.get("deterministic_assessment")
@@ -555,7 +602,7 @@ def _validate_finding(
         "proposal_id": _text(row.get("proposal_id"), 120),
         "hypothesis_id": hypothesis_id,
         "title": _text(row.get("title"), 200),
-        "technique_id": technique_id,
+        "technique_id": expected_technique,
         "observation": _text(row.get("observation"), 360),
         "interpretation": _text(row.get("interpretation"), 360),
         "evidence_ids": evidence_ids,
@@ -587,6 +634,30 @@ def _anchors(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     if timestamps:
         time_range = {"start": timestamps[0][1], "end": timestamps[-1][1]}
     return {"entities": entities[:24], "time_range": time_range}
+
+
+def _hypothesis_scope_entities(
+    hypothesis: Mapping[str, Any],
+    candidate_rows: Mapping[str, Mapping[str, Any]],
+    candidate_evidence: Mapping[str, set[str]],
+    evidence_rows: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    entities = {
+        normalized for key in ("anchor_entities", "candidate_assets", "ips", "hostnames")
+        for value in _strings(hypothesis.get(key), 255, 30)
+        if (normalized := _normalize_entity(value))
+    }
+    candidate_id = _hypothesis_candidate_id(hypothesis)
+    candidate = candidate_rows.get(candidate_id, {})
+    entities.update(normalized for value in _strings(candidate.get("assets"), 200, 30)
+        if (normalized := _normalize_entity(value)))
+    evidence_ids = set(candidate_evidence.get(candidate_id, set()))
+    evidence_ids.update(_strings(
+        hypothesis.get("basis_evidence_ids") or hypothesis.get("evidence_ids"), 120, 30
+    ))
+    rows = [evidence_rows[item] for item in evidence_ids if item in evidence_rows]
+    entities.update(_anchors(rows)["entities"])
+    return entities
 
 
 def _existing_fingerprint(row: Mapping[str, Any]) -> str:
