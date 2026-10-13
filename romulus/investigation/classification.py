@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+import ipaddress
+import re
 from typing import Any
 
 from ..models import utc_now
@@ -14,6 +16,9 @@ INVESTIGATION_STATUSES = {
     "new", "investigating", "follow_up_exhausted", "resolved", "dismissed",
 }
 _REPORTABLE = {"suspicious", "malicious"}
+_SUPPORTED_INDICATOR_TYPES = {
+    "sha256", "sha1", "md5", "domain", "ip", "path", "process", "certificate",
+}
 _TERMINAL_FOLLOW_UP = {
     "completed", "blocked", "closed", "resolved", "failed", "skipped",
     "skipped_due_gap", "budget_limited", "not_applicable", "partial",
@@ -196,14 +201,19 @@ def _trusted_malicious_admission(candidate: Mapping[str, Any]) -> bool:
     created = _timestamp(candidate.get("indicator_created_at"))
     expires = _timestamp(candidate.get("indicator_expires_at"))
     matched = _timestamp(candidate.get("indicator_matched_at"))
+    indicator_type = str(candidate.get("indicator_type") or "").strip()
+    indicator_value = str(candidate.get("indicator_value") or "")
+    normalized_value = _normalize_trusted_indicator(indicator_type, indicator_value)
     return bool(
         candidate.get("kind") == "trusted_indicator"
+        and str(candidate.get("indicator_id") or "").strip()
         and isinstance(confidence, int)
         and not isinstance(confidence, bool)
         and confidence >= 90
         and str(candidate.get("indicator_source") or "").strip()
-        and str(candidate.get("indicator_type") or "").strip()
-        and str(candidate.get("indicator_value") or "").strip()
+        and indicator_type in _SUPPORTED_INDICATOR_TYPES
+        and normalized_value is not None
+        and indicator_value == normalized_value
         and str(candidate.get("indicator_catalog_version") or "").strip()
         and candidate.get("indicator_match_type") == "exact"
         and candidate.get("indicator_current_at_match") is True
@@ -213,6 +223,29 @@ def _trusted_malicious_admission(candidate: Mapping[str, Any]) -> bool:
         and created <= matched < expires
         and _owned_evidence_ids(candidate)
     )
+
+
+def _normalize_trusted_indicator(kind: str, value: str) -> str | None:
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    if kind in {"sha256", "sha1", "md5"}:
+        lengths = {"sha256": 64, "sha1": 40, "md5": 32}
+        return normalized if re.fullmatch(rf"[0-9a-f]{{{lengths[kind]}}}", normalized) else None
+    if kind == "ip":
+        try:
+            return str(ipaddress.ip_address(normalized))
+        except ValueError:
+            return None
+    if kind == "domain":
+        return normalized.rstrip(".") or None
+    if kind == "path":
+        return normalized.replace("\\", "/")
+    if kind == "process":
+        return normalized.replace("\\", "/").rsplit("/", 1)[-1] or None
+    if kind == "certificate":
+        return normalized
+    return None
 
 
 def _timestamp(value: Any) -> datetime | None:

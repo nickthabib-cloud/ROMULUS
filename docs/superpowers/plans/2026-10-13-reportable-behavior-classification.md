@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-13-reportable-behavior-classification-design.md`
 
-**Progress snapshot (2026-10-13):** Tasks 1–5 and Task 6 Steps 1–3 are implemented and locally proven. The first whole-branch review completed and its Critical/Important findings received focused RED/GREEN fixes: selector-only narrative synthesis, exact-generation retention, finalized-primary isolation, full trusted-indicator lifecycle provenance, explicit finding ownership, citation existence checks, complete catalog-policy enforcement, reportability tie-breaking, and report-item-derived outcomes. The remaining gates are fresh re-review, exact-archive VM proof, one isolated generic live hunt, validation recording/cleanup, and the stacked PR.
+**Progress snapshot (2026-10-13):** Tasks 1–5 and Task 6 Steps 1–3 are implemented and locally proven. The whole-branch review and its first re-review completed; every Critical/Important finding now has a focused RED/GREEN fix, including selector-only synthesis plus report-time re-admission, strict present-manifest validation and exact-generation retention, finalized-primary isolation, stable typed canonical trusted-indicator provenance, explicit finding ownership, citation existence checks, complete catalog-policy enforcement, reportability tie-breaking, and report-item-derived outcomes. The remaining gates are final exact-head re-review, exact-archive VM proof, one isolated generic live hunt, validation recording/cleanup, and the stacked PR.
 
 ## Global Constraints
 

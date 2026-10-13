@@ -55,7 +55,7 @@ A singular reverse-shell construction or log-removal command may therefore be re
 
 ### Malicious
 
-Malicious means the evidence explicitly establishes hostile activity under a narrow reviewed rule. Admission requires a machine-verifiable reason, such as a matching current trusted indicator with provenance and applicability, or a deterministic analytic representing an unambiguous hostile action with all required context present.
+Malicious means the evidence explicitly establishes hostile activity under a narrow reviewed rule. Admission requires a machine-verifiable reason, such as a matching current trusted indicator with a stable ID, supported type, canonical exact value, provenance, and applicability, or a deterministic analytic representing an unambiguous hostile action with all required context present.
 
 The default for behavior analytics is never malicious. Neither high score, model confidence, ATT&CK mapping, suspicious tool name, nor narrative coherence is sufficient. When the available evidence supports only suspicion, ROMULUS must say suspicious.
 
@@ -133,7 +133,7 @@ After reportable items are finalized, the model receives a bounded narrative cas
 
 The response schema supports zero or more evidence-linked clusters, a possible sequence for each cluster, confidence, supporting item/evidence/relationship IDs, and a list of unconnected reportable item IDs. The model supplies selectors only, not factual prose. ROMULUS renders the hypothesis, alternate explanations, missing evidence, and limitations deterministically from canonical report items, admitted relationships, and recorded coverage gaps. `no_coherent_narrative` is a valid and preferred result when the evidence does not support a connection.
 
-The report labels this section exactly `Hypothesis: Possible Activity Narrative` and states that it is an investigative interpretation, not a confirmed path. Deterministic validation rejects unknown IDs, invisible citations, repeated placement, disconnected clusters, and any unauthorized output field. Because the schema contains no model-authored prose field, arbitrary tools, identities, actions, malware, or conclusions cannot enter the report through narrative synthesis. Rejected narrative output is omitted or replaced with a factual “no supported narrative” notice; it never affects findings or retention.
+The report labels this section exactly `Hypothesis: Possible Activity Narrative` and states that it is an investigative interpretation, not a confirmed path. Deterministic validation rejects unknown IDs, invisible citations, repeated placement, disconnected clusters, and any unauthorized output field. Because the schema contains no model-authored prose field, arbitrary tools, identities, actions, malware, or conclusions cannot enter the report through narrative synthesis. Persisted selectors are re-admitted against the current canonical report case on every generation; rejected, stale, or corrupt selector sets are replaced with a factual “no supported narrative” notice and never affect findings or retention.
 
 ## Data Flow
 

@@ -169,6 +169,7 @@ class ClassificationMigrationAndLifecycleTests(unittest.TestCase):
         admitted = migrate_candidate({
             "candidate_id": "CL-ADMITTED", "kind": "trusted_indicator",
             "classification": "malicious", "indicator_confidence": 95,
+            "indicator_id": "IOC-ADMITTED",
             "indicator_source": "customer incident response",
             "indicator_type": "domain", "indicator_value": "evil.example",
             "indicator_match_type": "exact", "indicator_current_at_match": True,
@@ -189,6 +190,7 @@ class ClassificationMigrationAndLifecycleTests(unittest.TestCase):
         complete = {
             "candidate_id": "CL-IOC", "kind": "trusted_indicator",
             "classification": "malicious", "indicator_confidence": 95,
+            "indicator_id": "IOC-CURRENT",
             "indicator_source": "customer incident response", "indicator_type": "domain",
             "indicator_value": "evil.example", "indicator_match_type": "exact",
             "indicator_current_at_match": True, "indicator_catalog_version": "1.0.0",
@@ -198,10 +200,16 @@ class ClassificationMigrationAndLifecycleTests(unittest.TestCase):
         }
         incomplete = dict(complete); incomplete.pop("indicator_created_at")
         expired = dict(complete, indicator_expires_at="2026-01-02T00:00:00Z")
+        missing_identity = dict(complete); missing_identity.pop("indicator_id")
+        invalid_type = dict(complete, indicator_type="not-a-real-type")
+        unnormalized_value = dict(complete, indicator_value="EVIL.EXAMPLE.")
 
         self.assertEqual(migrate_candidate(complete)["classification"], "malicious")
         self.assertEqual(migrate_candidate(incomplete)["classification"], "anomalous")
         self.assertEqual(migrate_candidate(expired)["classification"], "anomalous")
+        self.assertEqual(migrate_candidate(missing_identity)["classification"], "anomalous")
+        self.assertEqual(migrate_candidate(invalid_type)["classification"], "anomalous")
+        self.assertEqual(migrate_candidate(unnormalized_value)["classification"], "anomalous")
 
     def test_lifecycle_is_independent_from_classification(self):
         from romulus.investigation.classification import refresh_investigation_status
@@ -250,6 +258,7 @@ class ClassificationMigrationAndLifecycleTests(unittest.TestCase):
             _candidate(
                 classification="malicious", investigation_status="resolved", candidate_id="CL-4",
                 kind="trusted_indicator", indicator_confidence=95,
+                indicator_id="IOC-SELECTOR",
                 indicator_source="customer incident response", indicator_type="domain",
                 indicator_value="evil.example", indicator_match_type="exact",
                 indicator_current_at_match=True,

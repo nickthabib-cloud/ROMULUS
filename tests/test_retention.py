@@ -317,6 +317,33 @@ class RetentionTests(unittest.TestCase):
 
             self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
 
+    def test_present_incomplete_report_manifest_fails_closed(self):
+        from romulus.retention import RetentionError, apply_retention
+
+        malformed_manifests = (
+            {},
+            {"anomaly_expected": False},
+            {"generation_stamp": "20261013T000000Z"},
+            {"generation_stamp": "20261013T000000Z", "anomaly_expected": 0},
+            {"generation_stamp": "", "anomaly_expected": False},
+        )
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            paths = self._reports_with_anomaly(root, "HUNT-ONE")[:2]
+            for index, manifest in enumerate(malformed_manifests):
+                with self.subTest(manifest=manifest):
+                    store = Store(root / f"data-malformed-{index}", root / f"logs-malformed-{index}")
+                    state = self._state(paths)
+                    state["report_manifest"] = manifest
+                    store.save_state("HUNT-ONE", state)
+                    store.add_evidence("HUNT-ONE", {"evidence_id": "EV-KEEP"})
+
+                    with self.assertRaisesRegex(RetentionError, "manifest"):
+                        apply_retention(store, state, policy="compact", automatic=True)
+
+                    self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
+                    self.assertIn("host", store.load_state("HUNT-ONE"))
+
     def _checkpoint_rows(self, store: Store):
         db=sqlite3.connect(store.checkpoint_path)
         try:

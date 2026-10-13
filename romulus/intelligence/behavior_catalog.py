@@ -461,7 +461,10 @@ def build_candidate_queue(
                 "follow_up": follow_up, "follow_ups": _follow_up_records(candidate_id, follow_up),
                 "finding_ids": [],
                 "indicator_source": indicator.get("source"), "indicator_confidence": indicator.get("confidence"),
-                "indicator_type": indicator.get("type"), "indicator_value": indicator.get("value"),
+                "indicator_type": indicator.get("type"),
+                "indicator_value": _normalize_indicator(
+                    str(indicator.get("type")), str(indicator.get("value")),
+                ),
                 "indicator_catalog_version": indicators.get("catalog_version"),
                 "indicator_created_at": indicator.get("created_at"),
                 "indicator_expires_at": indicator.get("expires_at"),

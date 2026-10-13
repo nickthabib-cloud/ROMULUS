@@ -58,9 +58,7 @@ def apply_retention(
     hunt_id = str(working.get("hunt_id") or "")
     hunt_status=str(working.get("status") or "")
     existing = working.get("retention") if isinstance(working.get("retention"), dict) else {}
-    report_manifest = working.get("report_manifest") if isinstance(working.get("report_manifest"), dict) else {}
-    anomaly_expected = bool(report_manifest.get("anomaly_expected", False))
-    generation_stamp = str(report_manifest.get("generation_stamp") or "").strip() or None
+    anomaly_expected, generation_stamp = _report_manifest(working)
     if policy == "compact" and existing.get("status") == "completed":
         _verify_reports(hunt_id, working.get("report_paths", []),
             anomaly_expected=anomaly_expected, generation_stamp=generation_stamp)
@@ -130,6 +128,22 @@ def apply_retention(
         }
         store.save_state(hunt_id,fallback)
         return fallback
+
+
+def _report_manifest(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """Validate a present report manifest while preserving legacy states that have none."""
+    if "report_manifest" not in state:
+        return False, None
+    manifest = state.get("report_manifest")
+    if not isinstance(manifest, dict):
+        raise RetentionError("The report manifest must be an object")
+    generation_stamp = manifest.get("generation_stamp")
+    anomaly_expected = manifest.get("anomaly_expected")
+    if not isinstance(generation_stamp, str) or not generation_stamp.strip():
+        raise RetentionError("The report manifest requires a non-empty generation stamp")
+    if type(anomaly_expected) is not bool:
+        raise RetentionError("The report manifest requires a Boolean anomaly declaration")
+    return anomaly_expected, generation_stamp.strip()
 
 
 def _verify_reports(

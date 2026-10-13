@@ -470,7 +470,7 @@ class CandidateRankingTests(unittest.TestCase):
         indicator = {
             "id": "IOC-MALICIOUS",
             "type": "domain",
-            "value": "evil.example",
+            "value": "EVIL.EXAMPLE.",
             "source": "customer incident response",
             "confidence": 95,
             "classification": "malicious",
@@ -488,6 +488,7 @@ class CandidateRankingTests(unittest.TestCase):
         self.assertIn("current exact", exact["classification_reason"])
         self.assertEqual(exact["classification_history"], [])
         self.assertEqual(exact["indicator_catalog_version"], "1.0.0")
+        self.assertEqual(exact["indicator_value"], "evil.example")
         self.assertEqual(exact["indicator_created_at"], "2026-01-01T00:00:00Z")
         self.assertEqual(exact["indicator_matched_at"], "2026-10-12T00:00:00+00:00")
 

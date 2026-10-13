@@ -65,6 +65,7 @@ class ReportItemProjectionTests(unittest.TestCase):
                 "candidate_id": "CL-MALICIOUS", "classification": "malicious",
                 "investigation_status": "resolved", "title": "Exact malicious indicator",
                 "kind": "trusted_indicator", "indicator_confidence": 95,
+                "indicator_id": "IOC-REPORT-ITEM",
                 "indicator_source": "customer incident response", "indicator_type": "domain",
                 "indicator_value": "evil.example", "indicator_match_type": "exact",
                 "indicator_current_at_match": True,
@@ -278,6 +279,7 @@ class CustomerWordReportTests(unittest.TestCase):
             "investigation_status": "new",
             "kind": "trusted_indicator",
             "indicator_confidence": 95,
+            "indicator_id": "IOC-PRIMARY-REPORT",
             "indicator_source": "customer incident response",
             "indicator_type": "domain",
             "indicator_value": "evil.example",
@@ -356,6 +358,44 @@ class CustomerWordReportTests(unittest.TestCase):
             self.assertIn("F-001 (Suspicious PowerShell execution)", output)
             self.assertIn("CL-UNCONNECTED (Separate authentication behavior)", output)
             self.assertIn("A single item cannot establish an attack path.", output)
+
+    def test_report_revalidates_persisted_narrative_selectors_fail_closed(self):
+        from docx import Document
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        state["activity_narrative"] = {
+            "version": 1, "status": "admitted", "no_coherent_narrative": False,
+            "clusters": [{
+                "cluster_id": "NC-01",
+                "item_ids": ["F-001", "NARRATIVE-UNKNOWN-ITEM"],
+                "relationship_ids": ["NARRATIVE-UNKNOWN-RELATIONSHIP"],
+                "evidence_ids": ["EV-RAW-001", "NARRATIVE-UNKNOWN-EVIDENCE"],
+                "possible_sequence": ["F-001", "NARRATIVE-UNKNOWN-ITEM"],
+                "narrative": "NARRATIVE-UNTRUSTED-PROSE",
+                "confidence": "high",
+                "alternate_explanations": [], "missing_evidence": [],
+            }],
+            "unconnected_item_ids": [], "limitations": [],
+        }
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths = generate_report(state, Path(directory))
+            text = next(
+                path for path in paths
+                if path.suffix == ".txt" and path.parent.name != "anomalous"
+            ).read_text(encoding="utf-8")
+            document = Document(next(path for path in paths if path.suffix == ".docx"))
+            docx_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+        for output in (text, docx_text):
+            self.assertIn("No coherent activity narrative is supported", output)
+            self.assertIn("F-001 (Suspicious PowerShell execution)", output)
+            for forbidden in (
+                "NARRATIVE-UNKNOWN-ITEM", "NARRATIVE-UNKNOWN-RELATIONSHIP",
+                "NARRATIVE-UNKNOWN-EVIDENCE", "NARRATIVE-UNTRUSTED-PROSE",
+            ):
+                self.assertNotIn(forbidden, output)
 
     def test_unavailable_narrative_does_not_hide_factual_behavior(self):
         from romulus.reporting.report import _content

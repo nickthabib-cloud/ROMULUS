@@ -59,6 +59,7 @@ def _state():
                 "description": "A current trusted domain indicator other.example was observed.",
                 "classification_reason": "The strict trusted-indicator gate passed.",
                 "kind": "trusted_indicator", "indicator_confidence": 95,
+                "indicator_id": "IOC-NARRATIVE-C",
                 "indicator_source": "customer incident response", "indicator_type": "domain",
                 "indicator_value": "other.example", "indicator_match_type": "exact",
                 "indicator_current_at_match": True,

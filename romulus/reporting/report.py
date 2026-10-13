@@ -196,11 +196,37 @@ def _report_item_lines(item):
 
 def _activity_narrative_lines(state, report_items):
     """Render admitted interpretation while resolving all facts from canonical report data."""
-    from ..investigation.narrative import build_narrative_case
+    from ..investigation.narrative import (
+        admit_activity_narrative, build_narrative_case, unavailable_activity_narrative,
+    )
 
-    narrative=state.get("activity_narrative") if isinstance(state.get("activity_narrative"),dict) else {}
+    stored=state.get("activity_narrative") if isinstance(state.get("activity_narrative"),dict) else {}
     item_index={str(item.get("item_id")):item for item in report_items if item.get("item_id")}
     case=build_narrative_case(state,report_items)
+    if stored.get("status") == "admitted":
+        stored_clusters=stored.get("clusters")
+        selector_clusters=(
+            [
+                ({
+                    "item_ids":cluster.get("item_ids"),
+                    "relationship_ids":cluster.get("relationship_ids"),
+                    "evidence_ids":cluster.get("evidence_ids"),
+                    "possible_sequence":cluster.get("possible_sequence"),
+                    "confidence":cluster.get("confidence"),
+                } if isinstance(cluster,dict) else cluster)
+                for cluster in stored_clusters
+            ]
+            if isinstance(stored_clusters,list) else stored_clusters
+        )
+        proposal={
+            "no_coherent_narrative":stored.get("no_coherent_narrative"),
+            "clusters":selector_clusters,
+            "unconnected_item_ids":stored.get("unconnected_item_ids"),
+        }
+        narrative=admit_activity_narrative(case,proposal)
+    else:
+        reason=stored.get("reason") if stored else "Narrative synthesis was not available."
+        narrative=unavailable_activity_narrative(case.get("items",[]),reason)
     relationship_index={str(row.get("relationship_id")):row for row in case.get("relationships",[])}
     lines=[
         "This section is an unconfirmed investigative hypothesis built only from accepted report items and admitted relationships. It is not a confirmed attack path.",
