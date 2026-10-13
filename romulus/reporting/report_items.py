@@ -28,7 +28,12 @@ def build_report_items(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     known_finding_ids = {str(row["finding_id"]) for row in findings}
     for finding in findings:
         finding_id = str(finding["finding_id"])
-        linked = candidates_by_finding.get(finding_id, [])
+        explicit_candidate_ids = set(_strings(finding.get("candidate_ids")))
+        linked = list(candidates_by_finding.get(finding_id, []))
+        linked.extend(
+            candidate for candidate in candidates
+            if candidate.get("candidate_id") in explicit_candidate_ids and candidate not in linked
+        )
         represented_candidates.update(
             str(row.get("candidate_id")) for row in linked if row.get("candidate_id")
         )
@@ -51,6 +56,32 @@ def build_report_items(state: Mapping[str, Any]) -> list[dict[str, Any]]:
         str(row.get("first_observed") or ""),
         str(row.get("item_id") or ""),
     ))
+
+
+def validate_report_item_evidence(
+    state: Mapping[str, Any], items: list[dict[str, Any]] | None = None,
+) -> None:
+    """Fail report generation when a reportable citation cannot be resolved."""
+    source = state if isinstance(state, Mapping) else {}
+    available = {
+        str(row.get("evidence_id"))
+        for row in _rows(source.get("host")) + _rows(source.get("network"))
+        if row.get("evidence_id")
+    }
+    missing: set[str] = set()
+    empty: list[str] = []
+    for item in items if items is not None else build_report_items(source):
+        evidence_ids = _strings(item.get("evidence_ids"))
+        if not evidence_ids:
+            empty.append(str(item.get("item_id") or "unknown"))
+        missing.update(identifier for identifier in evidence_ids if identifier not in available)
+    if empty or missing:
+        details = []
+        if empty:
+            details.append("items without citations: " + ", ".join(sorted(empty)[:12]))
+        if missing:
+            details.append("unknown evidence IDs: " + ", ".join(sorted(missing)[:12]))
+        raise ValueError("Reportable evidence validation failed (" + "; ".join(details) + ")")
 
 
 def _project_item(

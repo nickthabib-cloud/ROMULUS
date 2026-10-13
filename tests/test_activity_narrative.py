@@ -62,6 +62,10 @@ def _state():
                 "indicator_source": "customer incident response", "indicator_type": "domain",
                 "indicator_value": "other.example", "indicator_match_type": "exact",
                 "indicator_current_at_match": True,
+                "indicator_catalog_version": "1.0.0",
+                "indicator_created_at": "2026-01-01T00:00:00Z",
+                "indicator_expires_at": "2027-01-01T00:00:00Z",
+                "indicator_matched_at": "2026-02-03T07:00:00Z",
                 "evidence_ids": ["EV-C"], "finding_ids": [],
             },
             {
@@ -102,16 +106,9 @@ def _valid_proposal(case):
             "relationship_ids": [relation_id],
             "evidence_ids": ["EV-A", "EV-B"],
             "possible_sequence": ["CL-A", "CL-B"],
-            "narrative": (
-                "The encoded script execution on app-01 may precede the connection to "
-                "198.51.100.24 at 2026-02-03T04:07:00Z."
-            ),
             "confidence": "moderate",
-            "alternate_explanations": ["Authorized automation may explain both observations."],
-            "missing_evidence": ["Process-to-socket attribution is unavailable."],
         }],
         "unconnected_item_ids": ["CL-C"],
-        "limitations": ["The admitted relationship shows proximity, not causality."],
     }
 
 
@@ -156,6 +153,8 @@ class NarrativeAdmissionTests(unittest.TestCase):
         self.assertFalse(admitted["no_coherent_narrative"])
         self.assertEqual(admitted["clusters"][0]["item_ids"], ["CL-A", "CL-B"])
         self.assertEqual(admitted["unconnected_item_ids"], ["CL-C"])
+        self.assertIn("Unusual script execution", admitted["clusters"][0]["narrative"])
+        self.assertIn("Outbound callback pattern", admitted["clusters"][0]["narrative"])
         self.assertNotIn("classification", str(admitted).lower())
 
     def test_no_coherent_result_normalizes_every_item_to_unconnected(self):
@@ -165,7 +164,7 @@ class NarrativeAdmissionTests(unittest.TestCase):
         case = build_narrative_case(_state(), build_report_items(_state()))
         admitted = admit_activity_narrative(case, {
             "no_coherent_narrative": True, "clusters": [],
-            "unconnected_item_ids": [], "limitations": ["No admitted link explains all items."],
+            "unconnected_item_ids": [],
         })
 
         self.assertTrue(admitted["no_coherent_narrative"])
@@ -179,8 +178,8 @@ class NarrativeAdmissionTests(unittest.TestCase):
         mutations = {}
         for label in (
             "unknown item", "unknown evidence", "unknown relationship", "invisible citation",
-            "repeated placement", "disconnected cluster", "invented ip", "invented domain",
-            "invented time", "classification mutation",
+            "repeated placement", "disconnected cluster", "invented prose",
+            "classification mutation",
         ):
             mutations[label] = _valid_proposal(case)
         mutations["unknown item"]["clusters"][0]["item_ids"][0] = "CL-UNKNOWN"
@@ -191,9 +190,9 @@ class NarrativeAdmissionTests(unittest.TestCase):
         mutations["disconnected cluster"]["clusters"][0]["item_ids"].append("CL-C")
         mutations["disconnected cluster"]["clusters"][0]["evidence_ids"].append("EV-C")
         mutations["disconnected cluster"]["clusters"][0]["possible_sequence"].append("CL-C")
-        mutations["invented ip"]["clusters"][0]["narrative"] += " It may contact 203.0.113.77."
-        mutations["invented domain"]["clusters"][0]["narrative"] += " It may contact invented.example."
-        mutations["invented time"]["clusters"][0]["narrative"] += " It may occur at 2026-02-03T05:55:00Z."
+        mutations["invented prose"]["clusters"][0]["narrative"] = (
+            "Mimikatz harvested administrator credentials."
+        )
         mutations["classification mutation"]["clusters"][0]["classification"] = "malicious"
 
         for label, proposal in mutations.items():
@@ -222,6 +221,10 @@ class NarrativeModelContractTests(unittest.TestCase):
         self.assertEqual(cluster["relationship_ids"]["items"]["enum"], [case["relationships"][0]["relationship_id"]])
         for forbidden in ("classification", "entity", "finding", "query", "tool_action", "tool action"):
             self.assertNotIn(forbidden, serialized)
+        self.assertNotIn("narrative", cluster)
+        self.assertNotIn("alternate_explanations", cluster)
+        self.assertNotIn("missing_evidence", cluster)
+        self.assertNotIn("limitations", schema["properties"])
 
     def test_adapter_uses_strict_schema_and_untrusted_case_prompt(self):
         from romulus.config import Settings
@@ -234,7 +237,7 @@ class NarrativeModelContractTests(unittest.TestCase):
             def raise_for_status(self): pass
             def iter_lines(self):
                 yield (b'{"message":{"content":"{\\"no_coherent_narrative\\":true,'
-                       b'\\"clusters\\":[],\\"unconnected_item_ids\\":[],\\"limitations\\":[]}"},'
+                       b'\\"clusters\\":[],\\"unconnected_item_ids\\":[]}"},'
                        b'"done":true,"done_reason":"stop"}')
 
         class Session:
@@ -298,6 +301,8 @@ class NarrativeWorkflowTests(unittest.TestCase):
             self.assertEqual(result["findings"], findings)
             self.assertEqual(result["investigation_graph"], graph)
             self.assertEqual(len(result["report_paths"]), 2)
+            self.assertEqual(result["outcome"], "evidence_supported_lead")
+            self.assertIn("reportable behavior", result["summary"])
 
     def test_candidate_free_disabled_and_exhausted_hunts_use_fallback_without_model_call(self):
         cases = (("candidate free", True, 20, False), ("disabled", False, 20, True),
@@ -322,9 +327,8 @@ class NarrativeWorkflowTests(unittest.TestCase):
             "no_coherent_narrative": False,
             "clusters": [{"item_ids": ["CL-UNKNOWN"], "relationship_ids": [],
                 "evidence_ids": [], "possible_sequence": ["CL-UNKNOWN"],
-                "narrative": "Unsupported.", "confidence": "high",
-                "alternate_explanations": [], "missing_evidence": []}],
-            "unconnected_item_ids": [], "limitations": [],
+                "confidence": "high"}],
+            "unconnected_item_ids": [],
         }
         for label, effect in (("invalid", lambda case: invalid), ("failure", RuntimeError("model unavailable"))):
             with self.subTest(label=label), tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

@@ -1720,6 +1720,9 @@ class HuntEngine:
                 confidence_justification,alternatives,follow_up)
             encoded=encode(finding)
             encoded["hypothesis_id"]=hypothesis.get("hypothesis_id")
+            encoded["candidate_ids"]=list(dict.fromkeys(
+                str(value) for value in hypothesis.get("basis_candidate_ids",[]) if value
+            ))
             old=next((f for f in self.store.list_findings(s["hunt_id"]) if f.get("finding_id")==identifier),None)
             if old: encoded["created_at"]=old.get("created_at",encoded["created_at"]); encoded["updated_at"]=utc_now(); action="updated"
             else: action="created"
@@ -1939,10 +1942,12 @@ class HuntEngine:
         interrupted=s.get("termination_reason") in {"tool_call_budget","runtime_budget","depth_budget",
             "workflow_error","resource_limit","no_productive_frontier"}
         successful_search=any(r.get("result_status")=="ok" and any(x in str(r.get("reasoning_stage","")) for x in ("search","pivot")) for r in s.get("tool_runs",[]))
-        if s.get("findings"):
+        from ..reporting.report_items import build_report_items
+        report_items=build_report_items(s)
+        if report_items:
             s["outcome"]="evidence_supported_lead"
-            titles="; ".join(f.get("title","") for f in s["findings"][:3] if f.get("title"))
-            s["summary"]=f"ROMULUS identified {len(s['findings'])} suspected investigative lead(s) supported by cited telemetry"+(f": {titles}." if titles else ".")+" These leads do not confirm compromise; review the evidence, benign alternatives, and follow-up actions in the report."
+            titles="; ".join(item.get("title","") for item in report_items[:3] if item.get("title"))
+            s["summary"]=f"ROMULUS identified {len(report_items)} reportable behavior item(s) supported by cited telemetry"+(f": {titles}." if titles else ".")+" These items do not by themselves confirm compromise; review the evidence, benign alternatives, and follow-up actions in the report."
             if model_failures: s["summary"]+=f" {len(model_failures)} structured model call(s) failed; deterministic coverage searches were used and the investigation is partial."
             if incomplete_coverage: s["summary"]+=" Coverage is partial because a source cap, source error, or required hypothesis-coverage item remains unresolved."
         elif (telemetry_errors or model_failures) and not successful_search:
@@ -2204,9 +2209,9 @@ def _lead_catalog(hypotheses):
 def _link_candidates_to_findings(s):
     findings=s.get("findings",[])
     for candidate in s.get("candidate_leads",[]):
-        evidence_ids=set(candidate.get("evidence_ids",[]))
         linked=[finding.get("finding_id") for finding in findings
-                if finding.get("finding_id") and evidence_ids.intersection(finding.get("evidence_ids",[]))]
+                if finding.get("finding_id") and candidate.get("candidate_id") in (
+                    finding.get("candidate_ids",[]) or [])]
         if linked:
             candidate["finding_ids"]=list(dict.fromkeys(candidate.get("finding_ids",[])+linked))
             candidate["disposition"]="corroborated"

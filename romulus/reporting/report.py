@@ -1,32 +1,107 @@
 """Professional DOCX and portable plain-text report generation."""
 from pathlib import Path
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 from ..intelligence.knowledge import TECHNIQUES, ATTACK_RELEASE, ATTACK_RELEASE_DATE, ATTACK_DOMAIN
 from ..investigation.classification import reportable_candidates, unresolved_anomalous_candidates
-from .report_items import build_report_items
+from .report_items import build_report_items, validate_report_item_evidence
 
 def generate_report(state: dict[str, Any], output_dir: Path) -> list[Path]:
-    output_dir.mkdir(parents=True,exist_ok=True)
     hid=state.get("hunt_id","UNKNOWN"); stamp=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     anomalies=unresolved_anomalous_candidates(state.get("candidate_leads",[]) or [])
     finalized=state.get("status")=="completed" or bool(state.get("finalized_at"))
     anomaly_expected=bool(finalized and anomalies)
+    report_items=build_report_items(state)
+    validate_report_item_evidence(state,report_items)
+    if anomaly_expected:
+        _validate_anomaly_evidence(state,anomalies)
     state["report_manifest"]={"generation_stamp":stamp,"anomaly_expected":anomaly_expected}
-    state=_xml_safe(state)
+    output_dir.mkdir(parents=True,exist_ok=True)
+    primary_state=_xml_safe(_primary_report_state(state,report_items))
+    anomaly_state=_xml_safe(state)
     text_path=output_dir/f"{hid}-{stamp}.txt"; docx_path=output_dir/f"{hid}-{stamp}.docx"
-    content=_content(state)
+    content=_content(primary_state)
     text_path.write_text(content,encoding="utf-8")
-    try: _docx(state,docx_path)
+    try: _docx(primary_state,docx_path)
     except ImportError as e: raise RuntimeError("python-docx is required to generate the Word deliverable") from e
     paths=[docx_path,text_path]
     if anomaly_expected:
         anomaly_dir=output_dir/"anomalous"; anomaly_dir.mkdir(parents=True,exist_ok=True)
         anomaly_path=anomaly_dir/f"{hid}-anomalous-leads-{stamp}.txt"
-        anomaly_path.write_text(_anomaly_content(state,unresolved_anomalous_candidates(
-            state.get("candidate_leads",[]) or [])),encoding="utf-8")
+        anomaly_path.write_text(_anomaly_content(anomaly_state,unresolved_anomalous_candidates(
+            anomaly_state.get("candidate_leads",[]) or [])),encoding="utf-8")
         paths.append(anomaly_path)
     return paths
+
+
+def _validate_anomaly_evidence(state, candidates):
+    available={
+        str(row.get("evidence_id"))
+        for row in list(state.get("host",[]) or [])+list(state.get("network",[]) or [])
+        if isinstance(row,dict) and row.get("evidence_id")
+    }
+    missing=set(); empty=[]
+    for candidate in candidates:
+        identifiers={str(value) for value in candidate.get("evidence_ids",[]) or [] if value}
+        if not identifiers: empty.append(str(candidate.get("candidate_id") or "unknown"))
+        missing.update(identifiers-available)
+    if empty or missing:
+        raise ValueError("Anomalous lead evidence validation failed ("+
+            ("items without citations: "+", ".join(sorted(empty)[:12])+"; " if empty else "")+
+            ("unknown evidence IDs: "+", ".join(sorted(missing)[:12]) if missing else "")+")")
+
+
+def _primary_report_state(state, report_items):
+    """Remove unowned working material from a finalized primary deliverable."""
+    result=deepcopy(state)
+    finalized=result.get("status")=="completed" or bool(result.get("finalized_at"))
+    if not finalized:
+        return result
+    cited={str(value) for item in report_items for value in item.get("evidence_ids",[]) or [] if value}
+    candidate_ids={str(value) for item in report_items for value in item.get("candidate_ids",[]) or [] if value}
+    finding_ids={str(value) for item in report_items for value in item.get("finding_ids",[]) or [] if value}
+    follow_up_ids={
+        str(row.get("follow_up_id"))
+        for candidate in result.get("candidate_leads",[]) or []
+        if isinstance(candidate,dict) and str(candidate.get("candidate_id")) in candidate_ids
+        for row in candidate.get("follow_ups",[]) or []
+        if isinstance(row,dict) and row.get("follow_up_id")
+    }
+    result["candidate_leads"]=[row for row in result.get("candidate_leads",[]) or []
+        if isinstance(row,dict) and str(row.get("candidate_id")) in candidate_ids]
+    result["findings"]=[row for row in result.get("findings",[]) or []
+        if isinstance(row,dict) and str(row.get("finding_id")) in finding_ids]
+    for key in ("host","network"):
+        result[key]=[row for row in result.get(key,[]) or []
+            if isinstance(row,dict) and str(row.get("evidence_id")) in cited]
+    result["hypotheses"]=[]
+    result["reasoning_history"]=[]
+    result["stage_history"]=[]
+    result["tool_runs"]=[]
+    result["search_artifacts"]=[]
+    result["correlations"]=[row for row in result.get("correlations",[]) or []
+        if isinstance(row,dict) and row.get("host_ref") in cited and row.get("network_ref") in cited]
+    tasks=result.get("search_tasks",{}) if isinstance(result.get("search_tasks"),dict) else {}
+    tasks={task_id:task for task_id,task in tasks.items() if isinstance(task,dict) and (
+        candidate_ids.intersection(str(value) for value in task.get("candidate_ids",[]) or [] if value)
+        or follow_up_ids.intersection(str(value) for value in task.get("follow_up_ids",[]) or [] if value)
+    )}
+    result["search_tasks"]=tasks
+    result["search_outcomes"]=[row for row in result.get("search_outcomes",[]) or []
+        if isinstance(row,dict) and str(row.get("task_id")) in tasks]
+    result["scheduler_history"]=[row for row in result.get("scheduler_history",[]) or []
+        if isinstance(row,dict) and str(row.get("task_id")) in tasks]
+    result.pop("analytic_summary",None)
+    coverage=result.get("coverage") if isinstance(result.get("coverage"),dict) else {}
+    for key in ("analytic_summary","recent_search_artifacts","hypothesis_coverage","scheduler_gaps"):
+        coverage.pop(key,None)
+    result["coverage"]=coverage
+    graph=result.get("investigation_graph") if isinstance(result.get("investigation_graph"),dict) else {}
+    graph["paths"]=[row for row in graph.get("paths",[]) or []
+        if isinstance(row,dict) and str(row.get("finding_id")) in finding_ids]
+    result["investigation_graph"]=graph
+    return result
 
 def _xml_safe(value):
     """Remove characters forbidden by XML 1.0 from telemetry-derived text."""
@@ -135,11 +210,18 @@ def _activity_narrative_lines(state, report_items):
         lines.append("No coherent activity narrative is supported by the visible evidence. "+(reason or ""))
     for cluster in narrative.get("clusters",[]) or []:
         cluster_id=str(cluster.get("cluster_id") or "possible cluster")
-        lines.append(f"- {cluster_id} [{cluster.get('confidence') or 'not assessed'} confidence]: {_bounded_text(cluster.get('narrative'),800)}")
         sequence=[]
         for item_id in cluster.get("possible_sequence",[]) or []:
             item=item_index.get(str(item_id),{})
             sequence.append(f"{item_id} ({_bounded_text(item.get('title'),200) or 'accepted report item'})")
+        if len(sequence)==1:
+            rendered=(f"{sequence[0]} is a standalone reportable behavior. "
+                "A single item cannot establish an attack path.")
+        else:
+            rendered=("The admitted relationships support considering this possible sequence: "
+                +" then ".join(sequence)+
+                ". This ordering is an investigative hypothesis and does not establish causality.")
+        lines.append(f"- {cluster_id} [{cluster.get('confidence') or 'not assessed'} confidence]: {rendered}")
         lines.append("  Possible sequence: "+(" → ".join(sequence) or "not proposed"))
         lines.append("  Supporting evidence: "+(_join_text(cluster.get("evidence_ids")) or "none"))
         for relationship_id in cluster.get("relationship_ids",[]) or []:
@@ -148,8 +230,14 @@ def _activity_narrative_lines(state, report_items):
                 f"  Relationship {relationship_id}: {_bounded_text(relationship.get('basis'),200) or 'admitted relationship'}; "
                 f"items={_join_text(relationship.get('item_ids'))}; caveat={_bounded_text(relationship.get('caveat'),300) or 'does not prove causality'}."
             )
-        alternatives=_join_text(cluster.get("alternate_explanations"),"; ")
-        missing=_join_text(cluster.get("missing_evidence"),"; ")
+        alternatives=_join_text(list(dict.fromkeys(
+            value for item_id in cluster.get("item_ids",[]) or []
+            for value in item_index.get(str(item_id),{}).get("benign_alternatives",[]) or []
+        )),"; ")
+        missing=_join_text(list(dict.fromkeys(
+            value for item_id in cluster.get("item_ids",[]) or []
+            for value in item_index.get(str(item_id),{}).get("coverage_gaps",[]) or []
+        )),"; ")
         if alternatives: lines.append("  Alternate explanations: "+alternatives)
         if missing: lines.append("  Missing evidence: "+missing)
     unconnected=[]
@@ -157,7 +245,7 @@ def _activity_narrative_lines(state, report_items):
         item=item_index.get(str(item_id),{})
         unconnected.append(f"{item_id} ({_bounded_text(item.get('title'),200) or 'accepted report item'})")
     lines.append("Unconnected report items: "+(_join_text(unconnected,"; ") or "none"))
-    limitations=_join_text(narrative.get("limitations"),"; ")
+    limitations=_join_text(case.get("coverage_gaps"),"; ")
     if limitations: lines.append("Narrative limitations: "+limitations)
     return lines
 
@@ -178,7 +266,11 @@ def _anomaly_content(state, candidates):
     lines=[
         "ROMULUS ANOMALOUS LEAD QUEUE",
         f"Investigation: {hunt_id}",
+        f"Objective: {_bounded_text(state.get('objective'),500) or 'not recorded'}",
         f"Hunt window: {coverage.get('time_scope') or 'not recorded'}",
+        f"Created: {state.get('started_at') or state.get('created_at') or 'not recorded'}",
+        f"Completed: {state.get('finished_at') or state.get('finalized_at') or 'not recorded'}",
+        f"Outcome: {state.get('outcome') or 'not recorded'}",
         "Warning: Each entry is an anomalous lead, not a conclusion. Validate it before escalation or action.",
     ]
     for candidate in candidates:

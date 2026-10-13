@@ -78,7 +78,7 @@ Scores and their reasons are stored with every candidate so an analyst can see w
 
 Non-dismissed suspicious and malicious candidates enter the primary Word and text reports even when no complete attack path can be constructed. Unresolved anomalous-only candidates from a finalized hunt enter a separate compact text queue under `reports/anomalous/`; they remain leads, not conclusions.
 
-The optional `Hypothesis: Possible Activity Narrative` is built after factual report items are fixed. The model receives at most twelve accepted report items, 48 owned evidence facts, and stable admitted relationship IDs. Code rejects unknown or cross-item citations, repeated placement, disconnected clusters, invented IP/domain/time facts, unauthorized fields, and unsupported causal claims. Unconnected items remain listed. The admitted narrative never changes evidence, findings, classifications, or retention eligibility.
+The optional `Hypothesis: Possible Activity Narrative` is built after factual report items are fixed. The model receives at most twelve accepted report items, 48 owned evidence facts, and stable admitted relationship IDs. It may select only enumerated cluster members, citations, relationships, a possible order, and confidence; it has no prose field. ROMULUS renders wording, benign alternatives, missing evidence, and limitations from canonical report items and coverage facts. Code rejects unknown or cross-item citations, repeated placement, disconnected clusters, and unauthorized fields. Unconnected items remain listed. Narrative synthesis never changes evidence, findings, classifications, or retention eligibility.
 
 ## Validation
 

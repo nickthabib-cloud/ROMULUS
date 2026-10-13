@@ -355,7 +355,7 @@ class CandidateRelationshipTests(unittest.TestCase):
 
 class CandidateFrontierTests(unittest.TestCase):
     @staticmethod
-    def _candidate(identifier, group, score, *, kind="behavior"):
+    def _candidate(identifier, group, score, *, kind="behavior", classification="anomalous"):
         return {
             "candidate_id": identifier,
             "kind": kind,
@@ -365,6 +365,7 @@ class CandidateFrontierTests(unittest.TestCase):
             "priority_score": score,
             "priority_tier": "critical" if score >= 90 else ("high" if score >= 70 else ("medium" if score >= 40 else "low")),
             "disposition": "observed",
+            "classification": classification,
             "customer_visible": kind == "trusted_indicator",
             "evidence_ids": [f"EV-{identifier}"],
             "assets": [f"host-{identifier.lower()}"],
@@ -375,6 +376,18 @@ class CandidateFrontierTests(unittest.TestCase):
             "title": f"Candidate {identifier}",
             "description": "Synthetic evidence-backed behavior.",
         }
+
+    def test_reportable_classification_breaks_equal_priority_frontier_ties(self):
+        from romulus.investigation.candidate_triage import select_candidate_frontier
+
+        anomalous = self._candidate("CL-A-ANOMALOUS", "anomaly", 70)
+        suspicious = self._candidate(
+            "CL-Z-SUSPICIOUS", "suspicious", 70, classification="suspicious"
+        )
+
+        selected = select_candidate_frontier([anomalous, suspicious], limit=1)
+
+        self.assertEqual(selected[0]["candidate_id"], "CL-Z-SUSPICIOUS")
 
     def test_repetitive_high_scores_do_not_crowd_distinct_groups(self):
         from romulus.investigation.candidate_triage import select_candidate_frontier

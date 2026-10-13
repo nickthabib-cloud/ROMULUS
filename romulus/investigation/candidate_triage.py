@@ -387,13 +387,16 @@ def _candidate_sort_key(candidate: Mapping[str, Any]) -> tuple[int, int, str]:
 
 def _frontier_sort_key(
     candidate: Mapping[str, Any], preferred_ids: set[str],
-) -> tuple[int, int, int, int, str]:
+) -> tuple[int, int, int, int, int, str]:
     protected = _is_protected(candidate)
     candidate_id = str(candidate.get("candidate_id") or "")
     return (
         0 if protected else 1,
         0 if candidate_id in preferred_ids else 1,
         -_bounded_int(candidate.get("priority_score"), 0, 100),
+        {"malicious": 0, "suspicious": 1, "anomalous": 2}.get(
+            str(candidate.get("classification") or ""), 3,
+        ),
         0 if candidate.get("kind") == "trusted_indicator" else 1,
         candidate_id,
     )

@@ -130,10 +130,16 @@ def load_local_indicators(path: Path = LOCAL_INDICATORS_PATH) -> dict[str, Any]:
             raise CatalogValidationError(f"{prefix}.classification: expected suspicious or malicious")
         if classification == "malicious" and confidence < 90:
             raise CatalogValidationError(f"{prefix}.confidence: malicious indicators require confidence at least 90")
+        if classification == "malicious" and not _nonempty_string(item.get("expires_at")):
+            raise CatalogValidationError(f"{prefix}.expires_at: malicious indicators require an expiry timestamp")
         item["classification"] = classification
         for field in ("created_at", "expires_at"):
             if item.get(field):
                 _parse_time(item[field], f"{prefix}.{field}")
+        if item.get("expires_at") and _parse_time(item["created_at"], f"{prefix}.created_at") >= _parse_time(
+            item["expires_at"], f"{prefix}.expires_at"
+        ):
+            raise CatalogValidationError(f"{prefix}.expires_at: must be later than created_at")
     return value
 
 
@@ -276,6 +282,10 @@ def _validate_classification_policy(item: dict[str, Any], prefix: str) -> None:
         raise CatalogValidationError(
             f"{path}.single_record_reportable: requires minimum_owned_evidence equal to 1"
         )
+    if classification == "suspicious" and not singular and minimum < 2:
+        raise CatalogValidationError(
+            f"{path}.single_record_reportable: false suspicious policies require at least two owned evidence records"
+        )
     roles = policy.get("required_context_roles")
     if not isinstance(roles, list) or not roles or not all(_nonempty_string(role) for role in roles):
         raise CatalogValidationError(f"{path}.required_context_roles: expected non-empty string array")
@@ -406,7 +416,9 @@ def build_candidate_queue(
 
     reference_time = _coerce_time(now) if now is not None else datetime.now(timezone.utc)
     for indicator in indicators.get("indicators", []):
-        if not _indicator_is_candidate_safe(indicator):
+        if not _indicator_is_candidate_safe(indicator, indicators.get("catalog_version")):
+            continue
+        if _parse_time(indicator["created_at"], f"indicator {indicator.get('id')}.created_at") > reference_time:
             continue
         expires = indicator.get("expires_at")
         if expires and _parse_time(expires, f"indicator {indicator.get('id')}.expires_at") <= reference_time:
@@ -450,7 +462,10 @@ def build_candidate_queue(
                 "finding_ids": [],
                 "indicator_source": indicator.get("source"), "indicator_confidence": indicator.get("confidence"),
                 "indicator_type": indicator.get("type"), "indicator_value": indicator.get("value"),
+                "indicator_catalog_version": indicators.get("catalog_version"),
+                "indicator_created_at": indicator.get("created_at"),
                 "indicator_expires_at": indicator.get("expires_at"),
+                "indicator_matched_at": reference_time.isoformat(),
                 "indicator_match_type": "exact", "indicator_current_at_match": True,
             })
     return sorted(
@@ -721,7 +736,7 @@ def _indicator_matches(indicator: dict[str, Any], event: dict[str, Any]) -> bool
     return expected in observed
 
 
-def _indicator_is_candidate_safe(indicator: dict[str, Any]) -> bool:
+def _indicator_is_candidate_safe(indicator: dict[str, Any], catalog_version: Any = None) -> bool:
     """Fail closed when callers bypass the validated local-indicator loader."""
     classification = str(indicator.get("classification") or "suspicious")
     confidence = indicator.get("confidence")
@@ -730,12 +745,17 @@ def _indicator_is_candidate_safe(indicator: dict[str, Any]) -> bool:
     if not _nonempty_string(indicator.get("source")) or not _nonempty_string(indicator.get("created_at")):
         return False
     try:
-        _parse_time(str(indicator["created_at"]), "indicator.created_at")
+        created = _parse_time(str(indicator["created_at"]), "indicator.created_at")
+        expires = (_parse_time(str(indicator["expires_at"]), "indicator.expires_at")
+            if indicator.get("expires_at") else None)
     except CatalogValidationError:
         return False
     if not isinstance(confidence, int) or isinstance(confidence, bool) or not 0 <= confidence <= 100:
         return False
-    return classification != "malicious" or confidence >= 90
+    return classification != "malicious" or bool(
+        confidence >= 90 and expires is not None and created < expires
+        and _nonempty_string(catalog_version)
+    )
 
 
 def _normalize_indicator(kind: str, value: str) -> str:
@@ -787,9 +807,22 @@ def _behavior_candidate(
     policy = dict(analytic["classification_policy"])
     evidence_ids = _evidence_ids(rows)
     enough_owned_evidence = len(set(evidence_ids)) >= int(policy["minimum_owned_evidence"])
+    matched_context_roles = sorted({
+        str(role)
+        for role in policy.get("required_context_roles", [])
+        if any(
+            _predicate_matches(predicate, row)
+            for row in rows
+            for group in ("all", "any")
+            for predicate in analytic.get("match", {}).get(group, [])
+            if predicate.get("role") == role
+        )
+    })
+    context_satisfied = set(policy.get("required_context_roles", [])) <= set(matched_context_roles)
+    singular_allowed = bool(policy.get("single_record_reportable")) or len(set(evidence_ids)) > 1
     classification = (
         str(policy["default_classification"])
-        if enough_owned_evidence
+        if enough_owned_evidence and context_satisfied and singular_allowed
         else "anomalous"
     )
     classification_reason = (
@@ -809,6 +842,7 @@ def _behavior_candidate(
         "classification_reason": classification_reason,
         "classification_policy_version": policy["policy_version"],
         "classification_policy": policy,
+        "matched_context_roles": matched_context_roles,
         "classification_history": [],
         "analytic_provenance": list(analytic.get("provenance", [])),
         "customer_visible": classification == "suspicious",

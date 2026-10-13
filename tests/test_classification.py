@@ -29,6 +29,7 @@ def _candidate(policy=None, **updates):
         "classification_policy": policy or _policy(),
         "classification": "anomalous",
         "classification_history": [],
+        "matched_context_roles": ["process.command_line"],
         "disposition": "observed",
         "follow_ups": [],
         "finding_ids": [],
@@ -59,6 +60,18 @@ class ClassificationPolicyTests(unittest.TestCase):
 
         self.assertEqual(apply_classification(duplicate)["classification"], "anomalous")
         self.assertEqual(apply_classification(distinct)["classification"], "suspicious")
+
+    def test_suspicious_policy_requires_its_singular_and_context_contract(self):
+        from romulus.investigation.classification import apply_classification
+
+        aggregate_only = _candidate(_policy("suspicious", singular=False, minimum=1, upgrade="none"))
+        missing_context = _candidate(
+            _policy("suspicious", singular=True, minimum=1, upgrade="none"),
+            matched_context_roles=[],
+        )
+
+        self.assertEqual(apply_classification(aggregate_only)["classification"], "anomalous")
+        self.assertEqual(apply_classification(missing_context)["classification"], "anomalous")
 
     def test_only_current_policy_authorized_relationship_can_upgrade_an_anomaly(self):
         from romulus.investigation.classification import apply_classification
@@ -159,12 +172,36 @@ class ClassificationMigrationAndLifecycleTests(unittest.TestCase):
             "indicator_source": "customer incident response",
             "indicator_type": "domain", "indicator_value": "evil.example",
             "indicator_match_type": "exact", "indicator_current_at_match": True,
+            "indicator_catalog_version": "1.0.0",
+            "indicator_created_at": "2026-01-01T00:00:00Z",
+            "indicator_expires_at": "2027-01-01T00:00:00Z",
+            "indicator_matched_at": "2026-10-12T00:00:00Z",
             "evidence_ids": ["EV-1"],
         })
 
         self.assertEqual(behavior["classification"], "anomalous")
         self.assertEqual(incomplete_indicator["classification"], "anomalous")
         self.assertEqual(admitted["classification"], "malicious")
+
+    def test_persisted_malicious_indicator_requires_complete_current_catalog_record(self):
+        from romulus.investigation.classification import migrate_candidate
+
+        complete = {
+            "candidate_id": "CL-IOC", "kind": "trusted_indicator",
+            "classification": "malicious", "indicator_confidence": 95,
+            "indicator_source": "customer incident response", "indicator_type": "domain",
+            "indicator_value": "evil.example", "indicator_match_type": "exact",
+            "indicator_current_at_match": True, "indicator_catalog_version": "1.0.0",
+            "indicator_created_at": "2026-01-01T00:00:00Z",
+            "indicator_expires_at": "2027-01-01T00:00:00Z",
+            "indicator_matched_at": "2026-10-12T00:00:00Z", "evidence_ids": ["EV-1"],
+        }
+        incomplete = dict(complete); incomplete.pop("indicator_created_at")
+        expired = dict(complete, indicator_expires_at="2026-01-02T00:00:00Z")
+
+        self.assertEqual(migrate_candidate(complete)["classification"], "malicious")
+        self.assertEqual(migrate_candidate(incomplete)["classification"], "anomalous")
+        self.assertEqual(migrate_candidate(expired)["classification"], "anomalous")
 
     def test_lifecycle_is_independent_from_classification(self):
         from romulus.investigation.classification import refresh_investigation_status
@@ -216,6 +253,10 @@ class ClassificationMigrationAndLifecycleTests(unittest.TestCase):
                 indicator_source="customer incident response", indicator_type="domain",
                 indicator_value="evil.example", indicator_match_type="exact",
                 indicator_current_at_match=True,
+                indicator_catalog_version="1.0.0",
+                indicator_created_at="2026-01-01T00:00:00Z",
+                indicator_expires_at="2027-01-01T00:00:00Z",
+                indicator_matched_at="2026-10-12T00:00:00Z",
             ),
             _candidate(classification="suspicious", investigation_status="dismissed", candidate_id="CL-5"),
         ]

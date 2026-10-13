@@ -60,8 +60,10 @@ def apply_retention(
     existing = working.get("retention") if isinstance(working.get("retention"), dict) else {}
     report_manifest = working.get("report_manifest") if isinstance(working.get("report_manifest"), dict) else {}
     anomaly_expected = bool(report_manifest.get("anomaly_expected", False))
+    generation_stamp = str(report_manifest.get("generation_stamp") or "").strip() or None
     if policy == "compact" and existing.get("status") == "completed":
-        _verify_reports(hunt_id, working.get("report_paths", []), anomaly_expected=anomaly_expected)
+        _verify_reports(hunt_id, working.get("report_paths", []),
+            anomaly_expected=anomaly_expected, generation_stamp=generation_stamp)
         working["retention_policy"]="compact"
         working["retention"]["finalized"]=True
         store.save_state(hunt_id,working)
@@ -76,6 +78,7 @@ def apply_retention(
         return working
     reports = _verify_reports(
         hunt_id, working.get("report_paths", []), anomaly_expected=anomaly_expected,
+        generation_stamp=generation_stamp,
     )
     if policy == "full":
         working["retention"] = {
@@ -86,6 +89,21 @@ def apply_retention(
         return working
 
     retained_ids = _cited_evidence_ids(working)
+    available_ids = {
+        str(row.get("evidence_id"))
+        for row in list(working.get("host", []) or []) + list(working.get("network", []) or [])
+        if isinstance(row, dict) and row.get("evidence_id")
+    }
+    available_ids.update(
+        str(row.get("evidence_id")) for row in store.list_evidence(hunt_id)
+        if isinstance(row, dict) and row.get("evidence_id")
+    )
+    missing_ids = sorted(retained_ids - available_ids)
+    if missing_ids:
+        raise RetentionError(
+            "Reportable items have cited evidence records that are unavailable: "
+            + ", ".join(missing_ids[:12])
+        )
     compact_state = _compact_state(working, retained_ids)
     compact_state["retention"] = {
         "policy":"compact","status":"in_progress","finalized":True,"finalized_at":utc_now(),
@@ -116,6 +134,7 @@ def apply_retention(
 
 def _verify_reports(
     hunt_id: str, report_paths: Any, *, anomaly_expected: bool = False,
+    generation_stamp: str | None = None,
 ) -> list[dict[str, Any]]:
     paths=[Path(str(value)) for value in report_paths or []]
     if len({str(path.resolve(strict=False)) for path in paths})!=len(paths):
@@ -131,6 +150,8 @@ def _verify_reports(
     docx_path,text_path=docx_paths[0],text_paths[0]
     if docx_path.stem!=text_path.stem:
         raise RetentionError("The DOCX and TXT reports do not belong to the same generation")
+    if generation_stamp and text_path.stem != f"{hunt_id}-{generation_stamp}":
+        raise RetentionError("The primary reports do not match the report manifest generation")
     if docx_path.parent.resolve(strict=False)!=text_path.parent.resolve(strict=False):
         raise RetentionError("The primary reports are not in the same directory")
     if anomaly_expected:

@@ -131,9 +131,9 @@ After reportable items are finalized, the model receives a bounded narrative cas
 - material coverage gaps; and
 - stable identifiers the response is allowed to cite.
 
-The response schema supports zero or more evidence-linked clusters, a possible sequence for each cluster, confidence, supporting item/evidence IDs, alternate explanations, missing evidence, and a list of unconnected reportable item IDs. `no_coherent_narrative` is a valid and preferred result when the evidence does not support a connection.
+The response schema supports zero or more evidence-linked clusters, a possible sequence for each cluster, confidence, supporting item/evidence/relationship IDs, and a list of unconnected reportable item IDs. The model supplies selectors only, not factual prose. ROMULUS renders the hypothesis, alternate explanations, missing evidence, and limitations deterministically from canonical report items, admitted relationships, and recorded coverage gaps. `no_coherent_narrative` is a valid and preferred result when the evidence does not support a connection.
 
-The report labels this section exactly `Hypothesis: Possible Activity Narrative` and states that it is an investigative interpretation, not a confirmed path. Deterministic validation rejects unknown IDs, invisible citations, classification changes, invented entities/times, and causal assertions lacking an admitted relationship. Rejected narrative output is omitted or replaced with a factual “no supported narrative” notice; it never affects findings or retention.
+The report labels this section exactly `Hypothesis: Possible Activity Narrative` and states that it is an investigative interpretation, not a confirmed path. Deterministic validation rejects unknown IDs, invisible citations, repeated placement, disconnected clusters, and any unauthorized output field. Because the schema contains no model-authored prose field, arbitrary tools, identities, actions, malware, or conclusions cannot enter the report through narrative synthesis. Rejected narrative output is omitted or replaced with a factual “no supported narrative” notice; it never affects findings or retention.
 
 ## Data Flow
 
@@ -143,7 +143,7 @@ The report labels this section exactly `Hypothesis: Possible Activity Narrative`
 4. Deterministic rules update investigation status and, only with cited qualifying evidence, classification.
 5. Suspicious and malicious items enter the primary report even when singular or unconnected.
 6. Unresolved anomalous-only items enter the companion text report.
-7. The narrative model receives only accepted primary-report material and returns a non-authoritative possible interpretation.
+7. The narrative model receives only accepted primary-report material and returns non-authoritative clustering/order selectors; ROMULUS renders the possible interpretation from canonical facts.
 8. All required report artifacts are written and verified before compact retention removes disposable working data.
 
 ## Compatibility and Migration

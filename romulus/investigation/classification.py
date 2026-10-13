@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 from ..models import utc_now
@@ -33,12 +34,21 @@ def apply_classification(
     rule = "insufficient_reviewed_evidence"
     cited = _owned_evidence_ids(item)
     minimum = policy.get("minimum_owned_evidence")
+    required_roles = {
+        str(value) for value in policy.get("required_context_roles", []) if value
+    }
+    matched_roles = {
+        str(value) for value in item.get("matched_context_roles", []) if value
+    }
+    singular_allowed = bool(policy.get("single_record_reportable")) or len(cited) > 1
     if (
         policy.get("default_classification") in {"anomalous", "suspicious"}
         and isinstance(minimum, int)
         and not isinstance(minimum, bool)
         and minimum >= 1
         and len(cited) >= minimum
+        and singular_allowed
+        and required_roles.issubset(matched_roles)
     ):
         desired = str(policy["default_classification"])
         rule = "reviewed_catalog_policy"
@@ -183,6 +193,9 @@ def _owned_evidence_ids(candidate: Mapping[str, Any]) -> list[str]:
 
 def _trusted_malicious_admission(candidate: Mapping[str, Any]) -> bool:
     confidence = candidate.get("indicator_confidence")
+    created = _timestamp(candidate.get("indicator_created_at"))
+    expires = _timestamp(candidate.get("indicator_expires_at"))
+    matched = _timestamp(candidate.get("indicator_matched_at"))
     return bool(
         candidate.get("kind") == "trusted_indicator"
         and isinstance(confidence, int)
@@ -191,10 +204,23 @@ def _trusted_malicious_admission(candidate: Mapping[str, Any]) -> bool:
         and str(candidate.get("indicator_source") or "").strip()
         and str(candidate.get("indicator_type") or "").strip()
         and str(candidate.get("indicator_value") or "").strip()
+        and str(candidate.get("indicator_catalog_version") or "").strip()
         and candidate.get("indicator_match_type") == "exact"
         and candidate.get("indicator_current_at_match") is True
+        and created is not None
+        and expires is not None
+        and matched is not None
+        and created <= matched < expires
         and _owned_evidence_ids(candidate)
     )
+
+
+def _timestamp(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
 
 
 def _classification_reason(rule: str) -> str:

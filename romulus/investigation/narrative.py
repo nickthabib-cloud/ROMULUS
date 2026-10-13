@@ -4,32 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import hashlib
-import ipaddress
 import json
-import re
 from typing import Any
 
 
 _TOP_LEVEL_KEYS = {
-    "no_coherent_narrative", "clusters", "unconnected_item_ids", "limitations",
+    "no_coherent_narrative", "clusters", "unconnected_item_ids",
 }
 _CLUSTER_KEYS = {
-    "item_ids", "relationship_ids", "evidence_ids", "possible_sequence",
-    "narrative", "confidence", "alternate_explanations", "missing_evidence",
+    "item_ids", "relationship_ids", "evidence_ids", "possible_sequence", "confidence",
 }
-_ISO_TIME = re.compile(
-    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})\b"
-)
-_DOMAIN = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?\.)+"
-    r"[A-Za-z]{2,63}(?![A-Za-z0-9_-])"
-)
-_CAUSAL_ASSERTION = re.compile(
-    r"\b(?:caused?|therefore caused|resulted in|proves?|confirmed that|establishes that)\b",
-    re.IGNORECASE,
-)
-
-
 def build_narrative_case(
     state: Mapping[str, Any], items: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -113,12 +97,11 @@ def admit_activity_narrative(
         if not isinstance(proposal.get("no_coherent_narrative"), bool):
             raise ValueError("Narrative coherence flag is invalid")
         clusters = proposal.get("clusters")
-        limitations = proposal.get("limitations")
         unconnected = proposal.get("unconnected_item_ids")
         if not isinstance(clusters, list) or len(clusters) > 6:
             raise ValueError("Narrative cluster set is invalid")
-        if not isinstance(unconnected, list) or not isinstance(limitations, list):
-            raise ValueError("Narrative unconnected items or limitations are invalid")
+        if not isinstance(unconnected, list):
+            raise ValueError("Narrative unconnected items are invalid")
         if proposal["no_coherent_narrative"] and clusters:
             raise ValueError("A no-coherent-narrative result cannot contain clusters")
         if not proposal["no_coherent_narrative"] and not clusters:
@@ -137,9 +120,10 @@ def admit_activity_narrative(
             str(row.get("evidence_id")) for row in _mapping_rows(case.get("evidence"))
             if row.get("evidence_id")
         }
-        visible_tokens = _fact_tokens(case)
-        normalized_limitations = _text_list(limitations, 6, 300, "limitations")
-        _validate_visible_tokens(normalized_limitations, visible_tokens)
+        case_item_index = {
+            str(row.get("item_id")): row for row in case_items if row.get("item_id")
+        }
+        normalized_limitations = _unique_strings(case.get("coverage_gaps"))[:6]
         normalized_unconnected = _id_list(unconnected, item_ids, "unconnected item")
         placed = set(normalized_unconnected)
         normalized_clusters = []
@@ -171,14 +155,17 @@ def admit_activity_narrative(
             confidence = cluster.get("confidence")
             if confidence not in {"low", "moderate", "high"}:
                 raise ValueError("Narrative confidence is invalid")
-            narrative = _required_text(cluster.get("narrative"), 800, "narrative")
-            alternatives = _text_list(
-                cluster.get("alternate_explanations"), 4, 300, "alternate explanations",
-            )
-            missing = _text_list(cluster.get("missing_evidence"), 4, 300, "missing evidence")
-            _validate_visible_tokens([narrative, *alternatives, *missing], visible_tokens)
-            if _CAUSAL_ASSERTION.search(narrative):
-                raise ValueError("Narrative makes an unsupported causal assertion")
+            narrative = _render_cluster_narrative(sequence, case_item_index)
+            alternatives = _unique_strings([
+                value
+                for item_id in members
+                for value in case_item_index.get(item_id, {}).get("benign_alternatives", [])
+            ])[:4]
+            missing = _unique_strings([
+                value
+                for item_id in members
+                for value in case_item_index.get(item_id, {}).get("coverage_gaps", [])
+            ])[:4]
             normalized_clusters.append({
                 "cluster_id": f"NC-{index + 1:02d}",
                 "item_ids": members,
@@ -209,6 +196,26 @@ def admit_activity_narrative(
         rejected = unavailable_activity_narrative(case_items, str(exc))
         rejected["status"] = "rejected"
         return rejected
+
+
+def _render_cluster_narrative(
+    sequence: Sequence[str], item_index: Mapping[str, Mapping[str, Any]],
+) -> str:
+    """Render canonical labels so the model cannot introduce factual prose."""
+    labels = [
+        f"{item_id} ({_bounded(item_index.get(item_id, {}).get('title'), 200) or 'accepted report item'})"
+        for item_id in sequence
+    ]
+    if len(labels) == 1:
+        return (
+            f"{labels[0]} is a standalone reportable behavior. The available evidence does not "
+            "establish a broader sequence."
+        )
+    return (
+        "The admitted relationships support considering this possible sequence: "
+        + " then ".join(labels)
+        + ". This ordering is an investigative hypothesis and does not establish causality."
+    )
 
 
 def unavailable_activity_narrative(
@@ -372,43 +379,6 @@ def _require_connected(
         raise ValueError("Narrative cluster is not connected by admitted relationships")
 
 
-def _validate_visible_tokens(texts: Sequence[str], allowed: Mapping[str, set[str]]) -> None:
-    observed = _tokens(" ".join(texts))
-    for token_type in ("ip", "domain", "time"):
-        invented = observed[token_type] - allowed[token_type]
-        if invented:
-            raise ValueError(f"Narrative invents an unobserved {token_type} fact")
-
-
-def _fact_tokens(value: Any) -> dict[str, set[str]]:
-    strings = []
-    pending = [value]
-    while pending:
-        current = pending.pop()
-        if isinstance(current, Mapping):
-            pending.extend(current.values())
-        elif isinstance(current, (list, tuple, set)):
-            pending.extend(current)
-        elif current is not None:
-            strings.append(str(current))
-    return _tokens(" ".join(strings))
-
-
-def _tokens(text: str) -> dict[str, set[str]]:
-    ips = set()
-    for raw in re.findall(r"[0-9A-Fa-f:.]+", text):
-        candidate = raw.strip(".,;:()[]{}<>'\"")
-        if not candidate or not ("." in candidate or ":" in candidate):
-            continue
-        try:
-            ips.add(str(ipaddress.ip_address(candidate)))
-        except ValueError:
-            pass
-    domains = {match.group(0).lower().rstrip(".") for match in _DOMAIN.finditer(text)}
-    times = {match.group(0) for match in _ISO_TIME.finditer(text)}
-    return {"ip": ips, "domain": domains, "time": times}
-
-
 def _id_list(
     value: Any, allowed: set[str], label: str, minimum: int = 0,
 ) -> list[str]:
@@ -420,18 +390,6 @@ def _id_list(
     if not set(values).issubset(allowed):
         raise ValueError(f"Narrative cites an unknown {label}")
     return values
-
-
-def _text_list(value: Any, maximum: int, limit: int, label: str) -> list[str]:
-    if not isinstance(value, list) or len(value) > maximum:
-        raise ValueError(f"Narrative {label} list is invalid")
-    return [_required_text(item, limit, label) for item in value]
-
-
-def _required_text(value: Any, limit: int, label: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > limit:
-        raise ValueError(f"Narrative {label} text is invalid")
-    return " ".join(value.split())
 
 
 def _mapping_rows(value: Any) -> list[Mapping[str, Any]]:

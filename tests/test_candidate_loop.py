@@ -798,7 +798,8 @@ class CandidateStateTests(unittest.TestCase):
         }
         state = {
             "candidate_leads": [candidate],
-            "findings": [{"finding_id": "F-1", "evidence_ids": ["EV-1"]}],
+            "findings": [{"finding_id": "F-1", "candidate_ids": ["CL-LINK"],
+                "evidence_ids": ["EV-1"]}],
         }
 
         _link_candidates_to_findings(state)
@@ -806,6 +807,31 @@ class CandidateStateTests(unittest.TestCase):
         self.assertEqual(candidate["classification"], "anomalous")
         self.assertEqual(candidate["investigation_status"], "resolved")
         self.assertFalse(candidate["customer_visible"])
+
+    def test_shared_evidence_does_not_implicitly_merge_distinct_candidates_into_finding(self):
+        from romulus.investigation.workflow import _link_candidates_to_findings
+
+        state = {
+            "candidate_leads": [{
+                "candidate_id": "CL-EXPLICIT", "classification": "suspicious",
+                "investigation_status": "new", "disposition": "observed",
+                "evidence_ids": ["EV-SHARED"], "finding_ids": [], "follow_ups": [],
+            }, {
+                "candidate_id": "CL-DISTINCT", "classification": "suspicious",
+                "investigation_status": "new", "disposition": "observed",
+                "evidence_ids": ["EV-SHARED"], "finding_ids": [], "follow_ups": [],
+            }],
+            "findings": [{
+                "finding_id": "F-EXPLICIT", "candidate_ids": ["CL-EXPLICIT"],
+                "evidence_ids": ["EV-SHARED"],
+            }],
+        }
+
+        _link_candidates_to_findings(state)
+
+        self.assertEqual(state["candidate_leads"][0]["finding_ids"], ["F-EXPLICIT"])
+        self.assertEqual(state["candidate_leads"][1]["finding_ids"], [])
+        self.assertEqual(state["candidate_leads"][1]["investigation_status"], "new")
 
     def test_candidate_merge_sanitizes_derived_state_when_candidate_is_not_refreshed(self):
         from romulus.intelligence.behavior_catalog import merge_candidate_queue

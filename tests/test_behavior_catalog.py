@@ -66,6 +66,10 @@ class CatalogLoadingTests(unittest.TestCase):
         inconsistent_singular["classification_policy"]["minimum_owned_evidence"] = 2
         invalid.append((inconsistent_singular, r"single_record_reportable"))
 
+        inconsistent_aggregate = _analytic("BH-TEST-POLICY-AGGREGATE")
+        inconsistent_aggregate["classification_policy"]["default_classification"] = "suspicious"
+        invalid.append((inconsistent_aggregate, r"single_record_reportable"))
+
         invalid_upgrade = _analytic("BH-TEST-POLICY-UPGRADE")
         invalid_upgrade["classification_policy"]["upgrade_rule"] = "score_at_least_70"
         invalid.append((invalid_upgrade, r"upgrade_rule"))
@@ -403,6 +407,9 @@ class CandidateRankingTests(unittest.TestCase):
         reverse_shell = next(item for item in candidates if item["analytic_id"] == "BH-LNX-016")
         self.assertEqual(reverse_shell["disposition"], "observed")
         self.assertEqual(reverse_shell["classification"], "suspicious")
+        self.assertTrue(set(reverse_shell["classification_policy"]["required_context_roles"]).issubset(
+            reverse_shell["matched_context_roles"]
+        ))
         self.assertTrue(reverse_shell["customer_visible"])
         self.assertNotIn("independent behavior", " ".join(reverse_shell["score_reasons"]).lower())
 
@@ -473,13 +480,16 @@ class CandidateRankingTests(unittest.TestCase):
         exact = build_candidate_queue(
             [_event("EV-IOC", "ws-01", dns_question="evil.example")],
             self.catalog,
-            {"indicators": [indicator]},
+            {"catalog_version": "1.0.0", "indicators": [indicator]},
             now="2026-10-12T00:00:00Z",
         )[0]
         self.assertEqual(exact["classification"], "malicious")
         self.assertEqual(exact["classification_policy_version"], 1)
         self.assertIn("current exact", exact["classification_reason"])
         self.assertEqual(exact["classification_history"], [])
+        self.assertEqual(exact["indicator_catalog_version"], "1.0.0")
+        self.assertEqual(exact["indicator_created_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(exact["indicator_matched_at"], "2026-10-12T00:00:00+00:00")
 
         for unsafe in (
             dict(indicator, confidence=89),
@@ -490,7 +500,7 @@ class CandidateRankingTests(unittest.TestCase):
             candidates = build_candidate_queue(
                 [_event("EV-IOC", "ws-01", dns_question="evil.example")],
                 self.catalog,
-                {"indicators": [unsafe]},
+                {"catalog_version": "1.0.0", "indicators": [unsafe]},
                 now="2026-10-12T00:00:00Z",
             )
             with self.subTest(unsafe=unsafe):
@@ -501,7 +511,7 @@ class CandidateRankingTests(unittest.TestCase):
         substring = build_candidate_queue(
             [_event("EV-SUBSTRING", "ws-01", dns_question="notevil.example")],
             self.catalog,
-            {"indicators": [indicator]},
+            {"catalog_version": "1.0.0", "indicators": [indicator]},
             now="2026-10-12T00:00:00Z",
         )
         self.assertFalse(any(item.get("indicator_id") == "IOC-MALICIOUS" for item in substring))

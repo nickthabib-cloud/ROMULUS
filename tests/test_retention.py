@@ -260,6 +260,9 @@ class RetentionTests(unittest.TestCase):
             wrong_dir.write_text("Investigation: HUNT-ONE\n", encoding="utf-8")
             wrong_generation = anomaly.with_name("HUNT-ONE-anomalous-leads-20261013T000002Z.txt")
             wrong_generation.write_text("Investigation: HUNT-ONE\n", encoding="utf-8")
+            stale_root = root / "stale"
+            stale_root.mkdir()
+            stale_primary = self._reports_with_anomaly(stale_root, "HUNT-ONE", "20261012T235959Z")
             mutations = {
                 "missing or undeclared": valid[:2],
                 "empty": valid[:2] + [str(empty)],
@@ -267,6 +270,7 @@ class RetentionTests(unittest.TestCase):
                 "wrong directory": valid[:2] + [str(wrong_dir)],
                 "duplicate": valid + [valid[2]],
                 "wrong generation": valid[:2] + [str(wrong_generation)],
+                "stale primary generation": stale_primary,
             }
             for label, paths in mutations.items():
                 with self.subTest(label=label):
@@ -293,6 +297,25 @@ class RetentionTests(unittest.TestCase):
                 apply_retention(store, state, policy="compact", automatic=True)
             self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
             self.assertIn("host", store.load_state("HUNT-ONE"))
+
+    def test_compaction_fails_closed_when_a_report_citation_has_no_evidence_record(self):
+        from romulus.retention import RetentionError, apply_retention
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            store = Store(root / "data", root / "logs")
+            paths = self._reports_with_anomaly(root, "HUNT-ONE")
+            state = self._state(paths)
+            state["report_manifest"] = {
+                "generation_stamp": "20261013T000000Z", "anomaly_expected": True,
+            }
+            state["host"] = [{"evidence_id": "EV-DROP"}]
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-DROP"})
+
+            with self.assertRaisesRegex(RetentionError, "cited evidence"):
+                apply_retention(store, state, policy="compact", automatic=True)
+
+            self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
 
     def _checkpoint_rows(self, store: Store):
         db=sqlite3.connect(store.checkpoint_path)

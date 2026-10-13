@@ -68,6 +68,10 @@ class ReportItemProjectionTests(unittest.TestCase):
                 "indicator_source": "customer incident response", "indicator_type": "domain",
                 "indicator_value": "evil.example", "indicator_match_type": "exact",
                 "indicator_current_at_match": True,
+                "indicator_catalog_version": "1.0.0",
+                "indicator_created_at": "2026-01-01T00:00:00Z",
+                "indicator_expires_at": "2027-01-01T00:00:00Z",
+                "indicator_matched_at": "2026-10-10T12:00:00Z",
                 "evidence_ids": ["EV-1"], "finding_ids": [],
             },
         ]
@@ -207,7 +211,11 @@ class CustomerWordReportTests(unittest.TestCase):
                     "source": "elasticsearch",
                     "asset": "WS-17",
                     "observation": "RAW-HOST-EVENT-SENTINEL",
-                }
+                },
+                {
+                    "evidence_id": "EV-RAW-002", "source": "elasticsearch",
+                    "asset": "WS-20", "observation": "LOW-PRIORITY-EVIDENCE-SENTINEL",
+                },
             ],
             "network": [],
             "correlations": [],
@@ -275,6 +283,10 @@ class CustomerWordReportTests(unittest.TestCase):
             "indicator_value": "evil.example",
             "indicator_match_type": "exact",
             "indicator_current_at_match": True,
+            "indicator_catalog_version": "1.0.0",
+            "indicator_created_at": "2026-01-01T00:00:00Z",
+            "indicator_expires_at": "2027-01-01T00:00:00Z",
+            "indicator_matched_at": "2026-10-10T12:00:00Z",
             "priority_score": 5,
             "priority_tier": "low",
             "disposition": "observed",
@@ -432,6 +444,73 @@ class CustomerWordReportTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, anomaly)
 
+    def test_finalized_primary_omits_anomaly_only_working_sections(self):
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        anomaly = state["candidate_leads"][1]
+        anomaly.update({
+            "title": "ANOMALY-TITLE-SENTINEL",
+            "description": "ANOMALY-DESCRIPTION-SENTINEL",
+            "evidence_ids": ["EV-ANOMALY-SENTINEL"],
+            "follow_ups": [{"follow_up_id": "FU-ANOMALY", "status": "completed",
+                "intent": "ANOMALY-FOLLOWUP-SENTINEL", "history": []}],
+        })
+        state["host"].append({
+            "evidence_id": "EV-ANOMALY-SENTINEL", "source": "elasticsearch",
+            "observation": "ANOMALY-EVIDENCE-SENTINEL", "asset": "ANOMALY-ASSET-SENTINEL",
+        })
+        state["hypotheses"].append({
+            "hypothesis_id": "H-ANOMALY", "candidate_id": anomaly["candidate_id"],
+            "title": "ANOMALY-HYPOTHESIS-SENTINEL", "rationale": "ANOMALY-RATIONALE-SENTINEL",
+        })
+        state["analytic_summary"] = {"behavioral_observations": [{
+            "analytic": "ANOMALY-ANALYTIC-SENTINEL",
+            "sample_evidence_ids": ["EV-ANOMALY-SENTINEL"],
+        }]}
+        state["correlations"] = [{
+            "host_ref": "EV-ANOMALY-SENTINEL", "network_ref": "EV-ANOMALY-SENTINEL",
+            "reasons": ["ANOMALY-CORRELATION-SENTINEL"],
+        }]
+        state["reasoning_history"].append({"reasoning": "ANOMALY-REASONING-SENTINEL"})
+        state["search_artifacts"].append({"artifact_id": "ANOMALY-ARTIFACT-SENTINEL"})
+        state["search_tasks"]["ST-ANOMALY"] = {
+            "task_id": "ST-ANOMALY", "candidate_ids": [anomaly["candidate_id"]],
+            "intent": "ANOMALY-TASK-SENTINEL", "status": "completed",
+        }
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths = generate_report(state, Path(directory))
+            primary = next(path for path in paths
+                if path.suffix == ".txt" and path.parent.name != "anomalous").read_text(encoding="utf-8")
+            anomaly_text = next(path for path in paths
+                if path.parent.name == "anomalous").read_text(encoding="utf-8")
+
+        for sentinel in (
+            "ANOMALY-TITLE-SENTINEL", "ANOMALY-DESCRIPTION-SENTINEL",
+            "ANOMALY-EVIDENCE-SENTINEL", "ANOMALY-ASSET-SENTINEL",
+            "ANOMALY-HYPOTHESIS-SENTINEL", "ANOMALY-RATIONALE-SENTINEL",
+            "ANOMALY-ANALYTIC-SENTINEL", "ANOMALY-CORRELATION-SENTINEL",
+            "ANOMALY-REASONING-SENTINEL", "ANOMALY-ARTIFACT-SENTINEL",
+            "ANOMALY-TASK-SENTINEL", "ANOMALY-FOLLOWUP-SENTINEL",
+        ):
+            self.assertNotIn(sentinel, primary)
+        self.assertIn("ANOMALY-TITLE-SENTINEL", anomaly_text)
+        self.assertIn("ANOMALY-EVIDENCE-SENTINEL", anomaly_text)
+        self.assertIn("ANOMALY-TASK-SENTINEL", anomaly_text)
+
+    def test_report_generation_fails_when_reportable_citation_is_unresolvable(self):
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        state["findings"][0]["evidence_ids"] = ["EV-DOES-NOT-EXIST"]
+        state["candidate_leads"][0]["evidence_ids"] = ["EV-DOES-NOT-EXIST"]
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            with self.assertRaisesRegex(ValueError, "EV-DOES-NOT-EXIST"):
+                generate_report(state, Path(directory))
+            self.assertEqual(list(Path(directory).rglob("*")), [])
+
     def test_anomaly_report_requires_finalization_and_unresolved_anomalies(self):
         from romulus.reporting.report import generate_report
 
@@ -577,7 +656,16 @@ class CustomerWordReportTests(unittest.TestCase):
                 "UNIFIED SEARCH SCHEDULER",
             ):
                 self.assertNotIn(internal, word_text)
-                self.assertIn(internal, technical_text)
+            for removed_working_detail in (
+                "INTERNAL-STAGE-SENTINEL", "INTERNAL-REASONING-SENTINEL",
+                "INTERNAL-TOOL-SENTINEL", "INTERNAL-SEARCH-SENTINEL",
+            ):
+                self.assertNotIn(removed_working_detail, technical_text)
+            for retained_reportable_detail in (
+                "RAW-HOST-EVENT-SENTINEL", "TECHNICAL CANDIDATE WORKING LIST",
+                "ST-INTERNAL-SENTINEL", "UNIFIED SEARCH SCHEDULER",
+            ):
+                self.assertIn(retained_reportable_detail, technical_text)
 
             self.assertNotIn("LOW-PRIORITY-INTERNAL-SENTINEL", word_text)
             self.assertNotIn("LOW-PRIORITY-INTERNAL-SENTINEL", technical_text)
@@ -592,8 +680,7 @@ class CustomerWordReportTests(unittest.TestCase):
             self.assertIn("matched_by_stratum=3, 3, 3, 3, 3, 3, 3",technical_text)
             self.assertNotIn("sampling=rank_stratified",word_text)
             self.assertIn("CL-HIGH",technical_text)
-            self.assertIn("budget-limited=ST-BUDGET-001, ST-BUDGET-002",technical_text)
-            self.assertIn("total=3; omitted=1",technical_text)
+            self.assertNotIn("ST-BUDGET-001",technical_text)
             self.assertNotIn("DO-NOT-REPORT-SECRET",technical_text)
 
             self.assertGreaterEqual(len(document.tables), 3)

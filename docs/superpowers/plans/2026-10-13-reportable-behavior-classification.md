@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-13-reportable-behavior-classification-design.md`
 
+**Progress snapshot (2026-10-13):** Tasks 1–5 and Task 6 Steps 1–3 are implemented and locally proven. The first whole-branch review completed and its Critical/Important findings received focused RED/GREEN fixes: selector-only narrative synthesis, exact-generation retention, finalized-primary isolation, full trusted-indicator lifecycle provenance, explicit finding ownership, citation existence checks, complete catalog-policy enforcement, reportability tie-breaking, and report-item-derived outcomes. The remaining gates are fresh re-review, exact-archive VM proof, one isolated generic live hunt, validation recording/cleanup, and the stacked PR.
+
 ## Global Constraints
 
 - Classification is exactly `anomalous`, `suspicious`, or `malicious`; investigation status is exactly `new`, `investigating`, `follow_up_exhausted`, `resolved`, or `dismissed`.
@@ -300,7 +302,7 @@ Limit the case to 12 report items and 48 owned evidence records. A multi-item cl
 
 - [ ] **Step 4: Write failing Ollama contract and workflow tests**
 
-Assert `_activity_narrative_schema(case)` enumerates only visible item/evidence/relationship IDs and has no classification, entity, time, finding, query, or tool-action fields. Assert broad candidate-free hunts make no narrative call; no reportable items and exhausted/unavailable model capacity use safe fallback; valid output is admitted once during `_report`; invalid/model-failed output cannot suppress factual reports or mutate candidates/findings/graph.
+Assert `_activity_narrative_schema(case)` enumerates only visible item/evidence/relationship IDs and has no model-authored narrative, alternate-explanation, missing-evidence, limitation, classification, entity, time, finding, query, or tool-action fields. Assert broad candidate-free hunts make no narrative call; no reportable items and exhausted/unavailable model capacity use safe fallback; valid output is admitted once during `_report`; invalid/model-failed output cannot suppress factual reports or mutate candidates/findings/graph.
 
 - [ ] **Step 5: Implement synthesis and report orchestration**
 
@@ -334,11 +336,11 @@ git commit -m "feat: add constrained activity narrative"
 - Consumes: completed Tasks 1–5.
 - Produces: reviewed exact commit, local and VM proof, one isolated generic live hunt, retained reports, cleanup evidence, and a stacked GitHub PR.
 
-- [ ] **Step 1: Update operator and maintainer documentation**
+- [x] **Step 1: Update operator and maintainer documentation**
 
 Document the three independent candidate dimensions, catalog policy fields, singular suspicious admission, malicious gate, anomaly report location/contents, narrative limits, and compact retention. State plainly that classification is not a compromise declaration and anomaly reports are fallback lead queues.
 
-- [ ] **Step 2: Run complete local verification**
+- [x] **Step 2: Run complete local verification**
 
 Run:
 
@@ -350,7 +352,7 @@ git diff --check
 
 Expected: every available test passes; only documented optional-dependency skips are allowed; compilation and diff checks are clean.
 
-- [ ] **Step 3: Run an isolated offline end-to-end hunt**
+- [x] **Step 3: Run an isolated offline end-to-end hunt**
 
 Use temporary ROMULUS data/log/report directories and compact retention. Prove a singular suspicious synthetic behavior reaches the primary report, an unrelated anomaly reaches only the anomaly TXT, the narrative does not force them together, all report paths reopen, and uncited working data is removed. Delete only the exact disposable runtime after recording hashes/results.
 
