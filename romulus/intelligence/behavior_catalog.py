@@ -436,11 +436,32 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
     # A bounded re-analysis may not reproduce a previously observed candidate
     # (for example after context retention or source availability changes).
     # Preserve it until an explicit analyst disposition closes it.
-    merged.extend(dict(item, follow_ups=[dict(entry, history=list(entry.get("history", [])))
-        for entry in item.get("follow_ups", [])]) for item in previous
+    merged.extend(_retained_candidate_without_derived_corroboration(item) for item in previous
         if str(item.get("candidate_id")) not in refreshed_ids)
     return sorted(merged, key=lambda item: (-int(item.get("priority_score", 0)),
         0 if item.get("kind") == "trusted_indicator" else 1, str(item.get("candidate_id"))))
+
+
+def _retained_candidate_without_derived_corroboration(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Keep investigation history without carrying an unavailable relationship."""
+    item = dict(candidate)
+    item["follow_ups"] = [dict(entry, history=list(entry.get("history", [])))
+        for entry in candidate.get("follow_ups", [])]
+    bonus = max(0, min(20, int(item.get("corroboration_bonus", 0) or 0)))
+    score = max(0, int(item.get("priority_score", 0) or 0) - bonus)
+    item["corroboration_bonus"] = 0
+    item["priority_score"] = score
+    item["priority_tier"] = "critical" if score >= 90 else (
+        "high" if score >= 70 else ("medium" if score >= 40 else "low")
+    )
+    item["related_candidates"] = []
+    item["corroboration_reasons"] = []
+    item["score_reasons"] = [str(reason) for reason in item.get("score_reasons", [])
+        if not str(reason).startswith("evidence-backed corroboration contribution ")]
+    if str(item.get("disposition") or "observed") == "corroborated":
+        item["disposition"] = "observed"
+    item["customer_visible"] = bool(item.get("kind") == "trusted_indicator")
+    return item
 
 
 def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) -> dict[str, Any] | None:

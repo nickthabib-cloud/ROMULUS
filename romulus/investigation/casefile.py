@@ -207,16 +207,52 @@ def _select_candidates(
     frontier = select_candidate_frontier(
         eligible, limit=candidate_limit, preferred_ids=preferred_ids or set(),
     )
+    prepared = []
     for raw in frontier:
-        if len(selected) >= candidate_limit:
+        if len(prepared) >= candidate_limit:
             break
         candidate_id = _text(raw.get("candidate_id"), 120)
-        if not candidate_id or candidate_id in used_ids:
+        if not candidate_id or any(item[0] == candidate_id for item in prepared):
             continue
         all_owned = sorted(set(_strings(raw.get("evidence_ids"), 120, 100)))
         owned = [item for item in all_owned if item in evidence_index]
-        remaining_evidence = max(0, evidence_limit - len(anchor_ids))
-        visible_owned = owned[:min(6, remaining_evidence)]
+        if not owned:
+            continue
+        prepared.append((candidate_id, raw, all_owned, owned))
+
+    allocations: dict[str, list[str]] = {}
+    # Give every candidate one owned record before any candidate gets a second.
+    for candidate_id, _, _, owned in prepared:
+        already_visible = next((identifier for identifier in owned if identifier in anchor_ids), None)
+        if already_visible:
+            allocations[candidate_id] = [already_visible]
+        elif len(anchor_ids) < evidence_limit:
+            allocations[candidate_id] = [owned[0]]
+            anchor_ids.append(owned[0])
+    # Distribute the remaining unique-evidence budget round-robin, bounded to
+    # six visible records per candidate.
+    while len(anchor_ids) < evidence_limit:
+        progressed = False
+        for candidate_id, _, _, owned in prepared:
+            visible_owned = allocations.get(candidate_id)
+            if not visible_owned or len(visible_owned) >= 6:
+                continue
+            next_owned = next((identifier for identifier in owned if identifier not in visible_owned), None)
+            if next_owned is None:
+                continue
+            if next_owned not in anchor_ids and len(anchor_ids) >= evidence_limit:
+                continue
+            visible_owned.append(next_owned)
+            if next_owned not in anchor_ids:
+                anchor_ids.append(next_owned)
+            progressed = True
+            if len(anchor_ids) >= evidence_limit:
+                break
+        if not progressed:
+            break
+
+    for candidate_id, raw, all_owned, _ in prepared:
+        visible_owned = allocations.get(candidate_id, [])
         if not visible_owned:
             continue
         compact = {
@@ -240,15 +276,34 @@ def _select_candidates(
         }
         selected.append(compact)
         used_ids.add(candidate_id)
-        anchor_ids.extend(item for item in visible_owned if item not in anchor_ids)
 
     visible_evidence_ids = set(anchor_ids)
     for compact in selected:
         raw = raw_by_id.get(compact["candidate_id"], {})
-        compact["related_candidates"] = _visible_relationships(
+        relationships = _visible_relationships(
             raw.get("related_candidates"), used_ids, visible_evidence_ids,
         )
-        compact["corroboration_reasons"] = _strings(raw.get("corroboration_reasons"), 360, 12)
+        compact["related_candidates"] = relationships
+        base_reasons = [reason for reason in compact["score_reasons"]
+            if not reason.startswith("evidence-backed corroboration contribution ")]
+        if relationships:
+            groups = {
+                _text(raw_by_id.get(row["candidate_id"], {}).get("corroboration_group")
+                    or raw_by_id.get(row["candidate_id"], {}).get("analytic_id"), 120)
+                for row in relationships
+            }
+            groups.discard("")
+            base_reasons.append(
+                f"evidence-backed corroboration contribution {min(20, len(groups) * 10)}"
+            )
+        compact["score_reasons"] = base_reasons
+        compact["corroboration_reasons"] = [
+            f"Related to {row['candidate_id']} "
+            f"({_text(raw_by_id.get(row['candidate_id'], {}).get('corroboration_group') or raw_by_id.get(row['candidate_id'], {}).get('analytic_id'), 120) or 'unknown'}) "
+            f"via shared {row['shared_entity_type']} {row['shared_entity']} within "
+            f"{row['time_delta_seconds']} seconds; {row['caveat']}"
+            for row in relationships
+        ]
     return selected, anchor_ids
 
 

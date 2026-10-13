@@ -304,6 +304,28 @@ class MissionModeTests(unittest.TestCase):
 
 
 class CandidateHypothesisTests(unittest.TestCase):
+    def test_candidate_hypothesis_rejects_citations_absent_from_current_evidence(self):
+        from romulus.investigation.workflow import _candidate_hypotheses
+
+        candidate = {
+            "candidate_id": "CL-STALE",
+            "kind": "behavior",
+            "title": "Previously observed behavior",
+            "priority_score": 75,
+            "priority_tier": "high",
+            "disposition": "observed",
+            "customer_visible": False,
+            "assets": ["srv-01"],
+            "evidence_ids": ["EV-NO-LONGER-AVAILABLE"],
+            "attack_techniques": ["T1059"],
+            "benign_explanations": ["Authorized administration"],
+            "follow_ups": [],
+        }
+
+        hypotheses = _candidate_hypotheses([candidate], [], evidence=[])
+
+        self.assertEqual(hypotheses, [])
+
     def test_observed_candidate_creates_only_candidate_backed_hypothesis(self):
         event = {
             "evidence_id": "EV-CHAIN",
@@ -466,6 +488,57 @@ class AggregateSignalTests(unittest.TestCase):
 
 
 class CandidateStateTests(unittest.TestCase):
+    def test_candidate_merge_sanitizes_derived_state_when_candidate_is_not_refreshed(self):
+        from romulus.intelligence.behavior_catalog import merge_candidate_queue
+        from romulus.investigation.candidate_triage import relate_candidates
+
+        candidates = [
+            {
+                "candidate_id": "CL-OLD-A",
+                "kind": "behavior",
+                "analytic_id": "BH-OLD-A",
+                "corroboration_group": "old-a",
+                "priority_score": 65,
+                "priority_tier": "medium",
+                "disposition": "observed",
+                "customer_visible": False,
+                "evidence_ids": ["EV-OLD-A"],
+                "score_reasons": ["base behavior score"],
+                "follow_ups": [],
+            },
+            {
+                "candidate_id": "CL-OLD-B",
+                "kind": "behavior",
+                "analytic_id": "BH-OLD-B",
+                "corroboration_group": "old-b",
+                "priority_score": 45,
+                "priority_tier": "medium",
+                "disposition": "observed",
+                "customer_visible": False,
+                "evidence_ids": ["EV-OLD-B"],
+                "score_reasons": ["base behavior score"],
+                "follow_ups": [],
+            },
+        ]
+        evidence = [
+            {"evidence_id": "EV-OLD-A", "observed_at": "2026-10-12T12:00:00Z",
+             "raw": {"host": {"name": "srv-01"}}},
+            {"evidence_id": "EV-OLD-B", "observed_at": "2026-10-12T12:01:00Z",
+             "raw": {"host": {"name": "srv-01"}}},
+        ]
+        prior = relate_candidates(candidates, evidence)
+
+        merged = merge_candidate_queue(prior, [])
+        retained = next(item for item in merged if item["candidate_id"] == "CL-OLD-A")
+
+        self.assertEqual(retained["disposition"], "observed")
+        self.assertFalse(retained["customer_visible"])
+        self.assertEqual(retained["priority_score"], 65)
+        self.assertEqual(retained["priority_tier"], "medium")
+        self.assertEqual(retained["corroboration_bonus"], 0)
+        self.assertEqual(retained["related_candidates"], [])
+        self.assertEqual(retained["corroboration_reasons"], [])
+
     def test_candidate_merge_clears_derived_corroboration_when_relationship_disappears(self):
         from romulus.intelligence.behavior_catalog import merge_candidate_queue
         from romulus.investigation.candidate_triage import relate_candidates

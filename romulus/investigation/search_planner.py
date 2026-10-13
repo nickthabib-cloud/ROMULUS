@@ -479,6 +479,8 @@ def candidate_network_spec(
             protocols.append(protocol)
         if len(protocols) >= 4:
             break
+    if require_entity and not (ports or protocols):
+        raise ValueError("candidate network pivot requires a validated port or protocol behavior selector")
     if not require_entity and not (ips or hostnames or ports or protocols):
         protocols = ["tcp", "udp", "icmp"]
 

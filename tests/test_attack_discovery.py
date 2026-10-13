@@ -58,6 +58,34 @@ class CandidateNetworkPivotTests(unittest.TestCase):
                 require_entity=True,
             )
 
+    def test_candidate_network_pivot_rejects_entity_without_behavior(self):
+        from romulus.investigation.search_planner import candidate_network_spec
+        from romulus.investigation.workflow import _lead_catalog, _lead_network_expression
+
+        lead = {
+            "candidate_id": "CL-SHELL",
+            "technique_id": "T1059.004",
+            "ips": ["10.40.5.9"],
+            "hostnames": [],
+        }
+        with self.assertRaisesRegex(ValueError, "behavior selector"):
+            candidate_network_spec(lead, {}, require_entity=True)
+        with self.assertRaisesRegex(ValueError, "behavior selector"):
+            _lead_network_expression(lead)
+
+        projected = _lead_catalog([{
+            "hypothesis_id": "H-SHELL",
+            "candidate_id": "CL-SHELL",
+            "technique_id": "T1059.004",
+            "title": "Observed shell behavior",
+            "expected_host": ["Review the cited process lineage."],
+            "expected_network": ["Review adjacent sessions."],
+            "ips": ["10.40.5.9"],
+            "hostnames": [],
+            "basis_evidence_ids": ["EV-SHELL"],
+        }])
+        self.assertEqual([item["source"] for item in projected], ["host"])
+
     def test_workflow_candidate_helpers_include_primary_entity(self):
         from romulus.investigation.workflow import _lead_network_expression, _lead_pcap_filter
 
@@ -307,6 +335,26 @@ class CandidateFrontierTests(unittest.TestCase):
         self.assertEqual(set(selected_ids[:2]), {"CL-TRUSTED", "CL-CRITICAL"})
         self.assertLess(selected_ids.index("CL-PREFERRED"), selected_ids.index("CL-ORDINARY"))
 
+    def test_all_unresolved_preferred_candidates_survive_the_exploration_reserve(self):
+        from romulus.investigation.candidate_triage import select_candidate_frontier
+
+        preferred = [
+            self._candidate(f"CL-PREFERRED-{index}", f"preferred-{index}", 20 - index)
+            for index in range(4)
+        ]
+        ordinary = [
+            self._candidate(f"CL-ORDINARY-{index}", f"ordinary-{index}", 80 - index)
+            for index in range(8)
+        ]
+
+        selected = select_candidate_frontier(
+            ordinary + preferred,
+            preferred_ids={item["candidate_id"] for item in preferred},
+        )
+        selected_ids = {item["candidate_id"] for item in selected}
+
+        self.assertTrue({item["candidate_id"] for item in preferred}.issubset(selected_ids))
+
     def test_exploration_never_displaces_critical_candidates(self):
         from romulus.investigation.candidate_triage import select_candidate_frontier
 
@@ -351,6 +399,8 @@ class AttackDiscoveryWorkflowTests(unittest.TestCase):
         from pathlib import Path
 
         from romulus.config import Settings
+        from romulus.investigation.casefile import build_case_file
+        from romulus.investigation.reasoning import admit_reasoning
         from romulus.investigation.workflow import HuntEngine
         from romulus.store import Store
 
@@ -470,6 +520,87 @@ class AttackDiscoveryWorkflowTests(unittest.TestCase):
         self.assertIn("protocols == tcp", expression)
         self.assertIn("protocols == udp", expression)
         self.assertEqual(result["findings"], [])
+
+        bounded_case = build_case_file(result, candidate_limit=8, evidence_limit=8)
+        self.assertTrue(bounded_case["candidates"])
+        self.assertTrue(all(item["evidence_ids"] for item in bounded_case["candidates"]))
+        self.assertLessEqual(len(bounded_case["evidence"]), 8)
+        hidden_owner = next(
+            item for item in bounded_case["candidates"]
+            if item["evidence_total"] > len(item["evidence_ids"])
+        )
+        raw_owner = next(
+            item for item in result["candidate_leads"]
+            if item["candidate_id"] == hidden_owner["candidate_id"]
+        )
+        hidden_evidence_id = next(
+            item for item in raw_owner["evidence_ids"]
+            if item not in hidden_owner["evidence_ids"]
+        )
+        hidden_hypothesis = next(
+            item for item in bounded_case["hypotheses"]
+            if item["candidate_id"] == hidden_owner["candidate_id"]
+        )
+        hidden_finding = {
+            "proposal_id": "P-HIDDEN-FINDING",
+            "hypothesis_id": hidden_hypothesis["hypothesis_id"],
+            "title": "Hidden citation attempt",
+            "technique_id": hidden_hypothesis["technique_id"],
+            "observation": "The proposal cites telemetry outside the bounded case file.",
+            "interpretation": "The proposal must remain inadmissible.",
+            "evidence_ids": [hidden_owner["evidence_ids"][0], hidden_evidence_id],
+            "confidence": "moderate",
+            "confidence_justification": "Two claimed citations.",
+            "alternatives": ["Expected administration"],
+            "follow_up": ["Review visible evidence only."],
+        }
+        hidden_admission = admit_reasoning(
+            bounded_case,
+            {"assessments": [], "new_hypotheses": [], "searches": [],
+             "findings": [hidden_finding], "summary": "bounded test"},
+            {"reviews": [{"proposal_id": "P-HIDDEN-FINDING", "decision": "accept",
+                "issue_codes": [], "rationale": "claimed grounding"}]},
+            result["hypotheses"],
+        )
+        self.assertEqual(hidden_admission["findings"], [])
+        self.assertTrue(any(
+            "unknown_evidence" in item.get("reason_codes", [])
+            for item in hidden_admission["rejections"]
+        ))
+
+        relationship_case = build_case_file(result, candidate_limit=8, evidence_limit=24)
+        related_owner = next(item for item in relationship_case["candidates"] if item["related_candidates"])
+        relationship = related_owner["related_candidates"][0]
+        relationship_hypothesis = next(
+            item for item in relationship_case["hypotheses"]
+            if item["candidate_id"] == related_owner["candidate_id"]
+        )
+        relationship_finding = {
+            "proposal_id": "P-RELATIONSHIP-FINDING",
+            "hypothesis_id": relationship_hypothesis["hypothesis_id"],
+            "title": "Relationship-only attempt",
+            "technique_id": relationship_hypothesis["technique_id"],
+            "observation": "Two related records are visible.",
+            "interpretation": "Temporal association alone is not a confirmed finding.",
+            "evidence_ids": relationship["evidence_ids"],
+            "confidence": "moderate",
+            "confidence_justification": "A relationship was observed.",
+            "alternatives": ["Independent expected activity"],
+            "follow_up": ["Seek discriminating evidence."],
+        }
+        relationship_admission = admit_reasoning(
+            relationship_case,
+            {"assessments": [], "new_hypotheses": [], "searches": [],
+             "findings": [relationship_finding], "summary": "relationship test"},
+            {"reviews": [{"proposal_id": "P-RELATIONSHIP-FINDING", "decision": "accept",
+                "issue_codes": [], "rationale": "claimed grounding"}]},
+            result["hypotheses"],
+        )
+        self.assertEqual(relationship_admission["findings"], [])
+        self.assertTrue(any(
+            "unsupported_hypothesis" in item.get("reason_codes", [])
+            for item in relationship_admission["rejections"]
+        ))
 
 
 if __name__ == "__main__":

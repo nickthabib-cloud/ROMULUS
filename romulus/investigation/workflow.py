@@ -2008,6 +2008,9 @@ def _state_mission_mode(state):
 
 def _candidate_hypotheses(candidates,existing,evidence=None):
     """Create bounded hypotheses only from deterministic candidates with citations."""
+    available_evidence_ids=None if evidence is None else {
+        str(event.get("evidence_id")) for event in evidence if event.get("evidence_id")
+    }
     existing_candidates={candidate_id for hypothesis in existing for candidate_id in hypothesis.get("basis_candidate_ids",[])}
     existing_candidates.update(hypothesis.get("candidate_id") for hypothesis in existing if hypothesis.get("candidate_id"))
     out=[]
@@ -2016,6 +2019,8 @@ def _candidate_hypotheses(candidates,existing,evidence=None):
     for candidate in select_candidate_frontier(remaining):
         candidate_id=candidate.get("candidate_id")
         evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
+        if available_evidence_ids is not None:
+            evidence_ids=[value for value in evidence_ids if value in available_evidence_ids]
         score=int(candidate.get("priority_score",0) or 0)
         if not candidate_id or not evidence_ids: continue
         technique=next((value for value in candidate.get("attack_techniques",[]) if value in TECHNIQUES),"unmapped")
@@ -2071,7 +2076,11 @@ def _lead_catalog(hypotheses):
         tid=hypothesis.get("technique_id"); meta=TECHNIQUES.get(tid,{})
         sources=[]
         if hypothesis.get("expected_host") or meta.get("host"): sources.append("host")
-        if hypothesis.get("expected_network") or meta.get("network") or meta.get("ports") or meta.get("protocols"): sources.append("network")
+        network_expected=bool(hypothesis.get("expected_network") or meta.get("network")
+            or meta.get("ports") or meta.get("protocols"))
+        candidate_network_compilable=bool(meta.get("ports") or meta.get("protocols"))
+        if network_expected and (not hypothesis.get("candidate_id") or candidate_network_compilable):
+            sources.append("network")
         if not sources: sources=["host"]
         follow_ups=hypothesis.get("follow_ups",[]) or []
         for source_index,source in enumerate(sources):

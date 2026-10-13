@@ -180,9 +180,19 @@ def select_candidate_frontier(
         or item.get("kind") == "trusted_indicator"
         or str(item.get("priority_tier") or "").lower() == "critical"
     ]
-    exploratory = [item for item in ordered if item not in primary]
     protected = [item for item in primary if _is_protected(item)]
-    ordinary_primary = [item for item in primary if not _is_protected(item)]
+    preferred_candidates = [
+        item for item in ordered
+        if str(item.get("candidate_id") or "") in preferred and not _is_protected(item)
+    ]
+    ordinary_primary = [
+        item for item in primary
+        if not _is_protected(item) and str(item.get("candidate_id") or "") not in preferred
+    ]
+    exploratory = [
+        item for item in ordered
+        if item not in primary and str(item.get("candidate_id") or "") not in preferred
+    ]
     selected: list[dict[str, Any]] = []
     selected_ids: set[str] = set()
     group_counts: dict[str, int] = {}
@@ -201,6 +211,7 @@ def select_candidate_frontier(
             capacity -= 1
 
     take(protected, limit)
+    take(preferred_candidates, limit - len(selected))
     reserved = min(exploration_slots, max(0, limit - len(selected)))
     take(ordinary_primary, max(0, limit - len(selected) - reserved))
     take(exploratory, reserved)

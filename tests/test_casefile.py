@@ -184,6 +184,101 @@ def _state():
 
 
 class CaseFileTests(unittest.TestCase):
+    def test_evidence_budget_gives_every_frontier_candidate_an_anchor_before_extras(self):
+        from romulus.investigation.casefile import build_case_file
+
+        candidates = []
+        evidence = []
+        for candidate_index in range(8):
+            evidence_ids = [
+                f"EV-{candidate_index}-{evidence_index}" for evidence_index in range(6)
+            ]
+            candidates.append({
+                "candidate_id": f"CL-{candidate_index}",
+                "kind": "behavior",
+                "corroboration_group": f"group-{candidate_index}",
+                "priority_tier": "high",
+                "priority_score": 88 - candidate_index,
+                "disposition": "observed",
+                "evidence_ids": evidence_ids,
+                "follow_ups": [],
+            })
+            evidence.extend({
+                "evidence_id": evidence_id,
+                "source": "elasticsearch",
+                "observed_at": f"2026-09-01T10:{candidate_index:02d}:00Z",
+                "observation": "bounded synthetic record",
+            } for evidence_id in evidence_ids)
+        state = {
+            "hunt_id": "HUNT-FAIR-ALLOCATION",
+            "candidate_leads": candidates,
+            "hypotheses": [],
+            "host": evidence,
+            "network": [],
+        }
+
+        case = build_case_file(state, candidate_limit=8, evidence_limit=24)
+
+        self.assertEqual(len(case["candidates"]), 8)
+        self.assertTrue(all(item["evidence_ids"] for item in case["candidates"]))
+        self.assertEqual(len(case["evidence"]), 24)
+
+    def test_hidden_relationship_has_no_visible_reason_or_score_claim(self):
+        from romulus.investigation.casefile import build_case_file
+
+        state = {
+            "hunt_id": "HUNT-HIDDEN-RELATIONSHIP",
+            "candidate_leads": [
+                {
+                    "candidate_id": "CL-A",
+                    "kind": "behavior",
+                    "corroboration_group": "group-a",
+                    "priority_tier": "high",
+                    "priority_score": 75,
+                    "disposition": "corroborated",
+                    "evidence_ids": ["EV-A"],
+                    "score_reasons": ["base score", "evidence-backed corroboration contribution 10"],
+                    "corroboration_reasons": ["LEAKED HIDDEN RELATIONSHIP"],
+                    "related_candidates": [{
+                        "candidate_id": "CL-B",
+                        "shared_entity_type": "host",
+                        "shared_entity": "srv-01",
+                        "evidence_ids": ["EV-A", "EV-B"],
+                        "time_delta_seconds": 60,
+                        "confidence": "moderate",
+                        "caveat": "Temporal association is not causation.",
+                    }],
+                    "follow_ups": [],
+                },
+                {
+                    "candidate_id": "CL-B",
+                    "kind": "behavior",
+                    "corroboration_group": "group-b",
+                    "priority_tier": "medium",
+                    "priority_score": 50,
+                    "disposition": "observed",
+                    "evidence_ids": ["EV-B"],
+                    "follow_ups": [],
+                },
+            ],
+            "hypotheses": [],
+            "host": [
+                {"evidence_id": "EV-A", "source": "elasticsearch",
+                 "observed_at": "2026-09-01T10:00:00Z", "observation": "first"},
+                {"evidence_id": "EV-B", "source": "elasticsearch",
+                 "observed_at": "2026-09-01T10:01:00Z", "observation": "second"},
+            ],
+            "network": [],
+        }
+
+        case = build_case_file(state, candidate_limit=1, evidence_limit=1)
+        candidate = case["candidates"][0]
+
+        self.assertEqual(candidate["candidate_id"], "CL-A")
+        self.assertEqual(candidate["related_candidates"], [])
+        self.assertEqual(candidate["corroboration_reasons"], [])
+        self.assertFalse(any("corroboration" in reason for reason in candidate["score_reasons"]))
+
     def test_preferred_large_candidate_keeps_bounded_visible_ownership(self):
         from romulus.investigation.casefile import build_case_file, visible_case_ids
 
