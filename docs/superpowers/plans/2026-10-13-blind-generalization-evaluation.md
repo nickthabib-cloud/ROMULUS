@@ -125,7 +125,7 @@ Assign misses to retrieval, normalization, candidate generation, hypothesis reas
 
 Update `VALIDATION.md` with exact commit/digest/hunt ID, observed metrics, unsupported claims, limitations, classified misses, cleanup, and the fact that the oracle was first consulted after finalization.
 
-- [ ] **Step 4: Commit and publish the evaluation record**
+- [x] **Step 4: Commit and publish the evaluation record**
 
 Run `git diff --check`, confirm no oracle-specific runtime/test/catalog changes and no tracked report/database/log files, commit the plan and validation record, push `codex/blind-generalization-evaluation`, and open a stacked PR against `codex/evidence-grounded-reasoning`.
 
