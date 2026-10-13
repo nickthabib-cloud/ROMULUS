@@ -167,9 +167,10 @@ def _content(s):
         f"Stagnation: current={progress.get('current_stagnant_cycles',coverage.get('stagnant_cycles',0))}; maximum observed={progress.get('max_stagnant_cycles_seen',0)}; configured stop threshold={coverage.get('max_stagnant_cycles','not recorded')}",
         f"ATT&CK knowledge baseline: {ATTACK_DOMAIN} {ATTACK_RELEASE} ({ATTACK_RELEASE_DATE})","", "OBJECTIVE AND SCOPE",s.get("objective",""),"", "DATA SOURCES AND COVERAGE"]
     aggregate_keys={"progress_summary","runtime_seconds_used","runtime_seconds_limit",
-        "max_stagnant_cycles","stagnant_cycles"}
+        "max_stagnant_cycles","stagnant_cycles","reasoning_summary"}
     lines += [f"- {k}: {v}" for k,v in coverage.items() if k not in
         {"search_fields","analytic_summary","hypothesis_coverage","recent_search_artifacts"}|aggregate_keys]
+    lines += ["", "INVESTIGATOR AND CRITIC COVERAGE"]+_reasoning_coverage_lines(s)
     lines += ["", "REASONING AND INVESTIGATION STAGES"]
     for stage in s.get("stage_history",[]): lines.append(f"- {stage.get('timestamp')} {stage.get('stage')}: {stage.get('status')}; details={stage.get('details')}.")
     for stage in s.get("reasoning_history",[]):
@@ -230,6 +231,47 @@ def _content(s):
         retention_note="Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite unless the hunt is explicitly finalized with compact retention."
     lines += ["", "TECHNICAL EVIDENCE APPENDIX", f"The human-readable evidence manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable citations and search-result IDs appear above. {retention_note}"]
     return "\n".join(lines)
+
+
+def _reasoning_coverage_lines(state):
+    coverage=state.get("coverage",{}) if isinstance(state.get("coverage"),dict) else {}
+    summary=coverage.get("reasoning_summary")
+    if not isinstance(summary,dict):
+        return ["No grounded investigator/critic aggregate was recorded for this investigation."]
+
+    def count(key):
+        try: return max(0,int(summary.get(key,0)))
+        except (TypeError,ValueError): return 0
+
+    lines=[
+        f"- Calls: investigator={count('investigator_calls')}; critic={count('critic_calls')}; unavailable passes={count('unavailable_passes')}.",
+    ]
+    labels=(("Hypotheses","hypotheses"),("Assessments","assessments"),
+        ("Searches","searches"),("Findings","findings"))
+    for label,key in labels:
+        lines.append(f"- {label}: proposed={count('proposed_'+key)}; admitted={count('admitted_'+key)}; rejected={count('rejected_'+key)}.")
+
+    rejection_counts={}
+    for stage in state.get("reasoning_history",[]) or []:
+        if not isinstance(stage,dict): continue
+        grounded=stage.get("grounded_reasoning")
+        admission=grounded.get("admission") if isinstance(grounded,dict) else None
+        for rejection in admission.get("rejections",[]) if isinstance(admission,dict) else []:
+            if not isinstance(rejection,dict): continue
+            reasons=rejection.get("reason_codes",[])
+            if not isinstance(reasons,list): continue
+            for reason in reasons:
+                if not isinstance(reason,str) or not reason.strip(): continue
+                code=reason.strip()[:120]
+                rejection_counts[code]=rejection_counts.get(code,0)+1
+    if rejection_counts:
+        lines.append("- Rejection reasons: "+"; ".join(
+            f"{key}={rejection_counts[key]}" for key in sorted(rejection_counts))+".")
+    else:
+        lines.append("- Rejection reasons: none recorded.")
+    gap=summary.get("last_gap")
+    lines.append(f"- Availability gaps: {str(gap)[:160] if gap else 'none recorded'}.")
+    return lines
 
 def _docx(s,path):
     from docx import Document

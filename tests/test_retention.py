@@ -15,6 +15,36 @@ from romulus.store import Store
 
 
 class RetentionTests(unittest.TestCase):
+    def test_compact_retention_keeps_reasoning_summary_and_removes_reasoning_payloads(self):
+        from romulus.retention import _compact_state
+
+        summary = {"investigator_calls": 2, "critic_calls": 2,
+            "proposed_searches": 3, "admitted_searches": 1, "rejected_searches": 2,
+            "last_gap": "critic_unavailable"}
+        state = self._state([])
+        state["coverage"]["reasoning_summary"] = summary
+        state["reasoning_history"] = [{"grounded_reasoning": {
+            "case_file": "CASE-FILE-PAYLOAD", "investigator": "INVESTIGATOR-PAYLOAD",
+            "critic": "CRITIC-PAYLOAD"}}]
+
+        compacted = _compact_state(state, {"EV-KEEP"})
+
+        self.assertEqual(compacted["coverage"]["reasoning_summary"], summary)
+        self.assertNotIn("reasoning_history", compacted)
+        serialized = json.dumps(compacted, sort_keys=True)
+        for payload in ("CASE-FILE-PAYLOAD", "INVESTIGATOR-PAYLOAD", "CRITIC-PAYLOAD"):
+            self.assertNotIn(payload, serialized)
+
+    def test_legacy_state_without_reasoning_summary_compacts_to_zero_free_absence(self):
+        from romulus.retention import _compact_state
+
+        state = self._state([])
+        state["coverage"].pop("reasoning_summary", None)
+
+        compacted = _compact_state(state, {"EV-KEEP"})
+
+        self.assertNotIn("reasoning_summary", compacted["coverage"])
+
     def test_compact_scheduler_summary_does_not_resolve_short_result(self):
         from romulus.retention import _scheduler_summary
 

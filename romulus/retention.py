@@ -197,7 +197,7 @@ def _compact_coverage(coverage: Any) -> dict[str, Any]:
         "time_scope","host","network","network_sources","source_error_count",
         "coverage_closure_ready","tool_calls_used","tool_call_limit","depth_used","depth_limit",
         "minimum_reasoning_rounds","termination_reason","behavior_candidates","analyst_model",
-        "progress_summary","max_stagnant_cycles","stagnant_cycles",
+        "progress_summary","max_stagnant_cycles","stagnant_cycles","reasoning_summary",
     )
     return {key:deepcopy(coverage[key]) for key in keys if key in coverage}
 
