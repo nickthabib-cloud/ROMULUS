@@ -26,6 +26,7 @@ from ..intelligence.behavior_catalog import (
 from ..tools.elasticsearch_client import ElasticsearchAdapter, validate_query
 from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
+from ..agent.providers import configured_model_name, is_model_tool_name, model_tool_name
 from .search_planner import (candidate_fields, validate_spec, compile_es, compile_arkime, compile_tshark,
     compile_native_es, validate_native_arkime, validate_native_tshark, expand_anchor_selectors, anchor_time_range,
     candidate_network_spec, SOURCE_FIELDS, TEXT_FIELDS)
@@ -298,6 +299,23 @@ class HuntEngine:
             s["termination_reason"]="runtime_budget"; return False
         return True
 
+    @staticmethod
+    def _attach_model_audit_metadata(record,tool,result):
+        """Copy only bounded, non-secret provider metadata into an audit record."""
+        model_metadata=getattr(result,"model_metadata",{}) if result is not None else {}
+        if not is_model_tool_name(tool) or not isinstance(model_metadata,dict):
+            return
+        audit_fields={
+            "provider":"model_provider", "model":"model_name",
+            "request_id":"provider_request_id", "input_tokens":"input_tokens",
+            "output_tokens":"output_tokens", "total_tokens":"total_tokens",
+            "total_duration_ns":"model_duration_ns",
+        }
+        for source,target in audit_fields.items():
+            value=model_metadata.get(source)
+            if isinstance(value,(str,int)) and value != "":
+                record[target]=value
+
     def _call(self,s,tool,stage,parameters,time_range,fn,count):
         """Run one external call; every attempt gets a bounded, credential-free audit entry."""
         if not self._budget_ok(s): return None
@@ -317,7 +335,8 @@ class HuntEngine:
         record={"timestamp":utc_now(),"hunt_id":s["hunt_id"],"tool":tool,"reasoning_stage":stage,
             "parameters":parameters,"time_range":time_range,"result_count":result_count,"source_total":source_total,
             "duration_ms":round((time.monotonic()-started)*1000),"result_status":result_status,"error":error,"error_reason":error_reason,"status_code":status_code}
-        if tool!="ollama.api.chat" and any(token in stage for token in ("search","pivot")):
+        self._attach_model_audit_metadata(record,tool,result)
+        if not is_model_tool_name(tool) and any(token in stage for token in ("search","pivot")):
             signature=json.dumps({"tool":tool,"stage":stage,"parameters":parameters,"time_range":time_range},sort_keys=True,default=str)
             artifact_id="SR-"+hashlib.sha1(signature.encode("utf-8",errors="replace")).hexdigest()[:12].upper()
             artifact={"artifact_id":artifact_id,"tool":tool,"stage":stage,"scope":time_range,"result_status":result_status,
@@ -938,8 +957,8 @@ class HuntEngine:
         try:
             from ..agent.ollama import Ollama, model_evidence_context
             visible_evidence=model_evidence_context(_all_evidence(s),10)
-            searches=self._call(s,"ollama.api.chat","initial_search_planning",
-                {"model":self.settings.ollama_model,"hypotheses":len(s.get("hypotheses",[]))},
+            searches=self._call(s,model_tool_name(self.settings),"initial_search_planning",
+                {"model":configured_model_name(self.settings),"hypotheses":len(s.get("hypotheses",[]))},
                 "operator-directed mission and completed deterministic discovery",
                 lambda:Ollama(self.settings).propose_searches(s.get("objective",""),s.get("hypotheses",[]),
                     visible_evidence,source_fields,6,_search_history_summary(s),"initial",
@@ -1332,7 +1351,7 @@ class HuntEngine:
         ledger_ready=(bool(ledger.get("closure_ready")) and has_coverage_subject) \
             if isinstance(ledger,dict) and ledger else not require_ledger
         errors=s.get("source_errors",[]) or []
-        model_failures=any(run.get("tool")=="ollama.api.chat" and run.get("result_status")!="ok"
+        model_failures=any(is_model_tool_name(run.get("tool")) and run.get("result_status")!="ok"
             for run in s.get("tool_runs",[]) or [] if isinstance(run,dict))
         missing_sources=not self.offline and (
             not bool(s.get("source_health",{}).get("host"))
@@ -1424,8 +1443,8 @@ class HuntEngine:
             return working
 
         before_calls=int(s.get("tool_calls",0))
-        investigator=self._call(s,"ollama.api.chat","grounded_investigator",
-            {"model":self.settings.ollama_model,"case_candidates":len(case_file.get("candidates",[])),
+        investigator=self._call(s,model_tool_name(self.settings),"grounded_investigator",
+            {"model":configured_model_name(self.settings),"case_candidates":len(case_file.get("candidates",[])),
              "case_evidence":len(case_file.get("evidence",[])),"max_hypotheses":3,"max_searches":3},
             "bounded evidence-grounded case file",
             lambda:analyst.investigate_case(case_file,source_fields,max_searches=3,max_hypotheses=3),
@@ -1450,8 +1469,8 @@ class HuntEngine:
         proposal_count=sum(proposed.values())
         if proposal_count:
             before_calls=int(s.get("tool_calls",0))
-            critic=self._call(s,"ollama.api.chat","grounded_critic",
-                {"model":self.settings.ollama_model,"proposal_count":proposal_count},
+            critic=self._call(s,model_tool_name(self.settings),"grounded_critic",
+                {"model":configured_model_name(self.settings),"proposal_count":proposal_count},
                 "same bounded case file and structured investigator proposals",
                 lambda:analyst.criticize_case(case_file,investigator),
                 lambda value:len(value.get("reviews",[])) if isinstance(value,dict) else 0)
@@ -1539,7 +1558,7 @@ class HuntEngine:
 
     def _reasoning_call_error(self,s,stage):
         row=next((item for item in reversed(s.get("tool_runs",[]))
-            if item.get("tool")=="ollama.api.chat" and item.get("reasoning_stage")==stage),{})
+            if is_model_tool_name(item.get("tool")) and item.get("reasoning_stage")==stage),{})
         return row.get("error_reason") or row.get("error") or "unavailable"
 
     def _reason(self,s):
@@ -1879,7 +1898,7 @@ class HuntEngine:
         else:
             from ..agent.ollama import Ollama
             attempted=True
-            proposal=self._call(s,"ollama.api.chat","activity_narrative",
+            proposal=self._call(s,model_tool_name(self.settings),"activity_narrative",
                 {"report_items":len(case.get("items",[])),
                  "visible_evidence":len(case.get("evidence",[])),
                  "admitted_relationships":len(case.get("relationships",[]))},
@@ -1916,6 +1935,7 @@ class HuntEngine:
             "duration_ms":round((time.monotonic()-started)*1000),
             "result_status":result_status,"error":error,"error_reason":error_reason,
             "status_code":None,"budget_domain":"report_finalization"}
+        self._attach_model_audit_metadata(record,tool,result)
         s.setdefault("tool_runs",[]).append(record); self.store.audit(record)
         reason=f" error={error_reason}" if error_reason else ""
         print(f"[ROMULUS] {stage}: {tool} status={result_status} results={result_count}{reason} scope={time_range}")
@@ -1947,7 +1967,7 @@ class HuntEngine:
         else:
             from ..agent.ollama import Ollama
             attempted=True
-            proposal=self._finalization_call(s,"ollama.api.chat","indicator_review_finalization",
+            proposal=self._finalization_call(s,model_tool_name(self.settings),"indicator_review_finalization",
                 {"report_items":len(case.get("items",[])),
                  "visible_evidence":len(case.get("evidence",[])),
                  "visible_observables":sum(len(row.get("observables",[]))
@@ -2002,7 +2022,7 @@ class HuntEngine:
             s["duration_ms"]=max(0,round((time.time()-s["started_epoch"])*1000))
         errors=s.get("source_errors",[])
         telemetry_errors=[e for e in errors if str(e.get("tool","")).startswith(("elasticsearch.","arkime.","tshark."))]
-        model_calls=[r for r in s.get("tool_runs",[]) if r.get("tool")=="ollama.api.chat"]
+        model_calls=[r for r in s.get("tool_runs",[]) if is_model_tool_name(r.get("tool"))]
         model_failures=[r for r in model_calls if r.get("result_status")!="ok"]
         planning=s.get("coverage",{}).get("model_search_planning",[])
         s["coverage"]["analyst_model"]={"calls":len(model_calls),"failed_calls":len(model_failures),

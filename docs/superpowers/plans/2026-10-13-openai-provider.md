@@ -1,0 +1,24 @@
+# Optional OpenAI Provider Milestone
+
+**Objective:** Let the existing evidence-constrained ROMULUS reasoning and report contracts run through either local Ollama or the OpenAI Responses API without weakening deterministic search, admission, reporting, or retention controls.
+
+## Scope and decisions
+
+- Ollama remains the default. `LLM_PROVIDER` is the single switch; both provider configuration blocks may coexist in `.env`.
+- OpenAI requires a configured model and API key plus the separate `ALLOW_CLOUD_LLM=true` authorization gate.
+- The provider boundary transports only the same bounded prompts and strict schemas already used by ROMULUS. It provides no search, shell, or direct telemetry-source access.
+- Responses API requests use strict JSON schema for structured work and `store: false`. Provider errors are sanitized; audits retain only provider, model, request ID, duration, and token counts.
+- `model-check` uses a fixed request with no hunt data. `model-report --id` re-synthesizes a deep copy of a saved hunt, performs no telemetry searches, never mutates the saved hunt, and writes to `reports/model-evaluations/`.
+
+## Delivery status
+
+- [x] Preserve and push the pre-change rollback checkpoint.
+- [x] Add provider-neutral transport with Ollama and OpenAI adapters.
+- [x] Add explicit cloud authorization and credential-safe audit metadata.
+- [x] Make model call labels and diagnostics provider-aware.
+- [x] Add no-hunt-data connectivity and saved-hunt report evaluation commands.
+- [x] Document configuration, switching, output locations, and cloud-data boundary.
+- [x] Run focused and full regression suites, compile verification, and diff review (361 tests passed; 8 expected dependency skips).
+- [ ] Commit, push `codex/openai-provider`, open and attach the GitHub pull request.
+- [ ] Deploy the non-secret branch to the VM and run dependency-backed tests without changing its network mode.
+- [ ] Operator switches the VM to NAT and runs the documented OpenAI checks; live API validation remains operator-executed.
