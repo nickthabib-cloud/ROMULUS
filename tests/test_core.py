@@ -183,7 +183,10 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as d:
             p=Path(d); cfg=replace(Settings.from_env(),home=p,reports_dir=p/"reports",data_dir=p/"data",logs_dir=p/"logs",
                 max_depth=2,min_reasoning_rounds=3)
-            state={"hunt_id":"H-DEPTH","depth":2,"lead_queue":[],"termination_reason":"depth_budget"}
+            state={"hunt_id":"H-DEPTH","objective":"Hunt for SMB lateral movement",
+                "mission_mode":"directed","depth":2,"tool_calls":0,"started_epoch":__import__("time").time(),
+                "coverage":{},"search_tasks":{},"search_queue":[],"search_outcomes":[],
+                "scheduler_history":[],"candidate_leads":[]}
             engine=HuntEngine(cfg,Store(cfg.data_dir,cfg.logs_dir),offline=True)
             self.assertEqual(engine._after_reason(state),"report")
             self.assertEqual(state["termination_reason"],"depth_budget")

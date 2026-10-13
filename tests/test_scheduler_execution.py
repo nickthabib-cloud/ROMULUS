@@ -104,6 +104,119 @@ class _DenyAdapter:
 
 
 class SchedulerExecutionTests(unittest.TestCase):
+    def _routing_fixture(self,directory):
+        engine=_engine(Path(directory))
+        state=_state()
+        state.update({"mission_mode":"directed","candidate_leads":[],"hypotheses":[],
+            "depth":0,"stagnant_cycles":0,"coverage":{"hypothesis_coverage":{"closure_ready":False}}})
+        return engine,state
+
+    def test_shared_router_drains_critical_and_high_work_before_stagnation(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._routing_fixture(directory)
+            _task(state,candidate_priority="high")
+            state["stagnant_cycles"]=engine.settings.max_stagnant_cycles
+
+            self.assertEqual(engine._route_investigation(state,just_reasoned=False),"pivot")
+            self.assertNotIn("termination_reason",state)
+
+    def test_shared_router_reasons_once_ahead_of_low_value_breadth(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._routing_fixture(directory)
+            _task(state)
+
+            self.assertEqual(engine._route_investigation(state,just_reasoned=False),"reason")
+            self.assertNotIn("termination_reason",state)
+
+    def test_shared_router_stops_low_value_breadth_after_stagnation_threshold(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._routing_fixture(directory)
+            _task(state,origin="coverage_frontier")
+            state["stagnant_cycles"]=engine.settings.max_stagnant_cycles
+
+            self.assertEqual(engine._route_investigation(state,just_reasoned=False),"report")
+            self.assertEqual(state["termination_reason"],"no_productive_frontier")
+
+    def test_shared_router_does_not_force_minimum_reasoning_rounds(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._routing_fixture(directory)
+            state["depth"]=1
+            self.assertGreater(engine.settings.min_reasoning_rounds,state["depth"])
+
+            self.assertEqual(engine._route_investigation(state,just_reasoned=True),"report")
+            self.assertEqual(state["termination_reason"],"no_productive_frontier")
+
+    def test_valid_closure_wins_after_final_allowed_reasoning_turn(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._routing_fixture(directory)
+            state["depth"]=engine.settings.max_depth
+            state["coverage"]["hypothesis_coverage"]["closure_ready"]=True
+
+            self.assertEqual(engine._route_investigation(state,just_reasoned=True),"report")
+            self.assertEqual(state["termination_reason"],"coverage_closure_reached")
+
+    def _progress_cycle_fixture(self,directory):
+        engine,state=self._routing_fixture(directory)
+        state.update({"findings":[],"lead_catalog":[],"completed_leads":[],
+            "reasoning_history":[],"stage_history":[],"source_health":{"host":True,"network":True},
+            "investigation_graph":{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}}})
+        state["coverage"]["search_fields"]={"elasticsearch":["@timestamp","process.name"]}
+        return engine,state
+
+    def test_analysis_and_reasoning_record_progress_before_routing(self):
+        from romulus.investigation.progress import initialize_progress
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._progress_cycle_fixture(directory)
+            initialize_progress(state)
+            engine._analyze(state)
+            self.assertEqual(state["progress_history"][-1]["stage"],"analysis")
+            engine._reason(state)
+            self.assertEqual(state["progress_history"][-1]["stage"],"reasoning")
+            persisted=engine.store.load_state(state["hunt_id"])
+            self.assertEqual(persisted["progress_history"],state["progress_history"])
+
+    def test_model_continue_true_cannot_override_exhausted_frontier(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._progress_cycle_fixture(directory)
+            state["candidate_leads"]=[{"candidate_id":"CL-GROUNDED","disposition":"observed",
+                "evidence_ids":[],"follow_ups":[]}]
+            state["reasoning_history"].append({"stage":"analyst_reasoning",
+                "continue_investigation":True,"reasoning":"Keep going without new evidence."})
+            action=engine._after_reason(state)
+            self.assertEqual(action,"report")
+            self.assertEqual(state["termination_reason"],"no_productive_frontier")
+            self.assertEqual(state.get("search_queue",[]),[])
+
+    def test_nonresolving_search_without_material_change_advances_stagnation(self):
+        from romulus.investigation.progress import initialize_progress
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._progress_cycle_fixture(directory)
+            task=_task(state,origin="coverage_frontier")
+            initialize_progress(state)
+            state["search_tasks"][task["task_id"]]["status"]="partial"
+            state["search_outcomes"].append({"task_id":task["task_id"],"source":"elasticsearch",
+                "source_family":"host","status":"partial","matched_total":100,"returned_total":5,
+                "capped":True,"timed_out":False,"shard_failures":0,"incomplete":True})
+            engine._analyze(state)
+            self.assertEqual(state["stagnant_cycles"],1)
+            self.assertFalse(state["progress_history"][-1]["material_progress"])
+
+    def test_material_evidence_or_closed_gap_resets_stagnation(self):
+        from romulus.investigation.progress import initialize_progress
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._progress_cycle_fixture(directory)
+            initialize_progress(state)
+            state["stagnant_cycles"]=2
+            state["host"].append({"evidence_id":"EV-NEW","source":"elasticsearch",
+                "observed_at":"2024-11-13T11:00:00Z","asset":"ws-01",
+                "observation":"newly admitted process evidence","raw":{"process":{"name":"cmd.exe"}}})
+            engine._analyze(state)
+            self.assertEqual(state["stagnant_cycles"],0)
+            self.assertEqual(state["progress_history"][-1]["signals"]["new_evidence"],1)
+
     def test_elasticsearch_task_uses_exact_scope_and_returns_own_outcome(self):
         class Elasticsearch:
             def __init__(self):

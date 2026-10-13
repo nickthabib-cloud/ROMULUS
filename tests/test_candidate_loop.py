@@ -138,6 +138,8 @@ class MissionModeTests(unittest.TestCase):
             self.assertEqual(result["reasoning_history"][0]["basis"], "deterministic_telemetry_discovery")
 
     def test_undirected_reasoning_does_not_call_model_without_a_candidate(self):
+        import time
+
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             engine = _engine(Path(directory), use_ollama=True)
             engine._call = lambda *args, **kwargs: self.fail("candidate-free undirected reasoning called a model")
@@ -150,13 +152,30 @@ class MissionModeTests(unittest.TestCase):
                 "completed_leads": [],
                 "lead_queue": [],
                 "depth": 0,
+                "started_epoch": time.time(),
                 "coverage": {"search_fields": {"elasticsearch": ["process.name"]}},
             })
 
             result = engine._reason(state)
 
             self.assertEqual(result["hypotheses"], [])
-            self.assertEqual(result["termination_reason"], "coverage_frontier_exhausted")
+            self.assertNotIn("termination_reason",result)
+            self.assertEqual(engine._after_reason(result),"report")
+            self.assertEqual(result["termination_reason"],"no_productive_frontier")
+
+    def test_undirected_hunt_without_candidate_still_never_reasons(self):
+        import time
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            engine=_engine(Path(directory),use_ollama=True)
+            engine._call=lambda *args,**kwargs: self.fail("candidate-free undirected hunt called a model")
+            state=_planning_state("Hunt for threats across all telemetry")
+            state.update({"mission_mode":"undirected","candidate_leads":[],"search_tasks":{},
+                "search_queue":[],"search_outcomes":[],"scheduler_history":[],"stagnant_cycles":0,
+                "depth":0,"started_epoch":time.time()})
+            action=engine._after_analyze(state)
+            self.assertEqual(action,"report")
+            self.assertEqual(state["termination_reason"],"no_productive_frontier")
 
     def test_missing_mission_mode_defaults_to_undirected_for_generic_objective(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
