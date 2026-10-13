@@ -15,14 +15,15 @@ This file records engineering validation performed against the development deplo
 
 ### Exact local and dependency-complete proof
 
-- The complete local suite passed all 214 tests with seven expected dependency-gated skips. The focused investigator/critic workflow gate passed all seven adversarial cases, the report/retention boundary gate passed all four cases, Python `compileall`, and `git diff --check` passed.
-- Exact candidate commit `75c75be948a6dcf9eebe72c1b78b2e5942d7f5ac` was archived with SHA-256 `F9ECEACAD238534AD3E3AFBE244225B0047150ED4FD9E8CB9A8F0B181B49E586`; the digest matched on Windows and the development VM.
-- The exact archive passed all 214 dependency-complete VM tests with no skips and passed `compileall`.
+- The complete post-review local suite passed all 219 tests with seven expected dependency-gated skips. Six focused review regressions passed, as did the broader reasoning/admission gates, Python `compileall`, and `git diff --check`.
+- Fresh whole-branch review found no Critical issues and four Important admission/atomicity gaps: cross-candidate evidence borrowing, anchorless directed support, mapped hypotheses publishing unmapped findings, and partially committed or stale reasoning state after failure. One permitted RED-to-GREEN fix pass corrected all four in commit `2c42c0d44f08e40a52c9bea435cfe307816eb243`. A Minor aggregate-report issue remains deferred: a later successful reasoning call can clear `last_gap`, so `unavailable_passes` may be nonzero while the final availability-gap list is empty.
+- Exact candidate commit `2c42c0d44f08e40a52c9bea435cfe307816eb243` was archived with SHA-256 `EA2D19203F8DA51B791F4769155265C6D9BF406467BA4F73E25FDC10E322B87E`; the digest matched on Windows and the development VM.
+- The exact archive passed all 219 dependency-complete VM tests with no skips and passed `compileall`.
 - An initial diagnostic invocation lacked the deployment `.env` and failed closed on unavailable credentials. After loading the existing deployment configuration without copying or displaying it, diagnostics were fully green: America/New_York mission time, all Python dependencies, the pinned Enterprise ATT&CK v19.2 catalog, `qwen3:8b` plus both structured reasoning schemas, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark 4.2.2, all configured Russell Mitchell captures, and writable runtime directories. No service configuration was changed.
 
 ### Disposable compact-retention proof
 
-- Synthetic offline investigation `HUNT-BBE717208C` completed as `evidence_supported_lead` with `coverage_closure_reached`, generated one DOCX and one TXT report, and compacted successfully in an isolated `/tmp` runtime.
+- Synthetic offline investigation `HUNT-A7A9450BFA` completed as `evidence_supported_lead` with `coverage_closure_reached`, generated one DOCX and one TXT report, and compacted successfully in an isolated `/tmp` runtime from the exact final candidate.
 - Both reports reopened successfully. The technical report contained `INVESTIGATOR AND CRITIC COVERAGE` and truthfully stated that the offline run had no grounded investigator/critic aggregate; compact state likewise omitted `reasoning_summary` rather than inventing prior calls. Populated-summary preservation and customer/technical audience separation passed in the dependency-complete report/retention tests.
 - Compact state retained two cited evidence records and one finding. It removed `reasoning_history`, host/network arrays, tool runs, search tasks/outcomes, queries, case/proposal/critic payloads, and every checkpoint/write row.
 - The validation archive, extracted checkout, and synthetic runtime were isolated from operational state and removed after proof. Operational reports, hunt state, logs, and telemetry were not modified by the synthetic hunt or cleanup.

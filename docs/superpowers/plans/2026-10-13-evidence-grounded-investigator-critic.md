@@ -44,7 +44,7 @@
 - Produces: `visible_case_ids(case_file: Mapping[str, Any]) -> dict[str, set[str]]` with `candidate_ids`, `evidence_ids`, `hypothesis_ids`, `follow_up_ids`, `task_ids`, and `proposal_ids` keys.
 - The case file contains `version`, `mission`, `candidates`, `hypotheses`, `evidence`, `timeline`, `path_fragments`, `completed_searches`, `unresolved_follow_ups`, `source_status`, `coverage_gaps`, and `novelty`; it never includes raw query bodies, credentials, or uncited full state.
 
-- [ ] **Step 1: Write failing case-file tests**
+- [x] **Step 1: Write failing case-file tests**
 
 Add `CaseFileTests` covering:
 
@@ -53,17 +53,17 @@ Add `CaseFileTests` covering:
 - `test_case_file_exposes_exact_outcomes_gaps_paths_and_recent_novelty_without_query_bodies`
 - `test_case_file_bounds_every_collection_and_normalizes_legacy_shapes`
 
-- [ ] **Step 2: Run the case-file tests and verify RED**
+- [x] **Step 2: Run the case-file tests and verify RED**
 
 Run: `python -m unittest -v tests.test_casefile`
 
 Expected: import failure because `romulus.investigation.casefile` does not exist.
 
-- [ ] **Step 3: Implement the minimal pure case-file builder**
+- [x] **Step 3: Implement the minimal pure case-file builder**
 
 Select visible candidates by deterministic priority, admit their owned evidence before representative remainder, build the compact timeline from factual graph/evidence state, summarize exact scheduler outcomes without query bodies, and copy only bounded JSON-safe values. `visible_case_ids` derives sets exclusively from the built case file.
 
-- [ ] **Step 4: Run focused and full tests**
+- [x] **Step 4: Run focused and full tests**
 
 Run: `python -m unittest -v tests.test_casefile`
 
@@ -73,7 +73,7 @@ Run: `python -m unittest discover tests`
 
 Expected: full suite passes with only dependency-gated local skips.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add romulus/investigation/casefile.py tests/test_casefile.py
@@ -93,7 +93,7 @@ git commit -m "feat: build bounded reasoning case files"
 - Produces: `_investigator_schema(sources: list[str], hypothesis_ids: list[str], max_searches: int, max_hypotheses: int) -> dict` and `_critic_schema(investigator_output: Mapping[str, Any]) -> dict`.
 - Every investigator assessment, hypothesis, search, and finding has a unique bounded `proposal_id`. Assessments/findings reference an existing `hypothesis_id`; searches use `hypothesis_ref`, which is either an existing hypothesis ID or a new-hypothesis `proposal_id`. A new-hypothesis item contains `candidate_id`, owned `evidence_ids`, `title`, `technique_id`, `explanation`, nonempty `expected_host` or `expected_network`, nonempty `falsifying_observations`, nonempty `benign_explanations`, and `analytic_goal`. The critic output contains only `reviews`; each review contains a known `proposal_id`, `accept` or `reject`, issue codes selected from `citation_mismatch`, `unsupported_causality`, `ignored_benign_alternative`, `duplicate_work`, `missing_discriminating_search`, `avoidable_search_cost`, and `malformed`, plus a short rationale. It has no fields for new evidence, hypotheses, searches, findings, ATT&CK mappings, or priority.
 
-- [ ] **Step 1: Write failing structured-contract tests**
+- [x] **Step 1: Write failing structured-contract tests**
 
 Add tests proving:
 
@@ -103,23 +103,23 @@ Add tests proving:
 - `test_critic_prompt_cannot_author_evidence_searches_findings_or_priorities`
 - `test_reasoning_preflight_validates_both_structured_contracts`
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `python -m unittest -v tests.test_core.CoreTests.test_investigator_schema_allows_three_grounded_competing_hypotheses_with_falsifiers tests.test_core.CoreTests.test_investigator_prompt_receives_only_the_case_file_and_marks_telemetry_untrusted tests.test_core.CoreTests.test_critic_schema_can_only_review_known_proposal_ids tests.test_core.CoreTests.test_critic_prompt_cannot_author_evidence_searches_findings_or_priorities tests.test_core.CoreTests.test_reasoning_preflight_validates_both_structured_contracts`
 
 Expected: failures because the investigator/critic APIs and schemas do not exist.
 
-- [ ] **Step 3: Implement the two structured model calls**
+- [x] **Step 3: Implement the two structured model calls**
 
 Keep model temperature low and response sizes bounded. The investigator must distinguish observation from interpretation, identify expected and falsifying observations, preserve benign explanations, and propose backward/forward discriminating searches. The critic receives the same case file plus only the structured investigator output and reviews citation mismatch, unsupported causality, ignored benign alternatives, duplicate work, missing discrimination, and avoidable search cost.
 
-- [ ] **Step 4: Run focused and full tests**
+- [x] **Step 4: Run focused and full tests**
 
 Run the five focused tests from Step 2, then `python -m unittest discover tests`.
 
 Expected: all pass with only dependency-gated local skips.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add romulus/agent/ollama.py tests/test_core.py
@@ -138,7 +138,7 @@ git commit -m "feat: separate investigator and critic contracts"
 - Returns `new_hypotheses`, `assessments`, `searches`, `findings`, `rejections`, and `summary`. Each admitted search replaces `hypothesis_ref` with an existing or newly assigned deterministic `hypothesis_id`. Each new hypothesis has basis `model_grounded_competing`, candidate/evidence basis IDs, deterministic anchor entities/time range derived from the cited case-file records, expected host/network observations, falsifying observations, benign explanations, analytic goal, and a stable `H-AI-...` ID hashed from candidate ID, technique, sorted evidence IDs, and normalized expected/falsifying observations—not title, rationale, or critic prose.
 - This module does not mutate state, call sources/model, compile queries, or assign scheduler priority.
 
-- [ ] **Step 1: Write failing admission tests**
+- [x] **Step 1: Write failing admission tests**
 
 Add tests proving:
 
@@ -149,17 +149,17 @@ Add tests proving:
 - `test_requires_at_least_one_approved_discriminating_search_for_a_new_hypothesis`
 - `test_deduplicates_stable_hypotheses_without_using_model_prose_as_fact`
 
-- [ ] **Step 2: Run the admission tests and verify RED**
+- [x] **Step 2: Run the admission tests and verify RED**
 
 Run: `python -m unittest -v tests.test_reasoning_admission`
 
 Expected: import failure because `romulus.investigation.reasoning` does not exist.
 
-- [ ] **Step 3: Implement deterministic normalization and admission**
+- [x] **Step 3: Implement deterministic normalization and admission**
 
 Validate critic references first, then candidate/evidence ownership, entity/time anchor presence, mapping, required alternatives/falsifiers, approved searches, and duplicate fingerprints. Treat every unknown or malformed reference as a rejection record. Generate stable hypothesis IDs from validated structural fields, not free-form rationales.
 
-- [ ] **Step 4: Run focused and full tests**
+- [x] **Step 4: Run focused and full tests**
 
 Run: `python -m unittest -v tests.test_reasoning_admission`
 
@@ -167,7 +167,7 @@ Run: `python -m unittest discover tests`
 
 Expected: all pass with only dependency-gated local skips.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add romulus/investigation/reasoning.py tests/test_reasoning_admission.py
@@ -187,7 +187,7 @@ git commit -m "feat: gate grounded reasoning admission"
 - Produces: `coverage.reasoning_summary` aggregate counters for investigator/critic calls, unavailable passes, proposed/admitted/rejected hypotheses, assessments, searches, and findings.
 - Full investigator and critic payloads remain only in working `reasoning_history`; accepted searches still flow through `_register_model_searches`, and accepted findings still flow through `_publish_model_findings`.
 
-- [ ] **Step 1: Write failing workflow tests**
+- [x] **Step 1: Write failing workflow tests**
 
 Add tests proving:
 
@@ -199,23 +199,23 @@ Add tests proving:
 - `test_new_hypothesis_is_rejected_if_its_search_fails_existing_validation_or_deduplication`
 - `test_model_priority_fields_cannot_change_scheduler_order`
 
-- [ ] **Step 2: Run the workflow tests and verify RED**
+- [x] **Step 2: Run the workflow tests and verify RED**
 
 Run: `python -m unittest -v tests.test_candidate_loop.MissionModeTests.test_undirected_candidate_free_reasoning_makes_no_investigator_or_critic_call tests.test_scheduler_execution.SchedulerInvestigationWorkflowTests.test_grounded_reasoning_runs_investigator_then_critic_and_admits_only_approved_items tests.test_scheduler_execution.SchedulerInvestigationWorkflowTests.test_critic_rejection_changes_no_hypothesis_search_finding_or_graph_fact tests.test_scheduler_execution.SchedulerInvestigationWorkflowTests.test_critic_failure_discards_investigator_output_and_continues_deterministic_candidate_work tests.test_scheduler_execution.SchedulerInvestigationWorkflowTests.test_one_remaining_external_call_does_not_start_an_unreviewable_investigator_pass tests.test_scheduler_execution.SchedulerInvestigationWorkflowTests.test_new_hypothesis_is_rejected_if_its_search_fails_existing_validation_or_deduplication tests.test_scheduler_execution.SchedulerInvestigationWorkflowTests.test_model_priority_fields_cannot_change_scheduler_order`
 
 Expected: failures because the workflow still performs a one-pass analyst call and does not admit grounded competing hypotheses.
 
-- [ ] **Step 3: Implement the two-call workflow and final validation sequence**
+- [x] **Step 3: Implement the two-call workflow and final validation sequence**
 
 Reserve two model-call slots before starting. Build one case file, call investigator, call critic, run `admit_reasoning`, tentatively normalize new hypotheses, and send searches through existing validation/compilation/deduplication. Commit a new hypothesis to state only when at least one of its approved searches becomes a real scheduler task. Apply only approved assessments/findings after their existing citation/entity/mapping checks. Record rejected items and availability gaps without inventing replacements.
 
-- [ ] **Step 4: Run focused and full tests**
+- [x] **Step 4: Run focused and full tests**
 
 Run the exact command from Step 2, then `python -m unittest discover tests`.
 
 Expected: all pass with only dependency-gated local skips.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add romulus/investigation/workflow.py tests/test_candidate_loop.py tests/test_scheduler_execution.py
@@ -236,7 +236,7 @@ git commit -m "feat: run grounded investigator critic cycle"
 - Preserves: customer DOCX wording at findings/coverage level only; no proposal IDs, critic payloads, prompts, or internal role terminology.
 - Preserves under compact retention: `coverage.reasoning_summary`; removes full case files, proposal/critic payloads, and reasoning history.
 
-- [ ] **Step 1: Write failing report/retention tests**
+- [x] **Step 1: Write failing report/retention tests**
 
 Add tests proving:
 
@@ -245,23 +245,23 @@ Add tests proving:
 - `test_compact_retention_keeps_reasoning_summary_and_removes_reasoning_payloads`
 - `test_legacy_state_without_reasoning_summary_compacts_to_zero_free_absence`
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `python -m unittest -v tests.test_customer_report.CustomerWordReportTests.test_technical_report_records_reasoning_admission_and_critic_gap_aggregates tests.test_customer_report.CustomerWordReportTests.test_customer_report_omits_case_file_proposal_and_critic_internals tests.test_retention.RetentionTests.test_compact_retention_keeps_reasoning_summary_and_removes_reasoning_payloads tests.test_retention.RetentionTests.test_legacy_state_without_reasoning_summary_compacts_to_zero_free_absence`
 
 Expected: failures because reasoning aggregates are neither reported nor retained.
 
-- [ ] **Step 3: Implement audience-separated reporting and compact aggregation**
+- [x] **Step 3: Implement audience-separated reporting and compact aggregation**
 
 Add the technical aggregate section and compact coverage key. Keep raw investigator/critic payloads only in working state and rely on the existing report-verification gate before removal. Legacy hunts may omit the summary; reporting and retention must not invent past calls.
 
-- [ ] **Step 4: Run focused and full tests**
+- [x] **Step 4: Run focused and full tests**
 
 Run the exact command from Step 2, then `python -m unittest discover tests`.
 
 Expected: all pass with only dependency-gated local skips.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add romulus/reporting/report.py romulus/retention.py tests/test_customer_report.py tests/test_retention.py
@@ -279,7 +279,7 @@ git commit -m "feat: report grounded reasoning coverage"
 - Consumes: Tasks 1–5 complete implementation and the authorized SSH validation path.
 - Produces: exact local/VM/offline proof and a clean reviewed branch. The Russell Mitchell live hunt remains Milestone 9 and is not used to alter this milestone's code, prompts, catalogs, or fixtures.
 
-- [ ] **Step 1: Run complete local verification**
+- [x] **Step 1: Run complete local verification**
 
 Run:
 
@@ -291,33 +291,33 @@ git diff --check
 
 Expected: complete local suite passes with only documented dependency-gated skips; compilation and diff check succeed.
 
-- [ ] **Step 2: Update operator documentation**
+- [x] **Step 2: Update operator documentation**
 
 Document the case file, investigator/critic separation, deterministic admission, two-call capacity rule, reasoning aggregates, model-unavailable behavior, and compact-retention boundary. State explicitly that this milestone used no holdout-derived runtime knowledge.
 
-- [ ] **Step 3: Commit the runtime/documentation candidate**
+- [x] **Step 3: Commit the runtime/documentation candidate**
 
 ```bash
 git add README.md CHANGELOG.md
 git commit -m "docs: explain grounded investigator critic reasoning"
 ```
 
-- [ ] **Step 4: Perform exact dependency-complete VM proof**
+- [x] **Step 4: Perform exact dependency-complete VM proof**
 
 Archive the exact candidate commit, record and match SHA-256 locally/on the VM, extract into a disposable `/tmp` directory, then run the full dependency-complete suite, `compileall`, and read-only `doctor`. Run one isolated synthetic offline hunt with compact retention; reopen DOCX/TXT reports and verify reasoning aggregate/working-state cleanup. Do not alter operational state or run the Russell holdout during this milestone.
 
-- [ ] **Step 5: Record proof and clean exact disposable artifacts**
+- [x] **Step 5: Record proof and clean exact disposable artifacts**
 
 Append commit, digest, test counts, diagnostics, offline hunt ID/outcome, investigator/critic evidence, retention evidence, and limitations to `VALIDATION.md`. Resolve and verify every cleanup target before removing only the exact local/remote archive, extracted validation root, logs, and disposable runtime.
 
-- [ ] **Step 6: Commit validation record**
+- [x] **Step 6: Commit validation record**
 
 ```bash
 git add VALIDATION.md
 git commit -m "docs: record grounded reasoning validation"
 ```
 
-- [ ] **Step 7: Whole-branch review and final verification**
+- [x] **Step 7: Whole-branch review and final verification**
 
 Request one fresh-context whole-branch review focused on pre-lead model calls, citation/entity/mapping admission, critic authority leakage, orphan investigator output, scheduler priority injection, model failure, report truth, retention, and holdout leakage. One Critical/Important fix pass is allowed, each fix RED→GREEN, followed by the full suite. Record Minor findings as deferred. Finish with a clean status and exact local/remote head match before opening a stacked PR.
 
