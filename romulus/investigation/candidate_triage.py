@@ -131,18 +131,20 @@ def relate_candidates(
 
         disposition = str(item.get("disposition") or "observed")
         terminal = disposition in {"benign_likely", "dismissed", "unresolved"}
-        if not terminal and bonus and score >= 70:
-            item["disposition"] = "corroborated"
-        elif not terminal and old_bonus and not bonus and disposition == "corroborated":
-            item["disposition"] = "observed"
+        investigating = disposition == "investigating"
+        finding_backed = bool(item.get("finding_ids"))
+        if not terminal and not investigating:
+            item["disposition"] = (
+                "corroborated" if finding_backed or (bonus and score >= 70) else "observed"
+            )
         if item.get("kind") == "trusted_indicator":
             item["customer_visible"] = True
-        elif old_bonus and not bonus:
-            item["customer_visible"] = False
+        elif terminal:
+            item["customer_visible"] = bool(item.get("customer_visible"))
+        elif finding_backed:
+            item["customer_visible"] = True
         else:
-            item["customer_visible"] = bool(
-                item.get("customer_visible") or (bonus and score >= 70 and not terminal)
-            )
+            item["customer_visible"] = bool(bonus and score >= 70 and not investigating)
 
     return sorted(items, key=_candidate_sort_key)
 

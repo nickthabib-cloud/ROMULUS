@@ -2014,13 +2014,21 @@ def _candidate_hypotheses(candidates,existing,evidence=None):
     existing_candidates={candidate_id for hypothesis in existing for candidate_id in hypothesis.get("basis_candidate_ids",[])}
     existing_candidates.update(hypothesis.get("candidate_id") for hypothesis in existing if hypothesis.get("candidate_id"))
     out=[]
-    remaining=[candidate for candidate in candidates
-        if candidate.get("candidate_id") not in existing_candidates]
+    remaining=[]
+    for candidate in candidates:
+        if candidate.get("candidate_id") in existing_candidates:
+            continue
+        current_evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
+        if available_evidence_ids is not None:
+            current_evidence_ids=[
+                value for value in current_evidence_ids if value in available_evidence_ids
+            ]
+            if not current_evidence_ids:
+                continue
+        remaining.append({**candidate,"evidence_ids":current_evidence_ids})
     for candidate in select_candidate_frontier(remaining):
         candidate_id=candidate.get("candidate_id")
         evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
-        if available_evidence_ids is not None:
-            evidence_ids=[value for value in evidence_ids if value in available_evidence_ids]
         score=int(candidate.get("priority_score",0) or 0)
         if not candidate_id or not evidence_ids: continue
         technique=next((value for value in candidate.get("attack_techniques",[]) if value in TECHNIQUES),"unmapped")

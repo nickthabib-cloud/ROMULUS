@@ -289,6 +289,33 @@ class CandidateRelationshipTests(unittest.TestCase):
         self.assertEqual(restored["corroboration_bonus"], 0)
         self.assertEqual(restored["disposition"], "observed")
 
+    def test_partial_relationship_loss_recomputes_visibility_and_disposition(self):
+        from romulus.investigation.candidate_triage import relate_candidates
+
+        candidates = [
+            self._candidate("CL-A", "GROUP-A", "EV-A", 50),
+            self._candidate("CL-B", "GROUP-B", "EV-B", 50),
+            self._candidate("CL-C", "GROUP-C", "EV-C", 50),
+        ]
+        evidence = [
+            self._event("EV-A", "2026-06-01T12:00:00Z", "10.55.0.8"),
+            self._event("EV-B", "2026-06-01T12:01:00Z", "10.55.0.8"),
+            self._event("EV-C", "2026-06-01T12:02:00Z", "10.55.0.8"),
+        ]
+
+        related = relate_candidates(candidates, evidence)
+        promoted = next(item for item in related if item["candidate_id"] == "CL-A")
+        self.assertEqual(promoted["priority_score"], 70)
+        self.assertEqual(promoted["disposition"], "corroborated")
+        self.assertTrue(promoted["customer_visible"])
+
+        recalculated = relate_candidates(related, evidence[:2])
+        demoted = next(item for item in recalculated if item["candidate_id"] == "CL-A")
+        self.assertEqual(demoted["corroboration_bonus"], 10)
+        self.assertEqual(demoted["priority_score"], 60)
+        self.assertEqual(demoted["disposition"], "observed")
+        self.assertFalse(demoted["customer_visible"])
+
 
 class CandidateFrontierTests(unittest.TestCase):
     @staticmethod
@@ -417,6 +444,22 @@ class CandidateFrontierTests(unittest.TestCase):
         self.assertTrue(first_ids.isdisjoint(second_ids))
         self.assertTrue((first_ids | second_ids).isdisjoint(third_ids))
         self.assertEqual(first_ids | second_ids | third_ids, {item["candidate_id"] for item in candidates})
+
+    def test_stale_high_scores_cannot_starve_a_current_lower_score_candidate(self):
+        from romulus.investigation.workflow import _candidate_hypotheses
+
+        stale = [
+            self._candidate(f"CL-STALE-{index}", f"stale-{index}", 99 - index)
+            for index in range(9)
+        ]
+        valid = self._candidate("CL-CURRENT", "current", 20)
+        hypotheses = _candidate_hypotheses(
+            stale + [valid],
+            [],
+            evidence=[{"evidence_id": "EV-CL-CURRENT", "asset": "host-current"}],
+        )
+
+        self.assertEqual([item["candidate_id"] for item in hypotheses], ["CL-CURRENT"])
 
 
 class AttackDiscoveryWorkflowTests(unittest.TestCase):
