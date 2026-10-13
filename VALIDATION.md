@@ -2,6 +2,37 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-13 — blind Russell Mitchell generalization evaluation (partial; no validated attack path)
+
+### Evaluation boundary and exact candidate
+
+- ROMULUS received only a broad undirected hunt objective and the operator-authorized mission window. No attack identity, host, account, domain, product, vulnerability, command, filename, technique, or sequence from the external oracle was supplied to the runtime. The oracle was first consulted after the hunt was finalized and compacted.
+- Exact candidate commit `5bdc888b941eb3e568db4e53f20cf3bd6e743ccb` was archived with SHA-256 `031BDFD972FDD80CC0F94F13C91ED18C5FE81EF173DDE84114309C6EFD38892D`; the digest matched locally and on the development VM. Configured read-only diagnostics were green for the model and structured schemas, Elasticsearch, Arkime, TShark, all configured captures, the pinned ATT&CK catalog, timezone, and isolated writable directories.
+- Hunt `HUNT-65EE9C609B` ran from the exact isolated candidate with production backstops of 3,600 seconds, 40 analyst rounds, 500 external calls, and three stagnant cycles. It stopped after 1,546,254 ms, 35 calls, and nine rounds as `partial / incomplete_investigation` with `no_productive_frontier`; it did not reach coverage closure.
+- The pre-model invariant held: deterministic telemetry produced candidates before any model call. The run created 20 behavior candidates and eight candidate-derived hypotheses. No model proposal, assessment, search, finding, or attack-path edge was admitted.
+
+### Blind result and oracle scoring
+
+- Final customer finding and attack-stage recall was **0/7**. ROMULUS published zero findings and zero supported attack paths, so precision is undefined rather than 100%. It made no unsupported final finding and assigned no incorrect technique to a final finding.
+- Candidate-stage recall was **1/7**: a deterministic `T1046 Network Service Discovery` candidate correctly surfaced the attacker IP `192.168.230.122` and its scan/fan-out behavior, but it remained unassessed. The report's raw evidence also contained the distinctive DNS-transfer traffic, so raw-evidence visibility was **2/7** for reconnaissance and DNS exfiltration; that exfiltration was not promoted into a finding or path. A separate early high-entropy-DNS candidate mapped to `T1071.004` was unassessed and was not established as the oracle's exfiltration.
+- Entity recall was limited to the attacker IP and nearby network endpoints. The attacker identity, compromised account, web-service account, WordPress foothold, password-cracking activity, reverse shell, and privileged action were not surfaced as hunt conclusions. No attack relationships or temporal stage sequence were constructed, so relationship and reported temporal-ordering recall were zero.
+- The report accurately disclosed that the hunt was incomplete, host telemetry was not searched, network retrieval was partial, model reasoning was unavailable, source errors remained, and no conclusion about the absence of suspicious activity was supported. This honest fail-closed result is materially better than a hallucinated chain, but it does not satisfy the threat-hunting objective.
+
+### Responsible-layer diagnosis
+
+- **Retrieval:** host inventory inspected one 695-field mapping but reported no usable timestamp field, registered no executable host discovery task, and returned zero host events. Initial Elasticsearch network retrieval did use timestamped data, so this is a field-role/inventory compatibility defect rather than proof that the dataset lacks time. Eight host follow-ups were consequently finalized as `budget_limited`. Network coverage was also heavily capped: Elasticsearch returned 500 of 154,043 matching events, Arkime discovery returned 20,000 of 610,789, and most Arkime pivots returned 20,000 from much larger totals.
+- **Source contract:** diagnostics accepted all 13 configured capture paths, while runtime validation rejected 11 capture names containing suffixes after `.pcap`; only two direct capture names executed. Doctor and runtime therefore disagree about valid configured captures, causing avoidable network loss.
+- **Candidate generation and normalization:** the correct attacker scan became a candidate, but readily visible DNS-transfer records were left in raw evidence instead of becoming a correlated exfiltration candidate. The foothold, discovery, credential, shell, and privilege-escalation stages had no usable host retrieval path and were never promoted.
+- **Hypothesis reasoning:** all nine grounded-investigator calls failed closed because structured Ollama output was either truncated or violated global proposal-ID requirements. The critic was never called. Deterministic work continued safely, but the reasoning layer contributed no hypothesis refinement, competing explanation, discriminating search, assessment, or finding.
+- **Correlation and admission:** no correlation or attack-path edge was built. Admission correctly rejected unusable model output and allowed no unsupported claim through; reporting then truthfully described the partial state. The primary failures are upstream retrieval, candidate promotion, and model-contract robustness, not report honesty.
+
+### Reporting, retention, and cleanup
+
+- Final reports `HUNT-65EE9C609B-20261013T113354Z.docx` and `.txt` reopened successfully. Their SHA-256 digests are `BE29B71D5204A4682F5695BB88E09C56BD9173C97682E4A0AF376CEDB95CA531` and `2ADDC699C104DB5D858A1185FA3AF183945A12F36E6269A2F832837707CF5921`. They contain the hunt identity, exact partial outcome, source/model limitations, scheduler and progress aggregates, and no raw model prompt or query body.
+- Compact retention removed all 111,777 working evidence rows, 35 audit rows, the checkpoint, detailed reasoning/model payloads, host/network working arrays, tools, tasks/outcomes, queries, and progress detail. No finding, evidence, checkpoint, or write row remained because no finding had cited support. Only the ignored final report pair was preserved locally, consistent with the operator's request not to retain disposable hunt bulk.
+- The exact remote archive, isolated checkout, runtime, hunt log, and diagnostic log plus the local transfer archive were resolved and removed. Operational telemetry and service configuration were not changed.
+- Because the oracle has now been consulted, this dataset is a regression corpus for subsequent generic fixes, not a fresh holdout. Any fix must be developed from general behavior with unrelated synthetic variants and benign controls; no oracle-specific indicator or sequence may enter runtime code, prompts, selectors, catalogs, tests, or fixtures.
+
 ## 2026-10-13 — evidence-grounded investigator and critic (local/VM proof; holdout remains blind)
 
 ### Implemented behavior
