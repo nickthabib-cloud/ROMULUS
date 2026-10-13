@@ -155,12 +155,21 @@ def _scheduler_lines(state):
 
 def _content(s):
     host_events=_bounded_report_events(s,"host"); network_events=_bounded_report_events(s,"network")
+    coverage=s.get("coverage",{}) if isinstance(s.get("coverage"),dict) else {}
+    progress=coverage.get("progress_summary",{}) if isinstance(coverage.get("progress_summary"),dict) else {}
     lines=[f"ROMULUS INVESTIGATION REPORT — {s.get('status','partial').upper()}",f"Investigation: {s.get('hunt_id','')}",f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}","", "EXECUTIVE SUMMARY",s.get("summary") or "Investigation summary unavailable.",
         f"Outcome: {s.get('outcome','not recorded')}",f"Termination reason: {s.get('termination_reason','not recorded')}",
         f"Elapsed: {s.get('duration_ms','not recorded')} ms",
         f"Tool calls: {s.get('tool_calls',0)} / {s.get('coverage',{}).get('tool_call_limit','not recorded')}; analyst rounds: {s.get('depth',0)} / {s.get('coverage',{}).get('depth_limit','not recorded')}",
+        f"Safety backstops: runtime={coverage.get('runtime_seconds_used','not recorded')} / {coverage.get('runtime_seconds_limit','not recorded')} seconds; tool calls={s.get('tool_calls',0)} / {coverage.get('tool_call_limit','not recorded')}; analyst rounds={s.get('depth',0)} / {coverage.get('depth_limit','not recorded')}",
+        f"Progress stop basis: {progress.get('final_stop_basis') or s.get('termination_reason','not recorded')}",
+        f"Progress cycles: {progress.get('cycles_recorded',0)} recorded; {progress.get('productive_cycles',0)} productive; {progress.get('stagnant_cycles_recorded',0)} stagnant",
+        f"Stagnation: current={progress.get('current_stagnant_cycles',coverage.get('stagnant_cycles',0))}; maximum observed={progress.get('max_stagnant_cycles_seen',0)}; configured stop threshold={coverage.get('max_stagnant_cycles','not recorded')}",
         f"ATT&CK knowledge baseline: {ATTACK_DOMAIN} {ATTACK_RELEASE} ({ATTACK_RELEASE_DATE})","", "OBJECTIVE AND SCOPE",s.get("objective",""),"", "DATA SOURCES AND COVERAGE"]
-    lines += [f"- {k}: {v}" for k,v in s.get("coverage",{}).items() if k not in {"search_fields","analytic_summary","hypothesis_coverage","recent_search_artifacts"}]
+    aggregate_keys={"progress_summary","runtime_seconds_used","runtime_seconds_limit",
+        "max_stagnant_cycles","stagnant_cycles"}
+    lines += [f"- {k}: {v}" for k,v in coverage.items() if k not in
+        {"search_fields","analytic_summary","hypothesis_coverage","recent_search_artifacts"}|aggregate_keys]
     lines += ["", "REASONING AND INVESTIGATION STAGES"]
     for stage in s.get("stage_history",[]): lines.append(f"- {stage.get('timestamp')} {stage.get('stage')}: {stage.get('status')}; details={stage.get('details')}.")
     for stage in s.get("reasoning_history",[]):
@@ -427,6 +436,8 @@ def _docx(s,path):
         limitations.append(f"{len(representative_outcomes)} search result set(s) used a bounded representative sample; capped searches remain incomplete coverage.")
     if fallback_outcomes:
         limitations.append(f"{len(fallback_outcomes)} search result set(s) used incomplete, nonrepresentative bounded retrieval because complete representative sampling was unavailable.")
+    if s.get("termination_reason")=="no_productive_frontier":
+        limitations.append("The investigation ended after repeated cycles produced no additional evidence or closed coverage gaps. Unresolved coverage remains a limitation.")
     if not limitations: limitations.append("No source errors or sampled-result limitations were recorded.")
     cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True)
     set_cell_text(cells[1]," ".join(limitations)+" See the technical TXT report for details.")

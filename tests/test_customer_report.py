@@ -244,6 +244,57 @@ class CustomerWordReportTests(unittest.TestCase):
             self.assertIn("incomplete, nonrepresentative bounded retrieval", word_text)
             self.assertNotIn("bounded representative sample", word_text)
 
+    def test_technical_report_explains_progress_stop_and_emergency_backstops(self):
+        from romulus.reporting.report import generate_report
+
+        state=self._state()
+        state.update({"status":"partial","termination_reason":"no_productive_frontier",
+            "duration_ms":42000,"tool_calls":7,"depth":3})
+        state["coverage"].update({
+            "runtime_seconds_used":42.0,"runtime_seconds_limit":3600,
+            "tool_call_limit":500,"depth_limit":40,"max_stagnant_cycles":3,
+            "stagnant_cycles":3,"progress_summary":{"cycles_recorded":5,
+                "productive_cycles":2,"stagnant_cycles_recorded":3,
+                "current_stagnant_cycles":3,"max_stagnant_cycles_seen":3,
+                "signal_totals":{"new_evidence":2},"last_stage":"analysis",
+                "last_material_signals":{},"final_stop_basis":"no_productive_frontier"},
+        })
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths=generate_report(state,Path(directory))
+            technical=next(path for path in paths if path.suffix==".txt").read_text(encoding="utf-8")
+
+        self.assertIn("Progress stop basis: no_productive_frontier",technical)
+        self.assertIn("Progress cycles: 5 recorded; 2 productive; 3 stagnant",technical)
+        self.assertIn("Stagnation: current=3; maximum observed=3; configured stop threshold=3",technical)
+        self.assertIn("Safety backstops: runtime=42.0 / 3600 seconds; tool calls=7 / 500; analyst rounds=3 / 40",technical)
+
+    def test_customer_report_uses_plain_language_without_progress_internals(self):
+        try:
+            from docx import Document
+        except ImportError:
+            self.skipTest("Install requirements.txt for Word report verification")
+        from romulus.reporting.report import generate_report
+
+        state=self._state()
+        state.update({"status":"partial","termination_reason":"no_productive_frontier",
+            "progress_baseline":{"changed_ids":["INTERNAL-BASELINE-SENTINEL"]},
+            "progress_history":[{"changed_ids":{"new_evidence":["INTERNAL-PROGRESS-SENTINEL"]}}]})
+        state["coverage"].update({"coverage_closure_ready":False,"stagnant_cycles":3,
+            "max_stagnant_cycles":3,"progress_summary":{"cycles_recorded":3,
+                "productive_cycles":0,"stagnant_cycles_recorded":3,
+                "final_stop_basis":"no_productive_frontier"}})
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths=generate_report(state,Path(directory))
+            document=Document(next(path for path in paths if path.suffix==".docx"))
+            word_text="\n".join(paragraph.text for paragraph in document.paragraphs)
+            word_text+="\n"+"\n".join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
+
+        self.assertIn("ended after repeated cycles produced no additional evidence or closed coverage gaps",word_text)
+        self.assertIn("No finding is not proof that the environment is free of malicious activity",word_text)
+        for internal in ("progress_baseline","progress_history","changed_ids",
+                "INTERNAL-BASELINE-SENTINEL","INTERNAL-PROGRESS-SENTINEL"):
+            self.assertNotIn(internal,word_text)
+
 
 if __name__ == "__main__":
     unittest.main()

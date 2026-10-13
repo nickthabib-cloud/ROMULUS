@@ -31,7 +31,7 @@ from .search_planner import (candidate_fields, validate_spec, compile_es, compil
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
     record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
     recover_interrupted_tasks)
-from .progress import decide_next_action, initialize_progress, record_progress
+from .progress import decide_next_action, initialize_progress, record_progress, summarize_progress
 from .sampling import sampling_policy
 from .synthetic import sample_evidence
 
@@ -1669,6 +1669,11 @@ class HuntEngine:
         s["coverage"]["depth_used"]=s.get("depth",0)
         s["coverage"]["depth_limit"]=self.settings.max_depth
         s["coverage"]["minimum_reasoning_rounds"]=self.settings.min_reasoning_rounds
+        s["coverage"]["runtime_seconds_used"]=round(float(s.get("duration_ms",0))/1000,3)
+        s["coverage"]["runtime_seconds_limit"]=self.settings.max_runtime_seconds
+        s["coverage"]["max_stagnant_cycles"]=self.settings.max_stagnant_cycles
+        s["coverage"]["stagnant_cycles"]=max(0,int(s.get("stagnant_cycles",0)))
+        s["coverage"]["progress_summary"]=summarize_progress(s)
         s["coverage"]["termination_reason"]=s["termination_reason"]
         s["coverage"]["source_error_count"]=len(errors)
         s["coverage"]["coverage_closure_ready"]=coverage_closure_ready

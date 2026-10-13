@@ -378,6 +378,32 @@ class SchedulerExecutionTests(unittest.TestCase):
             self.assertEqual(state["status"], "partial")
             self.assertFalse(state["coverage"]["coverage_closure_ready"])
 
+    def test_stagnation_report_remains_partial_when_coverage_is_open(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine=_engine(Path(directory))
+            state=_state()
+            state.update({"status":"running","outcome":"pending","termination_reason":"no_productive_frontier",
+                "hypotheses":[],"findings":[],"correlations":[],"stage_history":[],
+                "source_health":{"host":True,"network":True},"stagnant_cycles":3,
+                "progress_history":[
+                    {"stage":"analysis","material_progress":True,"signals":{"new_evidence":1},"stagnant_cycles":0},
+                    {"stage":"reasoning","material_progress":False,"signals":{},"stagnant_cycles":1},
+                    {"stage":"analysis","material_progress":False,"signals":{},"stagnant_cycles":2},
+                    {"stage":"reasoning","material_progress":False,"signals":{},"stagnant_cycles":3},
+                ]})
+            state["coverage"].update({"host":"searched","network":"searched",
+                "hypothesis_coverage":{"closure_ready":False,"rows":[{"hypothesis_id":"H-OPEN","closed":False}]}})
+            with patch("romulus.reporting.report.generate_report",return_value=[]):
+                engine._report(state)
+
+            self.assertEqual(state["status"],"partial")
+            self.assertFalse(state["coverage"]["coverage_closure_ready"])
+            self.assertEqual(state["coverage"]["progress_summary"]["final_stop_basis"],"no_productive_frontier")
+            self.assertEqual(state["coverage"]["progress_summary"]["productive_cycles"],1)
+            self.assertEqual(state["coverage"]["progress_summary"]["current_stagnant_cycles"],3)
+
 
 def _analytic():
     return {

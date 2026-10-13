@@ -4,6 +4,14 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 
 ## Unreleased
 
+### Adaptive evidence-grounded stopping
+
+- Replaced duplicated post-analysis/post-reasoning branches with one deterministic router. Critical/high searches retain priority, grounded reasoning runs before lower-value breadth, the last external-call slot remains available for queued telemetry work, and model `continue_investigation` advice cannot override the measured frontier.
+- Added a bounded persisted progress ledger for admitted evidence, resolving outcomes, candidate/hypothesis changes, factual graph/path expansion, and closed coverage gaps. Prose churn, duplicate records, raw count changes, and incomplete/capped outcomes do not create progress.
+- Raised production emergency defaults to one hour, 40 reasoning rounds, and 500 external calls, with a three-cycle stagnation stop. `MIN_REASONING_ROUNDS` remains environment-compatible but is no longer a routing requirement.
+- Added explicit `coverage_closure_reached`, `no_productive_frontier`, runtime, call, and depth stop reporting. Open coverage at stagnation or a safety ceiling remains partial and cannot become a clean-environment conclusion.
+- Extended report-gated compact retention with aggregate progress counts and the final stop basis while deleting detailed progress history and baselines alongside other bulky working data.
+
 ### Representative bounded telemetry retrieval
 
 - Replaced earliest-only capped retention with source-native representative retrieval: Elasticsearch time strata inside one PIT, Arkime stable rank windows, and deterministic TShark reservoirs over the complete matching stream.
