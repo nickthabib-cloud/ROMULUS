@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,14 @@ ALLOWED_SOURCES = {"elasticsearch", "aggregate"}
 PRIORITIES = {"informational", "low", "medium", "high", "critical"}
 NOISE_LEVELS = {"low", "medium", "high"}
 _ATTACK_TECHNIQUE_IDS: set[str] | None = None
+
+_TEXT_FIELD_TYPES = {"text", "match_only_text"}
+_EXACT_STRING_FIELD_TYPES = {"keyword", "constant_keyword", "wildcard", "version"}
+_PHRASE_FIELD_TYPES = _TEXT_FIELD_TYPES | {"keyword", "constant_keyword"}
+_PREFIX_FIELD_TYPES = {"keyword", "constant_keyword", "wildcard"}
+_INTEGER_FIELD_TYPES = {"byte", "short", "integer", "long", "unsigned_long"}
+_FLOAT_FIELD_TYPES = {"half_float", "float", "double", "scaled_float"}
+_DATE_FIELD_TYPES = {"date", "date_nanos"}
 
 SEMANTIC_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
     "event.time": ("@timestamp", "timestamp", "event.created", "event.start", "winlog.time_created"),
@@ -272,6 +281,7 @@ def compile_elasticsearch_seed(
     bindings: dict[str, list[str]],
     timestamp_field: str,
     time_range: dict[str, str] | None,
+    field_capabilities: dict[str, list[str]] | None = None,
 ) -> dict[str, Any] | None:
     """Compile a catalog entry into a bounded, validator-compatible ES query."""
     match = analytic.get("match", {})
@@ -279,16 +289,16 @@ def compile_elasticsearch_seed(
     should = []
     must_not = []
     for predicate in match.get("all", []):
-        clause = _predicate_query(predicate, bindings)
+        clause = _predicate_query(predicate, bindings, field_capabilities)
         if clause is None:
             return None
         must.append(clause)
     for predicate in match.get("any", []):
-        clause = _predicate_query(predicate, bindings)
+        clause = _predicate_query(predicate, bindings, field_capabilities)
         if clause is not None:
             should.append(clause)
     for predicate in match.get("none", []):
-        clause = _predicate_query(predicate, bindings)
+        clause = _predicate_query(predicate, bindings, field_capabilities)
         if clause is None:
             return None
         must_not.append(clause)
@@ -467,7 +477,11 @@ def _retained_candidate_without_derived_corroboration(candidate: dict[str, Any])
     return item
 
 
-def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) -> dict[str, Any] | None:
+def _predicate_query(
+    predicate: dict[str, Any],
+    bindings: dict[str, list[str]],
+    field_capabilities: dict[str, list[str]] | None = None,
+) -> dict[str, Any] | None:
     fields = bindings.get(predicate.get("role"), [])
     if not fields:
         return None
@@ -475,19 +489,69 @@ def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) 
     values = predicate.get("values", [])
     clauses = []
     for field in fields[:4]:
+        types = set(field_capabilities.get(field, [])) if field_capabilities is not None else set()
+        strict = field_capabilities is not None
         if operator == "exists":
-            clauses.append({"exists": {"field": field}})
+            if not strict or types:
+                clauses.append({"exists": {"field": field}})
         elif operator == "equals_any":
-            clauses.append({"terms": {field: values[:20]}})
+            if not strict:
+                clauses.append({"terms": {field: values[:20]}})
+            elif types and types <= _PHRASE_FIELD_TYPES and types & _TEXT_FIELD_TYPES:
+                clauses.extend({"match_phrase": {field: value}} for value in values[:20])
+            elif (coerced := _coerce_exact_values(values[:20], types)) is not None:
+                clauses.append({"terms": {field: coerced}})
         elif operator == "path_prefix_any":
-            clauses.extend({"prefix": {field: value}} for value in values[:12])
+            if not strict or (types and types <= _PREFIX_FIELD_TYPES):
+                clauses.extend({"prefix": {field: value}} for value in values[:12])
+            if strict and types and types <= _PHRASE_FIELD_TYPES and types & _TEXT_FIELD_TYPES:
+                clauses.extend({"match_phrase": {field: value}} for value in values[:12])
         elif operator in {"contains_any", "ends_with_any"}:
-            clauses.extend({"match_phrase": {field: value}} for value in values[:12])
+            if not strict or (types and types <= _PHRASE_FIELD_TYPES and types & _TEXT_FIELD_TYPES):
+                clauses.extend({"match_phrase": {field: value}} for value in values[:12])
         else:
             continue
     if not clauses:
         return None
     return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
+
+
+def _coerce_exact_values(values: list[Any], types: set[str]) -> list[Any] | None:
+    """Return values safe for every concrete field type, or fail closed."""
+    if not types:
+        return None
+    raw = [str(value).strip() for value in values]
+    if not raw or any(not value for value in raw):
+        return None
+    if types <= _EXACT_STRING_FIELD_TYPES:
+        return raw
+    if types <= _INTEGER_FIELD_TYPES:
+        if any(not re.fullmatch(r"[+-]?\d+", value) for value in raw):
+            return None
+        return [int(value) for value in raw]
+    if types <= (_INTEGER_FIELD_TYPES | _FLOAT_FIELD_TYPES):
+        try:
+            parsed = [float(value) for value in raw]
+        except ValueError:
+            return None
+        return parsed if all(math.isfinite(value) for value in parsed) else None
+    if types == {"boolean"}:
+        if any(value.lower() not in {"true", "false"} for value in raw):
+            return None
+        return [value.lower() == "true" for value in raw]
+    if types <= ({"ip"} | _EXACT_STRING_FIELD_TYPES) and "ip" in types:
+        try:
+            return [str(ipaddress.ip_address(value)) for value in raw]
+        except ValueError:
+            return None
+    if types <= (_DATE_FIELD_TYPES | _EXACT_STRING_FIELD_TYPES) and types & _DATE_FIELD_TYPES:
+        try:
+            for value in raw:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return raw
+    return None
 
 
 def _analytic_matches(analytic: dict[str, Any], event: dict[str, Any]) -> bool:
@@ -774,6 +838,7 @@ def compile_elasticsearch_indicator_seed(
     bindings: dict[str, list[str]],
     timestamp_field: str,
     time_range: dict[str, str] | None,
+    field_capabilities: dict[str, list[str]] | None = None,
 ) -> dict[str, Any] | None:
     """Compile a trusted exact indicator into a strict field-bound query."""
     roles_by_type = {
@@ -796,7 +861,23 @@ def compile_elasticsearch_indicator_seed(
     value = str(indicator.get("value") or "").strip()
     if not value:
         return None
-    should = [{"term": {field: value}} for field in list(dict.fromkeys(fields))[:8]]
+    kind = str(indicator.get("type") or "")
+    if kind == "ip":
+        try:
+            value = str(ipaddress.ip_address(value))
+        except ValueError:
+            return None
+    should = []
+    for field in list(dict.fromkeys(fields))[:8]:
+        types = set(field_capabilities.get(field, [])) if field_capabilities is not None else set()
+        if field_capabilities is None:
+            should.append({"term": {field: value}})
+        elif types and types <= _PHRASE_FIELD_TYPES and types & _TEXT_FIELD_TYPES:
+            should.append({"match_phrase": {field: value}})
+        elif (coerced := _coerce_exact_values([value], types)) is not None:
+            should.append({"term": {field: coerced[0]}})
+    if not should:
+        return None
     body: dict[str, Any] = {"should": should, "minimum_should_match": 1}
     if time_range:
         body["filter"] = [{"range": {timestamp_field: dict(time_range)}}]

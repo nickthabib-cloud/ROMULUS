@@ -104,6 +104,8 @@ class HuntState(TypedDict, total=False):
     local_model_note: str; report_paths: list[str]; mapping_errors: list[dict]
     depth: int; tool_calls: int; mode: str; tool_runs: list[dict]
     source_errors: list[dict]; es_fields_by_class: dict[str,list[str]]
+    es_field_capabilities: dict[str,list[str]]
+    es_field_capabilities_by_class: dict[str,dict[str,list[str]]]
     es_indices_by_class: dict[str,list[str]]
     source_health: dict[str,bool]
     lead_catalog: list[dict]; completed_leads: list[str]
@@ -139,7 +141,7 @@ class HuntEngine:
                 "queries":[],"coverage":{},"source_errors":[],"started_at":utc_now(),"started_epoch":time.time(),"depth":0,
                 "tool_calls":0,"mode":"offline" if self.offline else "live","tool_runs":[],"lead_catalog":[],
                 "completed_leads":[],"reasoning_history":[],"stage_history":[],"es_fields_by_class":{},
-                "es_indices_by_class":{},
+                "es_field_capabilities":{},"es_field_capabilities_by_class":{},"es_indices_by_class":{},
                 "analytic_summary":{},"search_artifacts":[],"evidence_keys":[],"candidate_leads":[],
                 "pivot_results":[],
                 "investigation_graph":{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}},
@@ -149,6 +151,8 @@ class HuntEngine:
                     "analytics":len(self.behavior_catalog.get("analytics",[])),
                     "trusted_indicators":len(self.local_indicators.get("indicators",[]))}}
         state.setdefault("sampling_policy",sampling_policy(self.settings))
+        if _resume:
+            self._migrate_legacy_schema_capabilities(state)
         initialize_scheduler(state)
         if _resume:
             migrate_legacy_search_state(state,compile_pending=lambda lead:
@@ -405,9 +409,12 @@ class HuntEngine:
         if mappings is None:
             s["coverage"]["host"]="indices discovered; mapping retrieval failed"
             s["es_fields"]=[]; s["es_fields_by_class"]={}; s["es_indices_by_class"]={}
+            s["es_field_capabilities"]={}; s["es_field_capabilities_by_class"]={}
             s.setdefault("source_health",{})["host"]=False
             self._stage(s,"host_inventory","failed",{"matched_indices":len(names)})
             return self._save(s)
+        s["es_field_capabilities"]=_field_capabilities(mappings)
+        s["es_field_capabilities_by_class"]=_field_capabilities_by_class(mappings)
         s["es_fields"]=_field_names(mappings); s["es_fields_by_class"]=_field_names_by_class(mappings)
         s["es_indices_by_class"]=_index_names_by_class(mappings)
         fields=s.get("es_fields",[]); field_classes=s.get("es_fields_by_class",{})
@@ -428,6 +435,35 @@ class HuntEngine:
         self._stage(s,"host_inventory","completed" if ready else "incomplete",
             {"matched_indices":len(names),"mapped_fields":len(fields),"timestamp_field_available":bool(timestamp)})
         return self._save(s)
+
+    def _migrate_legacy_schema_capabilities(self,s):
+        """Refresh pre-capability checkpoints before any discovery task can resume."""
+        capability_keys=("es_field_capabilities","es_field_capabilities_by_class")
+        if all(isinstance(s.get(key),dict) for key in capability_keys): return
+        s["es_field_capabilities"]={}; s["es_field_capabilities_by_class"]={}
+        tasks=s.get("search_tasks",{}) if isinstance(s.get("search_tasks"),dict) else {}
+        invalidated={task_id for task_id,task in tasks.items()
+            if isinstance(task,dict) and task.get("phase")=="discovery"
+            and task.get("origin") in {"behavior_catalog","trusted_indicator"}
+            and task.get("status") in {"queued","interrupted"}}
+        for task_id in invalidated: tasks.pop(task_id,None)
+        if invalidated:
+            s["search_queue"]=[task_id for task_id in s.get("search_queue",[])
+                if task_id not in invalidated]
+        details={"status":"failed_closed","invalidated_untyped_tasks":len(invalidated)}
+        names=list(s.get("es_indices",[]))
+        if not self.offline and names:
+            mappings=self._call(s,"elasticsearch.indices.get_mapping","resume_schema_migration",
+                {"indices":names},"configured indices from legacy checkpoint",
+                lambda:self.es.mappings_many(names),lambda value:len(value))
+            if mappings is not None:
+                s["es_field_capabilities"]=_field_capabilities(mappings)
+                s["es_field_capabilities_by_class"]=_field_capabilities_by_class(mappings)
+                s["es_fields"]=_field_names(mappings)
+                s["es_fields_by_class"]=_field_names_by_class(mappings)
+                s["es_indices_by_class"]=_index_names_by_class(mappings)
+                details.update({"status":"refreshed","mapped_fields":len(s["es_fields"])})
+        s.setdefault("coverage",{})["schema_capability_migration"]=details
 
     def _add_es_hit(self,s,hit,query,lead_id=None):
         index=str(hit.get("_index", "")); document_id=hit.get("_id")
@@ -475,9 +511,13 @@ class HuntEngine:
         classified_indices=isinstance(index_classes,dict) and bool(index_classes)
         field_classes=s.get("es_fields_by_class",{})
         classified_fields=isinstance(field_classes,dict) and bool(field_classes)
+        capability_classes=s.get("es_field_capabilities_by_class",{})
+        classified_capabilities=isinstance(capability_classes,dict) and bool(capability_classes)
         host_names=(list(index_classes.get("host",[])) if classified_indices else
             ([name for name in names if "host" in name.lower()] or [name for name in names if "network" not in name.lower()] or names))
         host_fields=list(field_classes.get("host",[])) if classified_fields else fields
+        host_capabilities=(dict(capability_classes.get("host",{})) if classified_capabilities else
+            dict(s.get("es_field_capabilities",{})))
         timestamp=s.get("timestamp_field") or next((field for field in
             ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
             if field in host_fields),None)
@@ -487,10 +527,12 @@ class HuntEngine:
         if host_ready:
             indicator_limit=min(12,max(1,self.settings.max_tool_calls//10))
             indicator_seeds,indicator_unsupported=_indicator_seed_queries(
-                self.local_indicators,host_fields,timestamp or "@timestamp",mission_range,indicator_limit)
+                self.local_indicators,host_fields,timestamp or "@timestamp",mission_range,indicator_limit,
+                host_capabilities)
             behavior_limit=min(32,max(1,self.settings.max_tool_calls//5))
             behavior_seeds,behavior_unsupported=_behavior_seed_queries(
-                self.behavior_catalog,host_fields,timestamp or "@timestamp",mission_range,behavior_limit)
+                self.behavior_catalog,host_fields,timestamp or "@timestamp",mission_range,behavior_limit,
+                host_capabilities)
             seed_size=min(25,self.settings.max_results)
             for origin,seeds,id_field in (("trusted_indicator",indicator_seeds,"indicator_id"),
                                           ("behavior_catalog",behavior_seeds,"analytic_id")):
@@ -2203,14 +2245,34 @@ def _lead_host_query(lead,fields,timestamp_field,time_range,state):
     return query
 
 
-def _field_names(mapping):
-    fields=set()
+def _field_capabilities(mapping):
+    """Return concrete Elasticsearch types for queryable leaf fields only."""
+    capabilities={}
+    def add(field,field_type):
+        if not field or not isinstance(field_type,str) or field_type in {"object","nested"}: return
+        capabilities.setdefault(field,set()).add(field_type)
     def walk(props,prefix=""):
+        if not isinstance(props,dict): return
         for name,desc in props.items():
-            full=(prefix+"."+name).strip("."); fields.add(full)
-            if isinstance(desc,dict) and isinstance(desc.get("properties"),dict): walk(desc["properties"],full)
-    for entry in mapping.values(): walk(entry.get("mappings",{}).get("properties",{}))
-    return sorted(fields)
+            if not isinstance(desc,dict): continue
+            full=(prefix+"."+str(name)).strip(".")
+            field_type=desc.get("type")
+            if field_type=="nested": continue
+            add(full,field_type)
+            if isinstance(desc.get("properties"),dict): walk(desc["properties"],full)
+            for sub_name,sub_desc in (desc.get("fields") or {}).items():
+                if isinstance(sub_desc,dict):
+                    add(f"{full}.{sub_name}",sub_desc.get("type"))
+                    if isinstance(sub_desc.get("properties"),dict):
+                        walk(sub_desc["properties"],f"{full}.{sub_name}")
+    for entry in mapping.values():
+        mappings=entry.get("mappings",{}) if isinstance(entry,dict) else {}
+        walk(mappings.get("properties",{}) if isinstance(mappings,dict) else {})
+    return {field:sorted(types) for field,types in sorted(capabilities.items())}
+
+
+def _field_names(mapping):
+    return sorted(_field_capabilities(mapping))
 
 
 def _mapping_categories(name,entry):
@@ -2285,6 +2347,17 @@ def _field_names_by_class(mapping):
         fields=_field_names({name:entry})
         for category in _mapping_categories(name,entry): grouped[category].update(fields)
     return {key:sorted(value) for key,value in grouped.items() if value}
+
+
+def _field_capabilities_by_class(mapping):
+    grouped={"host":{},"network":{},"other":{}}
+    for name,entry in mapping.items():
+        capabilities=_field_capabilities({name:entry})
+        for category in _mapping_categories(name,entry):
+            for field,types in capabilities.items():
+                grouped[category].setdefault(field,set()).update(types)
+    return {category:{field:sorted(types) for field,types in sorted(fields.items())}
+        for category,fields in grouped.items() if fields}
 
 
 def _index_names_by_class(mapping):
@@ -2671,13 +2744,13 @@ def _is_broad_objective(text):
         "malicious actors across all available","all available historical host and network","do not assume one technique"))
 
 
-def _behavior_seed_queries(catalog, fields, timestamp_field, time_range, limit=32):
+def _behavior_seed_queries(catalog, fields, timestamp_field, time_range, limit=32, field_capabilities=None):
     """Build a bounded, priority-ordered set of portable behavior searches."""
     bindings = resolve_semantic_fields(fields)
     applicable, unsupported = applicable_analytics(catalog, bindings, "elasticsearch")
     compiled = []
     for analytic in applicable:
-        query = compile_elasticsearch_seed(analytic, bindings, timestamp_field, time_range)
+        query = compile_elasticsearch_seed(analytic, bindings, timestamp_field, time_range, field_capabilities)
         if query is None:
             unsupported.append({"id": analytic["id"], "missing_roles": [], "reason": "predicate requires post-collection evaluation"})
             continue
@@ -2694,7 +2767,7 @@ def _behavior_seed_queries(catalog, fields, timestamp_field, time_range, limit=3
     return selected, sorted(unsupported, key=lambda item: item["id"])
 
 
-def _indicator_seed_queries(indicators, fields, timestamp_field, time_range, limit=12):
+def _indicator_seed_queries(indicators, fields, timestamp_field, time_range, limit=12, field_capabilities=None):
     bindings = resolve_semantic_fields(fields)
     compiled = []
     unsupported = []
@@ -2711,7 +2784,8 @@ def _indicator_seed_queries(indicators, fields, timestamp_field, time_range, lim
             except (TypeError, ValueError):
                 unsupported.append({"id": indicator.get("id"), "reason": "invalid expiration"})
                 continue
-        query = compile_elasticsearch_indicator_seed(indicator, bindings, timestamp_field, time_range)
+        query = compile_elasticsearch_indicator_seed(
+            indicator, bindings, timestamp_field, time_range, field_capabilities)
         if query is None:
             unsupported.append({"id": indicator.get("id"), "reason": "required semantic fields unavailable"})
             continue

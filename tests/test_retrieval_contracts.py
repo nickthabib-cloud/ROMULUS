@@ -57,6 +57,150 @@ def _inventory_state():
 
 
 class MixedIndexClassificationTests(unittest.TestCase):
+    def test_field_capabilities_survive_the_langgraph_node_boundary(self):
+        try:
+            from langgraph.graph import END, StateGraph
+        except ModuleNotFoundError:
+            self.skipTest("langgraph dependency is not installed")
+        from romulus.investigation.workflow import HuntState
+
+        mapping = _mapping({
+            "@timestamp": {"type": "date"},
+            "host": {"properties": {"name": {"type": "keyword"}}},
+            "process": {"properties": {"command_line": {"type": "text"}}},
+        })
+        seen = {}
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory), mapping)
+
+            def observe(state):
+                seen.update({
+                    "global": state.get("es_field_capabilities"),
+                    "classified": state.get("es_field_capabilities_by_class"),
+                })
+                return state
+
+            graph = StateGraph(HuntState)
+            graph.add_node("collect", engine._collect_host)
+            graph.add_node("observe", observe)
+            graph.set_entry_point("collect")
+            graph.add_edge("collect", "observe")
+            graph.add_edge("observe", END)
+            graph.compile().invoke(_inventory_state())
+
+        self.assertEqual(seen["global"]["process.command_line"], ["text"])
+        self.assertEqual(seen["classified"]["host"]["process.command_line"], ["text"])
+
+    def test_mapping_capabilities_keep_only_queryable_leaf_fields_and_multifields(self):
+        from romulus.investigation.workflow import _field_capabilities, _field_capabilities_by_class
+
+        mapping = _mapping({
+            "@timestamp": {"type": "date"},
+            "user": {"properties": {"name": {"type": "keyword"}}},
+            "process": {"type": "object", "properties": {
+                "command_line": {"type": "wildcard"},
+            }},
+            "nested_events": {"type": "nested", "properties": {
+                "value": {"type": "keyword"},
+            }},
+            "message": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+        })
+
+        capabilities = _field_capabilities(mapping)
+        classified = _field_capabilities_by_class(mapping)
+
+        self.assertNotIn("user", capabilities)
+        self.assertNotIn("process", capabilities)
+        self.assertNotIn("nested_events", capabilities)
+        self.assertNotIn("nested_events.value", capabilities)
+        self.assertEqual(capabilities["@timestamp"], ["date"])
+        self.assertEqual(capabilities["user.name"], ["keyword"])
+        self.assertEqual(capabilities["process.command_line"], ["wildcard"])
+        self.assertEqual(capabilities["message"], ["text"])
+        self.assertEqual(capabilities["message.keyword"], ["keyword"])
+        self.assertEqual(classified["host"]["process.command_line"], ["wildcard"])
+
+    def test_inventory_persists_field_capabilities_and_excludes_object_containers(self):
+        properties = {
+            "@timestamp": {"type": "date"},
+            "host": {"properties": {"name": {"type": "keyword"}}},
+            "process": {"properties": {"name": {"type": "keyword"}}},
+            "message": {"type": "text"},
+        }
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory), _mapping(properties))
+            state = engine._collect_host(_inventory_state())
+
+        self.assertNotIn("host", state["es_fields"])
+        self.assertNotIn("process", state["es_fields"])
+        self.assertEqual(state["es_field_capabilities"]["message"], ["text"])
+        self.assertEqual(
+            state["es_field_capabilities_by_class"]["host"]["process.name"],
+            ["keyword"],
+        )
+
+    def test_legacy_resumed_inventory_refreshes_capabilities_and_invalidates_untyped_tasks(self):
+        properties = {
+            "@timestamp": {"type": "date"},
+            "process": {"properties": {
+                "name": {"type": "keyword"},
+                "pid": {"type": "long"},
+            }},
+        }
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory), _mapping(properties))
+            state = _inventory_state()
+            state.update({
+                "es_indices": ["mixed-events"],
+                "es_fields": ["@timestamp", "process.name", "process.pid"],
+                "search_tasks": {
+                    "ST-LEGACY": {
+                        "phase": "discovery", "origin": "behavior_catalog",
+                        "status": "queued",
+                    },
+                },
+                "search_queue": ["ST-LEGACY"],
+            })
+            engine._migrate_legacy_schema_capabilities(state)
+
+        self.assertEqual(state["es_field_capabilities"]["process.pid"], ["long"])
+        self.assertEqual(
+            state["coverage"]["schema_capability_migration"]["status"],
+            "refreshed",
+        )
+        self.assertEqual(
+            state["coverage"]["schema_capability_migration"]["invalidated_untyped_tasks"],
+            1,
+        )
+        self.assertNotIn("ST-LEGACY", state["search_tasks"])
+        self.assertNotIn("ST-LEGACY", state["search_queue"])
+
+    def test_missing_capabilities_fail_closed_instead_of_using_legacy_queries(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory), _mapping({}))
+            state = _inventory_state()
+            state.update({
+                "es_indices": ["mixed-events"],
+                "es_fields": ["@timestamp", "process.name", "process.pid"],
+                "es_fields_by_class": {},
+                "es_indices_by_class": {},
+                "es_field_capabilities": {},
+                "es_field_capabilities_by_class": {},
+                "timestamp_field": "@timestamp",
+                "search_tasks": {},
+                "search_queue": [],
+            })
+            engine._register_discovery_tasks(state)
+
+        unsafe_origins = {"behavior_catalog", "trusted_indicator"}
+        self.assertFalse(any(
+            task.get("origin") in unsafe_origins
+            for task in state["search_tasks"].values()
+        ))
+        self.assertTrue(
+            state["coverage"]["behavior_catalog"]["unsupported_analytics"]
+        )
+
     def test_mixed_mapping_is_available_to_both_host_and_network_families(self):
         from romulus.investigation.workflow import _field_names_by_class, _index_names_by_class
 

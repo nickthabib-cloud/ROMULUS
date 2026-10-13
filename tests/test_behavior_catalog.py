@@ -160,6 +160,122 @@ class CandidateRankingTests(unittest.TestCase):
 
         self.assertIsNone(compile_elasticsearch_seed(analytic, bindings, "@timestamp", None))
 
+    def test_seed_query_uses_only_field_type_compatible_operators(self):
+        from romulus.intelligence.behavior_catalog import (
+            compile_elasticsearch_seed,
+            resolve_semantic_fields,
+        )
+
+        analytic = _analytic("BH-TEST-TYPED")
+        bindings = resolve_semantic_fields(["process.command_line"])
+        capabilities = {
+            "process.command_line": ["wildcard"],
+            "message": ["text"],
+        }
+
+        self.assertIsNone(
+            compile_elasticsearch_seed(analytic, bindings, "@timestamp", None, capabilities)
+        )
+
+        message_bindings = {"process.command_line": ["message"]}
+        message_analytic = _analytic("BH-TEST-TEXT")
+        query = compile_elasticsearch_seed(
+            message_analytic, message_bindings, "@timestamp", None, capabilities
+        )
+        rendered = json.dumps(query)
+        self.assertIn('"match_phrase": {"message": "test"}', rendered)
+        self.assertNotIn('"process.command_line"', rendered)
+
+    def test_equals_any_uses_terms_for_exact_fields_and_phrase_for_text(self):
+        from romulus.intelligence.behavior_catalog import compile_elasticsearch_seed
+
+        analytic = _analytic("BH-TEST-EQUALS", required_roles=["event.code"])
+        analytic["match"]["all"][0] = {
+            "role": "event.code", "operator": "equals_any", "values": ["4624", "4625"],
+        }
+        bindings = {"event.code": ["event.code", "message"]}
+        capabilities = {"event.code": ["keyword"], "message": ["text"]}
+
+        rendered = json.dumps(
+            compile_elasticsearch_seed(analytic, bindings, "@timestamp", None, capabilities)
+        )
+        self.assertIn('"terms": {"event.code": ["4624", "4625"]}', rendered)
+        self.assertIn('"match_phrase": {"message": "4624"}', rendered)
+
+    def test_containment_fails_closed_for_numeric_ip_and_object_fields(self):
+        from romulus.intelligence.behavior_catalog import compile_elasticsearch_seed
+
+        analytic = _analytic("BH-TEST-INCOMPATIBLE")
+        for field, field_type in (
+            ("destination.port", "integer"),
+            ("source.ip", "ip"),
+            ("process", "object"),
+        ):
+            self.assertIsNone(compile_elasticsearch_seed(
+                analytic,
+                {"process.command_line": [field]},
+                "@timestamp",
+                None,
+                {field: [field_type]},
+            ))
+
+    def test_exact_values_are_validated_and_coerced_for_concrete_types(self):
+        from romulus.intelligence.behavior_catalog import compile_elasticsearch_seed
+
+        analytic = _analytic("BH-TEST-NUMERIC", required_roles=["event.action"])
+        analytic["match"]["all"][0] = {
+            "role": "event.action", "operator": "equals_any", "values": ["4624"],
+        }
+        query = compile_elasticsearch_seed(
+            analytic,
+            {"event.action": ["event.code"]},
+            "@timestamp",
+            None,
+            {"event.code": ["long"]},
+        )
+        self.assertIn('"terms": {"event.code": [4624]}', json.dumps(query))
+
+        analytic["match"]["all"][0]["values"] = ["successful_logon"]
+        self.assertIsNone(compile_elasticsearch_seed(
+            analytic,
+            {"event.action": ["event.code"]},
+            "@timestamp",
+            None,
+            {"event.code": ["long"]},
+        ))
+
+    def test_mixed_keyword_and_text_mapping_uses_a_shared_safe_phrase_query(self):
+        from romulus.intelligence.behavior_catalog import compile_elasticsearch_seed
+
+        analytic = _analytic("BH-TEST-MIXED", required_roles=["event.action"])
+        analytic["match"]["all"][0] = {
+            "role": "event.action", "operator": "equals_any", "values": ["process_started"],
+        }
+        query = compile_elasticsearch_seed(
+            analytic,
+            {"event.action": ["event.action"]},
+            "@timestamp",
+            None,
+            {"event.action": ["keyword", "text"]},
+        )
+
+        self.assertEqual(
+            query["bool"]["must"],
+            [{"match_phrase": {"event.action": "process_started"}}],
+        )
+
+        contains = compile_elasticsearch_seed(
+            _analytic("BH-TEST-MIXED-CONTAINS"),
+            {"process.command_line": ["process.command_line"]},
+            "@timestamp",
+            None,
+            {"process.command_line": ["keyword", "text"]},
+        )
+        self.assertEqual(
+            contains["bool"]["must"],
+            [{"match_phrase": {"process.command_line": "test"}}],
+        )
+
     def test_temp_execution_stays_low_and_customer_hidden(self):
         from romulus.intelligence.behavior_catalog import build_candidate_queue
 
@@ -347,6 +463,51 @@ class WorkflowIntegrationTests(unittest.TestCase):
         self.assertIn("dns.question.name", rendered)
         self.assertIn("evil.example", rendered)
         self.assertIn("range", rendered)
+
+    def test_exact_indicator_seed_respects_field_types(self):
+        from romulus.intelligence.behavior_catalog import compile_elasticsearch_indicator_seed
+
+        query = compile_elasticsearch_indicator_seed(
+            {"id": "IOC-D", "type": "domain", "value": "evil.example"},
+            {"dns.question": ["dns.question.name", "dns.question.text"]},
+            "@timestamp",
+            None,
+            {"dns.question.name": ["keyword"], "dns.question.text": ["text"]},
+        )
+        rendered = json.dumps(query)
+        self.assertIn('"term": {"dns.question.name": "evil.example"}', rendered)
+        self.assertIn('"match_phrase": {"dns.question.text": "evil.example"}', rendered)
+
+        self.assertIsNone(compile_elasticsearch_indicator_seed(
+            {"id": "IOC-D", "type": "domain", "value": "evil.example"},
+            {"dns.question": ["dns.question.object"]},
+            "@timestamp",
+            None,
+            {"dns.question.object": ["object"]},
+        ))
+
+        mixed = compile_elasticsearch_indicator_seed(
+            {"id": "IOC-D", "type": "domain", "value": "evil.example"},
+            {"dns.question": ["dns.question.name"]},
+            "@timestamp",
+            None,
+            {"dns.question.name": ["keyword", "text"]},
+        )
+        self.assertEqual(
+            mixed["bool"]["should"],
+            [{"match_phrase": {"dns.question.name": "evil.example"}}],
+        )
+
+    def test_invalid_ip_indicator_does_not_compile_against_an_ip_mapping(self):
+        from romulus.intelligence.behavior_catalog import compile_elasticsearch_indicator_seed
+
+        self.assertIsNone(compile_elasticsearch_indicator_seed(
+            {"id": "IOC-IP", "type": "ip", "value": "not-an-ip"},
+            {"source.ip": ["source.ip"]},
+            "@timestamp",
+            None,
+            {"source.ip": ["ip"]},
+        ))
 
     def test_elasticsearch_evidence_retains_behavior_id(self):
         from dataclasses import replace

@@ -82,6 +82,8 @@ class MissionModeTests(unittest.TestCase):
 
         self.assertIn("mission_mode", HuntState.__annotations__)
         self.assertIn("pivot_results", HuntState.__annotations__)
+        self.assertIn("es_field_capabilities", HuntState.__annotations__)
+        self.assertIn("es_field_capabilities_by_class", HuntState.__annotations__)
         for field in ("search_tasks", "search_queue", "search_outcomes", "scheduler_history"):
             self.assertIn(field, HuntState.__annotations__)
         self.assertNotIn("dynamic_plan_created", HuntState.__annotations__)
@@ -486,6 +488,230 @@ class AggregateSignalTests(unittest.TestCase):
         self.assertEqual(candidate["first_observed"], "2026-08-04T09:17:00Z")
         self.assertEqual(candidate["last_observed"], "2026-08-04T09:17:00Z")
 
+    def test_dns_entropy_checks_all_labels_and_promotes_a_repeated_encoded_burst(self):
+        from romulus.intelligence.analytics import summarize_evidence
+        from romulus.intelligence.behavior_catalog import build_candidate_queue, load_behavior_catalog
+
+        events = []
+        for index in range(5):
+            events.append({
+                "evidence_id": f"EV-DNS-BURST-{index}",
+                "source": "arkime",
+                "observed_at": f"2026-08-04T09:0{index}:00Z",
+                "asset": "203.0.113.44",
+                "raw": {
+                    "source": {"ip": "10.70.0.12"},
+                    "destination": {"ip": "203.0.113.44", "port": 53},
+                    "network": {"protocol": "dns"},
+                    "dns": {"question": {"name":
+                        f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example"}},
+                },
+            })
+
+        summary = summarize_evidence([], events, limit=50)
+        entropy = summary["aggregate_signals"]["dns_high_entropy"]
+        bursts = summary["aggregate_signals"]["dns_encoded_label_burst"]
+
+        self.assertEqual(len(entropy), 5)
+        self.assertEqual(entropy[0]["label"], "a9f3k2m8q7w4z6x1c5v0b2n8d0")
+        self.assertEqual(len(bursts), 1)
+        self.assertEqual(bursts[0]["source"], "10.70.0.12")
+        self.assertEqual(bursts[0]["suffix"], "tunnel.example")
+        self.assertEqual(bursts[0]["observations"], 5)
+        self.assertEqual(len(bursts[0]["sample_evidence_ids"]), 5)
+
+        candidates = build_candidate_queue(
+            events, load_behavior_catalog(), {"indicators": []}, summary
+        )
+        candidate = next(
+            item for item in candidates if item.get("analytic_id") == "BH-NET-010"
+        )
+        self.assertEqual(candidate["evidence_ids"], [f"EV-DNS-BURST-{i}" for i in range(5)])
+        self.assertFalse(candidate["customer_visible"])
+
+    def test_dns_encoded_burst_requires_distinct_labels(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        events = [{
+            "evidence_id": f"EV-DNS-REPEAT-{index}",
+            "source": "arkime",
+            "observed_at": f"2026-08-04T09:0{index}:00Z",
+            "asset": "203.0.113.44",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    "1.a9f3k2m8q7w4z6x1c5v0b2n8d0.tunnel.example"}},
+            },
+        } for index in range(5)]
+
+        signals = summarize_evidence([], events, limit=50)["aggregate_signals"]
+        self.assertEqual(signals["dns_encoded_label_burst"], [])
+
+    def test_dns_encoded_burst_requires_distinct_evidence_records(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        labels = (
+            "a9f3k2m8q7w4z6x1c5v0b2n8d0",
+            "b9f3k2m8q7w4z6x1c5v0b2n8d1",
+            "c9f3k2m8q7w4z6x1c5v0b2n8d2",
+            "d9f3k2m8q7w4z6x1c5v0b2n8d3",
+            "e9f3k2m8q7w4z6x1c5v0b2n8d4",
+            "e9f3k2m8q7w4z6x1c5v0b2n8d4",
+        )
+        evidence_ids = (
+            "EV-DNS-DUPLICATE", "EV-DNS-DUPLICATE",
+            "EV-DNS-UNIQUE-1", "EV-DNS-UNIQUE-2",
+            "EV-DNS-UNIQUE-3", "EV-DNS-UNIQUE-4",
+        )
+        events = [{
+            "evidence_id": evidence_ids[index],
+            "source": "arkime",
+            "observed_at": f"2026-08-04T09:0{index}:00Z",
+            "asset": "203.0.113.44",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    f"{labels[index]}.tunnel.example"}},
+            },
+        } for index in range(6)]
+
+        signals = summarize_evidence([], events, limit=50)["aggregate_signals"]
+
+        self.assertEqual(signals["dns_encoded_label_burst"], [])
+
+    def test_dns_encoded_burst_rejects_split_sources_suffixes_low_entropy_and_wide_windows(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        def event(index, minute, source, domain):
+            return {
+                "evidence_id": f"EV-DNS-CONTROL-{source}-{index}-{minute}",
+                "source": "arkime",
+                "observed_at": f"2026-08-04T09:{minute:02d}:00Z",
+                "asset": "203.0.113.44",
+                "raw": {
+                    "source": {"ip": source},
+                    "dns": {"question": {"name": domain}},
+                },
+            }
+
+        split_sources = [event(
+            index, index, f"10.70.0.{index + 1}",
+            f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example",
+        ) for index in range(5)]
+        split_suffixes = [event(
+            index, index, "10.70.0.12",
+            f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel{index}.example",
+        ) for index in range(5)]
+        low_entropy = [event(
+            index, index, "10.70.0.12",
+            f"{index}.aaaaaaaaaaaaaaaaaaaaaaaa{index}.tunnel.example",
+        ) for index in range(5)]
+        wide_window = [event(
+            index, minute, "10.70.0.12",
+            f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example",
+        ) for index, minute in enumerate((0, 11, 22, 33, 44))]
+        missing_sources = [event(
+            index, index, "",
+            f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example",
+        ) for index in range(5)]
+        for row in missing_sources:
+            row["asset"] = "203.0.113.53"
+            row["raw"].pop("source")
+
+        for rows in (split_sources, split_suffixes, low_entropy, wide_window, missing_sources):
+            signals = summarize_evidence([], rows, limit=50)["aggregate_signals"]
+            self.assertEqual(signals["dns_encoded_label_burst"], [])
+
+    def test_dns_burst_evaluates_all_qualifying_labels_per_evidence_record(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        events = [{
+            "evidence_id": f"EV-DNS-MULTI-{index}",
+            "source": "arkime",
+            "observed_at": f"2026-08-04T09:0{index}:00Z",
+            "asset": "203.0.113.44",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    f"a9f3k2m8q7w4z6x1c5v0b2n8d0.aaaabbbbccccddddeeeeffff1111222{index}.tunnel.example"}},
+            },
+        } for index in range(5)]
+
+        bursts = summarize_evidence([], events, limit=50)["aggregate_signals"]["dns_encoded_label_burst"]
+
+        self.assertEqual(len(bursts), 1)
+        self.assertEqual(bursts[0]["observations"], 5)
+        self.assertEqual(len(bursts[0]["sample_evidence_ids"]), 5)
+
+    def test_dns_entropy_prefers_a_qualifying_long_label_over_a_short_marker(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        event = {
+            "evidence_id": "EV-DNS-STRONGEST",
+            "source": "arkime",
+            "observed_at": "2026-08-04T09:00:00Z",
+            "asset": "203.0.113.44",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    "q8z1m7p4x2v9k6c3.aaaabbbbccccddddeeeeffff11112222.tunnel.example"}},
+            },
+        }
+
+        rows = summarize_evidence([], [event])["aggregate_signals"]["dns_high_entropy"]
+
+        self.assertEqual(rows[0]["label"], "aaaabbbbccccddddeeeeffff11112222")
+
+    def test_encoded_dns_evidence_reaches_candidate_hypothesis_and_reasoning_case(self):
+        from romulus.investigation.casefile import build_case_file
+        from romulus.investigation.workflow import _candidate_hypotheses
+        from romulus.intelligence.analytics import summarize_evidence
+        from romulus.intelligence.behavior_catalog import build_candidate_queue, load_behavior_catalog
+
+        events = [{
+            "evidence_id": f"EV-DNS-CHAIN-{index}",
+            "source": "arkime",
+            "observed_at": f"2026-08-04T09:0{index}:00Z",
+            "asset": "10.70.0.12",
+            "observation": "bounded DNS record",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example"}},
+            },
+        } for index in range(5)]
+        summary = summarize_evidence([], events, limit=50)
+        candidates = build_candidate_queue(
+            events, load_behavior_catalog(), {"indicators": []}, summary
+        )
+        dns_candidate = next(
+            item for item in candidates if item.get("analytic_id") == "BH-NET-010"
+        )
+        self.assertEqual(dns_candidate["finding_ids"], [])
+        hypotheses = _candidate_hypotheses(candidates, [], events)
+        dns_hypothesis = next(
+            item for item in hypotheses if dns_candidate["candidate_id"] in item["basis_candidate_ids"]
+        )
+        case = build_case_file({
+            "hunt_id": "HUNT-DNS-CHAIN",
+            "mission_mode": "undirected",
+            "candidate_leads": candidates,
+            "hypotheses": hypotheses,
+            "host": [],
+            "network": events,
+        })
+
+        visible_candidate = next(
+            item for item in case["candidates"] if item["candidate_id"] == dns_candidate["candidate_id"]
+        )
+        self.assertEqual(dns_hypothesis["basis"], "observed_candidate")
+        self.assertTrue(visible_candidate["evidence_ids"])
+        self.assertTrue(any(
+            "dns.question.name" in evidence["raw"]
+            for evidence in case["evidence"]
+            if evidence["evidence_id"] in visible_candidate["evidence_ids"]
+        ))
+
 
 class CandidateStateTests(unittest.TestCase):
     def test_candidate_merge_sanitizes_derived_state_when_candidate_is_not_refreshed(self):
@@ -807,6 +1033,12 @@ def _aggregate_fixture():
         network_event("EV-RARE", 13, "10.0.0.20", "93.184.216.34", 443, "https", 900),
         network_event("EV-TRANSFER", 15, "10.0.0.10", "1.1.1.1", 443, "https", 8_000_000),
     ]
+    for index in range(5):
+        network.append(network_event(
+            f"EV-DNS-BURST-{index}", 16 + index, "10.0.0.10", "8.8.8.8", 53, "dns",
+            dns={"question": {"name":
+                f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example"}},
+        ))
     for index in range(5):
         network.append(network_event(
             f"EV-NX-{index}", 20 + index, "10.0.0.10", "8.8.8.8", 53, "dns",
