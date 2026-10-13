@@ -42,7 +42,7 @@
 - Consumes: existing `compile_arkime(spec) -> str` and `compile_tshark(spec) -> tuple[str, list[str]]`.
 - Produces: `_lead_network_expression(lead) -> str` and `_lead_pcap_filter(lead) -> str` backed by the same validated spec.
 
-- [ ] **Step 1: Write failing query-scope tests**
+- [x] **Step 1: Write failing query-scope tests**
 
 Add `CandidateNetworkPivotTests` proving:
 
@@ -52,23 +52,23 @@ Add `CandidateNetworkPivotTests` proving:
 - a candidate with no safe IP/hostname raises `ValueError`;
 - a non-candidate coverage lead can still compile bounded behavior-only selectors.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `python -m unittest tests.test_attack_discovery.CandidateNetworkPivotTests -v`
 
 Expected: FAIL because `candidate_network_spec` does not exist and current deterministic pivots omit candidate entities.
 
-- [ ] **Step 3: Implement the guarded candidate network spec**
+- [x] **Step 3: Implement the guarded candidate network spec**
 
 Implement `candidate_network_spec` using the first normalized IP, otherwise the first safe hostname, plus bounded integer ports and supported protocols from the technique metadata. A lead with `candidate_id` sets `require_entity=True`; invalid/missing entity input raises before compilation. Update the workflow helpers to call the existing Arkime/TShark compilers and preserve legacy non-candidate lead behavior.
 
-- [ ] **Step 4: Run focused query and scheduler tests**
+- [x] **Step 4: Run focused query and scheduler tests**
 
 Run: `python -m unittest tests.test_attack_discovery.CandidateNetworkPivotTests tests.test_scheduler_execution -v`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```text
 git add romulus/investigation/search_planner.py romulus/investigation/workflow.py tests/test_attack_discovery.py

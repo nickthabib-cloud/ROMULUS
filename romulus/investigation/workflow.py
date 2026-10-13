@@ -28,7 +28,7 @@ from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
 from .search_planner import (candidate_fields, validate_spec, compile_es, compile_arkime, compile_tshark,
     compile_native_es, validate_native_arkime, validate_native_tshark, expand_anchor_selectors, anchor_time_range,
-    SOURCE_FIELDS, TEXT_FIELDS)
+    candidate_network_spec, SOURCE_FIELDS, TEXT_FIELDS)
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
     record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
     recover_interrupted_tasks, execution_fingerprint)
@@ -2535,32 +2535,26 @@ def _pcap_filter(hypotheses):
 def _lead_network_expression(lead):
     tid=lead.get("technique_id") if isinstance(lead,dict) else None
     meta=TECHNIQUES.get(tid,{})
-    clauses=[]
-    for port in meta.get("ports",[])[:10]: clauses.append(f"port == {port}")
-    protocol_map={"https":"tls","rdp":"tcp","ssh":"tcp","smb":"tcp","dcom":"tcp","winrm":"tcp"}
-    for protocol in meta.get("protocols",[])[:6]:
-        value=protocol_map.get(protocol,protocol)
-        if value in {"tcp","udp","icmp","dns","http","tls"}: clauses.append(f"protocols == {value}")
     legacy={"network_smb_context":"port == 445","network_auth_context":"port == 3389 || port == 22 || port == 5985 || port == 5986",
             "network_dns_http_context":"protocols == dns || protocols == http || protocols == tls",
             "network_transfer_context":"protocols == dns || protocols == http || protocols == tls"}
-    if not clauses and isinstance(lead,dict) and lead.get("id") in legacy: return legacy[lead["id"]]
-    return " || ".join(dict.fromkeys(clauses)) or "protocols == tcp || protocols == udp || protocols == icmp"
+    if not meta and isinstance(lead,dict) and lead.get("id") in legacy and not lead.get("candidate_id"):
+        return legacy[lead["id"]]
+    spec=candidate_network_spec(lead if isinstance(lead,dict) else {},meta,
+        require_entity=bool(isinstance(lead,dict) and lead.get("candidate_id")))
+    return compile_arkime(spec)
 
 
 def _lead_pcap_filter(lead):
     tid=lead.get("technique_id") if isinstance(lead,dict) else None
     meta=TECHNIQUES.get(tid,{})
-    clauses=[]
-    for port in meta.get("ports",[])[:10]: clauses.append(f"tcp.port == {port} || udp.port == {port}")
-    protocol_map={"https":"tls","rdp":"tcp","ssh":"tcp","smb":"smb2","dcom":"dcerpc","winrm":"http"}
-    for protocol in meta.get("protocols",[])[:6]:
-        value=protocol_map.get(protocol,protocol)
-        if value in {"tcp","udp","icmp","dns","http","tls","smb2","dcerpc"}: clauses.append(value)
     legacy={"network_smb_context":"tcp.port == 445","network_auth_context":"tcp.port == 3389 || tcp.port == 22 || tcp.port == 5985 || tcp.port == 5986",
         "network_dns_http_context":"dns || http || tls","network_transfer_context":"dns || http || tls"}
-    if not clauses and isinstance(lead,dict) and lead.get("id") in legacy: return legacy[lead["id"]]
-    return " || ".join(dict.fromkeys(clauses)) or "ip"
+    if not meta and isinstance(lead,dict) and lead.get("id") in legacy and not lead.get("candidate_id"):
+        return legacy[lead["id"]]
+    spec=candidate_network_spec(lead if isinstance(lead,dict) else {},meta,
+        require_entity=bool(isinstance(lead,dict) and lead.get("candidate_id")))
+    return compile_tshark(spec)[0]
 
 
 def _evidence_ips(events):

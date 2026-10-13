@@ -6,6 +6,7 @@ execution. Rejected candidates fall back to deterministic selector compilation.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import ipaddress
 import json
@@ -431,6 +432,65 @@ def compile_arkime(spec: dict[str, Any]) -> str:
     if len(expression) > 512:
         raise ValueError("Compiled Arkime expression exceeds 512 characters")
     return expression
+
+
+def candidate_network_spec(
+    lead: Mapping[str, Any],
+    technique: Mapping[str, Any],
+    *,
+    require_entity: bool,
+) -> dict[str, Any]:
+    """Build one validated entity family plus bounded behavior selectors."""
+    ips = []
+    for value in lead.get("ips", []) if isinstance(lead.get("ips"), list) else []:
+        try:
+            normalized = str(ipaddress.ip_address(str(value)))
+        except ValueError:
+            continue
+        ips.append(normalized)
+        break
+
+    hostnames = []
+    if not ips:
+        for value in lead.get("hostnames", []) if isinstance(lead.get("hostnames"), list) else []:
+            text = str(value)
+            if _safe_host(text) and not _contains_malformed_ipv4_token(text):
+                hostnames.append(text.lower())
+                break
+
+    if require_entity and not (ips or hostnames):
+        raise ValueError("candidate network pivot requires a safe IP or hostname entity")
+
+    ports = []
+    for value in technique.get("ports", []) if isinstance(technique.get("ports"), list) else []:
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+        if len(ports) >= 6:
+            break
+
+    protocols = []
+    for value in technique.get("protocols", []) if isinstance(technique.get("protocols"), list) else []:
+        protocol = str(value).lower()
+        if protocol in PROTOCOLS and protocol not in protocols:
+            protocols.append(protocol)
+        if len(protocols) >= 4:
+            break
+    if not require_entity and not (ips or hostnames or ports or protocols):
+        protocols = ["tcp", "udp", "icmp"]
+
+    return {
+        "terms": [],
+        "fields": [],
+        "ips": ips,
+        "hostnames": hostnames,
+        "ports": ports,
+        "protocols": protocols,
+        "event_codes": [],
+    }
 
 
 def compile_tshark(spec: dict[str, Any]) -> tuple[str, list[str]]:
