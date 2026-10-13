@@ -36,6 +36,6 @@
 
 - [x] Run the complete local suite, compilation, and diff validation.
 - [x] Complete a fresh Critical/Important review and fix findings through RED/GREEN tests.
-- [ ] Archive the exact commit, match its digest on the VM, run all dependency-complete tests, compilation, and configured diagnostics.
-- [ ] Run a read-only live query-compatibility probe that executes every planned host seed query against the configured index with size one and records pass/fail totals without retaining events.
+- [x] Archive the exact commit, match its digest on the VM, run all dependency-complete tests, compilation, and configured diagnostics.
+- [x] Run a read-only live query-compatibility probe that executes every planned host seed query against the configured index with size one and records pass/fail totals without retaining events.
 - [ ] Record proof, remove disposable artifacts, commit, push, and open a stacked PR against `codex/attack-discovery`.

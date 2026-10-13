@@ -2,6 +2,32 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-13 — schema-aware deterministic discovery and encoded-DNS promotion
+
+### Implemented behavior
+
+- Elasticsearch inventory now preserves concrete capabilities only for queryable leaf fields, including multifields while excluding object containers and complete nested subtrees. Host behavior and trusted-indicator seeds compile by mapped type; incompatible or unvalidated field/operator combinations fail closed and remain visible as unsupported coverage.
+- Pre-capability resumable checkpoints refresh mappings before scheduler recovery, rebuild typed field and index classes, and invalidate queued untyped behavior/indicator searches. If refresh fails, explicit empty capability maps prevent fallback to the legacy compiler.
+- DNS entropy examines every payload label. A generic encoded-DNS burst candidate requires at least five distinct high-entropy labels supported by five distinct cited evidence records from one explicit source to one conservative suffix within ten minutes. Duplicate rows, repeated labels, split sources, split suffixes, low entropy, missing sources, and wide windows do not qualify.
+- Candidate-owned DNS names, response codes, and byte counts can enter the bounded reasoning case file. The signal creates a candidate and candidate-backed hypothesis, never a finding by itself. Runtime code and tests contain no evaluated-dataset entity, timestamp, tool, command, or attack sequence.
+
+### Review and local proof
+
+- Review found and regression-tested nested-field leakage, incompatible exact-value coercion, mixed text/keyword behavior, missing-source fallback, strongest-label masking, duplicate-evidence matching, LangGraph state loss, and legacy-resume fallback. Final re-review found no remaining Critical or Important issue.
+- The exact local candidate passed all 285 tests available locally with eight expected optional-dependency skips, `python -m compileall -q romulus tests`, and `git diff --check`.
+
+### Exact VM and live query proof
+
+- Commit `c0d523d5f6cc311796c97f3f1890ebaeb699f746` was archived with SHA-256 `91CAC482A10DABA3EADDB1D12B3FE9B3FE7E4D9CCB0434E85F4A31AA6535F821`; the digest matched locally and on the development VM.
+- The exact archive passed all 285 dependency-complete VM tests with no skips and passed `compileall`. Configured `doctor` was fully green for the pinned ATT&CK catalog, `qwen3:8b`, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark 4.2.2, all thirteen captures, and writable operational paths.
+- A read-only live compatibility probe inventoried 612 typed host leaf fields and compiled 31 generic behavior searches. All 31 executed against the configured index with size one and zero query failures; six returned at least one record: reverse-shell construction, curl/wget piped to a shell, security-log removal/truncation, download followed by execution-oriented command, encoded/obfuscated interpreter command, and SSH/utility port forwarding.
+- Those six matches are retrieval proof, not validated findings or proof that each belongs to the attack. Eleven catalog analytics were explicitly unsupported by the current schema rather than being emitted as broken queries. No trusted indicators were configured, no hunt was launched, and no telemetry or service configuration was modified.
+- The exact remote checkout, archive, probe, and local transfer artifacts were removed after proof. Operational hunt data, reports, logs, and telemetry were not deleted.
+
+### Scope boundary
+
+This milestone repairs the host-query failure mode and promotes repeated encoded DNS generically. It does not prove full attack-path recall. The next work must use the known attack story only as an external coverage matrix: for every stage, establish generic collection, detection, connection, and honest observability semantics, with unrelated synthetic variants and benign controls before scoring this dataset.
+
 ## 2026-10-13 — evidence-scoped attack discovery promotion (reviewed, VM-proven, live result partial)
 
 ### Implemented behavior
