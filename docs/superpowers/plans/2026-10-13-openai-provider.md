@@ -8,6 +8,7 @@
 - OpenAI requires a configured model and API key plus the separate `ALLOW_CLOUD_LLM=true` authorization gate.
 - The provider boundary transports only the same bounded prompts and strict schemas already used by ROMULUS. It provides no search, shell, or direct telemetry-source access.
 - Responses API requests use strict JSON schema for structured work and `store: false`. The provider boundary copies existing schemas into OpenAI's supported strict subset without changing Ollama's contracts. Provider errors are sanitized; audits retain only provider, model, request ID, duration, and token counts.
+- Model-facing indicator synthesis is globally bounded and classification-stratified; the complete deterministic report remains authoritative outside that bounded context.
 - `model-check` uses a fixed request with no hunt data. `model-report --id` re-synthesizes a deep copy of a saved hunt, performs no telemetry searches, never mutates the saved hunt, and writes to `reports/model-evaluations/`.
 
 ## Delivery status
@@ -18,7 +19,8 @@
 - [x] Make model call labels and diagnostics provider-aware.
 - [x] Add no-hunt-data connectivity and saved-hunt report evaluation commands.
 - [x] Document configuration, switching, output locations, and cloud-data boundary.
-- [x] Run focused and full regression suites, compile verification, and diff review (361 tests passed; 8 expected dependency skips).
+- [x] Close final review findings: strict-schema summaries and bounded large-hunt synthesis context.
+- [x] Run focused and full regression suites (368 tests passed; 8 expected dependency skips).
 - [ ] Commit, push `codex/openai-provider`, open and attach the GitHub pull request.
 - [ ] Deploy the non-secret branch to the VM and run dependency-backed tests without changing its network mode.
-- [ ] Operator switches the VM to NAT and runs the documented OpenAI checks; live API validation remains operator-executed.
+- [ ] Operator enables the VM NAT adapter, adds the secret locally, and runs the documented OpenAI checks; live API validation remains operator-executed.

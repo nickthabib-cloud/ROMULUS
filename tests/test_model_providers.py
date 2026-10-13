@@ -205,7 +205,9 @@ class OpenAIProviderTests(unittest.TestCase):
             "model": "gpt-test",
             "output": [{
                 "type": "message",
-                "content": [{"type": "output_text", "text": "Evidence remains inconclusive."}],
+                "content": [{"type": "output_text", "text": json.dumps({
+                    "summary": "Evidence remains inconclusive.",
+                })}],
             }],
             "usage": {"input_tokens": 25, "output_tokens": 4, "total_tokens": 29},
         })
@@ -219,8 +221,29 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertEqual(summary, "Evidence remains inconclusive.")
         _, url, request = session.calls[0]
         self.assertEqual(url, "https://api.example.test/v1/responses")
-        self.assertEqual(request["json"]["text"]["format"], {"type": "text"})
+        output_format = request["json"]["text"]["format"]
+        self.assertEqual(output_format["type"], "json_schema")
+        self.assertTrue(output_format["strict"])
+        self.assertEqual(output_format["schema"]["required"], ["summary"])
+        self.assertFalse(output_format["schema"]["additionalProperties"])
         self.assertFalse(request["json"]["store"])
+
+    def test_openai_provider_rejects_a_summary_outside_the_strict_contract(self):
+        response = _Response({
+            "id": "resp_bad_summary",
+            "status": "completed",
+            "model": "gpt-test",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": json.dumps({"not_summary": "x"})}],
+            }],
+        })
+
+        with _analyst_module() as module:
+            with self.assertRaisesRegex(ValueError, "summary output"):
+                module.Ollama(self._settings(), _Session(response)).summarize(
+                    "Hunt for threats", ["one bounded observation"]
+                )
 
     def test_openai_provider_refuses_cloud_requests_without_explicit_authorization(self):
         session = _Session(_Response({}))

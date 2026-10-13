@@ -183,11 +183,22 @@ class OpenAIProvider:
         configuration_error = self._configuration_error()
         if configuration_error:
             raise RuntimeError(configuration_error)
+        summary_schema = {
+            "type": "object",
+            "properties": {"summary": {"type": "string", "maxLength": 4000}},
+            "required": ["summary"],
+            "additionalProperties": False,
+        }
         payload = {
             "model": self.settings.openai_model,
             "instructions": system,
             "input": prompt,
-            "text": {"format": {"type": "text"}},
+            "text": {"format": {
+                "type": "json_schema",
+                "name": "romulus_summary",
+                "strict": True,
+                "schema": summary_schema,
+            }},
             "max_output_tokens": tokens,
             "store": False,
         }
@@ -204,9 +215,14 @@ class OpenAIProvider:
             raise RuntimeError("OpenAI request failed" + detail) from None
         if not isinstance(body, Mapping) or str(body.get("status", "")) != "completed":
             raise ValueError("OpenAI text response was incomplete")
-        text = _openai_output_text(body)
-        if not text:
-            raise ValueError("OpenAI response omitted text output")
+        raw_text = _openai_output_text(body)
+        try:
+            parsed = json.loads(raw_text)
+        except (TypeError, json.JSONDecodeError):
+            parsed = None
+        text = parsed.get("summary") if isinstance(parsed, Mapping) else None
+        if not isinstance(text, str):
+            raise ValueError("OpenAI response omitted strict summary output")
         usage = body.get("usage") if isinstance(body.get("usage"), Mapping) else {}
         metadata = {"provider": "openai",
             "model": str(body.get("model") or self.settings.openai_model),

@@ -29,12 +29,17 @@ _FILE_RE = re.compile(
 _CONFIDENCE = {"low", "moderate", "medium", "high", "critical", "not assessed"}
 _OUTCOMES = {"observed", "suspected", "confirmed"}
 _TEXT_LIMIT = 1200
+MAX_MODEL_ITEMS = 12
+MAX_MODEL_EVIDENCE = 24
+MAX_MODEL_RELATIONSHIPS = 12
+MAX_MODEL_OBSERVABLES = 48
 
 
 def build_indicator_case(state: Mapping[str, Any], report_items: list[dict[str, Any]]) -> dict[str, Any]:
     """Build the bounded canonical case shown to the reporting model."""
     source = state if isinstance(state, Mapping) else {}
-    items = [_project_item(row) for row in report_items if isinstance(row, Mapping) and row.get("item_id")]
+    all_items = [_project_item(row) for row in report_items if isinstance(row, Mapping) and row.get("item_id")]
+    items = _select_model_items(all_items, MAX_MODEL_ITEMS)
     owned_ids = {
         value for item in items for value in item.get("evidence_ids", []) if value
     }
@@ -44,21 +49,34 @@ def build_indicator_case(state: Mapping[str, Any], report_items: list[dict[str, 
         for row in _rows(source.get(section))
         if row.get("evidence_id") and str(row.get("evidence_id")) in owned_ids
     }
-    evidence = [_project_evidence(evidence_index[key]) for key in sorted(evidence_index)]
+    selected_evidence_ids = _select_model_evidence(items, evidence_index, MAX_MODEL_EVIDENCE)
+    selected_evidence_set = set(selected_evidence_ids)
+    items = [
+        {**item, "evidence_ids": [
+            evidence_id for evidence_id in item.get("evidence_ids", [])
+            if evidence_id in selected_evidence_set
+        ]}
+        for item in items
+    ]
+    items = [item for item in items if item["evidence_ids"]]
+    evidence_unbounded = [_project_evidence(evidence_index[key]) for key in selected_evidence_ids]
+    total_observables = sum(len(row["observables"]) for row in evidence_unbounded)
+    evidence = _cap_model_observables(evidence_unbounded, MAX_MODEL_OBSERVABLES)
     visible_ids = {row["evidence_id"] for row in evidence}
-    relationships = []
+    all_relationships = []
     for raw in _rows(source.get("correlations")):
         left = str(raw.get("host_ref") or raw.get("left_evidence_id") or "")
         right = str(raw.get("network_ref") or raw.get("right_evidence_id") or "")
         relationship_id = str(raw.get("correlation_id") or raw.get("relationship_id") or "")
         if not relationship_id or left not in visible_ids or right not in visible_ids:
             continue
-        relationships.append({
+        all_relationships.append({
             "relationship_id": relationship_id,
             "evidence_ids": [left, right],
             "reason": _text(raw.get("reason") or raw.get("reasons"), 360),
             "score": raw.get("score"),
         })
+    relationships = _stratified_rows(all_relationships, MAX_MODEL_RELATIONSHIPS)
     coverage = source.get("coverage") if isinstance(source.get("coverage"), Mapping) else {}
     return {
         "version": 1,
@@ -70,6 +88,22 @@ def build_indicator_case(state: Mapping[str, Any], report_items: list[dict[str, 
         "items": items,
         "evidence": evidence,
         "relationships": relationships,
+        "selection": {
+            "total_items": len(all_items),
+            "included_items": len(items),
+            "total_evidence": len(evidence_index),
+            "included_evidence": len(evidence),
+            "total_relationships": len(all_relationships),
+            "included_relationships": len(relationships),
+            "total_observables": total_observables,
+            "included_observables": sum(len(row["observables"]) for row in evidence),
+            "truncated": any((
+                len(items) < len(all_items),
+                len(evidence) < len(evidence_index),
+                len(relationships) < len(all_relationships),
+                sum(len(row["observables"]) for row in evidence) < total_observables,
+            )),
+        },
         "coverage": {
             "host": _text(coverage.get("host"), 300),
             "network": _text(coverage.get("network"), 300),
@@ -282,6 +316,82 @@ def _stratified_values(values: list[str], limit: int) -> list[str]:
     return [unique[index] for index in dict.fromkeys(positions)]
 
 
+def _stratified_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if len(rows) <= limit:
+        return rows
+    positions = [round(index * (len(rows) - 1) / (limit - 1)) for index in range(limit)]
+    return [rows[index] for index in dict.fromkeys(positions)]
+
+
+def _select_model_items(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Retain bounded coverage across analyst classifications, deterministically."""
+    if len(items) <= limit:
+        return items
+    labels = ("malicious", "suspicious", "anomalous", "other")
+    buckets = {label: [] for label in labels}
+    for item in items:
+        classification = str(item.get("classification") or "").lower()
+        buckets[classification if classification in buckets else "other"].append(item)
+    selected = []
+    position = 0
+    while len(selected) < limit:
+        added = False
+        for label in labels:
+            if position < len(buckets[label]):
+                selected.append(buckets[label][position])
+                added = True
+                if len(selected) == limit:
+                    break
+        if not added:
+            break
+        position += 1
+    return selected
+
+
+def _select_model_evidence(items: list[dict[str, Any]], evidence_index: Mapping[str, Any],
+                           limit: int) -> list[str]:
+    """Give each selected item evidence before adding second and third records."""
+    choices = [
+        [value for value in item.get("evidence_ids", []) if value in evidence_index]
+        for item in items
+    ]
+    selected: list[str] = []
+    position = 0
+    while len(selected) < limit:
+        added = False
+        for values in choices:
+            if position < len(values) and values[position] not in selected:
+                selected.append(values[position])
+                added = True
+                if len(selected) == limit:
+                    break
+        if not added:
+            break
+        position += 1
+    return selected
+
+
+def _cap_model_observables(evidence: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Distribute the global observable budget across evidence records."""
+    selected = [{**row, "observables": []} for row in evidence]
+    position = 0
+    count = 0
+    while count < limit:
+        added = False
+        for index, row in enumerate(evidence):
+            values = row.get("observables", [])
+            if position < len(values):
+                selected[index]["observables"].append(values[position])
+                count += 1
+                added = True
+                if count == limit:
+                    break
+        if not added:
+            break
+        position += 1
+    return selected
+
+
 def _case_facts(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Keep bounded outcome/context facts; observables carry exact artifact values."""
     tokens=("status","outcome","state","action","method","bytes","duration","protocol",
@@ -290,8 +400,8 @@ def _case_facts(raw: Mapping[str, Any]) -> dict[str, Any]:
     for key,value in raw.items():
         lowered=str(key).lower()
         if any(token in lowered for token in tokens):
-            selected.append((str(key)[:160],_text(value,320)))
-    return dict(selected[:24])
+            selected.append((str(key)[:160],_text(value,180)))
+    return dict(selected[:8])
 
 
 def _extract_observables(evidence_id: str, facts: Mapping[str, Any], observation: Any) -> list[dict[str, str]]:
@@ -335,7 +445,7 @@ def _extract_observables(evidence_id: str, facts: Mapping[str, Any], observation
         digest = hashlib.sha256(f"{evidence_id}|{observable_type}|{value}".encode("utf-8")).hexdigest()[:16].upper()
         unique.append({
             "observable_id": f"OB-{digest}", "type": observable_type,
-            "value": value, "field": field,
+            "value": _text(value, 320), "field": _text(field, 160),
         })
     return unique[:80]
 
