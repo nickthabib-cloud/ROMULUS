@@ -43,8 +43,60 @@
           "required_corroboration",
           "follow_up",
           "provenance",
-          "review_date"
-        ]
+          "review_date",
+          "classification_policy"
+        ],
+        "properties": {
+          "classification_policy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "default_classification",
+              "single_record_reportable",
+              "minimum_owned_evidence",
+              "required_context_roles",
+              "upgrade_rule",
+              "downgrade_rule",
+              "policy_version",
+              "policy_reason"
+            ],
+            "properties": {
+              "default_classification": {
+                "enum": ["anomalous", "suspicious"]
+              },
+              "single_record_reportable": {
+                "type": "boolean"
+              },
+              "minimum_owned_evidence": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "required_context_roles": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "upgrade_rule": {
+                "enum": ["none", "independent_typed_entity_within_30m"]
+              },
+              "downgrade_rule": {
+                "const": "explicit_benign_evidence_only"
+              },
+              "policy_version": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "policy_reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
       }
     }
   }

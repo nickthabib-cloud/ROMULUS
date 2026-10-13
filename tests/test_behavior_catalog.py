@@ -24,10 +24,102 @@ class CatalogLoadingTests(unittest.TestCase):
         self.assertTrue(all(item["benign_explanations"] for item in analytics))
         self.assertTrue(all(item["follow_up"] for item in analytics))
 
+    def test_every_shipped_analytic_has_a_complete_reviewed_classification_policy(self):
+        from romulus.intelligence.behavior_catalog import load_behavior_catalog
+
+        for analytic in load_behavior_catalog()["analytics"]:
+            policy = analytic["classification_policy"]
+            self.assertIn(policy["default_classification"], {"anomalous", "suspicious"})
+            self.assertIsInstance(policy["single_record_reportable"], bool)
+            self.assertGreaterEqual(policy["minimum_owned_evidence"], 1)
+            predicate_roles = {
+                predicate["role"]
+                for group in ("all", "any")
+                for predicate in analytic["match"][group]
+            }
+            self.assertTrue(set(policy["required_context_roles"]) <= predicate_roles)
+            self.assertIn(policy["upgrade_rule"], {
+                "none", "independent_typed_entity_within_30m",
+            })
+            self.assertEqual(policy["downgrade_rule"], "explicit_benign_evidence_only")
+            self.assertGreaterEqual(policy["policy_version"], 1)
+            self.assertTrue(policy["policy_reason"].strip())
+
+    def test_missing_or_unsafe_classification_policy_fails_closed(self):
+        from romulus.intelligence.behavior_catalog import CatalogValidationError, load_behavior_catalog
+
+        invalid = []
+        missing = _analytic("BH-TEST-POLICY-MISSING")
+        missing["classification_policy"].pop("policy_reason")
+        invalid.append((missing, r"classification_policy\.policy_reason"))
+
+        malicious = _analytic("BH-TEST-POLICY-MALICIOUS")
+        malicious["classification_policy"]["default_classification"] = "malicious"
+        invalid.append((malicious, r"default_classification"))
+
+        unrelated_context = _analytic("BH-TEST-POLICY-CONTEXT")
+        unrelated_context["classification_policy"]["required_context_roles"] = ["source.ip"]
+        invalid.append((unrelated_context, r"required_context_roles"))
+
+        inconsistent_singular = _analytic("BH-TEST-POLICY-SINGULAR")
+        inconsistent_singular["classification_policy"]["single_record_reportable"] = True
+        inconsistent_singular["classification_policy"]["minimum_owned_evidence"] = 2
+        invalid.append((inconsistent_singular, r"single_record_reportable"))
+
+        invalid_upgrade = _analytic("BH-TEST-POLICY-UPGRADE")
+        invalid_upgrade["classification_policy"]["upgrade_rule"] = "score_at_least_70"
+        invalid.append((invalid_upgrade, r"upgrade_rule"))
+
+        invalid_downgrade = _analytic("BH-TEST-POLICY-DOWNGRADE")
+        invalid_downgrade["classification_policy"]["downgrade_rule"] = "model_opinion"
+        invalid.append((invalid_downgrade, r"downgrade_rule"))
+
+        for item, expected_path in invalid:
+            with self.subTest(identifier=item["id"]), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "catalog.json"
+                path.write_text(json.dumps({"catalog_version": "1.0.0", "analytics": [item]}), encoding="utf-8")
+                with self.assertRaisesRegex(CatalogValidationError, expected_path):
+                    load_behavior_catalog(path)
+
     def test_default_local_indicator_catalog_starts_empty(self):
         from romulus.intelligence.behavior_catalog import load_local_indicators
 
         self.assertEqual(load_local_indicators()["indicators"], [])
+
+    def test_indicator_classification_defaults_suspicious_and_malicious_requires_confidence(self):
+        from romulus.intelligence.behavior_catalog import CatalogValidationError, load_local_indicators
+
+        base = {
+            "catalog_version": "1.0.0",
+            "indicators": [{
+                "id": "IOC-DEFAULT",
+                "type": "domain",
+                "value": "example.invalid",
+                "source": "unit-test feed",
+                "confidence": 89,
+                "created_at": "2026-10-12T00:00:00Z",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "indicators.json"
+            path.write_text(json.dumps(base), encoding="utf-8")
+            self.assertEqual(
+                load_local_indicators(path)["indicators"][0]["classification"],
+                "suspicious",
+            )
+
+            for field, value, expected_path in (
+                ("classification", "anomalous", r"classification"),
+                ("classification", "malicious", r"confidence"),
+                ("source", "", r"source"),
+                ("created_at", "", r"created_at"),
+            ):
+                invalid = json.loads(json.dumps(base))
+                invalid["indicators"][0][field] = value
+                path.write_text(json.dumps(invalid), encoding="utf-8")
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(CatalogValidationError, expected_path):
+                        load_local_indicators(path)
 
     def test_duplicate_id_fails_closed_with_actionable_path(self):
         from romulus.intelligence.behavior_catalog import CatalogValidationError, load_behavior_catalog
@@ -79,6 +171,7 @@ class CatalogLoadingTests(unittest.TestCase):
 
 
 def _analytic(identifier, required_roles=None):
+    primary_role = (required_roles or ["process.command_line"])[0]
     return {
         "id": identifier,
         "version": 1,
@@ -93,7 +186,7 @@ def _analytic(identifier, required_roles=None):
         "match": {
             "all": [
                 {
-                    "role": (required_roles or ["process.command_line"])[0],
+                    "role": primary_role,
                     "operator": "contains_any",
                     "values": ["test"],
                 }
@@ -110,6 +203,16 @@ def _analytic(identifier, required_roles=None):
         "follow_up": ["Review process context."],
         "provenance": [{"name": "test", "url": "https://example.test/rule"}],
         "review_date": "2026-10-12",
+        "classification_policy": {
+            "default_classification": "anomalous",
+            "single_record_reportable": False,
+            "minimum_owned_evidence": 1,
+            "required_context_roles": [primary_role],
+            "upgrade_rule": "independent_typed_entity_within_30m",
+            "downgrade_rule": "explicit_benign_evidence_only",
+            "policy_version": 1,
+            "policy_reason": "Synthetic weak behavior requires independent evidence.",
+        },
     }
 
 
@@ -299,13 +402,15 @@ class CandidateRankingTests(unittest.TestCase):
         candidates = build_candidate_queue([event], self.catalog, {"indicators": []})
         reverse_shell = next(item for item in candidates if item["analytic_id"] == "BH-LNX-016")
         self.assertEqual(reverse_shell["disposition"], "observed")
-        self.assertFalse(reverse_shell["customer_visible"])
+        self.assertEqual(reverse_shell["classification"], "suspicious")
+        self.assertTrue(reverse_shell["customer_visible"])
         self.assertNotIn("independent behavior", " ".join(reverse_shell["score_reasons"]).lower())
 
         related = relate_candidates(candidates, [event])
         promoted = next(item for item in related if item["analytic_id"] == "BH-LNX-016")
         self.assertEqual(promoted["disposition"], "observed")
-        self.assertFalse(promoted["customer_visible"])
+        self.assertEqual(promoted["classification"], "suspicious")
+        self.assertTrue(promoted["customer_visible"])
         self.assertEqual(promoted["related_candidates"], [])
 
     def test_lookalike_process_requires_executable_path_context(self):
@@ -351,6 +456,55 @@ class CandidateRankingTests(unittest.TestCase):
         self.assertEqual(lead["disposition"], "observed")
         self.assertTrue(lead["customer_visible"])
         self.assertEqual(lead["indicator_source"], "customer incident response")
+
+    def test_explicit_current_malicious_indicator_passes_only_the_exact_gate(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue
+
+        indicator = {
+            "id": "IOC-MALICIOUS",
+            "type": "domain",
+            "value": "evil.example",
+            "source": "customer incident response",
+            "confidence": 95,
+            "classification": "malicious",
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2027-01-01T00:00:00Z",
+        }
+        exact = build_candidate_queue(
+            [_event("EV-IOC", "ws-01", dns_question="evil.example")],
+            self.catalog,
+            {"indicators": [indicator]},
+            now="2026-10-12T00:00:00Z",
+        )[0]
+        self.assertEqual(exact["classification"], "malicious")
+        self.assertEqual(exact["classification_policy_version"], 1)
+        self.assertIn("current exact", exact["classification_reason"])
+        self.assertEqual(exact["classification_history"], [])
+
+        for unsafe in (
+            dict(indicator, confidence=89),
+            {key: value for key, value in indicator.items() if key != "source"},
+            {key: value for key, value in indicator.items() if key != "created_at"},
+            dict(indicator, expires_at="2025-12-31T00:00:00Z"),
+        ):
+            candidates = build_candidate_queue(
+                [_event("EV-IOC", "ws-01", dns_question="evil.example")],
+                self.catalog,
+                {"indicators": [unsafe]},
+                now="2026-10-12T00:00:00Z",
+            )
+            with self.subTest(unsafe=unsafe):
+                self.assertFalse(any(
+                    item.get("classification") == "malicious" for item in candidates
+                ))
+
+        substring = build_candidate_queue(
+            [_event("EV-SUBSTRING", "ws-01", dns_question="notevil.example")],
+            self.catalog,
+            {"indicators": [indicator]},
+            now="2026-10-12T00:00:00Z",
+        )
+        self.assertFalse(any(item.get("indicator_id") == "IOC-MALICIOUS" for item in substring))
 
     def test_expired_and_substring_indicators_do_not_match(self):
         from romulus.intelligence.behavior_catalog import build_candidate_queue

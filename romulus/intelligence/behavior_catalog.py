@@ -28,6 +28,9 @@ ALLOWED_OPERATORS = {
 ALLOWED_SOURCES = {"elasticsearch", "aggregate"}
 PRIORITIES = {"informational", "low", "medium", "high", "critical"}
 NOISE_LEVELS = {"low", "medium", "high"}
+BEHAVIOR_CLASSIFICATIONS = {"anomalous", "suspicious"}
+CLASSIFICATION_UPGRADE_RULES = {"none", "independent_typed_entity_within_30m"}
+CLASSIFICATION_DOWNGRADE_RULES = {"explicit_benign_evidence_only"}
 _ATTACK_TECHNIQUE_IDS: set[str] | None = None
 
 _TEXT_FIELD_TYPES = {"text", "match_only_text"}
@@ -121,6 +124,12 @@ def load_local_indicators(path: Path = LOCAL_INDICATORS_PATH) -> dict[str, Any]:
         confidence = item.get("confidence")
         if not isinstance(confidence, int) or isinstance(confidence, bool) or not 0 <= confidence <= 100:
             raise CatalogValidationError(f"{prefix}.confidence: expected integer 0 through 100")
+        classification = item.get("classification", "suspicious")
+        if classification not in {"suspicious", "malicious"}:
+            raise CatalogValidationError(f"{prefix}.classification: expected suspicious or malicious")
+        if classification == "malicious" and confidence < 90:
+            raise CatalogValidationError(f"{prefix}.confidence: malicious indicators require confidence at least 90")
+        item["classification"] = classification
         for field in ("created_at", "expires_at"):
             if item.get(field):
                 _parse_time(item[field], f"{prefix}.{field}")
@@ -245,6 +254,47 @@ def _validate_analytic(item: Any, index: int, seen: set[str]) -> None:
             raise CatalogValidationError(f"{prefix}.match.{group}: expected array")
         for number, predicate in enumerate(predicates):
             _validate_predicate(predicate, f"{prefix}.match.{group}[{number}]")
+    _validate_classification_policy(item, prefix)
+
+
+def _validate_classification_policy(item: dict[str, Any], prefix: str) -> None:
+    policy = item.get("classification_policy")
+    path = f"{prefix}.classification_policy"
+    if not isinstance(policy, dict):
+        raise CatalogValidationError(f"{path}: expected object")
+    classification = policy.get("default_classification")
+    if classification not in BEHAVIOR_CLASSIFICATIONS:
+        raise CatalogValidationError(f"{path}.default_classification: unsupported behavior classification")
+    singular = policy.get("single_record_reportable")
+    if not isinstance(singular, bool):
+        raise CatalogValidationError(f"{path}.single_record_reportable: expected boolean")
+    minimum = policy.get("minimum_owned_evidence")
+    if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 1:
+        raise CatalogValidationError(f"{path}.minimum_owned_evidence: expected positive integer")
+    if singular and minimum != 1:
+        raise CatalogValidationError(
+            f"{path}.single_record_reportable: requires minimum_owned_evidence equal to 1"
+        )
+    roles = policy.get("required_context_roles")
+    if not isinstance(roles, list) or not roles or not all(_nonempty_string(role) for role in roles):
+        raise CatalogValidationError(f"{path}.required_context_roles: expected non-empty string array")
+    predicate_roles = {
+        predicate.get("role")
+        for group in ("all", "any")
+        for predicate in item.get("match", {}).get(group, [])
+        if isinstance(predicate, dict)
+    }
+    if not set(roles) <= predicate_roles:
+        raise CatalogValidationError(f"{path}.required_context_roles: roles must be used by positive predicates")
+    if policy.get("upgrade_rule") not in CLASSIFICATION_UPGRADE_RULES:
+        raise CatalogValidationError(f"{path}.upgrade_rule: unsupported upgrade rule")
+    if policy.get("downgrade_rule") not in CLASSIFICATION_DOWNGRADE_RULES:
+        raise CatalogValidationError(f"{path}.downgrade_rule: unsupported downgrade rule")
+    version = policy.get("policy_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise CatalogValidationError(f"{path}.policy_version: expected positive integer")
+    if not _nonempty_string(policy.get("policy_reason")):
+        raise CatalogValidationError(f"{path}.policy_reason: expected non-empty string")
 
 
 def _validate_predicate(predicate: Any, path: str) -> None:
@@ -355,6 +405,8 @@ def build_candidate_queue(
 
     reference_time = _coerce_time(now) if now is not None else datetime.now(timezone.utc)
     for indicator in indicators.get("indicators", []):
+        if not _indicator_is_candidate_safe(indicator):
+            continue
         expires = indicator.get("expires_at")
         if expires and _parse_time(expires, f"indicator {indicator.get('id')}.expires_at") <= reference_time:
             continue
@@ -369,6 +421,7 @@ def build_candidate_queue(
             identifier = str(indicator["id"])
             candidate_id = _candidate_id("indicator", identifier, asset)
             follow_up = ["Validate the indicator source and investigate the cited event and adjacent activity."]
+            classification = str(indicator.get("classification") or "suspicious")
             candidates.append({
                 "candidate_id": candidate_id,
                 "kind": "trusted_indicator", "indicator_id": identifier,
@@ -377,6 +430,14 @@ def build_candidate_queue(
                 "base_priority_score": score,
                 "priority_score": score, "priority_tier": "critical",
                 "disposition": "observed", "customer_visible": True,
+                "classification": classification,
+                "classification_reason": (
+                    "Explicit current exact trusted indicator met the malicious admission gate."
+                    if classification == "malicious"
+                    else "Current exact trusted indicator is reportable as suspicious."
+                ),
+                "classification_policy_version": 1,
+                "classification_history": [],
                 "evidence_ids": _evidence_ids(rows), "assets": [asset],
                 "first_observed": _observed_bounds(rows)[0], "last_observed": _observed_bounds(rows)[1],
                 "score_reasons": [
@@ -473,7 +534,10 @@ def _retained_candidate_without_derived_corroboration(candidate: dict[str, Any])
         if not str(reason).startswith("evidence-backed corroboration contribution ")]
     if str(item.get("disposition") or "observed") == "corroborated":
         item["disposition"] = "observed"
-    item["customer_visible"] = bool(item.get("kind") == "trusted_indicator")
+    item["customer_visible"] = bool(
+        item.get("classification") in {"suspicious", "malicious"}
+        and item.get("disposition") not in {"benign_likely", "dismissed"}
+    )
     return item
 
 
@@ -631,6 +695,23 @@ def _indicator_matches(indicator: dict[str, Any], event: dict[str, Any]) -> bool
     return expected in observed
 
 
+def _indicator_is_candidate_safe(indicator: dict[str, Any]) -> bool:
+    """Fail closed when callers bypass the validated local-indicator loader."""
+    classification = str(indicator.get("classification") or "suspicious")
+    confidence = indicator.get("confidence")
+    if classification not in {"suspicious", "malicious"}:
+        return False
+    if not _nonempty_string(indicator.get("source")) or not _nonempty_string(indicator.get("created_at")):
+        return False
+    try:
+        _parse_time(str(indicator["created_at"]), "indicator.created_at")
+    except CatalogValidationError:
+        return False
+    if not isinstance(confidence, int) or isinstance(confidence, bool) or not 0 <= confidence <= 100:
+        return False
+    return classification != "malicious" or confidence >= 90
+
+
 def _normalize_indicator(kind: str, value: str) -> str:
     value = value.strip().lower()
     if kind == "path":
@@ -677,6 +758,19 @@ def _behavior_candidate(
     tier = "critical" if score >= 90 else ("high" if score >= 70 else ("medium" if score >= 40 else "low"))
     candidate_id = _candidate_id("behavior", analytic["id"], asset)
     follow_up = analytic.get("follow_up", [])
+    policy = dict(analytic["classification_policy"])
+    evidence_ids = _evidence_ids(rows)
+    enough_owned_evidence = len(set(evidence_ids)) >= int(policy["minimum_owned_evidence"])
+    classification = (
+        str(policy["default_classification"])
+        if enough_owned_evidence
+        else "anomalous"
+    )
+    classification_reason = (
+        str(policy["policy_reason"])
+        if enough_owned_evidence
+        else "Insufficient distinct owned evidence for the reviewed analytic policy."
+    )
     return {
         "candidate_id": candidate_id,
         "kind": "behavior", "analytic_id": analytic["id"], "indicator_id": None,
@@ -685,8 +779,14 @@ def _behavior_candidate(
         "title": analytic["title"], "description": analytic["description"],
         "base_priority_score": score,
         "priority_score": score, "priority_tier": tier, "disposition": disposition,
-        "customer_visible": bool(score >= 70 and disposition == "corroborated"),
-        "evidence_ids": _evidence_ids(rows), "assets": [asset],
+        "classification": classification,
+        "classification_reason": classification_reason,
+        "classification_policy_version": policy["policy_version"],
+        "classification_policy": policy,
+        "classification_history": [],
+        "analytic_provenance": list(analytic.get("provenance", [])),
+        "customer_visible": classification == "suspicious",
+        "evidence_ids": evidence_ids, "assets": [asset],
         "first_observed": _observed_bounds(rows)[0], "last_observed": _observed_bounds(rows)[1],
         "score_reasons": reasons, "attack_techniques": analytic.get("attack_techniques", []),
         "benign_explanations": analytic.get("benign_explanations", []),

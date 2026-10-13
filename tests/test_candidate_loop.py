@@ -527,7 +527,8 @@ class AggregateSignalTests(unittest.TestCase):
             item for item in candidates if item.get("analytic_id") == "BH-NET-010"
         )
         self.assertEqual(candidate["evidence_ids"], [f"EV-DNS-BURST-{i}" for i in range(5)])
-        self.assertFalse(candidate["customer_visible"])
+        self.assertEqual(candidate["classification"], "suspicious")
+        self.assertTrue(candidate["customer_visible"])
 
     def test_dns_encoded_burst_requires_distinct_labels(self):
         from romulus.intelligence.analytics import summarize_evidence

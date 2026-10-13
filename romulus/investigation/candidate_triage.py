@@ -137,7 +137,12 @@ def relate_candidates(
             item["disposition"] = (
                 "corroborated" if finding_backed or (bonus and score >= 70) else "observed"
             )
-        if item.get("kind") == "trusted_indicator":
+        if item.get("classification") in {"anomalous", "suspicious", "malicious"}:
+            item["customer_visible"] = bool(
+                item.get("classification") in {"suspicious", "malicious"}
+                and disposition not in {"benign_likely", "dismissed"}
+            )
+        elif item.get("kind") == "trusted_indicator":
             item["customer_visible"] = True
         elif terminal:
             item["customer_visible"] = bool(item.get("customer_visible"))
