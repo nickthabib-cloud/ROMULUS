@@ -116,7 +116,7 @@ def model_check(settings: Settings) -> int:
         print(f"OK model provider {settings.llm_provider} ({resolved}) completed a fixed no-hunt-data check{usage}")
         return 0
     except Exception as exc:
-        print(f"FAILED model provider {settings.llm_provider} ({model}): {type(exc).__name__}: {exc}")
+        print(f"FAILED model provider {settings.llm_provider} ({model}): {type(exc).__name__}")
         return 1
 
 
@@ -150,10 +150,12 @@ def model_report(settings: Settings, hunt_id: str) -> int:
     result=(state.get("coverage",{}).get("indicator_review",{})
         if isinstance(state.get("coverage"),dict) else {})
     status=result.get("model_result_status","unknown") if isinstance(result,dict) else "unknown"
-    print(f"Model report used provider {settings.llm_provider}; synthesis status={status}; no new telemetry searches were run.")
+    review_status=(state.get("indicator_review",{}).get("status","unknown")
+        if isinstance(state.get("indicator_review"),dict) else "unknown")
+    print(f"Model report used provider {settings.llm_provider}; synthesis status={status}; admission status={review_status}; no new telemetry searches were run.")
     for path in paths:
         print(f"Report: {path}")
-    return 0
+    return 0 if status=="ok" and review_status=="admitted" else 2
 
 def main(argv=None):
     parser=argparse.ArgumentParser(prog="romulus",description="Local defensive cyber threat hunting")

@@ -295,6 +295,28 @@ class ModelProviderCliTests(unittest.TestCase):
         self.assertIn("14", rendered)
         self.assertNotIn("test-secret", rendered)
 
+    def test_model_check_does_not_echo_untrusted_exception_text(self):
+        from romulus.cli import model_check
+
+        settings=replace(Settings.from_env(),llm_provider="openai",
+            openai_model="gpt-test",openai_api_key="test-secret",allow_cloud_llm=True)
+        fake_agent=types.SimpleNamespace(
+            available=lambda:{"available":True,"model_configured":True},
+            connectivity_check=lambda:(_ for _ in ()).throw(
+                RuntimeError("provider echoed test-secret and bounded content")),
+        )
+        agent_module=types.ModuleType("romulus.agent.ollama")
+        agent_module.Ollama=lambda configured:fake_agent
+        output=StringIO()
+
+        with patch.dict(sys.modules,{"romulus.agent.ollama":agent_module}), redirect_stdout(output):
+            code=model_check(settings)
+
+        self.assertEqual(code,1)
+        self.assertIn("RuntimeError",output.getvalue())
+        self.assertNotIn("test-secret",output.getvalue())
+        self.assertNotIn("bounded content",output.getvalue())
+
     def test_model_report_uses_a_copy_and_writes_under_model_evaluations(self):
         from romulus.cli import model_report
 
@@ -311,6 +333,8 @@ class ModelProviderCliTests(unittest.TestCase):
             def _indicator_review(self,state):
                 state["indicator_review"]={"status":"admitted"}
                 state["tool_runs"].append({"tool":"openai.responses"})
+                state["coverage"]["indicator_review"]={"model_result_status":"ok",
+                    "status":"admitted"}
 
         def generate(state, output_dir):
             captured["state"]=state
@@ -332,6 +356,32 @@ class ModelProviderCliTests(unittest.TestCase):
         self.assertTrue(captured["state"]["hunt_id"].startswith("HUNT-ORIGINAL-MODEL-"))
         self.assertEqual(captured["output_dir"],Path("C:/safe/reports/model-evaluations"))
         self.assertIn("evaluation.docx",output.getvalue())
+
+    def test_model_report_returns_nonzero_when_synthesis_falls_back(self):
+        from romulus.cli import model_report
+
+        settings=replace(Settings.from_env(),llm_provider="openai",
+            reports_dir=Path("C:/safe/reports"))
+        original={"hunt_id":"HUNT-ORIGINAL","status":"completed",
+            "coverage":{},"tool_runs":[],"candidate_leads":[]}
+        fake_store=types.SimpleNamespace(load_state=lambda hunt_id:original)
+
+        class Engine:
+            def __init__(self,*args,**kwargs): pass
+            def _indicator_review(self,state):
+                state["indicator_review"]={"status":"fallback"}
+                state["coverage"]["indicator_review"]={"model_result_status":"error",
+                    "status":"fallback"}
+
+        output=StringIO()
+        with patch("romulus.cli.Store",return_value=fake_store), \
+                patch("romulus.cli.HuntEngine",Engine), \
+                patch("romulus.reporting.report.generate_report",return_value=[]), \
+                redirect_stdout(output):
+            code=model_report(settings,"HUNT-ORIGINAL")
+
+        self.assertEqual(code,2)
+        self.assertIn("synthesis status=error",output.getvalue())
 
 
 class ModelAuditTests(unittest.TestCase):
