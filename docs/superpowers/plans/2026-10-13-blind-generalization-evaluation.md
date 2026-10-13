@@ -42,15 +42,15 @@
 - Consumes: reviewed Milestone 8 head and its completed local/VM/offline proof.
 - Produces: exact commit/archive digest, isolated VM checkout, unique runtime/report paths, and green read-only diagnostics.
 
-- [ ] **Step 1: Record the exact clean candidate and archive digest**
+- [x] **Step 1: Record the exact clean candidate and archive digest**
 
 Verify the branch starts at the reviewed Milestone 8 head, contains only this evaluation plan as an intentional change, and archive the committed candidate without credentials or runtime data.
 
-- [ ] **Step 2: Deploy to an isolated VM checkout**
+- [x] **Step 2: Deploy to an isolated VM checkout**
 
 Copy the archive to a unique `/tmp` path, match SHA-256, and extract without copying `.env`, local data, reports, logs, or oracle files.
 
-- [ ] **Step 3: Run configured read-only diagnostics**
+- [x] **Step 3: Run configured read-only diagnostics**
 
 Load the existing deployment configuration without displaying it and run `doctor` from the isolated checkout. Stop before the hunt if any required source, model contract, capture, or writable isolated directory is unavailable.
 
@@ -65,17 +65,17 @@ Expected: all configured dependencies, model schemas, sources, captures, and iso
 - Consumes: Task 1 exact checkout and green diagnostics.
 - Produces: one terminal or explicitly finalized hunt with reports and compact retained state, still unseen by the oracle comparison.
 
-- [ ] **Step 1: Start one broad undirected hunt**
+- [x] **Step 1: Start one broad undirected hunt**
 
 Pass only the generic broad-hunt objective and the operator-authorized time boundary. Override `ROMULUS_HOME`, `DATA_DIR`, `LOGS_DIR`, and `REPORTS_DIR` to the unique runtime root. Use the production backstops from Global Constraints and compact retention.
 
 Expected: the first model call, if any, occurs only after a deterministic telemetry-backed candidate exists.
 
-- [ ] **Step 2: Monitor bounded progress without steering**
+- [x] **Step 2: Monitor bounded progress without steering**
 
 Capture the hunt ID, source/task outcomes, candidate creation, first model-call basis, reasoning admissions/rejections, stop reason, and resource usage. Do not add attack hints or alter runtime behavior during the run.
 
-- [ ] **Step 3: Resolve terminal state before oracle access**
+- [x] **Step 3: Resolve terminal state before oracle access**
 
 If completed, verify automatic compact retention. If partial and a productive resumable frontier remains, resume the same hunt within the existing production backstops. If partial cannot productively continue, explicitly finalize it as partial with compact retention and record why.
 
@@ -91,15 +91,15 @@ Expected: matching DOCX/TXT reports exist and the hunt is finalized before Task 
 - Consumes: Task 2 finalized compact state.
 - Produces: verified evidence/report metrics and no disposable remote working artifacts.
 
-- [ ] **Step 1: Reopen and inspect both reports**
+- [x] **Step 1: Reopen and inspect both reports**
 
 Confirm hunt identity, outcome, stop basis, source limitations, findings, path/gaps, scheduler/sampling/progress/reasoning aggregates, and absence of raw prompts or query bodies.
 
-- [ ] **Step 2: Inspect compact state**
+- [x] **Step 2: Inspect compact state**
 
 Count retained findings/evidence and verify detailed reasoning, case files, model payloads, queries, task/outcome history, hunt-scoped JSONL rows, and checkpoints are absent.
 
-- [ ] **Step 3: Preserve reports and remove exact disposable artifacts**
+- [x] **Step 3: Preserve reports and remove exact disposable artifacts**
 
 Copy the compact result into an ignored local evaluation directory, then resolve and delete only the unique remote archive, checkout, runtime, and capture log plus the local transfer archive. Preserve the report pair for the operator.
 
@@ -113,15 +113,15 @@ Copy the compact result into an ignored local evaluation directory, then resolve
 - Consumes: Task 3 finalized findings, retained citations, report, and the external operator-supplied oracle.
 - Produces: honest stage/entity/path/technique scoring and layer-classified misses without runtime tuning.
 
-- [ ] **Step 1: Compare finalized output to the external oracle**
+- [x] **Step 1: Compare finalized output to the external oracle**
 
 Score attack-stage recall and precision, entity/relationship recall, temporal ordering, unsupported findings, incorrect techniques, explicit gaps, source coverage, and resource/stop metrics.
 
-- [ ] **Step 2: Classify each material miss**
+- [x] **Step 2: Classify each material miss**
 
 Assign misses to retrieval, normalization, candidate generation, hypothesis reasoning, correlation/path construction, admission, or reporting using retained evidence and exact outcomes. Do not infer unseen evidence.
 
-- [ ] **Step 3: Record the evaluation boundary and result**
+- [x] **Step 3: Record the evaluation boundary and result**
 
 Update `VALIDATION.md` with exact commit/digest/hunt ID, observed metrics, unsupported claims, limitations, classified misses, cleanup, and the fact that the oracle was first consulted after finalization.
 
