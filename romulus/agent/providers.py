@@ -144,7 +144,7 @@ class OpenAIProvider:
             "instructions": system,
             "input": prompt,
             "text": {"format": {"type": "json_schema", "name": "romulus_response",
-                "strict": True, "schema": schema}},
+                "strict": True, "schema": _openai_strict_schema(schema)}},
             "max_output_tokens": tokens,
             "store": False,
         }
@@ -230,6 +230,31 @@ def _openai_output_text(body: Mapping[str, object]) -> str:
             if isinstance(part, Mapping) and part.get("type") == "output_text":
                 chunks.append(str(part.get("text", "")))
     return "".join(chunks)
+
+
+def _openai_strict_schema(value):
+    """Copy ROMULUS schemas into OpenAI's strict Structured Outputs subset."""
+    if isinstance(value, list):
+        return [_openai_strict_schema(item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    normalized = {
+        key: _openai_strict_schema(item)
+        for key, item in value.items()
+        # uniqueItems is outside the strict subset. ROMULUS's current anyOf is
+        # a parent-object cross-field constraint expressed as partial object
+        # fragments, which strict mode also rejects; deterministic admission
+        # enforces that same expected-host-or-network rule after parsing.
+        if key not in {"uniqueItems", "anyOf"}
+    }
+    if normalized.get("type") == "object":
+        properties = normalized.get("properties")
+        if not isinstance(properties, Mapping):
+            properties = {}
+            normalized["properties"] = properties
+        normalized["required"] = list(properties)
+        normalized["additionalProperties"] = False
+    return normalized
 
 
 def _read_ollama_response(response) -> dict:

@@ -7,7 +7,7 @@
 - Ollama remains the default. `LLM_PROVIDER` is the single switch; both provider configuration blocks may coexist in `.env`.
 - OpenAI requires a configured model and API key plus the separate `ALLOW_CLOUD_LLM=true` authorization gate.
 - The provider boundary transports only the same bounded prompts and strict schemas already used by ROMULUS. It provides no search, shell, or direct telemetry-source access.
-- Responses API requests use strict JSON schema for structured work and `store: false`. Provider errors are sanitized; audits retain only provider, model, request ID, duration, and token counts.
+- Responses API requests use strict JSON schema for structured work and `store: false`. The provider boundary copies existing schemas into OpenAI's supported strict subset without changing Ollama's contracts. Provider errors are sanitized; audits retain only provider, model, request ID, duration, and token counts.
 - `model-check` uses a fixed request with no hunt data. `model-report --id` re-synthesizes a deep copy of a saved hunt, performs no telemetry searches, never mutates the saved hunt, and writes to `reports/model-evaluations/`.
 
 ## Delivery status

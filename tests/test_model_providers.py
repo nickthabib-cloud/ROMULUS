@@ -146,6 +146,58 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertTrue(payload["text"]["format"]["strict"])
         self.assertEqual(payload["text"]["format"]["schema"], schema)
 
+    def test_openai_provider_normalizes_schema_to_the_strict_supported_subset(self):
+        response=_Response({"id":"resp_schema","status":"completed","model":"gpt-test",
+            "output":[{"type":"message","content":[{"type":"output_text",
+                "text":'{"values":["one"],"optional_note":""}'}]}]})
+        session=_Session(response)
+        schema={"type":"object","properties":{
+            "values":{"type":"array","uniqueItems":True,"items":{"type":"string"}},
+            "optional_note":{"type":"string"}},
+            "required":["values"]}
+        original=json.loads(json.dumps(schema))
+
+        with _analyst_module() as module:
+            result=module.Ollama(self._settings(),session)._json_chat(
+                "system","bounded input",schema,tokens=100)
+
+        sent=session.calls[0][2]["json"]["text"]["format"]["schema"]
+        self.assertEqual(result["values"],["one"])
+        self.assertEqual(schema,original)
+        self.assertEqual(sent["required"],["values","optional_note"])
+        self.assertFalse(sent["additionalProperties"])
+        self.assertNotIn("uniqueItems",sent["properties"]["values"])
+
+    def test_every_current_structured_contract_normalizes_for_openai_strict_mode(self):
+        def assert_strict(node):
+            if isinstance(node,list):
+                for item in node: assert_strict(item)
+                return
+            if not isinstance(node,dict): return
+            self.assertNotIn("uniqueItems",node)
+            if "properties" in node:
+                self.assertEqual(node.get("type"),"object")
+                properties=node.get("properties",{})
+                self.assertEqual(node.get("required"),list(properties))
+                self.assertIs(node.get("additionalProperties"),False)
+            for item in node.values(): assert_strict(item)
+
+        with _analyst_module() as module:
+            providers=importlib.import_module("romulus.agent.providers")
+            case={"items":[{"item_id":"I-1"}],
+                "evidence":[{"evidence_id":"E-1","observables":[]}],
+                "relationships":[]}
+            schemas=[
+                module._activity_narrative_schema(case),
+                module._indicator_review_schema(case),
+                module._investigator_schema(["elasticsearch"],["H-1"],3,3),
+                module._critic_schema({"assessments":[{"proposal_id":"P-1"}]}),
+                module._reason_schema(["elasticsearch"],[{"hypothesis_id":"H-1"}],3),
+                module._search_schema(["elasticsearch"],3),
+            ]
+            for schema in schemas:
+                assert_strict(providers._openai_strict_schema(schema))
+
     def test_openai_provider_handles_the_plain_text_summary_path(self):
         response = _Response({
             "id": "resp_summary",
