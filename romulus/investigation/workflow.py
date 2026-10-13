@@ -31,6 +31,7 @@ from .search_planner import (candidate_fields, validate_spec, compile_es, compil
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
     record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
     recover_interrupted_tasks)
+from .progress import decide_next_action, initialize_progress, record_progress, summarize_progress
 from .sampling import sampling_policy
 from .synthetic import sample_evidence
 
@@ -110,6 +111,7 @@ class HuntState(TypedDict, total=False):
     candidate_leads: list[dict]; behavior_catalog_status: dict
     pivot_results: list[dict]
     investigation_graph: dict
+    progress_baseline: dict; progress_history: list[dict]; progress_totals: dict; stagnant_cycles: int
     retention_policy: str
 
 
@@ -150,11 +152,13 @@ class HuntEngine:
             requeued=recover_interrupted_tasks(state)
             state.setdefault("coverage",{})["scheduler_resume"]={"requeued_task_ids":requeued,
                 "migration_version":state.get("scheduler_migration_version")}
+        initialize_progress(state)
         self.store.save_state(hunt_id,state)
         checkpoint_conn=None
         try:
             app,checkpoint_conn=self._graph()
-            config={"configurable":{"thread_id":hunt_id},"recursion_limit":100}
+            config={"configurable":{"thread_id":hunt_id},
+                "recursion_limit":self._graph_recursion_limit()}
             snapshot=app.get_state(config) if _resume else None
             if snapshot and snapshot.next:
                 app.update_state(config,state)
@@ -187,6 +191,10 @@ class HuntEngine:
         if result.get("retention",{}).get("status")!="completed":
             self.store.prune_checkpoints(hunt_id,keep=1,compact=True)
         return result
+
+    def _graph_recursion_limit(self) -> int:
+        """Cover every supported tool/depth budget without a lower graph-step ceiling."""
+        return max(100,16+(3*self.settings.max_tool_calls)+(3*self.settings.max_depth))
 
     def resume(self,hunt_id: str) -> dict[str, Any]:
         state=self.store.load_state(hunt_id)
@@ -1065,6 +1073,15 @@ class HuntEngine:
         self._stage(s,stage,status,{"task_id":task_id,"source":source,"returned":returned,"matched_total":matched})
         return outcome
 
+    def _refresh_coverage_ledger(self,s):
+        host_available=self.offline or bool(s.get("source_health",{}).get("host"))
+        network_available=self.offline or bool(s.get("source_health",{}).get("network"))
+        ledger=build_coverage_ledger(s.get("hypotheses",[]),s.get("search_tasks",{}),
+            s.get("search_outcomes",[]),host_available,network_available,
+            s.get("candidate_leads",[]))
+        s.setdefault("coverage",{})["hypothesis_coverage"]=ledger
+        return ledger
+
     def _analyze(self,s):
         s["correlations"]=correlate(s.get("host",[]),s.get("network",[]))
         all_e=s.get("host",[])+s.get("network",[])
@@ -1101,11 +1118,17 @@ class HuntEngine:
         self._publish_tooling_leads(s)
         _link_candidates_to_findings(s)
         _attach_finding_paths(s)
-        host_available=self.offline or bool(s.get("source_health",{}).get("host"))
-        network_available=self.offline or bool(s.get("source_health",{}).get("network"))
-        ledger=build_coverage_ledger(s.get("hypotheses",[]),s.get("search_tasks",{}),s.get("search_outcomes",[]),
-            host_available,network_available,s.get("candidate_leads",[]))
-        s["coverage"]["hypothesis_coverage"]=ledger
+        # Register the current frontier before taking the cycle snapshot so a
+        # later capped/failed execution cannot look novel merely because its
+        # task fingerprint first became visible after routing.
+        self._register_investigation_tasks(s)
+        ledger=self._refresh_coverage_ledger(s)
+        record_progress(s,"analysis")
+        # LangGraph conditional-edge callbacks choose the next node but do not
+        # merge callback mutations into graph state. Persist the decision on
+        # the node result itself so the report node receives the exact stop
+        # basis selected by the progress-aware router.
+        self._apply_investigation_decision(s,just_reasoned=False)
         signals=len(s["analytic_summary"].get("behavioral_observations",[]))
         self._stage(s,"evidence_analysis","completed",{"host_events":len(s.get("host",[])),"network_events":len(s.get("network",[])),
             "correlations":len(s["correlations"]),"behavioral_observations":signals,
@@ -1251,48 +1274,76 @@ class HuntEngine:
             print(f"[ROMULUS] command-line tooling lead published: {finding.finding_id}; evidence_refs={len(refs)}; confidence={confidence}")
 
     def _after_analyze(self,s):
-        self._register_investigation_tasks(s)
-        queued=select_search_tasks(s,phase="investigation",limit=1)
-        grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
-        remaining_calls=max(0,self.settings.max_tool_calls-int(s.get("tool_calls",0)))
-        # Critical/high deterministic candidate work (tiers 1-2) remains ahead
-        # of the model. Once only model/coverage/medium breadth remains, admit a
-        # grounded reasoning turn while reserving at least one source call.
-        reason_before_breadth=bool(queued and self.use_ollama and grounded
-            and int(queued[0].get("priority_tier",99))>2 and remaining_calls>1
-            and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s))
-        if reason_before_breadth:
-            s.pop("termination_reason",None); self._save(s); return "reason"
-        if queued and self._can_pivot(s): s.pop("termination_reason",None); return "pivot"
-        if queued and not s.get("termination_reason"):
-            s["termination_reason"]="tool_call_budget" if s.get("tool_calls",0)>=self.settings.max_tool_calls else "runtime_budget"
-        if queued: self._save(s); return "report"
-        ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
-        if ledger.get("closure_ready"):
-            s.setdefault("termination_reason","lead_queue_exhausted"); self._save(s); return "report"
-        if grounded and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s):
-            s.pop("termination_reason",None); self._save(s); return "reason"
-        if not s.get("termination_reason"): s["termination_reason"]="coverage_frontier_exhausted"
-        self._save(s)
-        return "report"
+        return self._route_investigation(s,just_reasoned=False)
 
     def _after_reason(self,s):
-        queued=select_search_tasks(s,phase="investigation",limit=1)
-        if queued and self._can_pivot(s): s.pop("termination_reason",None); return "pivot"
-        if queued and not s.get("termination_reason"):
-            s["termination_reason"]="tool_call_budget" if s.get("tool_calls",0)>=self.settings.max_tool_calls else "runtime_budget"
-        if queued: self._save(s); return "report"
-        grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
-        if (grounded and s.get("depth",0)<self.settings.min_reasoning_rounds
-                and s.get("depth",0)<self.settings.max_depth and self._budget_ok(s)):
-            s.pop("termination_reason",None); self._save(s); return "reason"
-        if not s.get("termination_reason"):
-            s["termination_reason"]="lead_queue_exhausted" if self.offline else "no_useful_leads"
-        self._save(s)
-        return "report"
+        return self._route_investigation(s,just_reasoned=True)
 
-    def _can_pivot(self,s):
-        return self._budget_ok(s)
+    def _coverage_can_close(self,s,ledger=None,*,require_ledger=True):
+        coverage=s.get("coverage",{}) if isinstance(s.get("coverage"),dict) else {}
+        ledger=ledger if isinstance(ledger,dict) else coverage.get("hypothesis_coverage",{})
+        has_coverage_subject=bool(ledger.get("rows") or ledger.get("candidate_rows")) \
+            if isinstance(ledger,dict) else False
+        ledger_ready=(bool(ledger.get("closure_ready")) and has_coverage_subject) \
+            if isinstance(ledger,dict) and ledger else not require_ledger
+        errors=s.get("source_errors",[]) or []
+        model_failures=any(run.get("tool")=="ollama.api.chat" and run.get("result_status")!="ok"
+            for run in s.get("tool_runs",[]) or [] if isinstance(run,dict))
+        missing_sources=not self.offline and (
+            not bool(s.get("source_health",{}).get("host"))
+            or not bool(s.get("source_health",{}).get("network")))
+        host_coverage=str(coverage.get("host","")).lower()
+        network_coverage=str(coverage.get("network","")).lower()
+        network_sources=coverage.get("network_sources",{})
+        if not isinstance(network_sources,dict):
+            network_sources={}
+        network_source_coverage=[str(value).lower() for value in network_sources.values()]
+        coverage_limited=("result cap reached" in host_coverage or "cap reached" in network_coverage
+            or network_coverage.startswith("partial") or host_coverage.startswith("partial")
+            or any(("cap reached" in value or "reached by" in value) and "reached by 0" not in value
+                for value in network_source_coverage))
+        terminally_incomplete=s.get("termination_reason") in {
+            "tool_call_budget","runtime_budget","depth_budget","workflow_error",
+            "resource_limit","no_productive_frontier",
+        }
+        return bool(ledger_ready and not (errors or model_failures or missing_sources
+            or coverage_limited or coverage.get("scheduler_gaps") or terminally_incomplete))
+
+    def _investigation_decision(self,s,*,just_reasoned):
+        queued=select_search_tasks(s,phase="investigation",limit=1)
+        grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
+        ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
+        tool_limit=int(s.get("tool_calls",0))>=self.settings.max_tool_calls
+        remaining_calls=max(0,self.settings.max_tool_calls-int(s.get("tool_calls",0)))
+        runtime_limit=(time.time()-s.get("started_epoch",time.time())
+            >=self.settings.max_runtime_seconds)
+        hard_limit_reason="tool_call_budget" if tool_limit else "runtime_budget" if runtime_limit else None
+        depth_limit=grounded and int(s.get("depth",0))>=self.settings.max_depth
+        return decide_next_action(
+            hard_limit_reason=hard_limit_reason,
+            reasoning_limit_reason="depth_budget" if depth_limit else None,
+            coverage_closed=self._coverage_can_close(s,ledger,require_ledger=True),
+            queued_priority_tier=int(queued[0].get("priority_tier",99)) if queued else None,
+            grounded=grounded,
+            can_reason=(grounded and not depth_limit and not hard_limit_reason
+                and (not queued or remaining_calls>1)),
+            just_reasoned=just_reasoned,
+            stagnant_cycles=int(s.get("stagnant_cycles",0)),
+            max_stagnant_cycles=self.settings.max_stagnant_cycles,
+        )
+
+    def _apply_investigation_decision(self,s,*,just_reasoned):
+        decision=self._investigation_decision(s,just_reasoned=just_reasoned)
+        if decision["action"]=="report":
+            s["termination_reason"]=decision["termination_reason"]
+        else:
+            s.pop("termination_reason",None)
+        return decision["action"]
+
+    def _route_investigation(self,s,*,just_reasoned):
+        action=self._apply_investigation_decision(s,just_reasoned=just_reasoned)
+        self._save(s)
+        return action
 
     def _reason(self,s):
         if s.get("depth",0)>=self.settings.max_depth:
@@ -1355,20 +1406,15 @@ class HuntEngine:
             planning=s.get("coverage",{}).get("model_search_planning",[])
             planning=planning[-1] if planning else {"accepted":0,"rejected_or_duplicate":0}
             print(f"[ROMULUS] model follow-up plan: proposed={planning.get('proposed',len(raw_searches) if isinstance(raw_searches,list) else 0)} accepted={planning.get('accepted',0)} rejected_or_duplicate={planning.get('rejected_or_duplicate',0)} repeated_empty_anchor={planning.get('repeated_empty_anchor',0)}")
+        self._refresh_coverage_ledger(s)
         selected=[item["task_id"] for item in select_search_tasks(s,phase="investigation",limit=3)]
         if selected:
             s.pop("termination_reason",None)
-        elif isinstance(analysis,dict):
-            closure=s.get("coverage",{}).get("hypothesis_coverage",{}).get("closure_ready",False)
-            if closure and not analysis.get("continue_investigation",True): s["termination_reason"]="coverage_closure_reached"
-            else: s["termination_reason"]="coverage_frontier_exhausted"
-        elif not self.offline:
+        elif not isinstance(analysis,dict) and not self.offline:
             basis=("structured model output unavailable; deterministic ATT&CK coverage frontier used" if self.use_ollama and candidate_grounded
                 else "deterministic ATT&CK coverage frontier used")
-            s["termination_reason"]=("model_unavailable_no_fallback_leads" if self.use_ollama and candidate_grounded
-                else "coverage_frontier_exhausted")
-        else:
-            basis="offline deterministic fixture pivot"; s["termination_reason"]="lead_queue_exhausted"
+        elif not isinstance(analysis,dict):
+            basis="offline deterministic fixture pivot"
         s["reasoning_history"].append({"stage":"analyst_reasoning","basis":basis,"round":s["depth"],
             "reasoning":str(analysis.get("reasoning",""))[:350] if isinstance(analysis,dict) else "",
             "model_error":model_error,
@@ -1378,6 +1424,9 @@ class HuntEngine:
                 "hypothesis_ids":q.get("hypothesis_ids",[]),"intent":q.get("intent")} for q in
                 (s.get("search_tasks",{}).get(task_id,{}) for task_id in selected)],
             "evidence_count":len(_all_evidence(s)),"completed_search_count":len(s.get("search_outcomes",[]))})
+        record_progress(s,"reasoning")
+        if candidate_grounded:
+            self._apply_investigation_decision(s,just_reasoned=True)
         self._stage(s,"analyst_reasoning","completed" if selected else "stopped",{"basis":basis,"round":s["depth"],"selected_searches":selected,
             "continue_investigation":analysis.get("continue_investigation") if isinstance(analysis,dict) else None,
             "reason":s.get("termination_reason")})
@@ -1642,7 +1691,8 @@ class HuntEngine:
         coverage_frontier_incomplete=bool(ledger) and not ledger.get("closure_ready",False)
         scheduler_incomplete=bool(s.get("coverage",{}).get("scheduler_gaps"))
         incomplete_coverage=incomplete_coverage or coverage_frontier_incomplete or scheduler_incomplete
-        interrupted=s.get("termination_reason") in {"tool_call_budget","runtime_budget","depth_budget","workflow_error"}
+        interrupted=s.get("termination_reason") in {"tool_call_budget","runtime_budget","depth_budget",
+            "workflow_error","resource_limit","no_productive_frontier"}
         successful_search=any(r.get("result_status")=="ok" and any(x in str(r.get("reasoning_stage","")) for x in ("search","pivot")) for r in s.get("tool_runs",[]))
         if s.get("findings"):
             s["outcome"]="evidence_supported_lead"
@@ -1662,9 +1712,7 @@ class HuntEngine:
         else:
             s["outcome"]="insufficient_evidence"
             s["summary"]="The retrieved evidence was insufficient to support or reject the investigated hypotheses. No finding is not a clean bill of health; review source coverage, query scope, and follow-up needs."
-        coverage_closure_ready=not (
-            telemetry_errors or model_failures or interrupted or missing_sources or incomplete_coverage
-        )
+        coverage_closure_ready=self._coverage_can_close(s,ledger,require_ledger=False)
         s["status"]="completed" if coverage_closure_ready else "partial"
         if not s.get("termination_reason"):
             pending=any(task.get("status") in {"queued","running","interrupted"}
@@ -1675,6 +1723,11 @@ class HuntEngine:
         s["coverage"]["depth_used"]=s.get("depth",0)
         s["coverage"]["depth_limit"]=self.settings.max_depth
         s["coverage"]["minimum_reasoning_rounds"]=self.settings.min_reasoning_rounds
+        s["coverage"]["runtime_seconds_used"]=round(float(s.get("duration_ms",0))/1000,3)
+        s["coverage"]["runtime_seconds_limit"]=self.settings.max_runtime_seconds
+        s["coverage"]["max_stagnant_cycles"]=self.settings.max_stagnant_cycles
+        s["coverage"]["stagnant_cycles"]=max(0,int(s.get("stagnant_cycles",0)))
+        s["coverage"]["progress_summary"]=summarize_progress(s)
         s["coverage"]["termination_reason"]=s["termination_reason"]
         s["coverage"]["source_error_count"]=len(errors)
         s["coverage"]["coverage_closure_ready"]=coverage_closure_ready

@@ -210,6 +210,9 @@ After each approved milestone, deploy through the previously authorized SSH path
 4. **Attack-path graph:** add entity/activity relationships, backward/forward expansion, and path-aware findings. Pause for review.
 5. **Reporting and retention:** present the supported path in both reports and implement safe compact-on-finalization behavior. Pause for review.
 6. **VM validation:** deploy and run bounded end-to-end validation, then record measured limitations and remaining work.
+7. **Adaptive stopping:** replace validation-era runtime/round defaults as the normal stopping authority with a persisted progress ledger, productive-frontier checks, stagnation detection, and higher configurable emergency ceilings. See `2026-10-13-adaptive-evidence-grounded-hunting-design.md`.
+8. **Evidence-grounded reasoning:** allow investigator/critic reasoning and competing hypotheses only after deterministic telemetry produces a lead; keep evidence, query, scheduler, finding, and path admission deterministic. Pause only if verification requires a material design change.
+9. **Blind generalization evaluation:** evaluate the completed hunter against a different external telemetry corpus whose storyline remains hidden until after the hunt, then add only general synthetic-tested improvements for classified misses.
 
 Each milestone must include focused tests, the full available suite, a clean working-tree review, and a concise summary of behavior changed before the next milestone begins.
 

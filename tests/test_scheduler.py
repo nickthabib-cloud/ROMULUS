@@ -708,7 +708,12 @@ class SchedulerResumeIntegrationTests(unittest.TestCase):
                 reports_dir=root/"reports",retention_policy="full")
             store=Store(settings.data_dir,settings.logs_dir)
             state={"hunt_id":"HUNT-RESUME","objective":"Hunt PowerShell","status":"partial",
-                "started_epoch":0,"completed_leads":[],"lead_catalog":[],"coverage":{}}
+                "started_epoch":0,"completed_leads":["C-LEGACY"],
+                "lead_catalog":[{"id":"C-LEGACY","source":"host","intent":"legacy exact search"}],
+                "pivot_results":[{"lead_id":"C-LEGACY","status":"completed",
+                    "matched_total":0,"returned":0,"capped":False,"timed_out":False,
+                    "shard_failures":0,"total_relation":"eq"}],
+                "es_indices":["host-events"],"coverage":{}}
             first_id,_=register_search_task(state,_proposal(query_spec={"query":{"term":{"case":"first"}}}))
             second_id,_=register_search_task(state,_proposal(query_spec={"query":{"term":{"case":"second"}}}))
             begin_search_task(state,first_id,now="2026-10-12T10:00:00Z")
@@ -723,10 +728,13 @@ class SchedulerResumeIntegrationTests(unittest.TestCase):
                 def get_state(self,config): return Snapshot()
                 def update_state(self,config,value): self.updated=copy.deepcopy(value)
                 def invoke(self,value,config=None):
+                    from romulus.investigation.progress import snapshot_progress
                     self_test.assertIsNone(value)
                     self_test.assertEqual(self.updated["scheduler_migration_version"],1)
+                    self_test.assertEqual(len(self.updated["search_tasks"]),3)
                     self_test.assertEqual(self.updated["search_queue"],[second_id,first_id])
                     self_test.assertEqual(self.updated["search_tasks"][first_id]["status"],"interrupted")
+                    self_test.assertEqual(self.updated["progress_baseline"],snapshot_progress(self.updated))
                     return copy.deepcopy(self.updated)
             self_test=self; app=App(); engine=HuntEngine(settings,store,use_ollama=False)
             with patch.object(engine,"_graph",return_value=(app,Connection())), \

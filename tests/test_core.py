@@ -1,4 +1,4 @@
-import tempfile, unittest
+import os, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from romulus.config import Settings
@@ -29,11 +29,60 @@ class CoreTests(unittest.TestCase):
         encoded=str(query)
         self.assertIn("smb",encoded.lower()); self.assertIn("7045",encoded); self.assertNotIn("Hunt for SMB lateral movement",encoded)
         self.assertNotIn("range",query["bool"])
-    def test_default_configuration_searches_retained_history_and_has_iterative_budget(self):
-        cfg=Settings.from_env()
+    def test_default_configuration_uses_production_safety_backstops(self):
+        names=("MAX_RUNTIME_SECONDS","MAX_DEPTH","MAX_TOOL_CALLS","MAX_STAGNANT_CYCLES")
+        with patch.dict(os.environ,{name:"" for name in names}):
+            for name in names: os.environ.pop(name,None)
+            cfg=Settings.from_env()
         self.assertTrue(cfg.historical_search)
-        self.assertGreaterEqual(cfg.max_tool_calls,24)
+        self.assertEqual((cfg.max_runtime_seconds,cfg.max_depth,cfg.max_tool_calls,
+            cfg.max_stagnant_cycles),(3600,40,500,3))
         self.assertEqual(cfg.retention_policy,"compact")
+        example=(Path(__file__).resolve().parents[1]/".env.example").read_text(encoding="utf-8")
+        for setting in ("MAX_RUNTIME_SECONDS=3600","MAX_DEPTH=40","MAX_TOOL_CALLS=500",
+                "MAX_STAGNANT_CYCLES=3"):
+            self.assertIn(setting,example)
+    def test_safety_backstops_clamp_to_documented_finite_ranges(self):
+        names=("MAX_RUNTIME_SECONDS","MAX_DEPTH","MAX_TOOL_CALLS","MAX_STAGNANT_CYCLES")
+        with patch.dict(os.environ,{name:"999999" for name in names}):
+            high=Settings.from_env()
+        self.assertEqual((high.max_runtime_seconds,high.max_depth,high.max_tool_calls,
+            high.max_stagnant_cycles),(86400,200,5000,10))
+        with patch.dict(os.environ,{name:"-999999" for name in names}):
+            low=Settings.from_env()
+        self.assertEqual((low.max_runtime_seconds,low.max_depth,low.max_tool_calls,
+            low.max_stagnant_cycles),(10,1,1,1))
+    def test_graph_recursion_limit_scales_with_supported_hunt_budgets(self):
+        from dataclasses import replace
+        from romulus.investigation.workflow import HuntEngine
+        cfg=replace(Settings.from_env(),max_tool_calls=500,max_depth=40)
+        engine=HuntEngine(cfg,Store(cfg.data_dir,cfg.logs_dir),offline=True)
+        self.assertGreater(engine._graph_recursion_limit(),100)
+        self.assertGreaterEqual(engine._graph_recursion_limit(),
+            16+(3*cfg.max_tool_calls)+(3*cfg.max_depth))
+    def test_scaled_limit_allows_real_graph_to_cross_100_steps(self):
+        try:
+            from langgraph.graph import StateGraph, END
+        except ImportError:
+            self.skipTest("Install requirements.txt for the real LangGraph recursion check")
+        from dataclasses import replace
+        from typing import TypedDict
+        from romulus.investigation.workflow import HuntEngine
+        class CounterState(TypedDict):
+            count: int
+        cfg=replace(Settings.from_env(),max_tool_calls=500,max_depth=40)
+        engine=HuntEngine(cfg,Store(cfg.data_dir,cfg.logs_dir),offline=True)
+        graph=StateGraph(CounterState)
+        graph.add_node("step",lambda state:{"count":state["count"]+1})
+        graph.set_entry_point("step")
+        graph.add_conditional_edges("step",
+            lambda state:"again" if state["count"]<110 else "done",
+            {"again":"step","done":END})
+
+        result=graph.compile().invoke({"count":0},
+            config={"recursion_limit":engine._graph_recursion_limit()})
+
+        self.assertEqual(result["count"],110)
     def test_url_redaction(self):
         self.assertEqual(safe_url("http://alice:secret@example.test:8005/api?token=hide"),"http://example.test:8005/api")
     def test_arkime_adapter_uses_digest_and_bounded_documented_query(self):
@@ -165,7 +214,10 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as d:
             p=Path(d); cfg=replace(Settings.from_env(),home=p,reports_dir=p/"reports",data_dir=p/"data",logs_dir=p/"logs",
                 max_depth=2,min_reasoning_rounds=3)
-            state={"hunt_id":"H-DEPTH","depth":2,"lead_queue":[],"termination_reason":"depth_budget"}
+            state={"hunt_id":"H-DEPTH","objective":"Hunt for SMB lateral movement",
+                "mission_mode":"directed","depth":2,"tool_calls":0,"started_epoch":__import__("time").time(),
+                "coverage":{},"search_tasks":{},"search_queue":[],"search_outcomes":[],
+                "scheduler_history":[],"candidate_leads":[]}
             engine=HuntEngine(cfg,Store(cfg.data_dir,cfg.logs_dir),offline=True)
             self.assertEqual(engine._after_reason(state),"report")
             self.assertEqual(state["termination_reason"],"depth_budget")
@@ -195,7 +247,7 @@ class CoreTests(unittest.TestCase):
             store=Store(cfg.data_dir,cfg.logs_dir); state=HuntEngine(cfg,store,offline=True).run("Hunt for lateral movement using SMB")
             self.assertEqual(state["status"],"completed"); self.assertTrue(state["findings"])
             self.assertEqual(state["outcome"],"evidence_supported_lead")
-            self.assertEqual(state["termination_reason"],"lead_queue_exhausted")
+            self.assertEqual(state["termination_reason"],"coverage_closure_reached")
             self.assertEqual(state["retention"]["status"],"completed")
             self.assertNotIn("host",state); self.assertNotIn("network",state)
             cited={evidence_id for finding in state["findings"] for evidence_id in finding.get("evidence_ids",[])}
@@ -267,6 +319,6 @@ class CoreTests(unittest.TestCase):
             self.assertLessEqual(state["tool_calls"],cfg.max_tool_calls)
             self.assertEqual(state["tool_calls"],len(store.audit_records(state["hunt_id"])))
             self.assertTrue(all("result_count" in item and "time_range" in item and "duration_ms" in item for item in state["tool_runs"]))
-            self.assertEqual(state["termination_reason"],"coverage_frontier_exhausted")
+            self.assertEqual(state["termination_reason"],"no_productive_frontier")
 
 if __name__=="__main__": unittest.main()

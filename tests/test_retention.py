@@ -71,6 +71,16 @@ class RetentionTests(unittest.TestCase):
             "queries": [{"large": "working data"}],
             "tool_runs": [{"large": "working data"}],
             "reasoning_history": [{"large": "working data"}],
+            "progress_baseline": {"evidence_ids": ["EV-KEEP"], "changed_ids": ["working data"]},
+            "progress_history": [
+                {"stage": "analysis", "material_progress": True,
+                    "signals": {"new_evidence": 1}, "stagnant_cycles": 0},
+                {"stage": "reasoning", "material_progress": False,
+                    "signals": {}, "stagnant_cycles": 1},
+                {"stage": "analysis", "material_progress": False,
+                    "signals": {}, "stagnant_cycles": 2},
+            ],
+            "stagnant_cycles": 2,
             "search_artifacts": [{"large": "working data"}],
             "search_tasks": {
                 "ST-DONE": {"task_id": "ST-DONE", "source": "elasticsearch", "source_family": "host",
@@ -89,6 +99,12 @@ class RetentionTests(unittest.TestCase):
             "coverage": {
                 "time_scope": "all retained indexed time", "host": "available",
                 "network": "available", "tool_calls_used": 8, "tool_call_limit": 20,
+                "max_stagnant_cycles": 3, "stagnant_cycles": 2,
+                "progress_summary": {"cycles_recorded": 3, "productive_cycles": 1,
+                    "stagnant_cycles_recorded": 2, "current_stagnant_cycles": 2,
+                    "max_stagnant_cycles_seen": 2, "signal_totals": {"new_evidence": 1},
+                    "last_stage": "analysis", "last_material_signals": {},
+                    "final_stop_basis": "lead_queue_exhausted"},
                 "analytic_summary": {"large": ["working data"]},
                 "scheduler_gaps": [{"phase": "investigation", "reason": "tool_call_budget",
                     "queued_task_ids": ["ST-OPEN"]}],
@@ -160,6 +176,15 @@ class RetentionTests(unittest.TestCase):
             self.assertNotIn("search_queue", persisted)
             self.assertNotIn("search_outcomes", persisted)
             self.assertNotIn("scheduler_history", persisted)
+            self.assertNotIn("progress_baseline", persisted)
+            self.assertNotIn("progress_history", persisted)
+            self.assertNotIn("progress_totals", persisted)
+            self.assertNotIn("stagnant_cycles", persisted)
+            self.assertEqual(persisted["coverage"]["max_stagnant_cycles"],3)
+            self.assertEqual(persisted["coverage"]["stagnant_cycles"],2)
+            self.assertEqual(persisted["coverage"]["progress_summary"],state["coverage"]["progress_summary"])
+            self.assertEqual(persisted["coverage"]["progress_summary"]["final_stop_basis"],
+                persisted["termination_reason"])
             scheduler=persisted["coverage"]["scheduler_summary"]
             self.assertEqual(scheduler["tasks_total"],2)
             self.assertEqual(scheduler["by_source"],{"arkime":1,"elasticsearch":1})

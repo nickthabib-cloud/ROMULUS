@@ -2,6 +2,36 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-13 — adaptive evidence-grounded stopping (local/VM proof; no live holdout hunt)
+
+### Implemented behavior
+
+- Hunt continuation is now controlled by deterministic material progress: new stable evidence, candidate/follow-up transitions, resolving task outcomes, hypothesis changes, graph/path growth, and coverage-gap closure. Model prose, duplicate records, and raw count churn do not count as progress.
+- Broad undirected hunts still wait for a telemetry-backed candidate before creating a hypothesis or invoking model reasoning. Model requests to continue are retained only as audit context and cannot override queue, closure, stagnation, or safety decisions.
+- High-value queued work runs before stagnation can stop a hunt. Grounded reasoning runs before low-value breadth, while the final available tool call is reserved for already-queued telemetry work.
+- Normal hunts stop on validated closure or an exhausted productive frontier. Production defaults are finite emergency backstops rather than validation-era caps: 3,600 seconds, depth 40, and 500 tool calls, with three stagnant cycles by default.
+- Technical reports record the exact progress stop basis, productive/stagnant aggregate counts, and safety backstops. Customer reports use plain language and omit progress-ledger internals.
+- Compact retention keeps reports, cited evidence, findings, and the aggregate progress summary while removing detailed progress history and bulky host, network, query, task, tool-run, and checkpoint working state.
+- The detailed progress ledger remains bounded to 100 entries, but separate cumulative totals preserve full-hunt counts. Resumed legacy state is migrated and interrupted work is recovered before the progress baseline is established.
+- Coverage closure is shared by routing and reporting. It requires an actual assessed hypothesis or candidate and is blocked by source/model failures, missing live source families, incomplete/capped coverage, scheduler gaps, or an incomplete stop reason. LangGraph recursion capacity scales with configured tool/depth ceilings.
+
+### Local and dependency-complete proof
+
+- The complete local suite passed all 188 tests with seven expected dependency-gated skips. Python `compileall` and `git diff --check` passed.
+- Dependency-complete VM execution exposed that LangGraph conditional-edge callbacks selected the correct route but did not merge the callback's termination-reason mutation into graph state. The decision is now persisted by the preceding analysis/reasoning node; a focused regression covers the state boundary.
+- The same VM run exposed two stale dependency-only assertions that still expected legacy exhaustion labels. They now assert `coverage_closure_reached` for validated closure and `no_productive_frontier` for an open exhausted frontier.
+- Final whole-branch review found five additional correctness gaps: final reasoning used stale coverage, graph recursion had a hidden 100-step ceiling, resume established its baseline before migration/recovery, report closure could contradict routing closure, and aggregate totals were derived from the truncated detail ring. The single review-fix pass corrected each responsible layer and added focused regressions. It also prevented an empty directed frontier from becoming vacuous coverage closure.
+- Exact candidate commit `1bc238da95c847ddd32cc5729d9b4bac267ef324` was archived with SHA-256 `19BFBA9BBB68397F0EA4BA7E0BEBE921EE57658FE62D915E815A5E7904DE3C26`, which matched locally and on the VM. All 188 dependency-complete tests passed with no skips, including the real graph execution beyond 100 steps; `compileall` succeeded.
+- Deployment diagnostics were fully green for the configured model, structured reasoning schema, Elasticsearch, Arkime, TShark, pinned ATT&CK catalog, configured captures, and writable operational directories. Diagnostics were read-only.
+
+### Disposable retention proof
+
+- Offline investigation `HUNT-E6BCEC25C1` completed as `evidence_supported_lead` with `coverage_closure_reached`, generated Word and text reports, and reopened both reports successfully.
+- The technical report contained the progress stop basis and safety-backstop record. The retained aggregate recorded two productive cycles, zero stagnant cycles, and the final closure basis.
+- Compact retention completed after report verification. It retained two cited evidence records from three working records and one finding, while removing host/network arrays, tool runs, search tasks/outcomes, detailed progress history/baseline/totals, queries, one uncited evidence record, two finding events, two checkpoints, and 46 graph writes.
+- Validation used only the synthetic offline fixture in an isolated `/tmp` runtime. It did not execute a live hunt against the holdout telemetry and did not modify operational state, reports, logs, or telemetry.
+- The exact VM checkout, disposable runtime, transfer archive, and local transfer archive were removed after proof.
+
 ## 2026-10-12 — representative bounded retrieval (local/VM proof; no new live hunt)
 
 ### Implemented behavior
