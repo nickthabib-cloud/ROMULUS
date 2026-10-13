@@ -188,6 +188,18 @@ class SchedulerExecutionTests(unittest.TestCase):
             self.assertEqual(state["termination_reason"],"no_productive_frontier")
             self.assertEqual(state.get("search_queue",[]),[])
 
+    def test_reasoning_node_persists_final_route_across_graph_state_boundary(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._progress_cycle_fixture(directory)
+
+            result=engine._reason(state)
+
+            self.assertEqual(result["termination_reason"],"no_productive_frontier")
+            self.assertEqual(
+                engine.store.load_state(state["hunt_id"])["termination_reason"],
+                "no_productive_frontier",
+            )
+
     def test_nonresolving_search_without_material_change_advances_stagnation(self):
         from romulus.investigation.progress import initialize_progress
 

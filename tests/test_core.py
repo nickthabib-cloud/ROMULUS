@@ -288,6 +288,6 @@ class CoreTests(unittest.TestCase):
             self.assertLessEqual(state["tool_calls"],cfg.max_tool_calls)
             self.assertEqual(state["tool_calls"],len(store.audit_records(state["hunt_id"])))
             self.assertTrue(all("result_count" in item and "time_range" in item and "duration_ms" in item for item in state["tool_runs"]))
-            self.assertEqual(state["termination_reason"],"coverage_frontier_exhausted")
+            self.assertEqual(state["termination_reason"],"no_productive_frontier")
 
 if __name__=="__main__": unittest.main()

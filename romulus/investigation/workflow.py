@@ -1114,6 +1114,11 @@ class HuntEngine:
             host_available,network_available,s.get("candidate_leads",[]))
         s["coverage"]["hypothesis_coverage"]=ledger
         record_progress(s,"analysis")
+        # LangGraph conditional-edge callbacks choose the next node but do not
+        # merge callback mutations into graph state. Persist the decision on
+        # the node result itself so the report node receives the exact stop
+        # basis selected by the progress-aware router.
+        self._apply_investigation_decision(s,just_reasoned=False)
         signals=len(s["analytic_summary"].get("behavioral_observations",[]))
         self._stage(s,"evidence_analysis","completed",{"host_events":len(s.get("host",[])),"network_events":len(s.get("network",[])),
             "correlations":len(s["correlations"]),"behavioral_observations":signals,
@@ -1264,7 +1269,7 @@ class HuntEngine:
     def _after_reason(self,s):
         return self._route_investigation(s,just_reasoned=True)
 
-    def _route_investigation(self,s,*,just_reasoned):
+    def _investigation_decision(self,s,*,just_reasoned):
         queued=select_search_tasks(s,phase="investigation",limit=1)
         grounded=_state_mission_mode(s)=="directed" or bool(s.get("candidate_leads"))
         ledger=s.get("coverage",{}).get("hypothesis_coverage",{})
@@ -1274,7 +1279,7 @@ class HuntEngine:
             >=self.settings.max_runtime_seconds)
         hard_limit_reason="tool_call_budget" if tool_limit else "runtime_budget" if runtime_limit else None
         depth_limit=grounded and int(s.get("depth",0))>=self.settings.max_depth
-        decision=decide_next_action(
+        return decide_next_action(
             hard_limit_reason=hard_limit_reason,
             reasoning_limit_reason="depth_budget" if depth_limit else None,
             coverage_closed=bool(ledger.get("closure_ready")),
@@ -1286,12 +1291,19 @@ class HuntEngine:
             stagnant_cycles=int(s.get("stagnant_cycles",0)),
             max_stagnant_cycles=self.settings.max_stagnant_cycles,
         )
+
+    def _apply_investigation_decision(self,s,*,just_reasoned):
+        decision=self._investigation_decision(s,just_reasoned=just_reasoned)
         if decision["action"]=="report":
             s["termination_reason"]=decision["termination_reason"]
         else:
             s.pop("termination_reason",None)
-        self._save(s)
         return decision["action"]
+
+    def _route_investigation(self,s,*,just_reasoned):
+        action=self._apply_investigation_decision(s,just_reasoned=just_reasoned)
+        self._save(s)
+        return action
 
     def _reason(self,s):
         if s.get("depth",0)>=self.settings.max_depth:
@@ -1372,6 +1384,8 @@ class HuntEngine:
                 (s.get("search_tasks",{}).get(task_id,{}) for task_id in selected)],
             "evidence_count":len(_all_evidence(s)),"completed_search_count":len(s.get("search_outcomes",[]))})
         record_progress(s,"reasoning")
+        if candidate_grounded:
+            self._apply_investigation_decision(s,just_reasoned=True)
         self._stage(s,"analyst_reasoning","completed" if selected else "stopped",{"basis":basis,"round":s["depth"],"selected_searches":selected,
             "continue_investigation":analysis.get("continue_investigation") if isinstance(analysis,dict) else None,
             "reason":s.get("termination_reason")})
