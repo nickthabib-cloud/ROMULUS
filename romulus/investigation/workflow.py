@@ -2221,12 +2221,21 @@ def _es_hit_family(hit,index,index_classes):
         endpoint_fields=("process.name","process.command_line","process.executable","winlog.event_id")
         network_fields=("source.ip","destination.ip","source.port","destination.port","network.protocol",
             "dns.question.name","http.request.method","tls.client.server_name")
-        present=lambda field: (_nested(hit,field) if _nested(hit,field) is not None else hit.get(field)) not in (None,"",[],{})
+        def present(field):
+            value=_nested(hit,field)
+            if value is None: value=hit.get(field)
+            return value not in (None,"",[],{})
+        sparse_host_context=(present("host.name") and
+            (present("user.name") or present("event.code")) and
+            not any(present(field) for field in ("destination.ip","destination.port","network.protocol",
+                "dns.question.name","http.request.method","tls.client.server_name")))
         if any(token in module for token in network_modules): return "network"
         if any(token in module for token in host_modules): return "host"
         if any(token in category for token in host_categories): return "host"
+        if "network" in category: return "network"
+        if sparse_host_context: return "host"
         if any(present(field) for field in endpoint_fields): return "host"
-        if "network" in category or any(present(field) for field in network_fields): return "network"
+        if any(present(field) for field in network_fields): return "network"
         if "network" in index.lower(): return "network"
         return "host"
     if network_index: return "network"

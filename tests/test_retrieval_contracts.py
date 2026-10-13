@@ -191,11 +191,29 @@ class MixedIndexClassificationTests(unittest.TestCase):
                 "source": {"ip": "192.0.2.11"},
                 "message": "Accepted password for analyst",
             }, {"match_all": {}})
+            engine._add_es_hit(state, {
+                "_index": "mixed-events",
+                "_id": "host-event-code-1",
+                "@timestamp": "2026-02-01T00:14:00Z",
+                "event": {"code": "7045"},
+                "host": {"name": "windows-01"},
+                "source": {"ip": "192.0.2.12"},
+                "message": "Service installation event",
+            }, {"match_all": {}})
+            engine._add_es_hit(state, {
+                "_index": "mixed-events",
+                "_id": "network-firewall-1",
+                "@timestamp": "2026-02-01T00:15:00Z",
+                "event": {"category": "network", "code": "deny"},
+                "host": {"name": "firewall-01"},
+                "source": {"ip": "192.0.2.13"},
+            }, {"match_all": {}})
             summary = summarize_evidence(state["host"], state["network"])
 
-        self.assertEqual(len(state["host"]), 2)
-        self.assertEqual(len(state["network"]), 0)
-        self.assertEqual(summary["scope"]["host_events"], 2)
+        self.assertEqual(len(state["host"]), 3)
+        self.assertEqual(len(state["network"]), 1)
+        self.assertEqual(summary["scope"]["host_events"], 3)
+        self.assertEqual(summary["scope"]["network_events"], 1)
 
     def test_network_name_hint_blocks_context_only_host_classification(self):
         from romulus.investigation.workflow import _index_names_by_class
