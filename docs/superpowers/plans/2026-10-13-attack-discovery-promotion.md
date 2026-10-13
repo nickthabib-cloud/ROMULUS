@@ -89,7 +89,7 @@ git commit -m "fix: scope candidate network pivots"
 - Produces metadata: behavior candidates contain `corroboration_group` and `analytic_source`; aggregate synthetic observations contain timestamps derived from cited evidence.
 - Consumes: Task 3 reads `corroboration_group`, `related_candidates`, recalculated `priority_score`, and stable candidate IDs.
 
-- [ ] **Step 1: Write failing relationship tests**
+- [x] **Step 1: Write failing relationship tests**
 
 Add `CandidateRelationshipTests` proving literal expected records for:
 
@@ -101,23 +101,23 @@ Add `CandidateRelationshipTests` proving literal expected records for:
 
 Update the existing independent-behavior ranking test so mere same-asset membership no longer promotes a candidate before triage. Add an aggregate test proving cited evidence timestamps hydrate `first_observed`/`last_observed`.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `python -m unittest tests.test_attack_discovery.CandidateRelationshipTests tests.test_behavior_catalog.CandidateRankingTests tests.test_candidate_loop.AggregateSignalTests -v`
 
 Expected: FAIL because evidence-backed relationship logic and aggregate timestamp hydration do not exist, while the old asset-wide bonus still applies.
 
-- [ ] **Step 3: Implement relationship derivation and remove the asset-wide bonus**
+- [x] **Step 3: Implement relationship derivation and remove the asset-wide bonus**
 
 Implement typed structured-field normalization and cited-pair time comparison in `candidate_triage.py`. Enrich copies only, cap relationship score bonuses at twenty, and deterministically recompute priority tier/customer visibility/disposition without changing terminal dispositions. Preserve catalog source/group metadata and derive aggregate timestamps from supporting evidence. Call `relate_candidates` in `_analyze` before `merge_candidate_queue`.
 
-- [ ] **Step 4: Run focused candidate, graph, and workflow tests**
+- [x] **Step 4: Run focused candidate, graph, and workflow tests**
 
 Run: `python -m unittest tests.test_attack_discovery.CandidateRelationshipTests tests.test_behavior_catalog tests.test_candidate_loop tests.test_investigation_graph -v`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```text
 git add romulus/investigation/candidate_triage.py romulus/intelligence/behavior_catalog.py romulus/investigation/workflow.py tests/test_attack_discovery.py tests/test_behavior_catalog.py

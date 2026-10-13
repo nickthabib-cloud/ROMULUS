@@ -170,8 +170,9 @@ class CandidateRankingTests(unittest.TestCase):
         self.assertFalse(lead["customer_visible"])
         self.assertEqual(lead["disposition"], "observed")
 
-    def test_independent_behavior_promotes_specific_lead(self):
+    def test_same_event_multiple_rules_does_not_self_corroborate(self):
         from romulus.intelligence.behavior_catalog import build_candidate_queue
+        from romulus.investigation.candidate_triage import relate_candidates
 
         event = _event(
             "EV-CHAIN",
@@ -181,9 +182,15 @@ class CandidateRankingTests(unittest.TestCase):
         )
         candidates = build_candidate_queue([event], self.catalog, {"indicators": []})
         reverse_shell = next(item for item in candidates if item["analytic_id"] == "BH-LNX-016")
-        self.assertEqual(reverse_shell["disposition"], "corroborated")
-        self.assertTrue(reverse_shell["customer_visible"])
-        self.assertIn("independent behavior", " ".join(reverse_shell["score_reasons"]).lower())
+        self.assertEqual(reverse_shell["disposition"], "observed")
+        self.assertFalse(reverse_shell["customer_visible"])
+        self.assertNotIn("independent behavior", " ".join(reverse_shell["score_reasons"]).lower())
+
+        related = relate_candidates(candidates, [event])
+        promoted = next(item for item in related if item["analytic_id"] == "BH-LNX-016")
+        self.assertEqual(promoted["disposition"], "observed")
+        self.assertFalse(promoted["customer_visible"])
+        self.assertEqual(promoted["related_candidates"], [])
 
     def test_lookalike_process_requires_executable_path_context(self):
         from romulus.intelligence.behavior_catalog import build_candidate_queue

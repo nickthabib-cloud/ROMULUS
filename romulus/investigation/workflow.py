@@ -36,6 +36,7 @@ from .progress import decide_next_action, initialize_progress, record_progress, 
 from .sampling import sampling_policy
 from .synthetic import sample_evidence
 from .casefile import build_case_file, visible_case_ids
+from .candidate_triage import relate_candidates
 from .reasoning import admit_reasoning
 
 
@@ -1085,7 +1086,10 @@ class HuntEngine:
         s["analytic_summary"]=summarize_evidence(s.get("host",[]),s.get("network",[]))
         s.setdefault("coverage",{})["analytic_summary"]=s["analytic_summary"]
         previous_candidates=list(s.get("candidate_leads",[]))
-        fresh_candidates=build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        fresh_candidates=relate_candidates(
+            build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"]),
+            all_e,
+        )
         s["candidate_leads"]=merge_candidate_queue(previous_candidates,fresh_candidates)
         new_hypotheses=_candidate_hypotheses(s["candidate_leads"],s.get("hypotheses",[]),all_e)
         if new_hypotheses:

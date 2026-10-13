@@ -315,10 +315,8 @@ def build_candidate_queue(
     now: str | datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Match evidence and return a stable, explainable candidate queue."""
-    events = list(evidence) + _aggregate_events(analytic_summary or {})
+    events = list(evidence) + _aggregate_events(analytic_summary or {}, evidence)
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    matched_ids_by_asset: dict[str, set[str]] = {}
-    matched_groups_by_asset: dict[str, set[str]] = {}
     analytics = [item for item in catalog.get("analytics", []) if item.get("enabled", True)]
     for analytic in analytics:
         for event in events:
@@ -329,13 +327,10 @@ def build_candidate_queue(
             if _analytic_matches(analytic, event):
                 asset = str(event.get("asset") or "unknown")
                 grouped.setdefault((analytic["id"], asset), []).append(event)
-                matched_ids_by_asset.setdefault(asset, set()).add(analytic["id"])
-                matched_groups_by_asset.setdefault(asset, set()).add(str(analytic.get("corroboration_group") or analytic["id"]))
 
     candidates: list[dict[str, Any]] = []
     for (analytic_id, asset), rows in grouped.items():
         analytic = next(item for item in analytics if item["id"] == analytic_id)
-        independent = max(0, len(matched_groups_by_asset.get(asset, set())) - 1)
         score = int(analytic["base_priority"]) + min(10, int(analytic["specificity"]) // 10)
         reasons = [
             f"base analytic priority {analytic['base_priority']}",
@@ -345,13 +340,8 @@ def build_candidate_queue(
             repeat_bonus = min(9, (len(rows) - 1) * 3)
             score += repeat_bonus
             reasons.append(f"repeat observation contribution {repeat_bonus}")
-        if independent:
-            corroboration_bonus = min(30, independent * 15)
-            score += corroboration_bonus
-            reasons.append(f"independent behavior corroboration contribution {corroboration_bonus}")
         score = min(100, score)
-        disposition = "corroborated" if score >= 70 and independent else "observed"
-        candidates.append(_behavior_candidate(analytic, asset, rows, score, disposition, reasons))
+        candidates.append(_behavior_candidate(analytic, asset, rows, score, "observed", reasons))
 
     reference_time = _coerce_time(now) if now is not None else datetime.now(timezone.utc)
     for indicator in indicators.get("indicators", []):
@@ -597,6 +587,8 @@ def _behavior_candidate(
     return {
         "candidate_id": candidate_id,
         "kind": "behavior", "analytic_id": analytic["id"], "indicator_id": None,
+        "corroboration_group": str(analytic.get("corroboration_group") or analytic["id"]),
+        "analytic_source": analytic.get("source"),
         "title": analytic["title"], "description": analytic["description"],
         "priority_score": score, "priority_tier": tier, "disposition": disposition,
         "customer_visible": bool(score >= 70 and disposition == "corroborated"),
@@ -609,8 +601,13 @@ def _behavior_candidate(
     }
 
 
-def _aggregate_events(summary: dict[str, Any]) -> list[dict[str, Any]]:
+def _aggregate_events(
+    summary: dict[str, Any], evidence: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     out = []
+    evidence_by_id = {
+        str(event.get("evidence_id")): event for event in evidence or [] if event.get("evidence_id")
+    }
     aggregate_signals = summary.get("aggregate_signals")
     if isinstance(aggregate_signals, dict):
         for signal, rows in aggregate_signals.items():
@@ -620,26 +617,41 @@ def _aggregate_events(summary: dict[str, Any]) -> list[dict[str, Any]]:
                     refs.append(row["sample_evidence_id"])
                 asset = (row.get("asset") or row.get("source") or row.get("destination")
                     or row.get("user") or "unknown")
-                out.append(_aggregate_event(str(signal), asset, *refs))
+                out.append(_aggregate_event(str(signal), asset, *refs, evidence_by_id=evidence_by_id))
         return out
     host_profile = summary.get("host_profile", {})
     for row in host_profile.get("authentication_sequences", []) or []:
-        out.append(_aggregate_event("auth_failures_then_success", row.get("source") or row.get("user"), row.get("sample_evidence_id")))
+        out.append(_aggregate_event("auth_failures_then_success", row.get("source") or row.get("user"),
+            row.get("sample_evidence_id"), evidence_by_id=evidence_by_id))
     network = summary.get("network_profile", {})
     for row in network.get("high_fanout", []) or []:
-        out.append(_aggregate_event("high_fanout", row.get("source"), *(row.get("sample_evidence_ids") or [])))
+        out.append(_aggregate_event("high_fanout", row.get("source"), *(row.get("sample_evidence_ids") or []),
+            evidence_by_id=evidence_by_id))
     for row in network.get("periodic_edge_candidates", []) or []:
-        out.append(_aggregate_event("periodic_edge", row.get("source"), *(row.get("sample_evidence_ids") or [])))
+        out.append(_aggregate_event("periodic_edge", row.get("source"), *(row.get("sample_evidence_ids") or []),
+            evidence_by_id=evidence_by_id))
     for row in network.get("low_frequency_external_destinations", []) or []:
-        out.append(_aggregate_event("rare_external_destination", row.get("destination"), *(row.get("sample_evidence_ids") or [])))
+        out.append(_aggregate_event("rare_external_destination", row.get("destination"),
+            *(row.get("sample_evidence_ids") or []), evidence_by_id=evidence_by_id))
     return out
 
 
-def _aggregate_event(signal: str, asset: Any, *evidence_ids: Any) -> dict[str, Any]:
+def _aggregate_event(
+    signal: str,
+    asset: Any,
+    *evidence_ids: Any,
+    evidence_by_id: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     supporting = list(dict.fromkeys(str(value) for value in evidence_ids if value))
+    observed = sorted(
+        str((evidence_by_id or {}).get(identifier, {}).get("observed_at"))
+        for identifier in supporting
+        if (evidence_by_id or {}).get(identifier, {}).get("observed_at")
+    )
     return {
         "evidence_id": supporting[0] if supporting else f"AGG-{signal}",
-        "source": "aggregate", "observed_at": "", "asset": str(asset or "unknown"),
+        "source": "aggregate", "observed_at": observed[0] if observed else "",
+        "supporting_observed_at": observed, "asset": str(asset or "unknown"),
         "observation": signal, "supporting_evidence_ids": supporting,
         "raw": {"aggregate": {"signal": signal, "supporting_evidence_ids": supporting}},
     }
@@ -668,7 +680,12 @@ def _evidence_ids(rows: list[dict[str, Any]]) -> list[str]:
 
 
 def _observed_bounds(rows: list[dict[str, Any]]) -> tuple[str | None, str | None]:
-    values = sorted(str(row.get("observed_at")) for row in rows if row.get("observed_at"))
+    values = sorted(
+        str(value)
+        for row in rows
+        for value in ([row.get("observed_at")] + list(row.get("supporting_observed_at") or []))
+        if value
+    )
     return (values[0], values[-1]) if values else (None, None)
 
 

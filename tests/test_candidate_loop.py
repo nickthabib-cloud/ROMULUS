@@ -440,6 +440,30 @@ class AggregateSignalTests(unittest.TestCase):
         self.assertIn("EV-REMOTE", remote["evidence_ids"])
         self.assertIn("EV-EXEC", remote["evidence_ids"])
 
+    def test_aggregate_candidate_uses_supporting_evidence_time_bounds(self):
+        from romulus.intelligence.analytics import summarize_evidence
+        from romulus.intelligence.behavior_catalog import build_candidate_queue, load_behavior_catalog
+
+        event = {
+            "evidence_id": "EV-DNS-TIME",
+            "source": "arkime",
+            "observed_at": "2026-08-04T09:17:00Z",
+            "asset": "10.70.0.12",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "destination": {"ip": "203.0.113.44", "port": 53},
+                "network": {"protocol": "dns"},
+                "dns": {"question": {"name": "abcdefghijklmnopqrstuvwxyz012345.example.test"}},
+            },
+        }
+
+        summary = summarize_evidence([], [event], limit=50)
+        candidates = build_candidate_queue([event], load_behavior_catalog(), {"indicators": []}, summary)
+        candidate = next(item for item in candidates if item.get("analytic_id") == "BH-NET-004")
+
+        self.assertEqual(candidate["first_observed"], "2026-08-04T09:17:00Z")
+        self.assertEqual(candidate["last_observed"], "2026-08-04T09:17:00Z")
+
 
 class CandidateStateTests(unittest.TestCase):
     def test_candidate_merge_preserves_disposition_follow_up_status_and_history(self):
