@@ -252,6 +252,6 @@ Use the operator-authorized telemetry and broad objective without supplying orac
 
 Preserve only durable reports and validation summaries. Remove exact transfer archives, extracted validation trees, isolated runtimes, and disposable hunt bulk after verifying report integrity and exact paths.
 
-- [ ] **Step 5: Commit, push, and open a stacked PR**
+- [x] **Step 5: Commit, push, and open a stacked PR**
 
 Open the PR against `codex/reasoning-contract-hardening`, attach it to the task, and mark the plan complete only after the pushed branch contains the final validation record.
