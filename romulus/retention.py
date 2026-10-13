@@ -58,10 +58,11 @@ def apply_retention(
     hunt_id = str(working.get("hunt_id") or "")
     hunt_status=str(working.get("status") or "")
     existing = working.get("retention") if isinstance(working.get("retention"), dict) else {}
-    anomaly_expected, generation_stamp = _report_manifest(working)
+    anomaly_expected, generation_stamp, report_root = _report_manifest(working)
     if policy == "compact" and existing.get("status") == "completed":
         _verify_reports(hunt_id, working.get("report_paths", []),
-            anomaly_expected=anomaly_expected, generation_stamp=generation_stamp)
+            anomaly_expected=anomaly_expected, generation_stamp=generation_stamp,
+            report_root=report_root)
         working["retention_policy"]="compact"
         working["retention"]["finalized"]=True
         store.save_state(hunt_id,working)
@@ -76,7 +77,7 @@ def apply_retention(
         return working
     reports = _verify_reports(
         hunt_id, working.get("report_paths", []), anomaly_expected=anomaly_expected,
-        generation_stamp=generation_stamp,
+        generation_stamp=generation_stamp, report_root=report_root,
     )
     if policy == "full":
         working["retention"] = {
@@ -130,10 +131,10 @@ def apply_retention(
         return fallback
 
 
-def _report_manifest(state: dict[str, Any]) -> tuple[bool, str | None]:
+def _report_manifest(state: dict[str, Any]) -> tuple[bool, str | None, str | None]:
     """Validate a present report manifest while preserving legacy states that have none."""
     if "report_manifest" not in state:
-        return False, None
+        return False, None, None
     manifest = state.get("report_manifest")
     if not isinstance(manifest, dict):
         raise RetentionError("The report manifest must be an object")
@@ -143,14 +144,22 @@ def _report_manifest(state: dict[str, Any]) -> tuple[bool, str | None]:
         raise RetentionError("The report manifest requires a non-empty generation stamp")
     if type(anomaly_expected) is not bool:
         raise RetentionError("The report manifest requires a Boolean anomaly declaration")
-    return anomaly_expected, generation_stamp.strip()
+    report_root=manifest.get("report_root")
+    if report_root is not None and (not isinstance(report_root,str) or not report_root.strip()):
+        raise RetentionError("The report manifest report root must be a non-empty path")
+    return anomaly_expected, generation_stamp.strip(), report_root.strip() if report_root else None
 
 
 def _verify_reports(
     hunt_id: str, report_paths: Any, *, anomaly_expected: bool = False,
-    generation_stamp: str | None = None,
+    generation_stamp: str | None = None, report_root: str | None = None,
 ) -> list[dict[str, Any]]:
     paths=[Path(str(value)) for value in report_paths or []]
+    if report_root:
+        root=Path(report_root).resolve(strict=False)
+        if any(path.resolve(strict=False)==root or root not in path.resolve(strict=False).parents
+                for path in paths):
+            raise RetentionError("A final report is outside the configured reports directory")
     if len({str(path.resolve(strict=False)) for path in paths})!=len(paths):
         raise RetentionError("Duplicate report paths are not allowed")
     docx_paths=[path for path in paths if path.suffix.lower()==".docx"]
@@ -233,7 +242,7 @@ def _compact_state(state: dict[str, Any], retained_ids: set[str]) -> dict[str, A
     keys=(
         "hunt_id","objective","status","outcome","termination_reason","mission_mode","mode","retention_policy",
         "started_at","resumed_at","finished_at","duration_ms","summary","report_paths",
-        "report_manifest","activity_narrative","tool_calls","depth",
+        "report_manifest","activity_narrative","indicator_review","tool_calls","depth",
     )
     compact={key:deepcopy(state[key]) for key in keys if key in state}
     compact["manifest_version"]=1
@@ -256,7 +265,7 @@ def _compact_coverage(coverage: Any) -> dict[str, Any]:
         "coverage_closure_ready","tool_calls_used","tool_call_limit","depth_used","depth_limit",
         "minimum_reasoning_rounds","termination_reason","behavior_candidates","analyst_model",
         "progress_summary","max_stagnant_cycles","stagnant_cycles","reasoning_summary",
-        "activity_narrative",
+        "activity_narrative","indicator_review",
     )
     return {key:deepcopy(coverage[key]) for key in keys if key in coverage}
 

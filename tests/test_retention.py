@@ -64,6 +64,20 @@ class RetentionTests(unittest.TestCase):
             "status": "admitted", "model_calls": 1, "clusters": 1,
             "unconnected_items": 0, "no_coherent_narrative": False,
         }
+        state["indicator_review"] = {
+            "version": 1, "status": "admitted",
+            "strong_indicators": [{"item_ids": ["CL-ONE"], "evidence_ids": ["EV-KEEP"]}],
+            "supporting_context": [], "likely_noise": [],
+            "possible_activity_narrative": {"item_ids": ["CL-ONE"],
+                "relationship_ids": [], "summary": "One possible activity stage.",
+                "limitations": ["No adjacent records."]},
+            "recommended_follow_ups": ["Validate the cited behavior."],
+        }
+        state["coverage"]["indicator_review"] = {
+            "status": "admitted", "model_calls": 1, "model_result_status": "ok",
+            "strong_indicators": 1, "supporting_context": 0, "likely_noise": 0,
+            "rejection_codes": [], "budget_domain": "report_finalization",
+        }
         state["narrative_case_file"] = {"raw": "PRIVATE-CASE-PAYLOAD"}
         state["narrative_model_response"] = {"raw": "PRIVATE-MODEL-PAYLOAD"}
 
@@ -74,6 +88,8 @@ class RetentionTests(unittest.TestCase):
             compacted["coverage"]["activity_narrative"],
             state["coverage"]["activity_narrative"],
         )
+        self.assertEqual(compacted["indicator_review"], state["indicator_review"])
+        self.assertEqual(compacted["coverage"]["indicator_review"], state["coverage"]["indicator_review"])
         serialized = json.dumps(compacted, sort_keys=True)
         self.assertNotIn("PRIVATE-CASE-PAYLOAD", serialized)
         self.assertNotIn("PRIVATE-MODEL-PAYLOAD", serialized)
@@ -298,6 +314,27 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
             self.assertIn("host", store.load_state("HUNT-ONE"))
 
+    def test_retention_rejects_report_paths_outside_manifest_report_root(self):
+        from romulus.retention import RetentionError, apply_retention
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            paths = self._reports_with_anomaly(root, "HUNT-ONE")
+            state = self._state(paths)
+            state["report_manifest"] = {
+                "generation_stamp": "20261013T000000Z", "anomaly_expected": True,
+                "report_root": str((root / "different-reports-root").resolve()),
+            }
+            store = Store(root / "data-root-contract", root / "logs-root-contract")
+            store.save_state("HUNT-ONE", state)
+            store.add_evidence("HUNT-ONE", {"evidence_id": "EV-KEEP"})
+
+            with self.assertRaisesRegex(RetentionError, "outside the configured reports directory"):
+                apply_retention(store, state, policy="compact", automatic=True)
+
+            self.assertEqual(store.evidence_count("HUNT-ONE"), 1)
+            self.assertIn("host", store.load_state("HUNT-ONE"))
+
     def test_compaction_fails_closed_when_a_report_citation_has_no_evidence_record(self):
         from romulus.retention import RetentionError, apply_retention
 
@@ -326,6 +363,8 @@ class RetentionTests(unittest.TestCase):
             {"generation_stamp": "20261013T000000Z"},
             {"generation_stamp": "20261013T000000Z", "anomaly_expected": 0},
             {"generation_stamp": "", "anomaly_expected": False},
+            {"generation_stamp": "20261013T000000Z", "anomaly_expected": False,
+                "report_root": ""},
         )
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             root = Path(directory)

@@ -278,7 +278,12 @@ class IndicatorAdmissionTests(unittest.TestCase):
                 "outcome": "suspected",
             }],
             "supporting_context": [],
-            "likely_noise": [],
+            "likely_noise": [{
+                "item_ids": ["CL-WEB"], "evidence_ids": ["EV-WEB"],
+                "observable_ids": [], "relationship_ids": [],
+                "title": "Failed web probe", "assessment": "The request returned 404.",
+                "limitations": [], "recommended_follow_ups": [],
+            }],
             "possible_activity_narrative": {
                 "item_ids": ["CL-DNS"],
                 "relationship_ids": ["COR-DNS"],
@@ -318,6 +323,39 @@ class IndicatorAdmissionTests(unittest.TestCase):
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["strong_indicators"], [])
         self.assertIn("unknown_evidence_id", rejected["rejection_codes"])
+
+    def test_model_cannot_omit_or_conflict_reportable_items(self):
+        from romulus.reporting.indicator_review import admit_indicator_review
+
+        case = self._case()
+        empty = {
+            "strong_indicators": [], "supporting_context": [], "likely_noise": [],
+            "possible_activity_narrative": {"item_ids": [], "relationship_ids": [],
+                "summary": "", "limitations": []},
+            "recommended_follow_ups": [],
+        }
+        omitted = admit_indicator_review(case, empty)
+        self.assertEqual(omitted["status"], "rejected")
+        self.assertIn("unplaced_report_item", omitted["rejection_codes"])
+
+        dns = next(row for row in case["evidence"] if row["evidence_id"] == "EV-DNS-1")
+        web = next(row for row in case["evidence"] if row["evidence_id"] == "EV-WEB")
+        base_dns = {"item_ids": ["CL-DNS"], "evidence_ids": ["EV-DNS-1"],
+            "observable_ids": [row["observable_id"] for row in dns["observables"]],
+            "relationship_ids": [], "title": "DNS behavior", "assessment": "Review the DNS behavior.",
+            "limitations": [], "recommended_follow_ups": [], "confidence": "moderate", "outcome": "suspected"}
+        conflicted = admit_indicator_review(case, {
+            "strong_indicators": [base_dns], "supporting_context": [],
+            "likely_noise": [{"item_ids": ["CL-DNS", "CL-WEB"],
+                "evidence_ids": ["EV-DNS-1", "EV-WEB"], "observable_ids": [],
+                "relationship_ids": [], "title": "De-prioritized behaviors",
+                "assessment": "The cited records may be lower value.", "limitations": [],
+                "recommended_follow_ups": []}],
+            "possible_activity_narrative": {"item_ids": [], "relationship_ids": [],
+                "summary": "", "limitations": []}, "recommended_follow_ups": [],
+        })
+        self.assertEqual(conflicted["status"], "rejected")
+        self.assertIn("conflicting_item_placement", conflicted["rejection_codes"])
 
     def test_http_404_path_probe_cannot_support_confirmed_download(self):
         from romulus.reporting.indicator_review import admit_indicator_review
@@ -416,7 +454,12 @@ class IndicatorAdmissionTests(unittest.TestCase):
                 "assessment": "Evidence-backed DNS activity.", "limitations": [],
                 "recommended_follow_ups": [], "confidence": "moderate", "outcome": "suspected",
             }],
-            "supporting_context": [], "likely_noise": [],
+            "supporting_context": [], "likely_noise": [{
+                "item_ids": ["CL-WEB"], "evidence_ids": ["EV-WEB"],
+                "observable_ids": [], "relationship_ids": [],
+                "title": "Failed web probe", "assessment": "The request returned 404.",
+                "limitations": [], "recommended_follow_ups": [],
+            }],
             "possible_activity_narrative": {"item_ids": [], "relationship_ids": [], "summary": "", "limitations": []},
             "recommended_follow_ups": [],
         }

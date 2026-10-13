@@ -114,6 +114,13 @@ def admit_indicator_review(case: Mapping[str, Any], proposal: Mapping[str, Any])
             _validate_text_observables(raw, selectors["observable_ids"], indexes, rejection_codes)
             noise.append(_resolve_noise(raw, selectors, indexes))
 
+    strong_placed={value for row in admitted_indicators for value in row.get("item_ids",[])}
+    noise_placed={value for row in noise for value in row.get("item_ids",[])}
+    if strong_placed & noise_placed:
+        rejection_codes.add("conflicting_item_placement")
+    if set(indexes["item"])-strong_placed-noise_placed:
+        rejection_codes.add("unplaced_report_item")
+
     narrative_raw = proposal.get("possible_activity_narrative")
     if isinstance(narrative_raw, Mapping):
         _validate_text_observables(narrative_raw, list(indexes["observable"]), indexes, rejection_codes)
@@ -156,7 +163,7 @@ def deterministic_indicator_review(case: Mapping[str, Any], reason: str) -> dict
             **selectors,
             "title": item.get("title"),
             "assessment": item.get("why_it_matters") or item.get("observation"),
-            "limitations": list(item.get("coverage_gaps", [])) + list(item.get("benign_alternatives", [])),
+            "limitations": [],
             "recommended_follow_ups": item.get("recommended_actions", []),
             "confidence": item.get("confidence"),
             "outcome": "suspected",
@@ -188,7 +195,7 @@ def indicator_review_proposal(review: Mapping[str, Any]) -> dict[str, Any]:
         return {}
 
     def selector_entry(raw: Mapping[str, Any]) -> dict[str, Any]:
-        return {
+        result={
             key: raw.get(
                 key,
                 [] if key.endswith("_ids") or key in {"limitations", "recommended_follow_ups"} else "",
@@ -198,6 +205,11 @@ def indicator_review_proposal(review: Mapping[str, Any]) -> dict[str, Any]:
                 "assessment", "summary", "limitations", "recommended_follow_ups", "confidence", "outcome",
             )
         }
+        if "proposed_limitations" in raw:
+            result["limitations"]=raw.get("proposed_limitations",[])
+        if "proposed_follow_ups" in raw:
+            result["recommended_follow_ups"]=raw.get("proposed_follow_ups",[])
+        return result
 
     narrative = review.get("possible_activity_narrative")
     return {
@@ -371,14 +383,33 @@ def _resolve_indicator(raw, selectors, indexes, outcome):
     times = sorted({str(row.get("observed_at")) for row in evidence if row.get("observed_at")})
     assets = list(dict.fromkeys(str(row.get("asset")) for row in evidence if row.get("asset")))
     title = _text(raw.get("title"), 180) or _text(items[0].get("title"), 180)
+    canonical_limitations=list(dict.fromkeys(
+        [f"Coverage gap: {value}" for item in items for value in item.get("coverage_gaps",[]) if value]
+        +[f"Benign alternative: {value}" for item in items for value in item.get("benign_alternatives",[]) if value]
+    ))
+    canonical_actions=list(dict.fromkeys(
+        value for item in items for value in item.get("recommended_actions",[]) if value
+    ))
     return {
         **selectors,
         "indicator_id": _indicator_id(selectors["item_ids"], selectors["evidence_ids"]),
         "classification": classification,
         "title": title or "Evidence-backed indicator",
+        "observations": list(dict.fromkeys(
+            value for item in items for value in [item.get("observation")] if value
+        )),
+        "why_it_matters": list(dict.fromkeys(
+            value for item in items for value in [item.get("why_it_matters")] if value
+        )),
         "assessment": _text(raw.get("assessment"), _TEXT_LIMIT),
-        "limitations": _bounded_list(raw.get("limitations"), 12, 500),
-        "recommended_follow_ups": _bounded_list(raw.get("recommended_follow_ups"), 12, 500),
+        "proposed_limitations": _bounded_list(raw.get("limitations"), 12, 500),
+        "proposed_follow_ups": _bounded_list(raw.get("recommended_follow_ups"), 12, 500),
+        "limitations": list(dict.fromkeys(
+            _bounded_list(raw.get("limitations"), 12, 500)+canonical_limitations
+        ))[:18],
+        "recommended_follow_ups": list(dict.fromkeys(
+            _bounded_list(raw.get("recommended_follow_ups"), 12, 500)+canonical_actions
+        ))[:18],
         "confidence": confidence,
         "outcome": outcome if outcome in _OUTCOMES else "suspected",
         "artifacts": artifacts,

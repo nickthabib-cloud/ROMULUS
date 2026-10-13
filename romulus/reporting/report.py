@@ -16,11 +16,17 @@ def generate_report(state: dict[str, Any], output_dir: Path) -> list[Path]:
     validate_report_item_evidence(state,report_items)
     if anomaly_expected:
         _validate_anomaly_evidence(state,anomalies)
-    state["report_manifest"]={"generation_stamp":stamp,"anomaly_expected":anomaly_expected}
+    output_dir=Path(output_dir).expanduser().resolve(strict=False)
     output_dir.mkdir(parents=True,exist_ok=True)
+    text_path=output_dir/f"{hid}-{stamp}.txt"; docx_path=output_dir/f"{hid}-{stamp}.docx"
+    intended=[docx_path,text_path]
+    if anomaly_expected:
+        intended.append(output_dir/"anomalous"/f"{hid}-anomalous-leads-{stamp}.txt")
+    _validate_report_paths(output_dir,intended)
+    state["report_manifest"]={"generation_stamp":stamp,"anomaly_expected":anomaly_expected,
+        "report_root":str(output_dir)}
     primary_state=_xml_safe(_primary_report_state(state,report_items))
     anomaly_state=_xml_safe(state)
-    text_path=output_dir/f"{hid}-{stamp}.txt"; docx_path=output_dir/f"{hid}-{stamp}.docx"
     content=_content(primary_state)
     text_path.write_text(content,encoding="utf-8")
     try: _docx(primary_state,docx_path)
@@ -33,6 +39,14 @@ def generate_report(state: dict[str, Any], output_dir: Path) -> list[Path]:
             anomaly_state.get("candidate_leads",[]) or [])),encoding="utf-8")
         paths.append(anomaly_path)
     return paths
+
+
+def _validate_report_paths(report_root: Path, paths: list[Path]) -> None:
+    root=report_root.resolve(strict=False)
+    for path in paths:
+        resolved=path.resolve(strict=False)
+        if resolved==root or root not in resolved.parents:
+            raise ValueError(f"Final report path is outside the configured reports directory: {path}")
 
 
 def _validate_anomaly_evidence(state, candidates):
@@ -558,6 +572,27 @@ def _reasoning_coverage_lines(state):
     lines.append(f"- Availability gaps: {str(gap)[:160] if gap else 'none recorded'}.")
     return lines
 
+
+def _indicator_review_for_report(state, report_items):
+    """Re-admit persisted selectors so a stale briefing cannot bypass evidence checks."""
+    from .indicator_review import (
+        admit_indicator_review, build_indicator_case, deterministic_indicator_review,
+        indicator_review_proposal,
+    )
+
+    case=build_indicator_case(state,report_items)
+    stored=state.get("indicator_review") if isinstance(state.get("indicator_review"),dict) else {}
+    if stored.get("status")=="admitted":
+        admitted=admit_indicator_review(case,indicator_review_proposal(stored))
+        if admitted.get("status")=="admitted":
+            return admitted
+        reason="Persisted indicator selectors no longer match canonical report evidence."
+    elif stored.get("status")=="fallback":
+        reason=str(stored.get("reason") or "The indicator synthesis used deterministic fallback.")
+    else:
+        reason="Indicator synthesis was not available for this report generation."
+    return deterministic_indicator_review(case,reason)
+
 def _docx(s,path):
     from docx import Document
     from docx.shared import Inches,Pt,RGBColor
@@ -622,6 +657,7 @@ def _docx(s,path):
 
     findings=list(s.get("findings",[]) or [])
     report_items=build_report_items(s)
+    indicator_review=_indicator_review_for_report(s,report_items)
     errors=list(s.get("source_errors",[]) or [])
     sampled_outcomes=[item for item in s.get("search_outcomes",[]) or []
         if isinstance(item,dict) and (item.get("capped") or
@@ -656,8 +692,10 @@ def _docx(s,path):
         if event.get("evidence_id") in cited_ids and event.get("asset"): assets.append(str(event["asset"]))
     assets=list(dict.fromkeys(assets))
 
-    actions=[str(value).strip() for item in report_items
-        for value in item.get("recommended_actions",[]) if str(value).strip()]
+    actions=[str(value).strip() for value in indicator_review.get("recommended_follow_ups",[])
+        if str(value).strip()]
+    actions.extend(str(value).strip() for item in indicator_review.get("strong_indicators",[])
+        for value in item.get("recommended_follow_ups",[]) if str(value).strip())
     actions=list(dict.fromkeys(actions))[:6]
     if not actions:
         actions=["Review the hunt scope and retain the report with the investigation record."]
@@ -711,48 +749,76 @@ def _docx(s,path):
         cells=glance.add_row().cells; set_cell_text(cells[0],label,True,navy); set_cell_text(cells[1],value)
     format_table(glance,header=False)
 
-    heading("What We Found")
-    if not report_items:
-        para("No reportable suspicious activity met the finding threshold in the telemetry and time range examined.")
-    for classification,label in (("malicious","Malicious Behavior"),("suspicious","Suspicious Behavior")):
-        doc.add_heading(label,level=2)
-        selected=[item for item in report_items if item.get("classification")==classification]
-        if not selected: para(f"No {classification} report items were recorded.")
-        for item in selected:
-            doc.add_heading(str(item.get("title") or "Evidence-backed behavior"),level=2)
-            meta=doc.add_paragraph(
-                f"{friendly(item.get('classification'))}  •  {friendly(item.get('investigation_status'))}  •  "
-                f"{friendly(item.get('confidence'))} confidence"
-            )
-            meta.runs[0].bold=True; meta.runs[0].font.color.rgb=RGBColor.from_string(blue)
-            para(str(item.get("observation") or "No compact observation was recorded."))
-            para("Why it matters: "+str(item.get("why_it_matters") or "Not recorded."))
-            para("Evidence: "+(_join_text(item.get("evidence_ids")) or "None cited."))
-            para("Assets and time: "+(_join_text(item.get("assets")) or "No assets recorded")+
-                f"; {item.get('first_observed') or 'time unavailable'} through {item.get('last_observed') or 'time unavailable'}.")
-            if item.get("follow_up_results"): para("Follow-up results: "+_join_text(item.get("follow_up_results"),"; "))
-            if item.get("benign_alternatives"): para("Possible benign explanation: "+_join_text(item.get("benign_alternatives"),"; "))
-            if item.get("coverage_gaps"): para("Limitations: "+_join_text(item.get("coverage_gaps"),"; "))
-            if item.get("recommended_actions"): para("Recommended action: "+_join_text(item.get("recommended_actions"),"; "))
+    heading("Strong Indicators")
+    indicators=list(indicator_review.get("strong_indicators",[]) or [])
+    if not indicators:
+        para("No strong evidence-backed indicator was admitted. Review the technical report and any anomalous lead queue for lower-confidence leads.")
+    for number,item in enumerate(indicators,1):
+        doc.add_heading(f"{number}. {item.get('title') or 'Evidence-backed indicator'}",level=2)
+        meta=doc.add_paragraph(
+            f"{friendly(item.get('classification'))}  •  {friendly(item.get('outcome'))}  •  "
+            f"{friendly(item.get('confidence'))} confidence"
+        )
+        meta.runs[0].bold=True; meta.runs[0].font.color.rgb=RGBColor.from_string(blue)
+        observations=_join_text(item.get("observations")," ")
+        para("Observation: "+(observations or "The cited report item was observed in the bounded telemetry."))
+        why=_join_text(item.get("why_it_matters")," ")
+        if why: para("Why it matters: "+why)
+        if item.get("assessment"): para("Analyst assessment: "+str(item.get("assessment")))
+        para("Assets and time: "+(_join_text(item.get("assets")) or "No assets recorded")+
+            f"; {item.get('first_observed') or 'time unavailable'} through {item.get('last_observed') or 'time unavailable'}.")
+        artifacts=list(item.get("artifacts",[]) or [])
+        if artifacts:
+            artifact_table=doc.add_table(rows=1,cols=3); artifact_table.style="Light Shading Accent 1"
+            for column,label in enumerate(("Artifact type","Exact value","Evidence")):
+                set_cell_text(artifact_table.rows[0].cells[column],label,True,white)
+                shade(artifact_table.rows[0].cells[column],navy)
+            mark_header(artifact_table.rows[0])
+            for artifact in artifacts:
+                cells=artifact_table.add_row().cells
+                set_cell_text(cells[0],friendly(artifact.get("type")),True)
+                set_cell_text(cells[1],artifact.get("value"))
+                set_cell_text(cells[2],artifact.get("evidence_id"))
+            format_table(artifact_table)
+        else:
+            para("Artifacts: No structured observable was extracted from the cited record.")
+        para("Evidence: "+(_join_text(item.get("evidence_ids")) or "None cited."))
+        if item.get("limitations"): para("Limitations and alternatives: "+_join_text(item.get("limitations"),"; "))
+        if item.get("recommended_follow_ups"):
+            para("Recommended follow-up: "+_join_text(item.get("recommended_follow_ups"),"; "))
 
-    heading("Hypothesis: Possible Activity Narrative")
-    for line in _activity_narrative_lines(s,report_items):
-        para(line)
+    heading("Supporting Context")
+    context=list(indicator_review.get("supporting_context",[]) or [])
+    if not context: para("No additional admitted supporting context was available.")
+    for item in context:
+        detail=str(item.get("summary") or "Evidence-backed supporting context.")
+        artifacts=_join_text([f"{row.get('type')}={row.get('value')}" for row in item.get("artifacts",[])],"; ")
+        if artifacts: detail+=f" Artifacts: {artifacts}."
+        detail+=f" Evidence: {_join_text(item.get('evidence_ids')) or 'none cited'}."
+        para("• "+detail)
+        if item.get("limitations"): para("  Limitation: "+_join_text(item.get("limitations"),"; "))
 
-    heading("Supported Attack Path")
-    supported_paths=_supported_paths(s)
-    if not supported_paths:
-        para("No evidence-supported multi-record path was derived from the cited findings.")
-    for supported_path in supported_paths:
-        segment=f" — segment {supported_path.get('segment_index',1)} of {supported_path.get('segment_count',1)}" if int(supported_path.get("segment_count") or 1)>1 else ""
-        doc.add_heading(str(supported_path.get("title") or "Evidence-supported activity")+segment,level=2)
-        for step in supported_path.get("steps",[]):
-            entities=_path_entities(step)
-            detail=f"{step.get('sequence')}. {step.get('observed_at') or 'Time unavailable'} — {friendly(step.get('activity_type'))}: {step.get('label')}. Evidence: {_join_text(step.get('evidence_ids'))}."
-            if entities: detail+=f" Entities: {entities}."
-            para(detail)
-        caveats=list(supported_path.get("caveats",[]) or [])+list(supported_path.get("gaps",[]) or [])
-        if caveats: para("Limitations: "+_join_text(caveats," "))
+    heading("Likely Noise or Misclassified Activity")
+    noise=list(indicator_review.get("likely_noise",[]) or [])
+    if not noise: para("No reportable signal was explicitly de-prioritized by the admitted review.")
+    for item in noise:
+        doc.add_heading(str(item.get("title") or "De-prioritized signal"),level=2)
+        para(str(item.get("assessment") or "The cited evidence supports de-prioritization."))
+        artifacts=_join_text([f"{row.get('type')}={row.get('value')}" for row in item.get("artifacts",[])],"; ")
+        if artifacts: para("Artifacts: "+artifacts)
+        para("Evidence: "+(_join_text(item.get("evidence_ids")) or "None cited."))
+        if item.get("limitations"): para("Limitations: "+_join_text(item.get("limitations"),"; "))
+
+    heading("Possible Activity Narrative")
+    narrative=indicator_review.get("possible_activity_narrative",{}) or {}
+    para("This is an unconfirmed investigative hypothesis built from admitted report items and relationships. It is not a confirmed attack path.")
+    para(str(narrative.get("summary") or "No coherent activity narrative was supported by the admitted evidence."))
+    if narrative.get("item_ids"): para("Included indicators: "+_join_text(narrative.get("item_ids")))
+    if narrative.get("relationship_ids"): para("Supporting relationships: "+_join_text(narrative.get("relationship_ids")))
+    if narrative.get("limitations"): para("Narrative limitations: "+_join_text(narrative.get("limitations"),"; "))
+
+    heading("Recommended Follow-ups")
+    for index,action in enumerate(actions,1): para(f"{index}. {action}")
 
     heading("Scope and Coverage")
     scope=doc.add_table(rows=1,cols=2); scope.style="Light Shading Accent 1"; scope.alignment=WD_TABLE_ALIGNMENT.CENTER
@@ -788,16 +854,6 @@ def _docx(s,path):
         para(f"Technique names are mapped to MITRE ATT&CK {ATTACK_RELEASE} ({ATTACK_RELEASE_DATE}).")
     else:
         para("No supported finding was mapped to a MITRE ATT&CK technique.")
-
-    assessment_heading=heading("Assessment and Confidence"); assessment_heading.paragraph_format.page_break_before=True
-    para(f"Overall assessment: {verdict}. Overall confidence: {overall_confidence.title()}.")
-    confidence_bases=[str(item.get("why_it_matters") or "").strip() for item in report_items]
-    confidence_bases=[item for item in confidence_bases if item]
-    if confidence_bases: para("Confidence basis: "+" ".join(confidence_bases))
-    para("Malicious classification is limited to the strict trusted-indicator admission gate. Analyst validation is still required before containment or remediation.")
-
-    heading("Recommended Actions")
-    for index,action in enumerate(actions,1): para(f"{index}. {action}")
 
     divider=doc.add_paragraph(); divider.paragraph_format.space_before=Pt(12)
     run=divider.add_run("Technical record"); run.bold=True; run.font.color.rgb=RGBColor.from_string(blue)

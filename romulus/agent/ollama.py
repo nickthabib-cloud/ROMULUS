@@ -67,6 +67,8 @@ class Ollama:
             "preselected attack story. Group duplicate sensor views of the same behavior. Separate observed facts from bounded "
             "interpretation, and use likely_noise for contradicted, benign, or low-value signals. Response status and surrounding "
             "evidence override keyword resemblance: a tool-like path with a failed response does not prove download or execution. "
+            "Place every visible report item exactly once in either strong_indicators or likely_noise; supporting_context may cite "
+            "those items but does not replace that placement. "
             "Select only enumerated item, evidence, observable, and relationship IDs. Never invent or copy a new artifact value, "
             "entity, relationship, classification, success claim, or confirmed attack path. strong_indicators are evidence-backed "
             "behaviors analysts should review; supporting_context helps connect them without asserting causality; likely_noise "

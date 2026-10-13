@@ -351,13 +351,17 @@ class CustomerWordReportTests(unittest.TestCase):
             document = Document(next(path for path in paths if path.suffix == ".docx"))
             docx_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
 
+        self.assertIn("Hypothesis: Possible Activity Narrative", text)
         for output in (text, docx_text):
-            self.assertIn("Hypothesis: Possible Activity Narrative", output)
             self.assertIn("unconfirmed investigative hypothesis", output)
             self.assertIn("not a confirmed attack path", output)
-            self.assertIn("F-001 (Suspicious PowerShell execution)", output)
-            self.assertIn("CL-UNCONNECTED (Separate authentication behavior)", output)
-            self.assertIn("A single item cannot establish an attack path.", output)
+        for expected in ("F-001 (Suspicious PowerShell execution)",
+                         "CL-UNCONNECTED (Separate authentication behavior)",
+                         "A single item cannot establish an attack path."):
+            self.assertIn(expected, text)
+        self.assertIn("Possible Activity Narrative", docx_text)
+        self.assertIn("Suspicious PowerShell execution", docx_text)
+        self.assertIn("Separate authentication behavior", docx_text)
 
     def test_report_revalidates_persisted_narrative_selectors_fail_closed(self):
         from docx import Document
@@ -388,9 +392,11 @@ class CustomerWordReportTests(unittest.TestCase):
             document = Document(next(path for path in paths if path.suffix == ".docx"))
             docx_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
 
+        self.assertIn("No coherent activity narrative is supported", text)
+        self.assertIn("F-001 (Suspicious PowerShell execution)", text)
+        self.assertIn("No model-synthesized activity narrative was available", docx_text)
+        self.assertIn("Suspicious PowerShell execution", docx_text)
         for output in (text, docx_text):
-            self.assertIn("No coherent activity narrative is supported", output)
-            self.assertIn("F-001 (Suspicious PowerShell execution)", output)
             for forbidden in (
                 "NARRATIVE-UNKNOWN-ITEM", "NARRATIVE-UNKNOWN-RELATIONSHIP",
                 "NARRATIVE-UNKNOWN-EVIDENCE", "NARRATIVE-UNTRUSTED-PROSE",
@@ -673,13 +679,15 @@ class CustomerWordReportTests(unittest.TestCase):
             for expected in (
                 "Assessment at a Glance",
                 "Executive Summary",
-                "What We Found",
+                "Strong Indicators",
+                "Supporting Context",
+                "Likely Noise or Misclassified Activity",
+                "Possible Activity Narrative",
                 "Scope and Coverage",
                 "MITRE ATT&CK Context",
-                "Recommended Actions",
+                "Recommended Follow-ups",
                 "Suspicious PowerShell execution",
                 "WS-17",
-                "Supported Attack Path",
                 "EV-RAW-001",
                 "incomplete, nonrepresentative bounded retrieval",
             ):
@@ -728,6 +736,112 @@ class CustomerWordReportTests(unittest.TestCase):
             self.assertNotIn("3. Validate with the asset owner.", word_text)
             self.assertIn("uncited raw evidence", technical_text)
             self.assertNotIn("complete raw evidence remains in SQLite", technical_text)
+
+    def test_word_renders_admitted_indicator_brief_with_exact_artifacts_and_keeps_txt_exhaustive(self):
+        from docx import Document
+        from romulus.reporting.indicator_review import admit_indicator_review, build_indicator_case
+        from romulus.reporting.report import generate_report
+        from romulus.reporting.report_items import build_report_items
+
+        state = self._state()
+        state["host"][0]["observation"] = (
+            "WS-17 ran an encoded command and queried transfer.example for payroll.xlsx."
+        )
+        state["host"][0]["raw"] = {
+            "process.command_line": "powershell.exe -enc QUJD",
+            "process.name": "powershell.exe",
+            "dns.question.name": "transfer.example",
+            "file.name": "payroll.xlsx",
+            "source.ip": "10.10.10.17",
+        }
+        state["candidate_leads"].append({
+            "candidate_id": "CL-WEB", "title": "Download followed by execution",
+            "description": "A tool-like web path was requested.",
+            "classification": "suspicious", "classification_reason": "A keyword analytic matched.",
+            "investigation_status": "follow_up_exhausted", "kind": "behavior",
+            "evidence_ids": ["EV-WEB"], "finding_ids": [],
+            "benign_explanations": ["Directory enumeration."],
+            "follow_up": ["Review adjacent web requests."],
+        })
+        state["host"].append({
+            "evidence_id": "EV-WEB", "source": "elasticsearch", "asset": "web-01",
+            "observed_at": "2026-10-10T12:05:00Z",
+            "observation": "GET /wget returned 404 during directory enumeration.",
+            "raw": {"http.uri": "/wget", "http.status_code": 404,
+                    "source.ip": "10.10.10.18"},
+        })
+        report_items = build_report_items(state)
+        case = build_indicator_case(state, report_items)
+        strong_item = next(row for row in case["items"] if row["item_id"] == "F-001")
+        strong_evidence = next(row for row in case["evidence"] if row["evidence_id"] == "EV-RAW-001")
+        noise_evidence = next(row for row in case["evidence"] if row["evidence_id"] == "EV-WEB")
+        state["indicator_review"] = admit_indicator_review(case, {
+            "strong_indicators": [{
+                "item_ids": [strong_item["item_id"]], "evidence_ids": ["EV-RAW-001"],
+                "observable_ids": [row["observable_id"] for row in strong_evidence["observables"]],
+                "relationship_ids": [], "title": "Encoded script execution with DNS activity",
+                "assessment": "The combined process and DNS behavior warrants immediate analyst review.",
+                "limitations": ["Process ancestry was not available."],
+                "recommended_follow_ups": ["Validate the command with the asset owner."],
+                "confidence": "high", "outcome": "suspected",
+            }],
+            "supporting_context": [{
+                "item_ids": [strong_item["item_id"]], "evidence_ids": ["EV-RAW-001"],
+                "observable_ids": [row["observable_id"] for row in strong_evidence["observables"]],
+                "relationship_ids": [],
+                "assessment": "The command, host, file reference, and DNS name appear in one canonical record.",
+                "limitations": ["No second sensor corroborated the record."],
+            }],
+            "likely_noise": [{
+                "item_ids": ["CL-WEB"], "evidence_ids": ["EV-WEB"],
+                "observable_ids": [row["observable_id"] for row in noise_evidence["observables"]],
+                "relationship_ids": [], "title": "Failed tool-like web path probe",
+                "assessment": "The 404 response supports enumeration, not successful download or execution.",
+                "limitations": [], "recommended_follow_ups": ["Review adjacent requests if needed."],
+            }],
+            "possible_activity_narrative": {
+                "item_ids": [strong_item["item_id"]], "relationship_ids": [],
+                "summary": "One suspicious execution and DNS activity cluster may warrant a focused follow-up.",
+                "limitations": ["A single record does not establish a complete attack path."],
+            },
+            "recommended_follow_ups": ["Validate the encoded command and originating account."],
+        })
+        self.assertEqual(state["indicator_review"]["status"], "admitted")
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            report_root = Path(directory) / "reports"
+            paths = generate_report(state, report_root)
+            document = Document(next(path for path in paths if path.suffix == ".docx"))
+            word_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            word_text += "\n" + "\n".join(
+                cell.text for table in document.tables for row in table.rows for cell in row.cells
+            )
+            technical_text = next(path for path in paths if path.suffix == ".txt").read_text(encoding="utf-8")
+
+        for heading in ("Strong Indicators", "Supporting Context",
+                        "Likely Noise or Misclassified Activity", "Possible Activity Narrative",
+                        "Recommended Follow-ups"):
+            self.assertIn(heading, word_text)
+        for artifact in ("powershell.exe -enc QUJD", "transfer.example", "payroll.xlsx",
+                         "10.10.10.17", "/wget", "404", "EV-RAW-001", "EV-WEB"):
+            self.assertIn(artifact, word_text)
+        self.assertIn("supports enumeration, not successful download or execution", word_text)
+        self.assertNotIn("What We Found", word_text)
+        self.assertNotIn("Follow-up results:", word_text)
+        self.assertIn("SUSPICIOUS BEHAVIOR", technical_text)
+        self.assertIn("TECHNICAL CANDIDATE WORKING LIST", technical_text)
+
+    def test_generated_manifest_and_every_report_path_stay_under_supplied_reports_root(self):
+        from romulus.reporting.report import generate_report
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            report_root = Path(directory) / "reports"
+            state = self._state()
+            paths = generate_report(state, report_root)
+            resolved_root = report_root.resolve()
+
+            self.assertEqual(Path(state["report_manifest"]["report_root"]), resolved_root)
+            self.assertTrue(all(resolved_root in path.resolve().parents for path in paths))
 
     def test_word_identifies_successful_stratified_sampling_as_representative(self):
         try:
