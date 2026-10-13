@@ -295,6 +295,66 @@ class CustomerWordReportTests(unittest.TestCase):
         self.assertNotIn("LOW-PRIORITY-INTERNAL-SENTINEL", primary)
         self.assertIn("LOW-PRIORITY-INTERNAL-SENTINEL", technical)
 
+    def test_possible_activity_narrative_is_clearly_hypothetical_and_keeps_unconnected_items(self):
+        from docx import Document
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        state["activity_narrative"] = {
+            "version": 1, "status": "admitted", "no_coherent_narrative": False,
+            "clusters": [{
+                "cluster_id": "NC-01", "item_ids": ["F-001"],
+                "relationship_ids": [], "evidence_ids": ["EV-RAW-001"],
+                "possible_sequence": ["F-001"],
+                "narrative": "The accepted execution behavior may represent one stage of possible activity.",
+                "confidence": "low", "alternate_explanations": ["Authorized administration."],
+                "missing_evidence": ["No later activity was available."],
+            }],
+            "unconnected_item_ids": ["CL-UNCONNECTED"],
+            "limitations": ["A single item cannot establish an attack path."],
+        }
+        state["candidate_leads"].append({
+            "candidate_id": "CL-UNCONNECTED", "classification": "suspicious",
+            "investigation_status": "new", "title": "Separate authentication behavior",
+            "description": "An unusual but reportable authentication sequence was observed.",
+            "classification_reason": "A reviewed authentication behavior matched.",
+            "evidence_ids": ["EV-AUTH"], "finding_ids": [],
+        })
+        state["host"].append({
+            "evidence_id": "EV-AUTH", "source": "elasticsearch", "asset": "WS-21",
+            "observed_at": "2026-10-10T15:00:00Z", "observation": "Separate authentication sequence.",
+        })
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths = generate_report(state, Path(directory))
+            text = next(path for path in paths if path.suffix == ".txt" and path.parent.name != "anomalous").read_text(encoding="utf-8")
+            document = Document(next(path for path in paths if path.suffix == ".docx"))
+            docx_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+        for output in (text, docx_text):
+            self.assertIn("Hypothesis: Possible Activity Narrative", output)
+            self.assertIn("unconfirmed investigative hypothesis", output)
+            self.assertIn("not a confirmed attack path", output)
+            self.assertIn("F-001 (Suspicious PowerShell execution)", output)
+            self.assertIn("CL-UNCONNECTED (Separate authentication behavior)", output)
+            self.assertIn("A single item cannot establish an attack path.", output)
+
+    def test_unavailable_narrative_does_not_hide_factual_behavior(self):
+        from romulus.reporting.report import _content
+
+        state = self._state()
+        state["activity_narrative"] = {
+            "version": 1, "status": "unavailable", "no_coherent_narrative": True,
+            "clusters": [], "unconnected_item_ids": ["F-001"], "limitations": [],
+            "reason": "The narrative model was unavailable.",
+        }
+
+        text = _content(state)
+
+        self.assertIn("Suspicious PowerShell execution", text)
+        self.assertIn("No coherent activity narrative is supported", text)
+        self.assertIn("F-001 (Suspicious PowerShell execution)", text)
+
     def test_finalized_anomaly_report_is_separate_bounded_and_analyst_readable(self):
         from romulus.reporting.report import generate_report
 

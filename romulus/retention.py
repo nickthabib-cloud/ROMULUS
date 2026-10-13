@@ -198,7 +198,7 @@ def _compact_state(state: dict[str, Any], retained_ids: set[str]) -> dict[str, A
     keys=(
         "hunt_id","objective","status","outcome","termination_reason","mission_mode","mode","retention_policy",
         "started_at","resumed_at","finished_at","duration_ms","summary","report_paths",
-        "report_manifest","tool_calls","depth",
+        "report_manifest","activity_narrative","tool_calls","depth",
     )
     compact={key:deepcopy(state[key]) for key in keys if key in state}
     compact["manifest_version"]=1
@@ -221,6 +221,7 @@ def _compact_coverage(coverage: Any) -> dict[str, Any]:
         "coverage_closure_ready","tool_calls_used","tool_call_limit","depth_used","depth_limit",
         "minimum_reasoning_rounds","termination_reason","behavior_candidates","analyst_model",
         "progress_summary","max_stagnant_cycles","stagnant_cycles","reasoning_summary",
+        "activity_narrative",
     )
     return {key:deepcopy(coverage[key]) for key in keys if key in coverage}
 

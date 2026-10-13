@@ -178,6 +178,7 @@ class CoreTests(unittest.TestCase):
             "Hunt PowerShell",[{"hypothesis_id":"H1","title":"PowerShell execution"}],[],
             {"elasticsearch":["process.name"]},1)
         self.assertEqual(searches[0]["intent"],"Find PowerShell execution")
+
         schema=planning_session.payload["format"]
         self.assertEqual(schema["properties"]["searches"]["items"]["properties"]["source"]["enum"],["elasticsearch"])
         self.assertIn("candidate_id",schema["properties"]["searches"]["items"]["properties"])
@@ -205,6 +206,24 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(reason_schema["properties"]["new_hypotheses"]["maxItems"],0)
         finding_schema=reason_schema["properties"]["findings"]["items"]
         self.assertIn("hypothesis_id",finding_schema["required"])
+
+    def test_activity_narrative_output_contract_exposes_only_visible_identifiers(self):
+        case = {
+            "items": [{"item_id": "ITEM-1"}],
+            "evidence": [{"evidence_id": "EV-1"}],
+            "relationships": [{"relationship_id": "REL-1"}],
+        }
+        with _ollama_module() as module:
+            schema = module._activity_narrative_schema(case)
+
+        cluster = schema["properties"]["clusters"]["items"]
+        properties = cluster["properties"]
+        self.assertEqual(properties["item_ids"]["items"]["enum"], ["ITEM-1"])
+        self.assertEqual(properties["evidence_ids"]["items"]["enum"], ["EV-1"])
+        self.assertEqual(properties["relationship_ids"]["items"]["enum"], ["REL-1"])
+        self.assertFalse(cluster["additionalProperties"])
+        self.assertFalse(schema["additionalProperties"])
+
     def test_investigator_schema_allows_three_grounded_competing_hypotheses_with_falsifiers(self):
         with _ollama_module() as module:
             schema=module._investigator_schema(["elasticsearch","arkime"],["H-EXISTING"],3,3)

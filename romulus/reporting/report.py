@@ -119,6 +119,49 @@ def _report_item_lines(item):
     return lines
 
 
+def _activity_narrative_lines(state, report_items):
+    """Render admitted interpretation while resolving all facts from canonical report data."""
+    from ..investigation.narrative import build_narrative_case
+
+    narrative=state.get("activity_narrative") if isinstance(state.get("activity_narrative"),dict) else {}
+    item_index={str(item.get("item_id")):item for item in report_items if item.get("item_id")}
+    case=build_narrative_case(state,report_items)
+    relationship_index={str(row.get("relationship_id")):row for row in case.get("relationships",[])}
+    lines=[
+        "This section is an unconfirmed investigative hypothesis built only from accepted report items and admitted relationships. It is not a confirmed attack path.",
+    ]
+    if not narrative or narrative.get("no_coherent_narrative") or not narrative.get("clusters"):
+        reason=_bounded_text(narrative.get("reason"),240) if narrative else "Narrative synthesis was not available."
+        lines.append("No coherent activity narrative is supported by the visible evidence. "+(reason or ""))
+    for cluster in narrative.get("clusters",[]) or []:
+        cluster_id=str(cluster.get("cluster_id") or "possible cluster")
+        lines.append(f"- {cluster_id} [{cluster.get('confidence') or 'not assessed'} confidence]: {_bounded_text(cluster.get('narrative'),800)}")
+        sequence=[]
+        for item_id in cluster.get("possible_sequence",[]) or []:
+            item=item_index.get(str(item_id),{})
+            sequence.append(f"{item_id} ({_bounded_text(item.get('title'),200) or 'accepted report item'})")
+        lines.append("  Possible sequence: "+(" → ".join(sequence) or "not proposed"))
+        lines.append("  Supporting evidence: "+(_join_text(cluster.get("evidence_ids")) or "none"))
+        for relationship_id in cluster.get("relationship_ids",[]) or []:
+            relationship=relationship_index.get(str(relationship_id),{})
+            lines.append(
+                f"  Relationship {relationship_id}: {_bounded_text(relationship.get('basis'),200) or 'admitted relationship'}; "
+                f"items={_join_text(relationship.get('item_ids'))}; caveat={_bounded_text(relationship.get('caveat'),300) or 'does not prove causality'}."
+            )
+        alternatives=_join_text(cluster.get("alternate_explanations"),"; ")
+        missing=_join_text(cluster.get("missing_evidence"),"; ")
+        if alternatives: lines.append("  Alternate explanations: "+alternatives)
+        if missing: lines.append("  Missing evidence: "+missing)
+    unconnected=[]
+    for item_id in narrative.get("unconnected_item_ids",[]) or []:
+        item=item_index.get(str(item_id),{})
+        unconnected.append(f"{item_id} ({_bounded_text(item.get('title'),200) or 'accepted report item'})")
+    lines.append("Unconnected report items: "+(_join_text(unconnected,"; ") or "none"))
+    limitations=_join_text(narrative.get("limitations"),"; ")
+    if limitations: lines.append("Narrative limitations: "+limitations)
+    return lines
+
+
 def _anomaly_content(state, candidates):
     hunt_id=str(state.get("hunt_id") or "UNKNOWN")
     coverage=state.get("coverage",{}) if isinstance(state.get("coverage"),dict) else {}
@@ -318,6 +361,8 @@ def _content(s):
             lines.append(f"No {classification} report items were recorded.")
         for item in selected:
             lines += _report_item_lines(item)
+    lines += ["", "Hypothesis: Possible Activity Narrative"]
+    lines += _activity_narrative_lines(s,report_items)
     paths=_supported_paths(s)
     lines += ["", "SUPPORTED ATTACK PATHS"]
     if not paths: lines.append("No evidence-supported multi-record path was derived from the cited findings.")
@@ -570,6 +615,10 @@ def _docx(s,path):
             if item.get("benign_alternatives"): para("Possible benign explanation: "+_join_text(item.get("benign_alternatives"),"; "))
             if item.get("coverage_gaps"): para("Limitations: "+_join_text(item.get("coverage_gaps"),"; "))
             if item.get("recommended_actions"): para("Recommended action: "+_join_text(item.get("recommended_actions"),"; "))
+
+    heading("Hypothesis: Possible Activity Narrative")
+    for line in _activity_narrative_lines(s,report_items):
+        para(line)
 
     heading("Supported Attack Path")
     supported_paths=_supported_paths(s)

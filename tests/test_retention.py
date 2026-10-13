@@ -45,6 +45,39 @@ class RetentionTests(unittest.TestCase):
 
         self.assertNotIn("reasoning_summary", compacted["coverage"])
 
+    def test_compact_state_preserves_only_admitted_narrative_and_bounded_coverage_summary(self):
+        from romulus.retention import _compact_state
+
+        state = self._state([])
+        state["activity_narrative"] = {
+            "version": 1, "status": "admitted", "no_coherent_narrative": False,
+            "clusters": [{
+                "cluster_id": "NC-01", "item_ids": ["CL-ONE"],
+                "relationship_ids": [], "evidence_ids": ["EV-KEEP"],
+                "possible_sequence": ["CL-ONE"], "narrative": "One possible activity stage.",
+                "confidence": "low", "alternate_explanations": ["Administration."],
+                "missing_evidence": ["No adjacent records."],
+            }],
+            "unconnected_item_ids": [], "limitations": [],
+        }
+        state["coverage"]["activity_narrative"] = {
+            "status": "admitted", "model_calls": 1, "clusters": 1,
+            "unconnected_items": 0, "no_coherent_narrative": False,
+        }
+        state["narrative_case_file"] = {"raw": "PRIVATE-CASE-PAYLOAD"}
+        state["narrative_model_response"] = {"raw": "PRIVATE-MODEL-PAYLOAD"}
+
+        compacted = _compact_state(state, {"EV-KEEP"})
+
+        self.assertEqual(compacted["activity_narrative"], state["activity_narrative"])
+        self.assertEqual(
+            compacted["coverage"]["activity_narrative"],
+            state["coverage"]["activity_narrative"],
+        )
+        serialized = json.dumps(compacted, sort_keys=True)
+        self.assertNotIn("PRIVATE-CASE-PAYLOAD", serialized)
+        self.assertNotIn("PRIVATE-MODEL-PAYLOAD", serialized)
+
     def test_compact_scheduler_summary_does_not_resolve_short_result(self):
         from romulus.retention import _scheduler_summary
 

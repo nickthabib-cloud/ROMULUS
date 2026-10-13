@@ -118,6 +118,7 @@ class HuntState(TypedDict, total=False):
     candidate_leads: list[dict]; behavior_catalog_status: dict
     pivot_results: list[dict]
     investigation_graph: dict
+    activity_narrative: dict
     progress_baseline: dict; progress_history: list[dict]; progress_totals: dict; stagnant_cycles: int
     retention_policy: str
 
@@ -1850,6 +1851,52 @@ class HuntEngine:
             {"task_id":task["task_id"],"returned":recorded.get("returned_total",0)})
         return self._save(s)
 
+    def _activity_narrative(self,s):
+        """Run one bounded narrative synthesis without granting model authority over facts."""
+        from ..reporting.report_items import build_report_items
+        from .narrative import (
+            admit_activity_narrative, build_narrative_case, unavailable_activity_narrative,
+        )
+
+        items=build_report_items(s)
+        case=build_narrative_case(s,items)
+        attempted=False
+        if not items:
+            narrative=unavailable_activity_narrative(items,"No reportable behavior was available for narrative synthesis.")
+        elif not case.get("evidence"):
+            narrative=unavailable_activity_narrative(items,"No visible owned evidence was available for narrative synthesis.")
+        elif not self.use_ollama:
+            narrative=unavailable_activity_narrative(items,"The narrative model was disabled.")
+        elif self.offline:
+            narrative=unavailable_activity_narrative(items,"External model calls are disabled in offline mode.")
+        elif (s.get("tool_calls",0)>=self.settings.max_tool_calls or
+                time.time()-s.get("started_epoch",time.time())>=self.settings.max_runtime_seconds):
+            narrative=unavailable_activity_narrative(items,"No model-call capacity remained at report finalization.")
+        else:
+            from ..agent.ollama import Ollama
+            attempted=True
+            proposal=self._call(s,"ollama.api.chat","activity_narrative",
+                {"report_items":len(case.get("items",[])),
+                 "visible_evidence":len(case.get("evidence",[])),
+                 "admitted_relationships":len(case.get("relationships",[]))},
+                "bounded accepted report items and visible owned evidence",
+                lambda:Ollama(self.settings).synthesize_activity_narrative(case),
+                lambda result:len(result.get("clusters",[])) if isinstance(result,dict) else 0)
+            narrative=(admit_activity_narrative(case,proposal) if isinstance(proposal,dict)
+                else unavailable_activity_narrative(items,"Narrative synthesis was unavailable or failed."))
+        s["activity_narrative"]=narrative
+        coverage=s.setdefault("coverage",{})
+        coverage["activity_narrative"]={
+            "status":narrative.get("status","unavailable"),
+            "model_calls":1 if attempted else 0,
+            "clusters":len(narrative.get("clusters",[])),
+            "unconnected_items":len(narrative.get("unconnected_item_ids",[])),
+            "no_coherent_narrative":bool(narrative.get("no_coherent_narrative",True)),
+        }
+        if narrative.get("reason"):
+            coverage["activity_narrative"]["reason"]=str(narrative["reason"])[:240]
+        return narrative
+
     def _report(self,s):
         pending=[task for task in s.get("search_tasks",{}).values()
             if task.get("status") in {"queued","interrupted"}]
@@ -1930,6 +1977,7 @@ class HuntEngine:
         s["coverage"]["source_error_count"]=len(errors)
         s["coverage"]["coverage_closure_ready"]=coverage_closure_ready
         _attach_finding_paths(s)
+        self._activity_narrative(s)
         try:
             from ..reporting.report import generate_report
             s["report_paths"]=[str(p) for p in generate_report(s,self.settings.reports_dir)]
