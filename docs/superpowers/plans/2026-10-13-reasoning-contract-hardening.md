@@ -28,7 +28,7 @@
 
 - [x] Run focused reasoning, admission, scheduler-execution, reporting, and retention regressions plus the complete local suite, `compileall`, and `git diff --check`.
 - [x] Complete fresh whole-diff review focused on hallucination resistance, ID determinism, truncation handling, critic coverage, and state/accounting behavior.
-- [ ] Archive the exact candidate, match its digest on the VM, run the dependency-complete suite and configured `doctor`, then execute a generic synthetic investigator/critic contract probe against the configured model. Do not launch a hunt or use oracle facts.
+- [x] Archive the exact candidate, match its digest on the VM, run the dependency-complete suite and configured `doctor`, then execute a generic synthetic investigator/critic contract probe against the configured model. Do not launch a hunt or use oracle facts.
 - [ ] Record proof in `VALIDATION.md`, clean disposable artifacts, commit, push, and open a stacked PR against `codex/retrieval-contract-hardening`.
 
 **Next milestone:** Improve generic candidate promotion and correlation/path construction only after the reasoning pair proves reliable. Retrieval and structured-contract changes remain isolated so later hunt results can be attributed honestly.
