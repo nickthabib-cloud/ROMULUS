@@ -4,6 +4,17 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 
 ## Unreleased
 
+### Evidence-grounded investigator and critic
+
+- Added a bounded, deterministic case file that exposes only prioritized telemetry-backed candidates, their cited evidence, factual path context, exact scheduler outcomes, and coverage gaps to model reasoning.
+- Split reasoning into an investigator proposal pass and an independent critic pass over the same case. Neither response mutates hunt state; code admits only critic-approved items whose identifiers, citations, entities, mappings, anchors, source fields, query constraints, and execution identity validate.
+- Permitted evidence-grounded competing hypotheses only after a lead exists and only when an approved discriminating search creates a new scheduler task. Undirected candidate-free hunts still make no model call and create no hypothesis.
+- Reserved two external-call slots before starting the pair, discarded investigator output when the critic failed, kept model priority fields out of scheduler order, and made duplicate or invalid searches incapable of committing an orphan hypothesis.
+- Added technical-only aggregate reasoning coverage for calls, admissions, rejections, rejection reasons, and availability gaps. Customer Word reports omit case files, proposals, critic payloads, identifiers, and internal role terminology.
+- Extended report-gated compact retention to keep only the aggregate reasoning summary while removing the detailed reasoning history and complete investigator/critic working payloads.
+- Added synthetic adversarial tests without embedding knowledge from the newly authorized Russell Mitchell holdout. That telemetry remains reserved for the next blind read-only evaluation milestone.
+- Final review made candidate ownership authoritative for existing-hypothesis searches, rejected explicit entities not present in cited evidence or deterministic scope, prevented scope-free directed hypotheses from being supported by unrelated records, required findings to inherit the validated hypothesis mapping, and made reasoning admission an all-or-nothing state commit with current-cycle scheduler metadata.
+
 ### Adaptive evidence-grounded stopping
 
 - Replaced duplicated post-analysis/post-reasoning branches with one deterministic router. Critical/high searches retain priority, grounded reasoning runs before lower-value breadth, the last external-call slot remains available for queued telemetry work, and model `continue_investigation` advice cannot override the measured frontier.

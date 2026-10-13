@@ -134,6 +134,76 @@ class CustomerWordReportTests(unittest.TestCase):
             "source_errors": [],
         }
 
+    def test_technical_report_records_reasoning_admission_and_critic_gap_aggregates(self):
+        from romulus.reporting.report import _content
+
+        state = self._state()
+        state["coverage"]["reasoning_summary"] = {
+            "investigator_calls": 3, "critic_calls": 2, "unavailable_passes": 1,
+            "proposed_hypotheses": 4, "admitted_hypotheses": 1, "rejected_hypotheses": 3,
+            "proposed_assessments": 3, "admitted_assessments": 2, "rejected_assessments": 1,
+            "proposed_searches": 5, "admitted_searches": 2, "rejected_searches": 3,
+            "proposed_findings": 2, "admitted_findings": 1, "rejected_findings": 1,
+            "last_gap": "critic_unavailable",
+        }
+        state["reasoning_history"] = [{
+            "stage": "analyst_reasoning", "basis": "grounded review", "round": 1,
+            "grounded_reasoning": {
+                "case_file": {"private": "CASE-FILE-PAYLOAD-SENTINEL"},
+                "investigator": {"proposal_id": "PROPOSAL-PAYLOAD-SENTINEL"},
+                "critic": {"reviews": ["CRITIC-PAYLOAD-SENTINEL"]},
+                "admission": {"rejections": [
+                    {"proposal_id": "P-HIDDEN-1", "reason_codes": ["critic_not_approved"]},
+                    {"proposal_id": "P-HIDDEN-2", "reason_codes": ["missing_anchor", "critic_not_approved"]},
+                ]},
+            },
+        }]
+
+        technical_text = _content(state)
+
+        self.assertIn("INVESTIGATOR AND CRITIC COVERAGE", technical_text)
+        self.assertIn("investigator=3; critic=2; unavailable passes=1", technical_text)
+        self.assertIn("Hypotheses: proposed=4; admitted=1; rejected=3", technical_text)
+        self.assertIn("Searches: proposed=5; admitted=2; rejected=3", technical_text)
+        self.assertIn("critic_not_approved=2", technical_text)
+        self.assertIn("missing_anchor=1", technical_text)
+        self.assertIn("Availability gaps: critic_unavailable", technical_text)
+        for internal in ("P-HIDDEN-1", "CASE-FILE-PAYLOAD-SENTINEL",
+                "PROPOSAL-PAYLOAD-SENTINEL", "CRITIC-PAYLOAD-SENTINEL"):
+            self.assertNotIn(internal, technical_text)
+
+    def test_customer_report_omits_case_file_proposal_and_critic_internals(self):
+        try:
+            from docx import Document
+        except ImportError:
+            self.skipTest("Install requirements.txt for Word report verification")
+        from romulus.reporting.report import generate_report
+
+        state = self._state()
+        state["coverage"]["reasoning_summary"] = {
+            "investigator_calls": 1, "critic_calls": 1,
+            "proposed_searches": 1, "admitted_searches": 0, "rejected_searches": 1,
+        }
+        state["reasoning_history"].append({"stage": "analyst_reasoning",
+            "grounded_reasoning": {
+                "case_file": {"private": "CUSTOMER-CASE-FILE-SENTINEL"},
+                "investigator": {"proposal_id": "CUSTOMER-PROPOSAL-SENTINEL"},
+                "critic": {"reviews": ["CUSTOMER-CRITIC-SENTINEL"]},
+            }})
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            paths = generate_report(state, Path(directory))
+            document = Document(next(path for path in paths if path.suffix == ".docx"))
+            word_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            word_text += "\n" + "\n".join(
+                cell.text for table in document.tables for row in table.rows for cell in row.cells
+            )
+
+        for internal in ("INVESTIGATOR AND CRITIC COVERAGE", "investigator_calls",
+                "CUSTOMER-CASE-FILE-SENTINEL", "CUSTOMER-PROPOSAL-SENTINEL",
+                "CUSTOMER-CRITIC-SENTINEL"):
+            self.assertNotIn(internal, word_text)
+
     def test_word_is_concise_customer_report_and_text_keeps_technical_record(self):
         try:
             from docx import Document

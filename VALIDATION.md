@@ -2,6 +2,37 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-13 — evidence-grounded investigator and critic (local/VM proof; holdout remains blind)
+
+### Implemented behavior
+
+- Undirected candidate-free hunts still create no hypothesis and make no model call. Once a telemetry-backed lead exists, ROMULUS builds a bounded case file containing only visible candidates, their owned evidence, factual path context, exact search outcomes, and coverage gaps.
+- The investigator and critic are separate structured model calls over the same case. Neither response changes hunt state directly. Deterministic admission requires a known critic decision and validates proposal identifiers, evidence/candidate ownership, entity overlap, ATT&CK ownership, falsifiers and benign alternatives, search anchors, source fields, and query constraints.
+- A competing model hypothesis is committed only when an approved discriminating search creates a new scheduler task. Invalid or duplicate searches cannot commit an orphan hypothesis. Model priority fields cannot change scheduler order.
+- ROMULUS reserves capacity for both calls before starting the pair. Investigator output is discarded when the critic is unavailable, and deterministic candidate work continues.
+- The technical text report records aggregate calls, admissions, rejections, rejection reasons, and availability gaps without raw case files, proposal identifiers, prompts, query bodies, or critic payloads. The customer Word report contains only customer-facing findings and coverage.
+- Compact retention preserves `coverage.reasoning_summary` when it exists while removing detailed reasoning history and all case/investigator/critic working payloads. Legacy and offline state without a summary remains absent rather than inventing zero historical calls.
+
+### Exact local and dependency-complete proof
+
+- The complete post-review local suite passed all 219 tests with seven expected dependency-gated skips. Six focused review regressions passed, as did the broader reasoning/admission gates, Python `compileall`, and `git diff --check`.
+- Fresh whole-branch review found no Critical issues and four Important admission/atomicity gaps: cross-candidate evidence borrowing, anchorless directed support, mapped hypotheses publishing unmapped findings, and partially committed or stale reasoning state after failure. One permitted RED-to-GREEN fix pass corrected all four in commit `2c42c0d44f08e40a52c9bea435cfe307816eb243`. A Minor aggregate-report issue remains deferred: a later successful reasoning call can clear `last_gap`, so `unavailable_passes` may be nonzero while the final availability-gap list is empty.
+- Exact candidate commit `2c42c0d44f08e40a52c9bea435cfe307816eb243` was archived with SHA-256 `EA2D19203F8DA51B791F4769155265C6D9BF406467BA4F73E25FDC10E322B87E`; the digest matched on Windows and the development VM.
+- The exact archive passed all 219 dependency-complete VM tests with no skips and passed `compileall`.
+- An initial diagnostic invocation lacked the deployment `.env` and failed closed on unavailable credentials. After loading the existing deployment configuration without copying or displaying it, diagnostics were fully green: America/New_York mission time, all Python dependencies, the pinned Enterprise ATT&CK v19.2 catalog, `qwen3:8b` plus both structured reasoning schemas, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark 4.2.2, all configured Russell Mitchell captures, and writable runtime directories. No service configuration was changed.
+
+### Disposable compact-retention proof
+
+- Synthetic offline investigation `HUNT-A7A9450BFA` completed as `evidence_supported_lead` with `coverage_closure_reached`, generated one DOCX and one TXT report, and compacted successfully in an isolated `/tmp` runtime from the exact final candidate.
+- Both reports reopened successfully. The technical report contained `INVESTIGATOR AND CRITIC COVERAGE` and truthfully stated that the offline run had no grounded investigator/critic aggregate; compact state likewise omitted `reasoning_summary` rather than inventing prior calls. Populated-summary preservation and customer/technical audience separation passed in the dependency-complete report/retention tests.
+- Compact state retained two cited evidence records and one finding. It removed `reasoning_history`, host/network arrays, tool runs, search tasks/outcomes, queries, case/proposal/critic payloads, and every checkpoint/write row.
+- The validation archive, extracted checkout, and synthetic runtime were isolated from operational state and removed after proof. Operational reports, hunt state, logs, and telemetry were not modified by the synthetic hunt or cleanup.
+
+### Blind-evaluation boundary and limitation
+
+- No Russell Mitchell holdout identity, indicator, hostname, command, tool, timestamp, attack step, or oracle label was added to runtime code, prompts, catalogs, tests, or fixtures. Diagnostics verified source availability only; this milestone did not execute a hunt against the newly loaded telemetry.
+- The synthetic offline fixture cannot evaluate live model judgment or recall against a real attack. This milestone proves bounded reasoning, fail-closed admission, reporting, and retention mechanics. The authorized read-only Russell Mitchell hunt remains the next blind Milestone 9 evaluation, after branch review and integration.
+
 ## 2026-10-13 — adaptive evidence-grounded stopping (local/VM proof; no live holdout hunt)
 
 ### Implemented behavior
