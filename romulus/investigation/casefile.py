@@ -296,6 +296,22 @@ def _select_candidates(
             base_reasons.append(
                 f"evidence-backed corroboration contribution {min(20, len(groups) * 10)}"
             )
+        else:
+            groups = set()
+        raw_bonus = max(0, min(20, int(_number(raw.get("corroboration_bonus"), 0))))
+        inferred_base = max(0, int(_number(raw.get("priority_score"), 0)) - raw_bonus)
+        base_score = max(0, min(100, int(_number(raw.get("base_priority_score"), inferred_base))))
+        visible_bonus = min(20, len(groups) * 10)
+        visible_score = min(100, base_score + visible_bonus)
+        compact["priority_score"] = visible_score
+        compact["priority_tier"] = "critical" if visible_score >= 90 else (
+            "high" if visible_score >= 70 else ("medium" if visible_score >= 40 else "low")
+        )
+        disposition = _text(raw.get("disposition"), 60) or "observed"
+        terminal = disposition in {"benign_likely", "dismissed", "unresolved"}
+        if not terminal and disposition != "investigating" and not raw.get("finding_ids"):
+            disposition = "corroborated" if visible_bonus and visible_score >= 70 else "observed"
+        compact["disposition"] = disposition
         compact["score_reasons"] = base_reasons
         compact["corroboration_reasons"] = [
             f"Related to {row['candidate_id']} "

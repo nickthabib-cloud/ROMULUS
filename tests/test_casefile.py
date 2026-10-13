@@ -235,6 +235,7 @@ class CaseFileTests(unittest.TestCase):
                     "corroboration_group": "group-a",
                     "priority_tier": "high",
                     "priority_score": 75,
+                    "base_priority_score": 65,
                     "disposition": "corroborated",
                     "evidence_ids": ["EV-A"],
                     "score_reasons": ["base score", "evidence-backed corroboration contribution 10"],
@@ -278,6 +279,9 @@ class CaseFileTests(unittest.TestCase):
         self.assertEqual(candidate["related_candidates"], [])
         self.assertEqual(candidate["corroboration_reasons"], [])
         self.assertFalse(any("corroboration" in reason for reason in candidate["score_reasons"]))
+        self.assertEqual(candidate["priority_score"], 65)
+        self.assertEqual(candidate["priority_tier"], "medium")
+        self.assertEqual(candidate["disposition"], "observed")
 
     def test_preferred_large_candidate_keeps_bounded_visible_ownership(self):
         from romulus.investigation.casefile import build_case_file, visible_case_ids

@@ -104,9 +104,14 @@ def relate_candidates(
         item["related_candidates"] = records
         groups = sorted(related_groups.get(candidate_id, set()))
         old_bonus = _bounded_int(item.get("corroboration_bonus"), 0, 20)
-        base_score = max(0, _bounded_int(item.get("priority_score"), 0, 100) - old_bonus)
+        inferred_base = max(0, _bounded_int(item.get("priority_score"), 0, 100) - old_bonus)
+        base_score = (
+            _bounded_int(item.get("base_priority_score"), 0, 100)
+            if item.get("base_priority_score") is not None else inferred_base
+        )
         bonus = min(20, len(groups) * 10)
         score = min(100, base_score + bonus)
+        item["base_priority_score"] = base_score
         item["corroboration_bonus"] = bonus
         item["priority_score"] = score
         item["priority_tier"] = _priority_tier(score)

@@ -364,6 +364,7 @@ def build_candidate_queue(
                 "kind": "trusted_indicator", "indicator_id": identifier,
                 "analytic_id": None, "title": f"Trusted indicator observed: {identifier}",
                 "description": f"An exact {indicator.get('type')} indicator supplied by {indicator.get('source')} was observed.",
+                "base_priority_score": score,
                 "priority_score": score, "priority_tier": "critical",
                 "disposition": "observed", "customer_visible": True,
                 "evidence_ids": _evidence_ids(rows), "assets": [asset],
@@ -448,7 +449,9 @@ def _retained_candidate_without_derived_corroboration(candidate: dict[str, Any])
     item["follow_ups"] = [dict(entry, history=list(entry.get("history", [])))
         for entry in candidate.get("follow_ups", [])]
     bonus = max(0, min(20, int(item.get("corroboration_bonus", 0) or 0)))
-    score = max(0, int(item.get("priority_score", 0) or 0) - bonus)
+    fallback_base = max(0, int(item.get("priority_score", 0) or 0) - bonus)
+    score = max(0, min(100, int(item.get("base_priority_score", fallback_base) or 0)))
+    item["base_priority_score"] = score
     item["corroboration_bonus"] = 0
     item["priority_score"] = score
     item["priority_tier"] = "critical" if score >= 90 else (
@@ -616,6 +619,7 @@ def _behavior_candidate(
         "corroboration_group": str(analytic.get("corroboration_group") or analytic["id"]),
         "analytic_source": analytic.get("source"),
         "title": analytic["title"], "description": analytic["description"],
+        "base_priority_score": score,
         "priority_score": score, "priority_tier": tier, "disposition": disposition,
         "customer_visible": bool(score >= 70 and disposition == "corroborated"),
         "evidence_ids": _evidence_ids(rows), "assets": [asset],
