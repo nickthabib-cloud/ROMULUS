@@ -451,6 +451,7 @@ def build_candidate_queue(
                 "indicator_source": indicator.get("source"), "indicator_confidence": indicator.get("confidence"),
                 "indicator_type": indicator.get("type"), "indicator_value": indicator.get("value"),
                 "indicator_expires_at": indicator.get("expires_at"),
+                "indicator_match_type": "exact", "indicator_current_at_match": True,
             })
     return sorted(
         candidates,

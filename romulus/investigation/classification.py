@@ -103,6 +103,11 @@ def migrate_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize legacy/compact candidates conservatively without inventing truth."""
     item = dict(candidate) if isinstance(candidate, Mapping) else {}
     classification = item.get("classification")
+    if classification == "malicious" and not _trusted_malicious_admission(item):
+        classification = "anomalous"
+        item["classification_reason"] = (
+            "Malicious state lacked the complete strict trusted-indicator admission record and was migrated fail-closed."
+        )
     if classification not in CLASSIFICATIONS:
         classification = "anomalous"
         item["classification_reason"] = (
@@ -174,6 +179,22 @@ def unresolved_anomalous_candidates(
 
 def _owned_evidence_ids(candidate: Mapping[str, Any]) -> list[str]:
     return sorted({str(value) for value in candidate.get("evidence_ids", []) if value})
+
+
+def _trusted_malicious_admission(candidate: Mapping[str, Any]) -> bool:
+    confidence = candidate.get("indicator_confidence")
+    return bool(
+        candidate.get("kind") == "trusted_indicator"
+        and isinstance(confidence, int)
+        and not isinstance(confidence, bool)
+        and confidence >= 90
+        and str(candidate.get("indicator_source") or "").strip()
+        and str(candidate.get("indicator_type") or "").strip()
+        and str(candidate.get("indicator_value") or "").strip()
+        and candidate.get("indicator_match_type") == "exact"
+        and candidate.get("indicator_current_at_match") is True
+        and _owned_evidence_ids(candidate)
+    )
 
 
 def _classification_reason(rule: str) -> str:

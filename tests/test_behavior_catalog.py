@@ -768,6 +768,8 @@ class CandidateReportingTests(unittest.TestCase):
                     "candidate_id": "CL-HIGH",
                     "kind": "trusted_indicator",
                     "title": "Trusted indicator observed: IOC-1",
+                    "classification": "suspicious",
+                    "investigation_status": "new",
                     "priority_score": 95,
                     "priority_tier": "critical",
                     "disposition": "observed",
@@ -782,6 +784,8 @@ class CandidateReportingTests(unittest.TestCase):
                     "candidate_id": "CL-LOW",
                     "kind": "behavior",
                     "title": "Executable launched from a temporary path",
+                    "classification": "anomalous",
+                    "investigation_status": "follow_up_exhausted",
                     "priority_score": 25,
                     "priority_tier": "low",
                     "disposition": "observed",
@@ -796,7 +800,7 @@ class CandidateReportingTests(unittest.TestCase):
         }
         text = _content(state)
         customer, technical = text.split("TECHNICAL CANDIDATE WORKING LIST", 1)
-        self.assertIn("PRIORITIZED CANDIDATE LEADS", customer)
+        self.assertIn("SUSPICIOUS BEHAVIOR", customer)
         self.assertIn("Trusted indicator observed: IOC-1", customer)
         self.assertNotIn("Executable launched from a temporary path", customer)
         self.assertIn("Executable launched from a temporary path", technical)

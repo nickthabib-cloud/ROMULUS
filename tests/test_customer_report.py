@@ -3,6 +3,123 @@ import unittest
 from pathlib import Path
 
 
+class ReportItemProjectionTests(unittest.TestCase):
+    def test_singular_suspicious_candidate_projects_complete_analyst_context(self):
+        from romulus.reporting.report_items import build_report_items
+
+        state = {
+            "candidate_leads": [{
+                "candidate_id": "CL-REVERSE-SHELL",
+                "classification": "suspicious",
+                "classification_reason": "A reviewed reverse-shell behavior matched.",
+                "investigation_status": "follow_up_exhausted",
+                "title": "Interactive reverse shell behavior",
+                "description": "A shell redirected input and output to a network socket.",
+                "evidence_ids": ["EV-1"],
+                "assets": ["web-01"],
+                "first_observed": "2026-10-12T01:00:00Z",
+                "last_observed": "2026-10-12T01:00:00Z",
+                "follow_ups": [{
+                    "follow_up_id": "FU-1",
+                    "intent": "Review the parent process and destination.",
+                    "status": "blocked",
+                    "history": [{"task_id": "ST-1", "status": "failed", "returned": 0}],
+                }],
+                "benign_explanations": ["Authorized red-team activity."],
+                "telemetry_gaps": ["Parent process telemetry unavailable."],
+                "attack_techniques": ["T1059"],
+                "confidence": "moderate",
+                "finding_ids": [],
+            }],
+            "findings": [],
+        }
+
+        items = build_report_items(state)
+
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["classification"], "suspicious")
+        self.assertEqual(item["evidence_ids"], ["EV-1"])
+        self.assertEqual(item["assets"], ["web-01"])
+        self.assertEqual(item["investigation_status"], "follow_up_exhausted")
+        self.assertIn("failed", " ".join(item["follow_up_results"]))
+        self.assertEqual(item["benign_alternatives"], ["Authorized red-team activity."])
+        self.assertEqual(item["coverage_gaps"], ["Parent process telemetry unavailable."])
+        self.assertEqual(item["recommended_actions"], ["Review the parent process and destination."])
+
+    def test_anomaly_is_excluded_and_malicious_item_sorts_first(self):
+        from romulus.reporting.report_items import build_report_items
+
+        candidates = [
+            {
+                "candidate_id": "CL-SUSPICIOUS", "classification": "suspicious",
+                "investigation_status": "new", "title": "Suspicious behavior",
+                "evidence_ids": ["EV-2"], "finding_ids": [],
+            },
+            {
+                "candidate_id": "CL-ANOMALY", "classification": "anomalous",
+                "investigation_status": "new", "title": "Anomalous behavior",
+                "evidence_ids": ["EV-3"], "finding_ids": [],
+            },
+            {
+                "candidate_id": "CL-MALICIOUS", "classification": "malicious",
+                "investigation_status": "resolved", "title": "Exact malicious indicator",
+                "kind": "trusted_indicator", "indicator_confidence": 95,
+                "indicator_source": "customer incident response", "indicator_type": "domain",
+                "indicator_value": "evil.example", "indicator_match_type": "exact",
+                "indicator_current_at_match": True,
+                "evidence_ids": ["EV-1"], "finding_ids": [],
+            },
+        ]
+
+        items = build_report_items({"candidate_leads": candidates, "findings": []})
+
+        self.assertEqual(
+            [(item["item_id"], item["classification"]) for item in items],
+            [("CL-MALICIOUS", "malicious"), ("CL-SUSPICIOUS", "suspicious")],
+        )
+
+    def test_only_explicit_finding_links_deduplicate_items(self):
+        from romulus.reporting.report_items import build_report_items
+
+        finding = {
+            "finding_id": "F-LINKED", "title": "Evidence-backed finding",
+            "observation": "Observed suspicious execution.", "interpretation": "Needs review.",
+            "evidence_ids": ["EV-SHARED"], "confidence": "moderate",
+            "alternatives": ["Administration."], "follow_up": ["Validate ownership."],
+        }
+        linked = {
+            "candidate_id": "CL-LINKED", "classification": "suspicious",
+            "investigation_status": "resolved", "title": "Linked candidate",
+            "evidence_ids": ["EV-SHARED"], "finding_ids": ["F-LINKED"],
+        }
+        unlinked = {
+            "candidate_id": "CL-UNLINKED", "classification": "suspicious",
+            "investigation_status": "new", "title": "Separate behavior",
+            "evidence_ids": ["EV-SHARED"], "finding_ids": [],
+        }
+        legacy_finding = {
+            "finding_id": "F-LEGACY", "title": "Legacy evidence-backed lead",
+            "observation": "Separate observation.", "evidence_ids": ["EV-OTHER"],
+        }
+
+        items = build_report_items({
+            "candidate_leads": [linked, unlinked],
+            "findings": [finding, legacy_finding],
+        })
+
+        self.assertEqual(len(items), 3)
+        self.assertEqual({item["item_id"] for item in items}, {
+            "F-LINKED", "CL-UNLINKED", "F-LEGACY",
+        })
+        linked_item = next(item for item in items if item["item_id"] == "F-LINKED")
+        self.assertEqual(linked_item["candidate_ids"], ["CL-LINKED"])
+        self.assertEqual(
+            next(item for item in items if item["item_id"] == "F-LEGACY")["classification"],
+            "suspicious",
+        )
+
+
 class CustomerWordReportTests(unittest.TestCase):
     def _state(self):
         return {
@@ -55,6 +172,9 @@ class CustomerWordReportTests(unittest.TestCase):
                 {
                     "candidate_id": "CL-HIGH",
                     "title": "Suspicious PowerShell execution",
+                    "classification": "suspicious",
+                    "classification_reason": "Reviewed encoded-command behavior matched.",
+                    "investigation_status": "resolved",
                     "priority_score": 82,
                     "priority_tier": "high",
                     "disposition": "corroborated",
@@ -65,10 +185,13 @@ class CustomerWordReportTests(unittest.TestCase):
                     "score_reasons": ["process and network corroboration"],
                     "benign_explanations": ["authorized administration"],
                     "follow_up": ["Validate with the asset owner."],
+                    "finding_ids": ["F-001"],
                 },
                 {
                     "candidate_id": "CL-LOW",
                     "title": "LOW-PRIORITY-INTERNAL-SENTINEL",
+                    "classification": "anomalous",
+                    "investigation_status": "follow_up_exhausted",
                     "priority_score": 20,
                     "priority_tier": "low",
                     "disposition": "reviewed",
@@ -133,6 +256,44 @@ class CustomerWordReportTests(unittest.TestCase):
             "scheduler_history": [{"event": "investigation_budget_gap", "unserved_families": ["network"]}],
             "source_errors": [],
         }
+
+    def test_primary_text_uses_malicious_and_suspicious_sections_not_score_gates(self):
+        from romulus.reporting.report import _content
+
+        state = self._state()
+        state["candidate_leads"].append({
+            "candidate_id": "CL-MALICIOUS",
+            "title": "Exact malicious domain indicator",
+            "description": "A current exact trusted indicator was observed.",
+            "classification": "malicious",
+            "classification_reason": "Strict trusted-indicator gate passed.",
+            "investigation_status": "new",
+            "kind": "trusted_indicator",
+            "indicator_confidence": 95,
+            "indicator_source": "customer incident response",
+            "indicator_type": "domain",
+            "indicator_value": "evil.example",
+            "indicator_match_type": "exact",
+            "indicator_current_at_match": True,
+            "priority_score": 5,
+            "priority_tier": "low",
+            "disposition": "observed",
+            "evidence_ids": ["EV-MALICIOUS"],
+            "assets": ["WS-18"],
+            "follow_up": ["Validate and contain if confirmed."],
+            "finding_ids": [],
+        })
+
+        text = _content(state)
+        primary, technical = text.split("TECHNICAL CANDIDATE WORKING LIST", 1)
+
+        self.assertIn("MALICIOUS BEHAVIOR", primary)
+        self.assertIn("SUSPICIOUS BEHAVIOR", primary)
+        self.assertLess(primary.index("Exact malicious domain indicator"), primary.index("Suspicious PowerShell execution"))
+        self.assertIn("EV-MALICIOUS", primary)
+        self.assertIn("EV-RAW-001", primary)
+        self.assertNotIn("LOW-PRIORITY-INTERNAL-SENTINEL", primary)
+        self.assertIn("LOW-PRIORITY-INTERNAL-SENTINEL", technical)
 
     def test_technical_report_records_reasoning_admission_and_critic_gap_aggregates(self):
         from romulus.reporting.report import _content

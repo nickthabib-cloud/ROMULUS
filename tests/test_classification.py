@@ -141,6 +141,31 @@ class ClassificationMigrationAndLifecycleTests(unittest.TestCase):
         self.assertNotEqual(trusted["classification"], "malicious")
         self.assertEqual(trusted["classification_history"], [])
 
+    def test_unprovenanced_or_non_indicator_malicious_state_fails_closed(self):
+        from romulus.investigation.classification import migrate_candidate
+
+        behavior = migrate_candidate({
+            "candidate_id": "CL-BEHAVIOR", "kind": "behavior",
+            "classification": "malicious", "evidence_ids": ["EV-1"],
+        })
+        incomplete_indicator = migrate_candidate({
+            "candidate_id": "CL-IOC", "kind": "trusted_indicator",
+            "classification": "malicious", "indicator_confidence": 95,
+            "evidence_ids": ["EV-1"],
+        })
+        admitted = migrate_candidate({
+            "candidate_id": "CL-ADMITTED", "kind": "trusted_indicator",
+            "classification": "malicious", "indicator_confidence": 95,
+            "indicator_source": "customer incident response",
+            "indicator_type": "domain", "indicator_value": "evil.example",
+            "indicator_match_type": "exact", "indicator_current_at_match": True,
+            "evidence_ids": ["EV-1"],
+        })
+
+        self.assertEqual(behavior["classification"], "anomalous")
+        self.assertEqual(incomplete_indicator["classification"], "anomalous")
+        self.assertEqual(admitted["classification"], "malicious")
+
     def test_lifecycle_is_independent_from_classification(self):
         from romulus.investigation.classification import refresh_investigation_status
 
@@ -185,7 +210,13 @@ class ClassificationMigrationAndLifecycleTests(unittest.TestCase):
             _candidate(classification="anomalous", investigation_status="new"),
             _candidate(classification="anomalous", investigation_status="resolved", candidate_id="CL-2"),
             _candidate(classification="suspicious", investigation_status="follow_up_exhausted", candidate_id="CL-3"),
-            _candidate(classification="malicious", investigation_status="resolved", candidate_id="CL-4"),
+            _candidate(
+                classification="malicious", investigation_status="resolved", candidate_id="CL-4",
+                kind="trusted_indicator", indicator_confidence=95,
+                indicator_source="customer incident response", indicator_type="domain",
+                indicator_value="evil.example", indicator_match_type="exact",
+                indicator_current_at_match=True,
+            ),
             _candidate(classification="suspicious", investigation_status="dismissed", candidate_id="CL-5"),
         ]
 
