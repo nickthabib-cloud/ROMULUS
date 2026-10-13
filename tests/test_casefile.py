@@ -184,6 +184,45 @@ def _state():
 
 
 class CaseFileTests(unittest.TestCase):
+    def test_candidate_owned_dns_question_is_visible_to_reasoning(self):
+        from romulus.investigation.casefile import build_case_file
+
+        state = {
+            "hunt_id": "HUNT-DNS-VISIBILITY",
+            "candidate_leads": [{
+                "candidate_id": "CL-DNS",
+                "kind": "behavior",
+                "priority_tier": "high",
+                "priority_score": 75,
+                "disposition": "observed",
+                "evidence_ids": ["EV-DNS"],
+                "follow_ups": [],
+            }],
+            "hypotheses": [],
+            "host": [],
+            "network": [{
+                "evidence_id": "EV-DNS",
+                "source": "arkime",
+                "asset": "10.70.0.12",
+                "observed_at": "2026-08-04T09:00:00Z",
+                "observation": "bounded DNS record",
+                "raw": {
+                    "source": {"ip": "10.70.0.12"},
+                    "dns": {"question": {"name": "0.encoded-payload.tunnel.example"}},
+                    "password": "DO-NOT-EXPOSE",
+                },
+            }],
+        }
+
+        case = build_case_file(state)
+
+        self.assertEqual(
+            case["evidence"][0]["raw"]["dns.question.name"],
+            "0.encoded-payload.tunnel.example",
+        )
+        self.assertEqual(case["evidence"][0]["raw"]["source.ip"], "10.70.0.12")
+        self.assertNotIn("DO-NOT-EXPOSE", json.dumps(case))
+
     def test_evidence_budget_gives_every_frontier_candidate_an_anchor_before_extras(self):
         from romulus.investigation.casefile import build_case_file
 

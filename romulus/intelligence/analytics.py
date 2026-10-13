@@ -264,6 +264,7 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
         "periodic_edge": list(periodic[:limit]),
         "rare_external_destination": list(rare_external[:limit]),
         "dns_high_entropy": [],
+        "dns_encoded_label_burst": [],
         "dns_nxdomain_burst": [],
         "protocol_port_mismatch": [],
         "outbound_volume_outlier": [],
@@ -337,6 +338,7 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
             if len(result["remote_service_then_execution"]) >= limit: break
 
     nxdomain: dict[str, list[tuple[datetime, dict]]] = defaultdict(list)
+    encoded_dns: dict[tuple[str, str], list[tuple[datetime, dict, tuple[str, ...], str]]] = defaultdict(list)
     external_by_source: dict[str, list[tuple[datetime, dict, str]]] = defaultdict(list)
     byte_rows = []
     expected_ports = {
@@ -352,11 +354,19 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
         domain = next(iter(_values(event, ("dns.question.name", "dns.qry.name", "dns.host"))), "").lower().rstrip(".")
         rcode = next(iter(_values(event, ("dns.response_code", "dns.header.response_code", "dns.flags.rcode", "rcode"))), "").lower()
         if domain:
-            label = domain.split(".", 1)[0]
-            entropy = _entropy(label)
+            labels,suffix=_dns_payload_labels_and_suffix(domain)
+            qualifying=[value for value in labels if len(value)>=20 and _entropy(value)>=3.0]
+            label=max(qualifying or labels,key=lambda value:(_entropy(value),len(value),value),default="")
+            entropy=_entropy(label)
             if len(label) >= 20 and entropy >= 3.0:
                 result["dns_high_entropy"].append({"source": source or _asset(event), "domain": domain,
-                    "label_length": len(label), "entropy": round(entropy, 2), "sample_evidence_ids": _refs(event)})
+                    "label": label, "label_length": len(label), "entropy": round(entropy, 2),
+                    "sample_evidence_ids": _refs(event)})
+                dns_source=source
+                if (stamp is not None and dns_source and suffix and event.get("evidence_id")
+                        and qualifying):
+                    encoded_dns[(dns_source,suffix)].append(
+                        (stamp,event,tuple(sorted(set(qualifying))),domain))
         if rcode in {"3", "nxdomain", "name_error"}:
             nxdomain[source or _asset(event)].append((stamp, event))
         if protocol in expected_ports and port and port not in expected_ports[protocol]:
@@ -368,6 +378,17 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
         if source and destination and _external_ip(destination):
             external_by_source[source].append((stamp, event, destination))
     result["dns_high_entropy"] = result["dns_high_entropy"][:limit]
+    for (source,suffix),rows in encoded_dns.items():
+        window=_distinct_dns_label_window(rows,minutes=10,minimum=5)
+        if not window: continue
+        result["dns_encoded_label_burst"].append({"source":source,"suffix":suffix,
+            "observations":len(window),
+            "distinct_encoded_labels":len({label for row in window for label in row[2]}),
+            "sample_domains":[row[3] for row in window[:3]],
+            "sample_evidence_ids":[row[1].get("evidence_id") for row in window[:5]
+                if row[1].get("evidence_id")]})
+    result["dns_encoded_label_burst"] = sorted(result["dns_encoded_label_burst"],
+        key=lambda row:(-int(row["distinct_encoded_labels"]),str(row["source"]),str(row["suffix"])))[:limit]
     result["protocol_port_mismatch"] = result["protocol_port_mismatch"][:limit]
     for source, rows in nxdomain.items():
         window = _event_window(rows, minutes=10, minimum=5)
@@ -424,6 +445,59 @@ def _entropy(value: str) -> float:
     if not value: return 0.0
     counts = Counter(value)
     return -sum((count / len(value)) * math.log2(count / len(value)) for count in counts.values())
+
+
+def _dns_payload_labels_and_suffix(domain: str) -> tuple[list[str], str]:
+    """Split a DNS name into bounded payload candidates and a conservative suffix."""
+    labels=[label for label in str(domain).lower().rstrip(".").split(".")[:16]
+        if label and len(label)<=63 and re.fullmatch(r"[a-z0-9_-]+",label)]
+    if len(labels)<2: return labels,""
+    suffix_size=2
+    if len(labels)>=3 and len(labels[-1])==2 and labels[-2] in {"ac","co","com","edu","gov","net","org"}:
+        suffix_size=3
+    if len(labels)<=suffix_size:
+        return labels[:-1],".".join(labels[-1:])
+    return labels[:-suffix_size],".".join(labels[-suffix_size:])
+
+
+def _distinct_dns_label_window(
+    rows: list[tuple[datetime, dict, tuple[str, ...], str]], minutes: int, minimum: int,
+) -> list[tuple[datetime, dict, tuple[str, ...], str]]:
+    ordered=sorted(rows,key=lambda row:(row[0],str(row[1].get("evidence_id") or "")))
+    left=0
+    for right,row in enumerate(ordered):
+        while left<=right and (row[0]-ordered[left][0]).total_seconds()>minutes*60:
+            left+=1
+        window=ordered[left:right+1]
+        evidence_rows={}
+        for stamp,event,labels,domain in window:
+            evidence_id=str(event.get("evidence_id") or "")
+            if not evidence_id: continue
+            existing=evidence_rows.get(evidence_id)
+            if existing is None:
+                evidence_rows[evidence_id]=[stamp,event,set(labels),domain]
+            else:
+                existing[2].update(labels)
+        unique_window=[(entry[0],entry[1],tuple(sorted(entry[2])),entry[3])
+            for entry in evidence_rows.values()]
+        if len(unique_window)<minimum: continue
+        matched_labels={}
+        def assign(index,seen):
+            for label in unique_window[index][2]:
+                if label in seen: continue
+                seen.add(label)
+                prior=matched_labels.get(label)
+                if prior is None or assign(prior,seen):
+                    matched_labels[label]=index
+                    return True
+            return False
+        for index in range(len(unique_window)):
+            assign(index,set())
+        if len(matched_labels)>=minimum:
+            selected=sorted(set(matched_labels.values()))
+            if len(selected)>=minimum:
+                return [unique_window[index] for index in selected]
+    return []
 
 
 def _event_window(rows: list[tuple[datetime, Any]], minutes: int, minimum: int) -> list[tuple[datetime, Any]]:

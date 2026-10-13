@@ -532,6 +532,20 @@ def _discovery_state():
         }
     )
     state["es_fields_by_class"] = {"host": list(state["es_fields"]), "network": []}
+    state["es_field_capabilities"] = {
+        "@timestamp": ["date"],
+        "message": ["text"],
+        "process.name": ["keyword"],
+        "process.executable": ["keyword"],
+        "process.command_line": ["text"],
+        "host.name": ["keyword"],
+        "source.ip": ["ip"],
+        "destination.ip": ["ip"],
+    }
+    state["es_field_capabilities_by_class"] = {
+        "host": dict(state["es_field_capabilities"]),
+        "network": {},
+    }
     return state
 
 

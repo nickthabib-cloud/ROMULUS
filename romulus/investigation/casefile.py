@@ -31,7 +31,11 @@ _RAW_FIELDS = (
     "destination.port",
     "http.uri",
     "dns.host",
+    "dns.question.name",
+    "dns.qry.name",
+    "dns.response_code",
     "network.protocol",
+    "network.bytes",
 )
 _CLOSED_FOLLOW_UP = {"completed", "closed", "resolved", "not_applicable"}
 
@@ -177,13 +181,29 @@ def _evidence_index(state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
                     or "broad source collection",
                     120,
                 ),
-                "raw": {
-                    key: _safe_value(raw_fields[key], 240)
-                    for key in _RAW_FIELDS
-                    if key in raw_fields
-                },
+                "raw": _project_raw_fields(raw_fields),
             }
     return index
+
+
+def _project_raw_fields(raw_fields: Mapping[str, Any]) -> dict[str, Any]:
+    projected = {}
+    for key in _RAW_FIELDS:
+        value = raw_fields.get(key)
+        if value is None:
+            value = _nested_mapping_value(raw_fields, key)
+        if value is not None:
+            projected[key] = _safe_value(value, 240)
+    return projected
+
+
+def _nested_mapping_value(value: Mapping[str, Any], path: str) -> Any:
+    current: Any = value
+    for part in path.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(part)
+    return current
 
 
 def _select_candidates(

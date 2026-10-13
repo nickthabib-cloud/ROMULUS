@@ -3656,6 +3656,70 @@
       ],
       "review_date": "2026-10-12",
       "corroboration_group": "BH-NET-009"
+    },
+    {
+      "id": "BH-NET-010",
+      "version": 1,
+      "title": "Repeated encoded DNS label burst",
+      "description": "One source issued several distinct long, high-entropy DNS labels to the same suffix in a bounded window. Treat this as a DNS tunneling or encoded-channel lead until endpoint attribution and benign service context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "dns",
+        "command-and-control",
+        "exfiltration"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "dns_encoded_label_burst"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 68,
+      "specificity": 76,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1071.004"
+      ],
+      "benign_explanations": [
+        "Content delivery, endpoint security, tracking, telemetry, or an authorized DNS tunnel can produce repeated encoded-looking labels."
+      ],
+      "required_corroboration": [
+        "Attribute the queries to a process or user and verify payload, response, volume, timing, or independent command-and-control or exfiltration evidence."
+      ],
+      "follow_up": [
+        "Pivot on the cited source and suffix, inspect query and response timing and volume, and identify the originating process, user, and transferred content where telemetry permits."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-13",
+      "corroboration_group": "BH-NET-004"
     }
   ]
 }
