@@ -185,7 +185,7 @@ git commit -m "feat: diversify candidate discovery frontier"
 - Consumes: scoped pivots from Task 1, candidate relationships from Task 2, and frontier selection from Task 3.
 - Produces: one generic workflow regression and the milestone validation record.
 
-- [ ] **Step 1: Write the failing workflow regression**
+- [x] **Step 1: Write the failing workflow regression**
 
 Create a generic synthetic state containing repetitive benign scanner candidates plus distinct evidence-backed DNS and host-execution behaviors on unrelated synthetic entities. Assert that `_analyze`:
 
@@ -195,17 +195,17 @@ Create a generic synthetic state containing repetitive benign scanner candidates
 - compiles the scan candidate's Arkime task with its primary IP and TCP/UDP behavior; and
 - publishes no finding merely because candidates are related or highly scored.
 
-- [ ] **Step 2: Run the workflow regression and verify RED if integration is incomplete**
+- [x] **Step 2: Run the workflow regression and verify RED if integration is incomplete**
 
 Run: `python -m unittest tests.test_attack_discovery.AttackDiscoveryWorkflowTests -v`
 
 Expected: FAIL on any missing integration between Tasks 1–3; if it passes immediately, document that it is a coverage proof and add the smallest missing end-to-end assertion that fails against the pre-milestone base.
 
-- [ ] **Step 3: Make only the minimal integration corrections**
+- [x] **Step 3: Make only the minimal integration corrections**
 
 Wire existing task interfaces without adding scenario-specific selectors or changing admission/finding thresholds.
 
-- [ ] **Step 4: Run complete local proof**
+- [x] **Step 4: Run complete local proof**
 
 Run:
 
@@ -217,7 +217,7 @@ git diff --check
 
 Expected: all available tests pass with only documented dependency skips; compilation and diff checks pass.
 
-- [ ] **Step 5: Record exact validation and commit**
+- [x] **Step 5: Record exact validation and commit**
 
 Record the baseline, RED/GREEN evidence, test totals, known scope boundary, and absence of oracle-specific data in `VALIDATION.md`. Check completed plan items.
 

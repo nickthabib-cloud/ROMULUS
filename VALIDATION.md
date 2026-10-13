@@ -2,6 +2,27 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-13 — evidence-scoped attack discovery promotion (local proof; live validation pending)
+
+### Implemented behavior
+
+- Candidate-owned Arkime and TShark follow-ups now require one validated primary IP or hostname together with the applicable bounded protocol/port behavior. Missing candidate entities fail closed; coverage-only work may retain a behavior-only selector.
+- Behavior candidates no longer receive an asset-wide "independent behavior" bonus. Corroboration requires distinct analytic groups, distinct cited evidence records, a shared typed structured entity, parseable timestamps within 1,800 seconds, and an explicit non-causality caveat. Bonuses are idempotent and capped at twenty points; score or relationship changes do not publish findings.
+- Hypothesis creation uses a deterministic diverse frontier: no more than two candidates per analytic group in one pass, up to two cited sub-threshold exploration candidates, and protected precedence for trusted indicators and critical candidates. Represented candidates are filtered before later passes, so excluded work remains eligible instead of being discarded.
+- Reasoning case files prefer candidates owned by unresolved hypotheses. Each visible candidate exposes at most six deterministically selected owned records plus its full `evidence_total`; hidden owned records do not become valid model citations. Visible relationship records are limited to selected candidates and evidence.
+- Aggregate candidate observation bounds are derived from their cited source evidence. Runtime logic and tests contain no evaluated-dataset identity, tool, command, timestamp, attack sequence, or oracle label.
+
+### RED/GREEN and local proof
+
+- Query-scope regressions first showed that candidate pivots omitted their entity and could become protocol-wide. Relationship regressions then showed the missing triage boundary, empty aggregate timestamps, and same-record/same-asset self-corroboration. Frontier regressions reproduced scan-group crowding, one-pass candidate exhaustion, preferred-work loss, critical displacement by exploration, and oversized candidate disappearance.
+- A generic end-to-end fixture used eight unrelated scanner sources, a distinct high-entropy DNS observation, and a separate host-execution observation. Thirty-four records produced ten deterministic candidates. The first hypothesis frontier included the distinct DNS behavior, admitted no more than two scan candidates, recorded the DNS/host relationship with its two source evidence IDs, compiled the scan candidate's Arkime task with its primary IP plus TCP/UDP behavior, and published no finding merely from score or association.
+- The integration proof passed immediately after the three component slices were wired. Its assertions are still pre-milestone regressions: the original implementation lacked relationships and entity-scoped pivots and allowed repetitive scan candidates to crowd the DNS behavior from the first frontier.
+- The complete local suite passed all 255 tests with seven expected dependency-gated skips. `python -m compileall -q romulus tests` and `git diff --check` passed.
+
+### Scope boundary
+
+This local proof establishes deterministic candidate promotion and bounded reasoning visibility, not full attack-path recall. Dependency-complete VM execution, configured diagnostics, whole-branch review, and one bounded oracle-blind live hunt remain required before claiming operational improvement. Identity continuity across NAT/VPN leases and richer process/session lineage remain later work unless live evidence shows they are required for this slice.
+
 ## 2026-10-13 — evidence-grounded reasoning contract hardening (no new hunt)
 
 ### Implemented behavior
