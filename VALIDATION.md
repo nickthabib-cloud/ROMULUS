@@ -2,6 +2,32 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-13 — evidence-grounded reasoning contract hardening (no new hunt)
+
+### Implemented behavior
+
+- The model no longer authors bookkeeping IDs. ROMULUS assigns stable, globally unique proposal IDs only after a complete structured response parses, then resolves bounded `NEW-HYPOTHESIS-N` references before independent critic review and deterministic admission.
+- Ollama structured responses are assembled from NDJSON streaming so the read timeout detects a stalled connection rather than rejecting active inference. Malformed events, premature EOF, data after terminal completion, provider length stops, and incomplete JSON all fail closed.
+- The investigator retains up to three new hypotheses and three searches per pass while using tighter field and array limits and a conservative estimated schema envelope below 18,000 characters. An empty proposal set no longer spends a critic call.
+- Citation, evidence ownership, causal-language, finding, critic-coverage, and atomic-admission gates were not relaxed. No Russell Mitchell entity, indicator, attack step, oracle timestamp, or attack-specific rule was added.
+
+### Review and local proof
+
+- RED/GREEN coverage proves deterministic ID assignment, new-hypothesis/search linkage through actual admission, complete valid responses beyond the former 24,000-character slice, NDJSON assembly, explicit provider completion, malformed and truncated failure modes, the schema-size envelope, and empty-proposal accounting.
+- Fresh review first exposed unresolved positional hypothesis references and later exposed acceptance of EOF without `done:true`; both were reproduced with failing regressions before correction. Final whole-diff re-review found no remaining Critical or Important issue.
+- The complete local suite passed all 237 tests with seven expected dependency-gated skips. Python `compileall` and `git diff --check` passed.
+
+### Exact dependency-complete and configured-model proof
+
+- The first exact candidate, commit `92848dc36a120ab91250c802432f87d739ca3fe4`, matched its VM archive digest and passed all 235 then-current tests with no skips, compilation, and configured diagnostics. Its live investigator still timed out on the non-streaming path; a streamed diagnostic then reached the 5,200-token provider cap with incomplete JSON. The observed schema could permit roughly 38,000 serialized characters with one existing hypothesis, establishing output-envelope mismatch rather than context allocation as the root cause.
+- Final candidate commit `e1d285ff2690a84ab9f597a57138d0613e1dbd33` was archived with SHA-256 `7588D85F93F3360EC66522D37CB9430C2D05ABE97E95F285A2150A764FF0DBEF`, which matched locally and on the VM. A fresh shell passed all 237 dependency-complete tests with no skips and passed `compileall`. One earlier test invocation inherited deployment environment variables and was discarded as contaminated rather than counted as proof.
+- Configured `doctor` was fully green for `qwen3:8b`, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark, all 13 configured captures, and isolated writable runtime directories.
+- A generic synthetic production-adapter probe, with no hunt and no oracle facts, completed the investigator in 75.26 seconds and critic in 24.29 seconds. It returned one assessment, one new hypothesis, two searches, and one finding. All five assigned IDs were present and unique, and critic coverage exactly matched them. Deterministic admission accepted the assessment and two searches while rejecting the unsupported hypothesis and finding, demonstrating the intended hallucination-resistant boundary.
+
+### Scope boundary
+
+This milestone proves the investigator/critic transport and structured admission contract, not attack discovery. No hunt was launched and no telemetry was modified. Generic candidate promotion, cross-source correlation, and temporal attack-path construction remain the next milestone.
+
 ## 2026-10-13 — retrieval contract hardening (local/VM proof; no new hunt)
 
 ### Implemented behavior
