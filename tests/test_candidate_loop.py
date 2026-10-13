@@ -165,6 +165,34 @@ class MissionModeTests(unittest.TestCase):
             self.assertEqual(engine._after_reason(result),"report")
             self.assertEqual(result["termination_reason"],"no_productive_frontier")
 
+    def test_undirected_candidate_free_reasoning_makes_no_investigator_or_critic_call(self):
+        import time
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            engine = _engine(Path(directory), use_ollama=True)
+            engine._call = lambda *args, **kwargs: self.fail(
+                "candidate-free undirected reasoning started an investigator or critic call"
+            )
+            state = _planning_state("Hunt broadly across all available telemetry")
+            state.update({
+                "mission_mode": "undirected",
+                "candidate_leads": [],
+                "search_artifacts": [],
+                "completed_leads": [],
+                "lead_catalog": [],
+                "reasoning_history": [],
+                "stage_history": [],
+                "depth": 0,
+                "started_epoch": time.time(),
+                "coverage": {"search_fields": {"elasticsearch": ["process.name"]}},
+            })
+
+            result = engine._reason(state)
+
+            self.assertEqual(result["hypotheses"], [])
+            self.assertEqual(result["tool_calls"], 0)
+            self.assertFalse(result["coverage"].get("reasoning_summary", {}).get("investigator_calls", 0))
+
     def test_undirected_hunt_without_candidate_still_never_reasons(self):
         import time
 

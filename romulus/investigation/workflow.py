@@ -2,6 +2,7 @@
 from typing import TypedDict, Any
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import copy
 import ipaddress
 import json
 import hashlib
@@ -30,10 +31,12 @@ from .search_planner import (candidate_fields, validate_spec, compile_es, compil
     SOURCE_FIELDS, TEXT_FIELDS)
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
     record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
-    recover_interrupted_tasks)
+    recover_interrupted_tasks, execution_fingerprint)
 from .progress import decide_next_action, initialize_progress, record_progress, summarize_progress
 from .sampling import sampling_policy
 from .synthetic import sample_evidence
+from .casefile import build_case_file, visible_case_ids
+from .reasoning import admit_reasoning
 
 
 def _scheduled_time_bounds(time_range):
@@ -1345,6 +1348,152 @@ class HuntEngine:
         self._save(s)
         return action
 
+    def _reasoning_summary(self,s):
+        summary=s.setdefault("coverage",{}).setdefault("reasoning_summary",{})
+        for key in ("investigator_calls","critic_calls","unavailable_passes",
+                "proposed_hypotheses","admitted_hypotheses","rejected_hypotheses",
+                "proposed_assessments","admitted_assessments","rejected_assessments",
+                "proposed_searches","admitted_searches","rejected_searches",
+                "proposed_findings","admitted_findings","rejected_findings"):
+            try: summary[key]=max(0,int(summary.get(key,0)))
+            except (TypeError,ValueError): summary[key]=0
+        return summary
+
+    def _run_grounded_reasoning(self,s,source_fields):
+        """Run one atomic investigator/critic pass and commit only executable work."""
+        summary=self._reasoning_summary(s)
+        remaining=max(0,self.settings.max_tool_calls-int(s.get("tool_calls",0)))
+        if remaining<2:
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="insufficient_external_call_reserve"
+            return None
+
+        case_file=build_case_file(s)
+        visible=visible_case_ids(case_file)
+        working={"case_file":case_file,"investigator":None,"critic":None,
+            "admission":None,"registered_task_ids":[],"model_error":None}
+        try:
+            from ..agent.ollama import Ollama
+            analyst=Ollama(self.settings)
+        except Exception as exc:
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="investigator_unavailable"
+            working["model_error"]=type(exc).__name__
+            return working
+
+        before_calls=int(s.get("tool_calls",0))
+        investigator=self._call(s,"ollama.api.chat","grounded_investigator",
+            {"model":self.settings.ollama_model,"case_candidates":len(case_file.get("candidates",[])),
+             "case_evidence":len(case_file.get("evidence",[])),"max_hypotheses":3,"max_searches":3},
+            "bounded evidence-grounded case file",
+            lambda:analyst.investigate_case(case_file,source_fields,max_searches=3,max_hypotheses=3),
+            lambda value:sum(len(value.get(key,[])) for key in
+                ("assessments","new_hypotheses","searches","findings")) if isinstance(value,dict) else 0)
+        summary["investigator_calls"]+=int(int(s.get("tool_calls",0))>before_calls)
+        working["investigator"]=investigator if isinstance(investigator,dict) else None
+        if not isinstance(investigator,dict):
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="investigator_unavailable"
+            working["model_error"]=self._reasoning_call_error(s,"grounded_investigator")
+            return working
+
+        proposed={
+            "hypotheses":len(investigator.get("new_hypotheses",[])) if isinstance(investigator.get("new_hypotheses"),list) else 0,
+            "assessments":len(investigator.get("assessments",[])) if isinstance(investigator.get("assessments"),list) else 0,
+            "searches":len(investigator.get("searches",[])) if isinstance(investigator.get("searches"),list) else 0,
+            "findings":len(investigator.get("findings",[])) if isinstance(investigator.get("findings"),list) else 0,
+        }
+        for kind,count in proposed.items(): summary[f"proposed_{kind}"]+=count
+
+        before_calls=int(s.get("tool_calls",0))
+        critic=self._call(s,"ollama.api.chat","grounded_critic",
+            {"model":self.settings.ollama_model,"proposal_count":sum(proposed.values())},
+            "same bounded case file and structured investigator proposals",
+            lambda:analyst.criticize_case(case_file,investigator),
+            lambda value:len(value.get("reviews",[])) if isinstance(value,dict) else 0)
+        summary["critic_calls"]+=int(int(s.get("tool_calls",0))>before_calls)
+        working["critic"]=critic if isinstance(critic,dict) else None
+        if not isinstance(critic,dict):
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="critic_unavailable"
+            working["model_error"]=self._reasoning_call_error(s,"grounded_critic")
+            for kind,count in proposed.items(): summary[f"rejected_{kind}"]+=count
+            return working
+
+        admission=admit_reasoning(case_file,investigator,critic,s.get("hypotheses",[]))
+        working["admission"]=admission
+        prior_hypotheses=list(s.get("hypotheses",[]))
+        tentative=list(admission.get("new_hypotheses",[]))
+        tentative_ids={row.get("hypothesis_id") for row in tentative if row.get("hypothesis_id")}
+        scheduler_snapshot={key:copy.deepcopy(s.get(key)) for key in
+            ("search_tasks","search_queue","scheduler_history","candidate_leads")}
+        coverage=s.setdefault("coverage",{})
+        had_planning="model_search_planning" in coverage
+        planning_snapshot=copy.deepcopy(coverage.get("model_search_planning"))
+        s["hypotheses"]=prior_hypotheses+tentative
+        try:
+            accepted_tasks=self._register_model_searches(s,admission.get("searches",[]),"grounded",
+                visible_candidate_ids=visible.get("candidate",set()),
+                visible_evidence_ids=visible.get("evidence",set()),
+                new_hypothesis_ids=tentative_ids)
+        except Exception as exc:
+            accepted_tasks=[]
+            for key,value in scheduler_snapshot.items():
+                if value is None: s.pop(key,None)
+                else: s[key]=value
+            if had_planning: coverage["model_search_planning"]=planning_snapshot
+            else: coverage.pop("model_search_planning",None)
+            working["model_error"]="search_registration_"+type(exc).__name__
+        planning=s.get("coverage",{}).get("model_search_planning",[])
+        last_plan=planning[-1] if planning else {}
+        accepted_proposal_ids=set(last_plan.get("accepted_proposal_ids",[]) or [])
+        admitted_searches=[row for row in admission.get("searches",[])
+            if row.get("proposal_id") in accepted_proposal_ids]
+        committed_ids={row.get("hypothesis_id") for row in admitted_searches
+            if row.get("hypothesis_id") in tentative_ids}
+        committed_hypotheses=[row for row in tentative if row.get("hypothesis_id") in committed_ids]
+        dropped_hypotheses=[row for row in tentative if row.get("hypothesis_id") not in committed_ids]
+        s["hypotheses"]=prior_hypotheses+committed_hypotheses
+        for row in admission.get("searches",[]):
+            if row.get("proposal_id") not in accepted_proposal_ids:
+                admission.setdefault("rejections",[]).append({"proposal_id":row.get("proposal_id"),
+                    "kind":"search","reason_codes":["existing_validation_or_deduplication"]})
+        for row in dropped_hypotheses:
+            admission.setdefault("rejections",[]).append({"proposal_id":row.get("proposal_id"),
+                "kind":"new_hypothesis","reason_codes":["no_registered_scheduler_task"]})
+        admission["new_hypotheses"]=committed_hypotheses
+        admission["searches"]=admitted_searches
+        admission_summary=admission.setdefault("summary",{})
+        admission_summary["new_hypotheses_admitted"]=len(committed_hypotheses)
+        admission_summary["searches_admitted"]=len(admitted_searches)
+        admission_summary["rejections"]=len(admission.get("rejections",[]))
+        working["registered_task_ids"]=[row.get("task_id") for row in accepted_tasks if row.get("task_id")]
+        working["created_hypothesis_ids"]=[row.get("hypothesis_id") for row in committed_hypotheses]
+
+        self._apply_model_assessments(s,{"assessments":admission.get("assessments",[])},
+            visible.get("evidence",set()))
+        findings_before=len(s.get("findings",[]))
+        self._publish_model_findings(s,admission.get("findings",[]),visible.get("evidence",set()))
+        findings_admitted=max(0,len(s.get("findings",[]))-findings_before)
+        s.setdefault("coverage",{})["hypotheses_total"]=len(s.get("hypotheses",[]))
+
+        admitted_counts={
+            "hypotheses":len(committed_hypotheses),
+            "assessments":len(admission.get("assessments",[])),
+            "searches":len(admitted_searches),
+            "findings":findings_admitted,
+        }
+        for kind,count in admitted_counts.items():
+            summary[f"admitted_{kind}"]+=count
+            summary[f"rejected_{kind}"]+=max(0,proposed[kind]-count)
+        summary["last_gap"]=None
+        return working
+
+    def _reasoning_call_error(self,s,stage):
+        row=next((item for item in reversed(s.get("tool_runs",[]))
+            if item.get("tool")=="ollama.api.chat" and item.get("reasoning_stage")==stage),{})
+        return row.get("error_reason") or row.get("error") or "unavailable"
+
     def _reason(self,s):
         if s.get("depth",0)>=self.settings.max_depth:
             s["termination_reason"]="depth_budget"
@@ -1364,48 +1513,22 @@ class HuntEngine:
         candidate_grounded=(mission_mode!="undirected" or bool(s.get("candidate_leads")))
         if not self.offline and self.use_ollama and source_fields and candidate_grounded and self._budget_ok(s):
             try:
-                from ..agent.ollama import Ollama, model_evidence_context
-                visible_evidence_ids={e.get("evidence_id") for e in model_evidence_context(_all_evidence(s),12) if e.get("evidence_id")}
-                visible_candidate_ids={x.get("candidate_id") for x in s.get("candidate_leads",[])[:12] if x.get("candidate_id")}
-                model_coverage=dict(s.get("coverage",{}))
-                model_coverage["candidate_queue"]=[{"candidate_id":c.get("candidate_id"),"title":str(c.get("title",""))[:120],
-                    "priority_score":c.get("priority_score"),"priority_tier":c.get("priority_tier"),
-                    "disposition":c.get("disposition"),"evidence_ids":c.get("evidence_ids",[])[:5],
-                    "assets":c.get("assets",[])[:4],"attack_techniques":c.get("attack_techniques",[])[:4],
-                    "follow_ups":[{"follow_up_id":f.get("follow_up_id"),"intent":str(f.get("intent",""))[:140],"status":f.get("status")}
-                        for f in c.get("follow_ups",[])[:3]]} for c in s.get("candidate_leads",[])[:12]]
-                model_coverage["existing_findings"]=[{"title":str(f.get("title",""))[:100],
-                    "technique_id":f.get("technique_id"),"evidence_ids":f.get("evidence_ids",[])[:5]}
-                    for f in s.get("findings",[])[-5:]]
-                analysis=self._call(s,"ollama.api.chat","analyst_reasoning",
-                    {"model":self.settings.ollama_model,"hypotheses":len(s.get("hypotheses",[])),
-                     "evidence_count":len(_all_evidence(s)),"completed_searches":len(s.get("search_outcomes",[]))},
-                    "bounded mission, evidence excerpts, query coverage, and mapped source fields",
-                    lambda:Ollama(self.settings).reason_hunt(s["objective"],s.get("hypotheses",[]),_all_evidence(s),
-                        model_coverage,_search_history_summary(s),3),lambda x:len(x.get("searches",[])))
-                if analysis is None:
-                    last_call=next((r for r in reversed(s.get("tool_runs",[])) if r.get("tool")=="ollama.api.chat" and r.get("reasoning_stage")=="analyst_reasoning"),{})
-                    model_error=last_call.get("error_reason") or last_call.get("error") or "unavailable"
+                analysis=self._run_grounded_reasoning(s,source_fields)
                 if isinstance(analysis,dict):
-                    # Every undirected hypothesis is instantiated deterministically
-                    # from an observed candidate. Model-created hypotheses added
-                    # risk without adding a stronger evidence boundary, so the
-                    # model may assess and search but may not invent another one.
-                    created=[]
-                    self._apply_model_assessments(s,analysis,visible_evidence_ids)
-                    self._publish_model_findings(s,analysis.get("findings",[]),visible_evidence_ids)
-                    analysis["created_hypothesis_ids"]=created
-                    basis="model assessed cited evidence and proposed fresh bounded searches"
+                    model_error=analysis.get("model_error")
+                    if isinstance(analysis.get("admission"),dict):
+                        basis="grounded investigator proposals passed independent critic and deterministic admission"
+                    else:
+                        basis="structured model output unavailable; deterministic ATT&CK coverage frontier used"
             except Exception as exc:
                 analysis=None; model_error=type(exc).__name__
-        if isinstance(analysis,dict):
-            raw_searches=analysis.get("searches",[])
-            validated=self._register_model_searches(s,raw_searches,"iterative",
-                visible_candidate_ids=visible_candidate_ids,visible_evidence_ids=visible_evidence_ids)
-            self._register_investigation_tasks(s)
+                summary=self._reasoning_summary(s); summary["unavailable_passes"]+=1
+                summary["last_gap"]="reasoning_cycle_"+type(exc).__name__
+        if isinstance(analysis,dict) and isinstance(analysis.get("admission"),dict):
             planning=s.get("coverage",{}).get("model_search_planning",[])
             planning=planning[-1] if planning else {"accepted":0,"rejected_or_duplicate":0}
-            print(f"[ROMULUS] model follow-up plan: proposed={planning.get('proposed',len(raw_searches) if isinstance(raw_searches,list) else 0)} accepted={planning.get('accepted',0)} rejected_or_duplicate={planning.get('rejected_or_duplicate',0)} repeated_empty_anchor={planning.get('repeated_empty_anchor',0)}")
+            print(f"[ROMULUS] grounded model follow-up plan: proposed={planning.get('proposed',0)} accepted={planning.get('accepted',0)} rejected_or_duplicate={planning.get('rejected_or_duplicate',0)}")
+        self._register_investigation_tasks(s)
         self._refresh_coverage_ledger(s)
         selected=[item["task_id"] for item in select_search_tasks(s,phase="investigation",limit=3)]
         if selected:
@@ -1415,11 +1538,13 @@ class HuntEngine:
                 else "deterministic ATT&CK coverage frontier used")
         elif not isinstance(analysis,dict):
             basis="offline deterministic fixture pivot"
+        investigator=analysis.get("investigator") if isinstance(analysis,dict) else None
         s["reasoning_history"].append({"stage":"analyst_reasoning","basis":basis,"round":s["depth"],
-            "reasoning":str(analysis.get("reasoning",""))[:350] if isinstance(analysis,dict) else "",
+            "reasoning":str(investigator.get("summary",""))[:350] if isinstance(investigator,dict) else "",
             "model_error":model_error,
             "model_search_plan":s.get("coverage",{}).get("model_search_planning",[])[-1] if s.get("coverage",{}).get("model_search_planning") else None,
             "created_hypothesis_ids":analysis.get("created_hypothesis_ids",[]) if isinstance(analysis,dict) else [],
+            "grounded_reasoning":analysis if isinstance(analysis,dict) else None,
             "selected_searches":[{"task_id":q["task_id"],"source":q.get("source"),
                 "hypothesis_ids":q.get("hypothesis_ids",[]),"intent":q.get("intent")} for q in
                 (s.get("search_tasks",{}).get(task_id,{}) for task_id in selected)],
@@ -1428,7 +1553,7 @@ class HuntEngine:
         if candidate_grounded:
             self._apply_investigation_decision(s,just_reasoned=True)
         self._stage(s,"analyst_reasoning","completed" if selected else "stopped",{"basis":basis,"round":s["depth"],"selected_searches":selected,
-            "continue_investigation":analysis.get("continue_investigation") if isinstance(analysis,dict) else None,
+            "continue_investigation":None,
             "reason":s.get("termination_reason")})
         print(f"[ROMULUS] analyst round {s['depth']}/{self.settings.max_depth}: {basis}; next searches={selected or 'none'}")
         return self._save(s)
@@ -1552,7 +1677,8 @@ class HuntEngine:
             self.store.upsert_finding(s["hunt_id"],encoded,action)
             print(f"[ROMULUS] model-proposed evidence-cited lead: {identifier}; evidence_refs={len(refs)}; confidence={confidence}")
 
-    def _register_model_searches(self,s,raw_searches,phase,*,visible_candidate_ids=None,visible_evidence_ids=None):
+    def _register_model_searches(self,s,raw_searches,phase,*,visible_candidate_ids=None,
+            visible_evidence_ids=None,new_hypothesis_ids=None):
         source_fields=s.get("coverage",{}).get("search_fields",{})
         ids={h.get("hypothesis_id") for h in s.get("hypotheses",[]) if h.get("hypothesis_id")}
         all_evidence_ids={e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")}
@@ -1561,6 +1687,8 @@ class HuntEngine:
         if visible_candidate_ids is not None:
             candidates={key:value for key,value in candidates.items() if key in set(visible_candidate_ids)}
         accepted=[]; rejected=0; duplicate=0; repeated_empty_anchor=0
+        accepted_proposal_ids=[]; created_task_ids=[]; reused_task_ids=[]; proposal_task_ids={}
+        new_hypothesis_ids=set(new_hypothesis_ids or [])
         proposed=raw_searches if isinstance(raw_searches,list) else []
         for raw in proposed:
             if not isinstance(raw,dict): rejected+=1; continue
@@ -1583,18 +1711,38 @@ class HuntEngine:
             except (ValueError,TypeError,json.JSONDecodeError): rejected+=1; continue
             proposal_tasks=[]
             for proposal in proposals:
+                if raw.get("hypothesis_id") in new_hypothesis_ids:
+                    effective_proposal=dict(proposal)
+                    policy=s.get("sampling_policy")
+                    if isinstance(policy,dict):
+                        query_spec=dict(proposal.get("query_spec") or {})
+                        query_spec["sampling"]=policy
+                        effective_proposal["query_spec"]=query_spec
+                    fingerprint=execution_fingerprint(effective_proposal)
+                    predicted_id="ST-"+fingerprint[:16]
+                    if predicted_id in s.get("search_tasks",{}):
+                        duplicate+=1; reused_task_ids.append(predicted_id); continue
                 task_id,created=register_search_task(s,proposal)
-                if not created: duplicate+=1
+                if created: created_task_ids.append(task_id)
+                else: duplicate+=1; reused_task_ids.append(task_id)
                 task=s["search_tasks"][task_id]
                 if not any(existing.get("task_id")==task_id for existing in accepted): accepted.append(task)
                 proposal_tasks.append(task_id)
                 prior_outcome=next((item for item in reversed(s.get("search_outcomes",[]))
                     if item.get("task_id")==task_id),None)
                 if prior_outcome: self._record_scheduled_followups(s,task,prior_outcome)
-            if not proposal_tasks: rejected+=1
+            proposal_id=raw.get("proposal_id")
+            if proposal_tasks:
+                if proposal_id and proposal_id not in accepted_proposal_ids: accepted_proposal_ids.append(proposal_id)
+                if proposal_id: proposal_task_ids[str(proposal_id)[:120]]=list(dict.fromkeys(proposal_tasks))[:20]
+            else: rejected+=1
         s.setdefault("coverage",{}).setdefault("model_search_planning",[]).append({"phase":phase,"proposed":len(proposed),
             "accepted":len(accepted),"rejected_or_duplicate":rejected+duplicate,"duplicate":duplicate,
-            "repeated_empty_anchor":repeated_empty_anchor,"invalid_or_unmappable":rejected})
+            "repeated_empty_anchor":repeated_empty_anchor,"invalid_or_unmappable":rejected,
+            "accepted_proposal_ids":accepted_proposal_ids[:40],
+            "created_task_ids":list(dict.fromkeys(created_task_ids))[:100],
+            "reused_task_ids":list(dict.fromkeys(reused_task_ids))[:100],
+            "proposal_task_ids":proposal_task_ids})
         return accepted
 
     def _record_scheduled_followups(self,s,task,outcome):
