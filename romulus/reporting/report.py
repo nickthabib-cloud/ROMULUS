@@ -3,7 +3,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 from ..intelligence.knowledge import TECHNIQUES, ATTACK_RELEASE, ATTACK_RELEASE_DATE, ATTACK_DOMAIN
-from ..investigation.classification import unresolved_anomalous_candidates
+from ..investigation.classification import reportable_candidates, unresolved_anomalous_candidates
 from .report_items import build_report_items
 
 def generate_report(state: dict[str, Any], output_dir: Path) -> list[Path]:
@@ -64,15 +64,7 @@ def _event_reference(event):
 def _bounded_report_events(state, key, limit=175):
     rows=list(state.get(key,[])); cited=set()
     for item in build_report_items(state): cited.update(item.get("evidence_ids",[]) or [])
-    for finding in state.get("findings",[]): cited.update(finding.get("evidence_ids",[]) or [])
-    for hypothesis in state.get("hypotheses",[]): cited.update(hypothesis.get("evidence_ids",[]) or [])
     chosen=[row for row in rows if row.get("evidence_id") in cited]
-    chosen_ids={row.get("evidence_id") for row in chosen}
-    remaining=[row for row in rows if row.get("evidence_id") not in chosen_ids]
-    slots=max(0,limit-len(chosen))
-    if slots and remaining:
-        step=max(1,len(remaining)//slots)
-        chosen.extend(remaining[::step][:slots])
     return sorted(chosen[:max(limit,len(chosen))],key=lambda row:str(row.get("observed_at") or ""))
 
 def _analytic_lines(summary):
@@ -374,8 +366,8 @@ def _content(s):
             lines.append(f"  Link {relationship.get('source_sequence')}→{relationship.get('target_sequence')}: {relationship.get('relationship')} [{relationship.get('basis')} / {relationship.get('confidence')}]; reasons={_join_text(relationship.get('reasons'), '; ') or 'not recorded'}.")
         for caveat in path.get("caveats",[]): lines.append(f"  Caveat: {caveat}")
         for gap in path.get("gaps",[]): lines.append(f"  Gap: {gap}")
-    lines += ["", f"HOST ANALYSIS — {len(host_events)} representative/cited records of {len(s.get('host',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in host_events]
-    lines += ["", f"NETWORK ANALYSIS — {len(network_events)} representative/cited records of {len(s.get('network',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in network_events]
+    lines += ["", f"HOST ANALYSIS — {len(host_events)} cited records of {len(s.get('host',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in host_events]
+    lines += ["", f"NETWORK ANALYSIS — {len(network_events)} cited records of {len(s.get('network',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in network_events]
     lines += ["", "CROSS-DOMAIN CORRELATION"]
     lines += [f"- Host {c.get('host_ref')} ↔ network {c.get('network_ref')}; reasons={_join_text(c.get('reasons'), '; ') or ('shared IP '+str(c.get('ip')))}; direction={c.get('direction','unresolved')}; score={c.get('score','not scored')}; time delta {c.get('delta_seconds')} seconds. Caveat: {c.get('caveat')}" for c in s.get("correlations",[])] or ["No corroborated cross-domain correlation was made."]
     lines += ["", "ATT&CK MAPPING"]+[f"- {h.get('technique_id')} {TECHNIQUES.get(h.get('technique_id'),{}).get('name','')}: {h.get('status')}" for h in s.get("hypotheses",[])]
@@ -389,9 +381,10 @@ def _content(s):
     lines += [f"- {e.get('tool')} at {e.get('stage')}: {e.get('error')}; {e.get('reason')} (HTTP {e.get('status_code')})" if e.get("status_code") else f"- {e.get('tool')} at {e.get('stage')}: {e.get('error')}; {e.get('reason') or 'no additional detail'}" for e in errors] or ["No source errors were recorded."]
     if s.get("error"): lines.append(s["error"])
     lines += ["This assessment covers only the evidence sources and time period recorded above. Searches and reports are bounded; lack of findings does not establish that the environment is secure.","", "CONCLUSIONS AND RECOMMENDED FOLLOW-UP",s.get("summary") or "", "", "TECHNICAL CANDIDATE WORKING LIST"]
-    lines += [_candidate_line(item) for item in s.get("candidate_leads",[])] or ["No catalog candidates were recorded."]
+    lines += [_candidate_line(item) for item in reportable_candidates(
+        s.get("candidate_leads",[]) or [])] or ["No reportable catalog candidates were recorded."]
     if s.get("retention_policy")=="compact" and (s.get("status")=="completed" or s.get("finalized_at")):
-        retention_note=("This finalized investigation uses compact retention. After both reports are verified, per-hunt working audit records and uncited raw evidence are scheduled for removal; "
+        retention_note=("This finalized investigation uses compact retention. After the declared report set is verified, per-hunt working audit records and uncited raw evidence are scheduled for removal; "
             "structured findings, supported paths, and their cited evidence remain in the compact investigation record.")
     else:
         retention_note="Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite unless the hunt is explicitly finalized with compact retention."

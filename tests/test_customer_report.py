@@ -283,6 +283,11 @@ class CustomerWordReportTests(unittest.TestCase):
             "follow_up": ["Validate and contain if confirmed."],
             "finding_ids": [],
         })
+        state["host"].append({
+            "evidence_id": "EV-RAW-002", "source": "elasticsearch",
+            "observed_at": "2026-10-10T13:00:00Z", "asset": "WS-20",
+            "observation": "ANOMALY-EVIDENCE-SENTINEL",
+        })
 
         text = _content(state)
         primary, technical = text.split("TECHNICAL CANDIDATE WORKING LIST", 1)
@@ -293,7 +298,8 @@ class CustomerWordReportTests(unittest.TestCase):
         self.assertIn("EV-MALICIOUS", primary)
         self.assertIn("EV-RAW-001", primary)
         self.assertNotIn("LOW-PRIORITY-INTERNAL-SENTINEL", primary)
-        self.assertIn("LOW-PRIORITY-INTERNAL-SENTINEL", technical)
+        self.assertNotIn("LOW-PRIORITY-INTERNAL-SENTINEL", technical)
+        self.assertNotIn("ANOMALY-EVIDENCE-SENTINEL", text)
 
     def test_possible_activity_narrative_is_clearly_hypothetical_and_keeps_unconnected_items(self):
         from docx import Document
@@ -565,7 +571,6 @@ class CustomerWordReportTests(unittest.TestCase):
                 "INTERNAL-REASONING-SENTINEL",
                 "INTERNAL-TOOL-SENTINEL",
                 "INTERNAL-SEARCH-SENTINEL",
-                "LOW-PRIORITY-INTERNAL-SENTINEL",
                 "RAW-HOST-EVENT-SENTINEL",
                 "TECHNICAL CANDIDATE WORKING LIST",
                 "ST-INTERNAL-SENTINEL",
@@ -573,6 +578,9 @@ class CustomerWordReportTests(unittest.TestCase):
             ):
                 self.assertNotIn(internal, word_text)
                 self.assertIn(internal, technical_text)
+
+            self.assertNotIn("LOW-PRIORITY-INTERNAL-SENTINEL", word_text)
+            self.assertNotIn("LOW-PRIORITY-INTERNAL-SENTINEL", technical_text)
 
             self.assertIn("candidate_follow_up",technical_text)
             self.assertIn("returned=5",technical_text)
