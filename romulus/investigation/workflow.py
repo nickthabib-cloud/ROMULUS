@@ -119,6 +119,7 @@ class HuntState(TypedDict, total=False):
     pivot_results: list[dict]
     investigation_graph: dict
     activity_narrative: dict
+    indicator_review: dict
     progress_baseline: dict; progress_history: list[dict]; progress_totals: dict; stagnant_cycles: int
     retention_policy: str
 
@@ -1900,6 +1901,89 @@ class HuntEngine:
             coverage["activity_narrative"]["reason"]=str(narrative["reason"])[:240]
         return narrative
 
+    def _finalization_call(self,s,tool,stage,parameters,time_range,fn,count):
+        """Run one audited report-finalization call outside discovery budgets."""
+        started=time.monotonic()
+        try:
+            result=fn(); result_status="ok"; error=None; error_reason=None
+            result_count=count(result) if result is not None else 0
+        except Exception as exc:
+            result=None; result_status="error"; error=type(exc).__name__
+            error_reason=_safe_error_reason(exc); result_count=0
+        record={"timestamp":utc_now(),"hunt_id":s["hunt_id"],"tool":tool,
+            "reasoning_stage":stage,"parameters":parameters,"time_range":time_range,
+            "result_count":result_count,"source_total":None,
+            "duration_ms":round((time.monotonic()-started)*1000),
+            "result_status":result_status,"error":error,"error_reason":error_reason,
+            "status_code":None,"budget_domain":"report_finalization"}
+        s.setdefault("tool_runs",[]).append(record); self.store.audit(record)
+        reason=f" error={error_reason}" if error_reason else ""
+        print(f"[ROMULUS] {stage}: {tool} status={result_status} results={result_count}{reason} scope={time_range}")
+        return result
+
+    def _indicator_review(self,s):
+        """Create one admitted analyst briefing without extending discovery."""
+        from ..reporting.indicator_review import (
+            admit_indicator_review, build_indicator_case, deterministic_indicator_review,
+        )
+        from ..reporting.report_items import build_report_items
+
+        items=build_report_items(s)
+        case=build_indicator_case(s,items)
+        attempted=False
+        model_result_status="not_attempted"
+        rejection_codes=[]
+        if not items:
+            review=deterministic_indicator_review(case,
+                "No reportable behavior was available for indicator synthesis.")
+        elif not case.get("evidence"):
+            review=deterministic_indicator_review(case,
+                "No visible owned evidence was available for indicator synthesis.")
+        elif not self.use_ollama:
+            review=deterministic_indicator_review(case,"The indicator-review model was disabled.")
+        elif self.offline:
+            review=deterministic_indicator_review(case,
+                "External model calls are disabled in offline mode.")
+        else:
+            from ..agent.ollama import Ollama
+            attempted=True
+            proposal=self._finalization_call(s,"ollama.api.chat","indicator_review_finalization",
+                {"report_items":len(case.get("items",[])),
+                 "visible_evidence":len(case.get("evidence",[])),
+                 "visible_observables":sum(len(row.get("observables",[]))
+                    for row in case.get("evidence",[]) if isinstance(row,dict)),
+                 "admitted_relationships":len(case.get("relationships",[]))},
+                "bounded accepted report items and visible owned evidence",
+                lambda:Ollama(self.settings).synthesize_indicator_review(case),
+                lambda result:len(result.get("strong_indicators",[]))
+                    if isinstance(result,dict) else 0)
+            model_result_status=str(s.get("tool_runs",[])[-1].get("result_status","error"))
+            if isinstance(proposal,dict):
+                admitted=admit_indicator_review(case,proposal)
+                rejection_codes=list(admitted.get("rejection_codes",[]))
+                review=(admitted if admitted.get("status")=="admitted"
+                    else deterministic_indicator_review(case,
+                        "Indicator synthesis was rejected by deterministic admission: "+
+                        ", ".join(rejection_codes[:8])))
+            else:
+                review=deterministic_indicator_review(case,
+                    "Indicator synthesis was unavailable or failed.")
+        s["indicator_review"]=review
+        coverage=s.setdefault("coverage",{})
+        coverage["indicator_review"]={
+            "status":review.get("status","fallback"),
+            "model_calls":1 if attempted else 0,
+            "model_result_status":model_result_status,
+            "strong_indicators":len(review.get("strong_indicators",[])),
+            "supporting_context":len(review.get("supporting_context",[])),
+            "likely_noise":len(review.get("likely_noise",[])),
+            "rejection_codes":rejection_codes,
+            "budget_domain":"report_finalization",
+        }
+        if review.get("reason"):
+            coverage["indicator_review"]["reason"]=str(review["reason"])[:300]
+        return review
+
     def _report(self,s):
         pending=[task for task in s.get("search_tasks",{}).values()
             if task.get("status") in {"queued","interrupted"}]
@@ -1983,6 +2067,7 @@ class HuntEngine:
         s["coverage"]["coverage_closure_ready"]=coverage_closure_ready
         _attach_finding_paths(s)
         self._activity_narrative(s)
+        self._indicator_review(s)
         try:
             from ..reporting.report import generate_report
             s["report_paths"]=[str(p) for p in generate_report(s,self.settings.reports_dir)]

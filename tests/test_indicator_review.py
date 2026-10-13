@@ -1,4 +1,26 @@
+import copy
+import importlib
+import sys
+import tempfile
+import time
+import types
 import unittest
+from contextlib import contextmanager
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+
+@contextmanager
+def _ollama_module():
+    requests_stub = types.ModuleType("requests")
+    requests_stub.Session = lambda: None
+    sys.modules.pop("romulus.agent.ollama", None)
+    with patch.dict(sys.modules, {"requests": requests_stub}):
+        try:
+            yield importlib.import_module("romulus.agent.ollama")
+        finally:
+            sys.modules.pop("romulus.agent.ollama", None)
 
 
 def _state():
@@ -127,6 +149,60 @@ def _items():
         "confidence": "not assessed",
         "attack_techniques": ["T1105"],
     }]
+
+
+def _proposal(case):
+    dns_observables = [
+        row["observable_id"] for evidence in case["evidence"]
+        if evidence["evidence_id"] in {"EV-DNS-1", "EV-DNS-2"}
+        for row in evidence["observables"]
+        if row["type"] in {"domain", "ip", "port"}
+    ]
+    return {
+        "strong_indicators": [{
+            "item_ids": ["CL-DNS"],
+            "evidence_ids": ["EV-DNS-1", "EV-DNS-2"],
+            "observable_ids": dns_observables,
+            "relationship_ids": ["COR-DNS"],
+            "title": "Sequenced encoded DNS activity",
+            "assessment": "Repeated sequenced labels are consistent with an encoded DNS channel.",
+            "limitations": ["Endpoint process attribution is unavailable."],
+            "recommended_follow_ups": ["Identify the originating process and account."],
+            "confidence": "high",
+            "outcome": "suspected",
+        }],
+        "supporting_context": [{
+            "item_ids": ["CL-DNS"],
+            "evidence_ids": ["EV-DNS-1", "EV-DNS-2"],
+            "observable_ids": dns_observables,
+            "relationship_ids": ["COR-DNS"],
+            "title": "Two sensors observed the same query",
+            "assessment": "The admitted relationship provides cross-sensor support.",
+            "limitations": [],
+            "recommended_follow_ups": [],
+            "confidence": "moderate",
+            "outcome": "observed",
+        }],
+        "likely_noise": [{
+            "item_ids": ["CL-WEB"],
+            "evidence_ids": ["EV-WEB"],
+            "observable_ids": [],
+            "relationship_ids": [],
+            "title": "Tool-like path was a failed probe",
+            "assessment": "The HTTP response was 404, so this supports enumeration rather than successful download.",
+            "limitations": [],
+            "recommended_follow_ups": [],
+            "confidence": "high",
+            "outcome": "observed",
+        }],
+        "possible_activity_narrative": {
+            "item_ids": ["CL-DNS"],
+            "relationship_ids": ["COR-DNS"],
+            "summary": "The evidence may represent one bounded encoded-DNS activity cluster.",
+            "limitations": ["Endpoint process attribution is unavailable."],
+        },
+        "recommended_follow_ups": ["Identify the process that generated the queries."],
+    }
 
 
 class IndicatorCaseTests(unittest.TestCase):
@@ -269,6 +345,50 @@ class IndicatorAdmissionTests(unittest.TestCase):
         self.assertEqual(rejected["status"], "rejected")
         self.assertIn("unsupported_confirmed_outcome", rejected["rejection_codes"])
 
+    def test_valid_selectors_cannot_smuggle_an_invented_observable_in_prose(self):
+        from romulus.reporting.indicator_review import admit_indicator_review
+
+        case = self._case()
+        dns_evidence = next(row for row in case["evidence"] if row["evidence_id"] == "EV-DNS-1")
+        rejected = admit_indicator_review(case, {
+            "strong_indicators": [{
+                "item_ids": ["CL-DNS"], "evidence_ids": ["EV-DNS-1"],
+                "observable_ids": [row["observable_id"] for row in dns_evidence["observables"]],
+                "relationship_ids": [], "title": "DNS indicator for evil.example",
+                "assessment": "The selected evidence contacted evil.example.",
+                "limitations": [], "recommended_follow_ups": [],
+                "confidence": "high", "outcome": "suspected",
+            }],
+            "supporting_context": [], "likely_noise": [],
+            "possible_activity_narrative": {"item_ids": [], "relationship_ids": [], "summary": "", "limitations": []},
+            "recommended_follow_ups": [],
+        })
+
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertIn("unsupported_text_observable", rejected["rejection_codes"])
+
+    def test_failed_http_response_rejects_asserted_success_even_when_outcome_is_suspected(self):
+        from romulus.reporting.indicator_review import admit_indicator_review
+
+        case = self._case()
+        web_evidence = next(row for row in case["evidence"] if row["evidence_id"] == "EV-WEB")
+        rejected = admit_indicator_review(case, {
+            "strong_indicators": [{
+                "item_ids": ["CL-WEB"], "evidence_ids": ["EV-WEB"],
+                "observable_ids": [row["observable_id"] for row in web_evidence["observables"]],
+                "relationship_ids": [], "title": "Successful payload execution",
+                "assessment": "The payload was downloaded and executed.",
+                "limitations": [], "recommended_follow_ups": [],
+                "confidence": "moderate", "outcome": "suspected",
+            }],
+            "supporting_context": [], "likely_noise": [],
+            "possible_activity_narrative": {"item_ids": [], "relationship_ids": [], "summary": "", "limitations": []},
+            "recommended_follow_ups": [],
+        })
+
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertIn("contradicted_success_claim", rejected["rejection_codes"])
+
     def test_deterministic_fallback_preserves_reportable_items_and_artifacts(self):
         from romulus.reporting.indicator_review import deterministic_indicator_review
 
@@ -308,6 +428,146 @@ class IndicatorAdmissionTests(unittest.TestCase):
 
         self.assertEqual(rejected["status"], "rejected")
         self.assertIn("unknown_evidence_id", rejected["rejection_codes"])
+
+
+class IndicatorModelTests(unittest.TestCase):
+    def test_schema_enumerates_visible_selectors_and_adapter_treats_case_as_untrusted(self):
+        from romulus.config import Settings
+        from romulus.reporting.indicator_review import build_indicator_case
+
+        case = build_indicator_case(_state(), _items())
+        proposal = _proposal(case)
+
+        class Response:
+            def raise_for_status(self): pass
+            def iter_lines(self):
+                import json
+                content = json.dumps(proposal).replace('\\', '\\\\').replace('"', '\\"')
+                yield ('{"message":{"content":"' + content +
+                       '"},"done":true,"done_reason":"stop"}').encode()
+
+        class Session:
+            def __init__(self): self.payload = None
+            def post(self, url, **kwargs): self.payload = kwargs["json"]; return Response()
+
+        session = Session()
+        with _ollama_module() as module:
+            schema = module._indicator_review_schema(case)
+            result = module.Ollama(Settings.from_env(), session).synthesize_indicator_review(case)
+
+        indicator = schema["properties"]["strong_indicators"]["items"]["properties"]
+        self.assertEqual(set(indicator["item_ids"]["items"]["enum"]), {"CL-DNS", "CL-WEB"})
+        self.assertEqual(set(indicator["evidence_ids"]["items"]["enum"]), {
+            "EV-DNS-1", "EV-DNS-2", "EV-WEB",
+        })
+        visible_observables = {
+            row["observable_id"] for evidence in case["evidence"]
+            for row in evidence["observables"]
+        }
+        self.assertEqual(set(indicator["observable_ids"]["items"]["enum"]), visible_observables)
+        self.assertEqual(indicator["relationship_ids"]["items"]["enum"], ["COR-DNS"])
+        self.assertNotIn("artifact", str(schema).lower())
+
+        self.assertEqual(result["strong_indicators"][0]["item_ids"], ["CL-DNS"])
+        self.assertFalse(session.payload["format"]["additionalProperties"])
+        prompt = session.payload["messages"][1]["content"]
+        self.assertIn("untrusted", prompt.lower())
+        self.assertIn("strong_indicators", prompt)
+        self.assertIn("likely_noise", prompt)
+        self.assertIn("HUNT-INDICATORS", prompt)
+        self.assertNotIn("ground_truth", prompt.lower())
+        self.assertNotIn("answer-revealing", prompt.lower())
+
+
+class IndicatorWorkflowTests(unittest.TestCase):
+    def _engine(self, root, *, enabled=True):
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+        settings = replace(
+            Settings.from_env(), home=root, data_dir=root / "data", logs_dir=root / "logs",
+            reports_dir=root / "reports", max_runtime_seconds=1,
+        )
+        return HuntEngine(settings, Store(settings.data_dir, settings.logs_dir), offline=False, use_ollama=enabled)
+
+    def _report_state(self):
+        state = _state()
+        state.update({
+            "objective": "Hunt broadly", "status": "running", "outcome": "pending",
+            "termination_reason": "runtime_budget", "summary": "", "tool_calls": 3,
+            "depth": 1, "started_epoch": time.time() - 10, "source_errors": [],
+            "tool_runs": [], "search_tasks": {}, "stage_history": [],
+            "reasoning_history": [], "hypotheses": [], "search_artifacts": [],
+            "candidate_leads": copy.deepcopy(_items()), "findings": [],
+            "investigation_graph": {"version": 1, "nodes": [], "edges": [], "paths": [], "summary": {}},
+        })
+        for item in state["candidate_leads"]:
+            item["candidate_id"] = item["item_id"]
+        return state
+
+    def test_finalization_synthesizes_once_after_discovery_runtime_expires(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            engine = self._engine(root)
+            state = self._report_state()
+
+            with _ollama_module() as module:
+                with patch.object(module.Ollama, "synthesize_indicator_review",
+                                  side_effect=lambda case: _proposal(case)) as model, \
+                        patch("romulus.reporting.report.generate_report",
+                              return_value=[root / "reports" / "report.docx", root / "reports" / "report.txt"]):
+                    result = engine._report(state)
+
+            self.assertEqual(model.call_count, 1)
+            self.assertEqual(result["indicator_review"]["status"], "admitted")
+            self.assertEqual(result["coverage"]["indicator_review"]["model_calls"], 1)
+            self.assertEqual(result["coverage"]["indicator_review"]["model_result_status"], "ok")
+            self.assertEqual(result["coverage"]["indicator_review"]["strong_indicators"], 1)
+            self.assertEqual(len(result["report_paths"]), 2)
+            reporting_runs = [row for row in result["tool_runs"]
+                              if row.get("reasoning_stage") == "indicator_review_finalization"]
+            self.assertEqual(len(reporting_runs), 1)
+            self.assertEqual(reporting_runs[0]["result_status"], "ok")
+
+    def test_model_failure_records_error_and_falls_back_without_blocking_report(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            engine = self._engine(root)
+            state = self._report_state()
+
+            with _ollama_module() as module:
+                with patch.object(module.Ollama, "synthesize_indicator_review",
+                                  side_effect=RuntimeError("model unavailable")) as model, \
+                        patch("romulus.reporting.report.generate_report",
+                              return_value=[root / "reports" / "report.docx", root / "reports" / "report.txt"]):
+                    result = engine._report(state)
+
+            self.assertEqual(model.call_count, 1)
+            self.assertEqual(result["indicator_review"]["status"], "fallback")
+            self.assertEqual(result["coverage"]["indicator_review"]["model_calls"], 1)
+            self.assertEqual(result["coverage"]["indicator_review"]["model_result_status"], "error")
+            self.assertIn("unavailable", result["indicator_review"]["reason"].lower())
+            self.assertEqual(len(result["report_paths"]), 2)
+            reporting_runs = [row for row in result["tool_runs"]
+                              if row.get("reasoning_stage") == "indicator_review_finalization"]
+            self.assertEqual(reporting_runs[0]["result_status"], "error")
+
+    def test_disabled_model_uses_fallback_without_finalization_call(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            engine = self._engine(root, enabled=False)
+            state = self._report_state()
+
+            with _ollama_module() as module:
+                with patch.object(module.Ollama, "synthesize_indicator_review") as model, \
+                        patch("romulus.reporting.report.generate_report",
+                              return_value=[root / "reports" / "report.docx", root / "reports" / "report.txt"]):
+                    result = engine._report(state)
+
+            model.assert_not_called()
+            self.assertEqual(result["indicator_review"]["status"], "fallback")
+            self.assertEqual(result["coverage"]["indicator_review"]["model_calls"], 0)
+            self.assertEqual(result["coverage"]["indicator_review"]["model_result_status"], "not_attempted")
 
 
 if __name__ == "__main__":

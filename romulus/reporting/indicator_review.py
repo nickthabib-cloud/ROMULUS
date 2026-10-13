@@ -90,27 +90,37 @@ def admit_indicator_review(case: Mapping[str, Any], proposal: Mapping[str, Any])
         selectors = _selectors(raw, indexes, rejection_codes, require_item=True)
         if selectors is None:
             continue
+        _validate_text_observables(raw, selectors["observable_ids"], indexes, rejection_codes)
         outcome = str(raw.get("outcome") or "suspected").strip().lower()
         if outcome not in _OUTCOMES:
             rejection_codes.add("invalid_outcome")
         if outcome == "confirmed" and not _supports_confirmed_outcome(selectors["evidence_ids"], indexes):
             rejection_codes.add("unsupported_confirmed_outcome")
+        if (_asserts_success(raw) and
+                _only_failed_http_outcomes(selectors["evidence_ids"], indexes)):
+            rejection_codes.add("contradicted_success_claim")
         admitted_indicators.append(_resolve_indicator(raw, selectors, indexes, outcome))
 
     supporting = []
     for raw in _rows(proposal.get("supporting_context")):
         selectors = _selectors(raw, indexes, rejection_codes, require_item=False)
         if selectors is not None:
+            _validate_text_observables(raw, selectors["observable_ids"], indexes, rejection_codes)
             supporting.append(_resolve_context(raw, selectors, indexes))
     noise = []
     for raw in _rows(proposal.get("likely_noise")):
         selectors = _selectors(raw, indexes, rejection_codes, require_item=True)
         if selectors is not None:
+            _validate_text_observables(raw, selectors["observable_ids"], indexes, rejection_codes)
             noise.append(_resolve_noise(raw, selectors, indexes))
 
     narrative_raw = proposal.get("possible_activity_narrative")
+    if isinstance(narrative_raw, Mapping):
+        _validate_text_observables(narrative_raw, list(indexes["observable"]), indexes, rejection_codes)
     narrative = _resolve_narrative(narrative_raw, indexes, rejection_codes)
     follow_ups = _bounded_list(proposal.get("recommended_follow_ups"), 12, 500)
+    _validate_text_observables({"recommended_follow_ups":follow_ups},
+        list(indexes["observable"]), indexes, rejection_codes)
     if rejection_codes:
         return _rejected(sorted(rejection_codes))
     return {
@@ -431,6 +441,42 @@ def _supports_confirmed_outcome(evidence_ids, indexes):
         if any(token in observation for token in ("successfully ", "connection established", "received shell output")):
             return True
     return False
+
+
+def _validate_text_observables(raw, observable_ids, indexes, rejection_codes):
+    """Reject precise IOC values authored in prose instead of selected canonically."""
+    allowed={str(indexes["observable"][value].get("value","")).strip().lower()
+        for value in observable_ids if value in indexes["observable"]}
+    text=" ".join(str(raw.get(field) or "") for field in (
+        "title","assessment","summary","basis","limitations","recommended_follow_ups"
+    ))
+    candidates=set()
+    for pattern in (_URL_RE,_IP_RE,_DOMAIN_RE,_FILE_RE):
+        candidates.update(match.rstrip(".,;:)]}").lower() for match in pattern.findall(text))
+    for candidate in candidates:
+        if not any(candidate == value or candidate in value for value in allowed):
+            rejection_codes.add("unsupported_text_observable")
+            return
+
+
+def _asserts_success(raw):
+    text=" ".join(str(raw.get(field) or "") for field in ("title","assessment")).lower()
+    return bool(re.search(
+        r"\b(?:successful(?:ly)?|downloaded|executed|connected|exfiltrated|compromised)\b|"
+        r"\b(?:shell|session|connection)\s+(?:opened|established|succeeded)\b", text
+    ))
+
+
+def _only_failed_http_outcomes(evidence_ids, indexes):
+    statuses=[]
+    for evidence_id in evidence_ids:
+        evidence=indexes["evidence"].get(evidence_id,{})
+        for key,value in (evidence.get("facts") or {}).items():
+            if "status" not in str(key).lower():
+                continue
+            try: statuses.append(int(str(value)))
+            except (TypeError,ValueError): pass
+    return bool(statuses) and all(value >= 400 for value in statuses)
 
 
 def _consolidate_indicators(indicators):

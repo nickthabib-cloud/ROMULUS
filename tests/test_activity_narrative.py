@@ -113,6 +113,16 @@ def _valid_proposal(case):
     }
 
 
+def _empty_indicator_proposal(case):
+    return {
+        "strong_indicators": [], "supporting_context": [], "likely_noise": [],
+        "possible_activity_narrative": {
+            "item_ids": [], "relationship_ids": [], "summary": "", "limitations": [],
+        },
+        "recommended_follow_ups": [],
+    }
+
+
 class NarrativeAdmissionTests(unittest.TestCase):
     def test_case_contains_only_reportable_owned_bounded_facts_and_stable_relationships(self):
         from romulus.investigation.narrative import build_narrative_case
@@ -292,6 +302,7 @@ class NarrativeWorkflowTests(unittest.TestCase):
 
             with _ollama_module() as module:
                 with patch.object(module.Ollama, "synthesize_activity_narrative", side_effect=proposal) as model, \
+                        patch.object(module.Ollama, "synthesize_indicator_review", side_effect=_empty_indicator_proposal), \
                         patch("romulus.reporting.report.generate_report", return_value=[root / "report.docx", root / "report.txt"]):
                     result = engine._report(state)
 
@@ -317,6 +328,7 @@ class NarrativeWorkflowTests(unittest.TestCase):
                 if label == "exhausted": state["tool_calls"] = limit
                 with _ollama_module() as module:
                     with patch.object(module.Ollama, "synthesize_activity_narrative") as model, \
+                            patch.object(module.Ollama, "synthesize_indicator_review", side_effect=_empty_indicator_proposal), \
                             patch("romulus.reporting.report.generate_report", return_value=[root / "report.docx", root / "report.txt"]):
                         result = engine._report(state)
                 model.assert_not_called()
@@ -338,7 +350,8 @@ class NarrativeWorkflowTests(unittest.TestCase):
                 with _ollama_module() as module:
                     call = patch.object(module.Ollama, "synthesize_activity_narrative",
                         side_effect=effect if isinstance(effect, Exception) else effect)
-                    with call, patch("romulus.reporting.report.generate_report", return_value=[root / "report.docx", root / "report.txt"]):
+                    with call, patch.object(module.Ollama, "synthesize_indicator_review", side_effect=_empty_indicator_proposal), \
+                            patch("romulus.reporting.report.generate_report", return_value=[root / "report.docx", root / "report.txt"]):
                         result = engine._report(state)
                 self.assertTrue(result["activity_narrative"]["no_coherent_narrative"])
                 self.assertEqual(result["candidate_leads"], original)
