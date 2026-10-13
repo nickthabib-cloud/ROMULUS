@@ -4,6 +4,16 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 
 ## Unreleased
 
+### Reportable behavior classification and analyst delivery
+
+- Added reviewed catalog classification policies and separated candidate truth (`anomalous`, `suspicious`, `malicious`) from investigation status, priority, and confidence. Numeric score, ATT&CK mapping, or model output cannot promote classification.
+- Made high-specificity singular suspicious behavior reportable when its deterministic catalog policy explicitly permits one owned record. Restricted malicious admission to current exact trusted indicators with complete provenance and confidence of at least 90.
+- Reworked Word and text deliverables around normalized malicious and suspicious report items with exact citations, follow-up outcomes, benign alternatives, coverage gaps, and recommended analyst actions. Explicit finding links are the only de-duplication authority.
+- Added finalized, analyst-readable `reports/anomalous/` lead queues for unresolved anomalous-only candidates. Report manifests now require and verify the exact two- or three-artifact generation before compact cleanup.
+- Added an evidence-constrained `Hypothesis: Possible Activity Narrative`. The model can group only accepted items connected by admitted relationship IDs, may leave items unconnected, and can decline to form a story. Deterministic admission rejects unknown/invisible citations, repeated placement, disconnected clusters, unauthorized fields, invented IP/domain/time facts, and unsupported causal assertions.
+- Compact retention preserves primary reports, optional anomaly reports, reportable cited evidence, admitted narrative, and bounded coverage summaries while removing anomaly-only evidence, raw working queries/logs, model case/response bulk, and checkpoints.
+- Added generic synthetic regressions for classification history, singular admission, malicious gating, two-stream reporting, report verification, narrative hallucination resistance, model failure/capacity fallback, and hunt-scoped cleanup without evaluated-dataset identities or expected paths.
+
 ### Evidence-grounded investigator and critic
 
 - Added a bounded, deterministic case file that exposes only prioritized telemetry-backed candidates, their cited evidence, factual path context, exact scheduler outcomes, and coverage gaps to model reasoning.
