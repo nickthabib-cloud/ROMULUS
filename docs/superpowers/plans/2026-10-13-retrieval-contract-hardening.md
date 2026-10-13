@@ -25,6 +25,6 @@
 - [x] Run the complete local suite, `compileall`, and `git diff --check`.
 - [x] Run a fresh review focused on cross-family duplication, timestamp safety, path validation, and diagnostic/runtime parity; allow one RED/GREEN correction pass for material findings.
 - [x] Archive the exact candidate, match its digest on the VM, run the dependency-complete suite and configured `doctor`, and confirm all configured captures pass the runtime validator without launching another hunt.
-- [ ] Record proof in `VALIDATION.md`, remove exact disposable artifacts, commit, push, and open a stacked PR against `codex/blind-generalization-evaluation`.
+- [x] Record proof in `VALIDATION.md`, remove exact disposable artifacts, commit, push, and open a stacked PR against `codex/blind-generalization-evaluation`.
 
 **Next milestone:** Harden the structured investigator/critic contract and output-budget behavior separately, then improve generic candidate promotion/correlation. This keeps retrieval defects isolated from reasoning changes.
