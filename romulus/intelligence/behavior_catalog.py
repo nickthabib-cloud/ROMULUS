@@ -398,7 +398,6 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
     prior_by_id = {str(item.get("candidate_id")): item for item in previous if item.get("candidate_id")}
     merged = []
     refreshed_ids = set()
-    disposition_rank = {"observed": 0, "investigating": 1, "corroborated": 2}
     terminal = {"benign_likely", "dismissed", "unresolved"}
     for fresh in current:
         item = dict(fresh)
@@ -407,7 +406,13 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
         if prior:
             prior_disposition = str(prior.get("disposition") or "observed")
             fresh_disposition = str(item.get("disposition") or "observed")
-            if prior_disposition in terminal or disposition_rank.get(prior_disposition, 0) > disposition_rank.get(fresh_disposition, 0):
+            # Preserve analyst-owned terminal decisions and an in-progress
+            # investigation.  ``corroborated`` is derived from the current
+            # evidence relationships, so carrying it across refreshes can
+            # leave a candidate promoted after its relationship disappears.
+            if prior_disposition in terminal or (
+                prior_disposition == "investigating" and fresh_disposition == "observed"
+            ):
                 item["disposition"] = prior_disposition
             item["evidence_ids"] = sorted(set(prior.get("evidence_ids", [])) | set(item.get("evidence_ids", [])))
             observed = [value for value in (prior.get("first_observed"), item.get("first_observed")) if value]

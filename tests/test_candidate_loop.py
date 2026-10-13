@@ -466,6 +466,65 @@ class AggregateSignalTests(unittest.TestCase):
 
 
 class CandidateStateTests(unittest.TestCase):
+    def test_candidate_merge_clears_derived_corroboration_when_relationship_disappears(self):
+        from romulus.intelligence.behavior_catalog import merge_candidate_queue
+        from romulus.investigation.candidate_triage import relate_candidates
+
+        candidates = [
+            {
+                "candidate_id": "CL-A",
+                "kind": "behavior",
+                "analytic_id": "BH-A",
+                "corroboration_group": "group-a",
+                "priority_score": 65,
+                "priority_tier": "medium",
+                "disposition": "observed",
+                "customer_visible": False,
+                "evidence_ids": ["EV-A"],
+                "score_reasons": ["base behavior score"],
+                "follow_ups": [],
+            },
+            {
+                "candidate_id": "CL-B",
+                "kind": "behavior",
+                "analytic_id": "BH-B",
+                "corroboration_group": "group-b",
+                "priority_score": 45,
+                "priority_tier": "medium",
+                "disposition": "observed",
+                "customer_visible": False,
+                "evidence_ids": ["EV-B"],
+                "score_reasons": ["base behavior score"],
+                "follow_ups": [],
+            },
+        ]
+        evidence = [
+            {
+                "evidence_id": "EV-A",
+                "observed_at": "2026-10-12T12:00:00Z",
+                "raw": {"host": {"name": "srv-01"}},
+            },
+            {
+                "evidence_id": "EV-B",
+                "observed_at": "2026-10-12T12:01:00Z",
+                "raw": {"host": {"name": "srv-01"}},
+            },
+        ]
+
+        prior = relate_candidates(candidates, evidence)
+        previously_related = next(item for item in prior if item["candidate_id"] == "CL-A")
+        self.assertEqual(previously_related["disposition"], "corroborated")
+
+        fresh = relate_candidates(candidates, evidence[:1])
+        merged = merge_candidate_queue(prior, fresh)
+        current = next(item for item in merged if item["candidate_id"] == "CL-A")
+
+        self.assertEqual(current["disposition"], "observed")
+        self.assertFalse(current["customer_visible"])
+        self.assertEqual(current["priority_score"], 65)
+        self.assertEqual(current["corroboration_bonus"], 0)
+        self.assertEqual(current["related_candidates"], [])
+
     def test_candidate_merge_preserves_disposition_follow_up_status_and_history(self):
         from romulus.intelligence.behavior_catalog import (
             build_candidate_queue,
