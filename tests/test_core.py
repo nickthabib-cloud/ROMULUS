@@ -216,7 +216,7 @@ class CoreTests(unittest.TestCase):
             store=Store(cfg.data_dir,cfg.logs_dir); state=HuntEngine(cfg,store,offline=True).run("Hunt for lateral movement using SMB")
             self.assertEqual(state["status"],"completed"); self.assertTrue(state["findings"])
             self.assertEqual(state["outcome"],"evidence_supported_lead")
-            self.assertEqual(state["termination_reason"],"lead_queue_exhausted")
+            self.assertEqual(state["termination_reason"],"coverage_closure_reached")
             self.assertEqual(state["retention"]["status"],"completed")
             self.assertNotIn("host",state); self.assertNotIn("network",state)
             cited={evidence_id for finding in state["findings"] for evidence_id in finding.get("evidence_ids",[])}
