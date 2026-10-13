@@ -65,6 +65,14 @@ def _bounded_report_events(state, key, limit=175):
     rows=list(state.get(key,[])); cited=set()
     for item in build_report_items(state): cited.update(item.get("evidence_ids",[]) or [])
     chosen=[row for row in rows if row.get("evidence_id") in cited]
+    finalized=state.get("status")=="completed" or bool(state.get("finalized_at"))
+    if not finalized:
+        chosen_ids={row.get("evidence_id") for row in chosen}
+        remaining=[row for row in rows if row.get("evidence_id") not in chosen_ids]
+        slots=max(0,limit-len(chosen))
+        if slots and remaining:
+            step=max(1,len(remaining)//slots)
+            chosen.extend(remaining[::step][:slots])
     return sorted(chosen[:max(limit,len(chosen))],key=lambda row:str(row.get("observed_at") or ""))
 
 def _analytic_lines(summary):

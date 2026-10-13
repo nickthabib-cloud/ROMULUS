@@ -745,7 +745,7 @@ class WorkflowIntegrationTests(unittest.TestCase):
 
 
 class CandidateReportingTests(unittest.TestCase):
-    def test_customer_report_shows_high_lead_and_keeps_low_lead_technical(self):
+    def test_completed_primary_report_excludes_anomalous_only_lead(self):
         from romulus.reporting.report import _content
 
         state = {
@@ -803,8 +803,8 @@ class CandidateReportingTests(unittest.TestCase):
         self.assertIn("SUSPICIOUS BEHAVIOR", customer)
         self.assertIn("Trusted indicator observed: IOC-1", customer)
         self.assertNotIn("Executable launched from a temporary path", customer)
-        self.assertIn("Executable launched from a temporary path", technical)
-        self.assertIn("weak path anomaly", technical)
+        self.assertNotIn("Executable launched from a temporary path", technical)
+        self.assertNotIn("weak path anomaly", technical)
 
     def test_operator_guide_points_to_editable_catalogs(self):
         guide = Path("docs/behavior-analytics.md").read_text(encoding="utf-8")
