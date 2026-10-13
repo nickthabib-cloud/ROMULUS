@@ -10,6 +10,8 @@ from collections.abc import Mapping
 import hashlib
 from typing import Any
 
+from .candidate_triage import select_candidate_frontier
+
 
 _RAW_FIELDS = (
     "message",
@@ -31,7 +33,6 @@ _RAW_FIELDS = (
     "dns.host",
     "network.protocol",
 )
-_PRIORITY = {"critical": 4, "high": 3, "medium": 2, "low": 1, "informational": 0}
 _CLOSED_FOLLOW_UP = {"completed", "closed", "resolved", "not_applicable"}
 
 
@@ -53,10 +54,22 @@ def build_case_file(
     outcome_limit = _limit(outcome_limit)
 
     evidence_index = _evidence_index(source)
+    preferred_candidate_ids = _preferred_candidate_ids(source.get("hypotheses"))
     candidates, anchor_ids = _select_candidates(
-        source.get("candidate_leads"), evidence_index, candidate_limit, evidence_limit
+        source.get("candidate_leads"), evidence_index, candidate_limit, evidence_limit,
+        preferred_candidate_ids,
     )
-    evidence = _select_evidence(evidence_index, anchor_ids, evidence_limit)
+    selected_candidate_ids = {row["candidate_id"] for row in candidates}
+    hidden_candidate_evidence = {
+        evidence_id
+        for raw in _rows(source.get("candidate_leads"))
+        if _text(raw.get("candidate_id"), 120) in selected_candidate_ids
+        for evidence_id in _strings(raw.get("evidence_ids"), 120, 100)
+        if evidence_id not in set(anchor_ids)
+    }
+    evidence = _select_evidence(
+        evidence_index, anchor_ids, evidence_limit, excluded_ids=hidden_candidate_evidence,
+    )
     visible_evidence_ids = {row["evidence_id"] for row in evidence}
     visible_candidate_ids = {row["candidate_id"] for row in candidates}
     hypotheses = _hypotheses(
@@ -173,43 +186,88 @@ def _evidence_index(state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return index
 
 
-def _candidate_sort(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    tier = _text(row.get("priority_tier"), 40).lower()
-    score = _number(row.get("priority_score"), 0)
-    return (-_PRIORITY.get(tier, -1), -score, _text(row.get("candidate_id"), 120))
-
-
 def _select_candidates(
     raw_candidates: Any,
     evidence_index: Mapping[str, dict[str, Any]],
     candidate_limit: int,
     evidence_limit: int,
+    preferred_ids: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     selected: list[dict[str, Any]] = []
     anchor_ids: list[str] = []
     used_ids: set[str] = set()
-    for raw in sorted(_rows(raw_candidates), key=_candidate_sort):
-        if len(selected) >= candidate_limit:
+    raw_by_id = {
+        _text(raw.get("candidate_id"), 120): raw for raw in _rows(raw_candidates)
+        if _text(raw.get("candidate_id"), 120)
+    }
+    eligible = [
+        raw for raw in raw_by_id.values()
+        if any(identifier in evidence_index for identifier in _strings(raw.get("evidence_ids"), 120, 100))
+    ]
+    frontier = select_candidate_frontier(
+        eligible, limit=candidate_limit, preferred_ids=preferred_ids or set(),
+    )
+    prepared = []
+    for raw in frontier:
+        if len(prepared) >= candidate_limit:
             break
         candidate_id = _text(raw.get("candidate_id"), 120)
-        if not candidate_id or candidate_id in used_ids:
+        if not candidate_id or any(item[0] == candidate_id for item in prepared):
             continue
-        owned = [item for item in _strings(raw.get("evidence_ids"), 120, 100) if item in evidence_index]
-        owned = list(dict.fromkeys(owned))
-        # A reasoning-visible lead is never separated from all evidence records it owns.
-        missing_owned = [item for item in _strings(raw.get("evidence_ids"), 120, 100) if item not in evidence_index]
-        new_anchor_ids = [item for item in owned if item not in anchor_ids]
-        if not owned or missing_owned or len(anchor_ids) + len(new_anchor_ids) > evidence_limit:
+        all_owned = sorted(set(_strings(raw.get("evidence_ids"), 120, 100)))
+        owned = [item for item in all_owned if item in evidence_index]
+        if not owned:
+            continue
+        prepared.append((candidate_id, raw, all_owned, owned))
+
+    allocations: dict[str, list[str]] = {}
+    # Give every candidate one owned record before any candidate gets a second.
+    for candidate_id, _, _, owned in prepared:
+        already_visible = next((identifier for identifier in owned if identifier in anchor_ids), None)
+        if already_visible:
+            allocations[candidate_id] = [already_visible]
+        elif len(anchor_ids) < evidence_limit:
+            allocations[candidate_id] = [owned[0]]
+            anchor_ids.append(owned[0])
+    # Distribute the remaining unique-evidence budget round-robin, bounded to
+    # six visible records per candidate.
+    while len(anchor_ids) < evidence_limit:
+        progressed = False
+        for candidate_id, _, _, owned in prepared:
+            visible_owned = allocations.get(candidate_id)
+            if not visible_owned or len(visible_owned) >= 6:
+                continue
+            next_owned = next((identifier for identifier in owned if identifier not in visible_owned), None)
+            if next_owned is None:
+                continue
+            if next_owned not in anchor_ids and len(anchor_ids) >= evidence_limit:
+                continue
+            visible_owned.append(next_owned)
+            if next_owned not in anchor_ids:
+                anchor_ids.append(next_owned)
+            progressed = True
+            if len(anchor_ids) >= evidence_limit:
+                break
+        if not progressed:
+            break
+
+    for candidate_id, raw, all_owned, _ in prepared:
+        visible_owned = allocations.get(candidate_id, [])
+        if not visible_owned:
             continue
         compact = {
             "candidate_id": candidate_id,
             "kind": _text(raw.get("kind"), 80),
+            "corroboration_group": _text(
+                raw.get("corroboration_group") or raw.get("analytic_id"), 120
+            ),
             "title": _text(raw.get("title"), 240),
             "description": _text(raw.get("description"), 360),
             "priority_tier": _text(raw.get("priority_tier"), 40),
             "priority_score": _number(raw.get("priority_score"), 0),
             "disposition": _text(raw.get("disposition"), 60),
-            "evidence_ids": owned,
+            "evidence_ids": visible_owned,
+            "evidence_total": len(all_owned),
             "assets": _strings(raw.get("assets") or raw.get("affected_assets"), 160, 20),
             "attack_techniques": _strings(raw.get("attack_techniques"), 40, 20),
             "score_reasons": _strings(raw.get("score_reasons"), 200, 12),
@@ -218,8 +276,90 @@ def _select_candidates(
         }
         selected.append(compact)
         used_ids.add(candidate_id)
-        anchor_ids.extend(new_anchor_ids)
+
+    visible_evidence_ids = set(anchor_ids)
+    for compact in selected:
+        raw = raw_by_id.get(compact["candidate_id"], {})
+        relationships = _visible_relationships(
+            raw.get("related_candidates"), used_ids, visible_evidence_ids,
+        )
+        compact["related_candidates"] = relationships
+        base_reasons = [reason for reason in compact["score_reasons"]
+            if not reason.startswith("evidence-backed corroboration contribution ")]
+        if relationships:
+            groups = {
+                _text(raw_by_id.get(row["candidate_id"], {}).get("corroboration_group")
+                    or raw_by_id.get(row["candidate_id"], {}).get("analytic_id"), 120)
+                for row in relationships
+            }
+            groups.discard("")
+            base_reasons.append(
+                f"evidence-backed corroboration contribution {min(20, len(groups) * 10)}"
+            )
+        else:
+            groups = set()
+        raw_bonus = max(0, min(20, int(_number(raw.get("corroboration_bonus"), 0))))
+        inferred_base = max(0, int(_number(raw.get("priority_score"), 0)) - raw_bonus)
+        base_score = max(0, min(100, int(_number(raw.get("base_priority_score"), inferred_base))))
+        visible_bonus = min(20, len(groups) * 10)
+        visible_score = min(100, base_score + visible_bonus)
+        compact["priority_score"] = visible_score
+        compact["priority_tier"] = "critical" if visible_score >= 90 else (
+            "high" if visible_score >= 70 else ("medium" if visible_score >= 40 else "low")
+        )
+        disposition = _text(raw.get("disposition"), 60) or "observed"
+        terminal = disposition in {"benign_likely", "dismissed", "unresolved"}
+        if not terminal and disposition != "investigating" and not raw.get("finding_ids"):
+            disposition = "corroborated" if visible_bonus and visible_score >= 70 else "observed"
+        compact["disposition"] = disposition
+        compact["score_reasons"] = base_reasons
+        compact["corroboration_reasons"] = [
+            f"Related to {row['candidate_id']} "
+            f"({_text(raw_by_id.get(row['candidate_id'], {}).get('corroboration_group') or raw_by_id.get(row['candidate_id'], {}).get('analytic_id'), 120) or 'unknown'}) "
+            f"via shared {row['shared_entity_type']} {row['shared_entity']} within "
+            f"{row['time_delta_seconds']} seconds; {row['caveat']}"
+            for row in relationships
+        ]
     return selected, anchor_ids
+
+
+def _preferred_candidate_ids(raw_hypotheses: Any) -> set[str]:
+    terminal = {"supported", "contradicted", "rejected", "dismissed", "closed", "resolved"}
+    preferred: set[str] = set()
+    for hypothesis in _rows(raw_hypotheses):
+        if _text(hypothesis.get("status"), 60).lower() in terminal:
+            continue
+        candidate_id = _text(hypothesis.get("candidate_id"), 120)
+        if candidate_id:
+            preferred.add(candidate_id)
+        preferred.update(_strings(hypothesis.get("basis_candidate_ids"), 120, 20))
+    return preferred
+
+
+def _visible_relationships(
+    raw_relationships: Any,
+    visible_candidate_ids: set[str],
+    visible_evidence_ids: set[str],
+) -> list[dict[str, Any]]:
+    out = []
+    for raw in _rows(raw_relationships):
+        related_id = _text(raw.get("candidate_id"), 120)
+        evidence_ids = _strings(raw.get("evidence_ids"), 120, 2)
+        if (not related_id or related_id not in visible_candidate_ids or len(evidence_ids) != 2
+                or not set(evidence_ids).issubset(visible_evidence_ids)):
+            continue
+        out.append({
+            "candidate_id": related_id,
+            "shared_entity_type": _text(raw.get("shared_entity_type"), 40),
+            "shared_entity": _text(raw.get("shared_entity"), 200),
+            "evidence_ids": evidence_ids,
+            "time_delta_seconds": _number(raw.get("time_delta_seconds"), 0),
+            "confidence": _text(raw.get("confidence"), 40),
+            "caveat": _text(raw.get("caveat"), 240),
+        })
+    return sorted(out, key=lambda row: (
+        row["time_delta_seconds"], row["shared_entity_type"], row["shared_entity"], row["candidate_id"],
+    ))
 
 
 def _follow_ups(candidate: Mapping[str, Any], candidate_id: str) -> list[dict[str, Any]]:
@@ -255,10 +395,17 @@ def _follow_ups(candidate: Mapping[str, Any], candidate_id: str) -> list[dict[st
 
 
 def _select_evidence(
-    evidence_index: Mapping[str, dict[str, Any]], anchor_ids: list[str], limit: int
+    evidence_index: Mapping[str, dict[str, Any]],
+    anchor_ids: list[str],
+    limit: int,
+    excluded_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     chosen_ids = list(dict.fromkeys(anchor_ids))[:limit]
-    remaining = [row for key, row in evidence_index.items() if key not in set(chosen_ids)]
+    excluded = set(excluded_ids or ())
+    remaining = [
+        row for key, row in evidence_index.items()
+        if key not in set(chosen_ids) and key not in excluded
+    ]
     remaining.sort(key=lambda row: (row.get("observed_at", ""), row["evidence_id"]), reverse=True)
     chosen_ids.extend(row["evidence_id"] for row in remaining[: max(0, limit - len(chosen_ids))])
     return [dict(evidence_index[identifier]) for identifier in chosen_ids]
@@ -281,11 +428,12 @@ def _hypotheses(
             continue
         if candidate_id and candidate_id not in visible_candidate_ids:
             continue
-        cited = _strings(
+        owned_citations = _strings(
             raw.get("candidate_evidence_ids") or raw.get("basis_evidence_ids")
             or raw.get("evidence_ids"), 120, 100
         )
-        if cited and not set(cited).issubset(visible_evidence_ids):
+        cited = [identifier for identifier in owned_citations if identifier in visible_evidence_ids]
+        if owned_citations and not cited:
             continue
         assessment = raw.get("model_assessment") or raw.get("deterministic_assessment")
         compact_assessment = None

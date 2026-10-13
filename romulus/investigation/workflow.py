@@ -28,7 +28,7 @@ from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
 from .search_planner import (candidate_fields, validate_spec, compile_es, compile_arkime, compile_tshark,
     compile_native_es, validate_native_arkime, validate_native_tshark, expand_anchor_selectors, anchor_time_range,
-    SOURCE_FIELDS, TEXT_FIELDS)
+    candidate_network_spec, SOURCE_FIELDS, TEXT_FIELDS)
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
     record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
     recover_interrupted_tasks, execution_fingerprint)
@@ -36,6 +36,7 @@ from .progress import decide_next_action, initialize_progress, record_progress, 
 from .sampling import sampling_policy
 from .synthetic import sample_evidence
 from .casefile import build_case_file, visible_case_ids
+from .candidate_triage import relate_candidates, select_candidate_frontier
 from .reasoning import admit_reasoning
 
 
@@ -1085,7 +1086,10 @@ class HuntEngine:
         s["analytic_summary"]=summarize_evidence(s.get("host",[]),s.get("network",[]))
         s.setdefault("coverage",{})["analytic_summary"]=s["analytic_summary"]
         previous_candidates=list(s.get("candidate_leads",[]))
-        fresh_candidates=build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        fresh_candidates=relate_candidates(
+            build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"]),
+            all_e,
+        )
         s["candidate_leads"]=merge_candidate_queue(previous_candidates,fresh_candidates)
         new_hypotheses=_candidate_hypotheses(s["candidate_leads"],s.get("hypotheses",[]),all_e)
         if new_hypotheses:
@@ -2004,14 +2008,29 @@ def _state_mission_mode(state):
 
 def _candidate_hypotheses(candidates,existing,evidence=None):
     """Create bounded hypotheses only from deterministic candidates with citations."""
+    available_evidence_ids=None if evidence is None else {
+        str(event.get("evidence_id")) for event in evidence if event.get("evidence_id")
+    }
     existing_candidates={candidate_id for hypothesis in existing for candidate_id in hypothesis.get("basis_candidate_ids",[])}
+    existing_candidates.update(hypothesis.get("candidate_id") for hypothesis in existing if hypothesis.get("candidate_id"))
     out=[]
+    remaining=[]
     for candidate in candidates:
+        if candidate.get("candidate_id") in existing_candidates:
+            continue
+        current_evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
+        if available_evidence_ids is not None:
+            current_evidence_ids=[
+                value for value in current_evidence_ids if value in available_evidence_ids
+            ]
+            if not current_evidence_ids:
+                continue
+        remaining.append({**candidate,"evidence_ids":current_evidence_ids})
+    for candidate in select_candidate_frontier(remaining):
         candidate_id=candidate.get("candidate_id")
         evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
         score=int(candidate.get("priority_score",0) or 0)
-        if not candidate_id or candidate_id in existing_candidates or not evidence_ids: continue
-        if score<40 and candidate.get("kind")!="trusted_indicator": continue
+        if not candidate_id or not evidence_ids: continue
         technique=next((value for value in candidate.get("attack_techniques",[]) if value in TECHNIQUES),"unmapped")
         meta=TECHNIQUES.get(technique,{})
         asset=next(iter(candidate.get("assets",[]) or []),"unknown asset")
@@ -2065,7 +2084,11 @@ def _lead_catalog(hypotheses):
         tid=hypothesis.get("technique_id"); meta=TECHNIQUES.get(tid,{})
         sources=[]
         if hypothesis.get("expected_host") or meta.get("host"): sources.append("host")
-        if hypothesis.get("expected_network") or meta.get("network") or meta.get("ports") or meta.get("protocols"): sources.append("network")
+        network_expected=bool(hypothesis.get("expected_network") or meta.get("network")
+            or meta.get("ports") or meta.get("protocols"))
+        candidate_network_compilable=bool(meta.get("ports") or meta.get("protocols"))
+        if network_expected and (not hypothesis.get("candidate_id") or candidate_network_compilable):
+            sources.append("network")
         if not sources: sources=["host"]
         follow_ups=hypothesis.get("follow_ups",[]) or []
         for source_index,source in enumerate(sources):
@@ -2535,32 +2558,26 @@ def _pcap_filter(hypotheses):
 def _lead_network_expression(lead):
     tid=lead.get("technique_id") if isinstance(lead,dict) else None
     meta=TECHNIQUES.get(tid,{})
-    clauses=[]
-    for port in meta.get("ports",[])[:10]: clauses.append(f"port == {port}")
-    protocol_map={"https":"tls","rdp":"tcp","ssh":"tcp","smb":"tcp","dcom":"tcp","winrm":"tcp"}
-    for protocol in meta.get("protocols",[])[:6]:
-        value=protocol_map.get(protocol,protocol)
-        if value in {"tcp","udp","icmp","dns","http","tls"}: clauses.append(f"protocols == {value}")
     legacy={"network_smb_context":"port == 445","network_auth_context":"port == 3389 || port == 22 || port == 5985 || port == 5986",
             "network_dns_http_context":"protocols == dns || protocols == http || protocols == tls",
             "network_transfer_context":"protocols == dns || protocols == http || protocols == tls"}
-    if not clauses and isinstance(lead,dict) and lead.get("id") in legacy: return legacy[lead["id"]]
-    return " || ".join(dict.fromkeys(clauses)) or "protocols == tcp || protocols == udp || protocols == icmp"
+    if not meta and isinstance(lead,dict) and lead.get("id") in legacy and not lead.get("candidate_id"):
+        return legacy[lead["id"]]
+    spec=candidate_network_spec(lead if isinstance(lead,dict) else {},meta,
+        require_entity=bool(isinstance(lead,dict) and lead.get("candidate_id")))
+    return compile_arkime(spec)
 
 
 def _lead_pcap_filter(lead):
     tid=lead.get("technique_id") if isinstance(lead,dict) else None
     meta=TECHNIQUES.get(tid,{})
-    clauses=[]
-    for port in meta.get("ports",[])[:10]: clauses.append(f"tcp.port == {port} || udp.port == {port}")
-    protocol_map={"https":"tls","rdp":"tcp","ssh":"tcp","smb":"smb2","dcom":"dcerpc","winrm":"http"}
-    for protocol in meta.get("protocols",[])[:6]:
-        value=protocol_map.get(protocol,protocol)
-        if value in {"tcp","udp","icmp","dns","http","tls","smb2","dcerpc"}: clauses.append(value)
     legacy={"network_smb_context":"tcp.port == 445","network_auth_context":"tcp.port == 3389 || tcp.port == 22 || tcp.port == 5985 || tcp.port == 5986",
         "network_dns_http_context":"dns || http || tls","network_transfer_context":"dns || http || tls"}
-    if not clauses and isinstance(lead,dict) and lead.get("id") in legacy: return legacy[lead["id"]]
-    return " || ".join(dict.fromkeys(clauses)) or "ip"
+    if not meta and isinstance(lead,dict) and lead.get("id") in legacy and not lead.get("candidate_id"):
+        return legacy[lead["id"]]
+    spec=candidate_network_spec(lead if isinstance(lead,dict) else {},meta,
+        require_entity=bool(isinstance(lead,dict) and lead.get("candidate_id")))
+    return compile_tshark(spec)[0]
 
 
 def _evidence_ips(events):
