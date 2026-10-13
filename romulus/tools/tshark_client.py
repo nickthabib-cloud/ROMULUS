@@ -1,5 +1,5 @@
 """Constrained offline TShark wrapper: no shell, path allowlist, filter grammar allowlist."""
-import csv, hashlib, heapq, json, shutil, subprocess, threading
+import csv, hashlib, heapq, json, re, shutil, subprocess, threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -8,6 +8,20 @@ from ..investigation.sampling import allocate_cap, time_strata
 
 ALLOWED_FIELDS={"frame.time_epoch","frame.number","frame.len","ip.src","ip.dst","ipv6.src","ipv6.dst","ipv6.addr","ip.addr","tcp.srcport","tcp.dstport","tcp.port","tcp.stream","tcp.flags.syn","tcp.flags.ack","udp.srcport","udp.dstport","udp.port","udp.stream","dns.qry.name","dns.a","http.host","http.request.uri","http.user_agent","tls.handshake.extensions_server_name","smb2.cmd","smb2.filename"}
 FILTER_CHARS=set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ .:=<>!&|()/-\"'")
+CAPTURE_NAME=re.compile(r"^.+\.(?:pcap|pcapng)(?:\.[0-9][0-9._-]*)?$",re.IGNORECASE)
+
+
+def approve_capture_path(path: str | Path, allowed_dirs: tuple[Path, ...] | list[Path]) -> Path:
+    candidate=Path(path).expanduser().resolve(strict=True)
+    if not candidate.is_file() or not CAPTURE_NAME.fullmatch(candidate.name):
+        raise ValueError("Only existing PCAP/PCAPNG files are allowed")
+    allowed=[]
+    for directory in allowed_dirs:
+        try: allowed.append(Path(directory).expanduser().resolve(strict=True))
+        except OSError: continue
+    if not any(candidate.is_relative_to(directory) for directory in allowed):
+        raise ValueError("PCAP path is outside PCAP_ALLOWED_DIRS")
+    return candidate
 
 class TSharkAdapter:
     def __init__(self, settings: Settings): self.settings=settings
@@ -111,11 +125,7 @@ class TSharkAdapter:
                 "provenance":{"pcap":str(path),"display_filter":display_filter,"fields":requested_fields,"read_packet_cap":None,
                     "scan_mode":"complete capture or explicit time slice under timeout","time_range":"explicit filter" if time_filter else "entire configured capture"}}
     def _approved(self, path: str | Path) -> Path:
-        candidate=Path(path).expanduser().resolve(strict=True)
-        if not candidate.is_file() or candidate.suffix.lower() not in {".pcap",".pcapng"}: raise ValueError("Only existing PCAP/PCAPNG files are allowed")
-        allowed=[d.resolve() for d in self.settings.pcap_allowed_dirs if d.exists()]
-        if not any(candidate.is_relative_to(d) for d in allowed): raise ValueError("PCAP path is outside PCAP_ALLOWED_DIRS")
-        return candidate
+        return approve_capture_path(path,self.settings.pcap_allowed_dirs)
 
 
 def _offer(heap: list[tuple[int,int,int,str]], cap: int, ordinal: int, line: str) -> None:

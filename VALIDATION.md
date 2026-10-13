@@ -2,6 +2,29 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-13 — retrieval contract hardening (local/VM proof; no new hunt)
+
+### Implemented behavior
+
+- Elasticsearch mappings can belong to both host and network telemetry families when their fields support both roles. Timestamp and index availability are preserved independently for each family; an explicit mission window still fails closed when no supported timestamp is mapped.
+- Each record from a dual-family index is admitted exactly once. Network modules/categories retain network precedence, endpoint and authentication semantics route to host, and sparse host event context is preserved without converting source/destination firewall schemas into host telemetry.
+- `doctor` and the TShark runtime now use one canonical path validator. It requires an existing regular file inside a configured directory and accepts canonical `.pcap`/`.pcapng` names plus numeric generated suffixes such as `.pcap.1642684647`; arbitrary extensions and paths outside the allowlist remain rejected.
+- The implementation and tests contain no Russell Mitchell indicator, entity, attack step, tool, technique sequence, or oracle timestamp. The live dataset was used only to verify the generic source contract after blind evaluation.
+
+### Review and local proof
+
+- Focused RED/GREEN regressions cover mixed mapping membership, timestamp propagation, discovery registration, exact document routing, authentication records with and without categories, sparse Windows event-code records, explicit network-category precedence, firewall-only mappings, missing-timestamp failure, capture-name boundaries, allowlist escape, and diagnostic/runtime parity.
+- Review repeatedly challenged the classification boundary and exposed network-first dual-index routing, authentication compatibility, category-less `system.auth` routing, and explicit network-category precedence. Each material finding received a failing regression before correction. Final re-review found no remaining Critical or Important issue.
+- The complete local suite passed all 231 tests with seven expected dependency-gated skips. All 12 retrieval-contract tests, Python `compileall`, and `git diff --check` passed.
+
+### Exact dependency-complete and live source proof
+
+- Initial exact candidate `7b87478e505211cbad2f0a2463b5b22e7bd6a5c9` matched its archive digest on the VM. A first run was invalidated because deployment environment values were loaded before tests. The clean rerun then exposed a real dependency-only live-graph routing regression: a sparse host event mapped to both families but reached network analytics. The responsible routing layer was corrected and reviewed rather than weakening the integration assertion.
+- Final runtime commit `4c7dda551c1ddc07faeac352d5d341f9d8ebff55` was archived with SHA-256 `F0DA4EE989950D9F209C69E21A4B33B3CB07F99973F9710D9F7DD94FC47D9228`, which matched locally and on the VM. The exact archive passed all 231 dependency-complete tests with no skips and passed `compileall`.
+- Configured diagnostics were fully green for the timezone, dependencies, pinned Enterprise ATT&CK v19.2 catalog, `qwen3:8b` structured reasoning preparation, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark 4.2.2, all 13 configured captures, and isolated writable runtime directories. No secret was displayed and no service configuration changed.
+- A separate read-only assertion passed all 13 configured capture paths through the runtime validator. A live mapping assertion found one dual-family index and confirmed a supported timestamp in both host and network field inventories. No hunt was launched and no telemetry was modified.
+- The exact VM archives, checkouts, isolated runtimes, and local transfer archives were removed after proof. Only this validation record and the ignored implementation ledger remain.
+
 ## 2026-10-13 — blind Russell Mitchell generalization evaluation (partial; no validated attack path)
 
 ### Evaluation boundary and exact candidate
