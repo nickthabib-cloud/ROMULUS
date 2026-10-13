@@ -80,7 +80,7 @@ class Ollama:
         )
         return self._json_chat(
             "You are ROMULUS's evidence-constrained report analyst. You organize accepted evidence but cannot create facts, observables, classifications, or outcomes.",
-            prompt,schema,tokens=4200)
+            prompt,schema,tokens=3200)
 
     def investigate_case(self, case_file: dict, source_fields: dict[str,list[str]],
                          max_searches: int = 3, max_hypotheses: int = 3) -> dict:
@@ -471,15 +471,15 @@ def _indicator_review_schema(case_file: Mapping[str,object]) -> dict:
         "relationship_ids":references(relationship_ids),
     }
     limitations={"type":"array","maxItems":6,
-        "items":{"type":"string","maxLength":300}}
+        "items":{"type":"string","maxLength":240}}
     follow_ups={"type":"array","maxItems":6,
-        "items":{"type":"string","maxLength":300}}
+        "items":{"type":"string","maxLength":240}}
     strong={"type":"object","properties":{
         **selectors,
         "item_ids":references(item_ids,minimum=1),
         "evidence_ids":references(evidence_ids,minimum=1),
         "title":{"type":"string","minLength":3,"maxLength":180},
-        "assessment":{"type":"string","minLength":3,"maxLength":900},
+        "assessment":{"type":"string","minLength":3,"maxLength":520},
         "limitations":limitations,
         "recommended_follow_ups":follow_ups,
         "confidence":{"type":"string","enum":["low","moderate","high"]},
@@ -490,7 +490,7 @@ def _indicator_review_schema(case_file: Mapping[str,object]) -> dict:
     context={"type":"object","properties":{
         **selectors,
         "evidence_ids":references(evidence_ids,minimum=1),
-        "assessment":{"type":"string","minLength":3,"maxLength":700},
+        "assessment":{"type":"string","minLength":3,"maxLength":420},
         "limitations":limitations,
     },"required":["item_ids","evidence_ids","observable_ids","relationship_ids",
         "assessment","limitations"],"additionalProperties":False}
@@ -499,7 +499,7 @@ def _indicator_review_schema(case_file: Mapping[str,object]) -> dict:
         "item_ids":references(item_ids,minimum=1),
         "evidence_ids":references(evidence_ids,minimum=1),
         "title":{"type":"string","minLength":3,"maxLength":180},
-        "assessment":{"type":"string","minLength":3,"maxLength":700},
+        "assessment":{"type":"string","minLength":3,"maxLength":420},
         "limitations":limitations,
         "recommended_follow_ups":follow_ups,
     },"required":["item_ids","evidence_ids","observable_ids","relationship_ids",
@@ -508,7 +508,7 @@ def _indicator_review_schema(case_file: Mapping[str,object]) -> dict:
     narrative={"type":"object","properties":{
         "item_ids":references(item_ids),
         "relationship_ids":references(relationship_ids),
-        "summary":{"type":"string","maxLength":1400},
+        "summary":{"type":"string","maxLength":900},
         "limitations":limitations,
     },"required":["item_ids","relationship_ids","summary","limitations"],
         "additionalProperties":False}
@@ -519,7 +519,7 @@ def _indicator_review_schema(case_file: Mapping[str,object]) -> dict:
         "likely_noise":{"type":"array","maxItems":maximum,"items":noise},
         "possible_activity_narrative":narrative,
         "recommended_follow_ups":{"type":"array","maxItems":12,
-            "items":{"type":"string","maxLength":300}},
+            "items":{"type":"string","maxLength":240}},
     },"required":["strong_indicators","supporting_context","likely_noise",
         "possible_activity_narrative","recommended_follow_ups"],
         "additionalProperties":False}

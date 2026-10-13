@@ -64,7 +64,7 @@ def build_indicator_case(state: Mapping[str, Any], report_items: list[dict[str, 
         "version": 1,
         "mission": {
             "hunt_id": _text(source.get("hunt_id"), 100),
-            "objective": _text(source.get("objective"), 1200),
+            "objective": _text(source.get("objective"), 800),
             "time_scope": _text(coverage.get("time_scope"), 300),
         },
         "items": items,
@@ -226,18 +226,18 @@ def _project_item(raw: Mapping[str, Any]) -> dict[str, Any]:
         "item_id": _text(raw.get("item_id"), 120),
         "classification": _text(raw.get("classification"), 40),
         "title": _text(raw.get("title"), 180),
-        "observation": _text(raw.get("observation"), 600),
-        "why_it_matters": _text(raw.get("why_it_matters"), 600),
-        "evidence_ids": _bounded_list(raw.get("evidence_ids"), 100, 120),
-        "assets": _bounded_list(raw.get("assets"), 40, 160),
+        "observation": _text(raw.get("observation"), 320),
+        "why_it_matters": _text(raw.get("why_it_matters"), 320),
+        "evidence_ids": _stratified_values(_bounded_list(raw.get("evidence_ids"), 48, 120),3),
+        "assets": _bounded_list(raw.get("assets"), 16, 160),
         "first_observed": _text(raw.get("first_observed"), 80),
         "last_observed": _text(raw.get("last_observed"), 80),
         "investigation_status": _text(raw.get("investigation_status"), 80),
         "confidence": _text(raw.get("confidence"), 80),
         "attack_techniques": _bounded_list(raw.get("attack_techniques"), 20, 40),
-        "benign_alternatives": _bounded_list(raw.get("benign_alternatives"), 12, 300),
-        "coverage_gaps": _bounded_list(raw.get("coverage_gaps"), 12, 300),
-        "recommended_actions": _bounded_list(raw.get("recommended_actions"), 12, 300),
+        "benign_alternatives": _bounded_list(raw.get("benign_alternatives"), 6, 220),
+        "coverage_gaps": _bounded_list(raw.get("coverage_gaps"), 6, 220),
+        "recommended_actions": _bounded_list(raw.get("recommended_actions"), 6, 220),
     }
 
 
@@ -245,19 +245,20 @@ def _project_evidence(raw: Mapping[str, Any]) -> dict[str, Any]:
     raw_fields = raw.get("raw") if isinstance(raw.get("raw"), Mapping) else {}
     safe_raw = _safe_raw(raw_fields)
     evidence_id = str(raw.get("evidence_id"))
+    observables = _extract_observables(evidence_id, safe_raw, raw.get("observation"))
     return {
         "evidence_id": evidence_id,
         "source": _text(raw.get("source"), 80),
         "asset": _text(raw.get("asset"), 160),
         "observed_at": _text(raw.get("observed_at"), 80),
-        "observation": _text(raw.get("observation"), 700),
+        "observation": _text(raw.get("observation"), 320),
         "retrieval_context": _text(
             (raw.get("provenance") or {}).get("search_id")
             if isinstance(raw.get("provenance"), Mapping) else "",
             120,
         ),
-        "facts": safe_raw,
-        "observables": _extract_observables(evidence_id, safe_raw, raw.get("observation")),
+        "facts": _case_facts(safe_raw),
+        "observables": observables,
     }
 
 
@@ -270,6 +271,27 @@ def _safe_raw(raw: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(value, (str, int, float, bool)) and value is not None:
             projected[key[:160]] = _text(value, 700)
     return dict(list(projected.items())[:80])
+
+
+def _stratified_values(values: list[str], limit: int) -> list[str]:
+    """Retain deterministic first/middle/last coverage for model-only evidence context."""
+    unique=list(dict.fromkeys(values))
+    if len(unique)<=limit:
+        return unique
+    positions=[round(index*(len(unique)-1)/(limit-1)) for index in range(limit)]
+    return [unique[index] for index in dict.fromkeys(positions)]
+
+
+def _case_facts(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep bounded outcome/context facts; observables carry exact artifact values."""
+    tokens=("status","outcome","state","action","method","bytes","duration","protocol",
+        "direction","transport","event.code","event.category","event.type","response")
+    selected=[]
+    for key,value in raw.items():
+        lowered=str(key).lower()
+        if any(token in lowered for token in tokens):
+            selected.append((str(key)[:160],_text(value,320)))
+    return dict(selected[:24])
 
 
 def _extract_observables(evidence_id: str, facts: Mapping[str, Any], observation: Any) -> list[dict[str, str]]:
