@@ -1,4 +1,5 @@
-import os, tempfile, unittest
+import importlib, os, sys, tempfile, types, unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 from romulus.config import Settings
@@ -9,6 +10,19 @@ from romulus.store import Store
 from romulus.tools.elasticsearch_client import validate_query
 from romulus.tools.tshark_client import ALLOWED_FIELDS
 from romulus.config import safe_url
+
+
+@contextmanager
+def _ollama_module():
+    """Load the local-only adapter without requiring requests in the lean test runtime."""
+    requests_stub=types.ModuleType("requests")
+    requests_stub.Session=lambda: None
+    sys.modules.pop("romulus.agent.ollama",None)
+    with patch.dict(sys.modules,{"requests":requests_stub}):
+        try:
+            yield importlib.import_module("romulus.agent.ollama")
+        finally:
+            sys.modules.pop("romulus.agent.ollama",None)
 
 class CoreTests(unittest.TestCase):
     def test_hypotheses_are_mission_relevant(self):
@@ -191,6 +205,106 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(reason_schema["properties"]["new_hypotheses"]["maxItems"],0)
         finding_schema=reason_schema["properties"]["findings"]["items"]
         self.assertIn("hypothesis_id",finding_schema["required"])
+    def test_investigator_schema_allows_three_grounded_competing_hypotheses_with_falsifiers(self):
+        with _ollama_module() as module:
+            schema=module._investigator_schema(["elasticsearch","arkime"],["H-EXISTING"],3,3)
+        self.assertEqual(set(schema["properties"]),{
+            "assessments","new_hypotheses","searches","findings","summary"})
+        self.assertEqual(schema["properties"]["new_hypotheses"]["maxItems"],3)
+        hypothesis=schema["properties"]["new_hypotheses"]["items"]
+        for required in ("proposal_id","candidate_id","evidence_ids","title","technique_id",
+                "explanation","expected_host","expected_network","falsifying_observations",
+                "benign_explanations","analytic_goal"):
+            self.assertIn(required,hypothesis["required"])
+        self.assertEqual(hypothesis["properties"]["falsifying_observations"]["minItems"],1)
+        self.assertEqual(hypothesis["properties"]["benign_explanations"]["minItems"],1)
+        self.assertIn("anyOf",hypothesis)
+        for collection in ("assessments","new_hypotheses","searches","findings"):
+            self.assertIn("proposal_id",schema["properties"][collection]["items"]["required"])
+        search=schema["properties"]["searches"]["items"]
+        self.assertIn("hypothesis_ref",search["required"])
+        self.assertNotIn("hypothesis_id",search["properties"])
+    def test_investigator_prompt_receives_only_the_case_file_and_marks_telemetry_untrusted(self):
+        class Response:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"message":{"content":('{"assessments":[],"new_hypotheses":[],"searches":[],'
+                    '"findings":[],"summary":"No admissible proposal."}')}}
+        class Session:
+            def __init__(self): self.payload=None
+            def post(self,url,**kwargs): self.payload=kwargs["json"]; return Response()
+        case_file={"version":1,"mission":{"hunt_id":"HUNT-CASE"},
+            "evidence":[{"evidence_id":"EV-VISIBLE","observation":"CASE-FILE-SENTINEL"}]}
+        session=Session()
+
+        with _ollama_module() as module:
+            result=module.Ollama(Settings.from_env(),session).investigate_case(
+                case_file,{"elasticsearch":["process.name"]},max_searches=3,max_hypotheses=3)
+
+        self.assertEqual(result["summary"],"No admissible proposal.")
+        system=session.payload["messages"][0]["content"].lower()
+        prompt=session.payload["messages"][1]["content"]
+        self.assertIn("untrusted",system)
+        self.assertIn("untrusted",prompt.lower())
+        self.assertIn("CASE-FILE-SENTINEL",prompt)
+        self.assertIn('"EV-VISIBLE"',prompt)
+        self.assertNotIn("credentials",prompt.lower())
+        self.assertLessEqual(session.payload["options"]["temperature"],0.15)
+    def test_critic_schema_can_only_review_known_proposal_ids(self):
+        investigator={
+            "assessments":[{"proposal_id":"P-ASSESS"}],
+            "new_hypotheses":[{"proposal_id":"P-HYP"}],
+            "searches":[{"proposal_id":"P-SEARCH"}],
+            "findings":[{"proposal_id":"P-FIND"}],
+        }
+
+        with _ollama_module() as module:
+            schema=module._critic_schema(investigator)
+
+        self.assertEqual(set(schema["properties"]),{"reviews"})
+        review=schema["properties"]["reviews"]["items"]
+        self.assertEqual(set(review["properties"]),{"proposal_id","decision","issue_codes","rationale"})
+        self.assertEqual(set(review["properties"]["proposal_id"]["enum"]),
+            {"P-ASSESS","P-HYP","P-SEARCH","P-FIND"})
+        self.assertEqual(review["properties"]["decision"]["enum"],["accept","reject"])
+        self.assertEqual(set(review["properties"]["issue_codes"]["items"]["enum"]),{
+            "citation_mismatch","unsupported_causality","ignored_benign_alternative",
+            "duplicate_work","missing_discriminating_search","avoidable_search_cost","malformed"})
+        self.assertFalse(schema["additionalProperties"])
+        self.assertFalse(review["additionalProperties"])
+    def test_critic_prompt_cannot_author_evidence_searches_findings_or_priorities(self):
+        class Response:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"message":{"content":('{"reviews":[{"proposal_id":"P-1",'
+                    '"decision":"accept","issue_codes":[],"rationale":"Grounded."}]}')}}
+        class Session:
+            def __init__(self): self.payload=None
+            def post(self,url,**kwargs): self.payload=kwargs["json"]; return Response()
+        investigator={"assessments":[{"proposal_id":"P-1","hypothesis_id":"H-1"}],
+            "new_hypotheses":[],"searches":[],"findings":[],"summary":"bounded"}
+        session=Session()
+
+        with _ollama_module() as module:
+            result=module.Ollama(Settings.from_env(),session).criticize_case(
+                {"version":1,"evidence":[{"evidence_id":"EV-1"}]},investigator)
+
+        self.assertEqual(result["reviews"][0]["proposal_id"],"P-1")
+        prompt=session.payload["messages"][1]["content"].lower()
+        for phrase in ("cannot author new evidence","cannot author new hypotheses",
+                "cannot author new searches","cannot author new findings","cannot assign priority"):
+            self.assertIn(phrase,prompt)
+        self.assertEqual(set(session.payload["format"]["properties"]),{"reviews"})
+    def test_reasoning_preflight_validates_both_structured_contracts(self):
+        with _ollama_module() as module:
+            result=module.Ollama(Settings.from_env()).reasoning_preflight()
+
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["investigator_ready"])
+        self.assertTrue(result["critic_ready"])
+        self.assertEqual(result["investigator_schema_keys"],
+            ["assessments","findings","new_hypotheses","searches","summary"])
+        self.assertEqual(result["critic_schema_keys"],["reviews"])
     def test_elasticsearch_query_validation(self):
         validate_query({"bool":{"should":[{"match":{"message":"SMB"}}],"minimum_should_match":1}})
         with self.assertRaises(ValueError): validate_query({"query_string":{"query":"*"}})
