@@ -430,15 +430,8 @@ class HuntEngine:
 
     def _add_es_hit(self,s,hit,query,lead_id=None):
         index=str(hit.get("_index", "")); document_id=hit.get("_id")
-        category=str(_nested(hit,"event.category") or hit.get("event.category") or "").lower()
-        module=str(_nested(hit,"event.module") or _nested(hit,"event.dataset") or hit.get("event.module") or "").lower()
         index_classes=s.get("es_indices_by_class",{}) if isinstance(s.get("es_indices_by_class"),dict) else {}
-        if index in index_classes.get("network",[]): key="network"
-        elif index in index_classes.get("host",[]): key="host"
-        elif "host" in index.lower(): key="host"
-        elif "network" in index.lower() or any(x in module for x in ("zeek","suricata","netflow","packetbeat","panw","network")) or "network" in category:
-            key="network"
-        else: key="host"
+        key=_es_hit_family(hit,index,index_classes)
         observed_value=_nested(hit,"@timestamp") or _nested(hit,"timestamp") or _nested(hit,"event.created") or _nested(hit,"event.ingested") or _nested(hit,"event.start")
         observed=_as_iso(observed_value) if observed_value is not None else ""
         host=_nested(hit,"host.name") or hit.get("host.name","")
@@ -2190,26 +2183,75 @@ def _field_names(mapping):
     return sorted(fields)
 
 
-def _mapping_category(name,entry):
+def _mapping_categories(name,entry):
     lower=str(name).lower()
     fields=set(_field_names({name:entry}))
-    host_score=sum(field in fields for field in ("process.name","process.command_line","winlog.event_id","event.code","user.name","host.name"))
-    network_score=sum(field in fields for field in ("source.ip","destination.ip","source.port","destination.port","network.protocol","dns.question.name","http.request.method"))
-    return "network" if "network" in lower else ("host" if "host" in lower else
-        ("network" if network_score>host_score else ("host" if host_score else "other")))
+    categories=set()
+    endpoint_markers=("process.name","process.command_line","process.executable","winlog.event_id")
+    host_context_markers=("event.code","user.name","host.name")
+    network_markers=("source.ip","destination.ip","source.port","destination.port","network.protocol",
+        "dns.question.name","http.request.method")
+    network_evidence=any(field in fields for field in network_markers)
+    network_classified=network_evidence or "network" in lower
+    sparse_auth_context=("host.name" in fields and
+        any(field in fields for field in ("user.name","event.code")) and
+        not any(field in fields for field in ("destination.ip","destination.port","network.protocol",
+            "dns.question.name","http.request.method")))
+    if any(field in fields for field in endpoint_markers) or sparse_auth_context or "host" in lower:
+        categories.add("host")
+    if network_classified:
+        categories.add("network")
+    if not network_classified and any(field in fields for field in host_context_markers):
+        categories.add("host")
+    if not categories:
+        categories.add("other")
+    return categories
+
+
+def _es_hit_family(hit,index,index_classes):
+    host_index=index in index_classes.get("host",[])
+    network_index=index in index_classes.get("network",[])
+    if host_index and network_index:
+        category=str(_nested(hit,"event.category") or hit.get("event.category") or "").lower()
+        module=" ".join(str(value) for value in (_nested(hit,"event.module"),_nested(hit,"event.dataset"),
+            hit.get("event.module"),hit.get("event.dataset")) if value).lower()
+        network_modules=("zeek","suricata","netflow","packetbeat","panw","network")
+        host_modules=("auth","audit","winlog","security")
+        host_categories=("process","authentication","iam","file","registry","configuration","malware","package","driver")
+        endpoint_fields=("process.name","process.command_line","process.executable","winlog.event_id")
+        network_fields=("source.ip","destination.ip","source.port","destination.port","network.protocol",
+            "dns.question.name","http.request.method","tls.client.server_name")
+        present=lambda field: (_nested(hit,field) if _nested(hit,field) is not None else hit.get(field)) not in (None,"",[],{})
+        if any(token in module for token in network_modules): return "network"
+        if any(token in module for token in host_modules): return "host"
+        if any(token in category for token in host_categories): return "host"
+        if any(present(field) for field in endpoint_fields): return "host"
+        if "network" in category or any(present(field) for field in network_fields): return "network"
+        if "network" in index.lower(): return "network"
+        return "host"
+    if network_index: return "network"
+    if host_index: return "host"
+    category=str(_nested(hit,"event.category") or hit.get("event.category") or "").lower()
+    module=" ".join(str(value) for value in (_nested(hit,"event.module"),_nested(hit,"event.dataset"),
+        hit.get("event.module"),hit.get("event.dataset")) if value).lower()
+    if "host" in index.lower(): return "host"
+    if "network" in index.lower() or any(x in module for x in ("zeek","suricata","netflow","packetbeat","panw","network")) or "network" in category:
+        return "network"
+    return "host"
 
 
 def _field_names_by_class(mapping):
     grouped={"host":set(),"network":set(),"other":set()}
     for name,entry in mapping.items():
-        grouped[_mapping_category(name,entry)].update(_field_names({name:entry}))
+        fields=_field_names({name:entry})
+        for category in _mapping_categories(name,entry): grouped[category].update(fields)
     return {key:sorted(value) for key,value in grouped.items() if value}
 
 
 def _index_names_by_class(mapping):
     grouped={"host":[],"network":[],"other":[]}
     for name,entry in mapping.items():
-        grouped[_mapping_category(name,entry)].append(str(name))
+        for category in _mapping_categories(name,entry): grouped[category].append(str(name))
     return {key:sorted(value) for key,value in grouped.items() if value}
 
 
