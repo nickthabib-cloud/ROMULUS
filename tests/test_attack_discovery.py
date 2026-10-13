@@ -178,8 +178,43 @@ class CandidateRelationshipTests(unittest.TestCase):
         )
         self.assertEqual(by_id["CL-B"]["related_candidates"][0]["candidate_id"], "CL-A")
         self.assertIn("GROUP-B", " ".join(by_id["CL-A"]["corroboration_reasons"]))
-        self.assertTrue(by_id["CL-B"]["customer_visible"])
+        self.assertEqual(by_id["CL-B"]["classification"], "anomalous")
+        self.assertFalse(by_id["CL-B"]["customer_visible"])
         self.assertEqual(by_id["CL-B"]["disposition"], "corroborated")
+
+    def test_relationship_upgrades_only_a_policy_authorized_anomaly(self):
+        from romulus.investigation.candidate_triage import relate_candidates
+
+        authorized = self._candidate("CL-A", "GROUP-A", "EV-A", 10)
+        authorized["classification"] = "anomalous"
+        authorized["classification_history"] = []
+        authorized["classification_policy"] = {
+            "default_classification": "anomalous",
+            "minimum_owned_evidence": 1,
+            "upgrade_rule": "independent_typed_entity_within_30m",
+            "downgrade_rule": "explicit_benign_evidence_only",
+            "policy_version": 1,
+            "policy_reason": "Weak behavior needs an independent typed relationship.",
+        }
+        forbidden = self._candidate("CL-B", "GROUP-B", "EV-B", 100)
+        forbidden["classification"] = "anomalous"
+        forbidden["classification_history"] = []
+        forbidden["classification_policy"] = dict(
+            authorized["classification_policy"], upgrade_rule="none"
+        )
+        evidence = [
+            self._event("EV-A", "2026-06-01T12:00:00Z", "10.55.0.8"),
+            self._event("EV-B", "2026-06-01T12:01:00Z", "10.55.0.8"),
+        ]
+
+        related = {row["candidate_id"]: row for row in relate_candidates(
+            [authorized, forbidden], evidence
+        )}
+
+        self.assertEqual(related["CL-A"]["classification"], "suspicious")
+        self.assertTrue(related["CL-A"]["customer_visible"])
+        self.assertEqual(related["CL-B"]["classification"], "anomalous")
+        self.assertFalse(related["CL-B"]["customer_visible"])
 
     def test_relationship_is_input_order_stable(self):
         from romulus.investigation.candidate_triage import relate_candidates
@@ -307,7 +342,8 @@ class CandidateRelationshipTests(unittest.TestCase):
         promoted = next(item for item in related if item["candidate_id"] == "CL-A")
         self.assertEqual(promoted["priority_score"], 70)
         self.assertEqual(promoted["disposition"], "corroborated")
-        self.assertTrue(promoted["customer_visible"])
+        self.assertEqual(promoted["classification"], "anomalous")
+        self.assertFalse(promoted["customer_visible"])
 
         recalculated = relate_candidates(related, evidence[:2])
         demoted = next(item for item in recalculated if item["candidate_id"] == "CL-A")

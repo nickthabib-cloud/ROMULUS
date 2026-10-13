@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 import ipaddress
 from typing import Any, Collection, Mapping, Sequence
 
+from .classification import apply_classification, migrate_candidate
+
 
 RELATIONSHIP_CAVEAT = "Temporal or entity association is an investigative lead, not causation."
 
@@ -60,7 +62,7 @@ def relate_candidates(
         if identifier:
             evidence_by_id.setdefault(identifier, event)
 
-    items = [copy.deepcopy(dict(candidate)) for candidate in candidates]
+    items = [migrate_candidate(copy.deepcopy(dict(candidate))) for candidate in candidates]
     items.sort(key=_candidate_sort_key)
     relationships: dict[str, list[dict[str, Any]]] = {
         str(item.get("candidate_id") or ""): [] for item in items
@@ -150,6 +152,9 @@ def relate_candidates(
             item["customer_visible"] = True
         else:
             item["customer_visible"] = bool(bonus and score >= 70 and not investigating)
+        classified = apply_classification(item, relationship_count=len(records))
+        item.clear()
+        item.update(classified)
 
     return sorted(items, key=_candidate_sort_key)
 

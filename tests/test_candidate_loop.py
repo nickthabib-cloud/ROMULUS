@@ -715,6 +715,98 @@ class AggregateSignalTests(unittest.TestCase):
 
 
 class CandidateStateTests(unittest.TestCase):
+    def test_candidate_merge_preserves_a_fresh_classification_audit_event(self):
+        from romulus.intelligence.behavior_catalog import merge_candidate_queue
+
+        prior = [{
+            "candidate_id": "CL-AUDIT",
+            "classification": "anomalous",
+            "classification_history": [],
+            "priority_score": 10,
+            "evidence_ids": ["EV-1"],
+            "follow_ups": [],
+            "finding_ids": [],
+        }]
+        fresh = [{
+            "candidate_id": "CL-AUDIT",
+            "classification": "suspicious",
+            "classification_history": [{
+                "prior": "anomalous",
+                "new": "suspicious",
+                "rule": "independent_typed_entity_within_30m",
+                "evidence_ids": ["EV-1", "EV-2"],
+                "timestamp": "2026-10-13T00:00:00+00:00",
+            }],
+            "priority_score": 20,
+            "evidence_ids": ["EV-1", "EV-2"],
+            "follow_ups": [],
+            "finding_ids": [],
+        }]
+
+        merged = merge_candidate_queue(prior, fresh)[0]
+
+        self.assertEqual(merged["classification"], "suspicious")
+        self.assertEqual(len(merged["classification_history"]), 1)
+        self.assertEqual(
+            merged["classification_history"][0]["rule"],
+            "independent_typed_entity_within_30m",
+        )
+
+    def test_follow_up_outcomes_change_status_without_changing_classification(self):
+        from romulus.investigation.workflow import HuntEngine
+
+        candidate = {
+            "candidate_id": "CL-STATUS",
+            "classification": "suspicious",
+            "investigation_status": "new",
+            "disposition": "observed",
+            "finding_ids": [],
+            "follow_ups": [{
+                "follow_up_id": "FU-STATUS", "status": "pending", "history": [],
+            }],
+        }
+        task = {
+            "task_id": "ST-STATUS",
+            "candidate_ids": ["CL-STATUS"],
+            "follow_up_ids": ["FU-STATUS"],
+        }
+        state = {
+            "candidate_leads": [candidate],
+            "search_tasks": {"ST-STATUS": task},
+            "search_outcomes": [{"task_id": "ST-STATUS", "status": "failed"}],
+        }
+
+        HuntEngine._record_scheduled_followups(
+            None, state, task, {"task_id": "ST-STATUS", "status": "failed"}
+        )
+
+        self.assertEqual(candidate["classification"], "suspicious")
+        self.assertEqual(candidate["investigation_status"], "follow_up_exhausted")
+        self.assertTrue(candidate["customer_visible"])
+
+    def test_linked_finding_resolves_candidate_without_promoting_truth(self):
+        from romulus.investigation.workflow import _link_candidates_to_findings
+
+        candidate = {
+            "candidate_id": "CL-LINK",
+            "classification": "anomalous",
+            "investigation_status": "investigating",
+            "disposition": "investigating",
+            "evidence_ids": ["EV-1"],
+            "finding_ids": [],
+            "follow_ups": [],
+        }
+        state = {
+            "candidate_leads": [candidate],
+            "findings": [{"finding_id": "F-1", "evidence_ids": ["EV-1"]}],
+        }
+
+        _link_candidates_to_findings(state)
+
+        self.assertEqual(candidate["classification"], "anomalous")
+        self.assertEqual(candidate["investigation_status"], "resolved")
+        self.assertFalse(candidate["customer_visible"])
+
     def test_candidate_merge_sanitizes_derived_state_when_candidate_is_not_refreshed(self):
         from romulus.intelligence.behavior_catalog import merge_candidate_queue
         from romulus.investigation.candidate_triage import relate_candidates

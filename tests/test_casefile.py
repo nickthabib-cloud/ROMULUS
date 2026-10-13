@@ -184,6 +184,46 @@ def _state():
 
 
 class CaseFileTests(unittest.TestCase):
+    def test_case_file_exposes_truth_and_status_without_score_based_promotion(self):
+        from romulus.investigation.casefile import build_case_file
+
+        state = {
+            "hunt_id": "HUNT-CLASSIFICATION",
+            "objective": "Review bounded telemetry.",
+            "mission_mode": "undirected",
+            "candidate_leads": [{
+                "candidate_id": "CL-CLASSIFICATION",
+                "kind": "behavior",
+                "title": "Weak but high-score observation",
+                "classification": "anomalous",
+                "investigation_status": "follow_up_exhausted",
+                "priority_score": 100,
+                "priority_tier": "critical",
+                "disposition": "corroborated",
+                "evidence_ids": ["EV-1"],
+                "related_candidates": [{
+                    "candidate_id": "CL-HIDDEN",
+                    "evidence_ids": ["EV-1", "EV-2"],
+                    "shared_entity_type": "ip",
+                    "shared_entity": "192.0.2.5",
+                    "time_delta_seconds": 30,
+                }],
+                "follow_ups": [],
+            }],
+            "hypotheses": [],
+            "host": [{
+                "evidence_id": "EV-1", "observed_at": "2026-10-12T00:00:00Z",
+                "observation": "bounded event", "raw": {},
+            }],
+            "network": [],
+        }
+
+        candidate = build_case_file(state)["candidates"][0]
+
+        self.assertEqual(candidate["classification"], "anomalous")
+        self.assertEqual(candidate["investigation_status"], "follow_up_exhausted")
+        self.assertEqual(candidate["related_candidates"], [])
+
     def test_candidate_owned_dns_question_is_visible_to_reasoning(self):
         from romulus.investigation.casefile import build_case_file
 

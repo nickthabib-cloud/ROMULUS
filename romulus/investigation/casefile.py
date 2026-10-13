@@ -11,6 +11,7 @@ import hashlib
 from typing import Any
 
 from .candidate_triage import select_candidate_frontier
+from .classification import migrate_candidate
 
 
 _RAW_FIELDS = (
@@ -217,7 +218,7 @@ def _select_candidates(
     anchor_ids: list[str] = []
     used_ids: set[str] = set()
     raw_by_id = {
-        _text(raw.get("candidate_id"), 120): raw for raw in _rows(raw_candidates)
+        _text(raw.get("candidate_id"), 120): migrate_candidate(raw) for raw in _rows(raw_candidates)
         if _text(raw.get("candidate_id"), 120)
     }
     eligible = [
@@ -286,6 +287,9 @@ def _select_candidates(
             "priority_tier": _text(raw.get("priority_tier"), 40),
             "priority_score": _number(raw.get("priority_score"), 0),
             "disposition": _text(raw.get("disposition"), 60),
+            "classification": _text(raw.get("classification"), 40) or "anomalous",
+            "investigation_status": _text(raw.get("investigation_status"), 60) or "new",
+            "classification_reason": _text(raw.get("classification_reason"), 360),
             "evidence_ids": visible_owned,
             "evidence_total": len(all_owned),
             "assets": _strings(raw.get("assets") or raw.get("affected_assets"), 160, 20),

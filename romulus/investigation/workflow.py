@@ -37,6 +37,7 @@ from .sampling import sampling_policy
 from .synthetic import sample_evidence
 from .casefile import build_case_file, visible_case_ids
 from .candidate_triage import relate_candidates, select_candidate_frontier
+from .classification import refresh_investigation_status
 from .reasoning import admit_reasoning
 
 
@@ -1819,6 +1820,7 @@ class HuntEngine:
                 elif required and all(isinstance(item,dict) and item.get("status") in terminal for item in current):
                     follow_up["status"]="blocked"
                 else: follow_up["status"]="in_progress"
+            candidate.update(refresh_investigation_status(candidate))
 
     def _pivot(self,s):
         selected=select_search_tasks(s,phase="investigation",limit=1)
@@ -2160,6 +2162,7 @@ def _link_candidates_to_findings(s):
         if linked:
             candidate["finding_ids"]=list(dict.fromkeys(candidate.get("finding_ids",[])+linked))
             candidate["disposition"]="corroborated"
+        candidate.update(refresh_investigation_status(candidate))
 
 
 def _query_terms(technique_ids):

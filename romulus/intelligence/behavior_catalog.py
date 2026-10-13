@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .attack_catalog import load_attack_catalog
+from ..investigation.classification import migrate_candidate, refresh_investigation_status
 
 
 BEHAVIOR_CATALOG_PATH = Path(__file__).with_name("behavior_catalog.json")
@@ -467,12 +468,15 @@ def customer_visible_candidates(candidates: list[dict[str, Any]]) -> list[dict[s
 
 def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge fresh detections without erasing investigation decisions or follow-up history."""
-    prior_by_id = {str(item.get("candidate_id")): item for item in previous if item.get("candidate_id")}
+    prior_by_id = {
+        str(item.get("candidate_id")): migrate_candidate(item)
+        for item in previous if item.get("candidate_id")
+    }
     merged = []
     refreshed_ids = set()
     terminal = {"benign_likely", "dismissed", "unresolved"}
     for fresh in current:
-        item = dict(fresh)
+        item = migrate_candidate(fresh)
         prior = prior_by_id.get(str(item.get("candidate_id")))
         refreshed_ids.add(str(item.get("candidate_id")))
         if prior:
@@ -504,7 +508,32 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
             item["follow_ups"] = preserved
             for field in ("disposition_history", "telemetry_gaps"):
                 if prior.get(field): item[field] = list(prior[field])
-        merged.append(item)
+            rank = {"anomalous": 0, "suspicious": 1, "malicious": 2}
+            fresh_history = [
+                dict(row) for row in item.get("classification_history", [])
+                if isinstance(row, dict)
+            ]
+            explicit_downgrade = any(
+                row.get("rule") == "explicit_benign_evidence_only" for row in fresh_history
+            )
+            if (
+                rank[str(prior["classification"])] > rank[str(item["classification"])]
+                and not explicit_downgrade
+            ):
+                for field in (
+                    "classification", "classification_reason", "classification_policy_version",
+                ):
+                    if prior.get(field) is not None:
+                        item[field] = prior[field]
+            combined_history = [
+                dict(row) for row in prior.get("classification_history", [])
+                if isinstance(row, dict)
+            ]
+            for row in fresh_history:
+                if row not in combined_history:
+                    combined_history.append(row)
+            item["classification_history"] = combined_history
+        merged.append(refresh_investigation_status(item))
     # A bounded re-analysis may not reproduce a previously observed candidate
     # (for example after context retention or source availability changes).
     # Preserve it until an explicit analyst disposition closes it.
@@ -516,7 +545,7 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
 
 def _retained_candidate_without_derived_corroboration(candidate: dict[str, Any]) -> dict[str, Any]:
     """Keep investigation history without carrying an unavailable relationship."""
-    item = dict(candidate)
+    item = migrate_candidate(candidate)
     item["follow_ups"] = [dict(entry, history=list(entry.get("history", [])))
         for entry in candidate.get("follow_ups", [])]
     bonus = max(0, min(20, int(item.get("corroboration_bonus", 0) or 0)))
@@ -534,11 +563,7 @@ def _retained_candidate_without_derived_corroboration(candidate: dict[str, Any])
         if not str(reason).startswith("evidence-backed corroboration contribution ")]
     if str(item.get("disposition") or "observed") == "corroborated":
         item["disposition"] = "observed"
-    item["customer_visible"] = bool(
-        item.get("classification") in {"suspicious", "malicious"}
-        and item.get("disposition") not in {"benign_likely", "dismissed"}
-    )
-    return item
+    return refresh_investigation_status(item)
 
 
 def _predicate_query(
