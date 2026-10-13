@@ -1,4 +1,4 @@
-import tempfile, unittest
+import os, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from romulus.config import Settings
@@ -29,11 +29,29 @@ class CoreTests(unittest.TestCase):
         encoded=str(query)
         self.assertIn("smb",encoded.lower()); self.assertIn("7045",encoded); self.assertNotIn("Hunt for SMB lateral movement",encoded)
         self.assertNotIn("range",query["bool"])
-    def test_default_configuration_searches_retained_history_and_has_iterative_budget(self):
-        cfg=Settings.from_env()
+    def test_default_configuration_uses_production_safety_backstops(self):
+        names=("MAX_RUNTIME_SECONDS","MAX_DEPTH","MAX_TOOL_CALLS","MAX_STAGNANT_CYCLES")
+        with patch.dict(os.environ,{name:"" for name in names}):
+            for name in names: os.environ.pop(name,None)
+            cfg=Settings.from_env()
         self.assertTrue(cfg.historical_search)
-        self.assertGreaterEqual(cfg.max_tool_calls,24)
+        self.assertEqual((cfg.max_runtime_seconds,cfg.max_depth,cfg.max_tool_calls,
+            cfg.max_stagnant_cycles),(3600,40,500,3))
         self.assertEqual(cfg.retention_policy,"compact")
+        example=(Path(__file__).resolve().parents[1]/".env.example").read_text(encoding="utf-8")
+        for setting in ("MAX_RUNTIME_SECONDS=3600","MAX_DEPTH=40","MAX_TOOL_CALLS=500",
+                "MAX_STAGNANT_CYCLES=3"):
+            self.assertIn(setting,example)
+    def test_safety_backstops_clamp_to_documented_finite_ranges(self):
+        names=("MAX_RUNTIME_SECONDS","MAX_DEPTH","MAX_TOOL_CALLS","MAX_STAGNANT_CYCLES")
+        with patch.dict(os.environ,{name:"999999" for name in names}):
+            high=Settings.from_env()
+        self.assertEqual((high.max_runtime_seconds,high.max_depth,high.max_tool_calls,
+            high.max_stagnant_cycles),(86400,200,5000,10))
+        with patch.dict(os.environ,{name:"-999999" for name in names}):
+            low=Settings.from_env()
+        self.assertEqual((low.max_runtime_seconds,low.max_depth,low.max_tool_calls,
+            low.max_stagnant_cycles),(10,1,1,1))
     def test_url_redaction(self):
         self.assertEqual(safe_url("http://alice:secret@example.test:8005/api?token=hide"),"http://example.test:8005/api")
     def test_arkime_adapter_uses_digest_and_bounded_documented_query(self):

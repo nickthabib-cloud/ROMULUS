@@ -57,6 +57,7 @@ class Settings:
     max_depth: int
     min_reasoning_rounds: int
     max_runtime_seconds: int
+    max_stagnant_cycles: int
     max_results: int
     arkime_max_results: int
     time_sampling_strata: int
@@ -88,9 +89,12 @@ class Settings:
             arkime_default_hours=_int("ARKIME_DATE_HOURS", 24, 1, 8760),
             mission_timezone=os.getenv("MISSION_TIMEZONE", "UTC").strip() or "UTC",
             pcap_allowed_dirs=paths("PCAP_ALLOWED_DIRS"), pcap_files=paths("PCAP_FILES"), tshark_bin=os.getenv("TSHARK_BIN", "tshark"),
-            max_tool_calls=_int("MAX_TOOL_CALLS", 160, 1, 200), max_depth=_int("MAX_DEPTH", 10, 1, 20),
+            max_tool_calls=_int("MAX_TOOL_CALLS", 500, 1, 5000), max_depth=_int("MAX_DEPTH", 40, 1, 200),
+            # Compatibility-only routing metadata during the deprecation cycle.
             min_reasoning_rounds=_int("MIN_REASONING_ROUNDS", 3, 1, 10),
-            max_runtime_seconds=_int("MAX_RUNTIME_SECONDS", 600, 10, 7200), max_results=_int("MAX_RESULTS", 10000, 1, 20000),
+            max_runtime_seconds=_int("MAX_RUNTIME_SECONDS", 3600, 10, 86400),
+            max_stagnant_cycles=_int("MAX_STAGNANT_CYCLES", 3, 1, 10),
+            max_results=_int("MAX_RESULTS", 10000, 1, 20000),
             arkime_max_results=_int("ARKIME_MAX_RESULTS", 20000, 1, 100000),
             time_sampling_strata=_int("TIME_SAMPLING_STRATA", 8, 2, 24),
             context_evidence_per_source=_int("CONTEXT_EVIDENCE_PER_SOURCE", 1000, 100, 5000),

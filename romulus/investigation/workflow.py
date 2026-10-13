@@ -31,6 +31,7 @@ from .search_planner import (candidate_fields, validate_spec, compile_es, compil
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
     record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
     recover_interrupted_tasks)
+from .progress import initialize_progress
 from .sampling import sampling_policy
 from .synthetic import sample_evidence
 
@@ -110,6 +111,7 @@ class HuntState(TypedDict, total=False):
     candidate_leads: list[dict]; behavior_catalog_status: dict
     pivot_results: list[dict]
     investigation_graph: dict
+    progress_baseline: dict; progress_history: list[dict]; stagnant_cycles: int
     retention_policy: str
 
 
@@ -144,6 +146,7 @@ class HuntEngine:
                     "trusted_indicators":len(self.local_indicators.get("indicators",[]))}}
         state.setdefault("sampling_policy",sampling_policy(self.settings))
         initialize_scheduler(state)
+        initialize_progress(state)
         if _resume:
             migrate_legacy_search_state(state,compile_pending=lambda lead:
                 self._compile_investigation_proposals(state,lead,"coverage_frontier"))

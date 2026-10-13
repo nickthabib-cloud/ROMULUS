@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 def _engine(root: Path, *, use_ollama: bool = False):
@@ -39,6 +41,40 @@ def _planning_state(objective: str):
 
 
 class MissionModeTests(unittest.TestCase):
+    def test_hunt_state_contains_candidate_loop_fields(self):
+        from romulus.investigation.workflow import HuntState
+
+        for field in ("candidate_leads","search_tasks","search_queue","search_outcomes",
+                "progress_baseline","progress_history","stagnant_cycles"):
+            self.assertIn(field,HuntState.__annotations__)
+
+    def test_hunt_initialization_preserves_or_baselines_progress_state(self):
+        class App:
+            def get_state(self,config): return SimpleNamespace(next=())
+            def invoke(self,state,config): return state
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root=Path(directory); engine=_engine(root)
+            with patch.object(engine,"_graph",return_value=(App(),None)):
+                created=engine.run("Hunt broadly",hunt_id="HUNT-NEW")
+            self.assertEqual(created["progress_history"],[])
+            self.assertEqual(created["stagnant_cycles"],0)
+            self.assertIn("evidence_ids",created["progress_baseline"])
+
+            legacy={
+                "hunt_id":"HUNT-LEGACY","objective":"Hunt broadly","status":"partial",
+                "coverage":{},"lead_queue":[],"candidate_leads":[],"hypotheses":[],
+                "host":[],"network":[],"investigation_graph":{},
+                "progress_baseline":{"sentinel":["kept"]},
+                "progress_history":[{"stage":"kept"}],"stagnant_cycles":2,
+            }
+            engine.store.save_state("HUNT-LEGACY",legacy)
+            with patch.object(engine,"_graph",return_value=(App(),None)):
+                resumed=engine.run("Hunt broadly",hunt_id="HUNT-LEGACY",_resume=True)
+            self.assertEqual(resumed["progress_baseline"],{"sentinel":["kept"]})
+            self.assertEqual(resumed["progress_history"],[{"stage":"kept"}])
+            self.assertEqual(resumed["stagnant_cycles"],2)
+
     def test_mission_mode_is_declared_in_graph_state_schema(self):
         from romulus.investigation.workflow import HuntState
 
