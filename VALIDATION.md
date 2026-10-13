@@ -2,7 +2,7 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
-## 2026-10-13 — evidence-scoped attack discovery promotion (local proof; live validation pending)
+## 2026-10-13 — evidence-scoped attack discovery promotion (reviewed, VM-proven, live result partial)
 
 ### Implemented behavior
 
@@ -17,11 +17,39 @@ This file records engineering validation performed against the development deplo
 - Query-scope regressions first showed that candidate pivots omitted their entity and could become protocol-wide. Relationship regressions then showed the missing triage boundary, empty aggregate timestamps, and same-record/same-asset self-corroboration. Frontier regressions reproduced scan-group crowding, one-pass candidate exhaustion, preferred-work loss, critical displacement by exploration, and oversized candidate disappearance.
 - A generic end-to-end fixture used eight unrelated scanner sources, a distinct high-entropy DNS observation, and a separate host-execution observation. Thirty-four records produced ten deterministic candidates. The first hypothesis frontier included the distinct DNS behavior, admitted no more than two scan candidates, recorded the DNS/host relationship with its two source evidence IDs, compiled the scan candidate's Arkime task with its primary IP plus TCP/UDP behavior, and published no finding merely from score or association.
 - The integration proof passed immediately after the three component slices were wired. Its assertions are still pre-milestone regressions: the original implementation lacked relationships and entity-scoped pivots and allowed repetitive scan candidates to crowd the DNS behavior from the first frontier.
-- The complete local suite passed all 255 tests with seven expected dependency-gated skips. `python -m compileall -q romulus tests` and `git diff --check` passed.
+- Review-driven regressions additionally proved that stale candidate citations cannot occupy the frontier, derived corroboration disappears when its evidence relationship disappears, uncapped base scores survive relationship recalculation, partial bonus loss recomputes disposition and customer visibility, prior-only candidates cannot retain unavailable promotion, preferred unresolved work is not starved, every selected candidate receives a bounded evidence anchor, and hidden relationships cannot leak through case-file score or prose.
+- The final whole-branch review of `9452c65..26f5462` found no remaining Critical or Important issue. The exact local candidate `26f54625c9d32a23e20903f5d5af66bc37ebd6f3` passed all 265 tests with seven expected dependency-gated skips, `python -m compileall -q romulus tests`, and `git diff --check`.
+
+### Exact dependency-complete and configured-source proof
+
+- The exact candidate archive had SHA-256 `7125BA63EF152B4BB97EE9F4C0CE56936BBE0B9E8CBDC6E2B287F24D4B19B15E`, which matched locally and on the development VM.
+- The archive passed all 265 dependency-complete VM tests with no skips and passed `compileall`.
+- Configured `doctor` was fully green for the pinned ATT&CK v19.2 catalog, `qwen3:8b` and its structured schema, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark 4.2.2, all thirteen configured captures, and isolated writable runtime directories. No service configuration or operational telemetry was changed.
+
+### Bounded generic live validation
+
+- Hunt `HUNT-6798563291` received only a broad undirected objective over all retained telemetry. No attack identity, indicator, account, host, tool, command, timestamp, technique sequence, or external storyline was supplied to the runtime. Validation overrides allowed 120 external calls, 40 analyst rounds, four stagnant cycles, and 2,700 seconds.
+- Deterministic discovery ran before any model call. It planned 24 host and 16 network tasks, persisted 30,927 unique source records, and retained a 2,500-record network context. Seventeen host catalog searches failed with Elasticsearch `BadRequestError`; no host event reached analysis. Network coverage was partial: Elasticsearch retained 500 of 750,635 matching events, Arkime retained 20,000 of 919,254 broad sessions, and each configured-capture sweep retained 500 records from much larger matches.
+- Analysis created 23 behavior candidates and twelve candidate-backed hypotheses, but zero qualifying candidate relationships, zero model assessments, zero findings, and zero attack-path edges. It correctly surfaced `192.168.230.122` as a `T1046 Network Service Discovery` fan-out candidate citing four records and summarizing eight destinations across 34 ports. That is a genuine attack-related lead, but it remained unassessed and unconnected.
+- The retained report also contained conspicuous long encoded DNS labels and transferred spreadsheet/document names associated with the same environment. Those records remained raw evidence rather than a DNS-transfer/exfiltration candidate. DNS brute-force discovery, endpoint password-cracking activity, web foothold, interactive shell, and privileged action were not surfaced as conclusions.
+- The first investigator/critic pair took 711,130 ms and 255,338 ms. It admitted no model-authored search or finding; deterministic work selected three candidate tasks and executed one Arkime pivot. The second pair took 953,855 ms and 202,671 ms, admitted three searches, and executed one Elasticsearch pivot returning zero records. The workflow then started another reasoning pass after only one pivot. The operator interrupted that pass at the declared 45-minute validation boundary because the streaming call had no total-turn deadline; resume with an exhausted safety budget produced an honest `partial / incomplete_investigation` report.
+
+### Responsible-layer diagnosis
+
+- **Search compilation:** semantic roles are bound by field name without retaining Elasticsearch field capabilities. Text predicates can therefore emit `match_phrase` clauses against incompatible keyword or numeric mappings. The live failure rate shows that expanding catalog strings alone would not repair host discovery; bindings and compilation must become mapping-type aware and live-query compatible.
+- **Deterministic coverage:** the library can recognize scan fan-out but does not yet promote obvious DNS brute force/tunneling and other time-window aggregates robustly. Rare attack evidence can remain only in raw capped samples. Generic credential-access, foothold, shell, privilege, DNS-enumeration, and transfer analytics require schema-aware coverage and benign controls rather than dataset-specific signatures.
+- **Sampling and pivots:** broad PCAP sweeps are expensive and lossy. Candidate-owned searches must replace repeated whole-capture breadth sooner, and a requested analytic must run only on a source capable of answering it. One network candidate received a process-ancestry intent routed to Arkime, demonstrating a source/analytic contract mismatch.
+- **Reasoning cadence and runtime:** two model pairs consumed roughly 35 minutes while only two candidate pivots executed. Reasoning after every single pivot does not narrow this frontier efficiently. High-value deterministic tasks should be drained in a bounded batch before synthesis, case files should be smaller, and each streaming reasoning call needs a total-turn deadline derived from remaining hunt time.
+- **Partial-chain semantics:** a scan, staging behavior, suspicious access, or exfiltration preparation may be the strongest supported result even when later stages are absent. Future path construction must search backward and forward through shared typed entities and time, report supported partial chains plus missing links, and never force a complete kill chain.
+
+### Reporting, retention, and cleanup
+
+- The final DOCX and technical TXT reports reopened successfully. Their SHA-256 digests are `81BD1D13BA6DE2134A9C3192F0D429373FB59A5732536B977147D00A2E04940F` and `3DB39C45C8B7B5E5A03984580842EECC5BB179D481EF3213EBDD641DBA5729A6`.
+- Compact finalization retained the report pair and removed every hunt evidence row, detailed task/model payload, checkpoint, and hunt-scoped working log row; zero evidence and zero findings remained because no finding cited support. The remote archive, isolated checkout/runtime, superseded archive, and local transfer archive were removed after verification.
 
 ### Scope boundary
 
-This local proof establishes deterministic candidate promotion and bounded reasoning visibility, not full attack-path recall. Dependency-complete VM execution, configured diagnostics, whole-branch review, and one bounded oracle-blind live hunt remain required before claiming operational improvement. Identity continuity across NAT/VPN leases and richer process/session lineage remain later work unless live evidence shows they are required for this slice.
+This milestone improves candidate diversity, evidence-scoped pivots, and corroboration integrity, but the live result does **not** establish acceptable attack discovery or path recall. The next slice must repair schema-aware host queries, promote network aggregates such as DNS enumeration/transfer from complete statistics rather than incidental samples, drain deterministic pivots before expensive synthesis, enforce total reasoning deadlines, and construct evidence-backed partial paths. Identity continuity across NAT/VPN leases and richer process/session lineage remain additional work.
 
 ## 2026-10-13 — evidence-grounded reasoning contract hardening (no new hunt)
 

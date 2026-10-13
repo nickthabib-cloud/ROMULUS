@@ -236,19 +236,19 @@ git commit -m "test: prove evidence-scoped attack discovery"
 - Consumes: the complete feature-branch diff and exact committed archive.
 - Produces: independent review findings, dependency-complete proof, configured diagnostics, and measured live discovery behavior.
 
-- [ ] **Step 1: Complete a fresh whole-diff review**
+- [x] **Step 1: Complete a fresh whole-diff review**
 
 Review specifically for query broadening, entity overconstraint, false corroboration, candidate starvation, unstable IDs/order, citation ownership, and accidental finding/admission relaxation. Reproduce every Critical or Important finding with a failing test before correction.
 
-- [ ] **Step 2: Run an exact-candidate VM proof**
+- [x] **Step 2: Run an exact-candidate VM proof**
 
 Archive the committed candidate, match its SHA-256 on the VM, run the dependency-complete suite with zero unexpected skips, run `compileall`, and run configured `doctor` against isolated writable directories.
 
-- [ ] **Step 3: Run one bounded generic live hunt**
+- [x] **Step 3: Run one bounded generic live hunt**
 
 Use the operator-authorized telemetry and broad objective without supplying oracle facts. Measure candidate diversity, candidate-owned query matched/returned totals and cap rates, investigator/critic admission, supported relationships, findings, paths, stop basis, and source gaps. Do not claim improved attack-path recall unless cited findings and paths actually demonstrate it.
 
-- [ ] **Step 4: Record proof and clean disposable artifacts**
+- [x] **Step 4: Record proof and clean disposable artifacts**
 
 Preserve only durable reports and validation summaries. Remove exact transfer archives, extracted validation trees, isolated runtimes, and disposable hunt bulk after verifying report integrity and exact paths.
 
