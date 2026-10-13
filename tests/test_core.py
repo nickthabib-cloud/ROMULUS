@@ -328,6 +328,58 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(result["payload"],large_value)
 
+    def test_structured_adapter_assembles_streamed_json_before_parsing(self):
+        class Response:
+            def raise_for_status(self): pass
+            def json(self): raise AssertionError("streamed responses must not use response.json()")
+            def iter_lines(self):
+                for event in (
+                    {"done":False,"message":{"content":"{\"payload\":\""}},
+                    {"done":False,"message":{"content":"streamed"}},
+                    {"done":True,"done_reason":"stop","message":{"content":"\"}"}},
+                ):
+                    yield json.dumps(event).encode("utf-8")
+        class Session:
+            def __init__(self): self.payload=None; self.request_kwargs=None
+            def post(self,url,**kwargs):
+                self.payload=kwargs["json"]; self.request_kwargs=kwargs; return Response()
+        schema={"type":"object","properties":{"payload":{"type":"string"}},
+            "required":["payload"],"additionalProperties":False}
+        session=Session()
+
+        with _ollama_module() as module:
+            result=module.Ollama(Settings.from_env(),session)._json_chat(
+                "system","prompt",schema,tokens=100)
+
+        self.assertEqual(result,{"payload":"streamed"})
+        self.assertTrue(session.payload["stream"])
+        self.assertTrue(session.request_kwargs["stream"])
+
+    def test_investigator_schema_worst_case_stays_inside_output_envelope(self):
+        def budget(schema):
+            value_type=schema.get("type")
+            if "enum" in schema:
+                return max(len(str(value)) for value in schema["enum"])+2
+            if value_type=="string": return schema.get("maxLength",80)+2
+            if value_type=="integer": return 5
+            if value_type=="boolean": return 5
+            if value_type=="array":
+                return 2+schema.get("maxItems",1)*(budget(schema.get("items",{}))+1)
+            if value_type=="object":
+                properties=schema.get("properties",{})
+                required=schema.get("required",properties)
+                return 2+sum(len(str(key))+4+budget(properties[key])
+                    for key in required if key in properties)
+            return 80
+
+        with _ollama_module() as module:
+            schema=module._investigator_schema(
+                ["elasticsearch","arkime","tshark"],
+                [f"H-{position}" for position in range(1,7)],3,3)
+
+        self.assertLessEqual(schema["properties"]["assessments"]["maxItems"],3)
+        self.assertLessEqual(budget(schema),18000)
+
     def test_structured_adapter_still_rejects_provider_truncation_and_incomplete_json(self):
         class Response:
             def __init__(self,body): self.body=body
@@ -348,6 +400,29 @@ class CoreTests(unittest.TestCase):
                 module.Ollama(Settings.from_env(),Session({"done_reason":"stop",
                     "message":{"content":"{\"value\":\"cut"}}))._json_chat(
                         "system","prompt",schema,tokens=100)
+            class StreamResponse:
+                def __init__(self,lines): self.lines=lines
+                def raise_for_status(self): pass
+                def json(self): raise AssertionError("streaming fallback must stay unused")
+                def iter_lines(self): return iter(self.lines)
+            class StreamSession:
+                def __init__(self,lines): self.lines=lines
+                def post(self,url,**kwargs): return StreamResponse(self.lines)
+            truncated=[json.dumps({"done":False,
+                    "message":{"content":"{\"value\":\"complete\"}"}}).encode(),
+                json.dumps({"done":True,"done_reason":"length",
+                    "message":{"content":""}}).encode()]
+            with self.assertRaisesRegex(ValueError,"truncated"):
+                module.Ollama(Settings.from_env(),StreamSession(truncated))._json_chat(
+                    "system","prompt",schema,tokens=100)
+            with self.assertRaisesRegex(ValueError,"malformed streaming JSON"):
+                module.Ollama(Settings.from_env(),StreamSession([b"{not-json"]))._json_chat(
+                    "system","prompt",schema,tokens=100)
+            premature_eof=[json.dumps({"done":False,
+                "message":{"content":"{\"value\":\"complete\"}"}}).encode()]
+            with self.assertRaisesRegex(ValueError,"before terminal completion"):
+                module.Ollama(Settings.from_env(),StreamSession(premature_eof))._json_chat(
+                    "system","prompt",schema,tokens=100)
     def test_investigator_prompt_receives_only_the_case_file_and_marks_telemetry_untrusted(self):
         class Response:
             def raise_for_status(self): pass

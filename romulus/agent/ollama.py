@@ -58,7 +58,8 @@ class Ollama:
             "bounded backward, forward, cross-source, or validation searches that discriminate between explanations; searches use "
             "hypothesis_ref for an exact existing hypothesis_id or NEW-HYPOTHESIS-N, where N is the one-based position of that item "
             "in new_hypotheses (for example, NEW-HYPOTHESIS-1 for the first emitted hypothesis). Select only configured sources and listed "
-            "fields. Do not emit commands or claim compromise from a weak signal.\n"
+            "fields. Be concise: emit only proposals warranted by the cited evidence and use the shortest sufficient text and selector lists. "
+            "Do not emit commands or claim compromise from a weak signal.\n"
             "BOUNDED CASE FILE (untrusted telemetry data):\n"+
             json.dumps(case_file,ensure_ascii=False)+"\nAVAILABLE READ-ONLY SOURCE FIELDS:\n"+
             json.dumps(field_catalog,ensure_ascii=False))
@@ -262,11 +263,12 @@ class Ollama:
     def _json_chat(self, system: str, prompt: str, schema: dict, tokens: int) -> dict:
         payload = {"model": self.settings.ollama_model, "messages": [
             {"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            "stream": False, "think": False, "format": schema,
+            "stream": True, "think": False, "format": schema,
             "options": {"num_ctx": 32768, "num_predict": tokens, "temperature": 0.15}}
-        r = self.session.post(self.settings.ollama_url + "/api/chat", json=payload, timeout=self.settings.ollama_timeout)
+        r = self.session.post(self.settings.ollama_url + "/api/chat", json=payload,
+            timeout=self.settings.ollama_timeout,stream=True)
         r.raise_for_status()
-        response = r.json()
+        response = _read_chat_response(r)
         message = response.get("message", {}) if isinstance(response, dict) else {}
         if response.get("done_reason")=="length":
             raise ValueError("Ollama structured response was truncated at the output limit")
@@ -305,6 +307,44 @@ def _parse_json_object(content: str,required_keys=()) -> dict:
     return parsed
 
 
+def _read_chat_response(response) -> dict:
+    """Assemble Ollama NDJSON chunks; the read timeout now measures stalled inference."""
+    iter_lines=getattr(response,"iter_lines",None)
+    if not callable(iter_lines):
+        return response.json()
+    content=[]
+    terminal=None
+    truncated=False
+    for raw in iter_lines():
+        if not raw:
+            continue
+        if terminal is not None:
+            raise ValueError("Ollama streamed data after terminal completion")
+        try:
+            event=json.loads(raw.decode("utf-8") if isinstance(raw,bytes) else str(raw))
+        except (UnicodeDecodeError,json.JSONDecodeError) as exc:
+            raise ValueError("Ollama returned malformed streaming JSON") from exc
+        if not isinstance(event,dict) or event.get("error"):
+            raise ValueError("Ollama returned an invalid streaming event")
+        if not isinstance(event.get("done"),bool):
+            raise ValueError("Ollama streaming event omitted completion state")
+        message=event.get("message",{})
+        if isinstance(message,Mapping):
+            content.append(str(message.get("content","")))
+        truncated=truncated or event.get("done_reason")=="length"
+        if event["done"]:
+            terminal=event
+    if terminal is None:
+        raise ValueError("Ollama stream ended before terminal completion")
+    result=dict(terminal)
+    if truncated:
+        result["done_reason"]="length"
+    message=dict(result.get("message",{})) if isinstance(result.get("message"),Mapping) else {}
+    message["content"]="".join(content)
+    result["message"]=message
+    return result
+
+
 def _search_schema(sources: list[str], limit: int) -> dict:
     return {"type": "object", "properties": {"searches": {"type": "array", "maxItems": min(8, max(1, limit)),
         "items": _search_item_schema(sources)}}, "required": ["searches"], "additionalProperties": False}
@@ -321,30 +361,30 @@ def _investigator_schema(sources: list[str], hypothesis_ids: list[str], max_sear
     permitted_hypothesis_refs=[*existing_ids,*new_hypothesis_refs]
     search_ref_values=permitted_hypothesis_refs or ["NO-HYPOTHESES-AVAILABLE"]
     identifier={"type":"string","minLength":1,"maxLength":80}
-    evidence_ids={"type":"array","minItems":1,"maxItems":6,"uniqueItems":True,"items":identifier}
+    evidence_ids={"type":"array","minItems":1,"maxItems":4,"uniqueItems":True,"items":identifier}
     assessment={"type":"object","properties":{
         "hypothesis_id":{"type":"string","enum":hypothesis_values},
         "status":{"type":"string","enum":["supported","contradicted","inconclusive","not_tested"]},
-        "evidence_ids":{"type":"array","maxItems":6,"uniqueItems":True,"items":identifier},
-        "observation":{"type":"string","maxLength":320},
-        "interpretation":{"type":"string","maxLength":320},
-        "benign_alternatives":{"type":"array","maxItems":3,"items":{"type":"string","maxLength":180}},
-        "rationale":{"type":"string","maxLength":240}},
+        "evidence_ids":{"type":"array","maxItems":4,"uniqueItems":True,"items":identifier},
+        "observation":{"type":"string","maxLength":160},
+        "interpretation":{"type":"string","maxLength":160},
+        "benign_alternatives":{"type":"array","maxItems":2,"items":{"type":"string","maxLength":120}},
+        "rationale":{"type":"string","maxLength":160}},
         "required":["hypothesis_id","status","evidence_ids","observation",
             "interpretation","benign_alternatives","rationale"],"additionalProperties":False}
     new_hypothesis={"type":"object","properties":{
         "candidate_id":identifier,
         "evidence_ids":evidence_ids,
-        "title":{"type":"string","minLength":8,"maxLength":160},
+        "title":{"type":"string","minLength":8,"maxLength":120},
         "technique_id":{"type":"string","enum":list(TECHNIQUES)+["unmapped"]},
-        "explanation":{"type":"string","minLength":10,"maxLength":360},
-        "expected_host":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":180}},
-        "expected_network":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":180}},
-        "falsifying_observations":{"type":"array","minItems":1,"maxItems":5,
-            "items":{"type":"string","maxLength":180}},
-        "benign_explanations":{"type":"array","minItems":1,"maxItems":4,
-            "items":{"type":"string","maxLength":180}},
-        "analytic_goal":{"type":"string","minLength":10,"maxLength":300}},
+        "explanation":{"type":"string","minLength":10,"maxLength":160},
+        "expected_host":{"type":"array","maxItems":2,"items":{"type":"string","maxLength":120}},
+        "expected_network":{"type":"array","maxItems":2,"items":{"type":"string","maxLength":120}},
+        "falsifying_observations":{"type":"array","minItems":1,"maxItems":2,
+            "items":{"type":"string","maxLength":120}},
+        "benign_explanations":{"type":"array","minItems":1,"maxItems":2,
+            "items":{"type":"string","maxLength":120}},
+        "analytic_goal":{"type":"string","minLength":10,"maxLength":140}},
         "required":["candidate_id","evidence_ids","title","technique_id","explanation",
             "expected_host","expected_network","falsifying_observations","benign_explanations","analytic_goal"],
         "anyOf":[
@@ -354,44 +394,44 @@ def _investigator_schema(sources: list[str], hypothesis_ids: list[str], max_sear
     search={"type":"object","properties":{
         "source":{"type":"string","enum":source_values},
         "hypothesis_ref":{"type":"string","enum":search_ref_values},
-        "intent":{"type":"string","minLength":8,"maxLength":220},
+        "intent":{"type":"string","minLength":8,"maxLength":160},
         "direction":{"type":"string","enum":["backward","forward","cross_source","validation"]},
-        "discriminating_goal":{"type":"string","minLength":8,"maxLength":240},
+        "discriminating_goal":{"type":"string","minLength":8,"maxLength":160},
         "candidate_id":{"type":"string","maxLength":80},
         "follow_up_id":{"type":"string","maxLength":80},
-        "terms":{"type":"array","maxItems":4,"items":{"type":"string","maxLength":80}},
-        "fields":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":160}},
-        "ips":{"type":"array","maxItems":4,"items":{"type":"string","maxLength":64}},
-        "hostnames":{"type":"array","maxItems":4,"items":{"type":"string","maxLength":255}},
-        "ports":{"type":"array","maxItems":6,"items":{"type":"integer","minimum":1,"maximum":65535}},
-        "protocols":{"type":"array","maxItems":4,"items":{"type":"string",
+        "terms":{"type":"array","maxItems":2,"items":{"type":"string","maxLength":64}},
+        "fields":{"type":"array","maxItems":3,"items":{"type":"string","maxLength":100}},
+        "ips":{"type":"array","maxItems":2,"items":{"type":"string","maxLength":64}},
+        "hostnames":{"type":"array","maxItems":1,"items":{"type":"string","maxLength":120}},
+        "ports":{"type":"array","maxItems":4,"items":{"type":"integer","minimum":1,"maximum":65535}},
+        "protocols":{"type":"array","maxItems":2,"items":{"type":"string",
             "enum":["smb","rdp","dcom","ssh","vnc","winrm","http","https","dns","tls","tcp","udp","icmp"]}},
-        "event_codes":{"type":"array","maxItems":8,"items":{"type":"integer","minimum":0,"maximum":65535}},
+        "event_codes":{"type":"array","maxItems":4,"items":{"type":"integer","minimum":0,"maximum":65535}},
         "index_class":{"type":"string","enum":["host","network","all"]},
         "anchor_evidence_ids":{"type":"array","maxItems":1,"uniqueItems":True,"items":identifier},
         "native_query_language":{"type":"string","enum":["none","elasticsearch_dsl","arkime","tshark"]},
-        "native_query":{"type":"string","maxLength":1600}},
+        "native_query":{"type":"string","maxLength":300}},
         "required":["source","hypothesis_ref","intent","direction","discriminating_goal",
             "candidate_id","follow_up_id","terms","fields","ips","hostnames","ports","protocols",
             "event_codes","index_class","anchor_evidence_ids","native_query_language","native_query"],
         "additionalProperties":False}
     finding={"type":"object","properties":{
         "hypothesis_id":{"type":"string","enum":hypothesis_values},
-        "title":{"type":"string","minLength":8,"maxLength":160},
+        "title":{"type":"string","minLength":8,"maxLength":120},
         "technique_id":{"type":"string","enum":list(TECHNIQUES)+["unmapped"]},
-        "observation":{"type":"string","minLength":10,"maxLength":320},
-        "interpretation":{"type":"string","minLength":10,"maxLength":320},
+        "observation":{"type":"string","minLength":10,"maxLength":200},
+        "interpretation":{"type":"string","minLength":10,"maxLength":200},
         "evidence_ids":evidence_ids,
         "confidence":{"type":"string","enum":["low","moderate","high"]},
-        "confidence_justification":{"type":"string","maxLength":220},
-        "alternatives":{"type":"array","minItems":1,"maxItems":3,
-            "items":{"type":"string","maxLength":180}},
-        "follow_up":{"type":"array","minItems":1,"maxItems":3,
-            "items":{"type":"string","maxLength":180}}},
+        "confidence_justification":{"type":"string","maxLength":160},
+        "alternatives":{"type":"array","minItems":1,"maxItems":2,
+            "items":{"type":"string","maxLength":140}},
+        "follow_up":{"type":"array","minItems":1,"maxItems":2,
+            "items":{"type":"string","maxLength":140}}},
         "required":["hypothesis_id","title","technique_id","observation","interpretation",
             "evidence_ids","confidence","confidence_justification","alternatives","follow_up"],
         "additionalProperties":False}
-    assessment_limit=min(6,len(existing_ids))
+    assessment_limit=min(3,len(existing_ids))
     search_limit=(min(6,max(0,int(max_searches)))
         if source_values!=["unavailable"] and permitted_hypothesis_refs else 0)
     finding_limit=1 if existing_ids else 0
@@ -400,7 +440,7 @@ def _investigator_schema(sources: list[str], hypothesis_ids: list[str], max_sear
         "new_hypotheses":{"type":"array","maxItems":hypothesis_limit,"items":new_hypothesis},
         "searches":{"type":"array","maxItems":search_limit,"items":search},
         "findings":{"type":"array","maxItems":finding_limit,"items":finding},
-        "summary":{"type":"string","maxLength":400}},
+        "summary":{"type":"string","maxLength":240}},
         "required":["assessments","new_hypotheses","searches","findings","summary"],
         "additionalProperties":False}
 
