@@ -1,4 +1,4 @@
-import importlib, os, sys, tempfile, types, unittest
+import importlib, json, os, sys, tempfile, types, unittest
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -212,7 +212,7 @@ class CoreTests(unittest.TestCase):
             "assessments","new_hypotheses","searches","findings","summary"})
         self.assertEqual(schema["properties"]["new_hypotheses"]["maxItems"],3)
         hypothesis=schema["properties"]["new_hypotheses"]["items"]
-        for required in ("proposal_id","candidate_id","evidence_ids","title","technique_id",
+        for required in ("candidate_id","evidence_ids","title","technique_id",
                 "explanation","expected_host","expected_network","falsifying_observations",
                 "benign_explanations","analytic_goal"):
             self.assertIn(required,hypothesis["required"])
@@ -220,10 +220,134 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(hypothesis["properties"]["benign_explanations"]["minItems"],1)
         self.assertIn("anyOf",hypothesis)
         for collection in ("assessments","new_hypotheses","searches","findings"):
-            self.assertIn("proposal_id",schema["properties"][collection]["items"]["required"])
+            item=schema["properties"][collection]["items"]
+            self.assertNotIn("proposal_id",item["required"])
+            self.assertNotIn("proposal_id",item["properties"])
         search=schema["properties"]["searches"]["items"]
         self.assertIn("hypothesis_ref",search["required"])
         self.assertNotIn("hypothesis_id",search["properties"])
+
+    def test_investigator_assigns_stable_unique_proposal_ids_after_parsing(self):
+        structured={
+            "assessments":[{"hypothesis_id":"H-1","status":"inconclusive","evidence_ids":["EV-1"],
+                "observation":"One process record is visible.","interpretation":"The cause is unresolved.",
+                "benign_alternatives":["Authorized administration"],"rationale":"More context is required."}],
+            "new_hypotheses":[{"candidate_id":"CL-1","evidence_ids":["EV-1"],
+                "title":"Unexpected process lineage near the retained event","technique_id":"T1059.001",
+                "explanation":"The cited process may have an unexpected parent.",
+                "expected_host":["An unusual parent process"],"expected_network":[],
+                "falsifying_observations":["The lineage belongs to an approved job"],
+                "benign_explanations":["Authorized administration"],
+                "analytic_goal":"Determine whether the process lineage is expected."}],
+            "searches":[{"source":"elasticsearch","hypothesis_ref":"H-1",
+                "intent":"Inspect the cited process lineage.","direction":"backward",
+                "discriminating_goal":"Separate approved administration from unexpected execution.",
+                "candidate_id":"CL-1","follow_up_id":"FU-1","terms":["powershell.exe"],
+                "fields":["process.name"],"ips":[],"hostnames":[],"ports":[],"protocols":[],
+                "event_codes":[],"index_class":"host","anchor_evidence_ids":["EV-1"],
+                "native_query_language":"none","native_query":""},
+                {"source":"elasticsearch","hypothesis_ref":"NEW-HYPOTHESIS-1",
+                "intent":"Test the proposed process-lineage explanation.","direction":"validation",
+                "discriminating_goal":"Distinguish an approved job from unexpected execution.",
+                "candidate_id":"CL-1","follow_up_id":"FU-1","terms":["powershell.exe"],
+                "fields":["process.name"],"ips":[],"hostnames":[],"ports":[],"protocols":[],
+                "event_codes":[],"index_class":"host","anchor_evidence_ids":["EV-1"],
+                "native_query_language":"none","native_query":""}],
+            "findings":[{"hypothesis_id":"H-1","title":"Process lineage requires review",
+                "technique_id":"T1059.001","observation":"The cited event has unusual lineage context.",
+                "interpretation":"The activity remains a suspected lead.","evidence_ids":["EV-1"],
+                "confidence":"low","confidence_justification":"Only one record is visible.",
+                "alternatives":["Authorized administration"],"follow_up":["Validate the parent process."]}],
+            "summary":"One bounded follow-up is warranted.",
+        }
+        class Response:
+            def raise_for_status(self): pass
+            def json(self): return {"message":{"content":json.dumps(structured)}}
+        class Session:
+            def __init__(self): self.payload=None
+            def post(self,url,**kwargs): self.payload=kwargs["json"]; return Response()
+        case_file={"version":1,"candidates":[{"candidate_id":"CL-1","evidence_ids":["EV-1"],
+                "assets":["workstation-1"],"attack_techniques":["T1059.001"],
+                "follow_ups":[{"follow_up_id":"FU-1","status":"pending"}]}],
+            "hypotheses":[{"hypothesis_id":"H-1","candidate_id":"CL-1","evidence_ids":["EV-1"],
+                "technique_id":"T1059.001","status":"inconclusive"}],
+            "evidence":[{"evidence_id":"EV-1","asset":"workstation-1",
+                "observed_at":"2026-01-01T00:00:00Z",
+                "observation":"A bounded synthetic process event.",
+                "raw":{"process.name":"powershell.exe"}}]}
+
+        with _ollama_module() as module:
+            first_session=Session(); second_session=Session()
+            first=module.Ollama(Settings.from_env(),first_session).investigate_case(
+                case_file,{"elasticsearch":["process.name"]},3,3)
+            second=module.Ollama(Settings.from_env(),second_session).investigate_case(
+                case_file,{"elasticsearch":["process.name"]},3,3)
+
+        first_ids=[row["proposal_id"] for key in
+            ("assessments","new_hypotheses","searches","findings") for row in first[key]]
+        second_ids=[row["proposal_id"] for key in
+            ("assessments","new_hypotheses","searches","findings") for row in second[key]]
+        self.assertEqual(first_ids,second_ids)
+        self.assertEqual(len(first_ids),len(set(first_ids)))
+        self.assertTrue(all(identifier.startswith("P-") for identifier in first_ids))
+        self.assertEqual(first["searches"][1]["hypothesis_ref"],
+            first["new_hypotheses"][0]["proposal_id"])
+        search_ref_values=first_session.payload["format"]["properties"]["searches"]["items"] \
+            ["properties"]["hypothesis_ref"]["enum"]
+        self.assertIn("H-1",search_ref_values)
+        self.assertIn("NEW-HYPOTHESIS-1",search_ref_values)
+        critic={"reviews":[{"proposal_id":proposal_id,"decision":"accept",
+            "issue_codes":[],"rationale":"The bounded proposal is grounded."}
+            for proposal_id in first_ids]}
+        from romulus.investigation.reasoning import admit_reasoning
+        admission=admit_reasoning(case_file,first,critic,case_file["hypotheses"])
+        self.assertEqual(len(admission["new_hypotheses"]),1)
+        admitted_hypothesis_id=admission["new_hypotheses"][0]["hypothesis_id"]
+        self.assertTrue(any(search["hypothesis_id"]==admitted_hypothesis_id
+            for search in admission["searches"]))
+        self.assertNotIn("proposal_id",first_session.payload["format"]["properties"]
+            ["assessments"]["items"]["properties"])
+        self.assertGreaterEqual(first_session.payload["options"]["num_ctx"],16384)
+        self.assertGreaterEqual(first_session.payload["options"]["num_predict"],4000)
+
+    def test_structured_adapter_preserves_complete_json_beyond_legacy_slice(self):
+        large_value="x"*26000
+        class Response:
+            def raise_for_status(self): pass
+            def json(self): return {"done_reason":"stop",
+                "message":{"content":json.dumps({"payload":large_value})}}
+        class Session:
+            def __init__(self): self.payload=None
+            def post(self,url,**kwargs): self.payload=kwargs["json"]; return Response()
+        schema={"type":"object","properties":{"payload":{"type":"string"}},
+            "required":["payload"],"additionalProperties":False}
+
+        with _ollama_module() as module:
+            result=module.Ollama(Settings.from_env(),Session())._json_chat(
+                "system","prompt",schema,tokens=5000)
+
+        self.assertEqual(result["payload"],large_value)
+
+    def test_structured_adapter_still_rejects_provider_truncation_and_incomplete_json(self):
+        class Response:
+            def __init__(self,body): self.body=body
+            def raise_for_status(self): pass
+            def json(self): return self.body
+        class Session:
+            def __init__(self,body): self.body=body
+            def post(self,url,**kwargs): return Response(self.body)
+        schema={"type":"object","properties":{"value":{"type":"string"}},
+            "required":["value"],"additionalProperties":False}
+
+        with _ollama_module() as module:
+            with self.assertRaisesRegex(ValueError,"truncated"):
+                module.Ollama(Settings.from_env(),Session({"done_reason":"length",
+                    "message":{"content":"{\"value\":\"complete\"}"}}))._json_chat(
+                        "system","prompt",schema,tokens=100)
+            with self.assertRaisesRegex(ValueError,"invalid, truncated, or incomplete"):
+                module.Ollama(Settings.from_env(),Session({"done_reason":"stop",
+                    "message":{"content":"{\"value\":\"cut"}}))._json_chat(
+                        "system","prompt",schema,tokens=100)
     def test_investigator_prompt_receives_only_the_case_file_and_marks_telemetry_untrusted(self):
         class Response:
             def raise_for_status(self): pass

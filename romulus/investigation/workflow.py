@@ -1398,13 +1398,17 @@ class HuntEngine:
         }
         for kind,count in proposed.items(): summary[f"proposed_{kind}"]+=count
 
-        before_calls=int(s.get("tool_calls",0))
-        critic=self._call(s,"ollama.api.chat","grounded_critic",
-            {"model":self.settings.ollama_model,"proposal_count":sum(proposed.values())},
-            "same bounded case file and structured investigator proposals",
-            lambda:analyst.criticize_case(case_file,investigator),
-            lambda value:len(value.get("reviews",[])) if isinstance(value,dict) else 0)
-        summary["critic_calls"]+=int(int(s.get("tool_calls",0))>before_calls)
+        proposal_count=sum(proposed.values())
+        if proposal_count:
+            before_calls=int(s.get("tool_calls",0))
+            critic=self._call(s,"ollama.api.chat","grounded_critic",
+                {"model":self.settings.ollama_model,"proposal_count":proposal_count},
+                "same bounded case file and structured investigator proposals",
+                lambda:analyst.criticize_case(case_file,investigator),
+                lambda value:len(value.get("reviews",[])) if isinstance(value,dict) else 0)
+            summary["critic_calls"]+=int(int(s.get("tool_calls",0))>before_calls)
+        else:
+            critic={"reviews":[]}
         working["critic"]=critic if isinstance(critic,dict) else None
         if not isinstance(critic,dict):
             summary["unavailable_passes"]+=1
@@ -1512,7 +1516,10 @@ class HuntEngine:
                 if isinstance(analysis,dict):
                     model_error=analysis.get("model_error")
                     if isinstance(analysis.get("admission"),dict):
-                        basis="grounded investigator proposals passed independent critic and deterministic admission"
+                        proposal_count=sum(len(analysis.get("investigator",{}).get(key,[])) for key in
+                            ("assessments","new_hypotheses","searches","findings"))
+                        basis=("grounded investigator proposals passed independent critic and deterministic admission"
+                            if proposal_count else "grounded investigator returned no proposals; deterministic frontier used")
                     else:
                         basis="structured model output unavailable; deterministic ATT&CK coverage frontier used"
             except Exception as exc:

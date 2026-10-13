@@ -6,24 +6,26 @@
 
 **Observed failure:** The blind hunt made nine investigator calls and admitted none. Responses were either output-limited/incomplete or rejected because model-authored `proposal_id` values were not globally unique. The critic consequently never ran. The adapter also slices response content at 24,000 characters even when the configured structured output budget can legitimately exceed that boundary.
 
-**Design:** Proposal IDs are deterministic ROMULUS bookkeeping, not model judgment. Remove them from the investigator schema and assign stable collection-scoped IDs after a complete structured object parses. Increase the structured context/output envelope, parse the complete bounded response instead of slicing it, and continue to reject any response whose provider reports length truncation or whose JSON is incomplete. Skip the external critic only when the investigator proposed no work; an empty deterministic review is sufficient because there is nothing to approve.
+**Design:** Proposal IDs are deterministic ROMULUS bookkeeping, not model judgment. Remove them from the investigator schema and assign stable collection-scoped IDs after a complete structured object parses. A search for a newly emitted hypothesis uses a schema-enumerated positional reference (`NEW-HYPOTHESIS-N`), which ROMULUS resolves to its trusted assigned ID before critic review and deterministic admission; unknown positions remain unresolved and fail closed. Increase the structured context/output envelope, parse the complete bounded response instead of slicing it, and continue to reject any response whose provider reports length truncation or whose JSON is incomplete. Skip the external critic only when the investigator proposed no work; an empty deterministic review is sufficient because there is nothing to approve.
 
 ## Task 1: Prove the contract failures
 
-- [ ] Add a failing adapter regression showing a complete valid structured response beyond 24,000 characters is currently self-truncated.
-- [ ] Add failing schema/adapter regressions proving the model should not author proposal IDs and ROMULUS assigns stable globally unique IDs across all proposal collections.
-- [ ] Preserve fail-closed tests for provider-reported length truncation and incomplete JSON.
+- [x] Add a failing adapter regression showing a complete valid structured response beyond 24,000 characters is currently self-truncated.
+- [x] Add failing schema/adapter regressions proving the model should not author proposal IDs and ROMULUS assigns stable globally unique IDs across all proposal collections.
+- [x] Add an adapter-to-admission regression proving a search can reference a newly emitted hypothesis without predicting ROMULUS's later bookkeeping ID.
+- [x] Preserve fail-closed tests for provider-reported length truncation and incomplete JSON.
 
 ## Task 2: Implement the narrow repair
 
-- [ ] Remove `proposal_id` from investigator-authored fields and instructions; deterministically assign IDs only after complete parsing.
-- [ ] Expand the structured context/output envelope and parse the entire bounded response without attempting to repair partial JSON.
-- [ ] Avoid a critic call for a genuinely empty proposal set while preserving investigator accounting and atomic admission for nonempty output.
+- [x] Remove `proposal_id` from investigator-authored fields and instructions; deterministically assign IDs only after complete parsing.
+- [x] Enumerate positional new-hypothesis search references in the schema and resolve them to trusted assigned IDs before critic review and admission.
+- [x] Expand the structured context/output envelope and parse the entire bounded response without attempting to repair partial JSON.
+- [x] Avoid a critic call for a genuinely empty proposal set while preserving investigator accounting and atomic admission for nonempty output.
 
 ## Task 3: Review and exact proof
 
-- [ ] Run focused reasoning, admission, scheduler-execution, reporting, and retention regressions plus the complete local suite, `compileall`, and `git diff --check`.
-- [ ] Complete fresh whole-diff review focused on hallucination resistance, ID determinism, truncation handling, critic coverage, and state/accounting behavior.
+- [x] Run focused reasoning, admission, scheduler-execution, reporting, and retention regressions plus the complete local suite, `compileall`, and `git diff --check`.
+- [x] Complete fresh whole-diff review focused on hallucination resistance, ID determinism, truncation handling, critic coverage, and state/accounting behavior.
 - [ ] Archive the exact candidate, match its digest on the VM, run the dependency-complete suite and configured `doctor`, then execute a generic synthetic investigator/critic contract probe against the configured model. Do not launch a hunt or use oracle facts.
 - [ ] Record proof in `VALIDATION.md`, clean disposable artifacts, commit, push, and open a stacked PR against `codex/retrieval-contract-hardening`.
 

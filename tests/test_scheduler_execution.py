@@ -1271,6 +1271,30 @@ class SchedulerInvestigationWorkflowTests(unittest.TestCase):
             self.assertEqual(working["investigator"]["summary"], investigator["summary"])
             self.assertEqual(len(working["critic"]["reviews"]), 4)
 
+    def test_empty_investigator_output_does_not_spend_an_external_critic_call(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state(); state["lead_catalog"] = []
+            investigator = {"assessments":[],"new_hypotheses":[],"searches":[],
+                "findings":[],"summary":"No grounded proposal is warranted."}
+            calls = []
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator,{"reviews":[]},calls)
+            }):
+                working = engine._run_grounded_reasoning(
+                    state,state["coverage"]["search_fields"])
+
+            self.assertEqual(calls,["investigator"])
+            self.assertEqual(working["critic"],{"reviews":[]})
+            self.assertEqual(working["investigator"]["summary"],"No grounded proposal is warranted.")
+            self.assertEqual(working["admission"]["summary"]["proposals_received"],0)
+            summary=state["coverage"]["reasoning_summary"]
+            self.assertEqual(summary["investigator_calls"],1)
+            self.assertEqual(summary["critic_calls"],0)
+            self.assertEqual(summary["unavailable_passes"],0)
+
     def test_critic_rejection_changes_no_hypothesis_search_finding_or_graph_fact(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             engine = _engine(Path(directory)); engine.use_ollama = True
