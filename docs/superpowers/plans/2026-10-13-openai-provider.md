@@ -21,6 +21,6 @@
 - [x] Document configuration, switching, output locations, and cloud-data boundary.
 - [x] Close final review findings: strict-schema summaries and bounded large-hunt synthesis context.
 - [x] Run focused and full regression suites (368 tests passed; 8 expected dependency skips).
-- [ ] Commit, push `codex/openai-provider`, open and attach the GitHub pull request.
-- [ ] Deploy the non-secret branch to the VM and run dependency-backed tests without changing its network mode.
+- [x] Commit and push `codex/openai-provider`; open and attach [GitHub PR #11](https://github.com/nickthabib-cloud/ROMULUS/pull/11).
+- [x] Deploy the non-secret branch to the VM without changing its network mode; provider-focused tests passed 32/32, compile verification passed, `doctor` passed, and the default Ollama no-hunt-data model check passed.
 - [ ] Operator enables the VM NAT adapter, adds the secret locally, and runs the documented OpenAI checks; live API validation remains operator-executed.
