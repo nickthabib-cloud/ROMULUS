@@ -199,6 +199,49 @@ def compare_progress(previous: Mapping[str, Any], current: Mapping[str, Any]) ->
     }
 
 
+def _totals_from_history(history: Any) -> dict[str, Any]:
+    entries = [entry for entry in history if isinstance(entry, Mapping)] if isinstance(history, list) else []
+    signal_totals: dict[str, int] = {}
+    productive_cycles = 0
+    max_stagnant_cycles_seen = 0
+    for entry in entries:
+        if entry.get("material_progress") is True:
+            productive_cycles += 1
+        stagnant = entry.get("stagnant_cycles", 0)
+        if isinstance(stagnant, int) and not isinstance(stagnant, bool):
+            max_stagnant_cycles_seen = max(max_stagnant_cycles_seen, max(0, stagnant))
+        signals = entry.get("signals", {})
+        if not isinstance(signals, Mapping):
+            continue
+        for name, count in signals.items():
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                signal_totals[str(name)] = signal_totals.get(str(name), 0) + count
+    return {
+        "cycles_recorded": len(entries),
+        "productive_cycles": productive_cycles,
+        "stagnant_cycles_recorded": len(entries) - productive_cycles,
+        "max_stagnant_cycles_seen": max_stagnant_cycles_seen,
+        "signal_totals": dict(sorted(signal_totals.items())),
+    }
+
+
+def _normalized_totals(value: Any, history: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return _totals_from_history(history)
+    fallback = _totals_from_history(history)
+    normalized: dict[str, Any] = {}
+    for field in ("cycles_recorded", "productive_cycles", "stagnant_cycles_recorded",
+                  "max_stagnant_cycles_seen"):
+        count = value.get(field, fallback[field])
+        normalized[field] = max(0, count) if isinstance(count, int) and not isinstance(count, bool) else fallback[field]
+    signals = value.get("signal_totals", fallback["signal_totals"])
+    normalized["signal_totals"] = dict(sorted(
+        (str(name), count) for name, count in signals.items()
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0
+    )) if isinstance(signals, Mapping) else fallback["signal_totals"]
+    return normalized
+
+
 def initialize_progress(state: MutableMapping[str, Any]) -> None:
     """Add progress bookkeeping to new or legacy state without inventing a cycle."""
 
@@ -206,6 +249,9 @@ def initialize_progress(state: MutableMapping[str, Any]) -> None:
         state["progress_baseline"] = snapshot_progress(state)
     if not isinstance(state.get("progress_history"), list):
         state["progress_history"] = []
+    state["progress_totals"] = _normalized_totals(
+        state.get("progress_totals"), state["progress_history"]
+    )
 
     stagnant_cycles = state.get("stagnant_cycles", 0)
     if not isinstance(stagnant_cycles, int) or isinstance(stagnant_cycles, bool):
@@ -250,6 +296,14 @@ def record_progress(
     history = state["progress_history"]
     history.append(entry)
     state["progress_history"] = history[-history_limit:]
+    totals = state["progress_totals"]
+    totals["cycles_recorded"] += 1
+    cycle_field = "productive_cycles" if assessment["material_progress"] else "stagnant_cycles_recorded"
+    totals[cycle_field] += 1
+    totals["max_stagnant_cycles_seen"] = max(totals["max_stagnant_cycles_seen"], stagnant_cycles)
+    for name, count in assessment["signals"].items():
+        totals["signal_totals"][name] = totals["signal_totals"].get(name, 0) + count
+    totals["signal_totals"] = dict(sorted(totals["signal_totals"].items()))
     state["progress_baseline"] = current
     state["stagnant_cycles"] = stagnant_cycles
     return entry
@@ -263,21 +317,7 @@ def summarize_progress(state: Mapping[str, Any]) -> dict[str, Any]:
         history = []
     entries = [entry for entry in history if isinstance(entry, Mapping)]
 
-    signal_totals: dict[str, int] = {}
-    productive_cycles = 0
-    max_stagnant_cycles_seen = 0
-    for entry in entries:
-        if entry.get("material_progress") is True:
-            productive_cycles += 1
-        stagnant = entry.get("stagnant_cycles", 0)
-        if isinstance(stagnant, int) and not isinstance(stagnant, bool):
-            max_stagnant_cycles_seen = max(max_stagnant_cycles_seen, max(0, stagnant))
-        signals = entry.get("signals", {})
-        if not isinstance(signals, Mapping):
-            continue
-        for name, count in signals.items():
-            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-                signal_totals[str(name)] = signal_totals.get(str(name), 0) + count
+    totals = _normalized_totals(state.get("progress_totals"), history)
 
     current_stagnant = state.get("stagnant_cycles", 0)
     if not isinstance(current_stagnant, int) or isinstance(current_stagnant, bool):
@@ -288,12 +328,12 @@ def summarize_progress(state: Mapping[str, Any]) -> dict[str, Any]:
         last_signals = {}
 
     return {
-        "cycles_recorded": len(entries),
-        "productive_cycles": productive_cycles,
-        "stagnant_cycles_recorded": len(entries) - productive_cycles,
+        "cycles_recorded": totals["cycles_recorded"],
+        "productive_cycles": totals["productive_cycles"],
+        "stagnant_cycles_recorded": totals["stagnant_cycles_recorded"],
         "current_stagnant_cycles": max(0, current_stagnant),
-        "max_stagnant_cycles_seen": max_stagnant_cycles_seen,
-        "signal_totals": dict(sorted(signal_totals.items())),
+        "max_stagnant_cycles_seen": totals["max_stagnant_cycles_seen"],
+        "signal_totals": totals["signal_totals"],
         "last_stage": _text(last.get("stage")) or None,
         "last_material_signals": dict(last_signals) if last.get("material_progress") else {},
         "final_stop_basis": _text(state.get("termination_reason")) or None,

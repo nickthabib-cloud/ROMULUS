@@ -11,6 +11,8 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 - Raised production emergency defaults to one hour, 40 reasoning rounds, and 500 external calls, with a three-cycle stagnation stop. `MIN_REASONING_ROUNDS` remains environment-compatible but is no longer a routing requirement.
 - Added explicit `coverage_closure_reached`, `no_productive_frontier`, runtime, call, and depth stop reporting. Open coverage at stagnation or a safety ceiling remains partial and cannot become a clean-environment conclusion.
 - Extended report-gated compact retention with aggregate progress counts and the final stop basis while deleting detailed progress history and baselines alongside other bulky working data.
+- Made coverage closure conservative and shared across routing/reporting: it now requires an assessed hypothesis or candidate and is blocked by source/model failure, missing live sources, capped/partial coverage, scheduler gaps, or an incomplete terminal reason.
+- Preserved lifetime progress totals beyond the bounded detail ledger, refreshed coverage after the final reasoning assessment, migrated legacy state before establishing a resume baseline, and derived LangGraph's recursion allowance from supported hunt ceilings.
 
 ### Representative bounded telemetry retrieval
 

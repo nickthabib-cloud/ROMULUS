@@ -45,7 +45,7 @@ class MissionModeTests(unittest.TestCase):
         from romulus.investigation.workflow import HuntState
 
         for field in ("candidate_leads","search_tasks","search_queue","search_outcomes",
-                "progress_baseline","progress_history","stagnant_cycles"):
+                "progress_baseline","progress_history","progress_totals","stagnant_cycles"):
             self.assertIn(field,HuntState.__annotations__)
 
     def test_hunt_initialization_preserves_or_baselines_progress_state(self):
@@ -58,6 +58,7 @@ class MissionModeTests(unittest.TestCase):
             with patch.object(engine,"_graph",return_value=(App(),None)):
                 created=engine.run("Hunt broadly",hunt_id="HUNT-NEW")
             self.assertEqual(created["progress_history"],[])
+            self.assertEqual(created["progress_totals"]["cycles_recorded"],0)
             self.assertEqual(created["stagnant_cycles"],0)
             self.assertIn("evidence_ids",created["progress_baseline"])
 
@@ -73,6 +74,7 @@ class MissionModeTests(unittest.TestCase):
                 resumed=engine.run("Hunt broadly",hunt_id="HUNT-LEGACY",_resume=True)
             self.assertEqual(resumed["progress_baseline"],{"sentinel":["kept"]})
             self.assertEqual(resumed["progress_history"],[{"stage":"kept"}])
+            self.assertEqual(resumed["progress_totals"]["cycles_recorded"],1)
             self.assertEqual(resumed["stagnant_cycles"],2)
 
     def test_mission_mode_is_declared_in_graph_state_schema(self):

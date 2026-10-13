@@ -150,10 +150,68 @@ class SchedulerExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             engine,state=self._routing_fixture(directory)
             state["depth"]=engine.settings.max_depth
-            state["coverage"]["hypothesis_coverage"]["closure_ready"]=True
+            state["source_health"]={"host":True,"network":True}
+            state["coverage"]["hypothesis_coverage"].update({
+                "closure_ready":True,
+                "rows":[{"hypothesis_id":"H-001"}],
+            })
 
             self.assertEqual(engine._route_investigation(state,just_reasoned=True),"report")
             self.assertEqual(state["termination_reason"],"coverage_closure_reached")
+
+    def test_final_reasoning_assessment_refreshes_ledger_and_closes_coverage(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from romulus.investigation.scheduler import begin_search_task, record_search_outcome
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._progress_cycle_fixture(directory)
+            state["depth"]=engine.settings.max_depth-1
+            state["host"]=[{"evidence_id":"EV-ANCHOR","source":"elasticsearch",
+                "observed_at":"2024-11-13T11:00:00Z","asset":"ws-01",
+                "observation":"cited process evidence","raw":{"host":{"name":"ws-01"}}}]
+            state["hypotheses"]=[{"hypothesis_id":"H-001","technique_id":"T1059",
+                "priority":4,"expected_host":True,"expected_network":False,
+                "basis_evidence_ids":["EV-ANCHOR"]}]
+            task=_task(state,hypothesis_ids=["H-001"],candidate_ids=[],follow_up_ids=[])
+            begin_search_task(state,task["task_id"])
+            record_search_outcome(state,task["task_id"],{"status":"completed",
+                "matched_total":1,"returned_total":1,"total_relation":"eq","capped":False,
+                "timed_out":False,"shard_failures":0,"incomplete":False})
+            engine.use_ollama=True
+            engine._register_investigation_tasks=lambda current: None
+            engine._call=lambda *args,**kwargs:{"assessments":[{
+                "hypothesis_id":"H-001","status":"inconclusive",
+                "evidence_ids":["EV-ANCHOR"],"rationale":"Cited evidence assessed."}],
+                "findings":[],"new_hypotheses":[],"searches":[],
+                "continue_investigation":False,"reasoning":"Coverage assessed."}
+
+            fake_ollama=SimpleNamespace(Ollama=object,
+                model_evidence_context=lambda evidence,limit:list(evidence)[:limit])
+            with patch.dict("sys.modules",{"romulus.agent.ollama":fake_ollama}):
+                result=engine._reason(state)
+
+            self.assertTrue(result["coverage"]["hypothesis_coverage"]["closure_ready"],
+                result["reasoning_history"][-1])
+            self.assertEqual(result["termination_reason"],"coverage_closure_reached")
+
+    def test_source_failure_prevents_router_and_report_from_claiming_closure(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine,state=self._progress_cycle_fixture(directory)
+            state.update({"status":"running","outcome":"pending","findings":[],
+                "correlations":[],"source_health":{"host":False,"network":True},
+                "source_errors":[{"tool":"elasticsearch.search","error":"TimeoutError"}]})
+            state["coverage"].update({"host":"unavailable","network":"searched",
+                "hypothesis_coverage":{"closure_ready":True,"rows":[]}})
+
+            self.assertEqual(engine._route_investigation(state,just_reasoned=True),"report")
+            self.assertEqual(state["termination_reason"],"no_productive_frontier")
+            with patch("romulus.reporting.report.generate_report",return_value=[]):
+                engine._report(state)
+            self.assertEqual(state["status"],"partial")
+            self.assertFalse(state["coverage"]["coverage_closure_ready"])
 
     def _progress_cycle_fixture(self,directory):
         engine,state=self._routing_fixture(directory)

@@ -178,6 +178,7 @@ class RetentionTests(unittest.TestCase):
             self.assertNotIn("scheduler_history", persisted)
             self.assertNotIn("progress_baseline", persisted)
             self.assertNotIn("progress_history", persisted)
+            self.assertNotIn("progress_totals", persisted)
             self.assertNotIn("stagnant_cycles", persisted)
             self.assertEqual(persisted["coverage"]["max_stagnant_cycles"],3)
             self.assertEqual(persisted["coverage"]["stagnant_cycles"],2)

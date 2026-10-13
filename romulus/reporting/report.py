@@ -437,7 +437,7 @@ def _docx(s,path):
     if fallback_outcomes:
         limitations.append(f"{len(fallback_outcomes)} search result set(s) used incomplete, nonrepresentative bounded retrieval because complete representative sampling was unavailable.")
     if s.get("termination_reason")=="no_productive_frontier":
-        limitations.append("The investigation ended after repeated cycles produced no additional evidence or closed coverage gaps. Unresolved coverage remains a limitation.")
+        limitations.append("The investigation ended because no further productive evidence pivot was available. Unresolved coverage remains a limitation.")
     if not limitations: limitations.append("No source errors or sampled-result limitations were recorded.")
     cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True)
     set_cell_text(cells[1]," ".join(limitations)+" See the technical TXT report for details.")

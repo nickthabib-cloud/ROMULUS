@@ -52,6 +52,37 @@ class CoreTests(unittest.TestCase):
             low=Settings.from_env()
         self.assertEqual((low.max_runtime_seconds,low.max_depth,low.max_tool_calls,
             low.max_stagnant_cycles),(10,1,1,1))
+    def test_graph_recursion_limit_scales_with_supported_hunt_budgets(self):
+        from dataclasses import replace
+        from romulus.investigation.workflow import HuntEngine
+        cfg=replace(Settings.from_env(),max_tool_calls=500,max_depth=40)
+        engine=HuntEngine(cfg,Store(cfg.data_dir,cfg.logs_dir),offline=True)
+        self.assertGreater(engine._graph_recursion_limit(),100)
+        self.assertGreaterEqual(engine._graph_recursion_limit(),
+            16+(3*cfg.max_tool_calls)+(3*cfg.max_depth))
+    def test_scaled_limit_allows_real_graph_to_cross_100_steps(self):
+        try:
+            from langgraph.graph import StateGraph, END
+        except ImportError:
+            self.skipTest("Install requirements.txt for the real LangGraph recursion check")
+        from dataclasses import replace
+        from typing import TypedDict
+        from romulus.investigation.workflow import HuntEngine
+        class CounterState(TypedDict):
+            count: int
+        cfg=replace(Settings.from_env(),max_tool_calls=500,max_depth=40)
+        engine=HuntEngine(cfg,Store(cfg.data_dir,cfg.logs_dir),offline=True)
+        graph=StateGraph(CounterState)
+        graph.add_node("step",lambda state:{"count":state["count"]+1})
+        graph.set_entry_point("step")
+        graph.add_conditional_edges("step",
+            lambda state:"again" if state["count"]<110 else "done",
+            {"again":"step","done":END})
+
+        result=graph.compile().invoke({"count":0},
+            config={"recursion_limit":engine._graph_recursion_limit()})
+
+        self.assertEqual(result["count"],110)
     def test_url_redaction(self):
         self.assertEqual(safe_url("http://alice:secret@example.test:8005/api?token=hide"),"http://example.test:8005/api")
     def test_arkime_adapter_uses_digest_and_bounded_documented_query(self):

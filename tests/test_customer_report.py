@@ -289,7 +289,7 @@ class CustomerWordReportTests(unittest.TestCase):
             word_text="\n".join(paragraph.text for paragraph in document.paragraphs)
             word_text+="\n"+"\n".join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
 
-        self.assertIn("ended after repeated cycles produced no additional evidence or closed coverage gaps",word_text)
+        self.assertIn("ended because no further productive evidence pivot was available",word_text)
         self.assertIn("No finding is not proof that the environment is free of malicious activity",word_text)
         for internal in ("progress_baseline","progress_history","changed_ids",
                 "INTERNAL-BASELINE-SENTINEL","INTERNAL-PROGRESS-SENTINEL"):
