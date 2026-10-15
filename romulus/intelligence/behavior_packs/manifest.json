@@ -1,18 +1,22 @@
 {
-  "compiler_version": "3.0.0",
+  "aggregate_activation": {
+    "active": 18,
+    "reference_only": 188
+  },
+  "compiler_version": "4.0.0",
   "corpus_version": "2026-10-15",
   "curated_activation": {
-    "active": 99,
-    "observe_or_unsupported": 803
+    "active": 117,
+    "observe_or_unsupported": 785
   },
   "direct_activation": {
     "active": 73,
     "observe": 476
   },
   "execution_states": {
-    "executable": 575,
+    "executable": 593,
     "reference_only": 1216,
-    "unsupported": 327
+    "unsupported": 309
   },
   "manifest_version": "1.0.0",
   "observe_score_ceiling": 39,
@@ -24,7 +28,7 @@
     "sequences": 89
   },
   "pack_sha256": {
-    "aggregates.json": "dd0d9c3531e5ef1c708fce85090c7722ca7db665a9cf6b20a3cde6b1897054d1",
+    "aggregates.json": "7bb9de45a753e3d9daabf561f928530fc80962d8ef9bf41968e56a58f115bfd0",
     "baselines.json": "2f232d3d591eb23e4674b3840cc395c9a206206dc1db7b9fab36042c234e08c4",
     "capabilities.json": "3af17a7cb9f10ba3e95d29e2928bce95e94a02ae87d8eb4fd3746029b684fa22",
     "direct.json": "8ddc32d9f0af0a7dce468c0e1c0f491f8f4feb7ecbbce52587059835e88756ed",
@@ -47,7 +51,7 @@
   "source_hashes": {
     "attack_catalog_sha256": "352f57fee74902196c1ec685a5b1dc7d769bb399a6d5f67df6057592b2cc3b0a",
     "corpus_sha256": "6524697ef31ff64f6635b0945afb83af9dd22a198ed4c5c4177d9c803e4b5ef9",
-    "translations_sha256": "0497eb2ec9990ae225fb6d062d51b1a1a3885affeef0b1fbd9e3a47f6d7c1161"
+    "translations_sha256": "637d1be4bd9357a3923062817a6b59d9b086849b940ccaa68094056a40540f72"
   },
   "source_status": "authoritative-build-input"
 }

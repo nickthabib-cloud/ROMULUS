@@ -67,4 +67,16 @@ def load_behavior_packs(directory: Path = BEHAVIOR_PACK_DIR) -> dict[str, Any]:
             raise BehaviorPackError(f"{row.get('id')}: sequence execution status is missing")
         if status=="executable" and row.get("supported") is not True:
             raise BehaviorPackError(f"{row.get('id')}: executable sequence is not supported")
+    aggregate_primitives={"count","distinct_count","fanout","rate","transition",
+        "volume","ratio","duration","periodicity"}
+    for row in loaded["aggregates"]["records"]:
+        execution=row.get("execution") or {}
+        status=execution.get("status")
+        if status not in {"executable","reference_only"}:
+            raise BehaviorPackError(f"{row.get('id')}: aggregate execution status is missing")
+        if status=="executable":
+            if row.get("supported") is not True:
+                raise BehaviorPackError(f"{row.get('id')}: executable aggregate is not supported")
+            if execution.get("primitive") not in aggregate_primitives:
+                raise BehaviorPackError(f"{row.get('id')}: aggregate primitive is invalid")
     return loaded

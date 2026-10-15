@@ -14,7 +14,7 @@ CORPUS_PATH = ROOT / "docs" / "research" / "common-indicator-corpus.json"
 TRANSLATIONS_PATH = ROOT / "scripts" / "behavior_pack_translations.json"
 ATTACK_PATH = ROOT / "romulus" / "intelligence" / "attack_catalog.json"
 OUTPUT_DIR = ROOT / "romulus" / "intelligence" / "behavior_packs"
-COMPILER_VERSION = "3.0.0"
+COMPILER_VERSION = "4.0.0"
 EXPECTED = {
     "entries": 3863,
     "curated_behavioral_indicator": 902,
@@ -177,6 +177,62 @@ def _sequence_rule(row: dict[str, Any], registry: dict[str, Any]) -> dict[str, A
             "join_mode":translation.get("join_mode","all"),"stages":stages}}
 
 
+def _aggregate_rule(row: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any]:
+    values = [value for observable in row.get("observables", [])
+              if observable.get("role") == "aggregate.signal"
+              for value in observable.get("values", [])]
+    marker = values[0] if len(values) == 1 else None
+    translation = registry.get("aggregate_translations", {}).get(str(marker))
+    if not isinstance(translation, dict):
+        missing = str(marker or row.get("id"))
+        return {**row, "activation_mode": "reference", "supported": False,
+            "support_reason": "No reviewed aggregate parameters are available.",
+            "execution": {"status": "reference_only", "execution_kind": "aggregate",
+                "reason_code": "missing_explicit_aggregate_semantics", "missing_semantics": [missing]}}
+
+    primitive = translation.get("primitive")
+    allowed = {"count", "distinct_count", "fanout", "rate", "transition",
+               "volume", "ratio", "duration", "periodicity"}
+    if primitive not in allowed:
+        raise PackError(f"{row.get('id')}: unsupported aggregate primitive {primitive}")
+    threshold = translation.get("threshold")
+    if (not isinstance(threshold, dict) or threshold.get("operator") not in {"gte", "gt", "lte", "lt", "eq"}
+            or not isinstance(threshold.get("value"), (int, float))):
+        raise PackError(f"{row.get('id')}: aggregate threshold is incomplete")
+    families = translation.get("source_families")
+    if not isinstance(families, list) or not families or any(value not in {"host", "network"} for value in families):
+        raise PackError(f"{row.get('id')}: aggregate source_families are invalid")
+    required = {
+        "distinct_count": ("distinct_field",), "fanout": ("distinct_field",),
+        "volume": ("measure_field",), "transition": ("from_filter", "to_filter"),
+    }.get(str(primitive), ())
+    if primitive == "ratio" and not ({"numerator_field", "denominator_field"} <= set(translation)
+                                     or {"numerator_filter", "denominator_filter"} <= set(translation)):
+        raise PackError(f"{row.get('id')}: aggregate ratio fields or filters are incomplete")
+    if any(not translation.get(field) for field in required):
+        raise PackError(f"{row.get('id')}: aggregate {primitive} parameters are incomplete")
+    execution = {
+        "status": "executable", "execution_kind": "aggregate", "primitive": primitive,
+        "evaluation_location": "normalized_evidence", "source_families": families,
+        "source_stages": ([{"source": "elasticsearch", "source_language": "elasticsearch_dsl"}]
+                          if families == ["host"] else [
+                              {"source": "elasticsearch", "source_language": "elasticsearch_dsl"},
+                              {"source": "arkime", "source_language": "arkime_expression"},
+                              {"source": "tshark", "source_language": "wireshark_display_filter"},
+                          ]),
+        "window_minutes": int(translation.get("window_minutes") or 60),
+        "group_by": list(translation.get("group_by") or []),
+        "sample_min": int(translation.get("sample_min") or 1),
+        "threshold": threshold,
+    }
+    for name in ("filter", "distinct_field", "measure_field", "numerator_field", "denominator_field",
+                 "numerator_filter", "denominator_filter", "from_filter", "to_filter", "from_count"):
+        if name in translation:
+            execution[name] = translation[name]
+    return {**row, "activation_mode": "active", "supported": True, "support_reason": "",
+            "execution": execution}
+
+
 def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any]:
     entries = corpus.get("entries")
     if not isinstance(entries, list):
@@ -216,14 +272,9 @@ def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str,
     if active_direct != int(registry["activation_policy"]["direct_active_limit"]):
         raise PackError(f"activation policy expected {registry['activation_policy']['direct_active_limit']} active direct rules, found {active_direct}")
 
-    unsupported = registry["unsupported_semantics"]
     sequences = [_sequence_rule(row,registry) for row in sorted(sequence_rows,key=lambda row:row["id"])]
-    aggregates = [{
-        **row,
-        "activation_mode": "observe",
-        "supported": False,
-        "support_reason": unsupported["aggregate"],
-    } for row in sorted(aggregate_rows, key=lambda row: row["id"])]
+    aggregates = [_aggregate_rule(row, registry) for row in sorted(aggregate_rows, key=lambda row: row["id"])]
+    unsupported = registry["unsupported_semantics"]
     baselines = [{
         **row,
         "activation_mode": "observe",
@@ -238,7 +289,7 @@ def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str,
     return {
         "direct": {"schema_version": "1.0.0", "records": direct},
         "sequences": {"schema_version": "2.0.0", "records": sequences},
-        "aggregates": {"schema_version": "1.0.0", "records": aggregates},
+        "aggregates": {"schema_version": "2.0.0", "records": aggregates},
         "baselines": {"schema_version": "1.0.0", "records": baselines},
         "capabilities": capabilities_pack,
     }
@@ -256,7 +307,8 @@ def write_packs(packs: dict[str, Any], output_dir: Path, corpus: dict[str, Any])
         counts[name] = len(pack.get("records", [])) if isinstance(pack, dict) else 0
     active_direct = sum(row["activation_mode"] == "active" for row in packs["direct"]["records"])
     active_sequences = sum(row.get("activation_mode") == "active" for row in packs["sequences"]["records"])
-    active = active_direct + active_sequences
+    active_aggregates = sum(row.get("activation_mode") == "active" for row in packs["aggregates"]["records"])
+    active = active_direct + active_sequences + active_aggregates
     observe = EXPECTED["curated_behavioral_indicator"] - active
     executable = sum(row.get("supported") is True for name in ("direct","sequences","aggregates","baselines")
         for row in packs[name]["records"])
@@ -273,6 +325,8 @@ def write_packs(packs: dict[str, Any], output_dir: Path, corpus: dict[str, Any])
         "direct_activation": {"active": active_direct, "observe": len(packs["direct"]["records"])-active_direct},
         "sequence_activation": {"active": active_sequences,
             "reference_only": len(packs["sequences"]["records"])-active_sequences},
+        "aggregate_activation": {"active": active_aggregates,
+            "reference_only": len(packs["aggregates"]["records"])-active_aggregates},
         "execution_states": {
             "executable": executable,
             "unsupported": unsupported_count,

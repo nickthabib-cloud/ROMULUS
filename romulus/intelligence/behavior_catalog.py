@@ -186,6 +186,7 @@ def load_behavior_catalog(
         "curated_total": packs["manifest"].get("source_counts", {}).get("curated_behavioral_indicator"),
         "active_direct": packs["manifest"].get("direct_activation", {}).get("active"),
         "active_sequences": packs["manifest"].get("sequence_activation", {}).get("active"),
+        "active_aggregates": packs["manifest"].get("aggregate_activation", {}).get("active"),
         "observe_or_unsupported": packs["manifest"].get("curated_activation", {}).get("observe_or_unsupported"),
         "direct_loaded": len(direct),
         "windows_event_rules": len(windows_events),

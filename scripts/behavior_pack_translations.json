@@ -581,5 +581,177 @@
         ]
       ]
     }
+  },
+  "aggregate_translations": {
+    "password_spray_across_many_accounts": {
+      "primitive": "distinct_count",
+      "source_families": ["host"],
+      "filter": {"field": "event.outcome", "operator": "equals", "values": ["failure"]},
+      "group_by": ["source.ip"],
+      "distinct_field": "user.target.name",
+      "window_minutes": 10,
+      "sample_min": 5,
+      "threshold": {"operator": "gte", "value": 5}
+    },
+    "many_failures_then_success": {
+      "primitive": "transition",
+      "source_families": ["host"],
+      "group_by": ["user.name", "source.ip"],
+      "from_filter": {"field": "event.outcome", "operator": "equals", "values": ["failure"]},
+      "to_filter": {"field": "event.outcome", "operator": "equals", "values": ["success"]},
+      "from_count": 5,
+      "window_minutes": 15,
+      "sample_min": 6,
+      "threshold": {"operator": "gte", "value": 1}
+    },
+    "service_principal_high_failure_rate": {
+      "primitive": "rate",
+      "source_families": ["host"],
+      "filter": {"field": "event.outcome", "operator": "equals", "values": ["failure"]},
+      "group_by": ["service.name"],
+      "window_minutes": 15,
+      "sample_min": 10,
+      "threshold": {"operator": "gte", "value": 0.67}
+    },
+    "bulk_group_membership_change": {
+      "primitive": "count",
+      "source_families": ["host"],
+      "filter": {"field": "event.action", "operator": "contains_any", "values": ["add member", "group membership"]},
+      "group_by": ["user.name"],
+      "window_minutes": 30,
+      "sample_min": 10,
+      "threshold": {"operator": "gte", "value": 10}
+    },
+    "bulk_user_download_or_directory_read": {
+      "primitive": "count",
+      "source_families": ["host"],
+      "filter": {"field": "event.action", "operator": "contains_any", "values": ["download", "directory read"]},
+      "group_by": ["user.name"],
+      "window_minutes": 30,
+      "sample_min": 20,
+      "threshold": {"operator": "gte", "value": 20}
+    },
+    "mass_secret_enumeration": {
+      "primitive": "distinct_count",
+      "source_families": ["host"],
+      "filter": {"field": "kubernetes.audit.objectRef.resource", "operator": "equals", "values": ["secrets"]},
+      "group_by": ["user.name"],
+      "distinct_field": "kubernetes.audit.objectRef.name",
+      "window_minutes": 15,
+      "sample_min": 10,
+      "threshold": {"operator": "gte", "value": 10}
+    },
+    "bulk_pod_exec": {
+      "primitive": "count",
+      "source_families": ["host"],
+      "filter": {"field": "kubernetes.audit.objectRef.subresource", "operator": "equals", "values": ["exec"]},
+      "group_by": ["user.name"],
+      "window_minutes": 15,
+      "sample_min": 5,
+      "threshold": {"operator": "gte", "value": 5}
+    },
+    "dns_high_nxdomain_rate": {
+      "primitive": "ratio",
+      "source_families": ["network"],
+      "group_by": ["source.ip"],
+      "numerator_filter": {"field": "dns.response_code", "operator": "equals_any", "values": ["NXDOMAIN", "3"]},
+      "denominator_filter": {"field": "dns.question.name", "operator": "exists", "values": []},
+      "window_minutes": 10,
+      "sample_min": 20,
+      "threshold": {"operator": "gte", "value": 0.5}
+    },
+    "dns_many_unique_subdomains": {
+      "primitive": "distinct_count",
+      "source_families": ["network"],
+      "group_by": ["source.ip"],
+      "distinct_field": "dns.question.name",
+      "window_minutes": 10,
+      "sample_min": 20,
+      "threshold": {"operator": "gte", "value": 20}
+    },
+    "dns_txt_query_spike": {
+      "primitive": "count",
+      "source_families": ["network"],
+      "filter": {"field": "dns.question.type", "operator": "equals_any", "values": ["TXT", "16"]},
+      "group_by": ["source.ip"],
+      "window_minutes": 10,
+      "sample_min": 20,
+      "threshold": {"operator": "gte", "value": 20}
+    },
+    "periodic_outbound_beacon": {
+      "primitive": "periodicity",
+      "source_families": ["network"],
+      "group_by": ["source.ip", "destination.ip", "destination.port"],
+      "window_minutes": 60,
+      "sample_min": 5,
+      "threshold": {"operator": "lte", "value": 0.25}
+    },
+    "large_http_upload": {
+      "primitive": "volume",
+      "source_families": ["network"],
+      "filter": {"field": "http.request.method", "operator": "equals", "values": ["POST", "PUT"]},
+      "group_by": ["source.ip", "destination.ip"],
+      "measure_field": "source.bytes",
+      "window_minutes": 60,
+      "sample_min": 1,
+      "threshold": {"operator": "gte", "value": 52428800}
+    },
+    "high_outbound_to_inbound_ratio": {
+      "primitive": "ratio",
+      "source_families": ["network"],
+      "group_by": ["source.ip", "destination.ip"],
+      "numerator_field": "source.bytes",
+      "denominator_field": "destination.bytes",
+      "window_minutes": 60,
+      "sample_min": 3,
+      "threshold": {"operator": "gte", "value": 8}
+    },
+    "network_destination_fanout": {
+      "primitive": "fanout",
+      "source_families": ["network"],
+      "group_by": ["source.ip"],
+      "distinct_field": "destination.ip",
+      "window_minutes": 10,
+      "sample_min": 20,
+      "threshold": {"operator": "gte", "value": 20}
+    },
+    "network_port_fanout": {
+      "primitive": "fanout",
+      "source_families": ["network"],
+      "group_by": ["source.ip", "destination.ip"],
+      "distinct_field": "destination.port",
+      "window_minutes": 10,
+      "sample_min": 20,
+      "threshold": {"operator": "gte", "value": 20}
+    },
+    "horizontal_scan": {
+      "primitive": "fanout",
+      "source_families": ["network"],
+      "group_by": ["source.ip", "destination.port"],
+      "distinct_field": "destination.ip",
+      "window_minutes": 10,
+      "sample_min": 20,
+      "threshold": {"operator": "gte", "value": 20}
+    },
+    "vertical_scan": {
+      "primitive": "fanout",
+      "source_families": ["network"],
+      "group_by": ["source.ip", "destination.ip"],
+      "distinct_field": "destination.port",
+      "window_minutes": 10,
+      "sample_min": 20,
+      "threshold": {"operator": "gte", "value": 20}
+    },
+    "ssh_password_failures_then_success": {
+      "primitive": "transition",
+      "source_families": ["network"],
+      "group_by": ["source.ip", "destination.ip", "user.name"],
+      "from_filter": {"field": "event.outcome", "operator": "equals", "values": ["failure"]},
+      "to_filter": {"field": "event.outcome", "operator": "equals", "values": ["success"]},
+      "from_count": 5,
+      "window_minutes": 15,
+      "sample_min": 6,
+      "threshold": {"operator": "gte", "value": 1}
+    }
   }
 }
