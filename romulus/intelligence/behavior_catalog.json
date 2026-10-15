@@ -74,7 +74,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "temp_execution"
+      "corroboration_group": "temp_execution",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-XPLAT-001:elasticsearch"
     },
     {
       "id": "BH-XPLAT-002",
@@ -150,7 +152,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "download_execution"
+      "corroboration_group": "download_execution",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-XPLAT-002:elasticsearch"
     },
     {
       "id": "BH-XPLAT-003",
@@ -219,7 +223,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-XPLAT-003"
+      "corroboration_group": "BH-XPLAT-003",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-XPLAT-003:elasticsearch"
     },
     {
       "id": "BH-XPLAT-004",
@@ -293,7 +299,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "unexpected_parent_shell"
+      "corroboration_group": "unexpected_parent_shell",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-XPLAT-004:elasticsearch"
     },
     {
       "id": "BH-XPLAT-005",
@@ -363,7 +371,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-XPLAT-005"
+      "corroboration_group": "BH-XPLAT-005",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-XPLAT-005:elasticsearch"
     },
     {
       "id": "BH-XPLAT-006",
@@ -426,7 +436,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-XPLAT-006"
+      "corroboration_group": "BH-XPLAT-006",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-XPLAT-006:elasticsearch"
     },
     {
       "id": "BH-WIN-001",
@@ -504,7 +516,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-001"
+      "corroboration_group": "BH-WIN-001",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-001:elasticsearch"
     },
     {
       "id": "BH-WIN-002",
@@ -583,7 +597,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "unexpected_parent_shell"
+      "corroboration_group": "unexpected_parent_shell",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-002:elasticsearch"
     },
     {
       "id": "BH-WIN-003",
@@ -664,7 +680,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "unexpected_parent_shell"
+      "corroboration_group": "unexpected_parent_shell",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-003:elasticsearch"
     },
     {
       "id": "BH-WIN-004",
@@ -733,7 +751,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-004"
+      "corroboration_group": "BH-WIN-004",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-004:elasticsearch"
     },
     {
       "id": "BH-WIN-005",
@@ -799,7 +819,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-005"
+      "corroboration_group": "BH-WIN-005",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-005:elasticsearch"
     },
     {
       "id": "BH-WIN-006",
@@ -864,7 +886,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-006"
+      "corroboration_group": "BH-WIN-006",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-006:elasticsearch"
     },
     {
       "id": "BH-WIN-007",
@@ -929,7 +953,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-007"
+      "corroboration_group": "BH-WIN-007",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-007:elasticsearch"
     },
     {
       "id": "BH-WIN-008",
@@ -996,7 +1022,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-008"
+      "corroboration_group": "BH-WIN-008",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-008:elasticsearch"
     },
     {
       "id": "BH-WIN-009",
@@ -1061,7 +1089,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-009"
+      "corroboration_group": "BH-WIN-009",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-009:elasticsearch"
     },
     {
       "id": "BH-WIN-010",
@@ -1127,7 +1157,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-010"
+      "corroboration_group": "BH-WIN-010",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-010:elasticsearch"
     },
     {
       "id": "BH-WIN-011",
@@ -1191,7 +1223,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-011"
+      "corroboration_group": "BH-WIN-011",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-011:elasticsearch"
     },
     {
       "id": "BH-WIN-012",
@@ -1256,7 +1290,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-012"
+      "corroboration_group": "BH-WIN-012",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-012:elasticsearch"
     },
     {
       "id": "BH-WIN-013",
@@ -1322,7 +1358,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-013"
+      "corroboration_group": "BH-WIN-013",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-013:elasticsearch"
     },
     {
       "id": "BH-WIN-014",
@@ -1386,7 +1424,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-014"
+      "corroboration_group": "BH-WIN-014",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-014:elasticsearch"
     },
     {
       "id": "BH-WIN-015",
@@ -1451,7 +1491,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-015"
+      "corroboration_group": "BH-WIN-015",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-015:elasticsearch"
     },
     {
       "id": "BH-WIN-016",
@@ -1517,7 +1559,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-016"
+      "corroboration_group": "BH-WIN-016",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-016:elasticsearch"
     },
     {
       "id": "BH-WIN-017",
@@ -1580,7 +1624,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-017"
+      "corroboration_group": "BH-WIN-017",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-017:elasticsearch"
     },
     {
       "id": "BH-WIN-018",
@@ -1645,7 +1691,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-018"
+      "corroboration_group": "BH-WIN-018",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-018:elasticsearch"
     },
     {
       "id": "BH-LNX-001",
@@ -1712,7 +1760,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "temp_execution"
+      "corroboration_group": "temp_execution",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-001:elasticsearch"
     },
     {
       "id": "BH-LNX-002",
@@ -1775,7 +1825,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-002"
+      "corroboration_group": "BH-LNX-002",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-002:elasticsearch"
     },
     {
       "id": "BH-LNX-003",
@@ -1850,7 +1902,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "download_execution"
+      "corroboration_group": "download_execution",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-003:elasticsearch"
     },
     {
       "id": "BH-LNX-004",
@@ -1916,7 +1970,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-004"
+      "corroboration_group": "BH-LNX-004",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-004:elasticsearch"
     },
     {
       "id": "BH-LNX-005",
@@ -1997,7 +2053,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "unexpected_parent_shell"
+      "corroboration_group": "unexpected_parent_shell",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-005:elasticsearch"
     },
     {
       "id": "BH-LNX-006",
@@ -2060,7 +2118,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-006"
+      "corroboration_group": "BH-LNX-006",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-006:elasticsearch"
     },
     {
       "id": "BH-LNX-007",
@@ -2124,7 +2184,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-007"
+      "corroboration_group": "BH-LNX-007",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-007:elasticsearch"
     },
     {
       "id": "BH-LNX-008",
@@ -2188,7 +2250,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-008"
+      "corroboration_group": "BH-LNX-008",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-008:elasticsearch"
     },
     {
       "id": "BH-LNX-009",
@@ -2253,7 +2317,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-009"
+      "corroboration_group": "BH-LNX-009",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-009:elasticsearch"
     },
     {
       "id": "BH-LNX-010",
@@ -2318,7 +2384,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-010"
+      "corroboration_group": "BH-LNX-010",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-010:elasticsearch"
     },
     {
       "id": "BH-LNX-011",
@@ -2381,7 +2449,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-011"
+      "corroboration_group": "BH-LNX-011",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-011:elasticsearch"
     },
     {
       "id": "BH-LNX-012",
@@ -2448,7 +2518,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-012"
+      "corroboration_group": "BH-LNX-012",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-012:elasticsearch"
     },
     {
       "id": "BH-LNX-013",
@@ -2513,7 +2585,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-013"
+      "corroboration_group": "BH-LNX-013",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-013:elasticsearch"
     },
     {
       "id": "BH-LNX-014",
@@ -2580,7 +2654,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-014"
+      "corroboration_group": "BH-LNX-014",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-014:elasticsearch"
     },
     {
       "id": "BH-LNX-015",
@@ -2646,7 +2722,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-015"
+      "corroboration_group": "BH-LNX-015",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-015:elasticsearch"
     },
     {
       "id": "BH-LNX-016",
@@ -2715,7 +2793,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-016"
+      "corroboration_group": "BH-LNX-016",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-016:elasticsearch"
     },
     {
       "id": "BH-LNX-017",
@@ -2782,7 +2862,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-017"
+      "corroboration_group": "BH-LNX-017",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-017:elasticsearch"
     },
     {
       "id": "BH-LNX-018",
@@ -2847,7 +2929,9 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-018"
+      "corroboration_group": "BH-LNX-018",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-018:elasticsearch"
     },
     {
       "id": "BH-AUTH-001",
@@ -3167,7 +3251,9 @@
         }
       ],
       "review_date": "2026-10-15",
-      "corroboration_group": "download_execution"
+      "corroboration_group": "download_execution",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-019:elasticsearch"
     },
     {
       "id": "BH-LNX-020",
@@ -3229,7 +3315,9 @@
         }
       ],
       "review_date": "2026-10-15",
-      "corroboration_group": "interactive_shell"
+      "corroboration_group": "interactive_shell",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-020:elasticsearch"
     },
     {
       "id": "BH-LNX-021",
@@ -3302,7 +3390,9 @@
         }
       ],
       "review_date": "2026-10-15",
-      "corroboration_group": "credential_file_access"
+      "corroboration_group": "credential_file_access",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-021:elasticsearch"
     },
     {
       "id": "BH-LNX-022",
@@ -3387,7 +3477,9 @@
         }
       ],
       "review_date": "2026-10-15",
-      "corroboration_group": "firewall_modification"
+      "corroboration_group": "firewall_modification",
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-LNX-022:elasticsearch"
     },
     {
       "id": "BH-NET-001",

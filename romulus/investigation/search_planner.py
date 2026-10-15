@@ -162,7 +162,8 @@ def _native_candidate(raw: dict[str,Any],source: str,fields: list[str]) -> tuple
 def validate_native_arkime(expression: str,fields: list[str]) -> str:
     if not 1<=len(expression)<=512 or any(ord(ch)<32 for ch in expression): raise ValueError("Arkime expression has invalid length or control characters")
     if any(ch in expression for ch in (";","`","{","}","$")): raise ValueError("Arkime expression contains unsupported syntax")
-    if expression.count("(")!=expression.count(")") or expression.count('"')%2: raise ValueError("Arkime expression has unbalanced delimiters")
+    if expression.count("(")!=expression.count(")") or len(re.findall(r'(?<!\\)"',expression))%2:
+        raise ValueError("Arkime expression has unbalanced delimiters")
     referenced=re.findall(r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_.-]*)\s*(?:==|!=|=~|<=|>=|<|>)",expression)
     if not referenced or any(field not in fields or field not in SOURCE_FIELDS["arkime"] for field in referenced):
         raise ValueError("Arkime expression references an unavailable field")
@@ -184,27 +185,30 @@ def validate_native_tshark(expression: str,fields: list[str]) -> str:
     return expression
 
 
-def validate_native_es(candidate: str,fields: list[str]) -> str:
+def validate_native_es(candidate: str,fields: list[str],field_metadata: dict[str,dict[str,Any]]|None=None) -> str:
     parsed=json.loads(candidate)
     clause=parsed.get("query") if isinstance(parsed,dict) and set(parsed)=={"query"} else parsed
-    _validate_es_clause(clause,set(fields))
+    _validate_es_clause(clause,set(fields),field_metadata=field_metadata)
     return candidate
 
 
-def compile_native_es(candidate: str,fields: list[str],timestamp_field: str,time_range: dict[str,str] | None) -> dict[str,Any]:
-    validate_native_es(candidate,fields)
+def compile_native_es(candidate: str,fields: list[str],timestamp_field: str,time_range: dict[str,str] | None,
+                      field_metadata: dict[str,dict[str,Any]]|None=None) -> dict[str,Any]:
+    validate_native_es(candidate,fields,field_metadata)
     parsed=json.loads(candidate)
     clause=parsed.get("query") if isinstance(parsed,dict) and set(parsed)=={"query"} else parsed
     filters=[]
     if time_range:
-        if timestamp_field not in fields: raise ValueError("No mapped timestamp field is available to enforce the hunt time window")
+        if timestamp_field not in fields or not _mapped_searchable(timestamp_field,field_metadata):
+            raise ValueError("No searchable timestamp field is available to enforce the hunt time window")
         filters.append({"range":{timestamp_field:time_range}})
     query={"bool":{"must":[clause],**({"filter":filters} if filters else {})}}
     _limit_dsl(query)
     return query
 
 
-def _validate_es_clause(clause: Any,fields: set[str],depth: int=0) -> None:
+def _validate_es_clause(clause: Any,fields: set[str],depth: int=0,
+                        field_metadata: dict[str,dict[str,Any]]|None=None) -> None:
     if depth>10 or not isinstance(clause,dict) or len(clause)!=1: raise ValueError("Elasticsearch DSL clause is malformed")
     kind,value=next(iter(clause.items()))
     if kind=="bool":
@@ -212,25 +216,126 @@ def _validate_es_clause(clause: Any,fields: set[str],depth: int=0) -> None:
         for key in ("must","filter","should","must_not"):
             children=value.get(key,[]); children=children if isinstance(children,list) else [children]
             if len(children)>24: raise ValueError("Elasticsearch bool clause is too large")
-            for child in children: _validate_es_clause(child,fields,depth+1)
+            for child in children: _validate_es_clause(child,fields,depth+1,field_metadata)
         minimum=value.get("minimum_should_match")
         if minimum is not None and (not isinstance(minimum,int) or minimum<0 or minimum>24): raise ValueError("minimum_should_match is invalid")
         return
     if kind=="exists":
         if not isinstance(value,dict) or set(value)!={"field"} or value.get("field") not in fields: raise ValueError("Elasticsearch exists field is unavailable")
+        if field_metadata is not None and not _mapped_searchable(str(value.get("field")),field_metadata):
+            raise ValueError("Elasticsearch exists field is not indexed in the selected mapping")
         return
     if kind not in {"term","terms","match","match_phrase","range","wildcard","prefix"} or not isinstance(value,dict) or len(value)!=1:
         raise ValueError("Elasticsearch query clause is unsupported")
     field,operand=next(iter(value.items()))
     if field not in fields: raise ValueError("Elasticsearch query references an unavailable field")
+    if field_metadata is not None:
+        meta=field_metadata.get(field)
+        if not isinstance(meta,dict) or meta.get("searchable") is not True:
+            raise ValueError("Elasticsearch query references a field that is not indexed")
+        raw_types=meta.get("types",meta.get("type",[]))
+        types={str(raw_types)} if isinstance(raw_types,str) else {str(item) for item in raw_types} if isinstance(raw_types,(list,tuple,set)) else set()
+        text_types=types.intersection({"text","match_only_text"})
+        keyword_types=types.intersection({"keyword","constant_keyword","wildcard"})
+        if kind in {"term","terms"} and text_types and not keyword_types:
+            raise ValueError("Use a full-text query for a mapped text field")
+        if kind in {"match","match_phrase"} and keyword_types and not text_types:
+            raise ValueError("Use term for exact keyword matches or a bounded wildcard for substring matches")
+        if kind in {"wildcard","prefix"} and not keyword_types:
+            raise ValueError("Wildcard and prefix queries require a keyword-family field")
     if kind=="terms":
         if not isinstance(operand,list) or not 1<=len(operand)<=32 or any(not isinstance(x,(str,int,float,bool)) for x in operand): raise ValueError("Elasticsearch terms values are invalid")
     elif kind=="range":
         if not isinstance(operand,dict) or set(operand)-{"gt","gte","lt","lte"} or not operand: raise ValueError("Elasticsearch range is invalid")
     elif isinstance(operand,dict):
         if set(operand)-{"value","case_insensitive"} or "value" not in operand: raise ValueError("Elasticsearch query options are unsupported")
+        if "case_insensitive" in operand and not isinstance(operand["case_insensitive"],bool):
+            raise ValueError("Elasticsearch case_insensitive option must be boolean")
+        if kind in {"wildcard","prefix"} and not isinstance(operand.get("value"),str):
+            raise ValueError("Elasticsearch wildcard or prefix value must be text")
+        if kind=="wildcard" and not _bounded_wildcard_literal(str(operand.get("value",""))):
+            raise ValueError("Wildcard query must be a bounded literal substring or suffix of at least three characters")
+    elif kind=="wildcard":
+        if not isinstance(operand,str) or not _bounded_wildcard_literal(operand):
+            raise ValueError("Wildcard query must be a bounded literal substring or suffix of at least three characters")
     elif not isinstance(operand,(str,int,float,bool)):
         raise ValueError("Elasticsearch query value is invalid")
+
+
+def _mapped_searchable(field: str,field_metadata: dict[str,dict[str,Any]]|None) -> bool:
+    if field_metadata is None:
+        return True
+    meta=field_metadata.get(field)
+    return isinstance(meta,dict) and meta.get("searchable") is True
+
+
+def _mapped_text_clause(field: str,value: str,field_metadata: dict[str,dict[str,Any]]|None,
+                        *,exact: bool=False) -> dict[str,Any]|None:
+    if not _mapped_searchable(field,field_metadata):
+        return None
+    if field_metadata is None:
+        return {"match_phrase":{field:value}}
+    meta=field_metadata.get(field,{})
+    raw_types=meta.get("types",meta.get("type",[]))
+    types={str(raw_types)} if isinstance(raw_types,str) else {str(item) for item in raw_types} if isinstance(raw_types,(list,tuple,set)) else set()
+    text_types=types.intersection({"text","match_only_text"})
+    keyword_types=types.intersection({"keyword","constant_keyword","wildcard"})
+    clauses=[]
+    if text_types:
+        clauses.append({"match_phrase":{field:value}})
+    if keyword_types:
+        if exact:
+            clauses.append({"term":{field:value}})
+        elif len(value.strip())>=3 and not any(char in value for char in "*?\\"):
+            clauses.append({"wildcard":{field:{"value":f"*{value}*","case_insensitive":True}}})
+        elif value:
+            # Very short literals are too broad for a substring scan. An exact
+            # term can still find a single-token field such as a process name.
+            clauses.append({"term":{field:value}})
+    if not clauses:
+        return None
+    return clauses[0] if len(clauses)==1 else {"bool":{"should":clauses,"minimum_should_match":1}}
+
+
+def _mapped_terms_clause(field: str,values: list[Any],field_metadata: dict[str,dict[str,Any]]|None) -> dict[str,Any]|None:
+    if not _mapped_searchable(field,field_metadata):
+        return None
+    selected=list(values[:32])
+    if field_metadata is not None:
+        meta=field_metadata.get(field,{})
+        raw_types=meta.get("types",meta.get("type",[]))
+        types={str(raw_types)} if isinstance(raw_types,str) else {str(item) for item in raw_types} if isinstance(raw_types,(list,tuple,set)) else set()
+        if types.intersection({"text","match_only_text"}) and not types.intersection({"keyword","constant_keyword","wildcard"}):
+            clauses=[{"match_phrase":{field:str(value)}} for value in selected[:12]]
+            return clauses[0] if len(clauses)==1 else {"bool":{"should":clauses,"minimum_should_match":1}} if clauses else None
+        if types.intersection({"keyword","constant_keyword","wildcard"}):
+            selected=[str(value) for value in selected]
+    return {"terms":{field:selected}} if selected else None
+
+
+def _bounded_wildcard_literal(pattern: str) -> bool:
+    """Accept only *literal* or *literal suffix patterns, with escaped metacharacters."""
+    if not isinstance(pattern,str) or not pattern.startswith("*"):
+        return False
+    body=pattern[1:]
+    if body.endswith("*"):
+        body=body[:-1]
+    if not body or body.startswith("*") or body.endswith("*"):
+        return False
+    literal=[]; index=0
+    while index<len(body):
+        char=body[index]
+        if char=="\\":
+            index+=1
+            if index>=len(body) or body[index] not in "\\*?":
+                return False
+            literal.append(body[index])
+        elif char in "*?":
+            return False
+        else:
+            literal.append(char)
+        index+=1
+    return len("".join(literal))>=3
 
 
 def expand_anchor_selectors(raw: Any, evidence: list[dict]) -> Any:
@@ -326,32 +431,43 @@ def _parse_scope_time(value, default):
     except ValueError: return default
 
 
-def compile_es(spec: dict[str, Any], fields: list[str], timestamp_field: str, time_range: dict[str, str] | None) -> dict[str, Any]:
+def compile_es(spec: dict[str, Any], fields: list[str], timestamp_field: str, time_range: dict[str, str] | None,
+               field_metadata: dict[str,dict[str,Any]]|None=None) -> dict[str, Any]:
     groups = []
     actual = set(fields)
-    text_fields = [f for f in spec.get("fields", []) if f in actual and f in TEXT_FIELDS][:4]
+    text_fields = [f for f in spec.get("fields", []) if f in actual and f in TEXT_FIELDS
+        and _mapped_searchable(f,field_metadata)][:4]
     if spec.get("terms"):
         if not text_fields:
-            text_fields = [f for f in TEXT_FIELDS if f in actual][:4]
+            text_fields = [f for f in TEXT_FIELDS if f in actual and _mapped_searchable(f,field_metadata)][:4]
         if text_fields:
-            groups.append([{"match_phrase": {field: term}} for field in text_fields for term in spec["terms"][:4]])
-    ip_fields = [f for f in IP_FIELDS if f in actual][:4]
-    host_fields = [f for f in HOST_FIELDS if f in actual][:3]
-    port_fields = [f for f in PORT_FIELDS if f in actual][:4]
-    event_fields = [f for f in EVENT_FIELDS if f in actual][:3]
-    protocol_fields = [f for f in PROTOCOL_FIELDS if f in actual][:3]
+            clauses=[_mapped_text_clause(field,str(term),field_metadata) for field in text_fields for term in spec["terms"][:4]]
+            groups.append([clause for clause in clauses if clause])
+    ip_fields = [f for f in IP_FIELDS if f in actual and _mapped_searchable(f,field_metadata)][:4]
+    host_fields = [f for f in HOST_FIELDS if f in actual and _mapped_searchable(f,field_metadata)][:3]
+    port_fields = [f for f in PORT_FIELDS if f in actual and _mapped_searchable(f,field_metadata)][:4]
+    event_fields = [f for f in EVENT_FIELDS if f in actual and _mapped_searchable(f,field_metadata)][:3]
+    protocol_fields = [f for f in PROTOCOL_FIELDS if f in actual and _mapped_searchable(f,field_metadata)][:3]
     if spec.get("ips") and ip_fields: groups.append([{"term": {f: ip}} for f in ip_fields for ip in spec["ips"][:4]])
-    if spec.get("hostnames") and host_fields: groups.append([{"match_phrase": {f: h}} for f in host_fields for h in spec["hostnames"][:3]])
-    if spec.get("ports") and port_fields: groups.append([{"terms": {f: spec["ports"][:6]}} for f in port_fields])
-    if spec.get("event_codes") and event_fields: groups.append([{"terms": {f: spec["event_codes"][:8]}} for f in event_fields])
-    if spec.get("protocols") and protocol_fields: groups.append([{"terms": {f: spec["protocols"][:4]}} for f in protocol_fields])
+    if spec.get("hostnames") and host_fields:
+        clauses=[_mapped_text_clause(field,str(host),field_metadata,exact=True) for field in host_fields for host in spec["hostnames"][:3]]
+        groups.append([clause for clause in clauses if clause])
+    if spec.get("ports") and port_fields:
+        clauses=[_mapped_terms_clause(field,spec["ports"][:6],field_metadata) for field in port_fields]
+        groups.append([clause for clause in clauses if clause])
+    if spec.get("event_codes") and event_fields:
+        clauses=[_mapped_terms_clause(field,spec["event_codes"][:8],field_metadata) for field in event_fields]
+        groups.append([clause for clause in clauses if clause])
+    if spec.get("protocols") and protocol_fields:
+        clauses=[_mapped_terms_clause(field,spec["protocols"][:4],field_metadata) for field in protocol_fields]
+        groups.append([clause for clause in clauses if clause])
     if not groups:
         raise ValueError("No requested selector maps to fields in the Elasticsearch mapping")
     must = [{"bool": {"should": group, "minimum_should_match": 1}} for group in groups if group]
     filters = []
     if time_range:
-        if timestamp_field not in actual:
-            raise ValueError("No mapped timestamp field is available to enforce the hunt time window")
+        if timestamp_field not in actual or not _mapped_searchable(timestamp_field,field_metadata):
+            raise ValueError("No searchable timestamp field is available to enforce the hunt time window")
         filters.append({"range": {timestamp_field: time_range}})
     query = {"bool": {"must": must, **({"filter": filters} if filters else {})}}
     _limit_dsl(query)

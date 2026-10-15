@@ -32,6 +32,8 @@
           "platforms",
           "categories",
           "source",
+          "source_language",
+          "stage_id",
           "required_roles",
           "optional_roles",
           "match",

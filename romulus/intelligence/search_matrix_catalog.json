@@ -1,0 +1,2756 @@
+{
+  "catalog_version": "1.0.0",
+  "review_date": "2026-10-15",
+  "purpose": "Source-anchored Windows and Linux Elasticsearch DSL search recipes. Every emitted query combines its event/source selectors with one same-document behavior signature.",
+  "provenance": [
+    {
+      "name": "Elastic Elasticsearch Query DSL reference",
+      "url": "https://www.elastic.co/docs/reference/query-languages/querydsl"
+    },
+    {
+      "name": "Elastic Windows integration field mappings",
+      "url": "https://www.elastic.co/docs/reference/integrations/windows"
+    },
+    {
+      "name": "Elastic Auditd Manager integration",
+      "url": "https://www.elastic.co/docs/reference/integrations/auditd_manager"
+    },
+    {
+      "name": "Elastic Auditd Logs integration",
+      "url": "https://www.elastic.co/docs/reference/integrations/auditd"
+    },
+    {
+      "name": "Elastic System integration",
+      "url": "https://www.elastic.co/docs/reference/integrations/system"
+    },
+    {
+      "name": "Elastic Windows detection rules",
+      "url": "https://github.com/elastic/detection-rules/tree/main/rules/windows"
+    },
+    {
+      "name": "Elastic Linux detection rules",
+      "url": "https://github.com/elastic/detection-rules/tree/main/rules/linux"
+    }
+  ],
+  "signature_sets": {
+    "windows_powershell": [
+      {
+        "id": "ps_encoded_or_decoded_payload",
+        "title": "PowerShell encoded or decoded payload",
+        "priority_tier": "high",
+        "base_priority": 86,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "-EncodedCommand",
+              "FromBase64String",
+              "EncodedCommand",
+              "ToBase64String"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_remote_content_retrieval",
+        "title": "PowerShell remote content retrieval",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "DownloadString",
+              "Invoke-WebRequest",
+              "Start-BitsTransfer",
+              "Net.WebClient",
+              "Invoke-RestMethod"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_download_then_execute",
+        "title": "PowerShell download followed by dynamic execution",
+        "priority_tier": "critical",
+        "base_priority": 94,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "DownloadString",
+              "Invoke-WebRequest",
+              "Start-BitsTransfer",
+              "Invoke-RestMethod"
+            ]
+          },
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Invoke-Expression",
+              "IEX",
+              "Start-Process"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_amsi_tampering",
+        "title": "PowerShell antimalware scan interface tampering",
+        "priority_tier": "high",
+        "base_priority": 91,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "AmsiUtils",
+              "amsiInitFailed",
+              "AmsiScanBuffer",
+              "AmsiContext"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_logging_or_etw_tampering",
+        "title": "PowerShell logging or ETW tampering",
+        "priority_tier": "high",
+        "base_priority": 88,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "PSEtwLogProvider",
+              "EtwEventWrite",
+              "ScriptBlockLogging",
+              "EnableScriptBlockLogging"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_credential_access",
+        "title": "PowerShell credential access tooling or APIs",
+        "priority_tier": "high",
+        "base_priority": 84,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "sekurlsa",
+              "mimikatz",
+              "Get-Credential",
+              "VaultCmd",
+              "CredEnumerate",
+              "cmdkey"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_active_directory_discovery",
+        "title": "PowerShell directory and domain discovery",
+        "priority_tier": "medium",
+        "base_priority": 64,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Get-ADUser",
+              "Get-ADComputer",
+              "Get-ADGroup",
+              "DirectorySearcher",
+              "LDAP://",
+              "Get-NetUser",
+              "Get-DomainUser"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_host_network_discovery",
+        "title": "PowerShell host and network discovery",
+        "priority_tier": "medium",
+        "base_priority": 62,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Get-NetIPAddress",
+              "Get-NetTCPConnection",
+              "Get-LocalGroupMember",
+              "Get-CimInstance Win32",
+              "Get-Process",
+              "Get-Service"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_remote_session_or_command",
+        "title": "PowerShell remote session or command execution",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Invoke-Command",
+              "New-PSSession",
+              "Enter-PSSession",
+              "-ComputerName",
+              "Invoke-WmiMethod"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_scheduled_task_or_service_persistence",
+        "title": "PowerShell scheduled task or service persistence",
+        "priority_tier": "high",
+        "base_priority": 81,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Register-ScheduledTask",
+              "New-Service",
+              "Set-Service",
+              "schtasks.exe",
+              "New-ScheduledTaskAction"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_registry_autostart_change",
+        "title": "PowerShell registry autostart change",
+        "priority_tier": "high",
+        "base_priority": 80,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "CurrentVersion\\Run",
+              "New-ItemProperty",
+              "Set-ItemProperty",
+              "reg.exe add"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_defender_exclusion_or_protection_change",
+        "title": "PowerShell Defender exclusion or protection change",
+        "priority_tier": "high",
+        "base_priority": 88,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Add-MpPreference",
+              "Set-MpPreference",
+              "ExclusionPath",
+              "ExclusionProcess",
+              "DisableRealtimeMonitoring"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_obfuscation_and_dynamic_execution",
+        "title": "PowerShell obfuscation and dynamic execution",
+        "priority_tier": "medium",
+        "base_priority": 68,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "-join",
+              "[char]",
+              "FromCharCode",
+              "Replace("
+            ]
+          },
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Invoke-Expression",
+              "IEX",
+              "ScriptBlock::Create"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_archive_or_staging_activity",
+        "title": "PowerShell archive or payload staging",
+        "priority_tier": "medium",
+        "base_priority": 59,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Compress-Archive",
+              "Expand-Archive",
+              "-OutFile",
+              "\\AppData\\Local\\Temp\\",
+              "$env:TEMP"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_security_log_clearing",
+        "title": "PowerShell security log clearing",
+        "priority_tier": "high",
+        "base_priority": 83,
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Clear-EventLog",
+              "wevtutil cl",
+              "Remove-EventLog",
+              "Clear-WinEvent"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ps_recon_then_remote_execution",
+        "title": "PowerShell reconnaissance followed by remote execution",
+        "priority_tier": "high",
+        "base_priority": 79,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Get-ADComputer",
+              "Get-NetUser",
+              "Get-NetDomain",
+              "DirectorySearcher"
+            ]
+          },
+          {
+            "role": "powershell.script_block",
+            "operator": "contains_any",
+            "values": [
+              "Invoke-Command",
+              "New-PSSession",
+              "Enter-PSSession"
+            ]
+          }
+        ]
+      }
+    ],
+    "windows_process_tools": [
+      {
+        "id": "process_network_scanners",
+        "title": "Network scanning or packet-capture utility execution",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "nmap",
+              "masscan",
+              "socat",
+              "netcat",
+              "ncat",
+              "tcpdump",
+              "angryip"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_short_netcat_name",
+        "title": "Short-name netcat utility execution",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "equals_any",
+            "values": [
+              "nc",
+              "nc.exe",
+              "ncat",
+              "ncat.exe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_proxy_or_tunnel_tools",
+        "title": "Proxy, tunnel, or relay utility execution",
+        "priority_tier": "high",
+        "base_priority": 79,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "chisel",
+              "plink.exe",
+              "ngrok.exe",
+              "frpc",
+              "frps",
+              "ligolo",
+              "proxychains"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_remote_admin_or_execution",
+        "title": "Remote administration or remote execution utility",
+        "priority_tier": "high",
+        "base_priority": 76,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "psexec",
+              "paexec",
+              "wmic.exe /node",
+              "winrs.exe",
+              "Enter-PSSession",
+              "mstsc.exe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_encoded_powershell",
+        "title": "Encoded or hidden PowerShell process launch",
+        "priority_tier": "high",
+        "base_priority": 86,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "powershell.exe",
+              "pwsh.exe"
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "-enc",
+              "-EncodedCommand",
+              "-WindowStyle Hidden",
+              "-w hidden",
+              "-nop"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_script_host_proxy_execution",
+        "title": "Script host or proxy binary with suspicious arguments",
+        "priority_tier": "high",
+        "base_priority": 80,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "rundll32.exe",
+              "regsvr32.exe",
+              "mshta.exe",
+              "rundll32",
+              "regsvr32",
+              "mshta"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_certutil_or_bitsadmin_transfer",
+        "title": "Certutil or BITS transfer utility execution",
+        "priority_tier": "high",
+        "base_priority": 80,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "certutil.exe -urlcache",
+              "certutil -decode",
+              "bitsadmin.exe /transfer",
+              "bitsadmin /download",
+              "Start-BitsTransfer"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_download_then_shell",
+        "title": "Remote download piped or handed to a command shell",
+        "priority_tier": "critical",
+        "base_priority": 92,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "curl ",
+              "wget ",
+              "Invoke-WebRequest",
+              "DownloadString"
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "| powershell",
+              "| cmd",
+              "| sh",
+              "-OutFile",
+              "-o "
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_archive_or_exfiltration_tool",
+        "title": "Archive, synchronization, or bulk transfer utility execution",
+        "priority_tier": "medium",
+        "base_priority": 68,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "rclone.exe",
+              "7z.exe",
+              "7za.exe",
+              "rar.exe",
+              "winscp.com",
+              "robocopy.exe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_credential_dumping_utilities",
+        "title": "Credential dumping or memory collection utility execution",
+        "priority_tier": "high",
+        "base_priority": 88,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "procdump",
+              "rundll32 comsvcs.dll",
+              "mimikatz",
+              "nanodump",
+              "lsassy"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_event_log_clearing",
+        "title": "Windows event log clearing utility execution",
+        "priority_tier": "high",
+        "base_priority": 87,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "wevtutil cl",
+              "wevtutil clear-log",
+              "Clear-EventLog",
+              "Remove-EventLog"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_shadow_copy_or_backup_deletion",
+        "title": "Shadow copy or backup deletion utility execution",
+        "priority_tier": "high",
+        "base_priority": 86,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "vssadmin delete shadows",
+              "wmic shadowcopy delete",
+              "wbadmin delete catalog",
+              "bcdedit /set"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_account_or_group_discovery",
+        "title": "Local or domain account and group discovery commands",
+        "priority_tier": "medium",
+        "base_priority": 64,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "net user",
+              "net group",
+              "net localgroup",
+              "whoami /all",
+              "nltest /domain_trusts",
+              "Get-ADUser"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_host_network_discovery",
+        "title": "Host, route, connection, or process discovery commands",
+        "priority_tier": "medium",
+        "base_priority": 61,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "ipconfig /all",
+              "route print",
+              "arp -a",
+              "netstat -ano",
+              "tasklist /v",
+              "quser"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_scheduled_task_persistence",
+        "title": "Scheduled task creation or modification command",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "schtasks /create",
+              "schtasks.exe /create",
+              "Register-ScheduledTask",
+              "New-ScheduledTaskAction"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_service_persistence",
+        "title": "Service creation or configuration command",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "sc.exe create",
+              "sc create",
+              "New-Service",
+              "Set-Service",
+              "reg.exe add"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_defender_configuration_change",
+        "title": "Endpoint protection configuration change command",
+        "priority_tier": "high",
+        "base_priority": 85,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "Add-MpPreference",
+              "Set-MpPreference",
+              "DisableRealtimeMonitoring",
+              "ExclusionPath",
+              "MpPreference"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_shadow_copy_access",
+        "title": "Shadow copy or backup catalog access",
+        "priority_tier": "medium",
+        "base_priority": 70,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "vssadmin list shadows",
+              "diskshadow.exe",
+              "wbadmin get versions",
+              "esentutl.exe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_remote_file_share_access",
+        "title": "Remote share or administrative share access",
+        "priority_tier": "medium",
+        "base_priority": 66,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "\\\\ADMIN$",
+              "\\\\C$",
+              "net use ",
+              "New-PSDrive",
+              "smbclient"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_wmi_or_dcom_remote_execution",
+        "title": "WMI or DCOM remote execution command",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "wmic /node",
+              "Invoke-WmiMethod",
+              "impacket-wmiexec",
+              "dcomexec.py",
+              "Win32_Process Create"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "process_ssh_or_rdp_client_execution",
+        "title": "Remote interactive or SSH client execution",
+        "priority_tier": "medium",
+        "base_priority": 62,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "ssh.exe -R",
+              "ssh.exe -L",
+              "plink.exe -R",
+              "mstsc.exe /v:",
+              "xfreerdp"
+            ]
+          }
+        ]
+      }
+    ],
+    "windows_sysmon_network": [
+      {
+        "id": "sysmon_netcat_or_socat_connection",
+        "title": "Sysmon network event from netcat or Socat",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "contains_any",
+            "values": [
+              "ncat",
+              "netcat",
+              "socat",
+              "nc.exe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sysmon_scanner_connection",
+        "title": "Sysmon network event from a scanner",
+        "priority_tier": "high",
+        "base_priority": 80,
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "contains_any",
+            "values": [
+              "nmap",
+              "masscan",
+              "zmap"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sysmon_shell_remote_connection",
+        "title": "Sysmon network event from a command shell or interpreter",
+        "priority_tier": "medium",
+        "base_priority": 67,
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "contains_any",
+            "values": [
+              "powershell.exe",
+              "pwsh.exe",
+              "cmd.exe",
+              "wscript.exe",
+              "cscript.exe",
+              "python.exe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sysmon_remote_tool_connection",
+        "title": "Sysmon network event from a proxy or remote access utility",
+        "priority_tier": "high",
+        "base_priority": 77,
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "contains_any",
+            "values": [
+              "plink.exe",
+              "chisel.exe",
+              "ngrok.exe",
+              "psexec.exe",
+              "putty.exe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sysmon_nonstandard_destination_port",
+        "title": "Sysmon network event to a commonly abused remote shell or admin port",
+        "priority_tier": "medium",
+        "base_priority": 64,
+        "predicates": [
+          {
+            "role": "destination.port",
+            "operator": "equals_any",
+            "values": [
+              "22",
+              "2222",
+              "4444",
+              "5555",
+              "5985",
+              "5986",
+              "8080",
+              "8443"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sysmon_dns_from_script_or_shell",
+        "title": "Sysmon DNS event associated with a script host or shell",
+        "priority_tier": "medium",
+        "base_priority": 65,
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "contains_any",
+            "values": [
+              "powershell.exe",
+              "pwsh.exe",
+              "rundll32.exe",
+              "mshta.exe",
+              "wscript.exe",
+              "python.exe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sysmon_outbound_to_literal_address",
+        "title": "Sysmon connection using a literal destination address",
+        "priority_tier": "medium",
+        "base_priority": 60,
+        "predicates": [
+          {
+            "role": "destination.ip",
+            "operator": "exists",
+            "values": []
+          }
+        ]
+      },
+      {
+        "id": "sysmon_process_and_remote_port",
+        "title": "Sysmon connection from command shell to a remote management port",
+        "priority_tier": "high",
+        "base_priority": 75,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "contains_any",
+            "values": [
+              "powershell.exe",
+              "cmd.exe",
+              "wmic.exe",
+              "psexec.exe"
+            ]
+          },
+          {
+            "role": "destination.port",
+            "operator": "equals_any",
+            "values": [
+              "135",
+              "445",
+              "3389",
+              "5985",
+              "5986"
+            ]
+          }
+        ]
+      }
+    ],
+    "windows_services": [
+      {
+        "id": "service_binary_user_writable_path",
+        "title": "Service installed from a user-writable or temporary path",
+        "priority_tier": "high",
+        "base_priority": 85,
+        "predicates": [
+          {
+            "role": "service.image",
+            "operator": "contains_any",
+            "values": [
+              "\\Users\\Public\\",
+              "\\AppData\\",
+              "\\Temp\\",
+              "\\Downloads\\",
+              "\\ProgramData\\"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "service_shell_or_script_host",
+        "title": "Service binary or command invokes a shell or script host",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "service.image",
+            "operator": "contains_any",
+            "values": [
+              "powershell",
+              "pwsh",
+              "cmd.exe",
+              "wscript",
+              "cscript",
+              "mshta"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "service_unc_or_remote_binary",
+        "title": "Service binary path uses a remote share",
+        "priority_tier": "high",
+        "base_priority": 83,
+        "predicates": [
+          {
+            "role": "service.image",
+            "operator": "contains_any",
+            "values": [
+              "\\\\",
+              "\\Device\\Mup\\"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "service_suspicious_parameters",
+        "title": "Service configuration contains encoded or download parameters",
+        "priority_tier": "high",
+        "base_priority": 83,
+        "predicates": [
+          {
+            "role": "service.image",
+            "operator": "contains_any",
+            "values": [
+              "-EncodedCommand",
+              "DownloadString",
+              "http://",
+              "https://",
+              "-WindowStyle Hidden"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "service_short_netcat_name",
+        "title": "Service registration names a netcat or Socat utility",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "service.image",
+            "operator": "contains_any",
+            "values": [
+              "nmap",
+              "socat",
+              "netcat",
+              "ncat",
+              "nc.exe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "service_logon_account_change",
+        "title": "Service installed with an unexpected account context",
+        "priority_tier": "medium",
+        "base_priority": 62,
+        "predicates": [
+          {
+            "role": "event.message",
+            "operator": "contains_any",
+            "values": [
+              "LocalSystem",
+              "LocalService",
+              "NetworkService",
+              "user account"
+            ]
+          }
+        ]
+      }
+    ],
+    "windows_tasks": [
+      {
+        "id": "task_shell_or_script_host",
+        "title": "Scheduled task action launches a shell or script host",
+        "priority_tier": "high",
+        "base_priority": 80,
+        "predicates": [
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "powershell",
+              "pwsh",
+              "cmd.exe",
+              "wscript",
+              "cscript",
+              "mshta",
+              "rundll32"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "task_encoded_or_hidden_execution",
+        "title": "Scheduled task action uses encoded or hidden execution",
+        "priority_tier": "high",
+        "base_priority": 88,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "powershell",
+              "pwsh"
+            ]
+          },
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "-EncodedCommand",
+              "-enc ",
+              "-WindowStyle Hidden",
+              "-w hidden"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "task_download_then_execute",
+        "title": "Scheduled task action downloads and executes content",
+        "priority_tier": "critical",
+        "base_priority": 91,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "http://",
+              "https://",
+              "DownloadString",
+              "Invoke-WebRequest",
+              "curl ",
+              "wget "
+            ]
+          },
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "powershell",
+              "cmd.exe",
+              "wscript",
+              "cscript",
+              "rundll32"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "task_user_writable_execution",
+        "title": "Scheduled task action executes from a user-writable path",
+        "priority_tier": "high",
+        "base_priority": 81,
+        "predicates": [
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "\\Users\\Public\\",
+              "\\AppData\\",
+              "\\Temp\\",
+              "\\Downloads\\",
+              "\\ProgramData\\"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "task_remote_share_execution",
+        "title": "Scheduled task action executes from a remote share",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "\\\\",
+              "\\Device\\Mup\\"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "task_discovery_or_transfer_utility",
+        "title": "Scheduled task action invokes a scanner or transfer utility",
+        "priority_tier": "high",
+        "base_priority": 77,
+        "predicates": [
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "nmap",
+              "masscan",
+              "socat",
+              "netcat",
+              "ncat",
+              "certutil",
+              "bitsadmin",
+              "rclone"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "task_security_log_tampering",
+        "title": "Scheduled task action modifies Defender or event logging",
+        "priority_tier": "high",
+        "base_priority": 83,
+        "predicates": [
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "Add-MpPreference",
+              "DisableRealtimeMonitoring",
+              "wevtutil cl",
+              "Clear-EventLog"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "task_credential_or_memory_tool",
+        "title": "Scheduled task action invokes credential or memory tooling",
+        "priority_tier": "high",
+        "base_priority": 86,
+        "predicates": [
+          {
+            "role": "task.content",
+            "operator": "contains_any",
+            "values": [
+              "mimikatz",
+              "sekurlsa",
+              "procdump",
+              "nanodump",
+              "lsassy"
+            ]
+          }
+        ]
+      }
+    ],
+    "windows_authentication": [
+      {
+        "id": "failed_logon_bad_password",
+        "title": "Failed logon with bad-password status",
+        "priority_tier": "medium",
+        "base_priority": 63,
+        "predicates": [
+          {
+            "role": "event.status",
+            "operator": "equals_any",
+            "values": [
+              "0xC000006A",
+              "3221225578"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "failed_logon_unknown_account",
+        "title": "Failed logon with unknown-account status",
+        "priority_tier": "medium",
+        "base_priority": 65,
+        "predicates": [
+          {
+            "role": "event.status",
+            "operator": "equals_any",
+            "values": [
+              "0xC0000064",
+              "3221225572"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "failed_logon_locked_account",
+        "title": "Failed logon with locked-account status",
+        "priority_tier": "medium",
+        "base_priority": 60,
+        "predicates": [
+          {
+            "role": "event.status",
+            "operator": "equals_any",
+            "values": [
+              "0xC0000234",
+              "3221226036"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "failed_logon_network_or_remote_interactive",
+        "title": "Failed network or remote interactive logon",
+        "priority_tier": "medium",
+        "base_priority": 61,
+        "predicates": [
+          {
+            "role": "logon.type",
+            "operator": "equals_any",
+            "values": [
+              "3",
+              "10"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "successful_remote_interactive_logon",
+        "title": "Successful network or remote interactive logon",
+        "priority_tier": "medium",
+        "base_priority": 61,
+        "predicates": [
+          {
+            "role": "logon.type",
+            "operator": "equals_any",
+            "values": [
+              "3",
+              "10"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "explicit_credentials_logon",
+        "title": "Explicit-credential logon event",
+        "priority_tier": "medium",
+        "base_priority": 62,
+        "predicates": [
+          {
+            "role": "event.message",
+            "operator": "contains_any",
+            "values": [
+              "explicit credentials",
+              "process is accessing an account"
+            ]
+          }
+        ]
+      }
+    ],
+    "linux_audit_execution": [
+      {
+        "id": "linux_scanning_and_capture_tools",
+        "title": "Network scanning or packet-capture utility execution",
+        "priority_tier": "high",
+        "base_priority": 84,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "nmap",
+              "masscan",
+              "zmap",
+              "tcpdump",
+              "tshark",
+              "socat",
+              "netcat",
+              "ncat"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_short_netcat_process_name",
+        "title": "Netcat short-name process execution",
+        "priority_tier": "high",
+        "base_priority": 84,
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "equals_any",
+            "values": [
+              "nc",
+              "ncat",
+              "netcat"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_nmap_scan_modes",
+        "title": "Nmap scan or host-discovery argument pattern",
+        "priority_tier": "high",
+        "base_priority": 86,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "-sS",
+              "-sV",
+              "-sC",
+              "-Pn",
+              "-sn",
+              "-p-",
+              "--script"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_socat_relay_or_shell",
+        "title": "Socat relay, listener, or shell-connected execution",
+        "priority_tier": "high",
+        "base_priority": 89,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "socat",
+              "TCP-LISTEN:",
+              "TCP:",
+              "EXEC:",
+              "PTY,stderr,setsid"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_netcat_shell_or_listener",
+        "title": "Netcat shell, listener, or executable argument",
+        "priority_tier": "high",
+        "base_priority": 89,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "netcat",
+              "ncat",
+              "nc "
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "-e ",
+              "-lvp",
+              "-lvnp",
+              "/bin/sh",
+              "/bin/bash"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_reverse_shell_patterns",
+        "title": "Shell process with interactive or network redirection indicators",
+        "priority_tier": "critical",
+        "base_priority": 93,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "/dev/tcp/",
+              "bash -i",
+              "mkfifo",
+              "pty.spawn",
+              "socat TCP-LISTEN",
+              "nc -e"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_download_pipe_to_shell",
+        "title": "Remote download piped into a shell or interpreter",
+        "priority_tier": "critical",
+        "base_priority": 94,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "curl ",
+              "wget ",
+              "python -c",
+              "perl -e"
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "| sh",
+              "| bash",
+              "/bin/sh",
+              "/bin/bash",
+              "exec("
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_remote_transfer_tools",
+        "title": "Remote file-transfer or synchronization utility execution",
+        "priority_tier": "medium",
+        "base_priority": 68,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "curl ",
+              "wget ",
+              "scp ",
+              "sftp ",
+              "rsync ",
+              "tftp ",
+              "ftp "
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_privilege_enumeration",
+        "title": "Privilege or capability enumeration commands",
+        "priority_tier": "high",
+        "base_priority": 80,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "sudo -l",
+              "getcap -r",
+              "find / -perm",
+              "find / -writable",
+              "capsh --print",
+              "id -u",
+              "uname -a"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_privilege_escalation_helpers",
+        "title": "Privilege-elevation helper execution",
+        "priority_tier": "medium",
+        "base_priority": 66,
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "equals_any",
+            "values": [
+              "sudo",
+              "su",
+              "pkexec",
+              "doas",
+              "setcap",
+              "chsh",
+              "newgrp"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_host_network_discovery",
+        "title": "Host, interface, route, and socket discovery commands",
+        "priority_tier": "medium",
+        "base_priority": 64,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "ip addr",
+              "ip route",
+              "ifconfig",
+              "ss -lntp",
+              "netstat -tulpn",
+              "arp -a",
+              "route -n",
+              "hostname -f"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_user_group_discovery",
+        "title": "User, group, session, and account discovery commands",
+        "priority_tier": "medium",
+        "base_priority": 62,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "getent passwd",
+              "getent group",
+              "/etc/passwd",
+              "/etc/group",
+              "lastlog",
+              "last -a",
+              "whoami",
+              "w -h"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_credential_store_access",
+        "title": "Credential store or private-key access",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "/etc/shadow",
+              "/etc/gshadow",
+              "authorized_keys",
+              "id_rsa",
+              ".ssh/config",
+              "/root/.ssh",
+              "credentials.db"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_credential_dumping_tools",
+        "title": "Credential dumping or password recovery tool execution",
+        "priority_tier": "high",
+        "base_priority": 87,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "mimikatz",
+              "secretsdump.py",
+              "hashcat",
+              "john --wordlist",
+              "pypykatz",
+              "unshadow"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_shell_history_tampering",
+        "title": "Shell history removal or suppression",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "HISTFILE=/dev/null",
+              "history -c",
+              "unset HISTFILE",
+              ".bash_history",
+              ".zsh_history",
+              "shred -u"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_cron_persistence",
+        "title": "Cron or crontab persistence command",
+        "priority_tier": "high",
+        "base_priority": 81,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "crontab -e",
+              "/etc/cron.d/",
+              "/etc/cron.hourly/",
+              "/var/spool/cron/",
+              "@reboot"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_systemd_persistence",
+        "title": "Systemd service or timer creation and enablement",
+        "priority_tier": "high",
+        "base_priority": 83,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "systemctl enable",
+              "systemctl daemon-reload",
+              "systemctl edit",
+              "systemd-run",
+              "/etc/systemd/system/"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_ssh_persistence",
+        "title": "SSH authorized-key or server configuration change",
+        "priority_tier": "high",
+        "base_priority": 80,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "authorized_keys",
+              "sshd_config",
+              "ssh-keygen -A",
+              "PermitRootLogin",
+              "PubkeyAuthentication"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_account_creation_or_privilege_change",
+        "title": "Account creation or privileged-group modification",
+        "priority_tier": "high",
+        "base_priority": 79,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "useradd ",
+              "adduser ",
+              "usermod -aG",
+              "groupadd ",
+              "passwd ",
+              "visudo"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_security_service_tampering",
+        "title": "Security service stop, disable, or masking command",
+        "priority_tier": "high",
+        "base_priority": 86,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "systemctl stop auditd",
+              "systemctl disable auditd",
+              "systemctl mask",
+              "service auditd stop",
+              "setenforce 0",
+              "ufw disable"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_firewall_or_packet_filter_change",
+        "title": "Firewall or packet-filter rule modification",
+        "priority_tier": "high",
+        "base_priority": 77,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "iptables -F",
+              "iptables -A",
+              "nft add rule",
+              "nft flush ruleset",
+              "firewall-cmd --add",
+              "ufw allow"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_kernel_module_or_bpf_activity",
+        "title": "Kernel module or BPF-related utility execution",
+        "priority_tier": "high",
+        "base_priority": 79,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "insmod ",
+              "modprobe ",
+              "rmmod ",
+              "bpftool prog",
+              "bpftrace ",
+              "kallsyms"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_container_escape_or_namespace_tools",
+        "title": "Container, namespace, or mount manipulation utility execution",
+        "priority_tier": "medium",
+        "base_priority": 70,
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "nsenter ",
+              "unshare ",
+              "mount -t overlay",
+              "docker.sock",
+              "kubectl exec",
+              "crictl"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_archive_or_staging_activity",
+        "title": "Archive or staging activity in temporary locations",
+        "priority_tier": "medium",
+        "base_priority": 65,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "tar ",
+              "gzip ",
+              "zip ",
+              "7z ",
+              "base64 "
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "/tmp/",
+              "/var/tmp/",
+              "/dev/shm/",
+              "/run/user/"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "linux_interpreter_network_activity",
+        "title": "Script interpreter with network or socket indicators",
+        "priority_tier": "medium",
+        "base_priority": 67,
+        "match_mode": "all",
+        "predicates": [
+          {
+            "role": "process.name",
+            "operator": "equals_any",
+            "values": [
+              "python",
+              "python3",
+              "perl",
+              "ruby",
+              "php",
+              "node"
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "socket",
+              "urllib",
+              "requests.",
+              "Net::HTTP",
+              "curl ",
+              "wget "
+            ]
+          }
+        ]
+      }
+    ],
+    "linux_sensitive_files": [
+      {
+        "id": "file_etc_passwd_change",
+        "title": "Access or modification of /etc/passwd",
+        "priority_tier": "high",
+        "base_priority": 79,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/passwd"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_etc_shadow_access",
+        "title": "Access or modification of /etc/shadow",
+        "priority_tier": "high",
+        "base_priority": 86,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/shadow"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_sudoers_change",
+        "title": "Access or modification of sudoers policy",
+        "priority_tier": "high",
+        "base_priority": 83,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/sudoers",
+              "/etc/sudoers.d/"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_ssh_authorized_keys_change",
+        "title": "SSH authorized keys or host configuration change",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/root/.ssh/authorized_keys",
+              "/home/",
+              "/etc/ssh/sshd_config"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_cron_persistence_change",
+        "title": "Cron persistence file creation or modification",
+        "priority_tier": "high",
+        "base_priority": 80,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/crontab",
+              "/etc/cron.d/",
+              "/var/spool/cron/"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_systemd_unit_change",
+        "title": "Systemd unit or timer file creation or modification",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/systemd/system/",
+              "/usr/lib/systemd/system/",
+              "/lib/systemd/system/"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_loader_preload_change",
+        "title": "Dynamic loader configuration or preload change",
+        "priority_tier": "high",
+        "base_priority": 88,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/ld.so.preload",
+              "/etc/ld.so.conf",
+              "/etc/ld.so.conf.d/"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_shell_history_change",
+        "title": "Shell history file removal or modification",
+        "priority_tier": "medium",
+        "base_priority": 68,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "contains_any",
+            "values": [
+              ".bash_history",
+              ".zsh_history",
+              ".ash_history"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_ssh_host_keys_change",
+        "title": "SSH host key or authorized-key file change",
+        "priority_tier": "medium",
+        "base_priority": 67,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "contains_any",
+            "values": [
+              "/etc/ssh/ssh_host_",
+              "authorized_keys"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_service_or_init_script_change",
+        "title": "Init, service, or rc startup script change",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/init.d/",
+              "/etc/rc.local",
+              "/etc/rc.d/",
+              "/usr/local/lib/systemd/"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_audit_policy_change",
+        "title": "Audit policy or audit-rule configuration change",
+        "priority_tier": "high",
+        "base_priority": 84,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/etc/audit/",
+              "/etc/auditd.conf",
+              "/etc/audit/rules.d/"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "file_log_tampering",
+        "title": "Authentication or system log removal or truncation target",
+        "priority_tier": "medium",
+        "base_priority": 69,
+        "predicates": [
+          {
+            "role": "file.path",
+            "operator": "path_prefix_any",
+            "values": [
+              "/var/log/auth.log",
+              "/var/log/secure",
+              "/var/log/wtmp",
+              "/var/log/btmp",
+              "/var/log/audit/"
+            ]
+          }
+        ]
+      }
+    ],
+    "linux_audit_syscalls": [
+      {
+        "id": "syscall_network_connection",
+        "title": "Audit syscall for outbound or inbound network connection",
+        "priority_tier": "medium",
+        "base_priority": 68,
+        "predicates": [
+          {
+            "role": "auditd.syscall",
+            "operator": "equals_any",
+            "values": [
+              "connect",
+              "accept",
+              "accept4"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "syscall_socket_creation",
+        "title": "Audit syscall for raw, packet, or unusual socket creation",
+        "priority_tier": "medium",
+        "base_priority": 66,
+        "predicates": [
+          {
+            "role": "auditd.syscall",
+            "operator": "equals_any",
+            "values": [
+              "socket",
+              "socketpair",
+              "bind",
+              "listen"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "syscall_privilege_transition",
+        "title": "Audit syscall for UID, GID, or capability transition",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "auditd.syscall",
+            "operator": "equals_any",
+            "values": [
+              "setuid",
+              "setreuid",
+              "setresuid",
+              "setgid",
+              "setresgid",
+              "capset"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "syscall_process_injection_or_memory",
+        "title": "Audit syscall for process memory or tracing activity",
+        "priority_tier": "high",
+        "base_priority": 82,
+        "predicates": [
+          {
+            "role": "auditd.syscall",
+            "operator": "equals_any",
+            "values": [
+              "ptrace",
+              "process_vm_writev",
+              "mmap",
+              "mprotect"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "syscall_kernel_module",
+        "title": "Audit syscall for kernel module activity",
+        "priority_tier": "high",
+        "base_priority": 80,
+        "predicates": [
+          {
+            "role": "auditd.syscall",
+            "operator": "equals_any",
+            "values": [
+              "init_module",
+              "finit_module",
+              "delete_module"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "syscall_bpf_or_kernel_interface",
+        "title": "Audit syscall for BPF or kernel-interface activity",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "auditd.syscall",
+            "operator": "equals_any",
+            "values": [
+              "bpf",
+              "perf_event_open",
+              "keyctl"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "syscall_mount_or_namespace",
+        "title": "Audit syscall for mount or namespace changes",
+        "priority_tier": "medium",
+        "base_priority": 69,
+        "predicates": [
+          {
+            "role": "auditd.syscall",
+            "operator": "equals_any",
+            "values": [
+              "mount",
+              "umount2",
+              "unshare",
+              "setns"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "syscall_execution",
+        "title": "Audit syscall for process execution",
+        "priority_tier": "informational",
+        "base_priority": 35,
+        "predicates": [
+          {
+            "role": "auditd.syscall",
+            "operator": "equals_any",
+            "values": [
+              "execve",
+              "execveat"
+            ]
+          }
+        ]
+      }
+    ],
+    "linux_auth": [
+      {
+        "id": "ssh_failed_authentication",
+        "title": "SSH failed or invalid authentication event",
+        "priority_tier": "medium",
+        "base_priority": 68,
+        "predicates": [
+          {
+            "role": "system.auth.ssh.event",
+            "operator": "contains_any",
+            "values": [
+              "Failed",
+              "Invalid",
+              "authentication failure",
+              "refused"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ssh_successful_authentication",
+        "title": "SSH successful authentication event",
+        "priority_tier": "medium",
+        "base_priority": 61,
+        "predicates": [
+          {
+            "role": "system.auth.ssh.event",
+            "operator": "contains_any",
+            "values": [
+              "Accepted",
+              "success"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ssh_root_or_privileged_login",
+        "title": "SSH authentication event involving root or a privileged account",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "system.auth.message",
+            "operator": "contains_any",
+            "values": [
+              "Accepted root",
+              "Failed password for root",
+              "user=root"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sudo_network_or_transfer_tool",
+        "title": "Sudo execution of a scanner, relay, or transfer utility",
+        "priority_tier": "high",
+        "base_priority": 78,
+        "predicates": [
+          {
+            "role": "system.auth.sudo.command",
+            "operator": "contains_any",
+            "values": [
+              "nmap",
+              "masscan",
+              "socat",
+              "netcat",
+              "ncat",
+              "tcpdump",
+              "curl",
+              "wget"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sudo_shell_or_interpreter",
+        "title": "Sudo execution of an interactive shell or interpreter",
+        "priority_tier": "medium",
+        "base_priority": 67,
+        "predicates": [
+          {
+            "role": "system.auth.sudo.command",
+            "operator": "contains_any",
+            "values": [
+              "/bin/sh",
+              "/bin/bash",
+              "python",
+              "perl",
+              "ruby",
+              "lua",
+              "env "
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sudo_persistence_command",
+        "title": "Sudo execution of account, cron, service, or SSH persistence command",
+        "priority_tier": "high",
+        "base_priority": 79,
+        "predicates": [
+          {
+            "role": "system.auth.sudo.command",
+            "operator": "contains_any",
+            "values": [
+              "useradd",
+              "usermod",
+              "crontab",
+              "systemctl enable",
+              "authorized_keys",
+              "visudo"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sudo_security_control_change",
+        "title": "Sudo execution that changes audit, firewall, or security service state",
+        "priority_tier": "high",
+        "base_priority": 83,
+        "predicates": [
+          {
+            "role": "system.auth.sudo.command",
+            "operator": "contains_any",
+            "values": [
+              "systemctl stop auditd",
+              "systemctl disable auditd",
+              "iptables -F",
+              "nft flush",
+              "setenforce 0",
+              "ufw disable"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sudo_sensitive_file_command",
+        "title": "Sudo command reads or changes sensitive identity or audit files",
+        "priority_tier": "high",
+        "base_priority": 77,
+        "predicates": [
+          {
+            "role": "system.auth.sudo.command",
+            "operator": "contains_any",
+            "values": [
+              "/etc/shadow",
+              "/etc/sudoers",
+              "/etc/audit/",
+              "/etc/ssh/sshd_config"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "families": [
+    {
+      "id": "WIN-PS-4104",
+      "platform": "windows",
+      "title": "PowerShell Script Block Logging",
+      "priority_tier": "high",
+      "selectors": [
+        {
+          "role": "event.code.exact",
+          "operator": "equals_any",
+          "values": [
+            "4104"
+          ]
+        },
+        {
+          "role": "event.provider",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-PowerShell"
+          ]
+        },
+        {
+          "role": "event.channel",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-PowerShell/Operational"
+          ]
+        }
+      ],
+      "signature_set": "windows_powershell",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "WIN-SEC-4688",
+      "platform": "windows",
+      "title": "Windows Security Process Creation",
+      "priority_tier": "high",
+      "selectors": [
+        {
+          "role": "event.code.exact",
+          "operator": "equals_any",
+          "values": [
+            "4688"
+          ]
+        },
+        {
+          "role": "event.provider",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Security-Auditing"
+          ]
+        },
+        {
+          "role": "event.channel",
+          "operator": "equals_any",
+          "values": [
+            "Security"
+          ]
+        }
+      ],
+      "signature_set": "windows_process_tools",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "WIN-SYSMON-1",
+      "platform": "windows",
+      "title": "Sysmon Process Creation",
+      "priority_tier": "high",
+      "selectors": [
+        {
+          "role": "event.code.exact",
+          "operator": "equals_any",
+          "values": [
+            "1"
+          ]
+        },
+        {
+          "role": "event.provider",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Sysmon"
+          ]
+        },
+        {
+          "role": "event.channel",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Sysmon/Operational"
+          ]
+        }
+      ],
+      "signature_set": "windows_process_tools",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "WIN-SYSMON-3",
+      "platform": "windows",
+      "title": "Sysmon Network Connection",
+      "priority_tier": "high",
+      "selectors": [
+        {
+          "role": "event.code.exact",
+          "operator": "equals_any",
+          "values": [
+            "3"
+          ]
+        },
+        {
+          "role": "event.provider",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Sysmon"
+          ]
+        },
+        {
+          "role": "event.channel",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Sysmon/Operational"
+          ]
+        }
+      ],
+      "signature_set": "windows_sysmon_network",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "WIN-SEC-4697",
+      "platform": "windows",
+      "title": "Windows Service Installation",
+      "priority_tier": "high",
+      "selectors": [
+        {
+          "role": "event.code.exact",
+          "operator": "equals_any",
+          "values": [
+            "4697"
+          ]
+        },
+        {
+          "role": "event.provider",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Security-Auditing"
+          ]
+        },
+        {
+          "role": "event.channel",
+          "operator": "equals_any",
+          "values": [
+            "Security"
+          ]
+        }
+      ],
+      "signature_set": "windows_services",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "WIN-SEC-4698-4702",
+      "platform": "windows",
+      "title": "Windows Scheduled Task Creation or Update",
+      "priority_tier": "high",
+      "selectors": [
+        {
+          "role": "event.code.exact",
+          "operator": "equals_any",
+          "values": [
+            "4698",
+            "4702"
+          ]
+        },
+        {
+          "role": "event.provider",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Security-Auditing"
+          ]
+        },
+        {
+          "role": "event.channel",
+          "operator": "equals_any",
+          "values": [
+            "Security"
+          ]
+        }
+      ],
+      "signature_set": "windows_tasks",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "WIN-SEC-4625",
+      "platform": "windows",
+      "title": "Windows Failed Logon Context",
+      "priority_tier": "medium",
+      "selectors": [
+        {
+          "role": "event.code.exact",
+          "operator": "equals_any",
+          "values": [
+            "4625"
+          ]
+        },
+        {
+          "role": "event.provider",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Security-Auditing"
+          ]
+        },
+        {
+          "role": "event.channel",
+          "operator": "equals_any",
+          "values": [
+            "Security"
+          ]
+        }
+      ],
+      "signature_set": "windows_authentication",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "WIN-SEC-4624",
+      "platform": "windows",
+      "title": "Windows Successful Logon Context",
+      "priority_tier": "medium",
+      "selectors": [
+        {
+          "role": "event.code.exact",
+          "operator": "equals_any",
+          "values": [
+            "4624"
+          ]
+        },
+        {
+          "role": "event.provider",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Security-Auditing"
+          ]
+        },
+        {
+          "role": "event.channel",
+          "operator": "equals_any",
+          "values": [
+            "Security"
+          ]
+        }
+      ],
+      "signature_set": "windows_authentication",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "WIN-SEC-4648",
+      "platform": "windows",
+      "title": "Windows Explicit Credential Use",
+      "priority_tier": "medium",
+      "selectors": [
+        {
+          "role": "event.code.exact",
+          "operator": "equals_any",
+          "values": [
+            "4648"
+          ]
+        },
+        {
+          "role": "event.provider",
+          "operator": "equals_any",
+          "values": [
+            "Microsoft-Windows-Security-Auditing"
+          ]
+        },
+        {
+          "role": "event.channel",
+          "operator": "equals_any",
+          "values": [
+            "Security"
+          ]
+        }
+      ],
+      "signature_set": "windows_authentication",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "LIN-AUDIT-EXEC",
+      "platform": "linux",
+      "title": "Linux Auditd Process Execution",
+      "priority_tier": "high",
+      "selectors": [
+        {
+          "role": "event.dataset",
+          "operator": "equals_any",
+          "values": [
+            "auditd.log",
+            "auditd_manager.auditd"
+          ]
+        }
+      ],
+      "signature_set": "linux_audit_execution",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "LIN-AUDIT-FILES",
+      "platform": "linux",
+      "title": "Linux Auditd Sensitive File Activity",
+      "priority_tier": "high",
+      "selectors": [
+        {
+          "role": "event.dataset",
+          "operator": "equals_any",
+          "values": [
+            "auditd.log",
+            "auditd_manager.auditd"
+          ]
+        }
+      ],
+      "signature_set": "linux_sensitive_files",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "LIN-AUDIT-SYSCALL",
+      "platform": "linux",
+      "title": "Linux Auditd High-Value Syscall Context",
+      "priority_tier": "medium",
+      "selectors": [
+        {
+          "role": "event.dataset",
+          "operator": "equals_any",
+          "values": [
+            "auditd.log",
+            "auditd_manager.auditd"
+          ]
+        }
+      ],
+      "signature_set": "linux_audit_syscalls",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    },
+    {
+      "id": "LIN-SYSTEM-AUTH",
+      "platform": "linux",
+      "title": "Linux SSH and Sudo Authentication Context",
+      "priority_tier": "medium",
+      "selectors": [
+        {
+          "role": "event.dataset",
+          "operator": "equals_any",
+          "values": [
+            "system.auth"
+          ]
+        }
+      ],
+      "signature_set": "linux_auth",
+      "source": "elasticsearch",
+      "query_language": "elasticsearch_dsl"
+    }
+  ]
+}

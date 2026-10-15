@@ -1,0 +1,1491 @@
+{
+  "catalog_version": "1.0.0",
+  "review_date": "2026-10-15",
+  "purpose": "Source- and channel-aware Windows event-log leads. Event ID matches require the event provider and channel; a match is not by itself a compromise assessment.",
+  "analytics": [
+    {
+      "id": "BH-WIN-EVT-001",
+      "title": "Windows Security audit log cleared",
+      "description": "Windows Security event 1102 records that the Security audit log was cleared. Review the actor, time, nearby process activity, and gaps in other event sources.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "active",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "defense-evasion"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "session.id",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1685.005"
+      ],
+      "benign_explanations": [
+        "Authorized log maintenance, endpoint recovery, or incident-response activity."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Review the account and session, correlate nearby process and PowerShell activity, and check whether other channels continued collecting."
+      ],
+      "priority_tier": "high",
+      "base_priority": 84,
+      "specificity": 90,
+      "expected_noise": "low",
+      "provenance": [
+        {
+          "name": "Microsoft Windows Security auditing: event 1102",
+          "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/appendix-l--events-to-monitor"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "1102"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-001:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-002",
+      "title": "Windows system audit policy changed",
+      "description": "Windows Security event 4719 records a system audit-policy change. Establish whether the change was approved and whether it reduced telemetry relevant to the hunt.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "active",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "defense-evasion"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "session.id",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1685.001"
+      ],
+      "benign_explanations": [
+        "Approved security-baseline deployment or audit-policy maintenance."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Inspect which audit settings changed, identify the actor and session, and correlate subsequent process and authentication events."
+      ],
+      "priority_tier": "high",
+      "base_priority": 82,
+      "specificity": 86,
+      "expected_noise": "low",
+      "provenance": [
+        {
+          "name": "Microsoft Windows Security auditing: event 4719",
+          "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/appendix-l--events-to-monitor"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4719"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-002:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-003",
+      "title": "Windows service installed",
+      "description": "Security event 4697 records service installation. Elevate review when the service binary, start mode, account, actor, or subsequent process execution is unexpected.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "active",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "persistence",
+        "privilege-escalation"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "session.id",
+        "service.name",
+        "process.command_line"
+      ],
+      "attack_techniques": [
+        "T1543.003"
+      ],
+      "benign_explanations": [
+        "Approved software deployment, driver installation, or service maintenance."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Inspect service image path, account, start type, actor, and nearby process/file/network events."
+      ],
+      "priority_tier": "high",
+      "base_priority": 70,
+      "specificity": 76,
+      "expected_noise": "medium",
+      "provenance": [
+        {
+          "name": "Microsoft Windows Security auditing: event 4697",
+          "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4697"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4697"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-003:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-004",
+      "title": "Windows scheduled task created",
+      "description": "Security event 4698 records scheduled-task creation. Review the task action, principal, trigger, task path, and subsequent execution.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "active",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "persistence",
+        "execution"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "session.id",
+        "task.name",
+        "process.command_line"
+      ],
+      "attack_techniques": [
+        "T1053.005"
+      ],
+      "benign_explanations": [
+        "Approved endpoint management, software installation, or system maintenance."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Inspect the task XML/action, run-as identity, creation actor, and linked task/process/file events."
+      ],
+      "priority_tier": "high",
+      "base_priority": 68,
+      "specificity": 72,
+      "expected_noise": "medium",
+      "provenance": [
+        {
+          "name": "Microsoft Windows Security auditing: event 4698",
+          "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4698"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4698"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-004:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-005",
+      "title": "Windows scheduled task modified",
+      "description": "Security event 4702 records scheduled-task updates. A changed action, principal, trigger, or hidden task name can alter persistence behavior.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "active",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "persistence",
+        "execution"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "session.id",
+        "task.name",
+        "process.command_line"
+      ],
+      "attack_techniques": [
+        "T1053.005"
+      ],
+      "benign_explanations": [
+        "Approved task updates from software deployment or administration."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Compare the task action and principal before and after the change, then review its next execution."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 60,
+      "specificity": 68,
+      "expected_noise": "medium",
+      "provenance": [
+        {
+          "name": "Microsoft Advanced Audit Policy",
+          "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/advanced-audit-policy-configuration"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4702"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-005:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-006",
+      "title": "Windows failed logon event",
+      "description": "Security event 4625 records a failed logon. A single failure is weak evidence; group by source, account, host, status, and time to identify sprays, brute force, or later success.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "credential-access",
+        "initial-access"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "source.ip",
+        "event.status",
+        "logon.type",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1110"
+      ],
+      "benign_explanations": [
+        "Mistyped credentials, stale service credentials, or authentication infrastructure issues."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Group failures by source and account; inspect status/substatus, logon type, and later successful logons."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 48,
+      "specificity": 58,
+      "expected_noise": "high",
+      "provenance": [
+        {
+          "name": "Microsoft Windows Security auditing: event 4625",
+          "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4625"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4625"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-006:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-007",
+      "title": "Windows remote or network logon event",
+      "description": "Security event 4624 with logon type 3 or 10 provides a network or remote-interactive session lead. Assess account, source, device, session, and subsequent activity against the environment baseline.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "lateral-movement",
+        "initial-access"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel",
+        "logon.type"
+      ],
+      "optional_roles": [
+        "user.name",
+        "source.ip",
+        "session.id",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1078"
+      ],
+      "benign_explanations": [
+        "Expected SMB, RDP, service, application, or administrative access."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Correlate the target logon ID to process creation, task/service changes, and outbound activity on the destination host."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 52,
+      "specificity": 62,
+      "expected_noise": "high",
+      "provenance": [
+        {
+          "name": "Microsoft Windows Security auditing: event 4624",
+          "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4624"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4624"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          },
+          {
+            "role": "logon.type",
+            "operator": "equals_any",
+            "values": [
+              "3",
+              "10"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-007:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-008",
+      "title": "Windows explicit-credential logon event",
+      "description": "Security event 4648 records an attempt to log on using explicit credentials. Correlate the process, subject account, target account, source host, and subsequent authentication.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "credential-access",
+        "lateral-movement"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "user.target.name",
+        "process.name",
+        "source.ip",
+        "session.id"
+      ],
+      "attack_techniques": [
+        "T1078"
+      ],
+      "benign_explanations": [
+        "Approved run-as operations, scheduled jobs, or service workflows."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Compare the subject and target identities and correlate with a successful logon or remote process execution."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 56,
+      "specificity": 64,
+      "expected_noise": "medium",
+      "provenance": [
+        {
+          "name": "Microsoft Audit Logon",
+          "url": "https://learn.microsoft.com/windows/security/threat-protection/auditing/audit-logon"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4648"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-008:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-009",
+      "title": "Windows special privileges assigned to logon",
+      "description": "Security event 4672 records special privileges assigned to a new logon. Correlate the logon ID and account with the logon event and process activity.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "privilege-escalation"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "session.id",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1078"
+      ],
+      "benign_explanations": [
+        "Expected administrator, service, or operating-system logons."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Join the logon ID to 4624 and examine the account, source, and resulting process chain."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 52,
+      "specificity": 58,
+      "expected_noise": "high",
+      "provenance": [
+        {
+          "name": "Microsoft Advanced Audit Policy",
+          "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/advanced-audit-policy-configuration"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4672"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-009:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-010",
+      "title": "Windows user account created",
+      "description": "Security event 4720 records account creation. Review who created the account, its group membership, logon rights, and first use.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "persistence",
+        "privilege-escalation"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "user.target.name",
+        "session.id"
+      ],
+      "attack_techniques": [
+        "T1136.001"
+      ],
+      "benign_explanations": [
+        "Approved account provisioning or system administration."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Inspect the creator, new account attributes, group membership, and subsequent logons."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 58,
+      "specificity": 64,
+      "expected_noise": "medium",
+      "provenance": [
+        {
+          "name": "Microsoft Advanced Audit Policy",
+          "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/advanced-audit-policy-configuration"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4720"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-010:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-011",
+      "title": "Windows security group membership changed",
+      "description": "Security events 4728, 4732, or 4756 record a member added to a security-enabled group. Inspect the target group and account before deciding whether the change is privileged or unexpected.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "active",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "privilege-escalation",
+        "persistence"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "user.target.name",
+        "event.target.name",
+        "session.id"
+      ],
+      "attack_techniques": [
+        "T1098"
+      ],
+      "benign_explanations": [
+        "Approved access provisioning, role changes, or group maintenance."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Check the exact group, added member, actor, source session, and first use of the new privileges."
+      ],
+      "priority_tier": "high",
+      "base_priority": 68,
+      "specificity": 70,
+      "expected_noise": "medium",
+      "provenance": [
+        {
+          "name": "Microsoft Audit Security Group Management",
+          "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/audit-security-group-management"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4728",
+              "4732",
+              "4756"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-011:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-012",
+      "title": "Windows Kerberos pre-authentication failures",
+      "description": "Domain-controller Security event 4771 records Kerberos pre-authentication failure. Use source, account, result code, distinct-account count, and rate to identify password attacks.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "credential-access"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "source.ip",
+        "event.status",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1110.003"
+      ],
+      "benign_explanations": [
+        "Mistyped passwords, stale credentials, or Kerberos infrastructure issues."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Group by source and target account, then inspect rates, result codes, and later successful authentication."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 54,
+      "specificity": 62,
+      "expected_noise": "high",
+      "provenance": [
+        {
+          "name": "Microsoft Audit Kerberos Authentication Service",
+          "url": "https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/audit-kerberos-authentication-service"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4771"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-012:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-013",
+      "title": "Windows Kerberos service ticket request",
+      "description": "Domain-controller Security event 4769 records a Kerberos service ticket request. Treat an individual request as context and compare service/account patterns, rates, encryption details, and the host baseline.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "credential-access",
+        "discovery"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "source.ip",
+        "event.target.name",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1558.003"
+      ],
+      "benign_explanations": [
+        "Normal Kerberos service access and application activity."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Compare account, client, requested service, ticket encryption, and request volume with peer and historical behavior."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 48,
+      "specificity": 55,
+      "expected_noise": "high",
+      "provenance": [
+        {
+          "name": "Microsoft Audit Kerberos Service Ticket Operations",
+          "url": "https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/audit-kerberos-service-ticket-operations"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4769"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-Security-Auditing"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "equals_any",
+            "values": [
+              "Security"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-013:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-014",
+      "title": "PowerShell script-block event available",
+      "description": "PowerShell Operational event 4104 records script-block text when Script Block Logging is enabled. This is a coverage/context observation; suspicious command and script content are evaluated by the command-line rules.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "execution"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "process.command_line",
+        "user.name",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1059.001"
+      ],
+      "benign_explanations": [
+        "Legitimate interactive, administrative, deployment, or application PowerShell."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Check whether 4104 coverage is enabled and complete; inspect script-block content, actor, host, and linked process/network events."
+      ],
+      "priority_tier": "low",
+      "base_priority": 28,
+      "specificity": 48,
+      "expected_noise": "high",
+      "provenance": [
+        {
+          "name": "Microsoft PowerShell logging",
+          "url": "https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_logging?view=powershell-5.1"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "4104"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "equals_any",
+            "values": [
+              "Microsoft-Windows-PowerShell"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "contains_any",
+            "values": [
+              "Operational"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-014:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-015",
+      "title": "Sysmon remote-thread creation",
+      "description": "Sysmon event 8 records one process creating a thread in another process. Review source and target lineage, start address, signer, and nearby process-access events.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "active",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "defense-evasion",
+        "privilege-escalation"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "process.name",
+        "process.pid",
+        "process.parent.name",
+        "user.name",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1055"
+      ],
+      "benign_explanations": [
+        "Some debuggers, instrumentation tools, and security software create remote threads."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Inspect source and target process, signer, command line, and any subsequent credential or network activity."
+      ],
+      "priority_tier": "high",
+      "base_priority": 76,
+      "specificity": 82,
+      "expected_noise": "low",
+      "provenance": [
+        {
+          "name": "Microsoft Sysmon events",
+          "url": "https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "8"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "contains_any",
+            "values": [
+              "Sysmon"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "contains_any",
+            "values": [
+              "Operational"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-015:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-016",
+      "title": "Sysmon process-access event",
+      "description": "Sysmon event 10 records one process opening another. Use the source process, target process, access mask, signer, and timing; this event can be noisy and is commonly filtered.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "credential-access",
+        "defense-evasion"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "process.name",
+        "process.pid",
+        "user.name",
+        "event.target.name",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1003.001"
+      ],
+      "benign_explanations": [
+        "Endpoint security, diagnostics, debuggers, and management tools commonly inspect processes."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Determine whether the target was LSASS or another sensitive process and correlate access rights with process lineage."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 58,
+      "specificity": 65,
+      "expected_noise": "high",
+      "provenance": [
+        {
+          "name": "Microsoft Sysmon events",
+          "url": "https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "10"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "contains_any",
+            "values": [
+              "Sysmon"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "contains_any",
+            "values": [
+              "Operational"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-016:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-017",
+      "title": "Sysmon process-tampering event",
+      "description": "Sysmon event 25 records detected process image manipulation such as process hollowing or herpaderping. Validate the event with image, parent, signer, and adjacent activity.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "active",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "defense-evasion",
+        "privilege-escalation"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "process.name",
+        "process.pid",
+        "process.parent.name",
+        "user.name",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1055.012"
+      ],
+      "benign_explanations": [
+        "Validate the Sysmon finding against the sensor version and trusted security or instrumentation software."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Review process lineage, image hashes/signatures, target process, and nearby network or credential-access events."
+      ],
+      "priority_tier": "high",
+      "base_priority": 82,
+      "specificity": 88,
+      "expected_noise": "low",
+      "provenance": [
+        {
+          "name": "Microsoft Sysmon events",
+          "url": "https://learn.microsoft.com/en-us/windows/security/operating-system-security/sysmon/sysmon-events"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "25"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "contains_any",
+            "values": [
+              "Sysmon"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "contains_any",
+            "values": [
+              "Operational"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-017:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-018",
+      "title": "Microsoft Defender real-time protection disabled",
+      "description": "Microsoft Defender Antivirus event 5001 records that real-time protection was disabled. Confirm the endpoint protection policy and maintenance context, then inspect nearby changes and execution.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "active",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "defense-evasion"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "process.name",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1685"
+      ],
+      "benign_explanations": [
+        "Approved security-product migration, troubleshooting, or temporary maintenance."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Review who or what changed protection state, policy context, event 5000 restoration, and process or script activity."
+      ],
+      "priority_tier": "high",
+      "base_priority": 82,
+      "specificity": 88,
+      "expected_noise": "low",
+      "provenance": [
+        {
+          "name": "Microsoft Defender Antivirus event IDs",
+          "url": "https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "5001"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "contains_any",
+            "values": [
+              "Windows Defender"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "contains_any",
+            "values": [
+              "Operational"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-018:elasticsearch"
+    },
+    {
+      "id": "BH-WIN-EVT-019",
+      "title": "Microsoft Defender configuration changed",
+      "description": "Microsoft Defender Antivirus event 5007 records a configuration change. Review old and new values and correlate unexpected protection weakening with the actor and nearby execution.",
+      "review_date": "2026-10-15",
+      "version": 1,
+      "enabled": true,
+      "activation_mode": "observe",
+      "supported": true,
+      "source": "elasticsearch",
+      "platforms": [
+        "windows"
+      ],
+      "categories": [
+        "defense-evasion"
+      ],
+      "required_roles": [
+        "event.action",
+        "event.provider",
+        "event.channel"
+      ],
+      "optional_roles": [
+        "user.name",
+        "process.name",
+        "event.time"
+      ],
+      "attack_techniques": [
+        "T1685"
+      ],
+      "benign_explanations": [
+        "Defender updates, policy refresh, or approved security configuration changes."
+      ],
+      "required_corroboration": [],
+      "follow_up": [
+        "Compare old and new values and inspect whether exclusions, real-time protection, or monitoring were weakened."
+      ],
+      "priority_tier": "medium",
+      "base_priority": 62,
+      "specificity": 66,
+      "expected_noise": "medium",
+      "provenance": [
+        {
+          "name": "Microsoft Defender Antivirus event IDs",
+          "url": "https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus"
+        }
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "event.action",
+            "operator": "equals_any",
+            "values": [
+              "5007"
+            ]
+          },
+          {
+            "role": "event.provider",
+            "operator": "contains_any",
+            "values": [
+              "Windows Defender"
+            ]
+          },
+          {
+            "role": "event.channel",
+            "operator": "contains_any",
+            "values": [
+              "Operational"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "source_language": "elasticsearch_dsl",
+      "stage_id": "BH-WIN-EVT-019:elasticsearch"
+    }
+  ]
+}

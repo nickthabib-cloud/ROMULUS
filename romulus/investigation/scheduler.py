@@ -15,6 +15,7 @@ _SOURCE_FAMILIES = {"host", "network"}
 _PHASES = {"discovery", "investigation"}
 _ORIGINS = {
     "behavior_catalog",
+    "search_matrix",
     "trusted_indicator",
     "directed_survey",
     "candidate_follow_up",
@@ -26,6 +27,8 @@ _OWNER_FIELDS = (
     "follow_up_ids",
     "hypothesis_ids",
     "anchor_evidence_ids",
+    "analytic_ids",
+    "signature_ids",
 )
 _HISTORY_LIMIT = 500
 _OUTCOME_LIMIT = 1000
@@ -174,6 +177,14 @@ def _priority_for(proposal: Mapping[str, Any], origin: str) -> tuple[int, int]:
         return 3, 500
     if origin == "behavior_catalog":
         return 2, 800
+    if origin == "search_matrix":
+        priority=str(proposal.get("candidate_priority") or "medium").strip().lower()
+        try:
+            score=max(0,min(899,int(proposal.get("base_priority") or 50)*10))
+        except (TypeError,ValueError):
+            score=500
+        tier={"critical":1,"high":2,"medium":3,"low":4,"informational":5}.get(priority,3)
+        return tier,score
     if origin == "directed_survey":
         return 2, 600
     if origin == "model_proposal":
@@ -496,6 +507,8 @@ def _normalized_outcome(
             else int(outcome.get("shard_failures", 0) or 0)
         ),
         "incomplete": bool(outcome.get("incomplete", False)),
+        "analytic_ids": list(task.get("analytic_ids", []))[:100],
+        "signature_ids": list(task.get("signature_ids", []))[:100],
     }
     total_relation = outcome.get("total_relation")
     if isinstance(total_relation, str) and total_relation.strip():
@@ -515,6 +528,13 @@ def _normalized_outcome(
     sampling = _normalized_sampling(outcome.get("sampling"))
     if sampling is not None:
         normalized["sampling"] = sampling
+    signature_matches=outcome.get("signature_matches")
+    if isinstance(signature_matches,Mapping):
+        allowed=set(normalized["signature_ids"])
+        normalized["signature_matches"]={str(key):[
+            _required_list_text(item,"signature_matches") for item in value[:100]]
+            for key,value in signature_matches.items()
+            if str(key) in allowed and isinstance(value,(list,tuple))}
     if outcome.get("possible_duplicate_execution"):
         normalized["possible_duplicate_execution"] = True
     return normalized

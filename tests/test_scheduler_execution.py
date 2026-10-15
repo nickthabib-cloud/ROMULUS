@@ -425,7 +425,9 @@ class SchedulerDiscoveryWorkflowTests(unittest.TestCase):
             self.assertEqual(state["network"], [])
             tasks = list(state["search_tasks"].values())
             self.assertTrue(any(item["origin"] == "behavior_catalog" for item in tasks))
+            self.assertTrue(all(item["analytic_ids"] for item in tasks if item["origin"] == "behavior_catalog"))
             self.assertTrue(any(item["origin"] == "trusted_indicator" for item in tasks))
+            self.assertTrue(all(item["signature_ids"] for item in tasks if item["origin"] == "search_matrix"))
             self.assertTrue(any(item["origin"] == "directed_survey" for item in tasks))
             self.assertTrue(any(item["source"] == "arkime" for item in tasks))
             self.assertTrue(

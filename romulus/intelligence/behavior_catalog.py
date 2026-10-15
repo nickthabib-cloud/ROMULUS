@@ -15,9 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from .attack_catalog import load_attack_catalog
+from .behavior_packs import BEHAVIOR_PACK_DIR, load_behavior_packs
 
 
 BEHAVIOR_CATALOG_PATH = Path(__file__).with_name("behavior_catalog.json")
+WINDOWS_EVENT_CATALOG_PATH = Path(__file__).with_name("windows_event_catalog.json")
 LOCAL_INDICATORS_PATH = Path(__file__).with_name("local_indicators.json")
 
 ALLOWED_OPERATORS = {
@@ -28,29 +30,113 @@ ALLOWED_SOURCES = {"elasticsearch", "aggregate"}
 PRIORITIES = {"informational", "low", "medium", "high", "critical"}
 NOISE_LEVELS = {"low", "medium", "high"}
 MAX_CANDIDATE_EVIDENCE_IDS = 40
+OBSERVE_SCORE_CEILING = 39
+CORROBORATION_WINDOW_MINUTES = 30
 _ATTACK_TECHNIQUE_IDS: set[str] | None = None
 
 SEMANTIC_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
     "event.time": ("@timestamp", "timestamp", "event.created", "event.start", "winlog.time_created"),
-    "event.action": ("event.action", "event.type", "event.code", "event.id", "winlog.event_id", "action"),
+    "event.action": ("event.action", "event.type", "event.code", "event.id", "winlog.event_id", "event_id", "EventID", "action"),
+    "event.code.exact": ("event.code", "winlog.event_id", "event_id", "EventID"),
+    "event.provider": ("event.provider", "winlog.provider_name", "winlog.provider", "provider", "ProviderName"),
+    "event.channel": ("event.channel", "winlog.channel", "channel", "Channel"),
+    # Dataset names differ from module/provider names across integrations;
+    # do not bind them interchangeably or exact event-source selectors can miss.
+    "event.dataset": ("event.dataset",),
+    "event.message": (
+        "message", "winlog.event_data.Message", "winlog.message", "system.auth.message",
+        "auditd.log.message", "auditd_manager.auditd.message", "event.original",
+    ),
+    "powershell.script_block": (
+        "winlog.event_data.ScriptBlockText", "powershell.file.script_block_text",
+        "ScriptBlockText", "scriptblock_text",
+    ),
+    "auditd.syscall": ("auditd.data.syscall", "auditd.log.syscall", "auditd.syscall", "syscall"),
     "host.name": ("host.name", "host.hostname", "hostname", "computer_name", "agent.hostname"),
-    "user.name": ("user.name", "account.name", "winlog.event_data.SubjectUserName", "user", "username"),
-    "process.name": ("process.name", "process.executable", "winlog.event_data.Image", "exe", "comm"),
-    "process.executable": ("process.executable", "winlog.event_data.Image", "process.path", "exe", "image"),
+    "host.os.platform": ("host.os.platform", "host.os.type", "host.platform", "os.type", "agent.os.name", "platform"),
+    "user.name": (
+        "user.name", "account.name", "winlog.event_data.SubjectUserName",
+        "winlog.event_data.TargetUserName", "winlog.event_data.AccountName",
+        "winlog.event_data.UserName", "eventdata.SubjectUserName", "eventdata.TargetUserName",
+        "EventData.SubjectUserName", "EventData.TargetUserName", "user", "username",
+    ),
+    "user.target.name": (
+        "user.target.name", "winlog.event_data.TargetUserName",
+        "winlog.event_data.AccountName", "TargetUserName",
+    ),
+    "user.id": ("user.id", "winlog.event_data.SubjectUserSid", "winlog.event_data.TargetUserSid", "user.sid"),
+    "session.id": (
+        "session.id", "winlog.event_data.TargetLogonId", "winlog.event_data.SubjectLogonId",
+        "winlog.event_data.LogonId", "winlog.event_data.LogonGuid", "logon.id",
+    ),
+    "logon.type": ("winlog.event_data.LogonType", "logon.type", "LogonType"),
+    "process.name": (
+        "process.name", "process.executable", "winlog.event_data.Image",
+        "winlog.event_data.NewProcessName", "winlog.event_data.ProcessName", "exe", "comm",
+        "winlog.event_data.SourceImage", "winlog.event_data.TargetImage",
+    ),
+    "process.executable": (
+        "process.executable", "winlog.event_data.Image", "winlog.event_data.NewProcessName",
+        "winlog.event_data.ProcessName", "process.path", "exe", "image",
+        "winlog.event_data.SourceImage", "winlog.event_data.TargetImage",
+    ),
+    "process.pid": (
+        "process.pid", "winlog.event_data.NewProcessId", "winlog.event_data.ProcessId",
+        "winlog.event_data.CallerProcessId", "winlog.event_data.SourceProcessId",
+        "winlog.event_data.TargetProcessId", "process.entity_id", "process.entityid",
+    ),
+    "process.entity_id": ("process.entity_id", "process.entityid", "winlog.event_data.ProcessGuid"),
+    "process.parent.pid": (
+        "process.parent.pid", "winlog.event_data.ProcessId", "winlog.event_data.ParentProcessId",
+        "process.parent.entity_id",
+    ),
     "process.command_line": (
         "process.command_line", "process.args", "winlog.event_data.CommandLine",
+        "winlog.event_data.ScriptBlockText", "ScriptBlockText", "scriptblock_text",
+        "eventdata.CommandLine", "EventData.CommandLine", "eventdata.ScriptBlockText",
+        "EventData.ScriptBlockText",
         "audit.command", "cmdline", "command_line", "message", "event.original",
     ),
+    "process.title": ("process.title", "auditd.log.proctitle", "auditd.proctitle", "process.command_line"),
     "process.parent.name": (
         "process.parent.name", "process.parent.executable",
-        "winlog.event_data.ParentImage", "parent_process_name", "ppid_name",
+        "winlog.event_data.ParentImage", "winlog.event_data.ParentProcessName",
+        "parent_process_name", "ppid_name",
     ),
-    "file.path": ("file.path", "file.name", "target.file.path", "winlog.event_data.TargetFilename", "path"),
+    "file.path": (
+        "file.path", "file.name", "target.file.path", "winlog.event_data.TargetFilename",
+        "winlog.event_data.ObjectName", "path",
+    ),
     "registry.path": ("registry.path", "registry.key", "winlog.event_data.TargetObject"),
     "service.name": ("service.name", "winlog.event_data.ServiceName", "systemd.unit"),
-    "source.ip": ("source.ip", "src_ip", "srcIp", "ip.src", "client.ip"),
-    "destination.ip": ("destination.ip", "dst_ip", "dstIp", "ip.dst", "server.ip"),
-    "destination.port": ("destination.port", "dst_port", "dstPort", "tcp.dstport", "udp.dstport", "port"),
+    "service.image": (
+        "service.executable", "winlog.event_data.ServiceFileName", "winlog.event_data.ImagePath",
+        "ServiceFileName", "ImagePath", "service.path",
+    ),
+    "task.name": ("task.name", "winlog.event_data.TaskName", "TaskName"),
+    "task.content": (
+        "winlog.event_data.TaskContent", "winlog.event_data.Task", "TaskContent",
+        "task.action", "task.command",
+    ),
+    "system.auth.ssh.event": ("system.auth.ssh.event",),
+    "system.auth.sudo.command": ("system.auth.sudo.command",),
+    "event.status": ("event.outcome", "winlog.event_data.Status", "winlog.event_data.SubStatus", "status"),
+    "event.target.name": (
+        "event.target.name", "winlog.event_data.TargetObject", "winlog.event_data.ObjectName",
+        "winlog.event_data.ShareName", "winlog.event_data.RelativeTargetName",
+    ),
+    "source.ip": (
+        "source.ip", "src_ip", "srcIp", "ip.src", "client.ip",
+        "winlog.event_data.SourceAddress", "winlog.event_data.IpAddress",
+    ),
+    "destination.ip": (
+        "destination.ip", "dst_ip", "dstIp", "ip.dst", "server.ip",
+        "winlog.event_data.DestAddress", "winlog.event_data.DestinationAddress",
+    ),
+    "destination.port": (
+        "destination.port", "dst_port", "dstPort", "tcp.dstport", "udp.dstport", "port",
+        "winlog.event_data.DestPort", "winlog.event_data.DestinationPort",
+    ),
     "network.protocol": ("network.protocol", "network.transport", "network.application", "protocol", "protocols"),
     "network.bytes": ("network.bytes", "source.bytes", "destination.bytes", "bytes", "totBytes"),
     "dns.question": ("dns.question.name", "dns.qry.name", "dns.host", "query", "domain"),
@@ -69,7 +155,10 @@ class CatalogValidationError(ValueError):
     """Catalog content is unsafe or structurally invalid."""
 
 
-def load_behavior_catalog(path: Path = BEHAVIOR_CATALOG_PATH) -> dict[str, Any]:
+def load_behavior_catalog(
+    path: Path = BEHAVIOR_CATALOG_PATH,
+    pack_dir: Path = BEHAVIOR_PACK_DIR,
+) -> dict[str, Any]:
     value = _read_json(Path(path), "behavior catalog")
     if not isinstance(value, dict):
         raise CatalogValidationError("$: behavior catalog must be an object")
@@ -78,9 +167,39 @@ def load_behavior_catalog(path: Path = BEHAVIOR_CATALOG_PATH) -> dict[str, Any]:
     analytics = value.get("analytics")
     if not isinstance(analytics, list):
         raise CatalogValidationError("analytics: expected array")
+    base_analytics = list(analytics)
     seen: set[str] = set()
-    for index, analytic in enumerate(analytics):
+    for index, analytic in enumerate(base_analytics):
         _validate_analytic(analytic, index, seen)
+    packs = load_behavior_packs(Path(pack_dir))
+    direct = packs["direct"]["records"]
+    windows_catalog = _read_json(WINDOWS_EVENT_CATALOG_PATH, "Windows event catalog")
+    if not isinstance(windows_catalog, dict) or not isinstance(windows_catalog.get("analytics"), list):
+        raise CatalogValidationError("windows_event_catalog.json: expected analytics array")
+    windows_events = windows_catalog["analytics"]
+    for index, analytic in enumerate(direct + windows_events):
+        _validate_analytic(analytic, len(base_analytics) + index, seen)
+    value["analytics"] = base_analytics + direct + windows_events
+    value["pack_status"] = {
+        "manifest_version": packs["manifest"].get("manifest_version"),
+        "corpus_version": packs["manifest"].get("corpus_version"),
+        "curated_total": packs["manifest"].get("source_counts", {}).get("curated_behavioral_indicator"),
+        "active_direct": packs["manifest"].get("curated_activation", {}).get("active"),
+        "observe_or_unsupported": packs["manifest"].get("curated_activation", {}).get("observe_or_unsupported"),
+        "direct_loaded": len(direct),
+        "windows_event_rules": len(windows_events),
+        "sequence_loaded": len(packs["sequences"].get("records", [])),
+        "aggregate_loaded": len(packs["aggregates"].get("records", [])),
+        "baseline_loaded": len(packs["baselines"].get("records", [])),
+        "capability_references": len(packs["capabilities"].get("records", [])),
+        "executable_rules": packs["manifest"].get("execution_states", {}).get("executable", len(direct)),
+        "reference_only": packs["manifest"].get("execution_states", {}).get("reference_only", 0),
+        "unsupported_sequences": sum(row.get("supported") is not True for row in packs["sequences"].get("records", [])),
+        "unsupported_aggregates": sum(row.get("supported") is not True for row in packs["aggregates"].get("records", [])),
+        "unsupported_baselines": sum(row.get("supported") is not True for row in packs["baselines"].get("records", [])),
+    }
+    value["behavior_packs"] = packs
+    value["windows_event_catalog_version"] = windows_catalog.get("catalog_version")
     return value
 
 
@@ -141,7 +260,8 @@ def applicable_analytics(
     applicable: list[dict[str, Any]] = []
     unsupported: list[dict[str, Any]] = []
     for analytic in catalog.get("analytics", []):
-        if not analytic.get("enabled", True) or analytic.get("source") != source:
+        if (not analytic.get("enabled", True) or analytic.get("source") != source
+                or analytic.get("activation_mode", "active") != "active"):
             continue
         missing = [role for role in analytic.get("required_roles", []) if not bindings.get(role)]
         if missing:
@@ -185,6 +305,13 @@ def _validate_analytic(item: Any, index: int, seen: set[str]) -> None:
     if identifier in seen:
         raise CatalogValidationError(f"{prefix}.id: duplicate id {identifier}")
     seen.add(identifier)
+    activation_mode = item.get("activation_mode", "active")
+    if activation_mode not in {"active", "observe", "reference"}:
+        raise CatalogValidationError(f"{prefix}.activation_mode: unsupported activation mode")
+    if "supported" in item and not isinstance(item["supported"], bool):
+        raise CatalogValidationError(f"{prefix}.supported: expected boolean")
+    if activation_mode == "active" and item.get("supported", True) is not True:
+        raise CatalogValidationError(f"{prefix}.supported: active rule must be supported")
     for field in ("title", "description", "review_date"):
         if not _nonempty_string(item.get(field)):
             raise CatalogValidationError(f"{prefix}.{field}: expected non-empty string")
@@ -194,6 +321,11 @@ def _validate_analytic(item: Any, index: int, seen: set[str]) -> None:
         raise CatalogValidationError(f"{prefix}.enabled: expected boolean")
     if item.get("source") not in ALLOWED_SOURCES:
         raise CatalogValidationError(f"{prefix}.source: unsupported source")
+    if item.get("source") == "elasticsearch":
+        if item.get("source_language") != "elasticsearch_dsl":
+            raise CatalogValidationError(f"{prefix}.source_language: expected elasticsearch_dsl")
+        if not _nonempty_string(item.get("stage_id")):
+            raise CatalogValidationError(f"{prefix}.stage_id: expected non-empty string")
     for field in (
         "platforms", "categories", "required_roles", "optional_roles",
         "attack_techniques", "benign_explanations", "required_corroboration", "follow_up",
@@ -273,6 +405,7 @@ def compile_elasticsearch_seed(
     bindings: dict[str, list[str]],
     timestamp_field: str,
     time_range: dict[str, str] | None,
+    field_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Compile a catalog entry into a bounded, validator-compatible ES query."""
     match = analytic.get("match", {})
@@ -280,16 +413,16 @@ def compile_elasticsearch_seed(
     should = []
     must_not = []
     for predicate in match.get("all", []):
-        clause = _predicate_query(predicate, bindings)
+        clause = _predicate_query(predicate, bindings, field_metadata)
         if clause is None:
             return None
         must.append(clause)
     for predicate in match.get("any", []):
-        clause = _predicate_query(predicate, bindings)
+        clause = _predicate_query(predicate, bindings, field_metadata)
         if clause is not None:
             should.append(clause)
     for predicate in match.get("none", []):
-        clause = _predicate_query(predicate, bindings)
+        clause = _predicate_query(predicate, bindings, field_metadata)
         if clause is None:
             return None
         must_not.append(clause)
@@ -318,10 +451,12 @@ def build_candidate_queue(
     """Match evidence and return a stable, explainable candidate queue."""
     events = list(evidence) + _aggregate_events(analytic_summary or {})
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    matched_ids_by_asset: dict[str, set[str]] = {}
-    matched_groups_by_asset: dict[str, set[str]] = {}
     analytics = [item for item in catalog.get("analytics", []) if item.get("enabled", True)]
+    analytics_by_id = {str(item["id"]): item for item in analytics}
+    matched_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for analytic in analytics:
+        if analytic.get("supported", True) is not True or analytic.get("activation_mode", "active") == "reference":
+            continue
         for event in events:
             if analytic.get("source") == "aggregate" and event.get("source") != "aggregate":
                 continue
@@ -330,13 +465,23 @@ def build_candidate_queue(
             if _analytic_matches(analytic, event):
                 asset = str(event.get("asset") or "unknown")
                 grouped.setdefault((analytic["id"], asset), []).append(event)
-                matched_ids_by_asset.setdefault(asset, set()).add(analytic["id"])
-                matched_groups_by_asset.setdefault(asset, set()).add(str(analytic.get("corroboration_group") or analytic["id"]))
+                matched_pairs.append((analytic, event))
 
     candidates: list[dict[str, Any]] = []
     for (analytic_id, asset), rows in grouped.items():
-        analytic = next(item for item in analytics if item["id"] == analytic_id)
-        independent = max(0, len(matched_groups_by_asset.get(asset, set())) - 1)
+        analytic = analytics_by_id[str(analytic_id)]
+        related_groups: set[str] = set()
+        if analytic.get("activation_mode", "active") == "active":
+            own_group = str(analytic.get("corroboration_group") or analytic["id"])
+            for other, other_event in matched_pairs:
+                if other["id"] == analytic["id"] or other.get("activation_mode", "active") != "active":
+                    continue
+                other_group = str(other.get("corroboration_group") or other["id"])
+                if other_group == own_group:
+                    continue
+                if any(_has_correlated_support(row, other_event) for row in rows):
+                    related_groups.add(other_group)
+        independent = len(related_groups)
         score = int(analytic["base_priority"]) + min(10, int(analytic["specificity"]) // 10)
         reasons = [
             f"base analytic priority {analytic['base_priority']}",
@@ -353,9 +498,15 @@ def build_candidate_queue(
         if independent:
             corroboration_bonus = min(30, independent * 15)
             score += corroboration_bonus
-            reasons.append(f"independent behavior corroboration contribution {corroboration_bonus}")
+            reasons.append(
+                f"related independent behavior corroboration contribution {corroboration_bonus} "
+                f"from {independent} distinct behavior group(s)"
+            )
+        if analytic.get("activation_mode", "active") == "observe":
+            score = min(OBSERVE_SCORE_CEILING, score)
+            reasons.append(f"observe-only score ceiling {OBSERVE_SCORE_CEILING}")
         score = max(0,min(100, score))
-        disposition = "corroborated" if score >= 70 and independent else "observed"
+        disposition = "corroborated" if analytic.get("activation_mode", "active") == "active" and score >= 70 and independent else "observed"
         candidates.append(_behavior_candidate(analytic, asset, rows, score, disposition, reasons))
 
     reference_time = _coerce_time(now) if now is not None else datetime.now(timezone.utc)
@@ -459,7 +610,11 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
         0 if item.get("kind") == "trusted_indicator" else 1, str(item.get("candidate_id"))))
 
 
-def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) -> dict[str, Any] | None:
+def _predicate_query(
+    predicate: dict[str, Any],
+    bindings: dict[str, list[str]],
+    field_metadata: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     fields = bindings.get(predicate.get("role"), [])
     if not fields:
         return None
@@ -467,19 +622,55 @@ def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) 
     values = predicate.get("values", [])
     clauses = []
     for field in fields[:4]:
+        metadata = field_metadata.get(field) if field_metadata is not None else None
+        if field_metadata is not None and (not isinstance(metadata, dict) or metadata.get("searchable") is not True):
+            continue
+        raw_types = metadata.get("types", metadata.get("type", [])) if isinstance(metadata, dict) else []
+        field_types = ({str(raw_types)} if isinstance(raw_types, str) else
+            {str(value) for value in raw_types} if isinstance(raw_types, (list, tuple, set)) else set())
+        text_types = field_types.intersection({"text", "match_only_text"})
+        keyword_types = field_types.intersection({"keyword", "constant_keyword", "wildcard"})
         if operator == "exists":
             clauses.append({"exists": {"field": field}})
         elif operator == "equals_any":
-            clauses.append({"terms": {field: values[:20]}})
+            # Exact event identifiers may be mapped as keyword or numeric
+            # fields depending on the integration. Only text-only fields need
+            # analyzed phrase queries.
+            if field_metadata is None or keyword_types or not text_types:
+                clauses.append({"terms": {field: values[:20]}})
+            if text_types:
+                clauses.extend({"match_phrase": {field: value}} for value in values[:12])
         elif operator == "path_prefix_any":
-            clauses.extend({"prefix": {field: value}} for value in values[:12])
-        elif operator in {"contains_any", "ends_with_any"}:
-            clauses.extend({"match_phrase": {field: value}} for value in values[:12])
-            if field in {"message", "event.original", "audit.command"}:
+            if field_metadata is None or keyword_types or not field_types:
+                clauses.extend({"prefix": {field: value}} for value in values[:12])
+        elif operator == "contains_any":
+            if text_types:
+                clauses.extend({"match_phrase": {field: value}} for value in values[:12])
+            if keyword_types:
+                for value in values[:12]:
+                    literal = _escape_wildcard_literal(value)
+                    if len(literal) >= 3:
+                        clauses.append({"wildcard": {field: {"value": f"*{literal}*", "case_insensitive": True}}})
+            if field_metadata is None:
+                clauses.extend({"match_phrase": {field: value}} for value in values[:12])
+            if field in {"message", "event.original", "audit.command", "auditd.log.message",
+                         "auditd_manager.auditd.message"}:
                 for value in values[:12]:
                     token = re.match(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}", str(value).strip())
                     if token:
-                        clauses.append({"prefix": {field: token.group(0).encode("utf-8").hex()}})
+                        encoded = token.group(0).encode("utf-8").hex()
+                        if text_types or field_metadata is None:
+                            clauses.append({"match_phrase": {field: encoded}})
+                        if keyword_types:
+                            clauses.append({"wildcard": {field: {
+                                "value": f"*{encoded}*", "case_insensitive": True,
+                            }}})
+        elif operator == "ends_with_any":
+            if keyword_types or field_metadata is None or not field_types:
+                for value in values[:12]:
+                    literal = _escape_wildcard_literal(value)
+                    if len(literal) >= 3:
+                        clauses.append({"wildcard": {field: {"value": f"*{literal}", "case_insensitive": True}}})
         else:
             continue
     if not clauses:
@@ -487,12 +678,48 @@ def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) 
     return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
 
 
+def _escape_wildcard_literal(value: Any) -> str:
+    """Escape a literal before embedding it in one bounded wildcard pattern."""
+    return str(value).replace("\\", "\\\\").replace("*", "\\*").replace("?", "\\?")
+
+
 def _analytic_matches(analytic: dict[str, Any], event: dict[str, Any]) -> bool:
+    if not _platform_compatible(analytic, event):
+        return False
     match = analytic.get("match", {})
     all_results = [_predicate_matches(item, event) for item in match.get("all", [])]
     any_results = [_predicate_matches(item, event) for item in match.get("any", [])]
     none_results = [_predicate_matches(item, event) for item in match.get("none", [])]
     return all(all_results) and (any(any_results) if any_results else True) and not any(none_results)
+
+
+def event_matches_match(match: dict[str, Any], event: dict[str, Any]) -> bool:
+    """Evaluate one normalized event against a closed Boolean predicate mapping."""
+    return _analytic_matches({"platforms": [], "match": match}, event)
+
+
+def _platform_compatible(analytic: dict[str, Any], event: dict[str, Any]) -> bool:
+    expected = {str(value).strip().lower() for value in analytic.get("platforms", [])}
+    endpoint_platforms = {"windows", "linux", "macos", "darwin"}
+    expected_endpoint = expected.intersection(endpoint_platforms)
+    if not expected_endpoint:
+        return True
+    observed = {value.strip().lower() for value in _role_values(event, "host.os.platform") if value.strip()}
+    providers = [value.lower() for value in _role_values(event, "event.provider")]
+    channels = [value.lower() for value in _role_values(event, "event.channel")]
+    if any("microsoft-windows" in value for value in providers) or any(value == "security" or "windows defender" in value for value in channels):
+        observed.add("windows")
+    if any("linux" in value for value in observed):
+        observed.add("linux")
+    if any("darwin" in value or "macos" in value or "mac os" in value for value in observed):
+        observed.update(("macos", "darwin"))
+    if any("windows" in value or value.startswith("win") for value in observed):
+        observed.add("windows")
+    if not observed:
+        return True
+    if "macos" in expected_endpoint or "darwin" in expected_endpoint:
+        expected_endpoint.update(("macos", "darwin"))
+    return bool(expected_endpoint.intersection(observed))
 
 
 def _predicate_matches(predicate: dict[str, Any], event: dict[str, Any]) -> bool:
@@ -546,6 +773,82 @@ def _role_values(event: dict[str, Any], role: str) -> list[str]:
     if role == "host.name" and event.get("asset") and str(event["asset"]) not in out:
         out.append(str(event["asset"]))
     return out
+
+
+def _has_correlated_support(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Require separate evidence, same host, bounded time, and a real join key."""
+    left_ids = set(_evidence_ids([left]))
+    right_ids = set(_evidence_ids([right]))
+    if left_ids and right_ids and left_ids == right_ids:
+        return False
+
+    left_hosts = {value.strip().lower() for value in _role_values(left, "host.name") if value.strip()}
+    right_hosts = {value.strip().lower() for value in _role_values(right, "host.name") if value.strip()}
+    left_asset = str(left.get("asset") or "").strip().lower()
+    right_asset = str(right.get("asset") or "").strip().lower()
+    if left_asset not in {"", "unknown", "none"}:
+        left_hosts.add(left_asset)
+    if right_asset not in {"", "unknown", "none"}:
+        right_hosts.add(right_asset)
+    if not left_hosts.intersection(right_hosts):
+        return False
+
+    left_time = _event_time(left)
+    right_time = _event_time(right)
+    if left_time is None or right_time is None:
+        return False
+    if abs((left_time - right_time).total_seconds()) > CORROBORATION_WINDOW_MINUTES * 60:
+        return False
+
+    for role in ("session.id", "user.name", "process.entity_id"):
+        if _join_values(left, role).intersection(_join_values(right, role)):
+            return True
+    left_pids = _join_values(left, "process.pid")
+    left_parents = _join_values(left, "process.parent.pid")
+    right_pids = _join_values(right, "process.pid")
+    right_parents = _join_values(right, "process.parent.pid")
+    if left_pids.intersection(right_parents) or right_pids.intersection(left_parents):
+        return True
+    for role in ("file.path", "registry.path", "destination.ip"):
+        if _join_values(left, role).intersection(_join_values(right, role)):
+            return True
+    return False
+
+
+def _join_values(event: dict[str, Any], role: str) -> set[str]:
+    values = set()
+    placeholders = {"", "-", "unknown", "none", "null", "n/a", "system", "nt authority\\system"}
+    for value in _role_values(event, role):
+        normalized = str(value).strip().lower()
+        if normalized in placeholders:
+            continue
+        if role in {"process.pid", "process.parent.pid", "session.id"}:
+            token = normalized
+            try:
+                if re.fullmatch(r"0x[0-9a-f]+", token):
+                    normalized = str(int(token, 16))
+                elif re.fullmatch(r"\d+", token):
+                    normalized = str(int(token, 10))
+            except ValueError:
+                pass
+        elif role in {"file.path", "registry.path"}:
+            normalized = _normalize_path(normalized)
+        if normalized not in placeholders:
+            values.add(normalized)
+    return values
+
+
+def _event_time(event: dict[str, Any]) -> datetime | None:
+    value = event.get("observed_at")
+    if not value:
+        values = _role_values(event, "event.time")
+        value = values[0] if values else None
+    if not value:
+        return None
+    try:
+        return _coerce_time(str(value))
+    except (CatalogValidationError, TypeError, ValueError):
+        return None
 
 
 def _indicator_matches(indicator: dict[str, Any], event: dict[str, Any]) -> bool:
@@ -613,6 +916,9 @@ def _behavior_candidate(
     return {
         "candidate_id": candidate_id,
         "kind": "behavior", "analytic_id": analytic["id"], "indicator_id": None,
+        "research_id": analytic.get("research_id"),
+        "activation_mode": analytic.get("activation_mode", "active"),
+        "supported": analytic.get("supported", True),
         "title": analytic["title"], "description": analytic["description"],
         "priority_score": score, "priority_tier": tier, "disposition": disposition,
         "customer_visible": bool(score >= 70 and disposition == "corroborated"),

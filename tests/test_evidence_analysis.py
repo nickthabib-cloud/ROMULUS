@@ -104,6 +104,7 @@ class BehaviorSeedPrecisionTests(unittest.TestCase):
                 "asset": "videoserver",
                 "observation": command,
                 "raw": {"host": {"name": "videoserver"},
+                        "user": {"name": "operator-7"},
                         "process": {"command_line": command}},
             }
 

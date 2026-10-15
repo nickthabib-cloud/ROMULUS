@@ -34,6 +34,8 @@ def _proposal(**overrides):
         "follow_up_ids": [],
         "hypothesis_ids": ["H-001"],
         "anchor_evidence_ids": [],
+        "analytic_ids": ["BH-TEST-001"],
+        "signature_ids": ["SIG-TEST-001"],
     }
     proposal.update(overrides)
     return proposal
@@ -110,6 +112,8 @@ class SchedulerRegistrationTests(unittest.TestCase):
         self.assertEqual(task["follow_up_ids"], ["FU-001"])
         self.assertEqual(task["hypothesis_ids"], ["H-001", "H-002"])
         self.assertEqual(task["anchor_evidence_ids"], ["E-001"])
+        self.assertEqual(task["analytic_ids"], ["BH-TEST-001"])
+        self.assertEqual(task["signature_ids"], ["SIG-TEST-001"])
         self.assertEqual(task["origins"], ["behavior_catalog", "candidate_follow_up"])
 
     def test_different_target_selector_or_window_is_not_a_duplicate(self):

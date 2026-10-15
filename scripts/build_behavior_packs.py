@@ -14,7 +14,7 @@ CORPUS_PATH = ROOT / "docs" / "research" / "common-indicator-corpus.json"
 TRANSLATIONS_PATH = ROOT / "scripts" / "behavior_pack_translations.json"
 ATTACK_PATH = ROOT / "romulus" / "intelligence" / "attack_catalog.json"
 OUTPUT_DIR = ROOT / "romulus" / "intelligence" / "behavior_packs"
-COMPILER_VERSION = "2.0.0"
+COMPILER_VERSION = "2.1.0"
 EXPECTED = {
     "entries": 3863,
     "curated_behavioral_indicator": 902,
@@ -121,6 +121,8 @@ def _rule(row: dict[str, Any], registry: dict[str, Any], source_registry: dict[s
         "activation_mode": "active" if active else "observe",
         "supported": True,
         "source": "elasticsearch",
+        "source_language": "elasticsearch_dsl",
+        "stage_id": f"{identifier}:elasticsearch",
         "platforms": row.get("platforms", []),
         "categories": row.get("tactics", []),
         "required_roles": sorted({item["role"] for item in predicates}),

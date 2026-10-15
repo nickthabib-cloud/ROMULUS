@@ -23,7 +23,7 @@ from ..intelligence.behavior_catalog import (
     load_behavior_catalog, load_local_indicators, resolve_semantic_fields, applicable_analytics,
     compile_elasticsearch_seed, compile_elasticsearch_indicator_seed, build_candidate_queue, merge_candidate_queue,
 )
-from ..intelligence.search_matrix import compile_search_matrix, load_search_matrix
+from ..intelligence.search_matrix import attribute_signature_hits, compile_search_matrix, load_search_matrix
 from ..intelligence.reference_intelligence import attach_capability_context, compile_capability_index
 from ..tools.elasticsearch_client import ElasticsearchAdapter, validate_query
 from ..tools.arkime_client import ArkimeAdapter
@@ -1256,6 +1256,14 @@ class HuntEngine:
         outcome={"task_id":task_id,"status":status,"returned_total":returned,"matched_total":matched,
             "capped":capped,"timed_out":timed_out,"shard_failures":shard_failures,"incomplete":incomplete,
             "artifact_id":artifact_id,"evidence_ids":evidence_ids,"time_range":time_range}
+        if task.get("signature_ids"):
+            evidence_set=set(evidence_ids)
+            returned_evidence=[item for item in _all_evidence(s) if item.get("evidence_id") in evidence_set]
+            try:
+                outcome["signature_matches"]=attribute_signature_hits(
+                    returned_evidence,load_search_matrix(),list(task.get("signature_ids",[])))
+            except (OSError,ValueError,TypeError,json.JSONDecodeError):
+                outcome["signature_matches"]={}
         if total_relation is not None: outcome["total_relation"]=total_relation
         if sampling_summary: outcome["sampling"]=sampling_summary
         if error_kind: outcome["error_kind"]=error_kind

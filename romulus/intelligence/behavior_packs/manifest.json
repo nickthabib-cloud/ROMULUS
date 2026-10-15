@@ -1,5 +1,5 @@
 {
-  "compiler_version": "2.0.0",
+  "compiler_version": "2.1.0",
   "corpus_version": "2026-10-15",
   "curated_activation": {
     "active": 73,
@@ -23,7 +23,7 @@
     "aggregates.json": "dd0d9c3531e5ef1c708fce85090c7722ca7db665a9cf6b20a3cde6b1897054d1",
     "baselines.json": "2f232d3d591eb23e4674b3840cc395c9a206206dc1db7b9fab36042c234e08c4",
     "capabilities.json": "3af17a7cb9f10ba3e95d29e2928bce95e94a02ae87d8eb4fd3746029b684fa22",
-    "direct.json": "bfa11a50964fc7ec26db25f451600abd45a417f331c25832934e80263f075e8b",
+    "direct.json": "8ddc32d9f0af0a7dce468c0e1c0f491f8f4feb7ecbbce52587059835e88756ed",
     "sequences.json": "a8d22e683277b222e761331ccbf667a441a3a303e80d086322c715b320dcbe6c"
   },
   "source_counts": {

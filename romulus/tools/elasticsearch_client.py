@@ -152,8 +152,27 @@ def validate_query(q: dict[str, Any], depth: int=0) -> None:
                 if k!="minimum_should_match":
                     seq=v if isinstance(v,list) else [v]
                     for child in seq: validate_query(child,depth+1)
-        elif key in {"wildcard","prefix"}:
-            if isinstance(value,dict) and any("*" in str(v) or "?" in str(v) for v in value.values()): raise ValueError("Broad wildcard queries are not allowed")
+        elif key == "wildcard":
+            if not isinstance(value, dict) or len(value) != 1:
+                raise ValueError("Wildcard query must target one field")
+            operand = next(iter(value.values()))
+            if isinstance(operand, dict):
+                if set(operand) - {"value", "case_insensitive"} or "value" not in operand:
+                    raise ValueError("Wildcard query options are unsupported")
+                if "case_insensitive" in operand and not isinstance(operand["case_insensitive"], bool):
+                    raise ValueError("Wildcard case_insensitive option must be boolean")
+                pattern = str(operand.get("value", ""))
+            else:
+                pattern = str(operand)
+            # Allow a single bounded substring or suffix search. Do not allow
+            # arbitrary globbing, single-character wildcards, or short terms.
+            if not _bounded_wildcard_literal(pattern):
+                raise ValueError("Wildcard query must be a bounded literal substring or suffix of at least three characters")
+        elif key == "prefix":
+            if not isinstance(value, dict) or len(value) != 1:
+                raise ValueError("Prefix query must target one field")
+            if any("*" in str(v) or "?" in str(v) for v in value.values()):
+                raise ValueError("Prefix query cannot contain wildcard characters")
         elif not isinstance(value,dict): raise ValueError("Query clause must be an object")
 
 def _range_field(value: Any) -> str | None:
@@ -169,6 +188,31 @@ def _range_field(value: Any) -> str | None:
                 found=_range_field(child)
                 if found: return found
     return None
+
+
+def _bounded_wildcard_literal(pattern: str) -> bool:
+    """Reject broad wildcard expressions while allowing escaped literal paths/names."""
+    if not isinstance(pattern,str) or not pattern.startswith("*"):
+        return False
+    body=pattern[1:]
+    if body.endswith("*"):
+        body=body[:-1]
+    if not body or body.startswith("*") or body.endswith("*"):
+        return False
+    literal=[]; index=0
+    while index<len(body):
+        char=body[index]
+        if char=="\\":
+            index+=1
+            if index>=len(body) or body[index] not in "\\*?":
+                return False
+            literal.append(body[index])
+        elif char in "*?":
+            return False
+        else:
+            literal.append(char)
+        index+=1
+    return len("".join(literal))>=3
 
 
 def _pit_search(client: Any, pit_id: str, query: dict[str, Any], size: int, sort: list[Any], timeout: int) -> dict[str, Any]:

