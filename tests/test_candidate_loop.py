@@ -403,6 +403,26 @@ class AggregateSignalTests(unittest.TestCase):
         self.assertEqual(rows[0]["source"], "10.0.0.20")
         self.assertIn("EV-LATE-CALLBACK", rows[0]["sample_evidence_ids"])
 
+    def test_reverse_connection_after_http_path_scan_is_escalated(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        rows = [_network_event_at(
+            f"EV-WEB-SCAN-{index}", f"2026-10-12T15:00:{index:02d}Z",
+            "10.0.0.50", "10.0.0.90", 80,
+            http={"request": {"uri": f"/probe-{index}"}},
+        ) for index in range(12)]
+        rows.append(_network_event_at(
+            "EV-WEB-CALLBACK", "2026-10-12T15:06:00Z",
+            "10.0.0.90", "10.0.0.50", 4444,
+        ))
+
+        reversals = summarize_evidence([], rows)["aggregate_signals"]["scan_then_reverse_connection"]
+
+        self.assertEqual(reversals[0]["source"], "10.0.0.50")
+        self.assertEqual(reversals[0]["scan_basis"], "http_path_fanout")
+        self.assertEqual(reversals[0]["unique_paths"], 12)
+        self.assertIn("EV-WEB-CALLBACK", reversals[0]["sample_evidence_ids"])
+
     def test_fanout_limits_keep_strongest_later_sources(self):
         from romulus.intelligence.analytics import summarize_evidence
 

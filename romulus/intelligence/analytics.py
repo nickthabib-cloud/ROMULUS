@@ -433,8 +433,30 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
                 "sample_evidence_ids":list(dict.fromkeys(
                     [scan_event.get("evidence_id") for scan_event in scan_events[:4] if scan_event.get("evidence_id")]+_refs(callback)))})
             break
+    reversal_pairs={(str(row.get("source") or ""),str(row.get("destination") or ""))
+        for row in result["scan_then_reverse_connection"]}
+    for (source,destination),rows in http_paths.items():
+        if (source,destination) in reversal_pairs:
+            continue
+        window=_strongest_distinct_value_window(rows,minutes=10,minimum=12)
+        if not window:
+            continue
+        reverse_rows=sorted(peer_activity.get((destination,source),[]),key=lambda row:row[0])
+        scan_end=window[-1][0]
+        callback=next((reverse_event for reverse_stamp,reverse_event,_ in reverse_rows
+            if scan_end+timedelta(seconds=10)<=reverse_stamp<=scan_end+timedelta(minutes=60)),None)
+        if not callback:
+            continue
+        result["scan_then_reverse_connection"].append({
+            "source":source,"destination":destination,"scan_basis":"http_path_fanout",
+            "unique_paths":len({value for _,_,value in window}),
+            "sample_evidence_ids":list(dict.fromkeys(
+                [scan_event.get("evidence_id") for _,scan_event,_ in window[:4]
+                 if scan_event.get("evidence_id")]+_refs(callback))),
+        })
     result["scan_then_reverse_connection"]=sorted(result["scan_then_reverse_connection"],
-        key=lambda row:(-int(row.get("unique_ports",0)),str(row.get("source") or ""),str(row.get("destination") or "")))[:limit]
+        key=lambda row:(-max(int(row.get("unique_ports",0)),int(row.get("unique_paths",0))),
+            str(row.get("source") or ""),str(row.get("destination") or "")))[:limit]
     for source, rows in nxdomain.items():
         window = _event_window(rows, minutes=10, minimum=5)
         if window:

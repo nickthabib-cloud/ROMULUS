@@ -98,8 +98,7 @@
         "user.name"
       ],
       "match": {
-        "all": [],
-        "any": [
+        "all": [
           {
             "role": "process.command_line",
             "operator": "contains_any",
@@ -107,13 +106,20 @@
               "curl ",
               "wget ",
               "invoke-webrequest",
-              "downloadfile",
+              "downloadfile"
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
               "chmod +x",
               "| bash",
               "| sh"
             ]
           }
         ],
+        "any": [],
         "none": []
       },
       "priority_tier": "medium",
@@ -144,7 +150,7 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-XPLAT-002"
+      "corroboration_group": "download_execution"
     },
     {
       "id": "BH-XPLAT-003",
@@ -1844,7 +1850,7 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-003"
+      "corroboration_group": "download_execution"
     },
     {
       "id": "BH-LNX-004",
@@ -3096,6 +3102,292 @@
       ],
       "review_date": "2026-10-12",
       "corroboration_group": "BH-AUTH-004"
+    },
+    {
+      "id": "BH-LNX-019",
+      "version": 1,
+      "title": "Command-line downloader retrieved remote content",
+      "description": "A Linux command line used a common transfer utility to retrieve content over HTTP or HTTPS. Escalate repeated or independently corroborated downloads for review.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "command-and-control",
+        "execution"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "curl http://",
+              "curl https://",
+              "wget http://",
+              "wget https://"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 66,
+      "specificity": 78,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1105"
+      ],
+      "benign_explanations": [
+        "Approved package retrieval, deployment automation, or administrator activity."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence on the same asset."
+      ],
+      "follow_up": [
+        "Inspect the retrieved URL, destination path, parent process, user, and activity immediately after the transfer."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-15",
+      "corroboration_group": "download_execution"
+    },
+    {
+      "id": "BH-LNX-020",
+      "version": 1,
+      "title": "Interactive pseudo-terminal shell spawn",
+      "description": "A command invoked Python's pseudo-terminal spawn function, a high-signal way to turn a basic shell into an interactive terminal.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "execution"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "pty.spawn("
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 78,
+      "specificity": 92,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1059.004"
+      ],
+      "benign_explanations": [
+        "Authorized shell testing or an administrator repairing a constrained terminal session."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence on the same asset."
+      ],
+      "follow_up": [
+        "Review the parent process, user, terminal source, adjacent network session, and commands executed after the shell spawn."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-15",
+      "corroboration_group": "interactive_shell"
+    },
+    {
+      "id": "BH-LNX-021",
+      "version": 1,
+      "title": "Sensitive credential file read",
+      "description": "A command attempted to display the Linux shadow password file, which exposes password hashes when run with sufficient privilege.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "credential-access"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "cat ",
+              "less ",
+              "head ",
+              "tail ",
+              "awk "
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "/etc/shadow"
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 75,
+      "specificity": 92,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1003.008"
+      ],
+      "benign_explanations": [
+        "Approved account recovery, credential auditing, or incident response performed by a privileged administrator."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence on the same asset."
+      ],
+      "follow_up": [
+        "Identify the user and parent process, verify authorization, and inspect subsequent authentication or credential use."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-15",
+      "corroboration_group": "credential_file_access"
+    },
+    {
+      "id": "BH-LNX-022",
+      "version": 1,
+      "title": "Host firewall drop or deny rule changed",
+      "description": "A Linux host firewall command added or removed a traffic drop or deny rule. This can impair monitoring or isolate defensive infrastructure.",
+      "enabled": true,
+      "platforms": [
+        "linux"
+      ],
+      "categories": [
+        "defense-evasion",
+        "impact"
+      ],
+      "source": "elasticsearch",
+      "required_roles": [
+        "process.command_line"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "iptables ",
+              "nft ",
+              "ufw "
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              " -a ",
+              " -d ",
+              " add rule",
+              " delete rule",
+              " deny "
+            ]
+          },
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              " -j drop",
+              " drop",
+              " deny "
+            ]
+          }
+        ],
+        "any": [],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 82,
+      "specificity": 92,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1686"
+      ],
+      "benign_explanations": [
+        "Approved firewall administration, automated policy deployment, or incident containment."
+      ],
+      "required_corroboration": [
+        "Independent execution, persistence, identity, or network evidence on the same asset."
+      ],
+      "follow_up": [
+        "Identify the actor, affected source or destination, change authorization, nearby service errors, and whether the rule was later removed."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-15",
+      "corroboration_group": "firewall_modification"
     },
     {
       "id": "BH-NET-001",

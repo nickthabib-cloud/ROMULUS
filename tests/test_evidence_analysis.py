@@ -73,6 +73,62 @@ class BehaviorSeedPrecisionTests(unittest.TestCase):
         self.assertIn("| sh", encoded)
         self.assertIn("6375726c", encoded)
 
+    def test_generic_download_rule_requires_download_and_execution(self):
+        from romulus.intelligence.behavior_catalog import (
+            compile_elasticsearch_seed,
+            load_behavior_catalog,
+        )
+
+        analytic = next(
+            item for item in load_behavior_catalog()["analytics"]
+            if item["id"] == "BH-XPLAT-002"
+        )
+        query = compile_elasticsearch_seed(
+            analytic,
+            {"process.command_line": ["message", "event.original", "process.command_line"]},
+            "@timestamp",
+            {"gte": "2024-11-18T10:00:00Z", "lte": "2024-11-18T17:00:00Z"},
+        )
+
+        self.assertEqual(len(analytic["match"]["all"]), 2)
+        self.assertEqual(len(query["bool"]["must"]), 2)
+
+    def test_high_signal_linux_actions_create_prioritized_candidates(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue, load_behavior_catalog
+
+        def event(identifier, when, command):
+            return {
+                "evidence_id": identifier,
+                "source": "elasticsearch",
+                "observed_at": when,
+                "asset": "videoserver",
+                "observation": command,
+                "raw": {"host": {"name": "videoserver"},
+                        "process": {"command_line": command}},
+            }
+
+        evidence = [
+            event("EV-DOWNLOAD-1", "2024-11-18T15:00:01Z",
+                  "curl http://10.0.0.50/TODO.md"),
+            event("EV-DOWNLOAD-2", "2024-11-18T15:04:52Z",
+                  "curl http://10.0.0.50/README.txt.1"),
+            event("EV-PTY", "2024-11-18T15:04:45Z",
+                  'python3 -c import pty;pty.spawn("/bin/bash")'),
+            event("EV-SHADOW", "2024-11-18T15:19:35Z", "cat /etc/shadow"),
+            event("EV-FIREWALL", "2024-11-18T15:33:44Z",
+                  "iptables -A INPUT -s 10.0.0.60 -j DROP"),
+        ]
+
+        candidates = build_candidate_queue(
+            evidence, load_behavior_catalog(), {"indicators": []}
+        )
+        by_id = {item["analytic_id"]: item for item in candidates}
+
+        for analytic_id in ("BH-LNX-019", "BH-LNX-020", "BH-LNX-021", "BH-LNX-022"):
+            self.assertIn(analytic_id, by_id)
+            self.assertTrue(by_id[analytic_id]["customer_visible"])
+            self.assertGreaterEqual(by_id[analytic_id]["priority_score"], 70)
+
 
 class CompleteEvidenceAnalysisTests(unittest.TestCase):
     def test_full_candidate_catalog_is_persisted_while_checkpoint_queue_is_bounded(self):
