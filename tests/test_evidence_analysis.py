@@ -37,6 +37,16 @@ class AuditNormalizationTests(unittest.TestCase):
         self.assertEqual(invalid["process.command_line"], "tool zz11")
         self.assertNotIn("process.command_line", ordinary)
 
+    def test_quoted_hex_looking_execve_argument_remains_literal(self):
+        from romulus.intelligence.normalization import normalize_elasticsearch_event
+
+        normalized = normalize_elasticsearch_event({
+            "message": 'type=EXECVE msg=audit(1.0:2): argc=2 a0="6375726c" a1=6375726c'
+        })
+
+        self.assertEqual(normalized["process.args"], ["6375726c", "curl"])
+        self.assertEqual(normalized["process.command_line"], "6375726c curl")
+
 
 class BehaviorSeedPrecisionTests(unittest.TestCase):
     def test_download_to_shell_seed_requires_both_behaviors_and_queries_audit_hex(self):
@@ -143,6 +153,51 @@ class CompleteEvidenceAnalysisTests(unittest.TestCase):
             self.assertTrue(set(lead["evidence_ids"]) <= promoted_ids)
             self.assertIn(callback_id, promoted_ids)
             self.assertLessEqual(result["coverage"]["analysis_evidence"]["promoted"], 200)
+
+    def test_candidate_promotion_prefers_nearby_same_host_and_ignores_process_only_matches(self):
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(Settings.from_env(), home=root, data_dir=root / "data",
+                logs_dir=root / "logs", reports_dir=root / "reports")
+            engine = HuntEngine(settings, Store(settings.data_dir, settings.logs_dir), offline=True)
+            direct = {
+                "evidence_id": "EV-DIRECT", "source": "elasticsearch",
+                "observed_at": "2026-10-14T14:00:00Z", "asset": "host-a",
+                "provenance": {"domain": "host"},
+                "raw": {"host": {"name": "host-a"}, "process": {"name": "common-agent"}},
+            }
+            same_host_old = [{
+                "evidence_id": f"EV-OLD-{index}", "source": "elasticsearch",
+                "observed_at": f"2026-10-13T{index % 24:02d}:00:00Z", "asset": "host-a",
+                "provenance": {"domain": "host"},
+                "raw": {"host": {"name": "host-a"}, "process": {"name": "common-agent"}},
+            } for index in range(205)]
+            process_only = [{
+                "evidence_id": f"EV-PROCESS-{index}", "source": "elasticsearch",
+                "observed_at": "2026-10-12T13:59:00Z", "asset": f"host-{index + 100}",
+                "provenance": {"domain": "host"},
+                "raw": {"host": {"name": f"host-{index + 100}"}, "process": {"name": "common-agent"}},
+            } for index in range(205)]
+            adjacent = {
+                "evidence_id": "EV-ADJACENT", "source": "elasticsearch",
+                "observed_at": "2026-10-14T14:00:01Z", "asset": "host-a",
+                "provenance": {"domain": "host"}, "raw": {"host": {"name": "host-a"}},
+            }
+            state = {"host": [], "network": []}
+            promoted = engine._promote_candidate_context(state,
+                [direct] + same_host_old + process_only + [adjacent], [{
+                    "candidate_id": "CL-1", "kind": "behavior", "priority_score": 80,
+                    "evidence_ids": ["EV-DIRECT"], "assets": ["host-a"],
+                }])
+
+            promoted_ids = {event["evidence_id"] for event in state["host"]}
+            self.assertEqual(promoted, 200)
+            self.assertIn("EV-ADJACENT", promoted_ids)
+            self.assertFalse(any(value.startswith("EV-PROCESS-") for value in promoted_ids))
 
 
 if __name__ == "__main__":

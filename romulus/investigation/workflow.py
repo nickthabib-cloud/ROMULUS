@@ -264,39 +264,54 @@ class HuntEngine:
         """Promote cited and exact-entity related rows into bounded hunt context."""
         limit=max(0,min(int(limit),200))
         if not limit: return 0
-        selected=[candidate for candidate in candidates
-            if candidate.get("kind")=="trusted_indicator" or int(candidate.get("priority_score",0) or 0)>=40]
+        selected=sorted((candidate for candidate in candidates
+            if candidate.get("kind")=="trusted_indicator" or int(candidate.get("priority_score",0) or 0)>=40),
+            key=lambda candidate:(-int(candidate.get("priority_score",0) or 0),
+                0 if candidate.get("kind")=="trusted_indicator" else 1,str(candidate.get("candidate_id") or "")))
         evidence_by_id={str(event.get("evidence_id")):event for event in evidence if event.get("evidence_id")}
-        direct_ids=[]; entities=set()
+        contexts=[]; entity_owners={}
         for candidate in selected:
-            for value in candidate.get("assets",[]) or []:
-                normalized=_normalized_entity(value)
-                if normalized: entities.add(normalized)
+            direct=[]; entities=set(); anchors=[]
             for evidence_id in candidate.get("evidence_ids",[]) or []:
-                value=str(evidence_id)
-                if value not in direct_ids: direct_ids.append(value)
-                event=evidence_by_id.get(value)
-                if event: entities.update(_structured_entities(event))
-        ordered=[]; queued=set()
-        for evidence_id in direct_ids:
-            if evidence_id in evidence_by_id and evidence_id not in queued:
-                ordered.append(evidence_by_id[evidence_id]); queued.add(evidence_id)
-        related=sorted((event for event in evidence
-            if event.get("evidence_id") not in queued and entities.intersection(_structured_entities(event))),
-            key=lambda event:(str(event.get("observed_at") or ""),str(event.get("evidence_id") or "")))
-        ordered.extend(related)
+                event=evidence_by_id.get(str(evidence_id))
+                if event and event not in direct:
+                    direct.append(event); entities.update(_structured_entities(event))
+                    stamp=_event_timestamp(event)
+                    if stamp is not None: anchors.append(stamp)
+            index=len(contexts)
+            contexts.append({"direct":direct,"direct_ids":{str(event.get("evidence_id")) for event in direct},
+                "entities":entities,"anchors":anchors,"related":[]})
+            for entity in entities: entity_owners.setdefault(entity,set()).add(index)
+        for event in evidence:
+            event_id=str(event.get("evidence_id") or "")
+            owners=set()
+            for entity in _structured_entities(event): owners.update(entity_owners.get(entity,set()))
+            for index in owners:
+                if event_id not in contexts[index]["direct_ids"]: contexts[index]["related"].append(event)
+        queues=[]
+        for context in contexts:
+            anchors=context["anchors"]
+            related=sorted(context["related"],key=lambda event:(
+                _event_distance(event,anchors),str(event.get("observed_at") or ""),str(event.get("evidence_id") or "")))
+            queues.append(context["direct"]+related)
         retained={str(event.get("evidence_id")) for event in s.get("host",[])+s.get("network",[]) if event.get("evidence_id")}
-        promoted=0
-        for event in ordered:
-            evidence_id=str(event.get("evidence_id") or "")
-            if not evidence_id or evidence_id in retained: continue
-            compact={"evidence_id":evidence_id,"source":event.get("source","unknown"),
-                "observed_at":event.get("observed_at",""),"observation":event.get("observation",""),
-                "asset":event.get("asset",""),"provenance":event.get("provenance",{}),
-                "raw":_context_raw(event.get("raw",{}))}
-            s.setdefault(_evidence_domain(event),[]).append(compact)
-            retained.add(evidence_id); promoted+=1
-            if promoted>=limit: break
+        promoted=0; positions=[0 for _ in queues]
+        while promoted<limit:
+            advanced=False
+            for index,queue in enumerate(queues):
+                while positions[index]<len(queue):
+                    event=queue[positions[index]]; positions[index]+=1
+                    evidence_id=str(event.get("evidence_id") or "")
+                    if not evidence_id or evidence_id in retained: continue
+                    compact={"evidence_id":evidence_id,"source":event.get("source","unknown"),
+                        "observed_at":event.get("observed_at",""),"observation":event.get("observation",""),
+                        "asset":event.get("asset",""),"provenance":event.get("provenance",{}),
+                        "raw":_context_raw(event.get("raw",{}))}
+                    s.setdefault(_evidence_domain(event),[]).append(compact)
+                    retained.add(evidence_id); promoted+=1; advanced=True
+                    break
+                if promoted>=limit: break
+            if not advanced: break
         return promoted
 
     def _add_tshark_row(self,s,row,provenance,query,lead_id=None):
@@ -2161,9 +2176,7 @@ def _normalized_entity(value):
 def _structured_entities(event):
     """Return exact structured entities suitable for bounded candidate expansion."""
     raw=event.get("raw",{}) if isinstance(event.get("raw"),dict) else {}
-    fields=("host.name","host.hostname","host.ip","source.ip","destination.ip","srcIp","dstIp",
-        "ip.src","ip.dst","dns.question.name","dns.qry.name","dns.host","http.host","host.http",
-        "tls.handshake.extensions_server_name","user.name","process.name","process.executable")
+    fields=("host.name","host.hostname","host.ip","source.ip","destination.ip","srcIp","dstIp","ip.src","ip.dst")
     entities=set()
     for value in (event.get("asset"),):
         normalized=_normalized_entity(value)
@@ -2175,6 +2188,22 @@ def _structured_entities(event):
             normalized=_normalized_entity(item)
             if normalized: entities.add(normalized)
     return entities
+
+
+def _event_timestamp(event):
+    value=event.get("observed_at")
+    if not value: return None
+    try:
+        parsed=datetime.fromisoformat(str(value).replace("Z","+00:00"))
+        if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).timestamp()
+    except (TypeError,ValueError,OSError,OverflowError): return None
+
+
+def _event_distance(event,anchors):
+    stamp=_event_timestamp(event)
+    if stamp is None or not anchors: return float("inf")
+    return min(abs(stamp-anchor) for anchor in anchors)
 
 
 def _context_raw(raw):

@@ -368,6 +368,63 @@ class AggregateSignalTests(unittest.TestCase):
         self.assertIn("EV-CALLBACK", reversal["sample_evidence_ids"])
         self.assertTrue(any(ref.startswith("EV-SCAN-") for ref in reversal["sample_evidence_ids"]))
 
+    def test_reverse_connection_requires_multi_port_probe_against_same_peer(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        ordinary = [_network_event_at(
+            f"EV-ORD-{index}", f"2026-10-12T13:0{index}:00Z",
+            "10.0.0.10", f"10.0.1.{index + 1}", 443,
+        ) for index in range(6)]
+        ordinary.append(_network_event_at(
+            "EV-ORD-CALLBACK", "2026-10-12T13:06:00Z", "10.0.1.1", "10.0.0.10", 55000,
+        ))
+
+        signals = summarize_evidence([], ordinary)["aggregate_signals"]
+
+        self.assertEqual(signals["scan_then_reverse_connection"], [])
+
+    def test_reverse_connection_checks_later_valid_probe_windows(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        early = [_network_event_at(
+            f"EV-EARLY-{index}", f"2026-10-12T13:0{index}:00Z",
+            "10.0.0.20", f"10.0.2.{index + 1}", 443,
+        ) for index in range(6)]
+        later = [_network_event_at(
+            f"EV-LATE-{index}", f"2026-10-12T15:0{index}:00Z",
+            "10.0.0.20", "10.0.0.90", 20 + index,
+        ) for index in range(6)]
+        later.append(_network_event_at(
+            "EV-LATE-CALLBACK", "2026-10-12T15:07:00Z", "10.0.0.90", "10.0.0.20", 4444,
+        ))
+
+        rows = summarize_evidence([], early + later)["aggregate_signals"]["scan_then_reverse_connection"]
+
+        self.assertEqual(rows[0]["source"], "10.0.0.20")
+        self.assertIn("EV-LATE-CALLBACK", rows[0]["sample_evidence_ids"])
+
+    def test_fanout_limits_keep_strongest_later_sources(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        rows = []
+        for source_index, count in enumerate((12, 13, 20), start=1):
+            for index in range(count):
+                rows.append(_network_event_at(
+                    f"EV-DNS-RANK-{source_index}-{index}",
+                    f"2026-10-12T13:00:{index:02d}Z", f"10.0.3.{source_index}", "8.8.8.8", 53,
+                    dns={"question": {"name": f"rank-{source_index}-{index}.example.com"}},
+                ))
+                rows.append(_network_event_at(
+                    f"EV-HTTP-RANK-{source_index}-{index}",
+                    f"2026-10-12T13:10:{index:02d}Z", f"10.0.4.{source_index}", "10.0.4.99", 80,
+                    http={"request": {"uri": f"/rank-{source_index}-{index}"}},
+                ))
+
+        signals = summarize_evidence([], rows, limit=2)["aggregate_signals"]
+
+        self.assertIn("10.0.3.3", {row["source"] for row in signals["dns_query_fanout"]})
+        self.assertIn("10.0.4.3", {row["source"] for row in signals["http_path_fanout"]})
+
 
 class CandidateStateTests(unittest.TestCase):
     def test_candidate_merge_preserves_disposition_follow_up_status_and_history(self):
@@ -626,6 +683,23 @@ def _network_deviation_fixture():
     ) for index in range(6))
     rows.append(event("EV-CALLBACK", 47, "10.0.0.90", "10.0.0.50", 4444))
     return rows
+
+
+def _network_event_at(identifier, observed_at, source, destination, port, **raw):
+    body = {
+        "source": {"ip": source},
+        "destination": {"ip": destination, "port": port},
+        "network": {"protocol": "tcp"},
+    }
+    body.update(raw)
+    return {
+        "evidence_id": identifier,
+        "source": "arkime",
+        "observed_at": observed_at,
+        "asset": destination,
+        "observation": "network event",
+        "raw": body,
+    }
 
 
 if __name__ == "__main__":

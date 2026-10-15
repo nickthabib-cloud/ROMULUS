@@ -300,6 +300,25 @@ class CandidateRankingTests(unittest.TestCase):
         )
         self.assertIn("expected noise penalty 12", " ".join(by_id["BH-TEST-HIGH"]["score_reasons"]))
 
+    def test_complete_evidence_scoring_keeps_candidate_citations_bounded(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue, merge_candidate_queue
+
+        analytic = _analytic("BH-TEST-BOUNDED")
+        analytic["expected_noise"] = "low"
+        evidence = [dict(
+            _event(f"EV-{index:03d}", "busy-host", process_command_line="test"),
+            observed_at=f"2026-10-12T12:{index % 60:02d}:00Z",
+        ) for index in range(120)]
+
+        lead = build_candidate_queue(evidence, {"analytics": [analytic]}, {"indicators": []})[0]
+        merged = merge_candidate_queue([lead], [dict(lead,
+            evidence_ids=[f"EV-NEXT-{index:03d}" for index in range(120)])])[0]
+
+        self.assertEqual(lead["evidence_match_count"], 120)
+        self.assertEqual(len(lead["evidence_ids"]), 40)
+        self.assertEqual(len(merged["evidence_ids"]), 40)
+        self.assertIn("repeat observation contribution 9", lead["score_reasons"])
+
 
 def _event(
     evidence_id,

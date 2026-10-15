@@ -29,7 +29,8 @@ def normalize_elasticsearch_event(hit: dict[str, Any]) -> dict[str, Any]:
              if value is not None),
             "",
         )
-        arguments.append((int(match.group("index")), _decode_audit_argument(raw)))
+        value = _decode_audit_argument(raw) if match.group("bare") is not None else raw
+        arguments.append((int(match.group("index")), value))
     if not arguments:
         return normalized
 

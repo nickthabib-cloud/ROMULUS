@@ -27,6 +27,7 @@ ALLOWED_OPERATORS = {
 ALLOWED_SOURCES = {"elasticsearch", "aggregate"}
 PRIORITIES = {"informational", "low", "medium", "high", "critical"}
 NOISE_LEVELS = {"low", "medium", "high"}
+MAX_CANDIDATE_EVIDENCE_IDS = 40
 _ATTACK_TECHNIQUE_IDS: set[str] | None = None
 
 SEMANTIC_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
@@ -380,7 +381,7 @@ def build_candidate_queue(
                 "description": f"An exact {indicator.get('type')} indicator supplied by {indicator.get('source')} was observed.",
                 "priority_score": score, "priority_tier": "critical",
                 "disposition": "observed", "customer_visible": True,
-                "evidence_ids": _evidence_ids(rows), "assets": [asset],
+                "evidence_ids": _evidence_ids(rows), "evidence_match_count": len(rows), "assets": [asset],
                 "first_observed": _observed_bounds(rows)[0], "last_observed": _observed_bounds(rows)[1],
                 "score_reasons": [
                     f"trusted exact indicator confidence {indicator.get('confidence')}",
@@ -423,7 +424,10 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
             fresh_disposition = str(item.get("disposition") or "observed")
             if prior_disposition in terminal or disposition_rank.get(prior_disposition, 0) > disposition_rank.get(fresh_disposition, 0):
                 item["disposition"] = prior_disposition
-            item["evidence_ids"] = sorted(set(prior.get("evidence_ids", [])) | set(item.get("evidence_ids", [])))
+            item["evidence_ids"] = list(dict.fromkeys(
+                item.get("evidence_ids", []) + prior.get("evidence_ids", [])))[:MAX_CANDIDATE_EVIDENCE_IDS]
+            item["evidence_match_count"] = max(int(item.get("evidence_match_count",0) or 0),
+                int(prior.get("evidence_match_count",0) or 0))
             observed = [value for value in (prior.get("first_observed"), item.get("first_observed")) if value]
             item["first_observed"] = min(observed) if observed else None
             observed = [value for value in (prior.get("last_observed"), item.get("last_observed")) if value]
@@ -445,9 +449,12 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
     # A bounded re-analysis may not reproduce a previously observed candidate
     # (for example after context retention or source availability changes).
     # Preserve it until an explicit analyst disposition closes it.
-    merged.extend(dict(item, follow_ups=[dict(entry, history=list(entry.get("history", [])))
-        for entry in item.get("follow_ups", [])]) for item in previous
-        if str(item.get("candidate_id")) not in refreshed_ids)
+    for prior_item in previous:
+        if str(prior_item.get("candidate_id")) in refreshed_ids: continue
+        preserved=dict(prior_item,follow_ups=[dict(entry,history=list(entry.get("history",[])))
+            for entry in prior_item.get("follow_ups",[])])
+        preserved["evidence_ids"]=list(dict.fromkeys(preserved.get("evidence_ids",[])))[:MAX_CANDIDATE_EVIDENCE_IDS]
+        merged.append(preserved)
     return sorted(merged, key=lambda item: (-int(item.get("priority_score", 0)),
         0 if item.get("kind") == "trusted_indicator" else 1, str(item.get("candidate_id"))))
 
@@ -609,7 +616,7 @@ def _behavior_candidate(
         "title": analytic["title"], "description": analytic["description"],
         "priority_score": score, "priority_tier": tier, "disposition": disposition,
         "customer_visible": bool(score >= 70 and disposition == "corroborated"),
-        "evidence_ids": _evidence_ids(rows), "assets": [asset],
+        "evidence_ids": _evidence_ids(rows), "evidence_match_count": len(rows), "assets": [asset],
         "first_observed": _observed_bounds(rows)[0], "last_observed": _observed_bounds(rows)[1],
         "score_reasons": reasons, "attack_techniques": analytic.get("attack_techniques", []),
         "benign_explanations": analytic.get("benign_explanations", []),
@@ -673,7 +680,7 @@ def _evidence_ids(rows: list[dict[str, Any]]) -> list[str]:
         if row.get("evidence_id"):
             values.add(str(row["evidence_id"]))
         values.update(str(value) for value in row.get("supporting_evidence_ids", []) if value)
-    return sorted(values)
+    return sorted(values)[:MAX_CANDIDATE_EVIDENCE_IDS]
 
 
 def _observed_bounds(rows: list[dict[str, Any]]) -> tuple[str | None, str | None]:
