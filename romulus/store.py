@@ -18,7 +18,11 @@ class Store:
             CREATE TABLE IF NOT EXISTS evidence(id TEXT PRIMARY KEY, investigation_id TEXT NOT NULL, item TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY, investigation_id TEXT NOT NULL, item TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS candidates(investigation_id TEXT NOT NULL, id TEXT NOT NULL, item TEXT NOT NULL,
-                PRIMARY KEY(investigation_id,id));""")
+                PRIMARY KEY(investigation_id,id));
+            CREATE TABLE IF NOT EXISTS baselines(id TEXT PRIMARY KEY, version INTEGER NOT NULL,
+                state TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS baseline_updates(investigation_id TEXT NOT NULL, analytic_id TEXT NOT NULL,
+                applied_at TEXT NOT NULL, PRIMARY KEY(investigation_id,analytic_id));""")
     @contextmanager
     def _db(self):
         db = sqlite3.connect(self.db_path,timeout=30); db.row_factory = sqlite3.Row
@@ -68,6 +72,29 @@ class Store:
         with self._db() as db:
             row=db.execute("SELECT COUNT(*) FROM candidates WHERE investigation_id=?",(hunt_id,)).fetchone()
             return int(row[0]) if row else 0
+    def load_baseline_states(self, analytic_ids: list[str] | None = None) -> dict[str, dict[str, Any]]:
+        with self._db() as db:
+            if analytic_ids:
+                marks=",".join("?" for _ in analytic_ids)
+                rows=db.execute(f"SELECT id,version,state FROM baselines WHERE id IN ({marks})",
+                    tuple(analytic_ids)).fetchall()
+            else:
+                rows=db.execute("SELECT id,version,state FROM baselines").fetchall()
+        result={}
+        for row in rows:
+            state=json.loads(row[2]); state.setdefault("schema_version",int(row[1]))
+            result[str(row[0])]=state
+        return result
+    def apply_baseline_update(self, hunt_id: str, analytic_id: str, state: dict[str, Any], version: int = 1) -> bool:
+        """Persist one completed-hunt update once, even if report finalization is retried."""
+        with self._db() as db:
+            now=utc_now()
+            marker=db.execute("INSERT OR IGNORE INTO baseline_updates(investigation_id,analytic_id,applied_at) VALUES(?,?,?)",
+                (hunt_id,analytic_id,now))
+            if marker.rowcount==0: return False
+            db.execute("INSERT OR REPLACE INTO baselines(id,version,state,updated_at) VALUES(?,?,?,?)",
+                (analytic_id,int(version),json.dumps(state),now))
+            return True
     def upsert_finding(self, hunt_id: str, item: dict[str, Any], event: str = "created") -> None:
         with self._db() as db: db.execute("INSERT OR REPLACE INTO findings VALUES(?,?,?)", (item["finding_id"], hunt_id, json.dumps(item)))
         with _file_lock(self.log_lock_path):

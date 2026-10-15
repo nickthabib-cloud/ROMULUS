@@ -13,6 +13,8 @@ import hashlib
 import math
 from typing import Any, Iterable
 
+from .analytics import evidence_source_family
+
 
 MAX_AGGREGATE_EVENTS = 10_000
 MAX_GROUPS_PER_RULE = 2_000
@@ -334,14 +336,7 @@ def _asset_values(event: dict[str, Any], raw: dict[str, Any]) -> set[str]:
 
 
 def _source_family(event: dict[str, Any], raw: dict[str, Any]) -> str:
-    explicit = event.get("source_family")
-    if explicit in {"host", "network"}:
-        return str(explicit)
-    if event.get("source") in {"arkime", "tshark"}:
-        return "network"
-    if any(_nested(raw, field) is not None for field in ("source.ip", "destination.ip", "dns.question.name")):
-        return "network"
-    return "host"
+    return evidence_source_family(event, raw)
 
 
 def _nested(value: dict[str, Any], path: str) -> Any:

@@ -14,7 +14,7 @@ CORPUS_PATH = ROOT / "docs" / "research" / "common-indicator-corpus.json"
 TRANSLATIONS_PATH = ROOT / "scripts" / "behavior_pack_translations.json"
 ATTACK_PATH = ROOT / "romulus" / "intelligence" / "attack_catalog.json"
 OUTPUT_DIR = ROOT / "romulus" / "intelligence" / "behavior_packs"
-COMPILER_VERSION = "4.0.0"
+COMPILER_VERSION = "5.0.0"
 EXPECTED = {
     "entries": 3863,
     "curated_behavioral_indicator": 902,
@@ -233,6 +233,66 @@ def _aggregate_rule(row: dict[str, Any], registry: dict[str, Any]) -> dict[str, 
             "execution": execution}
 
 
+def _baseline_rule(row: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any]:
+    values = [value for observable in row.get("observables", [])
+              if observable.get("role") == "aggregate.signal"
+              for value in observable.get("values", [])]
+    marker = values[0] if len(values) == 1 else None
+    translation = registry.get("baseline_translations", {}).get(str(marker))
+    if not isinstance(translation, dict):
+        missing = str(marker or row.get("id"))
+        return {**row, "activation_mode": "reference", "supported": False,
+            "support_reason": "No reviewed historical baseline parameters are available.",
+            "execution": {"status": "reference_only", "execution_kind": "baseline",
+                "reason_code": "missing_explicit_baseline_semantics", "missing_semantics": [missing]}}
+    primitive = translation.get("primitive")
+    if primitive not in {"first_seen", "prevalence", "deviation"}:
+        raise PackError(f"{row.get('id')}: unsupported baseline primitive {primitive}")
+    families = translation.get("source_families")
+    scopes = translation.get("scope_fields")
+    if not isinstance(families, list) or not families or any(value not in {"host", "network"} for value in families):
+        raise PackError(f"{row.get('id')}: baseline source_families are invalid")
+    if not isinstance(scopes, list) or not scopes or not all(isinstance(value, str) and value for value in scopes):
+        raise PackError(f"{row.get('id')}: baseline scope_fields are invalid")
+    if not isinstance(translation.get("warmup_min"), int) or translation["warmup_min"] < 1:
+        raise PackError(f"{row.get('id')}: baseline warmup_min is invalid")
+    if primitive in {"first_seen", "prevalence"}:
+        fields = translation.get("value_fields")
+        if not isinstance(fields, list) or not fields or not all(isinstance(value, str) and value for value in fields):
+            raise PackError(f"{row.get('id')}: baseline value_fields are invalid")
+    if primitive == "prevalence" and (not isinstance(translation.get("peer_min_scopes"), int)
+            or not isinstance(translation.get("max_prevalence"), (int, float))):
+        raise PackError(f"{row.get('id')}: baseline prevalence parameters are incomplete")
+    if primitive == "deviation":
+        aggregation = translation.get("aggregation")
+        if aggregation not in {"count", "sum", "distinct_count", "ratio"}:
+            raise PackError(f"{row.get('id')}: baseline aggregation is invalid")
+        if aggregation == "sum" and not translation.get("measure_field"):
+            raise PackError(f"{row.get('id')}: baseline measure_field is missing")
+        if aggregation == "distinct_count" and not translation.get("distinct_field"):
+            raise PackError(f"{row.get('id')}: baseline distinct_field is missing")
+        if aggregation == "ratio" and not (translation.get("numerator_filter") and translation.get("denominator_filter")):
+            raise PackError(f"{row.get('id')}: baseline ratio filters are missing")
+        for name in ("multiplier", "zscore", "minimum"):
+            if not isinstance(translation.get(name), (int, float)):
+                raise PackError(f"{row.get('id')}: baseline {name} is missing")
+    execution = {"status": "executable", "execution_kind": "baseline", "primitive": primitive,
+        "evaluation_location": "completed_hunt_history", "source_families": families,
+        "scope_fields": scopes, "warmup_min": translation["warmup_min"],
+        "source_stages": ([{"source": "elasticsearch", "source_language": "elasticsearch_dsl"}]
+                          if families == ["host"] else [
+                              {"source": "elasticsearch", "source_language": "elasticsearch_dsl"},
+                              {"source": "arkime", "source_language": "arkime_expression"},
+                              {"source": "tshark", "source_language": "wireshark_display_filter"},
+                          ])}
+    for name in ("filter", "value_fields", "value_transform", "peer_min_scopes", "max_prevalence",
+                 "aggregation", "measure_field", "distinct_field", "numerator_filter", "denominator_filter",
+                 "multiplier", "zscore", "minimum"):
+        if name in translation:
+            execution[name] = translation[name]
+    return {**row, "activation_mode": "active", "supported": True, "support_reason": "", "execution": execution}
+
+
 def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any]:
     entries = corpus.get("entries")
     if not isinstance(entries, list):
@@ -275,12 +335,7 @@ def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str,
     sequences = [_sequence_rule(row,registry) for row in sorted(sequence_rows,key=lambda row:row["id"])]
     aggregates = [_aggregate_rule(row, registry) for row in sorted(aggregate_rows, key=lambda row: row["id"])]
     unsupported = registry["unsupported_semantics"]
-    baselines = [{
-        **row,
-        "activation_mode": "observe",
-        "supported": False,
-        "support_reason": unsupported["baseline_deviation"],
-    } for row in sorted(baseline_rows, key=lambda row: row["id"])]
+    baselines = [_baseline_rule(row, registry) for row in sorted(baseline_rows, key=lambda row: row["id"])]
     capabilities_pack = {
         "schema_version": "2.0.0",
         "record_type": "source_capability_reference",
@@ -290,7 +345,7 @@ def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str,
         "direct": {"schema_version": "1.0.0", "records": direct},
         "sequences": {"schema_version": "2.0.0", "records": sequences},
         "aggregates": {"schema_version": "2.0.0", "records": aggregates},
-        "baselines": {"schema_version": "1.0.0", "records": baselines},
+        "baselines": {"schema_version": "2.0.0", "records": baselines},
         "capabilities": capabilities_pack,
     }
 
@@ -308,7 +363,8 @@ def write_packs(packs: dict[str, Any], output_dir: Path, corpus: dict[str, Any])
     active_direct = sum(row["activation_mode"] == "active" for row in packs["direct"]["records"])
     active_sequences = sum(row.get("activation_mode") == "active" for row in packs["sequences"]["records"])
     active_aggregates = sum(row.get("activation_mode") == "active" for row in packs["aggregates"]["records"])
-    active = active_direct + active_sequences + active_aggregates
+    active_baselines = sum(row.get("activation_mode") == "active" for row in packs["baselines"]["records"])
+    active = active_direct + active_sequences + active_aggregates + active_baselines
     observe = EXPECTED["curated_behavioral_indicator"] - active
     executable = sum(row.get("supported") is True for name in ("direct","sequences","aggregates","baselines")
         for row in packs[name]["records"])
@@ -327,6 +383,8 @@ def write_packs(packs: dict[str, Any], output_dir: Path, corpus: dict[str, Any])
             "reference_only": len(packs["sequences"]["records"])-active_sequences},
         "aggregate_activation": {"active": active_aggregates,
             "reference_only": len(packs["aggregates"]["records"])-active_aggregates},
+        "baseline_activation": {"active": active_baselines,
+            "reference_only": len(packs["baselines"]["records"])-active_baselines},
         "execution_states": {
             "executable": executable,
             "unsupported": unsupported_count,

@@ -17,7 +17,7 @@ from ..intelligence.knowledge import hypotheses_for, TECHNIQUES, ATTACK_RELEASE,
 from ..intelligence.attack_catalog import bounded_attack_context, load_attack_catalog
 from ..intelligence.correlate import correlate
 from ..intelligence.investigation_graph import build_investigation_graph, derive_finding_paths
-from ..intelligence.analytics import summarize_evidence, build_coverage_ledger
+from ..intelligence.analytics import summarize_evidence, build_coverage_ledger, evidence_source_family
 from ..intelligence.normalization import normalize_elasticsearch_event
 from ..intelligence.behavior_catalog import (
     load_behavior_catalog, load_local_indicators, resolve_semantic_fields, applicable_analytics,
@@ -27,6 +27,7 @@ from ..intelligence.search_matrix import attribute_signature_hits, compile_searc
 from ..intelligence.reference_intelligence import attach_capability_context, compile_capability_index
 from ..intelligence.sequence_analytics import evaluate_sequences
 from ..intelligence.aggregate_analytics import evaluate_aggregates
+from ..intelligence.baseline_analytics import evaluate_baselines, persist_completed_baselines
 from ..tools.elasticsearch_client import ElasticsearchAdapter, validate_query
 from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
@@ -1297,6 +1298,13 @@ class HuntEngine:
             list(s.get("search_outcomes",[])),
         )
         fresh_candidates.extend(aggregate_candidates)
+        baseline_definitions=self.behavior_catalog.get("behavior_packs",{}).get("baselines",{}).get("records",[])
+        baseline_states=self.store.load_baseline_states([str(row.get("id")) for row in baseline_definitions])
+        baseline_candidates,baseline_coverage=evaluate_baselines(
+            analysis_evidence,baseline_definitions,baseline_states,
+            None if self.offline else list(s.get("search_outcomes",[])),
+        )
+        fresh_candidates.extend(baseline_candidates)
         fresh_candidates=attach_capability_context(
             fresh_candidates,analysis_evidence,self.capability_index,limit=5)
         full_candidates=merge_candidate_queue(previous_candidates,fresh_candidates)
@@ -1332,6 +1340,7 @@ class HuntEngine:
             "unresolved_low_priority":sum(item.get("priority_tier")=="low" and item.get("disposition")=="observed" for item in full_candidates)}
         s["coverage"]["sequence_analytics"]=sequence_coverage
         s["coverage"]["aggregate_analytics"]=aggregate_coverage
+        s["coverage"]["baseline_analytics"]=baseline_coverage
         for hypothesis in s.get("hypotheses",[]):
             relevant=[e for e in analysis_evidence if _relevant(hypothesis["technique_id"],e)]
             # Heuristic matches are candidate context for the model, not an
@@ -1936,6 +1945,19 @@ class HuntEngine:
         except Exception as e:
             s["status"]="partial"; s["error"]=(s.get("error","")+f" Report generation failed: {type(e).__name__}: {str(e)[:150]}").strip()
             s["coverage"]["coverage_closure_ready"]=False
+        baseline_definitions=self.behavior_catalog.get("behavior_packs",{}).get("baselines",{}).get("records",[])
+        if s.get("report_paths"):
+            current=self.store.load_baseline_states([str(row.get("id")) for row in baseline_definitions])
+            candidate_ids={evidence_id for candidate in self.store.list_candidates(s["hunt_id"])
+                for evidence_id in candidate.get("evidence_ids",[]) if evidence_id}
+            finding_ids={evidence_id for finding in s.get("findings",[])
+                for evidence_id in finding.get("evidence_ids",[]) if evidence_id}
+            baseline_host,baseline_network=self._analysis_evidence(s)
+            s["coverage"]["baseline_updates"]=persist_completed_baselines(
+                self.store,s["hunt_id"],str(s.get("status")),baseline_host+baseline_network,
+                baseline_definitions,current,candidate_ids|finding_ids)
+        else:
+            s["coverage"]["baseline_updates"]={"status":"skipped_incomplete_hunt","eligible":0,"applied":0}
         self._stage(s,"report","completed" if s.get("report_paths") else "failed",{"outcome":s.get("outcome"),"termination_reason":s.get("termination_reason")})
         print(f"[ROMULUS] termination={s['termination_reason']} outcome={s['outcome']} tools={s.get('tool_calls',0)}")
         return self._save(s)
@@ -2360,18 +2382,7 @@ def _bounded(value,depth=0):
 
 
 def _evidence_domain(event):
-    provenance=event.get("provenance",{}) if isinstance(event.get("provenance"),dict) else {}
-    domain=str(provenance.get("domain") or "").lower()
-    if domain in {"host","network"}: return domain
-    source=str(event.get("source") or "").lower()
-    if source in {"arkime","tshark","aggregate"}: return "network"
-    index=str(provenance.get("index") or "").lower()
-    raw=event.get("raw",{}) if isinstance(event.get("raw"),dict) else {}
-    category=str(_nested(raw,"event.category") or raw.get("event.category") or "").lower()
-    module=str(_nested(raw,"event.module") or _nested(raw,"event.dataset") or raw.get("event.module") or "").lower()
-    if "network" in index or "network" in category or any(token in module for token in ("zeek","suricata","netflow","packetbeat","panw","network")):
-        return "network"
-    return "host"
+    return evidence_source_family(event)
 
 
 def _normalized_entity(value):

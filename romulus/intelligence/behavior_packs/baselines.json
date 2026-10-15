@@ -1,7 +1,7 @@
 {
   "records": [
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -16,6 +16,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "process.name"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -45,8 +67,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -59,7 +81,7 @@
       "title": "Baseline deviation: first seen process on host"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -74,6 +96,30 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "max_prevalence": 0.05,
+        "peer_min_scopes": 20,
+        "primitive": "prevalence",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "process.name"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -103,8 +149,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -117,7 +163,7 @@
       "title": "Baseline deviation: rare process for peer group"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -132,6 +178,29 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "process.parent.name",
+          "process.name"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -161,8 +230,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -175,7 +244,7 @@
       "title": "Baseline deviation: first seen parent child pair"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -190,6 +259,31 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "max_prevalence": 0.05,
+        "peer_min_scopes": 20,
+        "primitive": "prevalence",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "process.parent.name",
+          "process.name"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -219,8 +313,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -233,7 +327,7 @@
       "title": "Baseline deviation: rare parent child pair"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -248,6 +342,30 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "host.name",
+          "process.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "process.command_line"
+        ],
+        "value_transform": "command_shape",
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -277,8 +395,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -291,7 +409,7 @@
       "title": "Baseline deviation: first seen command line shape"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -306,6 +424,31 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "max_prevalence": 0.05,
+        "peer_min_scopes": 20,
+        "primitive": "prevalence",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "process.command_line"
+        ],
+        "value_transform": "command_shape",
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -335,8 +478,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -349,7 +492,7 @@
       "title": "Baseline deviation: rare command for user"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -364,6 +507,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "unsigned_binary_on_normally_signed_host"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -393,7 +544,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -407,7 +558,7 @@
       "title": "Baseline deviation: unsigned binary on normally signed host"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -422,6 +573,30 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "max_prevalence": 0.05,
+        "peer_min_scopes": 20,
+        "primitive": "prevalence",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "file.hash.sha256"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -451,8 +626,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -465,7 +640,7 @@
       "title": "Baseline deviation: binary hash seen on one host"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -480,6 +655,29 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "host.name",
+          "process.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "process.executable"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -509,8 +707,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -523,7 +721,7 @@
       "title": "Baseline deviation: process runs from new path"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -538,6 +736,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "system_binary_runs_from_user_writable_path"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -567,7 +773,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -581,7 +787,7 @@
       "title": "Baseline deviation: system binary runs from user writable path"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -596,6 +802,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "service.name"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -625,8 +853,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -639,7 +867,7 @@
       "title": "Baseline deviation: first seen service"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -654,6 +882,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "task.name"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -683,8 +933,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -697,7 +947,7 @@
       "title": "Baseline deviation: first seen scheduled task"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -712,6 +962,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "registry.path"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -741,8 +1013,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -755,7 +1027,7 @@
       "title": "Baseline deviation: first seen autorun"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -770,6 +1042,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "first_seen_kernel_module"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -799,7 +1079,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -813,7 +1093,7 @@
       "title": "Baseline deviation: first seen kernel module"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -828,6 +1108,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "first_seen_driver"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -857,7 +1145,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -871,7 +1159,7 @@
       "title": "Baseline deviation: first seen driver"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -886,6 +1174,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "first_seen_login_item"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -915,7 +1211,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -929,7 +1225,7 @@
       "title": "Baseline deviation: first seen login item"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -944,6 +1240,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "user.name"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -973,8 +1291,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -987,7 +1305,7 @@
       "title": "Baseline deviation: first seen user on host"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1002,6 +1320,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "dormant_user_activity"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1031,7 +1357,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -1045,7 +1371,7 @@
       "title": "Baseline deviation: dormant user activity"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1060,6 +1386,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "service_account_interactive_use"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1089,7 +1423,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -1103,7 +1437,7 @@
       "title": "Baseline deviation: service account interactive use"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1118,6 +1452,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "user_logs_into_new_asset_class"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1147,7 +1489,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -1161,7 +1503,7 @@
       "title": "Baseline deviation: user logs into new asset class"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1176,6 +1518,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "privileged_action_new_for_user"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1205,7 +1555,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -1219,7 +1569,7 @@
       "title": "Baseline deviation: privileged action new for user"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1234,6 +1584,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "source.ip"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1263,8 +1635,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -1277,7 +1649,7 @@
       "title": "Baseline deviation: first seen source ip for account"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1292,6 +1664,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "source.geo.country_iso_code"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1321,8 +1715,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -1335,7 +1729,7 @@
       "title": "Baseline deviation: first seen country for account"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1350,6 +1744,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "device.id"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1379,8 +1795,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -1393,7 +1809,7 @@
       "title": "Baseline deviation: first seen device for account"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1408,6 +1824,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "network.protocol"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1437,8 +1875,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -1451,7 +1889,7 @@
       "title": "Baseline deviation: new authentication protocol for account"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1466,6 +1904,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "authentication.method"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1495,8 +1955,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -1509,7 +1969,7 @@
       "title": "Baseline deviation: new mfa method for account"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1524,6 +1984,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "authentication_at_unusual_hour"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1553,7 +2021,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -1567,7 +2035,7 @@
       "title": "Baseline deviation: authentication at unusual hour"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1582,6 +2050,36 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "count",
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "filter": {
+          "field": "event.category",
+          "operator": "contains",
+          "values": [
+            "authentication"
+          ]
+        },
+        "minimum": 20,
+        "multiplier": 3.0,
+        "primitive": "deviation",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1611,8 +2109,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -1625,7 +2123,7 @@
       "title": "Baseline deviation: authentication volume spike"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1640,6 +2138,41 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "ratio",
+        "denominator_filter": {
+          "field": "event.outcome",
+          "operator": "exists",
+          "values": []
+        },
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "minimum": 0.5,
+        "multiplier": 3.0,
+        "numerator_filter": {
+          "field": "event.outcome",
+          "operator": "equals",
+          "values": [
+            "failure"
+          ]
+        },
+        "primitive": "deviation",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1669,8 +2202,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -1683,7 +2216,7 @@
       "title": "Baseline deviation: failure rate spike"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1698,6 +2231,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "new_admin_relationship"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1727,7 +2268,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -1741,7 +2282,7 @@
       "title": "Baseline deviation: new admin relationship"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1756,6 +2297,35 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "filter": {
+          "field": "event.action",
+          "operator": "contains",
+          "values": [
+            "consent"
+          ]
+        },
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "application.name"
+        ],
+        "warmup_min": 25
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1785,8 +2355,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -1799,7 +2369,7 @@
       "title": "Baseline deviation: new application consent relationship"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1814,6 +2384,36 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "source.ip"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "dns.question.name"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1843,8 +2443,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -1857,7 +2457,7 @@
       "title": "Baseline deviation: first seen domain"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1872,6 +2472,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "first_seen_external_ip"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1901,7 +2509,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -1915,7 +2523,7 @@
       "title": "Baseline deviation: first seen external ip"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1930,6 +2538,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "first_seen_asn"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1959,7 +2575,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -1973,7 +2589,7 @@
       "title": "Baseline deviation: first seen asn"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -1988,6 +2604,36 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "source.ip"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "destination.port"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2017,8 +2663,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2031,7 +2677,7 @@
       "title": "Baseline deviation: first seen destination port"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2046,6 +2692,36 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "source.ip"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "network.protocol"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2075,8 +2751,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2089,7 +2765,7 @@
       "title": "Baseline deviation: new protocol for host"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2104,6 +2780,37 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "source.ip",
+          "process.name"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "tls.server.name"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2133,8 +2840,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2147,7 +2854,7 @@
       "title": "Baseline deviation: new sni for process"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2162,6 +2869,38 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "max_prevalence": 0.05,
+        "peer_min_scopes": 20,
+        "primitive": "prevalence",
+        "scope_fields": [
+          "source.ip"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "tls.client.ja3"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2191,8 +2930,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2205,7 +2944,7 @@
       "title": "Baseline deviation: rare tls fingerprint for host"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2220,6 +2959,38 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "sum",
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "measure_field": "source.bytes",
+        "minimum": 10485760,
+        "multiplier": 3.0,
+        "primitive": "deviation",
+        "scope_fields": [
+          "source.ip"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2249,8 +3020,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2263,7 +3034,7 @@
       "title": "Baseline deviation: outbound bytes above host baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2278,6 +3049,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "connection_duration_above_baseline"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2307,7 +3086,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -2321,7 +3100,7 @@
       "title": "Baseline deviation: connection duration above baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2336,6 +3115,37 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "count",
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "minimum": 100,
+        "multiplier": 3.0,
+        "primitive": "deviation",
+        "scope_fields": [
+          "source.ip"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2365,8 +3175,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2379,7 +3189,7 @@
       "title": "Baseline deviation: connection count above baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2394,6 +3204,42 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "count",
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "filter": {
+          "field": "dns.question.name",
+          "operator": "exists",
+          "values": []
+        },
+        "minimum": 100,
+        "multiplier": 3.0,
+        "primitive": "deviation",
+        "scope_fields": [
+          "source.ip"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2423,8 +3269,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2437,7 +3283,7 @@
       "title": "Baseline deviation: dns volume above baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2452,6 +3298,50 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "ratio",
+        "denominator_filter": {
+          "field": "dns.question.name",
+          "operator": "exists",
+          "values": []
+        },
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "minimum": 0.5,
+        "multiplier": 3.0,
+        "numerator_filter": {
+          "field": "dns.response_code",
+          "operator": "equals_any",
+          "values": [
+            "NXDOMAIN",
+            "3"
+          ]
+        },
+        "primitive": "deviation",
+        "scope_fields": [
+          "source.ip"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2481,8 +3371,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2495,7 +3385,7 @@
       "title": "Baseline deviation: nxdomain rate above baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2510,6 +3400,38 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "distinct_count",
+        "distinct_field": "destination.ip",
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "minimum": 20,
+        "multiplier": 3.0,
+        "primitive": "deviation",
+        "scope_fields": [
+          "source.ip"
+        ],
+        "source_families": [
+          "network"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          },
+          {
+            "source": "arkime",
+            "source_language": "arkime_expression"
+          },
+          {
+            "source": "tshark",
+            "source_language": "wireshark_display_filter"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2539,8 +3461,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2553,7 +3475,7 @@
       "title": "Baseline deviation: destination fanout above baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2568,6 +3490,14 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "execution_kind": "baseline",
+        "missing_semantics": [
+          "internal_scan_rate_above_baseline"
+        ],
+        "reason_code": "missing_explicit_baseline_semantics",
+        "status": "reference_only"
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2597,7 +3527,7 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "support_reason": "No reviewed historical baseline parameters are available.",
       "supported": false,
       "tactics": [
         "discovery",
@@ -2611,7 +3541,7 @@
       "title": "Baseline deviation: internal scan rate above baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2626,6 +3556,37 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "count",
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "filter": {
+          "field": "event.action",
+          "operator": "contains_any",
+          "values": [
+            "file create",
+            "file write"
+          ]
+        },
+        "minimum": 100,
+        "multiplier": 3.0,
+        "primitive": "deviation",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2655,8 +3616,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2669,7 +3630,7 @@
       "title": "Baseline deviation: file write volume above baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2684,6 +3645,36 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "count",
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "filter": {
+          "field": "event.action",
+          "operator": "contains",
+          "values": [
+            "rename"
+          ]
+        },
+        "minimum": 50,
+        "multiplier": 3.0,
+        "primitive": "deviation",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2713,8 +3704,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2727,7 +3718,7 @@
       "title": "Baseline deviation: file rename rate above baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2742,6 +3733,39 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "count",
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "filter": {
+          "field": "file.path",
+          "operator": "contains_any",
+          "values": [
+            ".zip",
+            ".7z",
+            ".rar",
+            ".tar"
+          ]
+        },
+        "minimum": 10,
+        "multiplier": 3.0,
+        "primitive": "deviation",
+        "scope_fields": [
+          "host.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2771,8 +3795,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2785,7 +3809,7 @@
       "title": "Baseline deviation: archive creation volume above baseline"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2800,6 +3824,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "event.action"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2829,8 +3875,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2843,7 +3889,7 @@
       "title": "Baseline deviation: cloud api new for principal"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2858,6 +3904,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "cloud.region"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2887,8 +3955,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2901,7 +3969,7 @@
       "title": "Baseline deviation: cloud region new for principal"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2916,6 +3984,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "cloud.resource.type"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2945,8 +4035,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -2959,7 +4049,7 @@
       "title": "Baseline deviation: cloud resource type new for principal"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -2974,6 +4064,41 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "aggregation": "ratio",
+        "denominator_filter": {
+          "field": "event.action",
+          "operator": "exists",
+          "values": []
+        },
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "minimum": 0.5,
+        "multiplier": 3.0,
+        "numerator_filter": {
+          "field": "event.outcome",
+          "operator": "equals",
+          "values": [
+            "failure"
+          ]
+        },
+        "primitive": "deviation",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "warmup_min": 7,
+        "zscore": 3.0
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3003,8 +4128,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -3017,7 +4142,7 @@
       "title": "Baseline deviation: cloud error rate spike"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -3032,6 +4157,35 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "filter": {
+          "field": "event.action",
+          "operator": "contains",
+          "values": [
+            "secret"
+          ]
+        },
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "cloud.resource.name"
+        ],
+        "warmup_min": 25
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3061,8 +4215,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -3075,7 +4229,7 @@
       "title": "Baseline deviation: secret access new for principal"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -3090,6 +4244,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "kubernetes.cluster.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "container.image.name"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3119,8 +4295,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -3133,7 +4309,7 @@
       "title": "Baseline deviation: container image new for cluster"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -3148,6 +4324,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "user_agent.original"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3177,8 +4375,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -3191,7 +4389,7 @@
       "title": "Baseline deviation: kubernetes user agent new for actor"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -3206,6 +4404,35 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "filter": {
+          "field": "kubernetes.audit.objectRef.subresource",
+          "operator": "equals",
+          "values": [
+            "exec"
+          ]
+        },
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "kubernetes.audit.objectRef.name"
+        ],
+        "warmup_min": 25
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3235,8 +4462,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -3249,7 +4476,7 @@
       "title": "Baseline deviation: pod exec new for actor"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -3264,6 +4491,28 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "primitive": "first_seen",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "kubernetes.namespace"
+        ],
+        "warmup_min": 50
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3293,8 +4542,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -3307,7 +4556,7 @@
       "title": "Baseline deviation: namespace access new for service account"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078",
         "T1059",
@@ -3322,6 +4571,31 @@
       "escalation_conditions": [
         "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
       ],
+      "execution": {
+        "evaluation_location": "completed_hunt_history",
+        "execution_kind": "baseline",
+        "max_prevalence": 0.05,
+        "peer_min_scopes": 20,
+        "primitive": "prevalence",
+        "scope_fields": [
+          "user.name"
+        ],
+        "source_families": [
+          "host"
+        ],
+        "source_stages": [
+          {
+            "source": "elasticsearch",
+            "source_language": "elasticsearch_dsl"
+          }
+        ],
+        "status": "executable",
+        "value_fields": [
+          "kubernetes.audit.verb",
+          "kubernetes.audit.objectRef.resource"
+        ],
+        "warmup_min": 100
+      },
       "expected_noise": "high",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3351,8 +4625,8 @@
         "ZEEK"
       ],
       "specificity": 40,
-      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "execution",
@@ -3365,5 +4639,5 @@
       "title": "Baseline deviation: rare api verb resource pair"
     }
   ],
-  "schema_version": "1.0.0"
+  "schema_version": "2.0.0"
 }

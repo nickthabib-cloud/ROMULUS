@@ -16,6 +16,38 @@ from typing import Any, Iterable
 from ..investigation.scheduler import outcome_resolves
 
 
+def evidence_source_family(event: dict[str, Any], raw: dict[str, Any] | None = None) -> str:
+    """Return the acquisition domain recorded by the scheduler and adapters."""
+    explicit = event.get("source_family")
+    if explicit in {"host", "network"}:
+        return str(explicit)
+    provenance = event.get("provenance") if isinstance(event.get("provenance"), dict) else {}
+    domain = str(provenance.get("domain") or "").lower()
+    if domain in {"host", "network"}:
+        return domain
+    source = str(event.get("source") or "").lower()
+    if source in {"arkime", "tshark", "aggregate"}:
+        return "network"
+    raw = raw if isinstance(raw, dict) else (event.get("raw") if isinstance(event.get("raw"), dict) else {})
+    index = str(provenance.get("index") or "").lower()
+    category = str(_nested_value(raw, "event.category") or raw.get("event.category") or "").lower()
+    module = str(_nested_value(raw, "event.module") or _nested_value(raw, "event.dataset")
+                 or raw.get("event.module") or "").lower()
+    if "network" in index or "network" in category or any(
+            token in module for token in ("zeek", "suricata", "netflow", "packetbeat", "panw", "network")):
+        return "network"
+    return "host"
+
+
+def _nested_value(value: dict[str, Any], path: str) -> Any:
+    current: Any = value
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
 def summarize_evidence(host_events: list[dict], network_events: list[dict], limit: int = 12) -> dict[str, Any]:
     all_events = list(host_events) + list(network_events)
     source_counts = Counter(str(e.get("source") or "unknown") for e in all_events)

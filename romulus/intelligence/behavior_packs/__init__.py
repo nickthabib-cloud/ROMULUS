@@ -79,4 +79,14 @@ def load_behavior_packs(directory: Path = BEHAVIOR_PACK_DIR) -> dict[str, Any]:
                 raise BehaviorPackError(f"{row.get('id')}: executable aggregate is not supported")
             if execution.get("primitive") not in aggregate_primitives:
                 raise BehaviorPackError(f"{row.get('id')}: aggregate primitive is invalid")
+    for row in loaded["baselines"]["records"]:
+        execution=row.get("execution") or {}
+        status=execution.get("status")
+        if status not in {"executable","reference_only"}:
+            raise BehaviorPackError(f"{row.get('id')}: baseline execution status is missing")
+        if status=="executable":
+            if row.get("supported") is not True:
+                raise BehaviorPackError(f"{row.get('id')}: executable baseline is not supported")
+            if execution.get("primitive") not in {"first_seen","prevalence","deviation"}:
+                raise BehaviorPackError(f"{row.get('id')}: baseline primitive is invalid")
     return loaded
