@@ -246,10 +246,63 @@ class HuntEngine:
         record["retained_in_context"]+=1
         return compact
 
+    def _analysis_evidence(self,s):
+        """Load the complete persisted evidence set for deterministic analysis.
+
+        Hunt state intentionally keeps a bounded context for checkpoints and
+        model calls. SQLite is the evidence truth set and must therefore drive
+        deterministic summaries and candidate generation.
+        """
+        persisted=self.store.list_evidence(s["hunt_id"])
+        evidence=persisted or list(s.get("host",[]))+list(s.get("network",[]))
+        host=[]; network=[]
+        for event in evidence:
+            (network if _evidence_domain(event)=="network" else host).append(event)
+        return host,network
+
+    def _promote_candidate_context(self,s,evidence,candidates,limit=200):
+        """Promote cited and exact-entity related rows into bounded hunt context."""
+        limit=max(0,min(int(limit),200))
+        if not limit: return 0
+        selected=[candidate for candidate in candidates
+            if candidate.get("kind")=="trusted_indicator" or int(candidate.get("priority_score",0) or 0)>=40]
+        evidence_by_id={str(event.get("evidence_id")):event for event in evidence if event.get("evidence_id")}
+        direct_ids=[]; entities=set()
+        for candidate in selected:
+            for value in candidate.get("assets",[]) or []:
+                normalized=_normalized_entity(value)
+                if normalized: entities.add(normalized)
+            for evidence_id in candidate.get("evidence_ids",[]) or []:
+                value=str(evidence_id)
+                if value not in direct_ids: direct_ids.append(value)
+                event=evidence_by_id.get(value)
+                if event: entities.update(_structured_entities(event))
+        ordered=[]; queued=set()
+        for evidence_id in direct_ids:
+            if evidence_id in evidence_by_id and evidence_id not in queued:
+                ordered.append(evidence_by_id[evidence_id]); queued.add(evidence_id)
+        related=sorted((event for event in evidence
+            if event.get("evidence_id") not in queued and entities.intersection(_structured_entities(event))),
+            key=lambda event:(str(event.get("observed_at") or ""),str(event.get("evidence_id") or "")))
+        ordered.extend(related)
+        retained={str(event.get("evidence_id")) for event in s.get("host",[])+s.get("network",[]) if event.get("evidence_id")}
+        promoted=0
+        for event in ordered:
+            evidence_id=str(event.get("evidence_id") or "")
+            if not evidence_id or evidence_id in retained: continue
+            compact={"evidence_id":evidence_id,"source":event.get("source","unknown"),
+                "observed_at":event.get("observed_at",""),"observation":event.get("observation",""),
+                "asset":event.get("asset",""),"provenance":event.get("provenance",{}),
+                "raw":_context_raw(event.get("raw",{}))}
+            s.setdefault(_evidence_domain(event),[]).append(compact)
+            retained.add(evidence_id); promoted+=1
+            if promoted>=limit: break
+        return promoted
+
     def _add_tshark_row(self,s,row,provenance,query,lead_id=None):
         observed=_as_iso(row.get("frame.time_epoch")) if row.get("frame.time_epoch") else ""
         item=encode(Evidence.create("tshark",_event_description(row),observed_at=observed,
-            query=query,provenance={**provenance,**({"lead_id":lead_id} if lead_id else {})},raw=_bounded(row)))
+            query=query,provenance={**provenance,"domain":"network",**({"lead_id":lead_id} if lead_id else {})},raw=_bounded(row)))
         compact=self._record_evidence(s,item)
         if compact:
             s.setdefault("network",[]).append(compact)
@@ -438,7 +491,7 @@ class HuntEngine:
             if value is None: value=hit.get(field)
             if value is not None: raw[field]=value
         item=encode(Evidence.create("elasticsearch",_event_description(hit),asset=str(host),observed_at=observed,query=json.dumps(query,sort_keys=True),
-            provenance={"index":index,"document_id":hit.get("_id"),"lead_id":lead_id},raw=raw))
+            provenance={"index":index,"document_id":hit.get("_id"),"lead_id":lead_id,"domain":key},raw=raw))
         compact=self._record_evidence(s,item)
         if compact: s.setdefault(key,[]).append(compact)
 
@@ -452,7 +505,7 @@ class HuntEngine:
             item=encode(Evidence.create("arkime",_event_description(row),
                 asset=str(row.get("destination.ip",row.get("dstIp",""))),
                 observed_at=_as_iso(row.get("firstPacket")) if row.get("firstPacket") is not None else "",query=expression,
-                provenance={"session_id":session_id,"lead_id":lead_id,"time_range":scope},raw=_bounded(row)))
+                provenance={"session_id":session_id,"lead_id":lead_id,"time_range":scope,"domain":"network"},raw=_bounded(row)))
             compact=self._record_evidence(s,item)
             if compact: s["network"].append(compact); added+=1
             if session_id: known.add(str(session_id))
@@ -1067,15 +1120,21 @@ class HuntEngine:
         return outcome
 
     def _analyze(self,s):
-        s["correlations"]=correlate(s.get("host",[]),s.get("network",[]))
-        all_e=s.get("host",[])+s.get("network",[])
-        s["investigation_graph"]=build_investigation_graph(all_e,s["correlations"])
-        s["analytic_summary"]=summarize_evidence(s.get("host",[]),s.get("network",[]))
+        analysis_host,analysis_network=self._analysis_evidence(s)
+        analysis_evidence=analysis_host+analysis_network
+        s["analytic_summary"]=summarize_evidence(analysis_host,analysis_network)
         s.setdefault("coverage",{})["analytic_summary"]=s["analytic_summary"]
         previous_candidates=list(s.get("candidate_leads",[]))
-        fresh_candidates=build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        fresh_candidates=build_candidate_queue(analysis_evidence,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
         s["candidate_leads"]=merge_candidate_queue(previous_candidates,fresh_candidates)
-        new_hypotheses=_candidate_hypotheses(s["candidate_leads"],s.get("hypotheses",[]),all_e)
+        promoted=self._promote_candidate_context(s,analysis_evidence,s["candidate_leads"])
+        context_evidence=s.get("host",[])+s.get("network",[])
+        s["correlations"]=correlate(s.get("host",[]),s.get("network",[]))
+        s["investigation_graph"]=build_investigation_graph(context_evidence,s["correlations"])
+        s["coverage"]["analysis_evidence"]={"persisted":len(analysis_evidence),
+            "host":len(analysis_host),"network":len(analysis_network),
+            "checkpoint_context":len(context_evidence),"promoted":promoted}
+        new_hypotheses=_candidate_hypotheses(s["candidate_leads"],s.get("hypotheses",[]),analysis_evidence)
         if new_hypotheses:
             s.setdefault("hypotheses",[]).extend(new_hypotheses)
             known_leads={lead.get("id") for lead in s.setdefault("lead_catalog",[])}
@@ -1089,7 +1148,7 @@ class HuntEngine:
             "customer_visible":sum(bool(item.get("customer_visible")) for item in s["candidate_leads"]),
             "unresolved_low_priority":sum(item.get("priority_tier")=="low" and item.get("disposition")=="observed" for item in s["candidate_leads"])}
         for hypothesis in s.get("hypotheses",[]):
-            relevant=[e for e in all_e if _relevant(hypothesis["technique_id"],e)]
+            relevant=[e for e in analysis_evidence if _relevant(hypothesis["technique_id"],e)]
             # Heuristic matches are candidate context for the model, not an
             # assessment. Only a cited analyst assessment may mark a hypothesis
             # supported or contradicted.
@@ -1108,11 +1167,12 @@ class HuntEngine:
             host_available,network_available,s.get("candidate_leads",[]))
         s["coverage"]["hypothesis_coverage"]=ledger
         signals=len(s["analytic_summary"].get("behavioral_observations",[]))
-        self._stage(s,"evidence_analysis","completed",{"host_events":len(s.get("host",[])),"network_events":len(s.get("network",[])),
+        self._stage(s,"evidence_analysis","completed",{"host_events":len(analysis_host),"network_events":len(analysis_network),
+            "checkpoint_context_events":len(context_evidence),"promoted_context_events":promoted,
             "correlations":len(s["correlations"]),"behavioral_observations":signals,
             "behavior_candidates":len(s.get("candidate_leads",[])),"findings":len(s.get("findings",[])),
             "high_priority_tested":ledger.get("high_priority_tested"),"high_priority_total":ledger.get("high_priority_total")})
-        print(f"[ROMULUS] analysis stage: evidence={len(all_e)} analytic_observations={signals} behavior_candidates={len(s.get('candidate_leads',[]))} correlations={len(s['correlations'])} findings={len(s.get('findings',[]))} high_priority_tested={ledger.get('high_priority_tested')}/{ledger.get('high_priority_total')}")
+        print(f"[ROMULUS] analysis stage: persisted_evidence={len(analysis_evidence)} context_evidence={len(context_evidence)} promoted={promoted} analytic_observations={signals} behavior_candidates={len(s.get('candidate_leads',[]))} correlations={len(s['correlations'])} findings={len(s.get('findings',[]))} high_priority_tested={ledger.get('high_priority_tested')}/{ledger.get('high_priority_total')}")
         return self._save(s)
 
     def _publish_smb_lead(self,s):
@@ -2075,6 +2135,46 @@ def _bounded(value,depth=0):
     if isinstance(value,list): return [_bounded(x,depth+1) for x in value[:40]]
     if isinstance(value,str): return value[:2000]
     return value
+
+
+def _evidence_domain(event):
+    provenance=event.get("provenance",{}) if isinstance(event.get("provenance"),dict) else {}
+    domain=str(provenance.get("domain") or "").lower()
+    if domain in {"host","network"}: return domain
+    source=str(event.get("source") or "").lower()
+    if source in {"arkime","tshark","aggregate"}: return "network"
+    index=str(provenance.get("index") or "").lower()
+    raw=event.get("raw",{}) if isinstance(event.get("raw"),dict) else {}
+    category=str(_nested(raw,"event.category") or raw.get("event.category") or "").lower()
+    module=str(_nested(raw,"event.module") or _nested(raw,"event.dataset") or raw.get("event.module") or "").lower()
+    if "network" in index or "network" in category or any(token in module for token in ("zeek","suricata","netflow","packetbeat","panw","network")):
+        return "network"
+    return "host"
+
+
+def _normalized_entity(value):
+    text=str(value or "").strip().lower().rstrip(".")
+    if not text or text in {"unknown","?","none","null","localhost"}: return None
+    return text[:500]
+
+
+def _structured_entities(event):
+    """Return exact structured entities suitable for bounded candidate expansion."""
+    raw=event.get("raw",{}) if isinstance(event.get("raw"),dict) else {}
+    fields=("host.name","host.hostname","host.ip","source.ip","destination.ip","srcIp","dstIp",
+        "ip.src","ip.dst","dns.question.name","dns.qry.name","dns.host","http.host","host.http",
+        "tls.handshake.extensions_server_name","user.name","process.name","process.executable")
+    entities=set()
+    for value in (event.get("asset"),):
+        normalized=_normalized_entity(value)
+        if normalized: entities.add(normalized)
+    for field in fields:
+        value=_nested(raw,field)
+        if value is None: value=raw.get(field)
+        for item in value if isinstance(value,list) else [value]:
+            normalized=_normalized_entity(item)
+            if normalized: entities.add(normalized)
+    return entities
 
 
 def _context_raw(raw):
