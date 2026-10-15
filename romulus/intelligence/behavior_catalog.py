@@ -464,6 +464,11 @@ def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) 
             clauses.extend({"prefix": {field: value}} for value in values[:12])
         elif operator in {"contains_any", "ends_with_any"}:
             clauses.extend({"match_phrase": {field: value}} for value in values[:12])
+            if field in {"message", "event.original", "audit.command"}:
+                for value in values[:12]:
+                    token = re.match(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}", str(value).strip())
+                    if token:
+                        clauses.append({"prefix": {field: token.group(0).encode("utf-8").hex()}})
         else:
             continue
     if not clauses:

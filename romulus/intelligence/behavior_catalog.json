@@ -1793,8 +1793,15 @@
         "user.name"
       ],
       "match": {
-        "all": [],
-        "any": [
+        "all": [
+          {
+            "role": "process.command_line",
+            "operator": "contains_any",
+            "values": [
+              "curl ",
+              "wget "
+            ]
+          },
           {
             "role": "process.command_line",
             "operator": "contains_any",
@@ -1806,6 +1813,7 @@
             ]
           }
         ],
+        "any": [],
         "none": []
       },
       "priority_tier": "high",

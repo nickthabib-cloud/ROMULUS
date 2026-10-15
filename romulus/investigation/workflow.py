@@ -18,6 +18,7 @@ from ..intelligence.attack_catalog import load_attack_catalog
 from ..intelligence.correlate import correlate
 from ..intelligence.investigation_graph import build_investigation_graph, derive_finding_paths
 from ..intelligence.analytics import summarize_evidence, build_coverage_ledger
+from ..intelligence.normalization import normalize_elasticsearch_event
 from ..intelligence.behavior_catalog import (
     load_behavior_catalog, load_local_indicators, resolve_semantic_fields, applicable_analytics,
     compile_elasticsearch_seed, compile_elasticsearch_indicator_seed, build_candidate_queue, merge_candidate_queue,
@@ -431,7 +432,7 @@ class HuntEngine:
         observed_value=_nested(hit,"@timestamp") or _nested(hit,"timestamp") or _nested(hit,"event.created") or _nested(hit,"event.ingested") or _nested(hit,"event.start")
         observed=_as_iso(observed_value) if observed_value is not None else ""
         host=_nested(hit,"host.name") or hit.get("host.name","")
-        raw=_bounded(hit)
+        raw=_bounded(normalize_elasticsearch_event(hit))
         for field in ("source.ip","destination.ip","source.port","destination.port","host.name","host.ip","event.code","winlog.event_id","process.name"):
             value=_nested(hit,field)
             if value is None: value=hit.get(field)
