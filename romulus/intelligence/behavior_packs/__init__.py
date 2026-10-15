@@ -60,4 +60,11 @@ def load_behavior_packs(directory: Path = BEHAVIOR_PACK_DIR) -> dict[str, Any]:
         raise BehaviorPackError("capabilities.json: duplicate reference IDs")
     if any(row.get("record_type") != "source_capability_reference" for row in capabilities):
         raise BehaviorPackError("capabilities.json: non-capability record found")
+    sequences=loaded["sequences"]["records"]
+    for row in sequences:
+        status=(row.get("execution") or {}).get("status")
+        if status not in {"executable","reference_only"}:
+            raise BehaviorPackError(f"{row.get('id')}: sequence execution status is missing")
+        if status=="executable" and row.get("supported") is not True:
+            raise BehaviorPackError(f"{row.get('id')}: executable sequence is not supported")
     return loaded

@@ -1,7 +1,7 @@
 {
   "records": [
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1105",
         "T1059"
@@ -15,6 +15,48 @@
       "escalation_conditions": [
         "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset",
+          "path"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "download",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0005:01"
+          },
+          {
+            "signal": "write_local",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0005:02"
+          },
+          {
+            "signal": "chmod",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0005:03"
+          },
+          {
+            "signal": "execute",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0005:04"
+          }
+        ],
+        "status": "executable",
+        "threshold": 4,
+        "window_minutes": 15
+      },
       "expected_noise": "low",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -48,8 +90,8 @@
         "ATOMIC_RED_TEAM"
       ],
       "specificity": 88,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "command-and-control"
@@ -60,7 +102,7 @@
       "title": "Downloaded payload made executable and launched"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1069",
         "T1087",
@@ -76,6 +118,90 @@
       "escalation_conditions": [
         "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset",
+          "actor"
+        ],
+        "order": "unordered_threshold",
+        "stages": [
+          {
+            "signal": "id",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:01"
+          },
+          {
+            "signal": "whoami",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:02"
+          },
+          {
+            "signal": "groups",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:03"
+          },
+          {
+            "signal": "sudo",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:04"
+          },
+          {
+            "signal": "uname",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:05"
+          },
+          {
+            "signal": "os_release",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:06"
+          },
+          {
+            "signal": "find_suid",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:07"
+          },
+          {
+            "signal": "getcap",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:08"
+          },
+          {
+            "signal": "list_cron",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:09"
+          },
+          {
+            "signal": "list_services",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0009:10"
+          }
+        ],
+        "status": "executable",
+        "threshold": 4,
+        "window_minutes": 10
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -116,8 +242,8 @@
         "ATOMIC_RED_TEAM"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "privilege-escalation"
@@ -128,7 +254,7 @@
       "title": "Privilege discovery command cluster on one Linux asset"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1005",
         "T1041"
@@ -142,6 +268,34 @@
       "escalation_conditions": [
         "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset",
+          "actor"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "sensitive_read",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0010:01"
+          },
+          {
+            "signal": "upload",
+            "source_families": [
+              "network"
+            ],
+            "stage_id": "CUR-CORE-0010:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "low",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -175,8 +329,8 @@
         "ATOMIC_RED_TEAM"
       ],
       "specificity": 88,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "collection",
         "exfiltration"
@@ -187,7 +341,7 @@
       "title": "Sensitive file access followed by outbound transfer"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1685",
         "T1070"
@@ -201,6 +355,34 @@
       "escalation_conditions": [
         "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "any",
+        "joins": [
+          "actor",
+          "asset"
+        ],
+        "order": "any_direction",
+        "stages": [
+          {
+            "signal": "logging_impairment",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0011:01"
+          },
+          {
+            "signal": "suspicious_execution",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0011:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 20
+      },
       "expected_noise": "low",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -234,8 +416,8 @@
         "ATOMIC_RED_TEAM"
       ],
       "specificity": 88,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "defense-impairment"
       ],
@@ -245,7 +427,7 @@
       "title": "Security logging impaired near suspicious execution"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1547",
         "T1053",
@@ -260,6 +442,14 @@
       "escalation_conditions": [
         "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "CUR-CORE-0012"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "low",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -294,7 +484,7 @@
         "ATOMIC_RED_TEAM"
       ],
       "specificity": 88,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "persistence",
@@ -306,7 +496,7 @@
       "title": "New persistence followed by first external connection"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1003",
         "T1021",
@@ -321,6 +511,34 @@
       "escalation_conditions": [
         "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "any",
+        "joins": [
+          "actor",
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "credential_access",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0013:01"
+          },
+          {
+            "signal": "remote_login",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0013:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 60
+      },
       "expected_noise": "low",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -353,8 +571,8 @@
         "ATOMIC_RED_TEAM"
       ],
       "specificity": 88,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "credential-access",
         "lateral-movement"
@@ -365,7 +583,7 @@
       "title": "Credential access followed by remote authentication"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1046",
         "T1021"
@@ -379,6 +597,34 @@
       "escalation_conditions": [
         "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "any",
+        "joins": [
+          "actor",
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "discovery",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0014:01"
+          },
+          {
+            "signal": "remote_service",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0014:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -411,8 +657,8 @@
         "ATOMIC_RED_TEAM"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "discovery",
         "lateral-movement"
@@ -423,7 +669,7 @@
       "title": "Discovery burst followed by remote service use"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1204.002",
         "T1547",
@@ -438,6 +684,33 @@
       "escalation_conditions": [
         "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "temp_execution",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0015:01"
+          },
+          {
+            "signal": "persistence",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-CORE-0015:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -470,8 +743,8 @@
         "ATOMIC_RED_TEAM"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence"
@@ -482,7 +755,7 @@
       "title": "Temporary-path executable followed by persistence"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -495,6 +768,34 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset",
+          "path"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "download",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0822:01"
+          },
+          {
+            "signal": "execute",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0822:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -529,8 +830,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -544,7 +845,7 @@
       "title": "Download followed by execution of the same file"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -557,6 +858,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "download",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0823:01"
+          },
+          {
+            "signal": "persistence",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0823:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -591,8 +919,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -606,7 +934,7 @@
       "title": "Download followed by persistence creation"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -619,6 +947,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "download",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0824:01"
+          },
+          {
+            "signal": "security_change",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0824:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -653,8 +1008,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -668,7 +1023,7 @@
       "title": "Download followed by firewall, audit, EDR, or policy change"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -681,6 +1036,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "archive",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0825:01"
+          },
+          {
+            "signal": "upload",
+            "source_families": [
+              "network"
+            ],
+            "stage_id": "CUR-SEQ-0825:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -715,8 +1097,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -730,7 +1112,7 @@
       "title": "Archive creation followed by outbound upload"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -743,6 +1125,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "sensitive_read",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0826:01"
+          },
+          {
+            "signal": "archive",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0826:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -777,8 +1186,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -792,7 +1201,7 @@
       "title": "Sensitive file reads followed by archive creation"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -805,6 +1214,34 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "any",
+        "joins": [
+          "actor",
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "sensitive_read",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0827:01"
+          },
+          {
+            "signal": "remote_login",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0827:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -839,8 +1276,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -854,7 +1291,7 @@
       "title": "Credential access followed by remote authentication"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -867,6 +1304,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "enumeration_then_exploit_check"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -901,7 +1346,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -916,7 +1361,7 @@
       "title": "System enumeration followed by local exploit probing"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -929,6 +1374,34 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "any",
+        "joins": [
+          "actor",
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "discovery",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0829:01"
+          },
+          {
+            "signal": "privilege_change",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0829:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -963,8 +1436,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -978,7 +1451,7 @@
       "title": "Privilege discovery followed by sudo, SUID, token, or role change"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -991,6 +1464,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "privilege_change",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0830:01"
+          },
+          {
+            "signal": "credential_access",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0830:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1025,8 +1525,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -1040,7 +1540,7 @@
       "title": "Privilege escalation followed by credential-store access"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -1053,6 +1553,34 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "any",
+        "joins": [
+          "actor",
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "new_user",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0831:01"
+          },
+          {
+            "signal": "admin_group",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0831:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1087,8 +1615,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -1102,7 +1630,7 @@
       "title": "Account creation followed by privileged group membership"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -1115,6 +1643,34 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "any",
+        "joins": [
+          "actor",
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "new_user",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0832:01"
+          },
+          {
+            "signal": "remote_login",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0832:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1149,8 +1705,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -1164,7 +1720,7 @@
       "title": "Account creation followed by remote login"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1177,6 +1733,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "password_reset_then_new_location_login"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1211,7 +1775,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1226,7 +1790,7 @@
       "title": "Password reset followed by successful authentication from a new location"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1239,6 +1803,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "mfa_change_then_sensitive_access"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1273,7 +1845,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1288,7 +1860,7 @@
       "title": "MFA method change followed by sensitive access"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1301,6 +1873,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "role_assignment_then_secret_access"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1335,7 +1915,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1350,7 +1930,7 @@
       "title": "Privilege grant followed by secret or key access"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1363,6 +1943,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "app_credential_then_service_principal_login"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1397,7 +1985,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1412,7 +2000,7 @@
       "title": "Application credential addition followed by service-principal authentication"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1425,6 +2013,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "oauth_consent_then_mail_access"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1459,7 +2055,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1474,7 +2070,7 @@
       "title": "OAuth consent followed by mailbox or file access"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1487,6 +2083,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "inbox_rule_then_external_forward"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1521,7 +2125,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1536,7 +2140,7 @@
       "title": "Inbox rule creation followed by external mail forwarding"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -1549,6 +2153,34 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "any",
+        "joins": [
+          "actor",
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "remote_login",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0839:01"
+          },
+          {
+            "signal": "discovery",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0839:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1583,8 +2215,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -1598,7 +2230,7 @@
       "title": "Remote authentication followed by host or domain discovery"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1611,6 +2243,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "remote_login_then_payload_transfer"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1645,7 +2285,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1660,7 +2300,7 @@
       "title": "Remote authentication followed by payload transfer"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1673,6 +2313,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "remote_login_then_service_creation"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1707,7 +2355,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1722,7 +2370,7 @@
       "title": "Remote authentication followed by service or scheduled-task creation"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1735,6 +2383,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "smb_write_then_service_start"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1769,7 +2425,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1784,7 +2440,7 @@
       "title": "SMB file write followed by remote service start"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1797,6 +2453,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "wmi_connection_then_process_create"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1831,7 +2495,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1846,7 +2510,7 @@
       "title": "WMI network activity followed by remote process creation"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1859,6 +2523,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "rdp_login_then_credential_dump"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1893,7 +2565,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1908,7 +2580,7 @@
       "title": "RDP login followed by credential dumping"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1921,6 +2593,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "ssh_login_then_pty_upgrade"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -1955,7 +2635,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -1970,7 +2650,7 @@
       "title": "SSH or shell access followed by PTY upgrade"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -1983,6 +2663,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "office_child_then_download"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2017,7 +2705,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2032,7 +2720,7 @@
       "title": "Office child process followed by network retrieval"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2045,6 +2733,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "browser_child_shell_then_persistence"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2079,7 +2775,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2094,7 +2790,7 @@
       "title": "Browser child shell followed by persistence"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2107,6 +2803,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "webserver_child_shell_then_external_connection"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2141,7 +2845,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2156,7 +2860,7 @@
       "title": "Web server child shell followed by external connection"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2169,6 +2873,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "script_interpreter_then_security_disable"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2203,7 +2915,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2218,7 +2930,7 @@
       "title": "Interpreter activity followed by security-control disablement"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -2231,6 +2943,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "event_log_clear",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0850:01"
+          },
+          {
+            "signal": "execute",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0850:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2265,8 +3004,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -2280,7 +3019,7 @@
       "title": "Event-log clearing near suspicious execution"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -2293,6 +3032,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "audit_stop",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0851:01"
+          },
+          {
+            "signal": "sensitive_read",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0851:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2327,8 +3093,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -2342,7 +3108,7 @@
       "title": "Audit service stop followed by sensitive file access"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -2355,6 +3121,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "firewall_drop",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0852:01"
+          },
+          {
+            "signal": "c2",
+            "source_families": [
+              "network"
+            ],
+            "stage_id": "CUR-SEQ-0852:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2389,8 +3182,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -2404,7 +3197,7 @@
       "title": "Firewall deny or drop rule followed by command-and-control traffic"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2417,6 +3210,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "dns_change_then_new_c2"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2451,7 +3252,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2466,7 +3267,7 @@
       "title": "Resolver change followed by a new external destination"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2479,6 +3280,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "proxy_change_then_data_egress"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2513,7 +3322,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2528,7 +3337,7 @@
       "title": "Proxy configuration change followed by unusual upload"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2541,6 +3350,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "defender_exclusion_then_payload_execution"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2575,7 +3392,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2590,7 +3407,7 @@
       "title": "Security exclusion creation followed by payload execution"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2603,6 +3420,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "driver_load_then_process_tampering"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2637,7 +3462,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2652,7 +3477,7 @@
       "title": "New driver load followed by process tampering"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2665,6 +3490,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "process_access_then_dump_file"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2699,7 +3532,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2714,7 +3547,7 @@
       "title": "Sensitive process access followed by dump-file creation"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2727,6 +3560,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "registry_hive_save_then_archive"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2761,7 +3602,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2776,7 +3617,7 @@
       "title": "SAM, SYSTEM, or SECURITY hive save followed by archive creation"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2789,6 +3630,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "shadow_copy_then_ntds_access"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2823,7 +3672,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2838,7 +3687,7 @@
       "title": "Volume shadow copy creation followed by directory database access"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2851,6 +3700,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "scheduled_task_then_first_run"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2885,7 +3742,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -2900,7 +3757,7 @@
       "title": "Scheduled task creation followed by its first execution"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -2913,6 +3770,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "service_creation",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0861:01"
+          },
+          {
+            "signal": "network_connection",
+            "source_families": [
+              "network"
+            ],
+            "stage_id": "CUR-SEQ-0861:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -2947,8 +3831,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -2962,7 +3846,7 @@
       "title": "New service followed by external network activity"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -2975,6 +3859,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "autorun_write_then_child_process"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3009,7 +3901,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3024,7 +3916,7 @@
       "title": "Autorun change followed by execution after logon or reboot"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -3037,6 +3929,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "persistence",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0863:01"
+          },
+          {
+            "signal": "shell",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0863:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3071,8 +3990,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -3086,7 +4005,7 @@
       "title": "Cron modification followed by shell execution"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3099,6 +4018,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "systemd_unit_write_then_enable_start"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3133,7 +4060,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3148,7 +4075,7 @@
       "title": "Systemd unit write followed by enable and start"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3161,6 +4088,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "launch_agent_write_then_launchctl"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3195,7 +4130,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3210,7 +4145,7 @@
       "title": "Launch item write followed by launchctl bootstrap"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3223,6 +4158,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "ssh_key_write_then_key_login"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3257,7 +4200,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3272,7 +4215,7 @@
       "title": "Authorized key addition followed by key-based login"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3285,6 +4228,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "cloud_key_create_then_api_burst"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3319,7 +4270,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3334,7 +4285,7 @@
       "title": "Cloud access-key creation followed by broad API activity"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3347,6 +4298,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "cloud_role_assume_then_region_fanout"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3381,7 +4340,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3396,7 +4355,7 @@
       "title": "Role assumption followed by multi-region enumeration"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3409,6 +4368,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "cloud_logging_disable_then_resource_change"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3443,7 +4410,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3458,7 +4425,7 @@
       "title": "Cloud logging impairment followed by control-plane changes"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3471,6 +4438,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "bucket_public_then_bulk_download"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3505,7 +4480,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3520,7 +4495,7 @@
       "title": "Storage resource made public followed by bulk reads"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3533,6 +4508,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "snapshot_share_then_external_account_access"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3567,7 +4550,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3582,7 +4565,7 @@
       "title": "Snapshot sharing followed by external account access"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3595,6 +4578,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "vm_metadata_change_then_new_process"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3629,7 +4620,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3644,7 +4635,7 @@
       "title": "VM startup metadata change followed by new process execution"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3657,6 +4648,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "serverless_code_update_then_external_connection"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3691,7 +4690,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3706,7 +4705,7 @@
       "title": "Function code update followed by first-seen egress"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3719,6 +4718,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "k8s_secret_list_then_external_connection"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3753,7 +4760,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3768,7 +4775,7 @@
       "title": "Kubernetes secret enumeration followed by external connection"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3781,6 +4788,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "k8s_exec_then_host_mount"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3815,7 +4830,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3830,7 +4845,7 @@
       "title": "Pod exec followed by host-path or runtime-socket access"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3843,6 +4858,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "k8s_rbac_grant_then_privileged_pod"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3877,7 +4900,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3892,7 +4915,7 @@
       "title": "RBAC privilege grant followed by privileged pod creation"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3905,6 +4928,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "container_download_then_shell"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -3939,7 +4970,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -3954,7 +4985,7 @@
       "title": "Container download followed by shell or executable launch"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -3967,6 +4998,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "container_metadata_then_cloud_api"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4001,7 +5040,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4016,7 +5055,7 @@
       "title": "Container metadata access followed by cloud API use"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -4029,6 +5068,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "scan",
+            "source_families": [
+              "network"
+            ],
+            "stage_id": "CUR-SEQ-0879:01"
+          },
+          {
+            "signal": "exploit_response",
+            "source_families": [
+              "network"
+            ],
+            "stage_id": "CUR-SEQ-0879:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4063,8 +5129,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -4078,7 +5144,7 @@
       "title": "Network scan followed by application error or exploit signature"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4091,6 +5157,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "dns_then_beacon"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4125,7 +5199,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4140,7 +5214,7 @@
       "title": "Rare DNS query followed by periodic connections"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4153,6 +5227,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "beacon_then_large_upload"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4187,7 +5269,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4202,7 +5284,7 @@
       "title": "Periodic command traffic followed by large egress"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4215,6 +5297,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "tls_anomaly_then_endpoint_execution"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4249,7 +5339,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4264,7 +5354,7 @@
       "title": "Rare TLS fingerprint correlated with suspicious endpoint process"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -4277,6 +5367,33 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "all",
+        "joins": [
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "ids_alert",
+            "source_families": [
+              "network"
+            ],
+            "stage_id": "CUR-SEQ-0883:01"
+          },
+          {
+            "signal": "host_behavior",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0883:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4311,8 +5428,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -4326,7 +5443,7 @@
       "title": "IDS alert correlated with endpoint execution on the same asset"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4339,6 +5456,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "rare_process_then_rare_destination"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4373,7 +5498,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4388,7 +5513,7 @@
       "title": "First-seen process connects to first-seen destination"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4401,6 +5526,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "rare_user_then_rare_host_then_privilege"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4435,7 +5568,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4450,7 +5583,7 @@
       "title": "New user-host relationship followed by privileged action"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4463,6 +5596,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "multiple_weak_signals_same_actor"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4497,7 +5638,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4512,7 +5653,7 @@
       "title": "Three or more weak anomalies share actor, asset, and short window"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4525,6 +5666,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "telemetry_gap_then_high_risk_change"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4559,7 +5708,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4574,7 +5723,7 @@
       "title": "Telemetry loss followed by high-risk administrative change"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4587,6 +5736,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "time_change_then_log_gap"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4621,7 +5778,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4636,7 +5793,7 @@
       "title": "System time change followed by audit discontinuity"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4649,6 +5806,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "archive_delete_after_upload"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4683,7 +5848,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4698,7 +5863,7 @@
       "title": "Staging archive deleted after outbound transfer"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4711,6 +5876,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "tool_cleanup_after_activity"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4745,7 +5918,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4760,7 +5933,7 @@
       "title": "Offensive tool or payload deleted shortly after use"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4773,6 +5946,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "persistence_removed_after_single_run"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4807,7 +5988,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4822,7 +6003,7 @@
       "title": "Persistence object created, executed once, then removed"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "active",
       "attack_techniques": [
         "T1078"
       ],
@@ -4835,6 +6016,34 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "join_mode": "any",
+        "joins": [
+          "actor",
+          "asset"
+        ],
+        "order": "ordered",
+        "stages": [
+          {
+            "signal": "failed_attempts",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0892:01"
+          },
+          {
+            "signal": "alternate_method_success",
+            "source_families": [
+              "host"
+            ],
+            "stage_id": "CUR-SEQ-0892:02"
+          }
+        ],
+        "status": "executable",
+        "threshold": 2,
+        "window_minutes": 30
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4869,8 +6078,8 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
-      "supported": false,
+      "support_reason": "",
+      "supported": true,
       "tactics": [
         "execution",
         "persistence",
@@ -4884,7 +6093,7 @@
       "title": "Repeated failures followed by success through another protocol or credential"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4897,6 +6106,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "multi_host_same_command"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4931,7 +6148,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -4946,7 +6163,7 @@
       "title": "Same rare command appears on multiple hosts in a short window"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -4959,6 +6176,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "multi_account_same_source"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -4993,7 +6218,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -5008,7 +6233,7 @@
       "title": "One source authenticates to many accounts"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -5021,6 +6246,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "one_account_many_hosts"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -5055,7 +6288,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -5070,7 +6303,7 @@
       "title": "One account authenticates to many assets"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -5083,6 +6316,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "service_account_changes_then_human_login"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -5117,7 +6358,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -5132,7 +6373,7 @@
       "title": "Service account configuration changes followed by interactive use"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -5145,6 +6386,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "security_tool_query_then_disable"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -5179,7 +6428,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -5194,7 +6443,7 @@
       "title": "Security product discovery followed by impairment"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -5207,6 +6456,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "backup_discovery_then_backup_deletion"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -5241,7 +6498,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -5256,7 +6513,7 @@
       "title": "Backup enumeration followed by deletion or encryption"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -5269,6 +6526,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "share_discovery_then_mass_file_change"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -5303,7 +6568,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -5318,7 +6583,7 @@
       "title": "File-share discovery followed by high rename or write volume"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -5331,6 +6596,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "database_discovery_then_dump"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -5365,7 +6638,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -5380,7 +6653,7 @@
       "title": "Database enumeration followed by export or dump"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -5393,6 +6666,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "browser_store_read_then_cloud_login"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -5427,7 +6708,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -5442,7 +6723,7 @@
       "title": "Browser credential access followed by cloud authentication"
     },
     {
-      "activation_mode": "observe",
+      "activation_mode": "reference",
       "attack_techniques": [
         "T1078"
       ],
@@ -5455,6 +6736,14 @@
       "escalation_conditions": [
         "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
       ],
+      "execution": {
+        "execution_kind": "sequence",
+        "missing_semantics": [
+          "keychain_read_then_new_ssh"
+        ],
+        "reason_code": "missing_canonical_signal_translation",
+        "status": "reference_only"
+      },
       "expected_noise": "medium",
       "follow_up": [
         "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
@@ -5489,7 +6778,7 @@
         "SURICATA"
       ],
       "specificity": 65,
-      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "support_reason": "No reviewed canonical stage translation is available.",
       "supported": false,
       "tactics": [
         "execution",
@@ -5504,5 +6793,5 @@
       "title": "Keychain access followed by SSH to a new destination"
     }
   ],
-  "schema_version": "1.0.0"
+  "schema_version": "2.0.0"
 }

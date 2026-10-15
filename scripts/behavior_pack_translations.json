@@ -1,5 +1,5 @@
 {
-  "translation_version": "1.0.0",
+  "translation_version": "2.0.0",
   "direct_roles": {
     "event.action": "event.action",
     "file.path": "file.path",
@@ -10,8 +10,13 @@
     "equals_any": "equals_any"
   },
   "activation_policy": {
-    "active_priorities": ["critical", "high"],
-    "active_noise": ["low"],
+    "active_priorities": [
+      "critical",
+      "high"
+    ],
+    "active_noise": [
+      "low"
+    ],
     "direct_active_limit": 73,
     "observe_score_ceiling": 39
   },
@@ -19,5 +24,562 @@
     "sequence": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
     "aggregate": "The record names an aggregate marker but does not define executable filters, grouping, window, measure, sample minimum, and threshold.",
     "baseline_deviation": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls."
+  },
+  "sequence_translations": {
+    "CUR-CORE-0005": {
+      "stages": [
+        "download",
+        "write_local",
+        "chmod",
+        "execute"
+      ],
+      "joins": [
+        "asset",
+        "path"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ],
+      "window_minutes": 15
+    },
+    "CUR-CORE-0009": {
+      "stages": [
+        "id",
+        "whoami",
+        "groups",
+        "sudo",
+        "uname",
+        "os_release",
+        "find_suid",
+        "getcap",
+        "list_cron",
+        "list_services"
+      ],
+      "joins": [
+        "asset",
+        "actor"
+      ],
+      "order": "unordered_threshold",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ],
+      "threshold": 4,
+      "window_minutes": 10
+    },
+    "CUR-CORE-0010": {
+      "stages": [
+        "sensitive_read",
+        "upload"
+      ],
+      "joins": [
+        "asset",
+        "actor"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "network"
+        ]
+      ],
+      "window_minutes": 30
+    },
+    "CUR-CORE-0011": {
+      "stages": [
+        "logging_impairment",
+        "suspicious_execution"
+      ],
+      "joins": [
+        "actor",
+        "asset"
+      ],
+      "order": "any_direction",
+      "join_mode": "any",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ],
+      "window_minutes": 20
+    },
+    "CUR-CORE-0013": {
+      "stages": [
+        "credential_access",
+        "remote_login"
+      ],
+      "joins": [
+        "actor",
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "any",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ],
+      "window_minutes": 60
+    },
+    "CUR-CORE-0014": {
+      "stages": [
+        "discovery",
+        "remote_service"
+      ],
+      "joins": [
+        "actor",
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "any",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ],
+      "window_minutes": 30
+    },
+    "CUR-CORE-0015": {
+      "stages": [
+        "temp_execution",
+        "persistence"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ],
+      "window_minutes": 30
+    },
+    "download_then_execute": {
+      "stages": [
+        "download",
+        "execute"
+      ],
+      "joins": [
+        "asset",
+        "path"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "download_then_persistence": {
+      "stages": [
+        "download",
+        "persistence"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "download_then_security_change": {
+      "stages": [
+        "download",
+        "security_change"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "archive_then_upload": {
+      "stages": [
+        "archive",
+        "upload"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "network"
+        ]
+      ]
+    },
+    "sensitive_read_then_archive": {
+      "stages": [
+        "sensitive_read",
+        "archive"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "sensitive_read_then_remote_login": {
+      "stages": [
+        "sensitive_read",
+        "remote_login"
+      ],
+      "joins": [
+        "actor",
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "any",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "enumeration_then_privilege_change": {
+      "stages": [
+        "discovery",
+        "privilege_change"
+      ],
+      "joins": [
+        "actor",
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "any",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "privilege_change_then_credential_access": {
+      "stages": [
+        "privilege_change",
+        "credential_access"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "new_user_then_admin_group": {
+      "stages": [
+        "new_user",
+        "admin_group"
+      ],
+      "joins": [
+        "actor",
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "any",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "new_user_then_remote_login": {
+      "stages": [
+        "new_user",
+        "remote_login"
+      ],
+      "joins": [
+        "actor",
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "any",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "remote_login_then_discovery": {
+      "stages": [
+        "remote_login",
+        "discovery"
+      ],
+      "joins": [
+        "actor",
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "any",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "event_log_clear_then_execution": {
+      "stages": [
+        "event_log_clear",
+        "execute"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "audit_stop_then_sensitive_read": {
+      "stages": [
+        "audit_stop",
+        "sensitive_read"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "firewall_drop_then_c2": {
+      "stages": [
+        "firewall_drop",
+        "c2"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "network"
+        ]
+      ]
+    },
+    "service_creation_then_network_connection": {
+      "stages": [
+        "service_creation",
+        "network_connection"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "network"
+        ]
+      ]
+    },
+    "cron_write_then_shell": {
+      "stages": [
+        "persistence",
+        "shell"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "scan_then_exploit_response": {
+      "stages": [
+        "scan",
+        "exploit_response"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "network"
+        ],
+        [
+          "network"
+        ]
+      ]
+    },
+    "ids_alert_then_host_behavior": {
+      "stages": [
+        "ids_alert",
+        "host_behavior"
+      ],
+      "joins": [
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "all",
+      "source_families": [
+        [
+          "network"
+        ],
+        [
+          "host"
+        ]
+      ]
+    },
+    "failed_attempts_then_alternate_method_success": {
+      "stages": [
+        "failed_attempts",
+        "alternate_method_success"
+      ],
+      "joins": [
+        "actor",
+        "asset"
+      ],
+      "order": "ordered",
+      "join_mode": "any",
+      "source_families": [
+        [
+          "host"
+        ],
+        [
+          "host"
+        ]
+      ]
+    }
   }
 }

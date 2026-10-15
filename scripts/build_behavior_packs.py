@@ -14,7 +14,7 @@ CORPUS_PATH = ROOT / "docs" / "research" / "common-indicator-corpus.json"
 TRANSLATIONS_PATH = ROOT / "scripts" / "behavior_pack_translations.json"
 ATTACK_PATH = ROOT / "romulus" / "intelligence" / "attack_catalog.json"
 OUTPUT_DIR = ROOT / "romulus" / "intelligence" / "behavior_packs"
-COMPILER_VERSION = "2.1.0"
+COMPILER_VERSION = "3.0.0"
 EXPECTED = {
     "entries": 3863,
     "curated_behavioral_indicator": 902,
@@ -145,6 +145,38 @@ def _rule(row: dict[str, Any], registry: dict[str, Any], source_registry: dict[s
     }
 
 
+def _sequence_rule(row: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any]:
+    relationship=(row.get("relationship_logic") or [{}])[0]
+    pattern=relationship.get("pattern")
+    translations=registry.get("sequence_translations",{})
+    translation=translations.get(row.get("id")) or translations.get(pattern)
+    if not isinstance(translation,dict):
+        missing=str(pattern or row.get("id"))
+        return {**row,"activation_mode":"reference","supported":False,
+            "support_reason":"No reviewed canonical stage translation is available.",
+            "execution":{"status":"reference_only","execution_kind":"sequence",
+                "reason_code":"missing_canonical_signal_translation","missing_semantics":[missing]}}
+    stage_names=translation.get("stages",[])
+    sources=translation.get("source_families") or [["host"] for _ in stage_names]
+    if not stage_names or len(sources)!=len(stage_names):
+        raise PackError(f"{row.get('id')}: invalid sequence translation stages/source_families")
+    stages=[]
+    for number,(signal,families) in enumerate(zip(stage_names,sources),start=1):
+        if not isinstance(signal,str) or not signal or not isinstance(families,list) or not families:
+            raise PackError(f"{row.get('id')}: invalid sequence stage {number}")
+        if any(value not in {"host","network"} for value in families):
+            raise PackError(f"{row.get('id')}: invalid source family in sequence stage {number}")
+        stages.append({"stage_id":f"{row['id']}:{number:02d}","signal":signal,
+            "source_families":families})
+    window=int(translation.get("window_minutes") or relationship.get("within_minutes")
+        or relationship.get("default_window_minutes") or 30)
+    return {**row,"activation_mode":"active","supported":True,"support_reason":"",
+        "execution":{"status":"executable","execution_kind":"sequence",
+            "order":translation.get("order","ordered"),"threshold":int(translation.get("threshold") or len(stages)),
+            "window_minutes":window,"joins":list(translation.get("joins") or []),
+            "join_mode":translation.get("join_mode","all"),"stages":stages}}
+
+
 def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any]:
     entries = corpus.get("entries")
     if not isinstance(entries, list):
@@ -185,12 +217,7 @@ def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str,
         raise PackError(f"activation policy expected {registry['activation_policy']['direct_active_limit']} active direct rules, found {active_direct}")
 
     unsupported = registry["unsupported_semantics"]
-    sequences = [{
-        **row,
-        "activation_mode": "observe",
-        "supported": False,
-        "support_reason": unsupported["sequence"],
-    } for row in sorted(sequence_rows, key=lambda row: row["id"])]
+    sequences = [_sequence_rule(row,registry) for row in sorted(sequence_rows,key=lambda row:row["id"])]
     aggregates = [{
         **row,
         "activation_mode": "observe",
@@ -210,7 +237,7 @@ def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str,
     }
     return {
         "direct": {"schema_version": "1.0.0", "records": direct},
-        "sequences": {"schema_version": "1.0.0", "records": sequences},
+        "sequences": {"schema_version": "2.0.0", "records": sequences},
         "aggregates": {"schema_version": "1.0.0", "records": aggregates},
         "baselines": {"schema_version": "1.0.0", "records": baselines},
         "capabilities": capabilities_pack,
@@ -227,8 +254,14 @@ def write_packs(packs: dict[str, Any], output_dir: Path, corpus: dict[str, Any])
         path.write_bytes(data)
         hashes[path.name] = _hash_bytes(data)
         counts[name] = len(pack.get("records", [])) if isinstance(pack, dict) else 0
-    active = sum(row["activation_mode"] == "active" for row in packs["direct"]["records"])
+    active_direct = sum(row["activation_mode"] == "active" for row in packs["direct"]["records"])
+    active_sequences = sum(row.get("activation_mode") == "active" for row in packs["sequences"]["records"])
+    active = active_direct + active_sequences
     observe = EXPECTED["curated_behavioral_indicator"] - active
+    executable = sum(row.get("supported") is True for name in ("direct","sequences","aggregates","baselines")
+        for row in packs[name]["records"])
+    unsupported_count = sum(row.get("supported") is not True for name in ("sequences","aggregates","baselines")
+        for row in packs[name]["records"])
     manifest = {
         "manifest_version": "1.0.0",
         "compiler_version": COMPILER_VERSION,
@@ -237,13 +270,12 @@ def write_packs(packs: dict[str, Any], output_dir: Path, corpus: dict[str, Any])
         "source_counts": EXPECTED,
         "pack_counts": counts,
         "curated_activation": {"active": active, "observe_or_unsupported": observe},
+        "direct_activation": {"active": active_direct, "observe": len(packs["direct"]["records"])-active_direct},
+        "sequence_activation": {"active": active_sequences,
+            "reference_only": len(packs["sequences"]["records"])-active_sequences},
         "execution_states": {
-            "executable": len(packs["direct"]["records"]),
-            "unsupported": (
-                len(packs["sequences"]["records"])
-                + len(packs["aggregates"]["records"])
-                + len(packs["baselines"]["records"])
-            ),
+            "executable": executable,
+            "unsupported": unsupported_count,
             "reference_only": len(packs["capabilities"]["records"]),
         },
         "observe_score_ceiling": 39,

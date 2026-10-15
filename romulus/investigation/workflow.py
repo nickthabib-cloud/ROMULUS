@@ -25,6 +25,7 @@ from ..intelligence.behavior_catalog import (
 )
 from ..intelligence.search_matrix import attribute_signature_hits, compile_search_matrix, load_search_matrix
 from ..intelligence.reference_intelligence import attach_capability_context, compile_capability_index
+from ..intelligence.sequence_analytics import evaluate_sequences
 from ..tools.elasticsearch_client import ElasticsearchAdapter, validate_query
 from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
@@ -1283,6 +1284,12 @@ class HuntEngine:
         previous_candidates=(merge_candidate_queue(persisted_candidates,list(s.get("candidate_leads",[])))
             if persisted_candidates else list(s.get("candidate_leads",[])))
         fresh_candidates=build_candidate_queue(analysis_evidence,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        sequence_candidates,sequence_coverage=evaluate_sequences(
+            analysis_evidence,
+            self.behavior_catalog.get("behavior_packs",{}).get("sequences",{}).get("records",[]),
+            list(s.get("search_outcomes",[])),
+        )
+        fresh_candidates.extend(sequence_candidates)
         fresh_candidates=attach_capability_context(
             fresh_candidates,analysis_evidence,self.capability_index,limit=5)
         full_candidates=merge_candidate_queue(previous_candidates,fresh_candidates)
@@ -1316,6 +1323,7 @@ class HuntEngine:
             "kinds":kind_counts,
             "customer_visible":sum(bool(item.get("customer_visible")) for item in full_candidates),
             "unresolved_low_priority":sum(item.get("priority_tier")=="low" and item.get("disposition")=="observed" for item in full_candidates)}
+        s["coverage"]["sequence_analytics"]=sequence_coverage
         for hypothesis in s.get("hypotheses",[]):
             relevant=[e for e in analysis_evidence if _relevant(hypothesis["technique_id"],e)]
             # Heuristic matches are candidate context for the model, not an
