@@ -1,5 +1,6 @@
 """Command line interface for deployment checks, hunting, resume, and offline demonstration."""
 import argparse, importlib.util, shutil, sys
+from copy import deepcopy
 from dataclasses import replace
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
@@ -8,6 +9,7 @@ from .config import Settings, safe_url
 from .store import Store
 from .models import utc_now
 from .investigation.workflow import HuntEngine
+from .agent.providers import configured_model_name
 
 
 def _configured_pcap_ready(path: Path, allowed_dirs: tuple[Path, ...]) -> bool:
@@ -53,10 +55,14 @@ def doctor(settings: Settings) -> int:
     try:
         from .agent.ollama import Ollama
         agent=Ollama(settings); o=agent.available(); model_ready=bool(o.get("available") and o.get("model_configured")); checks.append(model_ready)
-        print(f"{'OK' if o['available'] else 'UNAVAILABLE'} Ollama: {safe_url(settings.ollama_url)}; configured model {'available' if o.get('model_configured') else 'not found'} ({settings.ollama_model})")
+        endpoint=settings.openai_base_url if settings.llm_provider=="openai" else settings.ollama_url
+        model=configured_model_name(settings) or "not configured"
+        detail=o.get("error") if not o.get("available") else None
+        suffix=f"; {detail}" if detail else ""
+        print(f"{'OK' if o.get('available') else 'UNAVAILABLE'} model provider {settings.llm_provider}: {safe_url(endpoint)}; configured model {'available' if o.get('model_configured') else 'not found'} ({model}){suffix}")
         reasoning=agent.reasoning_preflight(); checks.append(bool(reasoning.get("ready")))
         print(f"{'OK' if reasoning.get('ready') else 'FAILED'} iterative reasoning preparation and structured schema")
-    except Exception as e: checks.append(False); print(f"UNAVAILABLE Ollama: {type(e).__name__}")
+    except Exception as e: checks.append(False); print(f"UNAVAILABLE model provider {settings.llm_provider}: {type(e).__name__}")
     try:
         from .tools.elasticsearch_client import ElasticsearchAdapter
         es=ElasticsearchAdapter(settings).check(); checks.append(bool(es.get("available"))); detail=f"{es.get('matched_indices',0)} allowlisted index(es)" if es.get('available') else es.get('error','failed')
@@ -87,11 +93,78 @@ def doctor(settings: Settings) -> int:
     print("Secrets are never displayed. No service configuration is changed.")
     return 0 if all(checks) else 1
 
+
+def model_check(settings: Settings) -> int:
+    """Verify the selected provider with a fixed request that contains no hunt data."""
+    from .agent.ollama import Ollama
+    model=configured_model_name(settings) or "not configured"
+    try:
+        agent=Ollama(settings)
+        availability=agent.available()
+        if not availability.get("available") or not availability.get("model_configured"):
+            detail=str(availability.get("error") or "selected model is unavailable")
+            print(f"FAILED model provider {settings.llm_provider} ({model}): {detail}")
+            return 1
+        result=agent.connectivity_check()
+        if result.get("status")!="ready":
+            print(f"FAILED model provider {settings.llm_provider} ({model}): invalid readiness response")
+            return 1
+        metadata=getattr(result,"model_metadata",{})
+        resolved=str(metadata.get("model") or model)
+        tokens=metadata.get("total_tokens")
+        usage=f"; total tokens={tokens}" if isinstance(tokens,int) else ""
+        print(f"OK model provider {settings.llm_provider} ({resolved}) completed a fixed no-hunt-data check{usage}")
+        return 0
+    except Exception as exc:
+        print(f"FAILED model provider {settings.llm_provider} ({model}): {type(exc).__name__}")
+        return 1
+
+
+def model_report(settings: Settings, hunt_id: str) -> int:
+    """Re-synthesize one saved hunt into a separate report without new telemetry searches."""
+    from .reporting.report import generate_report
+    store=Store(settings.data_dir,settings.logs_dir)
+    original=store.load_state(hunt_id)
+    if not original:
+        print(f"Unknown investigation ID: {hunt_id}")
+        return 1
+    state=deepcopy(original)
+    state["source_hunt_id"]=hunt_id
+    stamp=utc_now().replace("-","").replace(":","").replace("+00:00","Z")
+    state["hunt_id"]=f"{hunt_id}-MODEL-{stamp}"
+    state["tool_runs"]=[]
+    state.pop("indicator_review",None)
+    state.pop("report_manifest",None)
+    state.pop("report_paths",None)
+    coverage=state.setdefault("coverage",{})
+    if isinstance(coverage,dict):
+        coverage.pop("indicator_review",None)
+    engine=HuntEngine(settings,store,offline=False)
+    try:
+        engine._indicator_review(state)
+        output_dir=settings.reports_dir/"model-evaluations"
+        paths=generate_report(state,output_dir)
+    except Exception as exc:
+        print(f"Model report failed: {type(exc).__name__}: {exc}")
+        return 1
+    result=(state.get("coverage",{}).get("indicator_review",{})
+        if isinstance(state.get("coverage"),dict) else {})
+    status=result.get("model_result_status","unknown") if isinstance(result,dict) else "unknown"
+    review_status=(state.get("indicator_review",{}).get("status","unknown")
+        if isinstance(state.get("indicator_review"),dict) else "unknown")
+    print(f"Model report used provider {settings.llm_provider}; synthesis status={status}; admission status={review_status}; no new telemetry searches were run.")
+    for path in paths:
+        print(f"Report: {path}")
+    return 0 if status=="ok" and review_status=="admitted" else 2
+
 def main(argv=None):
     parser=argparse.ArgumentParser(prog="romulus",description="Local defensive cyber threat hunting")
     parser.add_argument("--version",action="version",version=__version__)
     sub=parser.add_subparsers(dest="command",required=True)
     sub.add_parser("doctor",help="check configured dependencies and deployment services")
+    sub.add_parser("model-check",help="test the selected model provider without sending hunt data")
+    model_report_parser=sub.add_parser("model-report",help="re-synthesize a saved hunt without new telemetry searches")
+    model_report_parser.add_argument("--id",required=True)
     sub.add_parser("test",help="run local unit and synthetic integration tests")
     hunt=sub.add_parser("hunt",help="start a bounded investigation"); hunt.add_argument("--objective",required=True); hunt.add_argument("--offline",action="store_true",help="run the synthetic demonstration without external services"); hunt.add_argument("--retention",choices=("compact","full"))
     resume=sub.add_parser("resume",help="resume a persisted investigation"); resume.add_argument("--id",required=True); resume.add_argument("--offline",action="store_true"); resume.add_argument("--retention",choices=("compact","full"))
@@ -102,6 +175,8 @@ def main(argv=None):
     args=parser.parse_args(argv); settings=Settings.from_env()
     if getattr(args,"retention",None): settings=replace(settings,retention_policy=args.retention)
     if args.command=="doctor": return doctor(settings)
+    if args.command=="model-check": return model_check(settings)
+    if args.command=="model-report": return model_report(settings,args.id)
     if args.command=="test":
         import unittest
         suite=unittest.defaultTestLoader.discover(str(Path(__file__).resolve().parent.parent/"tests"))

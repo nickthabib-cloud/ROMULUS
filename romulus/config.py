@@ -34,9 +34,15 @@ def safe_url(value: str) -> str:
 class Settings:
     home: Path
     mode: str
+    llm_provider: str
+    llm_timeout: int
     ollama_url: str
     ollama_model: str
     ollama_timeout: int
+    openai_base_url: str
+    openai_api_key: str
+    openai_model: str
+    allow_cloud_llm: bool
     es_url: str
     es_username: str
     es_password: str
@@ -76,8 +82,14 @@ class Settings:
             return tuple(Path(x.strip()).expanduser() for x in os.getenv(key, "").split(",") if x.strip())
         return cls(
             home=home, mode=os.getenv("ROMULUS_MODE", "live").lower(),
+            llm_provider=_choice("LLM_PROVIDER","ollama",{"ollama","openai"}),
+            llm_timeout=_int("LLM_TIMEOUT",_int("OLLAMA_TIMEOUT",180,1,600),1,3600),
             ollama_url=os.getenv("OLLAMA_URL", "http://192.168.36.1:11434").rstrip("/"),
             ollama_model=os.getenv("OLLAMA_MODEL", "qwen3:8b"), ollama_timeout=_int("OLLAMA_TIMEOUT", 180, 1, 600),
+            openai_base_url=os.getenv("OPENAI_BASE_URL","https://api.openai.com/v1").rstrip("/"),
+            openai_api_key=os.getenv("OPENAI_API_KEY",""),
+            openai_model=os.getenv("OPENAI_MODEL",""),
+            allow_cloud_llm=_bool("ALLOW_CLOUD_LLM",False),
             es_url=os.getenv("ES_URL", "http://127.0.0.1:9200").rstrip("/"),
             es_username=os.getenv("ES_USERNAME", "romulus_agent"), es_password=os.getenv("ES_PASSWORD", ""),
             es_index_patterns=tuple(x.strip() for x in os.getenv("ES_INDEX_PATTERNS", "ainception-hostlogs-a-b,ainception-network-a-b").split(",") if x.strip()),

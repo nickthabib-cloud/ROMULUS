@@ -1,5 +1,6 @@
 import copy
 import importlib
+import json
 import sys
 import tempfile
 import time
@@ -230,6 +231,111 @@ class IndicatorCaseTests(unittest.TestCase):
         self.assertIn(("url_path", "/wget"), observables)
         self.assertIn(("http_status", "404"), observables)
         self.assertEqual([row["relationship_id"] for row in case["relationships"]], ["COR-DNS"])
+
+    def test_large_case_is_deterministically_bounded_for_model_synthesis(self):
+        from romulus.reporting.indicator_review import (
+            MAX_MODEL_EVIDENCE,
+            MAX_MODEL_ITEMS,
+            MAX_MODEL_OBSERVABLES,
+            MAX_MODEL_RELATIONSHIPS,
+            build_indicator_case,
+        )
+
+        state = _state()
+        state["host"] = []
+        state["network"] = []
+        state["correlations"] = []
+        items = []
+        for item_number in range(40):
+            classification = ("malicious", "suspicious", "anomalous")[item_number % 3]
+            evidence_ids = []
+            for evidence_number in range(3):
+                evidence_id = f"EV-{item_number:02d}-{evidence_number}"
+                evidence_ids.append(evidence_id)
+                state["network"].append({
+                    "evidence_id": evidence_id,
+                    "source": "elasticsearch",
+                    "asset": f"asset-{item_number:02d}",
+                    "observed_at": f"2022-01-24T04:{item_number:02d}:00Z",
+                    "observation": "Many bounded observables were found.",
+                    "raw": {
+                        f"dns.query.{index}": f"part-{index}.{item_number}.example.test"
+                        for index in range(20)
+                    } | {
+                        "source.ip": f"10.0.{item_number}.{evidence_number + 1}",
+                        "destination.ip": "192.0.2.10",
+                        "destination.port": 53,
+                        "network.protocol": "dns",
+                    },
+                })
+            items.append({
+                "item_id": f"ITEM-{item_number:02d}",
+                "classification": classification,
+                "title": f"Behavior {item_number}",
+                "observation": "A reportable behavior.",
+                "why_it_matters": "It warrants analyst review.",
+                "evidence_ids": evidence_ids,
+                "assets": [f"asset-{item_number:02d}"],
+                "recommended_actions": ["Review adjacent telemetry."],
+            })
+        for relationship_number in range(80):
+            left = state["network"][relationship_number % len(state["network"])]["evidence_id"]
+            right = state["network"][(relationship_number + 1) % len(state["network"])]["evidence_id"]
+            state["correlations"].append({
+                "correlation_id": f"REL-{relationship_number:03d}",
+                "host_ref": left,
+                "network_ref": right,
+                "reason": "same bounded activity cluster",
+            })
+        original_state = copy.deepcopy(state)
+        original_items = copy.deepcopy(items)
+
+        first = build_indicator_case(state, items)
+        second = build_indicator_case(state, items)
+
+        self.assertEqual(first, second)
+        self.assertLessEqual(len(first["items"]), MAX_MODEL_ITEMS)
+        self.assertLessEqual(len(first["evidence"]), MAX_MODEL_EVIDENCE)
+        self.assertLessEqual(len(first["relationships"]), MAX_MODEL_RELATIONSHIPS)
+        self.assertLessEqual(sum(
+            len(row["observables"]) for row in first["evidence"]
+        ), MAX_MODEL_OBSERVABLES)
+        self.assertTrue({"malicious", "suspicious", "anomalous"}.issubset({
+            row["classification"] for row in first["items"]
+        }))
+        visible_evidence = {row["evidence_id"] for row in first["evidence"]}
+        self.assertTrue(all(
+            item["evidence_ids"] and set(item["evidence_ids"]) <= visible_evidence
+            for item in first["items"]
+        ))
+        self.assertLess(len(json.dumps(first)), 100_000)
+        self.assertEqual(state, original_state)
+        self.assertEqual(items, original_items)
+        self.assertEqual(first["selection"]["total_items"], 40)
+        self.assertTrue(first["selection"]["truncated"])
+
+    def test_bounded_case_keeps_selector_schema_under_openai_enum_limit(self):
+        from romulus.reporting.indicator_review import build_indicator_case
+
+        state = _state()
+        items = _items() * 600
+        for number, item in enumerate(items):
+            item = copy.deepcopy(item)
+            item["item_id"] = f"ITEM-{number}"
+            items[number] = item
+        case = build_indicator_case(state, items)
+
+        with _ollama_module() as module:
+            schema = module._indicator_review_schema(case)
+
+        def enum_entries(value):
+            if isinstance(value, dict):
+                return len(value.get("enum", [])) + sum(enum_entries(row) for row in value.values())
+            if isinstance(value, list):
+                return sum(enum_entries(row) for row in value)
+            return 0
+
+        self.assertLess(enum_entries(schema), 1000)
 
 
 class IndicatorAdmissionTests(unittest.TestCase):
