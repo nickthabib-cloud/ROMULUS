@@ -4,6 +4,8 @@
 **Status:** Proposed for implementation
 **Scope:** Investigation control flow, candidate triage, attack-path reconstruction, reporting, verification, and post-hunt retention
 
+> **Current product-priority clarification (2026-10-15):** Indicator and suspicious-behavior discovery, ranking, and escalation are the primary goals. Correlation enriches those findings and guides pivots. Attack-path reconstruction is optional secondary analysis after the findings and must never gate or delay indicator escalation. The approved indicator-runtime and anomaly-escalation designs supersede any wording below that could imply otherwise.
+
 ## Goal
 
 ROMULUS will behave like a coordinated Air Force CPT host analyst, network analyst, and intelligence analyst. It will begin with repeatable host and network discovery, turn unusual observations into shared candidate leads, pursue the strongest leads across sources and time, reconstruct the supported portions of an attacker path, and deliver evidence-cited findings with explicit uncertainty and coverage gaps.
