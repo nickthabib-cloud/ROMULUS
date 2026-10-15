@@ -275,6 +275,31 @@ class CandidateRankingTests(unittest.TestCase):
             [(item["candidate_id"], item["priority_score"]) for item in second],
         )
 
+    def test_expected_noise_applies_a_fixed_explainable_priority_penalty(self):
+        from romulus.intelligence.behavior_catalog import build_candidate_queue
+
+        low_noise = _analytic("BH-TEST-LOW")
+        low_noise["expected_noise"] = "low"
+        low_noise["match"]["all"][0]["values"] = ["low-noise-marker"]
+        high_noise = _analytic("BH-TEST-HIGH")
+        high_noise["expected_noise"] = "high"
+        high_noise["match"]["all"][0]["values"] = ["high-noise-marker"]
+        events = [
+            _event("EV-LOW", "low-host", process_command_line="low-noise-marker"),
+            _event("EV-HIGH", "high-host", process_command_line="high-noise-marker"),
+        ]
+
+        candidates = build_candidate_queue(
+            events, {"analytics": [low_noise, high_noise]}, {"indicators": []}
+        )
+        by_id = {item["analytic_id"]: item for item in candidates}
+
+        self.assertEqual(
+            by_id["BH-TEST-LOW"]["priority_score"] - by_id["BH-TEST-HIGH"]["priority_score"],
+            12,
+        )
+        self.assertIn("expected noise penalty 12", " ".join(by_id["BH-TEST-HIGH"]["score_reasons"]))
+
 
 def _event(
     evidence_id,

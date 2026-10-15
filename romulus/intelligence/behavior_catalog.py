@@ -341,6 +341,10 @@ def build_candidate_queue(
             f"base analytic priority {analytic['base_priority']}",
             f"specificity contribution {min(10, int(analytic['specificity']) // 10)}",
         ]
+        noise_penalty={"low":0,"medium":6,"high":12}[str(analytic.get("expected_noise") or "high")]
+        if noise_penalty:
+            score-=noise_penalty
+            reasons.append(f"expected noise penalty {noise_penalty}")
         if len(rows) > 1:
             repeat_bonus = min(9, (len(rows) - 1) * 3)
             score += repeat_bonus
@@ -349,7 +353,7 @@ def build_candidate_queue(
             corroboration_bonus = min(30, independent * 15)
             score += corroboration_bonus
             reasons.append(f"independent behavior corroboration contribution {corroboration_bonus}")
-        score = min(100, score)
+        score = max(0,min(100, score))
         disposition = "corroborated" if score >= 70 and independent else "observed"
         candidates.append(_behavior_candidate(analytic, asset, rows, score, disposition, reasons))
 

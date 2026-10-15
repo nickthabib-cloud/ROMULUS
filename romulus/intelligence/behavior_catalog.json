@@ -1,5 +1,5 @@
 {
-  "catalog_version": "1.0.0",
+  "catalog_version": "1.1.0",
   "generated_from": [
     "MITRE ATT&CK",
     "Sigma",
@@ -3664,6 +3664,247 @@
       ],
       "review_date": "2026-10-12",
       "corroboration_group": "BH-NET-009"
+    },
+    {
+      "id": "BH-NET-010",
+      "version": 1,
+      "title": "Burst of distinct DNS queries from one source",
+      "description": "One source queried many distinct DNS names in a short window.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "dns",
+        "discovery"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "dns_query_fanout"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 48,
+      "specificity": 60,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1046"
+      ],
+      "benign_explanations": [
+        "Authorized vulnerability scanning, asset discovery, monitoring, or application testing."
+      ],
+      "required_corroboration": [
+        "Validate asset role, approved scanner inventory, direction, timing, and adjacent activity."
+      ],
+      "follow_up": [
+        "Review queried domains, resolver role, client process, and approved discovery activity."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        }
+      ],
+      "review_date": "2026-10-14",
+      "corroboration_group": "BH-NET-010"
+    },
+    {
+      "id": "BH-NET-011",
+      "version": 1,
+      "title": "Burst of distinct HTTP paths against one destination",
+      "description": "One source requested many distinct HTTP paths on one destination in a short window.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "web",
+        "discovery"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "http_path_fanout"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "medium",
+      "base_priority": 55,
+      "specificity": 70,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1046"
+      ],
+      "benign_explanations": [
+        "Authorized vulnerability scanning, asset discovery, monitoring, or application testing."
+      ],
+      "required_corroboration": [
+        "Validate asset role, approved scanner inventory, direction, timing, and adjacent activity."
+      ],
+      "follow_up": [
+        "Review paths, response codes, source role, and authorized web testing windows."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        }
+      ],
+      "review_date": "2026-10-14",
+      "corroboration_group": "BH-NET-011"
+    },
+    {
+      "id": "BH-NET-012",
+      "version": 1,
+      "title": "Known web scanner user agent",
+      "description": "An HTTP request used a user agent associated with common web scanning tools.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "web",
+        "discovery"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "web_scanner_user_agent"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 68,
+      "specificity": 88,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1046"
+      ],
+      "benign_explanations": [
+        "Authorized vulnerability scanning, asset discovery, monitoring, or application testing."
+      ],
+      "required_corroboration": [
+        "Validate asset role, approved scanner inventory, direction, timing, and adjacent activity."
+      ],
+      "follow_up": [
+        "Validate the source against approved scanner inventory and inspect adjacent requests."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        }
+      ],
+      "review_date": "2026-10-14",
+      "corroboration_group": "BH-NET-012"
+    },
+    {
+      "id": "BH-NET-013",
+      "version": 1,
+      "title": "Connection reversal after network scan behavior",
+      "description": "A destination contacted the scanning source after a short burst of distinct network targets.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "network",
+        "discovery",
+        "command-and-control"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "scan_then_reverse_connection"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 78,
+      "specificity": 92,
+      "expected_noise": "low",
+      "attack_techniques": [
+        "T1046",
+        "T1105"
+      ],
+      "benign_explanations": [
+        "Authorized vulnerability scanning, asset discovery, monitoring, or application testing."
+      ],
+      "required_corroboration": [
+        "Validate asset role, approved scanner inventory, direction, timing, and adjacent activity."
+      ],
+      "follow_up": [
+        "Validate both endpoint roles and inspect the reverse connection, process telemetry, and transferred content."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        }
+      ],
+      "review_date": "2026-10-14",
+      "corroboration_group": "BH-NET-013"
     }
   ]
 }

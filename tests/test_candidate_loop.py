@@ -355,6 +355,19 @@ class AggregateSignalTests(unittest.TestCase):
         self.assertIn("EV-REMOTE", remote["evidence_ids"])
         self.assertIn("EV-EXEC", remote["evidence_ids"])
 
+    def test_network_deviations_emit_cited_candidates_without_scenario_indicators(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        signals = summarize_evidence([], _network_deviation_fixture(), limit=50)["aggregate_signals"]
+
+        self.assertEqual(signals["dns_query_fanout"][0]["unique_queries"], 12)
+        self.assertEqual(signals["http_path_fanout"][0]["unique_paths"], 12)
+        self.assertIn("EV-UA", signals["web_scanner_user_agent"][0]["sample_evidence_ids"])
+        reversal = signals["scan_then_reverse_connection"][0]
+        self.assertEqual(reversal["source"], "10.0.0.50")
+        self.assertIn("EV-CALLBACK", reversal["sample_evidence_ids"])
+        self.assertTrue(any(ref.startswith("EV-SCAN-") for ref in reversal["sample_evidence_ids"]))
+
 
 class CandidateStateTests(unittest.TestCase):
     def test_candidate_merge_preserves_disposition_follow_up_status_and_history(self):
@@ -575,7 +588,44 @@ def _aggregate_fixture():
         network.append(network_event(f"EV-FAN-{index}", 30 + index, "10.0.0.50", f"10.0.1.{index + 1}", 445, "smb"))
     for index, minute in enumerate((40, 44, 48, 52)):
         network.append(network_event(f"EV-PER-{index}", minute, "10.0.0.60", "203.0.113.20", 443, "tls"))
+    network.extend(_network_deviation_fixture())
     return host, network
+
+
+def _network_deviation_fixture():
+    def event(identifier, minute, source, destination, port, **raw):
+        body = {
+            "source": {"ip": source},
+            "destination": {"ip": destination, "port": port},
+            "network": {"protocol": "tcp"},
+        }
+        body.update(raw)
+        return {
+            "evidence_id": identifier,
+            "source": "arkime",
+            "observed_at": f"2026-10-12T13:{minute:02d}:00Z",
+            "asset": destination,
+            "observation": "network event",
+            "raw": body,
+        }
+
+    rows = [event(
+        f"EV-DNS-FAN-{index}", index % 10, "10.0.0.70", "8.8.8.8", 53,
+        dns={"question": {"name": f"unique-{index}.example.com"}},
+    ) for index in range(12)]
+    rows.extend(event(
+        f"EV-HTTP-PATH-{index}", 20 + index % 10, "10.0.0.80", "10.0.0.81", 80,
+        http={"request": {"uri": f"/path-{index}"}},
+    ) for index in range(12))
+    rows.append(event(
+        "EV-UA", 31, "10.0.0.82", "10.0.0.83", 80,
+        http={"request": {"uri": "/"}, "user_agent": "sqlmap/1.8"},
+    ))
+    rows.extend(event(
+        f"EV-SCAN-{index}", 40 + index, "10.0.0.50", "10.0.0.90", 20 + index,
+    ) for index in range(6))
+    rows.append(event("EV-CALLBACK", 47, "10.0.0.90", "10.0.0.50", 4444))
+    return rows
 
 
 if __name__ == "__main__":

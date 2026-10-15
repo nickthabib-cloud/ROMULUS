@@ -269,6 +269,10 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
         "outbound_volume_outlier": [],
         "rare_process_rare_destination": [],
         "staging_then_outbound_transfer": [],
+        "dns_query_fanout": [],
+        "http_path_fanout": [],
+        "web_scanner_user_agent": [],
+        "scan_then_reverse_connection": [],
     }
     host_rows = [(stamp, event) for event in host_events if (stamp := _time(event.get("observed_at"))) is not None]
     network_rows = [(stamp, event) for event in network_events if (stamp := _time(event.get("observed_at"))) is not None]
@@ -337,6 +341,9 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
             if len(result["remote_service_then_execution"]) >= limit: break
 
     nxdomain: dict[str, list[tuple[datetime, dict]]] = defaultdict(list)
+    dns_queries: dict[str, list[tuple[datetime, dict, str]]] = defaultdict(list)
+    http_paths: dict[tuple[str, str], list[tuple[datetime, dict, str]]] = defaultdict(list)
+    source_activity: dict[str, list[tuple[datetime, dict, str]]] = defaultdict(list)
     external_by_source: dict[str, list[tuple[datetime, dict, str]]] = defaultdict(list)
     byte_rows = []
     expected_ports = {
@@ -350,8 +357,11 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
         port = next(iter(_values(event, ("destination.port", "dstPort", "dst_port", "tcp.dstport", "udp.dstport"))), "")
         protocol = next(iter(_values(event, ("network.protocol", "network.application", "protocol", "protocols"))), "").lower()
         domain = next(iter(_values(event, ("dns.question.name", "dns.qry.name", "dns.host"))), "").lower().rstrip(".")
+        uri = next(iter(_values(event, ("http.request.uri", "http.uri", "url.path", "uri"))), "")
+        user_agent = next(iter(_values(event, ("http.user_agent", "http.user-agent", "http.request.user_agent", "user_agent"))), "")
         rcode = next(iter(_values(event, ("dns.response_code", "dns.header.response_code", "dns.flags.rcode", "rcode"))), "").lower()
         if domain:
+            dns_queries[source or _asset(event)].append((stamp,event,domain))
             label = domain.split(".", 1)[0]
             entropy = _entropy(label)
             if len(label) >= 20 and entropy >= 3.0:
@@ -359,6 +369,14 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
                     "label_length": len(label), "entropy": round(entropy, 2), "sample_evidence_ids": _refs(event)})
         if rcode in {"3", "nxdomain", "name_error"}:
             nxdomain[source or _asset(event)].append((stamp, event))
+        if source and destination and uri:
+            http_paths[(source,destination)].append((stamp,event,uri.split("?",1)[0]))
+        if user_agent and any(token in user_agent.lower() for token in
+                ("sqlmap", "nikto", "nmap scripting engine", "masscan", "zgrab", "gobuster", "dirbuster", "ffuf", "nuclei")):
+            result["web_scanner_user_agent"].append({"source":source or _asset(event),
+                "destination":destination,"user_agent":user_agent[:200],"sample_evidence_ids":_refs(event)})
+        if source and destination:
+            source_activity[source].append((stamp,event,f"{destination}:{port or '?'}"))
         if protocol in expected_ports and port and port not in expected_ports[protocol]:
             result["protocol_port_mismatch"].append({"source": source, "destination": destination,
                 "protocol": protocol, "port": port, "sample_evidence_ids": _refs(event)})
@@ -369,6 +387,38 @@ def _aggregate_signal_rows(host_events: list[dict], network_events: list[dict], 
             external_by_source[source].append((stamp, event, destination))
     result["dns_high_entropy"] = result["dns_high_entropy"][:limit]
     result["protocol_port_mismatch"] = result["protocol_port_mismatch"][:limit]
+    result["web_scanner_user_agent"] = result["web_scanner_user_agent"][:limit]
+    for source,rows in dns_queries.items():
+        window=_distinct_value_window(rows,minutes=10,minimum=12)
+        if window:
+            result["dns_query_fanout"].append({"source":source,
+                "unique_queries":len({value for _,_,value in window}),
+                "sample_evidence_ids":[event.get("evidence_id") for _,event,_ in window if event.get("evidence_id")][:5]})
+    result["dns_query_fanout"]=result["dns_query_fanout"][:limit]
+    for (source,destination),rows in http_paths.items():
+        window=_distinct_value_window(rows,minutes=10,minimum=12)
+        if window:
+            result["http_path_fanout"].append({"source":source,"destination":destination,
+                "unique_paths":len({value for _,_,value in window}),
+                "sample_evidence_ids":[event.get("evidence_id") for _,event,_ in window if event.get("evidence_id")][:5]})
+    result["http_path_fanout"]=result["http_path_fanout"][:limit]
+    for source,rows in source_activity.items():
+        window=_distinct_value_window(rows,minutes=15,minimum=6)
+        if not window: continue
+        scan_end=max(stamp for stamp,_,_ in window)
+        scanned_destinations={value.split(":",1)[0] for _,_,value in window}
+        callback=next((event for stamp,event in network_rows
+            if scan_end <= stamp <= scan_end+timedelta(minutes=60)
+            and next(iter(_values(event,("source.ip","srcIp","src_ip","ip.src"))),"") in scanned_destinations
+            and next(iter(_values(event,("destination.ip","dstIp","dst_ip","ip.dst"))),"")==source),None)
+        if callback:
+            scan_events=[event for _,event,_ in window]
+            result["scan_then_reverse_connection"].append({"source":source,
+                "scanned_destinations":len(scanned_destinations),
+                "unique_targets":len({value for _,_,value in window}),
+                "sample_evidence_ids":list(dict.fromkeys(
+                    [event.get("evidence_id") for event in scan_events[:4] if event.get("evidence_id")]+_refs(callback)))})
+            if len(result["scan_then_reverse_connection"])>=limit: break
     for source, rows in nxdomain.items():
         window = _event_window(rows, minutes=10, minimum=5)
         if window:
@@ -444,6 +494,16 @@ def _distinct_asset_window(rows: list[tuple[datetime, dict, str]], minutes: int,
         window = [row for row in ordered[left:] if (row[0] - ordered[left][0]).total_seconds() <= minutes * 60]
         if len({asset for _, _, asset in window if asset and asset != "unknown"}) >= minimum:
             return window
+    return []
+
+
+def _distinct_value_window(rows: list[tuple[datetime, dict, str]], minutes: int,
+                           minimum: int) -> list[tuple[datetime, dict, str]]:
+    ordered=sorted(rows,key=lambda row:row[0])
+    for left in range(len(ordered)):
+        window=[row for row in ordered[left:]
+            if 0 <= (row[0]-ordered[left][0]).total_seconds() <= minutes*60]
+        if len({value for _,_,value in window if value})>=minimum: return window
     return []
 
 
