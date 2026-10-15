@@ -56,6 +56,7 @@ class Finding:
     follow_up: list[str]
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
+    classification: str = "suspicious"
 
 def encode(obj: Any) -> Any:
     if hasattr(obj, "__dataclass_fields__"): return asdict(obj)

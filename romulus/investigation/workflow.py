@@ -2,6 +2,7 @@
 from typing import TypedDict, Any
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import copy
 import ipaddress
 import json
 import hashlib
@@ -27,13 +28,17 @@ from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
 from .search_planner import (candidate_fields, validate_spec, compile_es, compile_arkime, compile_tshark,
     compile_native_es, validate_native_arkime, validate_native_tshark, expand_anchor_selectors, anchor_time_range,
-    SOURCE_FIELDS, TEXT_FIELDS)
+    candidate_network_spec, SOURCE_FIELDS, TEXT_FIELDS)
 from .scheduler import (initialize_scheduler, register_search_task, select_search_tasks, begin_search_task,
     record_search_outcome, record_unexecuted_outcome, outcome_resolves, migrate_legacy_search_state,
-    recover_interrupted_tasks)
+    recover_interrupted_tasks, execution_fingerprint)
 from .progress import decide_next_action, initialize_progress, record_progress, summarize_progress
 from .sampling import sampling_policy
 from .synthetic import sample_evidence
+from .casefile import build_case_file, visible_case_ids
+from .candidate_triage import relate_candidates, select_candidate_frontier
+from .classification import refresh_investigation_status
+from .reasoning import admit_reasoning
 
 
 def _scheduled_time_bounds(time_range):
@@ -100,6 +105,8 @@ class HuntState(TypedDict, total=False):
     local_model_note: str; report_paths: list[str]; mapping_errors: list[dict]
     depth: int; tool_calls: int; mode: str; tool_runs: list[dict]
     source_errors: list[dict]; es_fields_by_class: dict[str,list[str]]
+    es_field_capabilities: dict[str,list[str]]
+    es_field_capabilities_by_class: dict[str,dict[str,list[str]]]
     es_indices_by_class: dict[str,list[str]]
     source_health: dict[str,bool]
     lead_catalog: list[dict]; completed_leads: list[str]
@@ -111,6 +118,8 @@ class HuntState(TypedDict, total=False):
     candidate_leads: list[dict]; behavior_catalog_status: dict
     pivot_results: list[dict]
     investigation_graph: dict
+    activity_narrative: dict
+    indicator_review: dict
     progress_baseline: dict; progress_history: list[dict]; progress_totals: dict; stagnant_cycles: int
     retention_policy: str
 
@@ -135,7 +144,7 @@ class HuntEngine:
                 "queries":[],"coverage":{},"source_errors":[],"started_at":utc_now(),"started_epoch":time.time(),"depth":0,
                 "tool_calls":0,"mode":"offline" if self.offline else "live","tool_runs":[],"lead_catalog":[],
                 "completed_leads":[],"reasoning_history":[],"stage_history":[],"es_fields_by_class":{},
-                "es_indices_by_class":{},
+                "es_field_capabilities":{},"es_field_capabilities_by_class":{},"es_indices_by_class":{},
                 "analytic_summary":{},"search_artifacts":[],"evidence_keys":[],"candidate_leads":[],
                 "pivot_results":[],
                 "investigation_graph":{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}},
@@ -145,6 +154,8 @@ class HuntEngine:
                     "analytics":len(self.behavior_catalog.get("analytics",[])),
                     "trusted_indicators":len(self.local_indicators.get("indicators",[]))}}
         state.setdefault("sampling_policy",sampling_policy(self.settings))
+        if _resume:
+            self._migrate_legacy_schema_capabilities(state)
         initialize_scheduler(state)
         if _resume:
             migrate_legacy_search_state(state,compile_pending=lambda lead:
@@ -401,9 +412,12 @@ class HuntEngine:
         if mappings is None:
             s["coverage"]["host"]="indices discovered; mapping retrieval failed"
             s["es_fields"]=[]; s["es_fields_by_class"]={}; s["es_indices_by_class"]={}
+            s["es_field_capabilities"]={}; s["es_field_capabilities_by_class"]={}
             s.setdefault("source_health",{})["host"]=False
             self._stage(s,"host_inventory","failed",{"matched_indices":len(names)})
             return self._save(s)
+        s["es_field_capabilities"]=_field_capabilities(mappings)
+        s["es_field_capabilities_by_class"]=_field_capabilities_by_class(mappings)
         s["es_fields"]=_field_names(mappings); s["es_fields_by_class"]=_field_names_by_class(mappings)
         s["es_indices_by_class"]=_index_names_by_class(mappings)
         fields=s.get("es_fields",[]); field_classes=s.get("es_fields_by_class",{})
@@ -425,17 +439,39 @@ class HuntEngine:
             {"matched_indices":len(names),"mapped_fields":len(fields),"timestamp_field_available":bool(timestamp)})
         return self._save(s)
 
+    def _migrate_legacy_schema_capabilities(self,s):
+        """Refresh pre-capability checkpoints before any discovery task can resume."""
+        capability_keys=("es_field_capabilities","es_field_capabilities_by_class")
+        if all(isinstance(s.get(key),dict) for key in capability_keys): return
+        s["es_field_capabilities"]={}; s["es_field_capabilities_by_class"]={}
+        tasks=s.get("search_tasks",{}) if isinstance(s.get("search_tasks"),dict) else {}
+        invalidated={task_id for task_id,task in tasks.items()
+            if isinstance(task,dict) and task.get("phase")=="discovery"
+            and task.get("origin") in {"behavior_catalog","trusted_indicator"}
+            and task.get("status") in {"queued","interrupted"}}
+        for task_id in invalidated: tasks.pop(task_id,None)
+        if invalidated:
+            s["search_queue"]=[task_id for task_id in s.get("search_queue",[])
+                if task_id not in invalidated]
+        details={"status":"failed_closed","invalidated_untyped_tasks":len(invalidated)}
+        names=list(s.get("es_indices",[]))
+        if not self.offline and names:
+            mappings=self._call(s,"elasticsearch.indices.get_mapping","resume_schema_migration",
+                {"indices":names},"configured indices from legacy checkpoint",
+                lambda:self.es.mappings_many(names),lambda value:len(value))
+            if mappings is not None:
+                s["es_field_capabilities"]=_field_capabilities(mappings)
+                s["es_field_capabilities_by_class"]=_field_capabilities_by_class(mappings)
+                s["es_fields"]=_field_names(mappings)
+                s["es_fields_by_class"]=_field_names_by_class(mappings)
+                s["es_indices_by_class"]=_index_names_by_class(mappings)
+                details.update({"status":"refreshed","mapped_fields":len(s["es_fields"])})
+        s.setdefault("coverage",{})["schema_capability_migration"]=details
+
     def _add_es_hit(self,s,hit,query,lead_id=None):
         index=str(hit.get("_index", "")); document_id=hit.get("_id")
-        category=str(_nested(hit,"event.category") or hit.get("event.category") or "").lower()
-        module=str(_nested(hit,"event.module") or _nested(hit,"event.dataset") or hit.get("event.module") or "").lower()
         index_classes=s.get("es_indices_by_class",{}) if isinstance(s.get("es_indices_by_class"),dict) else {}
-        if index in index_classes.get("network",[]): key="network"
-        elif index in index_classes.get("host",[]): key="host"
-        elif "host" in index.lower(): key="host"
-        elif "network" in index.lower() or any(x in module for x in ("zeek","suricata","netflow","packetbeat","panw","network")) or "network" in category:
-            key="network"
-        else: key="host"
+        key=_es_hit_family(hit,index,index_classes)
         observed_value=_nested(hit,"@timestamp") or _nested(hit,"timestamp") or _nested(hit,"event.created") or _nested(hit,"event.ingested") or _nested(hit,"event.start")
         observed=_as_iso(observed_value) if observed_value is not None else ""
         host=_nested(hit,"host.name") or hit.get("host.name","")
@@ -478,9 +514,13 @@ class HuntEngine:
         classified_indices=isinstance(index_classes,dict) and bool(index_classes)
         field_classes=s.get("es_fields_by_class",{})
         classified_fields=isinstance(field_classes,dict) and bool(field_classes)
+        capability_classes=s.get("es_field_capabilities_by_class",{})
+        classified_capabilities=isinstance(capability_classes,dict) and bool(capability_classes)
         host_names=(list(index_classes.get("host",[])) if classified_indices else
             ([name for name in names if "host" in name.lower()] or [name for name in names if "network" not in name.lower()] or names))
         host_fields=list(field_classes.get("host",[])) if classified_fields else fields
+        host_capabilities=(dict(capability_classes.get("host",{})) if classified_capabilities else
+            dict(s.get("es_field_capabilities",{})))
         timestamp=s.get("timestamp_field") or next((field for field in
             ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
             if field in host_fields),None)
@@ -490,10 +530,12 @@ class HuntEngine:
         if host_ready:
             indicator_limit=min(12,max(1,self.settings.max_tool_calls//10))
             indicator_seeds,indicator_unsupported=_indicator_seed_queries(
-                self.local_indicators,host_fields,timestamp or "@timestamp",mission_range,indicator_limit)
+                self.local_indicators,host_fields,timestamp or "@timestamp",mission_range,indicator_limit,
+                host_capabilities)
             behavior_limit=min(32,max(1,self.settings.max_tool_calls//5))
             behavior_seeds,behavior_unsupported=_behavior_seed_queries(
-                self.behavior_catalog,host_fields,timestamp or "@timestamp",mission_range,behavior_limit)
+                self.behavior_catalog,host_fields,timestamp or "@timestamp",mission_range,behavior_limit,
+                host_capabilities)
             seed_size=min(25,self.settings.max_results)
             for origin,seeds,id_field in (("trusted_indicator",indicator_seeds,"indicator_id"),
                                           ("behavior_catalog",behavior_seeds,"analytic_id")):
@@ -1089,7 +1131,10 @@ class HuntEngine:
         s["analytic_summary"]=summarize_evidence(s.get("host",[]),s.get("network",[]))
         s.setdefault("coverage",{})["analytic_summary"]=s["analytic_summary"]
         previous_candidates=list(s.get("candidate_leads",[]))
-        fresh_candidates=build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        fresh_candidates=relate_candidates(
+            build_candidate_queue(all_e,self.behavior_catalog,self.local_indicators,s["analytic_summary"]),
+            all_e,
+        )
         s["candidate_leads"]=merge_candidate_queue(previous_candidates,fresh_candidates)
         new_hypotheses=_candidate_hypotheses(s["candidate_leads"],s.get("hypotheses",[]),all_e)
         if new_hypotheses:
@@ -1345,6 +1390,158 @@ class HuntEngine:
         self._save(s)
         return action
 
+    def _reasoning_summary(self,s):
+        summary=s.setdefault("coverage",{}).setdefault("reasoning_summary",{})
+        for key in ("investigator_calls","critic_calls","unavailable_passes",
+                "proposed_hypotheses","admitted_hypotheses","rejected_hypotheses",
+                "proposed_assessments","admitted_assessments","rejected_assessments",
+                "proposed_searches","admitted_searches","rejected_searches",
+                "proposed_findings","admitted_findings","rejected_findings"):
+            try: summary[key]=max(0,int(summary.get(key,0)))
+            except (TypeError,ValueError): summary[key]=0
+        return summary
+
+    def _run_grounded_reasoning(self,s,source_fields):
+        """Run one atomic investigator/critic pass and commit only executable work."""
+        summary=self._reasoning_summary(s)
+        remaining=max(0,self.settings.max_tool_calls-int(s.get("tool_calls",0)))
+        if remaining<2:
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="insufficient_external_call_reserve"
+            return None
+
+        case_file=build_case_file(s)
+        visible=visible_case_ids(case_file)
+        working={"case_file":case_file,"investigator":None,"critic":None,
+            "admission":None,"registered_task_ids":[],"model_error":None}
+        try:
+            from ..agent.ollama import Ollama
+            analyst=Ollama(self.settings)
+        except Exception as exc:
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="investigator_unavailable"
+            working["model_error"]=type(exc).__name__
+            return working
+
+        before_calls=int(s.get("tool_calls",0))
+        investigator=self._call(s,"ollama.api.chat","grounded_investigator",
+            {"model":self.settings.ollama_model,"case_candidates":len(case_file.get("candidates",[])),
+             "case_evidence":len(case_file.get("evidence",[])),"max_hypotheses":3,"max_searches":3},
+            "bounded evidence-grounded case file",
+            lambda:analyst.investigate_case(case_file,source_fields,max_searches=3,max_hypotheses=3),
+            lambda value:sum(len(value.get(key,[])) for key in
+                ("assessments","new_hypotheses","searches","findings")) if isinstance(value,dict) else 0)
+        summary["investigator_calls"]+=int(int(s.get("tool_calls",0))>before_calls)
+        working["investigator"]=investigator if isinstance(investigator,dict) else None
+        if not isinstance(investigator,dict):
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="investigator_unavailable"
+            working["model_error"]=self._reasoning_call_error(s,"grounded_investigator")
+            return working
+
+        proposed={
+            "hypotheses":len(investigator.get("new_hypotheses",[])) if isinstance(investigator.get("new_hypotheses"),list) else 0,
+            "assessments":len(investigator.get("assessments",[])) if isinstance(investigator.get("assessments"),list) else 0,
+            "searches":len(investigator.get("searches",[])) if isinstance(investigator.get("searches"),list) else 0,
+            "findings":len(investigator.get("findings",[])) if isinstance(investigator.get("findings"),list) else 0,
+        }
+        for kind,count in proposed.items(): summary[f"proposed_{kind}"]+=count
+
+        proposal_count=sum(proposed.values())
+        if proposal_count:
+            before_calls=int(s.get("tool_calls",0))
+            critic=self._call(s,"ollama.api.chat","grounded_critic",
+                {"model":self.settings.ollama_model,"proposal_count":proposal_count},
+                "same bounded case file and structured investigator proposals",
+                lambda:analyst.criticize_case(case_file,investigator),
+                lambda value:len(value.get("reviews",[])) if isinstance(value,dict) else 0)
+            summary["critic_calls"]+=int(int(s.get("tool_calls",0))>before_calls)
+        else:
+            critic={"reviews":[]}
+        working["critic"]=critic if isinstance(critic,dict) else None
+        if not isinstance(critic,dict):
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="critic_unavailable"
+            working["model_error"]=self._reasoning_call_error(s,"grounded_critic")
+            for kind,count in proposed.items(): summary[f"rejected_{kind}"]+=count
+            return working
+
+        admission=admit_reasoning(case_file,investigator,critic,s.get("hypotheses",[]))
+        cycle=copy.deepcopy(s)
+        prior_hypotheses=list(cycle.get("hypotheses",[]))
+        tentative=list(admission.get("new_hypotheses",[]))
+        tentative_ids={row.get("hypothesis_id") for row in tentative if row.get("hypothesis_id")}
+        cycle["hypotheses"]=prior_hypotheses+tentative
+        try:
+            planning=cycle.setdefault("coverage",{}).setdefault("model_search_planning",[])
+            planning_before=len(planning)
+            accepted_tasks=self._register_model_searches(cycle,admission.get("searches",[]),"grounded",
+                visible_candidate_ids=visible.get("candidate",set()),
+                visible_evidence_ids=visible.get("evidence",set()),
+                new_hypothesis_ids=tentative_ids)
+            planning=cycle.get("coverage",{}).get("model_search_planning",[])
+            if len(planning)!=planning_before+1:
+                raise RuntimeError("model search registration did not return current-cycle metadata")
+            current_plan=planning[planning_before]
+            accepted_proposal_ids=set(current_plan.get("accepted_proposal_ids",[]) or [])
+            admitted_searches=[row for row in admission.get("searches",[])
+                if row.get("proposal_id") in accepted_proposal_ids]
+            committed_ids={row.get("hypothesis_id") for row in admitted_searches
+                if row.get("hypothesis_id") in tentative_ids}
+            committed_hypotheses=[row for row in tentative if row.get("hypothesis_id") in committed_ids]
+            dropped_hypotheses=[row for row in tentative if row.get("hypothesis_id") not in committed_ids]
+            cycle["hypotheses"]=prior_hypotheses+committed_hypotheses
+            for row in admission.get("searches",[]):
+                if row.get("proposal_id") not in accepted_proposal_ids:
+                    admission.setdefault("rejections",[]).append({"proposal_id":row.get("proposal_id"),
+                        "kind":"search","reason_codes":["existing_validation_or_deduplication"]})
+            for row in dropped_hypotheses:
+                admission.setdefault("rejections",[]).append({"proposal_id":row.get("proposal_id"),
+                    "kind":"new_hypothesis","reason_codes":["no_registered_scheduler_task"]})
+            admission["new_hypotheses"]=committed_hypotheses
+            admission["searches"]=admitted_searches
+            admission_summary=admission.setdefault("summary",{})
+            admission_summary["new_hypotheses_admitted"]=len(committed_hypotheses)
+            admission_summary["searches_admitted"]=len(admitted_searches)
+            admission_summary["rejections"]=len(admission.get("rejections",[]))
+
+            self._apply_model_assessments(cycle,{"assessments":admission.get("assessments",[])},
+                visible.get("evidence",set()))
+            findings_before=len(cycle.get("findings",[]))
+            self._publish_model_findings(cycle,admission.get("findings",[]),visible.get("evidence",set()))
+            findings_admitted=max(0,len(cycle.get("findings",[]))-findings_before)
+            cycle.setdefault("coverage",{})["hypotheses_total"]=len(cycle.get("hypotheses",[]))
+
+            admitted_counts={
+                "hypotheses":len(committed_hypotheses),
+                "assessments":len(admission.get("assessments",[])),
+                "searches":len(admitted_searches),
+                "findings":findings_admitted,
+            }
+            cycle_summary=self._reasoning_summary(cycle)
+            for kind,count in admitted_counts.items():
+                cycle_summary[f"admitted_{kind}"]+=count
+                cycle_summary[f"rejected_{kind}"]+=max(0,proposed[kind]-count)
+            cycle_summary["last_gap"]=None
+        except Exception as exc:
+            summary["unavailable_passes"]+=1
+            summary["last_gap"]="reasoning_commit_"+type(exc).__name__
+            for kind,count in proposed.items(): summary[f"rejected_{kind}"]+=count
+            working["admission"]=None
+            working["model_error"]="reasoning_commit_"+type(exc).__name__
+            return working
+
+        working["admission"]=admission
+        working["registered_task_ids"]=[row.get("task_id") for row in accepted_tasks if row.get("task_id")]
+        working["created_hypothesis_ids"]=[row.get("hypothesis_id") for row in committed_hypotheses]
+        s.clear(); s.update(cycle)
+        return working
+
+    def _reasoning_call_error(self,s,stage):
+        row=next((item for item in reversed(s.get("tool_runs",[]))
+            if item.get("tool")=="ollama.api.chat" and item.get("reasoning_stage")==stage),{})
+        return row.get("error_reason") or row.get("error") or "unavailable"
+
     def _reason(self,s):
         if s.get("depth",0)>=self.settings.max_depth:
             s["termination_reason"]="depth_budget"
@@ -1364,48 +1561,25 @@ class HuntEngine:
         candidate_grounded=(mission_mode!="undirected" or bool(s.get("candidate_leads")))
         if not self.offline and self.use_ollama and source_fields and candidate_grounded and self._budget_ok(s):
             try:
-                from ..agent.ollama import Ollama, model_evidence_context
-                visible_evidence_ids={e.get("evidence_id") for e in model_evidence_context(_all_evidence(s),12) if e.get("evidence_id")}
-                visible_candidate_ids={x.get("candidate_id") for x in s.get("candidate_leads",[])[:12] if x.get("candidate_id")}
-                model_coverage=dict(s.get("coverage",{}))
-                model_coverage["candidate_queue"]=[{"candidate_id":c.get("candidate_id"),"title":str(c.get("title",""))[:120],
-                    "priority_score":c.get("priority_score"),"priority_tier":c.get("priority_tier"),
-                    "disposition":c.get("disposition"),"evidence_ids":c.get("evidence_ids",[])[:5],
-                    "assets":c.get("assets",[])[:4],"attack_techniques":c.get("attack_techniques",[])[:4],
-                    "follow_ups":[{"follow_up_id":f.get("follow_up_id"),"intent":str(f.get("intent",""))[:140],"status":f.get("status")}
-                        for f in c.get("follow_ups",[])[:3]]} for c in s.get("candidate_leads",[])[:12]]
-                model_coverage["existing_findings"]=[{"title":str(f.get("title",""))[:100],
-                    "technique_id":f.get("technique_id"),"evidence_ids":f.get("evidence_ids",[])[:5]}
-                    for f in s.get("findings",[])[-5:]]
-                analysis=self._call(s,"ollama.api.chat","analyst_reasoning",
-                    {"model":self.settings.ollama_model,"hypotheses":len(s.get("hypotheses",[])),
-                     "evidence_count":len(_all_evidence(s)),"completed_searches":len(s.get("search_outcomes",[]))},
-                    "bounded mission, evidence excerpts, query coverage, and mapped source fields",
-                    lambda:Ollama(self.settings).reason_hunt(s["objective"],s.get("hypotheses",[]),_all_evidence(s),
-                        model_coverage,_search_history_summary(s),3),lambda x:len(x.get("searches",[])))
-                if analysis is None:
-                    last_call=next((r for r in reversed(s.get("tool_runs",[])) if r.get("tool")=="ollama.api.chat" and r.get("reasoning_stage")=="analyst_reasoning"),{})
-                    model_error=last_call.get("error_reason") or last_call.get("error") or "unavailable"
+                analysis=self._run_grounded_reasoning(s,source_fields)
                 if isinstance(analysis,dict):
-                    # Every undirected hypothesis is instantiated deterministically
-                    # from an observed candidate. Model-created hypotheses added
-                    # risk without adding a stronger evidence boundary, so the
-                    # model may assess and search but may not invent another one.
-                    created=[]
-                    self._apply_model_assessments(s,analysis,visible_evidence_ids)
-                    self._publish_model_findings(s,analysis.get("findings",[]),visible_evidence_ids)
-                    analysis["created_hypothesis_ids"]=created
-                    basis="model assessed cited evidence and proposed fresh bounded searches"
+                    model_error=analysis.get("model_error")
+                    if isinstance(analysis.get("admission"),dict):
+                        proposal_count=sum(len(analysis.get("investigator",{}).get(key,[])) for key in
+                            ("assessments","new_hypotheses","searches","findings"))
+                        basis=("grounded investigator proposals passed independent critic and deterministic admission"
+                            if proposal_count else "grounded investigator returned no proposals; deterministic frontier used")
+                    else:
+                        basis="structured model output unavailable; deterministic ATT&CK coverage frontier used"
             except Exception as exc:
                 analysis=None; model_error=type(exc).__name__
-        if isinstance(analysis,dict):
-            raw_searches=analysis.get("searches",[])
-            validated=self._register_model_searches(s,raw_searches,"iterative",
-                visible_candidate_ids=visible_candidate_ids,visible_evidence_ids=visible_evidence_ids)
-            self._register_investigation_tasks(s)
+                summary=self._reasoning_summary(s); summary["unavailable_passes"]+=1
+                summary["last_gap"]="reasoning_cycle_"+type(exc).__name__
+        if isinstance(analysis,dict) and isinstance(analysis.get("admission"),dict):
             planning=s.get("coverage",{}).get("model_search_planning",[])
             planning=planning[-1] if planning else {"accepted":0,"rejected_or_duplicate":0}
-            print(f"[ROMULUS] model follow-up plan: proposed={planning.get('proposed',len(raw_searches) if isinstance(raw_searches,list) else 0)} accepted={planning.get('accepted',0)} rejected_or_duplicate={planning.get('rejected_or_duplicate',0)} repeated_empty_anchor={planning.get('repeated_empty_anchor',0)}")
+            print(f"[ROMULUS] grounded model follow-up plan: proposed={planning.get('proposed',0)} accepted={planning.get('accepted',0)} rejected_or_duplicate={planning.get('rejected_or_duplicate',0)}")
+        self._register_investigation_tasks(s)
         self._refresh_coverage_ledger(s)
         selected=[item["task_id"] for item in select_search_tasks(s,phase="investigation",limit=3)]
         if selected:
@@ -1415,11 +1589,13 @@ class HuntEngine:
                 else "deterministic ATT&CK coverage frontier used")
         elif not isinstance(analysis,dict):
             basis="offline deterministic fixture pivot"
+        investigator=analysis.get("investigator") if isinstance(analysis,dict) else None
         s["reasoning_history"].append({"stage":"analyst_reasoning","basis":basis,"round":s["depth"],
-            "reasoning":str(analysis.get("reasoning",""))[:350] if isinstance(analysis,dict) else "",
+            "reasoning":str(investigator.get("summary",""))[:350] if isinstance(investigator,dict) else "",
             "model_error":model_error,
             "model_search_plan":s.get("coverage",{}).get("model_search_planning",[])[-1] if s.get("coverage",{}).get("model_search_planning") else None,
             "created_hypothesis_ids":analysis.get("created_hypothesis_ids",[]) if isinstance(analysis,dict) else [],
+            "grounded_reasoning":analysis if isinstance(analysis,dict) else None,
             "selected_searches":[{"task_id":q["task_id"],"source":q.get("source"),
                 "hypothesis_ids":q.get("hypothesis_ids",[]),"intent":q.get("intent")} for q in
                 (s.get("search_tasks",{}).get(task_id,{}) for task_id in selected)],
@@ -1428,7 +1604,7 @@ class HuntEngine:
         if candidate_grounded:
             self._apply_investigation_decision(s,just_reasoned=True)
         self._stage(s,"analyst_reasoning","completed" if selected else "stopped",{"basis":basis,"round":s["depth"],"selected_searches":selected,
-            "continue_investigation":analysis.get("continue_investigation") if isinstance(analysis,dict) else None,
+            "continue_investigation":None,
             "reason":s.get("termination_reason")})
         print(f"[ROMULUS] analyst round {s['depth']}/{self.settings.max_depth}: {basis}; next searches={selected or 'none'}")
         return self._save(s)
@@ -1444,8 +1620,7 @@ class HuntEngine:
             refs=list(dict.fromkeys(x for x in item.get("evidence_ids",[]) if isinstance(x,str) and x in valid_evidence))
             if status in {"supported","contradicted"}:
                 anchors=_hypothesis_anchor_entities(s,hypothesis,evidence)
-                if anchors:
-                    refs=[ref for ref in refs if anchors & _event_entities(evidence[ref])]
+                refs=[ref for ref in refs if anchors and anchors & _event_entities(evidence[ref])]
             if status in {"supported","contradicted"} and not refs:
                 status="inconclusive"
             assessment={"status":status,"rationale":str(item.get("rationale",""))[:500],"evidence_ids":refs,
@@ -1481,10 +1656,11 @@ class HuntEngine:
             proposed_observation=str(proposal.get("observation",""))[:700].strip()
             proposed_interpretation=str(proposal.get("interpretation",""))[:800].strip()
             if len(proposed_title)<8 or len(proposed_observation)<10 or len(proposed_interpretation)<10: continue
-            technique=proposal.get("technique_id")
-            if technique not in TECHNIQUES: technique="unmapped"
             expected_technique=hypothesis.get("technique_id")
-            if technique!="unmapped" and technique!=expected_technique: continue
+            if expected_technique in TECHNIQUES: technique=expected_technique
+            elif expected_technique=="unmapped": technique="unmapped"
+            else: continue
+            if proposal.get("technique_id")!=technique: continue
             claimed_ips=_text_ips(proposed_title+" "+proposed_observation+" "+proposed_interpretation)
             if claimed_ips:
                 refs=[ref for ref in refs if claimed_ips <= _event_ips_set(evidence[ref])]
@@ -1545,6 +1721,9 @@ class HuntEngine:
                 confidence_justification,alternatives,follow_up)
             encoded=encode(finding)
             encoded["hypothesis_id"]=hypothesis.get("hypothesis_id")
+            encoded["candidate_ids"]=list(dict.fromkeys(
+                str(value) for value in hypothesis.get("basis_candidate_ids",[]) if value
+            ))
             old=next((f for f in self.store.list_findings(s["hunt_id"]) if f.get("finding_id")==identifier),None)
             if old: encoded["created_at"]=old.get("created_at",encoded["created_at"]); encoded["updated_at"]=utc_now(); action="updated"
             else: action="created"
@@ -1552,7 +1731,8 @@ class HuntEngine:
             self.store.upsert_finding(s["hunt_id"],encoded,action)
             print(f"[ROMULUS] model-proposed evidence-cited lead: {identifier}; evidence_refs={len(refs)}; confidence={confidence}")
 
-    def _register_model_searches(self,s,raw_searches,phase,*,visible_candidate_ids=None,visible_evidence_ids=None):
+    def _register_model_searches(self,s,raw_searches,phase,*,visible_candidate_ids=None,
+            visible_evidence_ids=None,new_hypothesis_ids=None):
         source_fields=s.get("coverage",{}).get("search_fields",{})
         ids={h.get("hypothesis_id") for h in s.get("hypotheses",[]) if h.get("hypothesis_id")}
         all_evidence_ids={e.get("evidence_id") for e in _all_evidence(s) if e.get("evidence_id")}
@@ -1561,6 +1741,8 @@ class HuntEngine:
         if visible_candidate_ids is not None:
             candidates={key:value for key,value in candidates.items() if key in set(visible_candidate_ids)}
         accepted=[]; rejected=0; duplicate=0; repeated_empty_anchor=0
+        accepted_proposal_ids=[]; created_task_ids=[]; reused_task_ids=[]; proposal_task_ids={}
+        new_hypothesis_ids=set(new_hypothesis_ids or [])
         proposed=raw_searches if isinstance(raw_searches,list) else []
         for raw in proposed:
             if not isinstance(raw,dict): rejected+=1; continue
@@ -1583,18 +1765,38 @@ class HuntEngine:
             except (ValueError,TypeError,json.JSONDecodeError): rejected+=1; continue
             proposal_tasks=[]
             for proposal in proposals:
+                if raw.get("hypothesis_id") in new_hypothesis_ids:
+                    effective_proposal=dict(proposal)
+                    policy=s.get("sampling_policy")
+                    if isinstance(policy,dict):
+                        query_spec=dict(proposal.get("query_spec") or {})
+                        query_spec["sampling"]=policy
+                        effective_proposal["query_spec"]=query_spec
+                    fingerprint=execution_fingerprint(effective_proposal)
+                    predicted_id="ST-"+fingerprint[:16]
+                    if predicted_id in s.get("search_tasks",{}):
+                        duplicate+=1; reused_task_ids.append(predicted_id); continue
                 task_id,created=register_search_task(s,proposal)
-                if not created: duplicate+=1
+                if created: created_task_ids.append(task_id)
+                else: duplicate+=1; reused_task_ids.append(task_id)
                 task=s["search_tasks"][task_id]
                 if not any(existing.get("task_id")==task_id for existing in accepted): accepted.append(task)
                 proposal_tasks.append(task_id)
                 prior_outcome=next((item for item in reversed(s.get("search_outcomes",[]))
                     if item.get("task_id")==task_id),None)
                 if prior_outcome: self._record_scheduled_followups(s,task,prior_outcome)
-            if not proposal_tasks: rejected+=1
+            proposal_id=raw.get("proposal_id")
+            if proposal_tasks:
+                if proposal_id and proposal_id not in accepted_proposal_ids: accepted_proposal_ids.append(proposal_id)
+                if proposal_id: proposal_task_ids[str(proposal_id)[:120]]=list(dict.fromkeys(proposal_tasks))[:20]
+            else: rejected+=1
         s.setdefault("coverage",{}).setdefault("model_search_planning",[]).append({"phase":phase,"proposed":len(proposed),
             "accepted":len(accepted),"rejected_or_duplicate":rejected+duplicate,"duplicate":duplicate,
-            "repeated_empty_anchor":repeated_empty_anchor,"invalid_or_unmappable":rejected})
+            "repeated_empty_anchor":repeated_empty_anchor,"invalid_or_unmappable":rejected,
+            "accepted_proposal_ids":accepted_proposal_ids[:40],
+            "created_task_ids":list(dict.fromkeys(created_task_ids))[:100],
+            "reused_task_ids":list(dict.fromkeys(reused_task_ids))[:100],
+            "proposal_task_ids":proposal_task_ids})
         return accepted
 
     def _record_scheduled_followups(self,s,task,outcome):
@@ -1623,6 +1825,7 @@ class HuntEngine:
                 elif required and all(isinstance(item,dict) and item.get("status") in terminal for item in current):
                     follow_up["status"]="blocked"
                 else: follow_up["status"]="in_progress"
+            candidate.update(refresh_investigation_status(candidate))
 
     def _pivot(self,s):
         selected=select_search_tasks(s,phase="investigation",limit=1)
@@ -1651,6 +1854,135 @@ class HuntEngine:
         self._stage(s,"follow_up_pivot",recorded.get("status","attempted"),
             {"task_id":task["task_id"],"returned":recorded.get("returned_total",0)})
         return self._save(s)
+
+    def _activity_narrative(self,s):
+        """Run one bounded narrative synthesis without granting model authority over facts."""
+        from ..reporting.report_items import build_report_items
+        from .narrative import (
+            admit_activity_narrative, build_narrative_case, unavailable_activity_narrative,
+        )
+
+        items=build_report_items(s)
+        case=build_narrative_case(s,items)
+        attempted=False
+        if not items:
+            narrative=unavailable_activity_narrative(items,"No reportable behavior was available for narrative synthesis.")
+        elif not case.get("evidence"):
+            narrative=unavailable_activity_narrative(items,"No visible owned evidence was available for narrative synthesis.")
+        elif not self.use_ollama:
+            narrative=unavailable_activity_narrative(items,"The narrative model was disabled.")
+        elif self.offline:
+            narrative=unavailable_activity_narrative(items,"External model calls are disabled in offline mode.")
+        elif (s.get("tool_calls",0)>=self.settings.max_tool_calls or
+                time.time()-s.get("started_epoch",time.time())>=self.settings.max_runtime_seconds):
+            narrative=unavailable_activity_narrative(items,"No model-call capacity remained at report finalization.")
+        else:
+            from ..agent.ollama import Ollama
+            attempted=True
+            proposal=self._call(s,"ollama.api.chat","activity_narrative",
+                {"report_items":len(case.get("items",[])),
+                 "visible_evidence":len(case.get("evidence",[])),
+                 "admitted_relationships":len(case.get("relationships",[]))},
+                "bounded accepted report items and visible owned evidence",
+                lambda:Ollama(self.settings).synthesize_activity_narrative(case),
+                lambda result:len(result.get("clusters",[])) if isinstance(result,dict) else 0)
+            narrative=(admit_activity_narrative(case,proposal) if isinstance(proposal,dict)
+                else unavailable_activity_narrative(items,"Narrative synthesis was unavailable or failed."))
+        s["activity_narrative"]=narrative
+        coverage=s.setdefault("coverage",{})
+        coverage["activity_narrative"]={
+            "status":narrative.get("status","unavailable"),
+            "model_calls":1 if attempted else 0,
+            "clusters":len(narrative.get("clusters",[])),
+            "unconnected_items":len(narrative.get("unconnected_item_ids",[])),
+            "no_coherent_narrative":bool(narrative.get("no_coherent_narrative",True)),
+        }
+        if narrative.get("reason"):
+            coverage["activity_narrative"]["reason"]=str(narrative["reason"])[:240]
+        return narrative
+
+    def _finalization_call(self,s,tool,stage,parameters,time_range,fn,count):
+        """Run one audited report-finalization call outside discovery budgets."""
+        started=time.monotonic()
+        try:
+            result=fn(); result_status="ok"; error=None; error_reason=None
+            result_count=count(result) if result is not None else 0
+        except Exception as exc:
+            result=None; result_status="error"; error=type(exc).__name__
+            error_reason=_safe_error_reason(exc); result_count=0
+        record={"timestamp":utc_now(),"hunt_id":s["hunt_id"],"tool":tool,
+            "reasoning_stage":stage,"parameters":parameters,"time_range":time_range,
+            "result_count":result_count,"source_total":None,
+            "duration_ms":round((time.monotonic()-started)*1000),
+            "result_status":result_status,"error":error,"error_reason":error_reason,
+            "status_code":None,"budget_domain":"report_finalization"}
+        s.setdefault("tool_runs",[]).append(record); self.store.audit(record)
+        reason=f" error={error_reason}" if error_reason else ""
+        print(f"[ROMULUS] {stage}: {tool} status={result_status} results={result_count}{reason} scope={time_range}")
+        return result
+
+    def _indicator_review(self,s):
+        """Create one admitted analyst briefing without extending discovery."""
+        from ..reporting.indicator_review import (
+            admit_indicator_review, build_indicator_case, deterministic_indicator_review,
+        )
+        from ..reporting.report_items import build_report_items
+
+        items=build_report_items(s)
+        case=build_indicator_case(s,items)
+        attempted=False
+        model_result_status="not_attempted"
+        rejection_codes=[]
+        if not items:
+            review=deterministic_indicator_review(case,
+                "No reportable behavior was available for indicator synthesis.")
+        elif not case.get("evidence"):
+            review=deterministic_indicator_review(case,
+                "No visible owned evidence was available for indicator synthesis.")
+        elif not self.use_ollama:
+            review=deterministic_indicator_review(case,"The indicator-review model was disabled.")
+        elif self.offline:
+            review=deterministic_indicator_review(case,
+                "External model calls are disabled in offline mode.")
+        else:
+            from ..agent.ollama import Ollama
+            attempted=True
+            proposal=self._finalization_call(s,"ollama.api.chat","indicator_review_finalization",
+                {"report_items":len(case.get("items",[])),
+                 "visible_evidence":len(case.get("evidence",[])),
+                 "visible_observables":sum(len(row.get("observables",[]))
+                    for row in case.get("evidence",[]) if isinstance(row,dict)),
+                 "admitted_relationships":len(case.get("relationships",[]))},
+                "bounded accepted report items and visible owned evidence",
+                lambda:Ollama(self.settings).synthesize_indicator_review(case),
+                lambda result:len(result.get("strong_indicators",[]))
+                    if isinstance(result,dict) else 0)
+            model_result_status=str(s.get("tool_runs",[])[-1].get("result_status","error"))
+            if isinstance(proposal,dict):
+                admitted=admit_indicator_review(case,proposal)
+                rejection_codes=list(admitted.get("rejection_codes",[]))
+                review=(admitted if admitted.get("status")=="admitted"
+                    else deterministic_indicator_review(case,
+                        "Indicator synthesis was rejected by deterministic admission: "+
+                        ", ".join(rejection_codes[:8])))
+            else:
+                review=deterministic_indicator_review(case,
+                    "Indicator synthesis was unavailable or failed.")
+        s["indicator_review"]=review
+        coverage=s.setdefault("coverage",{})
+        coverage["indicator_review"]={
+            "status":review.get("status","fallback"),
+            "model_calls":1 if attempted else 0,
+            "model_result_status":model_result_status,
+            "strong_indicators":len(review.get("strong_indicators",[])),
+            "supporting_context":len(review.get("supporting_context",[])),
+            "likely_noise":len(review.get("likely_noise",[])),
+            "rejection_codes":rejection_codes,
+            "budget_domain":"report_finalization",
+        }
+        if review.get("reason"):
+            coverage["indicator_review"]["reason"]=str(review["reason"])[:300]
+        return review
 
     def _report(self,s):
         pending=[task for task in s.get("search_tasks",{}).values()
@@ -1694,10 +2026,12 @@ class HuntEngine:
         interrupted=s.get("termination_reason") in {"tool_call_budget","runtime_budget","depth_budget",
             "workflow_error","resource_limit","no_productive_frontier"}
         successful_search=any(r.get("result_status")=="ok" and any(x in str(r.get("reasoning_stage","")) for x in ("search","pivot")) for r in s.get("tool_runs",[]))
-        if s.get("findings"):
+        from ..reporting.report_items import build_report_items
+        report_items=build_report_items(s)
+        if report_items:
             s["outcome"]="evidence_supported_lead"
-            titles="; ".join(f.get("title","") for f in s["findings"][:3] if f.get("title"))
-            s["summary"]=f"ROMULUS identified {len(s['findings'])} suspected investigative lead(s) supported by cited telemetry"+(f": {titles}." if titles else ".")+" These leads do not confirm compromise; review the evidence, benign alternatives, and follow-up actions in the report."
+            titles="; ".join(item.get("title","") for item in report_items[:3] if item.get("title"))
+            s["summary"]=f"ROMULUS identified {len(report_items)} reportable behavior item(s) supported by cited telemetry"+(f": {titles}." if titles else ".")+" These items do not by themselves confirm compromise; review the evidence, benign alternatives, and follow-up actions in the report."
             if model_failures: s["summary"]+=f" {len(model_failures)} structured model call(s) failed; deterministic coverage searches were used and the investigation is partial."
             if incomplete_coverage: s["summary"]+=" Coverage is partial because a source cap, source error, or required hypothesis-coverage item remains unresolved."
         elif (telemetry_errors or model_failures) and not successful_search:
@@ -1732,6 +2066,8 @@ class HuntEngine:
         s["coverage"]["source_error_count"]=len(errors)
         s["coverage"]["coverage_closure_ready"]=coverage_closure_ready
         _attach_finding_paths(s)
+        self._activity_narrative(s)
+        self._indicator_review(s)
         try:
             from ..reporting.report import generate_report
             s["report_paths"]=[str(p) for p in generate_report(s,self.settings.reports_dir)]
@@ -1854,14 +2190,29 @@ def _state_mission_mode(state):
 
 def _candidate_hypotheses(candidates,existing,evidence=None):
     """Create bounded hypotheses only from deterministic candidates with citations."""
+    available_evidence_ids=None if evidence is None else {
+        str(event.get("evidence_id")) for event in evidence if event.get("evidence_id")
+    }
     existing_candidates={candidate_id for hypothesis in existing for candidate_id in hypothesis.get("basis_candidate_ids",[])}
+    existing_candidates.update(hypothesis.get("candidate_id") for hypothesis in existing if hypothesis.get("candidate_id"))
     out=[]
+    remaining=[]
     for candidate in candidates:
+        if candidate.get("candidate_id") in existing_candidates:
+            continue
+        current_evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
+        if available_evidence_ids is not None:
+            current_evidence_ids=[
+                value for value in current_evidence_ids if value in available_evidence_ids
+            ]
+            if not current_evidence_ids:
+                continue
+        remaining.append({**candidate,"evidence_ids":current_evidence_ids})
+    for candidate in select_candidate_frontier(remaining):
         candidate_id=candidate.get("candidate_id")
         evidence_ids=[str(value) for value in candidate.get("evidence_ids",[]) if value]
         score=int(candidate.get("priority_score",0) or 0)
-        if not candidate_id or candidate_id in existing_candidates or not evidence_ids: continue
-        if score<40 and candidate.get("kind")!="trusted_indicator": continue
+        if not candidate_id or not evidence_ids: continue
         technique=next((value for value in candidate.get("attack_techniques",[]) if value in TECHNIQUES),"unmapped")
         meta=TECHNIQUES.get(technique,{})
         asset=next(iter(candidate.get("assets",[]) or []),"unknown asset")
@@ -1915,7 +2266,11 @@ def _lead_catalog(hypotheses):
         tid=hypothesis.get("technique_id"); meta=TECHNIQUES.get(tid,{})
         sources=[]
         if hypothesis.get("expected_host") or meta.get("host"): sources.append("host")
-        if hypothesis.get("expected_network") or meta.get("network") or meta.get("ports") or meta.get("protocols"): sources.append("network")
+        network_expected=bool(hypothesis.get("expected_network") or meta.get("network")
+            or meta.get("ports") or meta.get("protocols"))
+        candidate_network_compilable=bool(meta.get("ports") or meta.get("protocols"))
+        if network_expected and (not hypothesis.get("candidate_id") or candidate_network_compilable):
+            sources.append("network")
         if not sources: sources=["host"]
         follow_ups=hypothesis.get("follow_ups",[]) or []
         for source_index,source in enumerate(sources):
@@ -1939,12 +2294,13 @@ def _lead_catalog(hypotheses):
 def _link_candidates_to_findings(s):
     findings=s.get("findings",[])
     for candidate in s.get("candidate_leads",[]):
-        evidence_ids=set(candidate.get("evidence_ids",[]))
         linked=[finding.get("finding_id") for finding in findings
-                if finding.get("finding_id") and evidence_ids.intersection(finding.get("evidence_ids",[]))]
+                if finding.get("finding_id") and candidate.get("candidate_id") in (
+                    finding.get("candidate_ids",[]) or [])]
         if linked:
             candidate["finding_ids"]=list(dict.fromkeys(candidate.get("finding_ids",[])+linked))
             candidate["disposition"]="corroborated"
+        candidate.update(refresh_investigation_status(candidate))
 
 
 def _query_terms(technique_ids):
@@ -2030,36 +2386,125 @@ def _lead_host_query(lead,fields,timestamp_field,time_range,state):
     return query
 
 
-def _field_names(mapping):
-    fields=set()
+def _field_capabilities(mapping):
+    """Return concrete Elasticsearch types for queryable leaf fields only."""
+    capabilities={}
+    def add(field,field_type):
+        if not field or not isinstance(field_type,str) or field_type in {"object","nested"}: return
+        capabilities.setdefault(field,set()).add(field_type)
     def walk(props,prefix=""):
+        if not isinstance(props,dict): return
         for name,desc in props.items():
-            full=(prefix+"."+name).strip("."); fields.add(full)
-            if isinstance(desc,dict) and isinstance(desc.get("properties"),dict): walk(desc["properties"],full)
-    for entry in mapping.values(): walk(entry.get("mappings",{}).get("properties",{}))
-    return sorted(fields)
+            if not isinstance(desc,dict): continue
+            full=(prefix+"."+str(name)).strip(".")
+            field_type=desc.get("type")
+            if field_type=="nested": continue
+            add(full,field_type)
+            if isinstance(desc.get("properties"),dict): walk(desc["properties"],full)
+            for sub_name,sub_desc in (desc.get("fields") or {}).items():
+                if isinstance(sub_desc,dict):
+                    add(f"{full}.{sub_name}",sub_desc.get("type"))
+                    if isinstance(sub_desc.get("properties"),dict):
+                        walk(sub_desc["properties"],f"{full}.{sub_name}")
+    for entry in mapping.values():
+        mappings=entry.get("mappings",{}) if isinstance(entry,dict) else {}
+        walk(mappings.get("properties",{}) if isinstance(mappings,dict) else {})
+    return {field:sorted(types) for field,types in sorted(capabilities.items())}
 
 
-def _mapping_category(name,entry):
+def _field_names(mapping):
+    return sorted(_field_capabilities(mapping))
+
+
+def _mapping_categories(name,entry):
     lower=str(name).lower()
     fields=set(_field_names({name:entry}))
-    host_score=sum(field in fields for field in ("process.name","process.command_line","winlog.event_id","event.code","user.name","host.name"))
-    network_score=sum(field in fields for field in ("source.ip","destination.ip","source.port","destination.port","network.protocol","dns.question.name","http.request.method"))
-    return "network" if "network" in lower else ("host" if "host" in lower else
-        ("network" if network_score>host_score else ("host" if host_score else "other")))
+    categories=set()
+    endpoint_markers=("process.name","process.command_line","process.executable","winlog.event_id")
+    host_context_markers=("event.code","user.name","host.name")
+    network_markers=("source.ip","destination.ip","source.port","destination.port","network.protocol",
+        "dns.question.name","http.request.method")
+    network_evidence=any(field in fields for field in network_markers)
+    network_classified=network_evidence or "network" in lower
+    sparse_auth_context=("host.name" in fields and
+        any(field in fields for field in ("user.name","event.code")) and
+        not any(field in fields for field in ("destination.ip","destination.port","network.protocol",
+            "dns.question.name","http.request.method")))
+    if any(field in fields for field in endpoint_markers) or sparse_auth_context or "host" in lower:
+        categories.add("host")
+    if network_classified:
+        categories.add("network")
+    if not network_classified and any(field in fields for field in host_context_markers):
+        categories.add("host")
+    if not categories:
+        categories.add("other")
+    return categories
+
+
+def _es_hit_family(hit,index,index_classes):
+    host_index=index in index_classes.get("host",[])
+    network_index=index in index_classes.get("network",[])
+    if host_index and network_index:
+        category=str(_nested(hit,"event.category") or hit.get("event.category") or "").lower()
+        module=" ".join(str(value) for value in (_nested(hit,"event.module"),_nested(hit,"event.dataset"),
+            hit.get("event.module"),hit.get("event.dataset")) if value).lower()
+        network_modules=("zeek","suricata","netflow","packetbeat","panw","network")
+        host_modules=("auth","audit","winlog","security")
+        host_categories=("process","authentication","iam","file","registry","configuration","malware","package","driver")
+        endpoint_fields=("process.name","process.command_line","process.executable","winlog.event_id")
+        network_fields=("source.ip","destination.ip","source.port","destination.port","network.protocol",
+            "dns.question.name","http.request.method","tls.client.server_name")
+        def present(field):
+            value=_nested(hit,field)
+            if value is None: value=hit.get(field)
+            return value not in (None,"",[],{})
+        sparse_host_context=(present("host.name") and
+            (present("user.name") or present("event.code")) and
+            not any(present(field) for field in ("destination.ip","destination.port","network.protocol",
+                "dns.question.name","http.request.method","tls.client.server_name")))
+        if any(token in module for token in network_modules): return "network"
+        if any(token in module for token in host_modules): return "host"
+        if any(token in category for token in host_categories): return "host"
+        if "network" in category: return "network"
+        if sparse_host_context: return "host"
+        if any(present(field) for field in endpoint_fields): return "host"
+        if any(present(field) for field in network_fields): return "network"
+        if "network" in index.lower(): return "network"
+        return "host"
+    if network_index: return "network"
+    if host_index: return "host"
+    category=str(_nested(hit,"event.category") or hit.get("event.category") or "").lower()
+    module=" ".join(str(value) for value in (_nested(hit,"event.module"),_nested(hit,"event.dataset"),
+        hit.get("event.module"),hit.get("event.dataset")) if value).lower()
+    if "host" in index.lower(): return "host"
+    if "network" in index.lower() or any(x in module for x in ("zeek","suricata","netflow","packetbeat","panw","network")) or "network" in category:
+        return "network"
+    return "host"
 
 
 def _field_names_by_class(mapping):
     grouped={"host":set(),"network":set(),"other":set()}
     for name,entry in mapping.items():
-        grouped[_mapping_category(name,entry)].update(_field_names({name:entry}))
+        fields=_field_names({name:entry})
+        for category in _mapping_categories(name,entry): grouped[category].update(fields)
     return {key:sorted(value) for key,value in grouped.items() if value}
+
+
+def _field_capabilities_by_class(mapping):
+    grouped={"host":{},"network":{},"other":{}}
+    for name,entry in mapping.items():
+        capabilities=_field_capabilities({name:entry})
+        for category in _mapping_categories(name,entry):
+            for field,types in capabilities.items():
+                grouped[category].setdefault(field,set()).update(types)
+    return {category:{field:sorted(types) for field,types in sorted(fields.items())}
+        for category,fields in grouped.items() if fields}
 
 
 def _index_names_by_class(mapping):
     grouped={"host":[],"network":[],"other":[]}
     for name,entry in mapping.items():
-        grouped[_mapping_category(name,entry)].append(str(name))
+        for category in _mapping_categories(name,entry): grouped[category].append(str(name))
     return {key:sorted(value) for key,value in grouped.items() if value}
 
 
@@ -2327,32 +2772,26 @@ def _pcap_filter(hypotheses):
 def _lead_network_expression(lead):
     tid=lead.get("technique_id") if isinstance(lead,dict) else None
     meta=TECHNIQUES.get(tid,{})
-    clauses=[]
-    for port in meta.get("ports",[])[:10]: clauses.append(f"port == {port}")
-    protocol_map={"https":"tls","rdp":"tcp","ssh":"tcp","smb":"tcp","dcom":"tcp","winrm":"tcp"}
-    for protocol in meta.get("protocols",[])[:6]:
-        value=protocol_map.get(protocol,protocol)
-        if value in {"tcp","udp","icmp","dns","http","tls"}: clauses.append(f"protocols == {value}")
     legacy={"network_smb_context":"port == 445","network_auth_context":"port == 3389 || port == 22 || port == 5985 || port == 5986",
             "network_dns_http_context":"protocols == dns || protocols == http || protocols == tls",
             "network_transfer_context":"protocols == dns || protocols == http || protocols == tls"}
-    if not clauses and isinstance(lead,dict) and lead.get("id") in legacy: return legacy[lead["id"]]
-    return " || ".join(dict.fromkeys(clauses)) or "protocols == tcp || protocols == udp || protocols == icmp"
+    if not meta and isinstance(lead,dict) and lead.get("id") in legacy and not lead.get("candidate_id"):
+        return legacy[lead["id"]]
+    spec=candidate_network_spec(lead if isinstance(lead,dict) else {},meta,
+        require_entity=bool(isinstance(lead,dict) and lead.get("candidate_id")))
+    return compile_arkime(spec)
 
 
 def _lead_pcap_filter(lead):
     tid=lead.get("technique_id") if isinstance(lead,dict) else None
     meta=TECHNIQUES.get(tid,{})
-    clauses=[]
-    for port in meta.get("ports",[])[:10]: clauses.append(f"tcp.port == {port} || udp.port == {port}")
-    protocol_map={"https":"tls","rdp":"tcp","ssh":"tcp","smb":"smb2","dcom":"dcerpc","winrm":"http"}
-    for protocol in meta.get("protocols",[])[:6]:
-        value=protocol_map.get(protocol,protocol)
-        if value in {"tcp","udp","icmp","dns","http","tls","smb2","dcerpc"}: clauses.append(value)
     legacy={"network_smb_context":"tcp.port == 445","network_auth_context":"tcp.port == 3389 || tcp.port == 22 || tcp.port == 5985 || tcp.port == 5986",
         "network_dns_http_context":"dns || http || tls","network_transfer_context":"dns || http || tls"}
-    if not clauses and isinstance(lead,dict) and lead.get("id") in legacy: return legacy[lead["id"]]
-    return " || ".join(dict.fromkeys(clauses)) or "ip"
+    if not meta and isinstance(lead,dict) and lead.get("id") in legacy and not lead.get("candidate_id"):
+        return legacy[lead["id"]]
+    spec=candidate_network_spec(lead if isinstance(lead,dict) else {},meta,
+        require_entity=bool(isinstance(lead,dict) and lead.get("candidate_id")))
+    return compile_tshark(spec)[0]
 
 
 def _evidence_ips(events):
@@ -2446,13 +2885,13 @@ def _is_broad_objective(text):
         "malicious actors across all available","all available historical host and network","do not assume one technique"))
 
 
-def _behavior_seed_queries(catalog, fields, timestamp_field, time_range, limit=32):
+def _behavior_seed_queries(catalog, fields, timestamp_field, time_range, limit=32, field_capabilities=None):
     """Build a bounded, priority-ordered set of portable behavior searches."""
     bindings = resolve_semantic_fields(fields)
     applicable, unsupported = applicable_analytics(catalog, bindings, "elasticsearch")
     compiled = []
     for analytic in applicable:
-        query = compile_elasticsearch_seed(analytic, bindings, timestamp_field, time_range)
+        query = compile_elasticsearch_seed(analytic, bindings, timestamp_field, time_range, field_capabilities)
         if query is None:
             unsupported.append({"id": analytic["id"], "missing_roles": [], "reason": "predicate requires post-collection evaluation"})
             continue
@@ -2469,7 +2908,7 @@ def _behavior_seed_queries(catalog, fields, timestamp_field, time_range, limit=3
     return selected, sorted(unsupported, key=lambda item: item["id"])
 
 
-def _indicator_seed_queries(indicators, fields, timestamp_field, time_range, limit=12):
+def _indicator_seed_queries(indicators, fields, timestamp_field, time_range, limit=12, field_capabilities=None):
     bindings = resolve_semantic_fields(fields)
     compiled = []
     unsupported = []
@@ -2486,7 +2925,8 @@ def _indicator_seed_queries(indicators, fields, timestamp_field, time_range, lim
             except (TypeError, ValueError):
                 unsupported.append({"id": indicator.get("id"), "reason": "invalid expiration"})
                 continue
-        query = compile_elasticsearch_indicator_seed(indicator, bindings, timestamp_field, time_range)
+        query = compile_elasticsearch_indicator_seed(
+            indicator, bindings, timestamp_field, time_range, field_capabilities)
         if query is None:
             unsupported.append({"id": indicator.get("id"), "reason": "required semantic fields unavailable"})
             continue

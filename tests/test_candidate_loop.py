@@ -82,6 +82,8 @@ class MissionModeTests(unittest.TestCase):
 
         self.assertIn("mission_mode", HuntState.__annotations__)
         self.assertIn("pivot_results", HuntState.__annotations__)
+        self.assertIn("es_field_capabilities", HuntState.__annotations__)
+        self.assertIn("es_field_capabilities_by_class", HuntState.__annotations__)
         for field in ("search_tasks", "search_queue", "search_outcomes", "scheduler_history"):
             self.assertIn(field, HuntState.__annotations__)
         self.assertNotIn("dynamic_plan_created", HuntState.__annotations__)
@@ -164,6 +166,34 @@ class MissionModeTests(unittest.TestCase):
             self.assertNotIn("termination_reason",result)
             self.assertEqual(engine._after_reason(result),"report")
             self.assertEqual(result["termination_reason"],"no_productive_frontier")
+
+    def test_undirected_candidate_free_reasoning_makes_no_investigator_or_critic_call(self):
+        import time
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            engine = _engine(Path(directory), use_ollama=True)
+            engine._call = lambda *args, **kwargs: self.fail(
+                "candidate-free undirected reasoning started an investigator or critic call"
+            )
+            state = _planning_state("Hunt broadly across all available telemetry")
+            state.update({
+                "mission_mode": "undirected",
+                "candidate_leads": [],
+                "search_artifacts": [],
+                "completed_leads": [],
+                "lead_catalog": [],
+                "reasoning_history": [],
+                "stage_history": [],
+                "depth": 0,
+                "started_epoch": time.time(),
+                "coverage": {"search_fields": {"elasticsearch": ["process.name"]}},
+            })
+
+            result = engine._reason(state)
+
+            self.assertEqual(result["hypotheses"], [])
+            self.assertEqual(result["tool_calls"], 0)
+            self.assertFalse(result["coverage"].get("reasoning_summary", {}).get("investigator_calls", 0))
 
     def test_undirected_hunt_without_candidate_still_never_reasons(self):
         import time
@@ -276,6 +306,28 @@ class MissionModeTests(unittest.TestCase):
 
 
 class CandidateHypothesisTests(unittest.TestCase):
+    def test_candidate_hypothesis_rejects_citations_absent_from_current_evidence(self):
+        from romulus.investigation.workflow import _candidate_hypotheses
+
+        candidate = {
+            "candidate_id": "CL-STALE",
+            "kind": "behavior",
+            "title": "Previously observed behavior",
+            "priority_score": 75,
+            "priority_tier": "high",
+            "disposition": "observed",
+            "customer_visible": False,
+            "assets": ["srv-01"],
+            "evidence_ids": ["EV-NO-LONGER-AVAILABLE"],
+            "attack_techniques": ["T1059"],
+            "benign_explanations": ["Authorized administration"],
+            "follow_ups": [],
+        }
+
+        hypotheses = _candidate_hypotheses([candidate], [], evidence=[])
+
+        self.assertEqual(hypotheses, [])
+
     def test_observed_candidate_creates_only_candidate_backed_hypothesis(self):
         event = {
             "evidence_id": "EV-CHAIN",
@@ -412,8 +464,485 @@ class AggregateSignalTests(unittest.TestCase):
         self.assertIn("EV-REMOTE", remote["evidence_ids"])
         self.assertIn("EV-EXEC", remote["evidence_ids"])
 
+    def test_aggregate_candidate_uses_supporting_evidence_time_bounds(self):
+        from romulus.intelligence.analytics import summarize_evidence
+        from romulus.intelligence.behavior_catalog import build_candidate_queue, load_behavior_catalog
+
+        event = {
+            "evidence_id": "EV-DNS-TIME",
+            "source": "arkime",
+            "observed_at": "2026-08-04T09:17:00Z",
+            "asset": "10.70.0.12",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "destination": {"ip": "203.0.113.44", "port": 53},
+                "network": {"protocol": "dns"},
+                "dns": {"question": {"name": "abcdefghijklmnopqrstuvwxyz012345.example.test"}},
+            },
+        }
+
+        summary = summarize_evidence([], [event], limit=50)
+        candidates = build_candidate_queue([event], load_behavior_catalog(), {"indicators": []}, summary)
+        candidate = next(item for item in candidates if item.get("analytic_id") == "BH-NET-004")
+
+        self.assertEqual(candidate["first_observed"], "2026-08-04T09:17:00Z")
+        self.assertEqual(candidate["last_observed"], "2026-08-04T09:17:00Z")
+
+    def test_dns_entropy_checks_all_labels_and_promotes_a_repeated_encoded_burst(self):
+        from romulus.intelligence.analytics import summarize_evidence
+        from romulus.intelligence.behavior_catalog import build_candidate_queue, load_behavior_catalog
+
+        events = []
+        for index in range(5):
+            events.append({
+                "evidence_id": f"EV-DNS-BURST-{index}",
+                "source": "arkime",
+                "observed_at": f"2026-08-04T09:0{index}:00Z",
+                "asset": "203.0.113.44",
+                "raw": {
+                    "source": {"ip": "10.70.0.12"},
+                    "destination": {"ip": "203.0.113.44", "port": 53},
+                    "network": {"protocol": "dns"},
+                    "dns": {"question": {"name":
+                        f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example"}},
+                },
+            })
+
+        summary = summarize_evidence([], events, limit=50)
+        entropy = summary["aggregate_signals"]["dns_high_entropy"]
+        bursts = summary["aggregate_signals"]["dns_encoded_label_burst"]
+
+        self.assertEqual(len(entropy), 5)
+        self.assertEqual(entropy[0]["label"], "a9f3k2m8q7w4z6x1c5v0b2n8d0")
+        self.assertEqual(len(bursts), 1)
+        self.assertEqual(bursts[0]["source"], "10.70.0.12")
+        self.assertEqual(bursts[0]["suffix"], "tunnel.example")
+        self.assertEqual(bursts[0]["observations"], 5)
+        self.assertEqual(len(bursts[0]["sample_evidence_ids"]), 5)
+
+        candidates = build_candidate_queue(
+            events, load_behavior_catalog(), {"indicators": []}, summary
+        )
+        candidate = next(
+            item for item in candidates if item.get("analytic_id") == "BH-NET-010"
+        )
+        self.assertEqual(candidate["evidence_ids"], [f"EV-DNS-BURST-{i}" for i in range(5)])
+        self.assertEqual(candidate["classification"], "suspicious")
+        self.assertTrue(candidate["customer_visible"])
+
+    def test_dns_encoded_burst_requires_distinct_labels(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        events = [{
+            "evidence_id": f"EV-DNS-REPEAT-{index}",
+            "source": "arkime",
+            "observed_at": f"2026-08-04T09:0{index}:00Z",
+            "asset": "203.0.113.44",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    "1.a9f3k2m8q7w4z6x1c5v0b2n8d0.tunnel.example"}},
+            },
+        } for index in range(5)]
+
+        signals = summarize_evidence([], events, limit=50)["aggregate_signals"]
+        self.assertEqual(signals["dns_encoded_label_burst"], [])
+
+    def test_dns_encoded_burst_requires_distinct_evidence_records(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        labels = (
+            "a9f3k2m8q7w4z6x1c5v0b2n8d0",
+            "b9f3k2m8q7w4z6x1c5v0b2n8d1",
+            "c9f3k2m8q7w4z6x1c5v0b2n8d2",
+            "d9f3k2m8q7w4z6x1c5v0b2n8d3",
+            "e9f3k2m8q7w4z6x1c5v0b2n8d4",
+            "e9f3k2m8q7w4z6x1c5v0b2n8d4",
+        )
+        evidence_ids = (
+            "EV-DNS-DUPLICATE", "EV-DNS-DUPLICATE",
+            "EV-DNS-UNIQUE-1", "EV-DNS-UNIQUE-2",
+            "EV-DNS-UNIQUE-3", "EV-DNS-UNIQUE-4",
+        )
+        events = [{
+            "evidence_id": evidence_ids[index],
+            "source": "arkime",
+            "observed_at": f"2026-08-04T09:0{index}:00Z",
+            "asset": "203.0.113.44",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    f"{labels[index]}.tunnel.example"}},
+            },
+        } for index in range(6)]
+
+        signals = summarize_evidence([], events, limit=50)["aggregate_signals"]
+
+        self.assertEqual(signals["dns_encoded_label_burst"], [])
+
+    def test_dns_encoded_burst_rejects_split_sources_suffixes_low_entropy_and_wide_windows(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        def event(index, minute, source, domain):
+            return {
+                "evidence_id": f"EV-DNS-CONTROL-{source}-{index}-{minute}",
+                "source": "arkime",
+                "observed_at": f"2026-08-04T09:{minute:02d}:00Z",
+                "asset": "203.0.113.44",
+                "raw": {
+                    "source": {"ip": source},
+                    "dns": {"question": {"name": domain}},
+                },
+            }
+
+        split_sources = [event(
+            index, index, f"10.70.0.{index + 1}",
+            f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example",
+        ) for index in range(5)]
+        split_suffixes = [event(
+            index, index, "10.70.0.12",
+            f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel{index}.example",
+        ) for index in range(5)]
+        low_entropy = [event(
+            index, index, "10.70.0.12",
+            f"{index}.aaaaaaaaaaaaaaaaaaaaaaaa{index}.tunnel.example",
+        ) for index in range(5)]
+        wide_window = [event(
+            index, minute, "10.70.0.12",
+            f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example",
+        ) for index, minute in enumerate((0, 11, 22, 33, 44))]
+        missing_sources = [event(
+            index, index, "",
+            f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example",
+        ) for index in range(5)]
+        for row in missing_sources:
+            row["asset"] = "203.0.113.53"
+            row["raw"].pop("source")
+
+        for rows in (split_sources, split_suffixes, low_entropy, wide_window, missing_sources):
+            signals = summarize_evidence([], rows, limit=50)["aggregate_signals"]
+            self.assertEqual(signals["dns_encoded_label_burst"], [])
+
+    def test_dns_burst_evaluates_all_qualifying_labels_per_evidence_record(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        events = [{
+            "evidence_id": f"EV-DNS-MULTI-{index}",
+            "source": "arkime",
+            "observed_at": f"2026-08-04T09:0{index}:00Z",
+            "asset": "203.0.113.44",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    f"a9f3k2m8q7w4z6x1c5v0b2n8d0.aaaabbbbccccddddeeeeffff1111222{index}.tunnel.example"}},
+            },
+        } for index in range(5)]
+
+        bursts = summarize_evidence([], events, limit=50)["aggregate_signals"]["dns_encoded_label_burst"]
+
+        self.assertEqual(len(bursts), 1)
+        self.assertEqual(bursts[0]["observations"], 5)
+        self.assertEqual(len(bursts[0]["sample_evidence_ids"]), 5)
+
+    def test_dns_entropy_prefers_a_qualifying_long_label_over_a_short_marker(self):
+        from romulus.intelligence.analytics import summarize_evidence
+
+        event = {
+            "evidence_id": "EV-DNS-STRONGEST",
+            "source": "arkime",
+            "observed_at": "2026-08-04T09:00:00Z",
+            "asset": "203.0.113.44",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    "q8z1m7p4x2v9k6c3.aaaabbbbccccddddeeeeffff11112222.tunnel.example"}},
+            },
+        }
+
+        rows = summarize_evidence([], [event])["aggregate_signals"]["dns_high_entropy"]
+
+        self.assertEqual(rows[0]["label"], "aaaabbbbccccddddeeeeffff11112222")
+
+    def test_encoded_dns_evidence_reaches_candidate_hypothesis_and_reasoning_case(self):
+        from romulus.investigation.casefile import build_case_file
+        from romulus.investigation.workflow import _candidate_hypotheses
+        from romulus.intelligence.analytics import summarize_evidence
+        from romulus.intelligence.behavior_catalog import build_candidate_queue, load_behavior_catalog
+
+        events = [{
+            "evidence_id": f"EV-DNS-CHAIN-{index}",
+            "source": "arkime",
+            "observed_at": f"2026-08-04T09:0{index}:00Z",
+            "asset": "10.70.0.12",
+            "observation": "bounded DNS record",
+            "raw": {
+                "source": {"ip": "10.70.0.12"},
+                "dns": {"question": {"name":
+                    f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example"}},
+            },
+        } for index in range(5)]
+        summary = summarize_evidence([], events, limit=50)
+        candidates = build_candidate_queue(
+            events, load_behavior_catalog(), {"indicators": []}, summary
+        )
+        dns_candidate = next(
+            item for item in candidates if item.get("analytic_id") == "BH-NET-010"
+        )
+        self.assertEqual(dns_candidate["finding_ids"], [])
+        hypotheses = _candidate_hypotheses(candidates, [], events)
+        dns_hypothesis = next(
+            item for item in hypotheses if dns_candidate["candidate_id"] in item["basis_candidate_ids"]
+        )
+        case = build_case_file({
+            "hunt_id": "HUNT-DNS-CHAIN",
+            "mission_mode": "undirected",
+            "candidate_leads": candidates,
+            "hypotheses": hypotheses,
+            "host": [],
+            "network": events,
+        })
+
+        visible_candidate = next(
+            item for item in case["candidates"] if item["candidate_id"] == dns_candidate["candidate_id"]
+        )
+        self.assertEqual(dns_hypothesis["basis"], "observed_candidate")
+        self.assertTrue(visible_candidate["evidence_ids"])
+        self.assertTrue(any(
+            "dns.question.name" in evidence["raw"]
+            for evidence in case["evidence"]
+            if evidence["evidence_id"] in visible_candidate["evidence_ids"]
+        ))
+
 
 class CandidateStateTests(unittest.TestCase):
+    def test_candidate_merge_preserves_a_fresh_classification_audit_event(self):
+        from romulus.intelligence.behavior_catalog import merge_candidate_queue
+
+        prior = [{
+            "candidate_id": "CL-AUDIT",
+            "classification": "anomalous",
+            "classification_history": [],
+            "priority_score": 10,
+            "evidence_ids": ["EV-1"],
+            "follow_ups": [],
+            "finding_ids": [],
+        }]
+        fresh = [{
+            "candidate_id": "CL-AUDIT",
+            "classification": "suspicious",
+            "classification_history": [{
+                "prior": "anomalous",
+                "new": "suspicious",
+                "rule": "independent_typed_entity_within_30m",
+                "evidence_ids": ["EV-1", "EV-2"],
+                "timestamp": "2026-10-13T00:00:00+00:00",
+            }],
+            "priority_score": 20,
+            "evidence_ids": ["EV-1", "EV-2"],
+            "follow_ups": [],
+            "finding_ids": [],
+        }]
+
+        merged = merge_candidate_queue(prior, fresh)[0]
+
+        self.assertEqual(merged["classification"], "suspicious")
+        self.assertEqual(len(merged["classification_history"]), 1)
+        self.assertEqual(
+            merged["classification_history"][0]["rule"],
+            "independent_typed_entity_within_30m",
+        )
+
+    def test_follow_up_outcomes_change_status_without_changing_classification(self):
+        from romulus.investigation.workflow import HuntEngine
+
+        candidate = {
+            "candidate_id": "CL-STATUS",
+            "classification": "suspicious",
+            "investigation_status": "new",
+            "disposition": "observed",
+            "finding_ids": [],
+            "follow_ups": [{
+                "follow_up_id": "FU-STATUS", "status": "pending", "history": [],
+            }],
+        }
+        task = {
+            "task_id": "ST-STATUS",
+            "candidate_ids": ["CL-STATUS"],
+            "follow_up_ids": ["FU-STATUS"],
+        }
+        state = {
+            "candidate_leads": [candidate],
+            "search_tasks": {"ST-STATUS": task},
+            "search_outcomes": [{"task_id": "ST-STATUS", "status": "failed"}],
+        }
+
+        HuntEngine._record_scheduled_followups(
+            None, state, task, {"task_id": "ST-STATUS", "status": "failed"}
+        )
+
+        self.assertEqual(candidate["classification"], "suspicious")
+        self.assertEqual(candidate["investigation_status"], "follow_up_exhausted")
+        self.assertTrue(candidate["customer_visible"])
+
+    def test_linked_finding_resolves_candidate_without_promoting_truth(self):
+        from romulus.investigation.workflow import _link_candidates_to_findings
+
+        candidate = {
+            "candidate_id": "CL-LINK",
+            "classification": "anomalous",
+            "investigation_status": "investigating",
+            "disposition": "investigating",
+            "evidence_ids": ["EV-1"],
+            "finding_ids": [],
+            "follow_ups": [],
+        }
+        state = {
+            "candidate_leads": [candidate],
+            "findings": [{"finding_id": "F-1", "candidate_ids": ["CL-LINK"],
+                "evidence_ids": ["EV-1"]}],
+        }
+
+        _link_candidates_to_findings(state)
+
+        self.assertEqual(candidate["classification"], "anomalous")
+        self.assertEqual(candidate["investigation_status"], "resolved")
+        self.assertFalse(candidate["customer_visible"])
+
+    def test_shared_evidence_does_not_implicitly_merge_distinct_candidates_into_finding(self):
+        from romulus.investigation.workflow import _link_candidates_to_findings
+
+        state = {
+            "candidate_leads": [{
+                "candidate_id": "CL-EXPLICIT", "classification": "suspicious",
+                "investigation_status": "new", "disposition": "observed",
+                "evidence_ids": ["EV-SHARED"], "finding_ids": [], "follow_ups": [],
+            }, {
+                "candidate_id": "CL-DISTINCT", "classification": "suspicious",
+                "investigation_status": "new", "disposition": "observed",
+                "evidence_ids": ["EV-SHARED"], "finding_ids": [], "follow_ups": [],
+            }],
+            "findings": [{
+                "finding_id": "F-EXPLICIT", "candidate_ids": ["CL-EXPLICIT"],
+                "evidence_ids": ["EV-SHARED"],
+            }],
+        }
+
+        _link_candidates_to_findings(state)
+
+        self.assertEqual(state["candidate_leads"][0]["finding_ids"], ["F-EXPLICIT"])
+        self.assertEqual(state["candidate_leads"][1]["finding_ids"], [])
+        self.assertEqual(state["candidate_leads"][1]["investigation_status"], "new")
+
+    def test_candidate_merge_sanitizes_derived_state_when_candidate_is_not_refreshed(self):
+        from romulus.intelligence.behavior_catalog import merge_candidate_queue
+        from romulus.investigation.candidate_triage import relate_candidates
+
+        candidates = [
+            {
+                "candidate_id": "CL-OLD-A",
+                "kind": "behavior",
+                "analytic_id": "BH-OLD-A",
+                "corroboration_group": "old-a",
+                "priority_score": 65,
+                "priority_tier": "medium",
+                "disposition": "observed",
+                "customer_visible": False,
+                "evidence_ids": ["EV-OLD-A"],
+                "score_reasons": ["base behavior score"],
+                "follow_ups": [],
+            },
+            {
+                "candidate_id": "CL-OLD-B",
+                "kind": "behavior",
+                "analytic_id": "BH-OLD-B",
+                "corroboration_group": "old-b",
+                "priority_score": 45,
+                "priority_tier": "medium",
+                "disposition": "observed",
+                "customer_visible": False,
+                "evidence_ids": ["EV-OLD-B"],
+                "score_reasons": ["base behavior score"],
+                "follow_ups": [],
+            },
+        ]
+        evidence = [
+            {"evidence_id": "EV-OLD-A", "observed_at": "2026-10-12T12:00:00Z",
+             "raw": {"host": {"name": "srv-01"}}},
+            {"evidence_id": "EV-OLD-B", "observed_at": "2026-10-12T12:01:00Z",
+             "raw": {"host": {"name": "srv-01"}}},
+        ]
+        prior = relate_candidates(candidates, evidence)
+
+        merged = merge_candidate_queue(prior, [])
+        retained = next(item for item in merged if item["candidate_id"] == "CL-OLD-A")
+
+        self.assertEqual(retained["disposition"], "observed")
+        self.assertFalse(retained["customer_visible"])
+        self.assertEqual(retained["priority_score"], 65)
+        self.assertEqual(retained["priority_tier"], "medium")
+        self.assertEqual(retained["corroboration_bonus"], 0)
+        self.assertEqual(retained["related_candidates"], [])
+        self.assertEqual(retained["corroboration_reasons"], [])
+
+    def test_candidate_merge_clears_derived_corroboration_when_relationship_disappears(self):
+        from romulus.intelligence.behavior_catalog import merge_candidate_queue
+        from romulus.investigation.candidate_triage import relate_candidates
+
+        candidates = [
+            {
+                "candidate_id": "CL-A",
+                "kind": "behavior",
+                "analytic_id": "BH-A",
+                "corroboration_group": "group-a",
+                "priority_score": 65,
+                "priority_tier": "medium",
+                "disposition": "observed",
+                "customer_visible": False,
+                "evidence_ids": ["EV-A"],
+                "score_reasons": ["base behavior score"],
+                "follow_ups": [],
+            },
+            {
+                "candidate_id": "CL-B",
+                "kind": "behavior",
+                "analytic_id": "BH-B",
+                "corroboration_group": "group-b",
+                "priority_score": 45,
+                "priority_tier": "medium",
+                "disposition": "observed",
+                "customer_visible": False,
+                "evidence_ids": ["EV-B"],
+                "score_reasons": ["base behavior score"],
+                "follow_ups": [],
+            },
+        ]
+        evidence = [
+            {
+                "evidence_id": "EV-A",
+                "observed_at": "2026-10-12T12:00:00Z",
+                "raw": {"host": {"name": "srv-01"}},
+            },
+            {
+                "evidence_id": "EV-B",
+                "observed_at": "2026-10-12T12:01:00Z",
+                "raw": {"host": {"name": "srv-01"}},
+            },
+        ]
+
+        prior = relate_candidates(candidates, evidence)
+        previously_related = next(item for item in prior if item["candidate_id"] == "CL-A")
+        self.assertEqual(previously_related["disposition"], "corroborated")
+
+        fresh = relate_candidates(candidates, evidence[:1])
+        merged = merge_candidate_queue(prior, fresh)
+        current = next(item for item in merged if item["candidate_id"] == "CL-A")
+
+        self.assertEqual(current["disposition"], "observed")
+        self.assertFalse(current["customer_visible"])
+        self.assertEqual(current["priority_score"], 65)
+        self.assertEqual(current["corroboration_bonus"], 0)
+        self.assertEqual(current["related_candidates"], [])
+
     def test_candidate_merge_preserves_disposition_follow_up_status_and_history(self):
         from romulus.intelligence.behavior_catalog import (
             build_candidate_queue,
@@ -623,6 +1152,12 @@ def _aggregate_fixture():
         network_event("EV-RARE", 13, "10.0.0.20", "93.184.216.34", 443, "https", 900),
         network_event("EV-TRANSFER", 15, "10.0.0.10", "1.1.1.1", 443, "https", 8_000_000),
     ]
+    for index in range(5):
+        network.append(network_event(
+            f"EV-DNS-BURST-{index}", 16 + index, "10.0.0.10", "8.8.8.8", 53, "dns",
+            dns={"question": {"name":
+                f"{index}.a9f3k2m8q7w4z6x1c5v0b2n8d{index}.tunnel.example"}},
+        ))
     for index in range(5):
         network.append(network_event(
             f"EV-NX-{index}", 20 + index, "10.0.0.10", "8.8.8.8", 53, "dns",

@@ -10,6 +10,7 @@ from typing import Any
 from .models import utc_now
 from .store import Store
 from .investigation.scheduler import outcome_resolves
+from .investigation.classification import reportable_candidates
 
 
 class RetentionError(RuntimeError):
@@ -57,8 +58,11 @@ def apply_retention(
     hunt_id = str(working.get("hunt_id") or "")
     hunt_status=str(working.get("status") or "")
     existing = working.get("retention") if isinstance(working.get("retention"), dict) else {}
+    anomaly_expected, generation_stamp, report_root = _report_manifest(working)
     if policy == "compact" and existing.get("status") == "completed":
-        _verify_reports(hunt_id, working.get("report_paths", []))
+        _verify_reports(hunt_id, working.get("report_paths", []),
+            anomaly_expected=anomaly_expected, generation_stamp=generation_stamp,
+            report_root=report_root)
         working["retention_policy"]="compact"
         working["retention"]["finalized"]=True
         store.save_state(hunt_id,working)
@@ -71,7 +75,10 @@ def apply_retention(
         }
         store.save_state(hunt_id,working)
         return working
-    reports = _verify_reports(hunt_id, working.get("report_paths", []))
+    reports = _verify_reports(
+        hunt_id, working.get("report_paths", []), anomaly_expected=anomaly_expected,
+        generation_stamp=generation_stamp, report_root=report_root,
+    )
     if policy == "full":
         working["retention"] = {
             "policy":"full","status":"retained","finalized":True,"updated_at":utc_now(),
@@ -81,6 +88,21 @@ def apply_retention(
         return working
 
     retained_ids = _cited_evidence_ids(working)
+    available_ids = {
+        str(row.get("evidence_id"))
+        for row in list(working.get("host", []) or []) + list(working.get("network", []) or [])
+        if isinstance(row, dict) and row.get("evidence_id")
+    }
+    available_ids.update(
+        str(row.get("evidence_id")) for row in store.list_evidence(hunt_id)
+        if isinstance(row, dict) and row.get("evidence_id")
+    )
+    missing_ids = sorted(retained_ids - available_ids)
+    if missing_ids:
+        raise RetentionError(
+            "Reportable items have cited evidence records that are unavailable: "
+            + ", ".join(missing_ids[:12])
+        )
     compact_state = _compact_state(working, retained_ids)
     compact_state["retention"] = {
         "policy":"compact","status":"in_progress","finalized":True,"finalized_at":utc_now(),
@@ -109,17 +131,66 @@ def apply_retention(
         return fallback
 
 
-def _verify_reports(hunt_id: str, report_paths: Any) -> list[dict[str, Any]]:
+def _report_manifest(state: dict[str, Any]) -> tuple[bool, str | None, str | None]:
+    """Validate a present report manifest while preserving legacy states that have none."""
+    if "report_manifest" not in state:
+        return False, None, None
+    manifest = state.get("report_manifest")
+    if not isinstance(manifest, dict):
+        raise RetentionError("The report manifest must be an object")
+    generation_stamp = manifest.get("generation_stamp")
+    anomaly_expected = manifest.get("anomaly_expected")
+    if not isinstance(generation_stamp, str) or not generation_stamp.strip():
+        raise RetentionError("The report manifest requires a non-empty generation stamp")
+    if type(anomaly_expected) is not bool:
+        raise RetentionError("The report manifest requires a Boolean anomaly declaration")
+    report_root=manifest.get("report_root")
+    if report_root is not None and (not isinstance(report_root,str) or not report_root.strip()):
+        raise RetentionError("The report manifest report root must be a non-empty path")
+    return anomaly_expected, generation_stamp.strip(), report_root.strip() if report_root else None
+
+
+def _verify_reports(
+    hunt_id: str, report_paths: Any, *, anomaly_expected: bool = False,
+    generation_stamp: str | None = None, report_root: str | None = None,
+) -> list[dict[str, Any]]:
     paths=[Path(str(value)) for value in report_paths or []]
+    if report_root:
+        root=Path(report_root).resolve(strict=False)
+        if any(path.resolve(strict=False)==root or root not in path.resolve(strict=False).parents
+                for path in paths):
+            raise RetentionError("A final report is outside the configured reports directory")
+    if len({str(path.resolve(strict=False)) for path in paths})!=len(paths):
+        raise RetentionError("Duplicate report paths are not allowed")
     docx_paths=[path for path in paths if path.suffix.lower()==".docx"]
-    text_paths=[path for path in paths if path.suffix.lower()==".txt"]
-    if len(docx_paths)!=1 or len(text_paths)!=1:
+    anomaly_paths=[path for path in paths if path.suffix.lower()==".txt" and path.parent.name=="anomalous"]
+    text_paths=[path for path in paths if path.suffix.lower()==".txt" and path.parent.name!="anomalous"]
+    expected_count=3 if anomaly_expected else 2
+    if len(paths)!=expected_count or len(docx_paths)!=1 or len(text_paths)!=1:
         raise RetentionError("Exactly one DOCX and one TXT report are required before compaction")
+    if len(anomaly_paths)!=(1 if anomaly_expected else 0):
+        raise RetentionError("The declared anomaly report set does not match the report manifest")
     docx_path,text_path=docx_paths[0],text_paths[0]
     if docx_path.stem!=text_path.stem:
         raise RetentionError("The DOCX and TXT reports do not belong to the same generation")
+    if generation_stamp and text_path.stem != f"{hunt_id}-{generation_stamp}":
+        raise RetentionError("The primary reports do not match the report manifest generation")
+    if docx_path.parent.resolve(strict=False)!=text_path.parent.resolve(strict=False):
+        raise RetentionError("The primary reports are not in the same directory")
+    if anomaly_expected:
+        anomaly_path=anomaly_paths[0]
+        expected_anomaly_parent=(text_path.parent/"anomalous").resolve(strict=False)
+        if anomaly_path.parent.resolve(strict=False)!=expected_anomaly_parent:
+            raise RetentionError("The anomaly report is outside the anomalous report directory")
+        prefix=f"{hunt_id}-"
+        if not text_path.stem.startswith(prefix):
+            raise RetentionError("The primary report generation stamp is invalid")
+        manifest_stamp=text_path.stem[len(prefix):]
+        if anomaly_path.name!=f"{hunt_id}-anomalous-leads-{manifest_stamp}.txt":
+            raise RetentionError("The anomaly report does not belong to the primary report generation")
     verified=[]
-    for path in (docx_path,text_path):
+    ordered=[docx_path,text_path]+anomaly_paths
+    for path in ordered:
         if not path.name.startswith(f"{hunt_id}-") or not path.is_file() or path.stat().st_size<=0:
             raise RetentionError("A hunt-scoped report is missing or empty")
         if path.suffix.lower()==".docx":
@@ -157,8 +228,7 @@ def _cited_evidence_ids(state: dict[str, Any]) -> set[str]:
         str(evidence_id) for finding in state.get("findings",[]) or []
         for evidence_id in (finding.get("evidence_ids") or []) if str(evidence_id).strip()
     }
-    for candidate in state.get("candidate_leads",[]) or []:
-        if not candidate.get("customer_visible"): continue
+    for candidate in reportable_candidates(state.get("candidate_leads",[]) or []):
         cited.update(str(value) for value in candidate.get("evidence_ids",[]) or [] if str(value).strip())
     for path in (state.get("investigation_graph") or {}).get("paths",[]) or []:
         for step in path.get("steps",[]) or []:
@@ -172,15 +242,12 @@ def _compact_state(state: dict[str, Any], retained_ids: set[str]) -> dict[str, A
     keys=(
         "hunt_id","objective","status","outcome","termination_reason","mission_mode","mode","retention_policy",
         "started_at","resumed_at","finished_at","duration_ms","summary","report_paths",
-        "tool_calls","depth",
+        "report_manifest","activity_narrative","indicator_review","tool_calls","depth",
     )
     compact={key:deepcopy(state[key]) for key in keys if key in state}
     compact["manifest_version"]=1
     compact["findings"]=deepcopy(state.get("findings",[]) or [])
-    compact["candidate_leads"]=[
-        deepcopy(candidate) for candidate in state.get("candidate_leads",[]) or []
-        if candidate.get("customer_visible")
-    ]
+    compact["candidate_leads"]=deepcopy(reportable_candidates(state.get("candidate_leads",[]) or []))
     compact["coverage"]=_compact_coverage(state.get("coverage",{}))
     compact["coverage"]["scheduler_summary"]=_scheduler_summary(state)
     compact["coverage"]["sampling_summary"]=_sampling_summary(state)
@@ -197,7 +264,8 @@ def _compact_coverage(coverage: Any) -> dict[str, Any]:
         "time_scope","host","network","network_sources","source_error_count",
         "coverage_closure_ready","tool_calls_used","tool_call_limit","depth_used","depth_limit",
         "minimum_reasoning_rounds","termination_reason","behavior_candidates","analyst_model",
-        "progress_summary","max_stagnant_cycles","stagnant_cycles",
+        "progress_summary","max_stagnant_cycles","stagnant_cycles","reasoning_summary",
+        "activity_narrative","indicator_review",
     )
     return {key:deepcopy(coverage[key]) for key in keys if key in coverage}
 

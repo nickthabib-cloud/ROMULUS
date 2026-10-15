@@ -1,19 +1,121 @@
 """Professional DOCX and portable plain-text report generation."""
 from pathlib import Path
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 from ..intelligence.knowledge import TECHNIQUES, ATTACK_RELEASE, ATTACK_RELEASE_DATE, ATTACK_DOMAIN
+from ..investigation.classification import reportable_candidates, unresolved_anomalous_candidates
+from .report_items import build_report_items, validate_report_item_evidence
 
 def generate_report(state: dict[str, Any], output_dir: Path) -> list[Path]:
-    output_dir.mkdir(parents=True,exist_ok=True)
-    state=_xml_safe(state)
     hid=state.get("hunt_id","UNKNOWN"); stamp=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    anomalies=unresolved_anomalous_candidates(state.get("candidate_leads",[]) or [])
+    finalized=state.get("status")=="completed" or bool(state.get("finalized_at"))
+    anomaly_expected=bool(finalized and anomalies)
+    report_items=build_report_items(state)
+    validate_report_item_evidence(state,report_items)
+    if anomaly_expected:
+        _validate_anomaly_evidence(state,anomalies)
+    output_dir=Path(output_dir).expanduser().resolve(strict=False)
+    output_dir.mkdir(parents=True,exist_ok=True)
     text_path=output_dir/f"{hid}-{stamp}.txt"; docx_path=output_dir/f"{hid}-{stamp}.docx"
-    content=_content(state)
+    intended=[docx_path,text_path]
+    if anomaly_expected:
+        intended.append(output_dir/"anomalous"/f"{hid}-anomalous-leads-{stamp}.txt")
+    _validate_report_paths(output_dir,intended)
+    state["report_manifest"]={"generation_stamp":stamp,"anomaly_expected":anomaly_expected,
+        "report_root":str(output_dir)}
+    primary_state=_xml_safe(_primary_report_state(state,report_items))
+    anomaly_state=_xml_safe(state)
+    content=_content(primary_state)
     text_path.write_text(content,encoding="utf-8")
-    try: _docx(state,docx_path)
+    try: _docx(primary_state,docx_path)
     except ImportError as e: raise RuntimeError("python-docx is required to generate the Word deliverable") from e
-    return [docx_path,text_path]
+    paths=[docx_path,text_path]
+    if anomaly_expected:
+        anomaly_dir=output_dir/"anomalous"; anomaly_dir.mkdir(parents=True,exist_ok=True)
+        anomaly_path=anomaly_dir/f"{hid}-anomalous-leads-{stamp}.txt"
+        anomaly_path.write_text(_anomaly_content(anomaly_state,unresolved_anomalous_candidates(
+            anomaly_state.get("candidate_leads",[]) or [])),encoding="utf-8")
+        paths.append(anomaly_path)
+    return paths
+
+
+def _validate_report_paths(report_root: Path, paths: list[Path]) -> None:
+    root=report_root.resolve(strict=False)
+    for path in paths:
+        resolved=path.resolve(strict=False)
+        if resolved==root or root not in resolved.parents:
+            raise ValueError(f"Final report path is outside the configured reports directory: {path}")
+
+
+def _validate_anomaly_evidence(state, candidates):
+    available={
+        str(row.get("evidence_id"))
+        for row in list(state.get("host",[]) or [])+list(state.get("network",[]) or [])
+        if isinstance(row,dict) and row.get("evidence_id")
+    }
+    missing=set(); empty=[]
+    for candidate in candidates:
+        identifiers={str(value) for value in candidate.get("evidence_ids",[]) or [] if value}
+        if not identifiers: empty.append(str(candidate.get("candidate_id") or "unknown"))
+        missing.update(identifiers-available)
+    if empty or missing:
+        raise ValueError("Anomalous lead evidence validation failed ("+
+            ("items without citations: "+", ".join(sorted(empty)[:12])+"; " if empty else "")+
+            ("unknown evidence IDs: "+", ".join(sorted(missing)[:12]) if missing else "")+")")
+
+
+def _primary_report_state(state, report_items):
+    """Remove unowned working material from a finalized primary deliverable."""
+    result=deepcopy(state)
+    finalized=result.get("status")=="completed" or bool(result.get("finalized_at"))
+    if not finalized:
+        return result
+    cited={str(value) for item in report_items for value in item.get("evidence_ids",[]) or [] if value}
+    candidate_ids={str(value) for item in report_items for value in item.get("candidate_ids",[]) or [] if value}
+    finding_ids={str(value) for item in report_items for value in item.get("finding_ids",[]) or [] if value}
+    follow_up_ids={
+        str(row.get("follow_up_id"))
+        for candidate in result.get("candidate_leads",[]) or []
+        if isinstance(candidate,dict) and str(candidate.get("candidate_id")) in candidate_ids
+        for row in candidate.get("follow_ups",[]) or []
+        if isinstance(row,dict) and row.get("follow_up_id")
+    }
+    result["candidate_leads"]=[row for row in result.get("candidate_leads",[]) or []
+        if isinstance(row,dict) and str(row.get("candidate_id")) in candidate_ids]
+    result["findings"]=[row for row in result.get("findings",[]) or []
+        if isinstance(row,dict) and str(row.get("finding_id")) in finding_ids]
+    for key in ("host","network"):
+        result[key]=[row for row in result.get(key,[]) or []
+            if isinstance(row,dict) and str(row.get("evidence_id")) in cited]
+    result["hypotheses"]=[]
+    result["reasoning_history"]=[]
+    result["stage_history"]=[]
+    result["tool_runs"]=[]
+    result["search_artifacts"]=[]
+    result["correlations"]=[row for row in result.get("correlations",[]) or []
+        if isinstance(row,dict) and row.get("host_ref") in cited and row.get("network_ref") in cited]
+    tasks=result.get("search_tasks",{}) if isinstance(result.get("search_tasks"),dict) else {}
+    tasks={task_id:task for task_id,task in tasks.items() if isinstance(task,dict) and (
+        candidate_ids.intersection(str(value) for value in task.get("candidate_ids",[]) or [] if value)
+        or follow_up_ids.intersection(str(value) for value in task.get("follow_up_ids",[]) or [] if value)
+    )}
+    result["search_tasks"]=tasks
+    result["search_outcomes"]=[row for row in result.get("search_outcomes",[]) or []
+        if isinstance(row,dict) and str(row.get("task_id")) in tasks]
+    result["scheduler_history"]=[row for row in result.get("scheduler_history",[]) or []
+        if isinstance(row,dict) and str(row.get("task_id")) in tasks]
+    result.pop("analytic_summary",None)
+    coverage=result.get("coverage") if isinstance(result.get("coverage"),dict) else {}
+    for key in ("analytic_summary","recent_search_artifacts","hypothesis_coverage","scheduler_gaps"):
+        coverage.pop(key,None)
+    result["coverage"]=coverage
+    graph=result.get("investigation_graph") if isinstance(result.get("investigation_graph"),dict) else {}
+    graph["paths"]=[row for row in graph.get("paths",[]) or []
+        if isinstance(row,dict) and str(row.get("finding_id")) in finding_ids]
+    result["investigation_graph"]=graph
+    return result
 
 def _xml_safe(value):
     """Remove characters forbidden by XML 1.0 from telemetry-derived text."""
@@ -50,15 +152,16 @@ def _event_reference(event):
 
 def _bounded_report_events(state, key, limit=175):
     rows=list(state.get(key,[])); cited=set()
-    for finding in state.get("findings",[]): cited.update(finding.get("evidence_ids",[]) or [])
-    for hypothesis in state.get("hypotheses",[]): cited.update(hypothesis.get("evidence_ids",[]) or [])
+    for item in build_report_items(state): cited.update(item.get("evidence_ids",[]) or [])
     chosen=[row for row in rows if row.get("evidence_id") in cited]
-    chosen_ids={row.get("evidence_id") for row in chosen}
-    remaining=[row for row in rows if row.get("evidence_id") not in chosen_ids]
-    slots=max(0,limit-len(chosen))
-    if slots and remaining:
-        step=max(1,len(remaining)//slots)
-        chosen.extend(remaining[::step][:slots])
+    finalized=state.get("status")=="completed" or bool(state.get("finalized_at"))
+    if not finalized:
+        chosen_ids={row.get("evidence_id") for row in chosen}
+        remaining=[row for row in rows if row.get("evidence_id") not in chosen_ids]
+        slots=max(0,limit-len(chosen))
+        if slots and remaining:
+            step=max(1,len(remaining)//slots)
+            chosen.extend(remaining[::step][:slots])
     return sorted(chosen[:max(limit,len(chosen))],key=lambda row:str(row.get("observed_at") or ""))
 
 def _analytic_lines(summary):
@@ -77,13 +180,204 @@ def _analytic_lines(summary):
 def _candidate_line(candidate):
     return (
         f"- {candidate.get('candidate_id')} {candidate.get('title')} "
-        f"[{candidate.get('priority_tier')} / score {candidate.get('priority_score')} / {candidate.get('disposition')}]; "
+        f"[{candidate.get('classification','legacy-unclassified')} / {candidate.get('investigation_status','legacy-status')} / "
+        f"{candidate.get('priority_tier')} / score {candidate.get('priority_score')} / {candidate.get('disposition')}]; "
         f"kind={candidate.get('kind')}; evidence={_join_text(candidate.get('evidence_ids')) or 'none'}; "
         f"ATT&CK={_join_text(candidate.get('attack_techniques')) or 'unmapped'}; "
         f"score basis={_join_text(candidate.get('score_reasons'), '; ') or 'not recorded'}; "
         f"benign context={_join_text(candidate.get('benign_explanations'), '; ') or 'none supplied'}; "
         f"follow-up={_join_text(candidate.get('follow_up'), '; ') or 'none supplied'}."
     )
+
+
+def _report_item_lines(item):
+    lines=[
+        f"- {item.get('item_id')} {item.get('title')} "
+        f"[{str(item.get('classification') or '').upper()} / {item.get('investigation_status')} / confidence {item.get('confidence')}]: "
+        f"{item.get('observation')}",
+        f"  Why it matters: {item.get('why_it_matters')}",
+        f"  Evidence: {_join_text(item.get('evidence_ids')) or 'none cited'}",
+        f"  Assets: {_join_text(item.get('assets')) or 'none recorded'}; "
+        f"first={item.get('first_observed') or 'not recorded'}; last={item.get('last_observed') or 'not recorded'}; "
+        f"ATT&CK={_join_text(item.get('attack_techniques')) or 'unmapped'}.",
+        f"  Follow-up results: {_join_text(item.get('follow_up_results'), '; ') or 'none recorded'}",
+        f"  Benign alternatives: {_join_text(item.get('benign_alternatives'), '; ') or 'none recorded'}",
+        f"  Coverage gaps: {_join_text(item.get('coverage_gaps'), '; ') or 'none recorded'}",
+        f"  Recommended actions: {_join_text(item.get('recommended_actions'), '; ') or 'analyst review'}",
+    ]
+    return lines
+
+
+def _activity_narrative_lines(state, report_items):
+    """Render admitted interpretation while resolving all facts from canonical report data."""
+    from ..investigation.narrative import (
+        admit_activity_narrative, build_narrative_case, unavailable_activity_narrative,
+    )
+
+    stored=state.get("activity_narrative") if isinstance(state.get("activity_narrative"),dict) else {}
+    item_index={str(item.get("item_id")):item for item in report_items if item.get("item_id")}
+    case=build_narrative_case(state,report_items)
+    if stored.get("status") == "admitted":
+        stored_clusters=stored.get("clusters")
+        selector_clusters=(
+            [
+                ({
+                    "item_ids":cluster.get("item_ids"),
+                    "relationship_ids":cluster.get("relationship_ids"),
+                    "evidence_ids":cluster.get("evidence_ids"),
+                    "possible_sequence":cluster.get("possible_sequence"),
+                    "confidence":cluster.get("confidence"),
+                } if isinstance(cluster,dict) else cluster)
+                for cluster in stored_clusters
+            ]
+            if isinstance(stored_clusters,list) else stored_clusters
+        )
+        proposal={
+            "no_coherent_narrative":stored.get("no_coherent_narrative"),
+            "clusters":selector_clusters,
+            "unconnected_item_ids":stored.get("unconnected_item_ids"),
+        }
+        narrative=admit_activity_narrative(case,proposal)
+    else:
+        reason=stored.get("reason") if stored else "Narrative synthesis was not available."
+        narrative=unavailable_activity_narrative(case.get("items",[]),reason)
+    relationship_index={str(row.get("relationship_id")):row for row in case.get("relationships",[])}
+    lines=[
+        "This section is an unconfirmed investigative hypothesis built only from accepted report items and admitted relationships. It is not a confirmed attack path.",
+    ]
+    if not narrative or narrative.get("no_coherent_narrative") or not narrative.get("clusters"):
+        reason=_bounded_text(narrative.get("reason"),240) if narrative else "Narrative synthesis was not available."
+        lines.append("No coherent activity narrative is supported by the visible evidence. "+(reason or ""))
+    for cluster in narrative.get("clusters",[]) or []:
+        cluster_id=str(cluster.get("cluster_id") or "possible cluster")
+        sequence=[]
+        for item_id in cluster.get("possible_sequence",[]) or []:
+            item=item_index.get(str(item_id),{})
+            sequence.append(f"{item_id} ({_bounded_text(item.get('title'),200) or 'accepted report item'})")
+        if len(sequence)==1:
+            rendered=(f"{sequence[0]} is a standalone reportable behavior. "
+                "A single item cannot establish an attack path.")
+        else:
+            rendered=("The admitted relationships support considering this possible sequence: "
+                +" then ".join(sequence)+
+                ". This ordering is an investigative hypothesis and does not establish causality.")
+        lines.append(f"- {cluster_id} [{cluster.get('confidence') or 'not assessed'} confidence]: {rendered}")
+        lines.append("  Possible sequence: "+(" → ".join(sequence) or "not proposed"))
+        lines.append("  Supporting evidence: "+(_join_text(cluster.get("evidence_ids")) or "none"))
+        for relationship_id in cluster.get("relationship_ids",[]) or []:
+            relationship=relationship_index.get(str(relationship_id),{})
+            lines.append(
+                f"  Relationship {relationship_id}: {_bounded_text(relationship.get('basis'),200) or 'admitted relationship'}; "
+                f"items={_join_text(relationship.get('item_ids'))}; caveat={_bounded_text(relationship.get('caveat'),300) or 'does not prove causality'}."
+            )
+        alternatives=_join_text(list(dict.fromkeys(
+            value for item_id in cluster.get("item_ids",[]) or []
+            for value in item_index.get(str(item_id),{}).get("benign_alternatives",[]) or []
+        )),"; ")
+        missing=_join_text(list(dict.fromkeys(
+            value for item_id in cluster.get("item_ids",[]) or []
+            for value in item_index.get(str(item_id),{}).get("coverage_gaps",[]) or []
+        )),"; ")
+        if alternatives: lines.append("  Alternate explanations: "+alternatives)
+        if missing: lines.append("  Missing evidence: "+missing)
+    unconnected=[]
+    for item_id in narrative.get("unconnected_item_ids",[]) or []:
+        item=item_index.get(str(item_id),{})
+        unconnected.append(f"{item_id} ({_bounded_text(item.get('title'),200) or 'accepted report item'})")
+    lines.append("Unconnected report items: "+(_join_text(unconnected,"; ") or "none"))
+    limitations=_join_text(case.get("coverage_gaps"),"; ")
+    if limitations: lines.append("Narrative limitations: "+limitations)
+    return lines
+
+
+def _anomaly_content(state, candidates):
+    hunt_id=str(state.get("hunt_id") or "UNKNOWN")
+    coverage=state.get("coverage",{}) if isinstance(state.get("coverage"),dict) else {}
+    evidence_index={
+        str(row.get("evidence_id")):row
+        for row in list(state.get("host",[]) or [])+list(state.get("network",[]) or [])
+        if isinstance(row,dict) and row.get("evidence_id")
+    }
+    tasks=state.get("search_tasks",{}) if isinstance(state.get("search_tasks"),dict) else {}
+    outcomes={
+        str(row.get("task_id")):row for row in state.get("search_outcomes",[]) or []
+        if isinstance(row,dict) and row.get("task_id")
+    }
+    lines=[
+        "ROMULUS ANOMALOUS LEAD QUEUE",
+        f"Investigation: {hunt_id}",
+        f"Objective: {_bounded_text(state.get('objective'),500) or 'not recorded'}",
+        f"Hunt window: {coverage.get('time_scope') or 'not recorded'}",
+        f"Created: {state.get('started_at') or state.get('created_at') or 'not recorded'}",
+        f"Completed: {state.get('finished_at') or state.get('finalized_at') or 'not recorded'}",
+        f"Outcome: {state.get('outcome') or 'not recorded'}",
+        "Warning: Each entry is an anomalous lead, not a conclusion. Validate it before escalation or action.",
+    ]
+    for candidate in candidates:
+        candidate_id=str(candidate.get("candidate_id") or "unknown")
+        owned=list(dict.fromkeys(str(value) for value in candidate.get("evidence_ids",[]) if value))[:12]
+        lines += [
+            "",
+            f"LEAD {candidate_id}: {_bounded_text(candidate.get('title'),240) or 'Untitled anomaly'}",
+            f"Status: {candidate.get('investigation_status') or 'new'}",
+            "Why unusual: "+(_bounded_text(candidate.get("classification_reason"),500)
+                or _bounded_text(candidate.get("description"),500)
+                or "The deterministic behavior did not meet the suspicious-report policy without additional context."),
+            "Observed facts:",
+        ]
+        facts=0
+        for evidence_id in owned:
+            event=evidence_index.get(evidence_id,{})
+            provenance=event.get("provenance",{}) if isinstance(event.get("provenance"),dict) else {}
+            provenance_bits=[
+                f"{key}={_bounded_text(provenance.get(key),160)}"
+                for key in ("search_id","lead_id","index","document_id","session_id","pcap")
+                if provenance.get(key) is not None
+            ]
+            lines.append(
+                f"- {evidence_id}: {_bounded_text(event.get('observation'),500) or 'Owned evidence record'}; "
+                f"source={_bounded_text(event.get('source'),80) or 'unknown'}; "
+                f"time={_bounded_text(event.get('observed_at'),80) or 'not recorded'}; "
+                f"asset={_bounded_text(event.get('asset'),160) or 'not recorded'}; "
+                f"provenance={'; '.join(provenance_bits) or 'compact provenance unavailable'}."
+            )
+            facts+=1
+        if not facts: lines.append("- No owned evidence fact was available in the bounded retained state.")
+        lines.append("Performed searches and outcomes:")
+        relevant=[]
+        for task_id,task in sorted(tasks.items()):
+            if not isinstance(task,dict) or candidate_id not in (task.get("candidate_ids") or []): continue
+            outcome=outcomes.get(str(task_id),{})
+            relevant.append(
+                f"- {task_id}: intent={_bounded_text(task.get('intent'),300) or 'not recorded'}; "
+                f"status={outcome.get('status') or task.get('status') or 'not recorded'}; "
+                f"returned={outcome.get('returned_total','not recorded')}; matched={outcome.get('matched_total','not recorded')}; "
+                f"capped={bool(outcome.get('capped'))}; timed_out={bool(outcome.get('timed_out'))}; "
+                f"result={_bounded_text(outcome.get('reason') or outcome.get('error_kind'),240) or 'no additional detail'}."
+            )
+        lines += relevant or ["- No candidate-owned search outcome was recorded."]
+        lines.append("Benign alternatives: "+(
+            _join_text(_bounded_values(candidate.get("benign_explanations"),300),"; ")
+            or "none recorded"))
+        lines.append("Coverage gaps: "+(
+            _join_text(_bounded_values(candidate.get("telemetry_gaps"),300),"; ")
+            or "none recorded"))
+        pivots=[
+            _bounded_text(row.get("intent"),300) for row in candidate.get("follow_ups",[]) or []
+            if isinstance(row,dict) and row.get("intent")
+        ] or _bounded_values(candidate.get("follow_up"),300)
+        lines.append("Next pivot: "+(_join_text(pivots,"; ") or "Analyst review of the cited evidence and adjacent activity."))
+    return "\n".join(lines)+"\n"
+
+
+def _bounded_text(value,limit):
+    if value is None: return ""
+    return " ".join(str(value).split())[:max(0,int(limit))]
+
+
+def _bounded_values(value,limit):
+    values=value if isinstance(value,(list,tuple,set)) else [value]
+    return [_bounded_text(item,limit) for item in values if _bounded_text(item,limit)]
 
 
 def _supported_paths(state):
@@ -155,6 +449,7 @@ def _scheduler_lines(state):
 
 def _content(s):
     host_events=_bounded_report_events(s,"host"); network_events=_bounded_report_events(s,"network")
+    report_items=build_report_items(s)
     coverage=s.get("coverage",{}) if isinstance(s.get("coverage"),dict) else {}
     progress=coverage.get("progress_summary",{}) if isinstance(coverage.get("progress_summary"),dict) else {}
     lines=[f"ROMULUS INVESTIGATION REPORT — {s.get('status','partial').upper()}",f"Investigation: {s.get('hunt_id','')}",f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}","", "EXECUTIVE SUMMARY",s.get("summary") or "Investigation summary unavailable.",
@@ -167,9 +462,10 @@ def _content(s):
         f"Stagnation: current={progress.get('current_stagnant_cycles',coverage.get('stagnant_cycles',0))}; maximum observed={progress.get('max_stagnant_cycles_seen',0)}; configured stop threshold={coverage.get('max_stagnant_cycles','not recorded')}",
         f"ATT&CK knowledge baseline: {ATTACK_DOMAIN} {ATTACK_RELEASE} ({ATTACK_RELEASE_DATE})","", "OBJECTIVE AND SCOPE",s.get("objective",""),"", "DATA SOURCES AND COVERAGE"]
     aggregate_keys={"progress_summary","runtime_seconds_used","runtime_seconds_limit",
-        "max_stagnant_cycles","stagnant_cycles"}
+        "max_stagnant_cycles","stagnant_cycles","reasoning_summary"}
     lines += [f"- {k}: {v}" for k,v in coverage.items() if k not in
         {"search_fields","analytic_summary","hypothesis_coverage","recent_search_artifacts"}|aggregate_keys]
+    lines += ["", "INVESTIGATOR AND CRITIC COVERAGE"]+_reasoning_coverage_lines(s)
     lines += ["", "REASONING AND INVESTIGATION STAGES"]
     for stage in s.get("stage_history",[]): lines.append(f"- {stage.get('timestamp')} {stage.get('stage')}: {stage.get('status')}; details={stage.get('details')}.")
     for stage in s.get("reasoning_history",[]):
@@ -190,12 +486,15 @@ def _content(s):
         lines.append(f"- {row.get('hypothesis_id')} / {row.get('technique_id')}: priority={row.get('priority')}; analytics attempted={row.get('executed_analytics')}/{row.get('planned_analytics')}; resolved={row.get('resolved_analytics')}; sources={_join_text(row.get('sources')) or 'none'}; returned={row.get('returned')}; assessment={row.get('assessment')}; gaps={_join_text(row.get('telemetry_gaps')) or 'none'}.")
     lines += ["", "UNIFIED SEARCH SCHEDULER"]+(_scheduler_lines(s) or ["No scheduler tasks were recorded."])
     lines += ["", "DETERMINISTIC BEHAVIORAL ANALYTICS"]+(_analytic_lines(s.get("analytic_summary",{})) or ["No analytic summary was produced."])
-    visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
-    lines += ["", "PRIORITIZED CANDIDATE LEADS"]
-    lines += [_candidate_line(item) for item in visible_candidates] or ["No trusted or corroborated high-priority catalog leads met the customer-report threshold."]
-    lines += ["", "SIGNIFICANT FINDINGS"]
-    if not s.get("findings"): lines.append("No significant findings recorded.")
-    for f in s.get("findings",[]): lines += [f"- {f.get('finding_id')} {f.get('title')} [{f.get('status')} / {f.get('confidence')}]: {f.get('observation')}","  Analysis: "+str(f.get("interpretation") or ""),"  Evidence: "+_join_text(f.get("evidence_ids")),"  Alternatives: "+_join_text(f.get("alternatives"),"; "),"  Follow-up: "+_join_text(f.get("follow_up"),"; ")]
+    for classification,label in (("malicious","MALICIOUS BEHAVIOR"),("suspicious","SUSPICIOUS BEHAVIOR")):
+        lines += ["",label]
+        selected=[item for item in report_items if item.get("classification")==classification]
+        if not selected:
+            lines.append(f"No {classification} report items were recorded.")
+        for item in selected:
+            lines += _report_item_lines(item)
+    lines += ["", "Hypothesis: Possible Activity Narrative"]
+    lines += _activity_narrative_lines(s,report_items)
     paths=_supported_paths(s)
     lines += ["", "SUPPORTED ATTACK PATHS"]
     if not paths: lines.append("No evidence-supported multi-record path was derived from the cited findings.")
@@ -207,8 +506,8 @@ def _content(s):
             lines.append(f"  Link {relationship.get('source_sequence')}→{relationship.get('target_sequence')}: {relationship.get('relationship')} [{relationship.get('basis')} / {relationship.get('confidence')}]; reasons={_join_text(relationship.get('reasons'), '; ') or 'not recorded'}.")
         for caveat in path.get("caveats",[]): lines.append(f"  Caveat: {caveat}")
         for gap in path.get("gaps",[]): lines.append(f"  Gap: {gap}")
-    lines += ["", f"HOST ANALYSIS — {len(host_events)} representative/cited records of {len(s.get('host',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in host_events]
-    lines += ["", f"NETWORK ANALYSIS — {len(network_events)} representative/cited records of {len(s.get('network',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in network_events]
+    lines += ["", f"HOST ANALYSIS — {len(host_events)} cited records of {len(s.get('host',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in host_events]
+    lines += ["", f"NETWORK ANALYSIS — {len(network_events)} cited records of {len(s.get('network',[]))}"]+[f"- {e.get('evidence_id')} {e.get('observed_at')} {e.get('asset')}: {e.get('observation')} [{_event_reference(e)}]" for e in network_events]
     lines += ["", "CROSS-DOMAIN CORRELATION"]
     lines += [f"- Host {c.get('host_ref')} ↔ network {c.get('network_ref')}; reasons={_join_text(c.get('reasons'), '; ') or ('shared IP '+str(c.get('ip')))}; direction={c.get('direction','unresolved')}; score={c.get('score','not scored')}; time delta {c.get('delta_seconds')} seconds. Caveat: {c.get('caveat')}" for c in s.get("correlations",[])] or ["No corroborated cross-domain correlation was made."]
     lines += ["", "ATT&CK MAPPING"]+[f"- {h.get('technique_id')} {TECHNIQUES.get(h.get('technique_id'),{}).get('name','')}: {h.get('status')}" for h in s.get("hypotheses",[])]
@@ -222,14 +521,77 @@ def _content(s):
     lines += [f"- {e.get('tool')} at {e.get('stage')}: {e.get('error')}; {e.get('reason')} (HTTP {e.get('status_code')})" if e.get("status_code") else f"- {e.get('tool')} at {e.get('stage')}: {e.get('error')}; {e.get('reason') or 'no additional detail'}" for e in errors] or ["No source errors were recorded."]
     if s.get("error"): lines.append(s["error"])
     lines += ["This assessment covers only the evidence sources and time period recorded above. Searches and reports are bounded; lack of findings does not establish that the environment is secure.","", "CONCLUSIONS AND RECOMMENDED FOLLOW-UP",s.get("summary") or "", "", "TECHNICAL CANDIDATE WORKING LIST"]
-    lines += [_candidate_line(item) for item in s.get("candidate_leads",[])] or ["No catalog candidates were recorded."]
+    lines += [_candidate_line(item) for item in reportable_candidates(
+        s.get("candidate_leads",[]) or [])] or ["No reportable catalog candidates were recorded."]
     if s.get("retention_policy")=="compact" and (s.get("status")=="completed" or s.get("finalized_at")):
-        retention_note=("This finalized investigation uses compact retention. After both reports are verified, per-hunt working audit records and uncited raw evidence are scheduled for removal; "
+        retention_note=("This finalized investigation uses compact retention. After the declared report set is verified, per-hunt working audit records and uncited raw evidence are scheduled for removal; "
             "structured findings, supported paths, and their cited evidence remain in the compact investigation record.")
     else:
         retention_note="Exact compiled queries remain in tool_audit.jsonl and complete raw evidence remains in SQLite unless the hunt is explicitly finalized with compact retention."
     lines += ["", "TECHNICAL EVIDENCE APPENDIX", f"The human-readable evidence manifest is bounded to {len(host_events)} host and {len(network_events)} network records. Stable citations and search-result IDs appear above. {retention_note}"]
     return "\n".join(lines)
+
+
+def _reasoning_coverage_lines(state):
+    coverage=state.get("coverage",{}) if isinstance(state.get("coverage"),dict) else {}
+    summary=coverage.get("reasoning_summary")
+    if not isinstance(summary,dict):
+        return ["No grounded investigator/critic aggregate was recorded for this investigation."]
+
+    def count(key):
+        try: return max(0,int(summary.get(key,0)))
+        except (TypeError,ValueError): return 0
+
+    lines=[
+        f"- Calls: investigator={count('investigator_calls')}; critic={count('critic_calls')}; unavailable passes={count('unavailable_passes')}.",
+    ]
+    labels=(("Hypotheses","hypotheses"),("Assessments","assessments"),
+        ("Searches","searches"),("Findings","findings"))
+    for label,key in labels:
+        lines.append(f"- {label}: proposed={count('proposed_'+key)}; admitted={count('admitted_'+key)}; rejected={count('rejected_'+key)}.")
+
+    rejection_counts={}
+    for stage in state.get("reasoning_history",[]) or []:
+        if not isinstance(stage,dict): continue
+        grounded=stage.get("grounded_reasoning")
+        admission=grounded.get("admission") if isinstance(grounded,dict) else None
+        for rejection in admission.get("rejections",[]) if isinstance(admission,dict) else []:
+            if not isinstance(rejection,dict): continue
+            reasons=rejection.get("reason_codes",[])
+            if not isinstance(reasons,list): continue
+            for reason in reasons:
+                if not isinstance(reason,str) or not reason.strip(): continue
+                code=reason.strip()[:120]
+                rejection_counts[code]=rejection_counts.get(code,0)+1
+    if rejection_counts:
+        lines.append("- Rejection reasons: "+"; ".join(
+            f"{key}={rejection_counts[key]}" for key in sorted(rejection_counts))+".")
+    else:
+        lines.append("- Rejection reasons: none recorded.")
+    gap=summary.get("last_gap")
+    lines.append(f"- Availability gaps: {str(gap)[:160] if gap else 'none recorded'}.")
+    return lines
+
+
+def _indicator_review_for_report(state, report_items):
+    """Re-admit persisted selectors so a stale briefing cannot bypass evidence checks."""
+    from .indicator_review import (
+        admit_indicator_review, build_indicator_case, deterministic_indicator_review,
+        indicator_review_proposal,
+    )
+
+    case=build_indicator_case(state,report_items)
+    stored=state.get("indicator_review") if isinstance(state.get("indicator_review"),dict) else {}
+    if stored.get("status")=="admitted":
+        admitted=admit_indicator_review(case,indicator_review_proposal(stored))
+        if admitted.get("status")=="admitted":
+            return admitted
+        reason="Persisted indicator selectors no longer match canonical report evidence."
+    elif stored.get("status")=="fallback":
+        reason=str(stored.get("reason") or "The indicator synthesis used deterministic fallback.")
+    else:
+        reason="Indicator synthesis was not available for this report generation."
+    return deterministic_indicator_review(case,reason)
 
 def _docx(s,path):
     from docx import Document
@@ -294,7 +656,8 @@ def _docx(s,path):
         return str(value or "Not recorded").replace("_"," ").strip().capitalize()
 
     findings=list(s.get("findings",[]) or [])
-    visible_candidates=[item for item in s.get("candidate_leads",[]) if item.get("customer_visible")]
+    report_items=build_report_items(s)
+    indicator_review=_indicator_review_for_report(s,report_items)
     errors=list(s.get("source_errors",[]) or [])
     sampled_outcomes=[item for item in s.get("search_outcomes",[]) or []
         if isinstance(item,dict) and (item.get("capped") or
@@ -305,43 +668,41 @@ def _docx(s,path):
         and not item.get("sampling",{}).get("fallback_reason")]
     fallback_outcomes=[item for item in sampled_outcomes if item not in representative_outcomes]
     confidence_order={"not assessed":0,"low":1,"moderate":2,"high":3}
-    overall_confidence=max((str(item.get("confidence") or "low").lower() for item in findings),key=lambda value:confidence_order.get(value,0),default="low")
-    if s.get("status")!="completed" or errors:
-        verdict="Inconclusive"
-    elif findings or visible_candidates:
+    confidence_values=[]
+    for item in report_items:
+        value=str(item.get("confidence") or "not assessed").lower()
+        if value.isdigit(): value="high" if int(value)>=90 else "moderate" if int(value)>=60 else "low"
+        confidence_values.append(value)
+    overall_confidence=max(confidence_values,key=lambda value:confidence_order.get(value,0),default="low")
+    if any(item.get("classification")=="malicious" for item in report_items):
+        verdict="Malicious Activity Identified"
+    elif report_items:
         verdict="Suspicious Activity Identified"
+    elif s.get("status")!="completed" or errors:
+        verdict="Inconclusive"
     else:
         verdict="No Significant Findings"
-    tiers=[str(item.get("priority_tier") or "").lower() for item in visible_candidates]
-    priority="Critical" if "critical" in tiers else "High" if "high" in tiers else "Moderate" if findings else "Informational"
+    priority=("Critical" if any(item.get("classification")=="malicious" for item in report_items)
+        else "High" if report_items else "Informational")
 
-    cited_ids={evidence for finding in findings for evidence in (finding.get("evidence_ids") or [])}
+    cited_ids={evidence for item in report_items for evidence in (item.get("evidence_ids") or [])}
     assets=[]
-    for finding in findings:
-        for key in ("affected_assets","assets"):
-            value=finding.get(key) or []
-            if isinstance(value,str): value=[value]
-            assets.extend(str(item) for item in value if item)
+    for item in report_items: assets.extend(str(value) for value in item.get("assets",[]) if value)
     for event in list(s.get("host",[]) or [])+list(s.get("network",[]) or []):
         if event.get("evidence_id") in cited_ids and event.get("asset"): assets.append(str(event["asset"]))
     assets=list(dict.fromkeys(assets))
 
-    represented_titles={str(item.get("title") or "").strip().lower() for item in findings}
-    action_items=findings+[item for item in visible_candidates if str(item.get("title") or "").strip().lower() not in represented_titles]
-    actions=[]
-    for item in action_items:
-        values=item.get("follow_up") or []
-        if isinstance(values,str): values=[values]
-        actions.extend(str(value).strip() for value in values if str(value).strip())
+    actions=[str(value).strip() for value in indicator_review.get("recommended_follow_ups",[])
+        if str(value).strip()]
+    actions.extend(str(value).strip() for item in indicator_review.get("strong_indicators",[])
+        for value in item.get("recommended_follow_ups",[]) if str(value).strip())
     actions=list(dict.fromkeys(actions))[:6]
     if not actions:
         actions=["Review the hunt scope and retain the report with the investigation record."]
 
     attack_rows=[]; seen_techniques=set()
     technique_inputs=[]
-    for finding in findings:
-        technique_inputs.extend([finding.get("technique_id")]+list(finding.get("attack_techniques") or []))
-    for candidate in visible_candidates: technique_inputs.extend(candidate.get("attack_techniques") or [])
+    for item in report_items: technique_inputs.extend(item.get("attack_techniques") or [])
     for hypothesis in s.get("hypotheses",[]) or []:
         if str(hypothesis.get("status") or "").lower() in {"supported","suspected","observed"}:
             technique_inputs.append(hypothesis.get("technique_id"))
@@ -382,46 +743,82 @@ def _docx(s,path):
         ("Objective",s.get("objective") or "Not recorded"),
         ("Hunt window",s.get("coverage",{}).get("time_scope") or "Not recorded"),
         ("Affected assets",", ".join(assets) if assets else "No affected assets identified"),
-        ("Finding count",str(len(findings))),
+        ("Reportable behavior count",str(len(report_items))),
     )
     for label,value in glance_items:
         cells=glance.add_row().cells; set_cell_text(cells[0],label,True,navy); set_cell_text(cells[1],value)
     format_table(glance,header=False)
 
-    heading("What We Found")
-    if not findings and not visible_candidates:
-        para("No reportable suspicious activity met the finding threshold in the telemetry and time range examined.")
-    finding_titles=set()
-    for finding in findings:
-        title_text=str(finding.get("title") or "Untitled finding"); finding_titles.add(title_text.lower())
-        p=doc.add_heading(title_text,level=2)
-        meta=doc.add_paragraph(f"{friendly(finding.get('status'))}  •  {friendly(finding.get('confidence'))} confidence")
+    heading("Strong Indicators")
+    indicators=list(indicator_review.get("strong_indicators",[]) or [])
+    if not indicators:
+        para("No strong evidence-backed indicator was admitted. Review the technical report and any anomalous lead queue for lower-confidence leads.")
+    for number,item in enumerate(indicators,1):
+        doc.add_heading(f"{number}. {item.get('title') or 'Evidence-backed indicator'}",level=2)
+        meta=doc.add_paragraph(
+            f"{friendly(item.get('classification'))}  •  {friendly(item.get('outcome'))}  •  "
+            f"{friendly(item.get('confidence'))} confidence"
+        )
         meta.runs[0].bold=True; meta.runs[0].font.color.rgb=RGBColor.from_string(blue)
-        para(str(finding.get("observation") or "No observation was recorded."))
-        if finding.get("interpretation"): para(str(finding["interpretation"]))
-        alternatives=_join_text(finding.get("alternatives"),"; ")
-        if alternatives: para("Possible benign explanation: "+alternatives)
-    for candidate in visible_candidates:
-        if str(candidate.get("title") or "").lower() in finding_titles: continue
-        doc.add_heading(str(candidate.get("title") or "Priority lead"),level=2)
-        para(f"Priority lead  •  {friendly(candidate.get('priority_tier'))} priority  •  {friendly(candidate.get('disposition'))}")
-        reasons=_join_text(candidate.get("score_reasons"),"; ")
-        if reasons: para("Why it matters: "+reasons)
+        observations=_join_text(item.get("observations")," ")
+        para("Observation: "+(observations or "The cited report item was observed in the bounded telemetry."))
+        why=_join_text(item.get("why_it_matters")," ")
+        if why: para("Why it matters: "+why)
+        if item.get("assessment"): para("Analyst assessment: "+str(item.get("assessment")))
+        para("Assets and time: "+(_join_text(item.get("assets")) or "No assets recorded")+
+            f"; {item.get('first_observed') or 'time unavailable'} through {item.get('last_observed') or 'time unavailable'}.")
+        artifacts=list(item.get("artifacts",[]) or [])
+        if artifacts:
+            artifact_table=doc.add_table(rows=1,cols=3); artifact_table.style="Light Shading Accent 1"
+            for column,label in enumerate(("Artifact type","Exact value","Evidence")):
+                set_cell_text(artifact_table.rows[0].cells[column],label,True,white)
+                shade(artifact_table.rows[0].cells[column],navy)
+            mark_header(artifact_table.rows[0])
+            for artifact in artifacts:
+                cells=artifact_table.add_row().cells
+                set_cell_text(cells[0],friendly(artifact.get("type")),True)
+                set_cell_text(cells[1],artifact.get("value"))
+                set_cell_text(cells[2],artifact.get("evidence_id"))
+            format_table(artifact_table)
+        else:
+            para("Artifacts: No structured observable was extracted from the cited record.")
+        para("Evidence: "+(_join_text(item.get("evidence_ids")) or "None cited."))
+        if item.get("limitations"): para("Limitations and alternatives: "+_join_text(item.get("limitations"),"; "))
+        if item.get("recommended_follow_ups"):
+            para("Recommended follow-up: "+_join_text(item.get("recommended_follow_ups"),"; "))
 
-    heading("Supported Attack Path")
-    supported_paths=_supported_paths(s)
-    if not supported_paths:
-        para("No evidence-supported multi-record path was derived from the cited findings.")
-    for supported_path in supported_paths:
-        segment=f" — segment {supported_path.get('segment_index',1)} of {supported_path.get('segment_count',1)}" if int(supported_path.get("segment_count") or 1)>1 else ""
-        doc.add_heading(str(supported_path.get("title") or "Evidence-supported activity")+segment,level=2)
-        for step in supported_path.get("steps",[]):
-            entities=_path_entities(step)
-            detail=f"{step.get('sequence')}. {step.get('observed_at') or 'Time unavailable'} — {friendly(step.get('activity_type'))}: {step.get('label')}. Evidence: {_join_text(step.get('evidence_ids'))}."
-            if entities: detail+=f" Entities: {entities}."
-            para(detail)
-        caveats=list(supported_path.get("caveats",[]) or [])+list(supported_path.get("gaps",[]) or [])
-        if caveats: para("Limitations: "+_join_text(caveats," "))
+    heading("Supporting Context")
+    context=list(indicator_review.get("supporting_context",[]) or [])
+    if not context: para("No additional admitted supporting context was available.")
+    for item in context:
+        detail=str(item.get("summary") or "Evidence-backed supporting context.")
+        artifacts=_join_text([f"{row.get('type')}={row.get('value')}" for row in item.get("artifacts",[])],"; ")
+        if artifacts: detail+=f" Artifacts: {artifacts}."
+        detail+=f" Evidence: {_join_text(item.get('evidence_ids')) or 'none cited'}."
+        para("• "+detail)
+        if item.get("limitations"): para("  Limitation: "+_join_text(item.get("limitations"),"; "))
+
+    heading("Likely Noise or Misclassified Activity")
+    noise=list(indicator_review.get("likely_noise",[]) or [])
+    if not noise: para("No reportable signal was explicitly de-prioritized by the admitted review.")
+    for item in noise:
+        doc.add_heading(str(item.get("title") or "De-prioritized signal"),level=2)
+        para(str(item.get("assessment") or "The cited evidence supports de-prioritization."))
+        artifacts=_join_text([f"{row.get('type')}={row.get('value')}" for row in item.get("artifacts",[])],"; ")
+        if artifacts: para("Artifacts: "+artifacts)
+        para("Evidence: "+(_join_text(item.get("evidence_ids")) or "None cited."))
+        if item.get("limitations"): para("Limitations: "+_join_text(item.get("limitations"),"; "))
+
+    heading("Possible Activity Narrative")
+    narrative=indicator_review.get("possible_activity_narrative",{}) or {}
+    para("This is an unconfirmed investigative hypothesis built from admitted report items and relationships. It is not a confirmed attack path.")
+    para(str(narrative.get("summary") or "No coherent activity narrative was supported by the admitted evidence."))
+    if narrative.get("item_ids"): para("Included indicators: "+_join_text(narrative.get("item_ids")))
+    if narrative.get("relationship_ids"): para("Supporting relationships: "+_join_text(narrative.get("relationship_ids")))
+    if narrative.get("limitations"): para("Narrative limitations: "+_join_text(narrative.get("limitations"),"; "))
+
+    heading("Recommended Follow-ups")
+    for index,action in enumerate(actions,1): para(f"{index}. {action}")
 
     heading("Scope and Coverage")
     scope=doc.add_table(rows=1,cols=2); scope.style="Light Shading Accent 1"; scope.alignment=WD_TABLE_ALIGNMENT.CENTER
@@ -457,16 +854,6 @@ def _docx(s,path):
         para(f"Technique names are mapped to MITRE ATT&CK {ATTACK_RELEASE} ({ATTACK_RELEASE_DATE}).")
     else:
         para("No supported finding was mapped to a MITRE ATT&CK technique.")
-
-    assessment_heading=heading("Assessment and Confidence"); assessment_heading.paragraph_format.page_break_before=True
-    para(f"Overall assessment: {verdict}. Overall confidence: {overall_confidence.title()}.")
-    confidence_bases=[str(item.get("confidence_justification") or "").strip() for item in findings]
-    confidence_bases=[item for item in confidence_bases if item]
-    if confidence_bases: para("Confidence basis: "+" ".join(confidence_bases))
-    para("ROMULUS does not automatically declare activity confirmed malicious. Analyst validation is required before containment or remediation.")
-
-    heading("Recommended Actions")
-    for index,action in enumerate(actions,1): para(f"{index}. {action}")
 
     divider=doc.add_paragraph(); divider.paragraph_format.space_before=Pt(12)
     run=divider.add_run("Technical record"); run.bold=True; run.font.color.rgb=RGBColor.from_string(blue)

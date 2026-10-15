@@ -1,5 +1,5 @@
 {
-  "catalog_version": "1.0.0",
+  "catalog_version": "1.1.0",
   "generated_from": [
     "MITRE ATT&CK",
     "Sigma",
@@ -74,7 +74,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "temp_execution"
+      "corroboration_group": "temp_execution",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.executable"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-XPLAT-002",
@@ -144,7 +156,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-XPLAT-002"
+      "corroboration_group": "BH-XPLAT-002",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-XPLAT-003",
@@ -213,7 +237,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-XPLAT-003"
+      "corroboration_group": "BH-XPLAT-003",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-XPLAT-004",
@@ -287,7 +323,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "unexpected_parent_shell"
+      "corroboration_group": "unexpected_parent_shell",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.parent.name"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-XPLAT-005",
@@ -357,7 +405,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-XPLAT-005"
+      "corroboration_group": "BH-XPLAT-005",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.name"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-XPLAT-006",
@@ -420,7 +480,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-XPLAT-006"
+      "corroboration_group": "BH-XPLAT-006",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.executable"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-001",
@@ -498,7 +570,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-001"
+      "corroboration_group": "BH-WIN-001",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.name"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-002",
@@ -577,7 +661,20 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "unexpected_parent_shell"
+      "corroboration_group": "unexpected_parent_shell",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.parent.name",
+          "process.name"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-003",
@@ -658,7 +755,20 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "unexpected_parent_shell"
+      "corroboration_group": "unexpected_parent_shell",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.parent.name",
+          "process.name"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-004",
@@ -727,7 +837,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-004"
+      "corroboration_group": "BH-WIN-004",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-005",
@@ -793,7 +915,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-005"
+      "corroboration_group": "BH-WIN-005",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-006",
@@ -858,7 +992,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-006"
+      "corroboration_group": "BH-WIN-006",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-007",
@@ -923,7 +1069,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-007"
+      "corroboration_group": "BH-WIN-007",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-008",
@@ -990,7 +1148,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-008"
+      "corroboration_group": "BH-WIN-008",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-009",
@@ -1055,7 +1225,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-009"
+      "corroboration_group": "BH-WIN-009",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-010",
@@ -1121,7 +1303,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-010"
+      "corroboration_group": "BH-WIN-010",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-011",
@@ -1185,7 +1379,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-011"
+      "corroboration_group": "BH-WIN-011",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-012",
@@ -1250,7 +1456,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-012"
+      "corroboration_group": "BH-WIN-012",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "registry.path"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-013",
@@ -1316,7 +1534,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-013"
+      "corroboration_group": "BH-WIN-013",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-014",
@@ -1380,7 +1610,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-014"
+      "corroboration_group": "BH-WIN-014",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-015",
@@ -1445,7 +1687,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-015"
+      "corroboration_group": "BH-WIN-015",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-016",
@@ -1511,7 +1765,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-016"
+      "corroboration_group": "BH-WIN-016",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-017",
@@ -1574,7 +1840,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-017"
+      "corroboration_group": "BH-WIN-017",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-WIN-018",
@@ -1639,7 +1917,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-WIN-018"
+      "corroboration_group": "BH-WIN-018",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-001",
@@ -1706,7 +1996,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "temp_execution"
+      "corroboration_group": "temp_execution",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.executable"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-002",
@@ -1769,7 +2071,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-002"
+      "corroboration_group": "BH-LNX-002",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.executable"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-LNX-003",
@@ -1836,7 +2150,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-003"
+      "corroboration_group": "BH-LNX-003",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-004",
@@ -1902,7 +2228,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-004"
+      "corroboration_group": "BH-LNX-004",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-005",
@@ -1983,7 +2321,20 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "unexpected_parent_shell"
+      "corroboration_group": "unexpected_parent_shell",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.parent.name",
+          "process.name"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-006",
@@ -2046,7 +2397,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-006"
+      "corroboration_group": "BH-LNX-006",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "file.path"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-007",
@@ -2110,7 +2473,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-007"
+      "corroboration_group": "BH-LNX-007",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "file.path"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-LNX-008",
@@ -2174,7 +2549,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-008"
+      "corroboration_group": "BH-LNX-008",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "file.path"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-LNX-009",
@@ -2239,7 +2626,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-009"
+      "corroboration_group": "BH-LNX-009",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "file.path"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-LNX-010",
@@ -2304,7 +2703,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-010"
+      "corroboration_group": "BH-LNX-010",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "file.path"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-011",
@@ -2367,7 +2778,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-011"
+      "corroboration_group": "BH-LNX-011",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "file.path"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-012",
@@ -2434,7 +2857,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-012"
+      "corroboration_group": "BH-LNX-012",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-013",
@@ -2499,7 +2934,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-013"
+      "corroboration_group": "BH-LNX-013",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-014",
@@ -2566,7 +3013,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-014"
+      "corroboration_group": "BH-LNX-014",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-015",
@@ -2632,7 +3091,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-015"
+      "corroboration_group": "BH-LNX-015",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-016",
@@ -2701,7 +3172,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-016"
+      "corroboration_group": "BH-LNX-016",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-017",
@@ -2768,7 +3251,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-017"
+      "corroboration_group": "BH-LNX-017",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-LNX-018",
@@ -2833,7 +3328,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-LNX-018"
+      "corroboration_group": "BH-LNX-018",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": true,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "process.command_line"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-AUTH-001",
@@ -2896,7 +3403,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-AUTH-001"
+      "corroboration_group": "BH-AUTH-001",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-AUTH-002",
@@ -2960,7 +3479,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-AUTH-002"
+      "corroboration_group": "BH-AUTH-002",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 2,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-AUTH-003",
@@ -3023,7 +3554,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-AUTH-003"
+      "corroboration_group": "BH-AUTH-003",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-AUTH-004",
@@ -3087,7 +3630,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-AUTH-004"
+      "corroboration_group": "BH-AUTH-004",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 2,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     },
     {
       "id": "BH-NET-001",
@@ -3150,7 +3705,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-NET-001"
+      "corroboration_group": "BH-NET-001",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-NET-002",
@@ -3213,7 +3780,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-NET-002"
+      "corroboration_group": "BH-NET-002",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-NET-003",
@@ -3276,7 +3855,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-NET-003"
+      "corroboration_group": "BH-NET-003",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-NET-004",
@@ -3339,7 +3930,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-NET-004"
+      "corroboration_group": "BH-NET-004",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-NET-005",
@@ -3402,7 +4005,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-NET-005"
+      "corroboration_group": "BH-NET-005",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-NET-006",
@@ -3465,7 +4080,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-NET-006"
+      "corroboration_group": "BH-NET-006",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-NET-007",
@@ -3528,7 +4155,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-NET-007"
+      "corroboration_group": "BH-NET-007",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-NET-008",
@@ -3591,7 +4230,19 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-NET-008"
+      "corroboration_group": "BH-NET-008",
+      "classification_policy": {
+        "default_classification": "anomalous",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 1,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "independent_typed_entity_within_30m",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "This behavior is unusual but has common operational explanations; independent typed-entity evidence is required for suspicious reporting."
+      }
     },
     {
       "id": "BH-NET-009",
@@ -3655,7 +4306,95 @@
         }
       ],
       "review_date": "2026-10-12",
-      "corroboration_group": "BH-NET-009"
+      "corroboration_group": "BH-NET-009",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 2,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
+    },
+    {
+      "id": "BH-NET-010",
+      "version": 1,
+      "title": "Repeated encoded DNS label burst",
+      "description": "One source issued several distinct long, high-entropy DNS labels to the same suffix in a bounded window. Treat this as a DNS tunneling or encoded-channel lead until endpoint attribution and benign service context are verified.",
+      "enabled": true,
+      "platforms": [
+        "cross-platform"
+      ],
+      "categories": [
+        "dns",
+        "command-and-control",
+        "exfiltration"
+      ],
+      "source": "aggregate",
+      "required_roles": [
+        "aggregate.signal"
+      ],
+      "optional_roles": [
+        "host.name",
+        "user.name"
+      ],
+      "match": {
+        "all": [],
+        "any": [
+          {
+            "role": "aggregate.signal",
+            "operator": "equals_any",
+            "values": [
+              "dns_encoded_label_burst"
+            ]
+          }
+        ],
+        "none": []
+      },
+      "priority_tier": "high",
+      "base_priority": 68,
+      "specificity": 76,
+      "expected_noise": "medium",
+      "attack_techniques": [
+        "T1071.004"
+      ],
+      "benign_explanations": [
+        "Content delivery, endpoint security, tracking, telemetry, or an authorized DNS tunnel can produce repeated encoded-looking labels."
+      ],
+      "required_corroboration": [
+        "Attribute the queries to a process or user and verify payload, response, volume, timing, or independent command-and-control or exfiltration evidence."
+      ],
+      "follow_up": [
+        "Pivot on the cited source and suffix, inspect query and response timing and volume, and identify the originating process, user, and transferred content where telemetry permits."
+      ],
+      "provenance": [
+        {
+          "name": "MITRE ATT&CK",
+          "url": "https://github.com/mitre-attack/attack-stix-data"
+        },
+        {
+          "name": "SigmaHQ rules",
+          "url": "https://github.com/SigmaHQ/sigma"
+        }
+      ],
+      "review_date": "2026-10-13",
+      "corroboration_group": "BH-NET-004",
+      "classification_policy": {
+        "default_classification": "suspicious",
+        "single_record_reportable": false,
+        "minimum_owned_evidence": 5,
+        "required_context_roles": [
+          "aggregate.signal"
+        ],
+        "upgrade_rule": "none",
+        "downgrade_rule": "explicit_benign_evidence_only",
+        "policy_version": 1,
+        "policy_reason": "The reviewed deterministic match is adversary-relevant when its owned evidence and required context satisfy this policy."
+      }
     }
   ]
 }

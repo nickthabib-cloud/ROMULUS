@@ -10,11 +10,13 @@ from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
 
 from .attack_catalog import load_attack_catalog
+from ..investigation.classification import migrate_candidate, refresh_investigation_status
 
 
 BEHAVIOR_CATALOG_PATH = Path(__file__).with_name("behavior_catalog.json")
@@ -27,7 +29,18 @@ ALLOWED_OPERATORS = {
 ALLOWED_SOURCES = {"elasticsearch", "aggregate"}
 PRIORITIES = {"informational", "low", "medium", "high", "critical"}
 NOISE_LEVELS = {"low", "medium", "high"}
+BEHAVIOR_CLASSIFICATIONS = {"anomalous", "suspicious"}
+CLASSIFICATION_UPGRADE_RULES = {"none", "independent_typed_entity_within_30m"}
+CLASSIFICATION_DOWNGRADE_RULES = {"explicit_benign_evidence_only"}
 _ATTACK_TECHNIQUE_IDS: set[str] | None = None
+
+_TEXT_FIELD_TYPES = {"text", "match_only_text"}
+_EXACT_STRING_FIELD_TYPES = {"keyword", "constant_keyword", "wildcard", "version"}
+_PHRASE_FIELD_TYPES = _TEXT_FIELD_TYPES | {"keyword", "constant_keyword"}
+_PREFIX_FIELD_TYPES = {"keyword", "constant_keyword", "wildcard"}
+_INTEGER_FIELD_TYPES = {"byte", "short", "integer", "long", "unsigned_long"}
+_FLOAT_FIELD_TYPES = {"half_float", "float", "double", "scaled_float"}
+_DATE_FIELD_TYPES = {"date", "date_nanos"}
 
 SEMANTIC_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
     "event.time": ("@timestamp", "timestamp", "event.created", "event.start", "winlog.time_created"),
@@ -112,9 +125,21 @@ def load_local_indicators(path: Path = LOCAL_INDICATORS_PATH) -> dict[str, Any]:
         confidence = item.get("confidence")
         if not isinstance(confidence, int) or isinstance(confidence, bool) or not 0 <= confidence <= 100:
             raise CatalogValidationError(f"{prefix}.confidence: expected integer 0 through 100")
+        classification = item.get("classification", "suspicious")
+        if classification not in {"suspicious", "malicious"}:
+            raise CatalogValidationError(f"{prefix}.classification: expected suspicious or malicious")
+        if classification == "malicious" and confidence < 90:
+            raise CatalogValidationError(f"{prefix}.confidence: malicious indicators require confidence at least 90")
+        if classification == "malicious" and not _nonempty_string(item.get("expires_at")):
+            raise CatalogValidationError(f"{prefix}.expires_at: malicious indicators require an expiry timestamp")
+        item["classification"] = classification
         for field in ("created_at", "expires_at"):
             if item.get(field):
                 _parse_time(item[field], f"{prefix}.{field}")
+        if item.get("expires_at") and _parse_time(item["created_at"], f"{prefix}.created_at") >= _parse_time(
+            item["expires_at"], f"{prefix}.expires_at"
+        ):
+            raise CatalogValidationError(f"{prefix}.expires_at: must be later than created_at")
     return value
 
 
@@ -236,6 +261,51 @@ def _validate_analytic(item: Any, index: int, seen: set[str]) -> None:
             raise CatalogValidationError(f"{prefix}.match.{group}: expected array")
         for number, predicate in enumerate(predicates):
             _validate_predicate(predicate, f"{prefix}.match.{group}[{number}]")
+    _validate_classification_policy(item, prefix)
+
+
+def _validate_classification_policy(item: dict[str, Any], prefix: str) -> None:
+    policy = item.get("classification_policy")
+    path = f"{prefix}.classification_policy"
+    if not isinstance(policy, dict):
+        raise CatalogValidationError(f"{path}: expected object")
+    classification = policy.get("default_classification")
+    if classification not in BEHAVIOR_CLASSIFICATIONS:
+        raise CatalogValidationError(f"{path}.default_classification: unsupported behavior classification")
+    singular = policy.get("single_record_reportable")
+    if not isinstance(singular, bool):
+        raise CatalogValidationError(f"{path}.single_record_reportable: expected boolean")
+    minimum = policy.get("minimum_owned_evidence")
+    if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 1:
+        raise CatalogValidationError(f"{path}.minimum_owned_evidence: expected positive integer")
+    if singular and minimum != 1:
+        raise CatalogValidationError(
+            f"{path}.single_record_reportable: requires minimum_owned_evidence equal to 1"
+        )
+    if classification == "suspicious" and not singular and minimum < 2:
+        raise CatalogValidationError(
+            f"{path}.single_record_reportable: false suspicious policies require at least two owned evidence records"
+        )
+    roles = policy.get("required_context_roles")
+    if not isinstance(roles, list) or not roles or not all(_nonempty_string(role) for role in roles):
+        raise CatalogValidationError(f"{path}.required_context_roles: expected non-empty string array")
+    predicate_roles = {
+        predicate.get("role")
+        for group in ("all", "any")
+        for predicate in item.get("match", {}).get(group, [])
+        if isinstance(predicate, dict)
+    }
+    if not set(roles) <= predicate_roles:
+        raise CatalogValidationError(f"{path}.required_context_roles: roles must be used by positive predicates")
+    if policy.get("upgrade_rule") not in CLASSIFICATION_UPGRADE_RULES:
+        raise CatalogValidationError(f"{path}.upgrade_rule: unsupported upgrade rule")
+    if policy.get("downgrade_rule") not in CLASSIFICATION_DOWNGRADE_RULES:
+        raise CatalogValidationError(f"{path}.downgrade_rule: unsupported downgrade rule")
+    version = policy.get("policy_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise CatalogValidationError(f"{path}.policy_version: expected positive integer")
+    if not _nonempty_string(policy.get("policy_reason")):
+        raise CatalogValidationError(f"{path}.policy_reason: expected non-empty string")
 
 
 def _validate_predicate(predicate: Any, path: str) -> None:
@@ -272,6 +342,7 @@ def compile_elasticsearch_seed(
     bindings: dict[str, list[str]],
     timestamp_field: str,
     time_range: dict[str, str] | None,
+    field_capabilities: dict[str, list[str]] | None = None,
 ) -> dict[str, Any] | None:
     """Compile a catalog entry into a bounded, validator-compatible ES query."""
     match = analytic.get("match", {})
@@ -279,16 +350,16 @@ def compile_elasticsearch_seed(
     should = []
     must_not = []
     for predicate in match.get("all", []):
-        clause = _predicate_query(predicate, bindings)
+        clause = _predicate_query(predicate, bindings, field_capabilities)
         if clause is None:
             return None
         must.append(clause)
     for predicate in match.get("any", []):
-        clause = _predicate_query(predicate, bindings)
+        clause = _predicate_query(predicate, bindings, field_capabilities)
         if clause is not None:
             should.append(clause)
     for predicate in match.get("none", []):
-        clause = _predicate_query(predicate, bindings)
+        clause = _predicate_query(predicate, bindings, field_capabilities)
         if clause is None:
             return None
         must_not.append(clause)
@@ -315,10 +386,8 @@ def build_candidate_queue(
     now: str | datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Match evidence and return a stable, explainable candidate queue."""
-    events = list(evidence) + _aggregate_events(analytic_summary or {})
+    events = list(evidence) + _aggregate_events(analytic_summary or {}, evidence)
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    matched_ids_by_asset: dict[str, set[str]] = {}
-    matched_groups_by_asset: dict[str, set[str]] = {}
     analytics = [item for item in catalog.get("analytics", []) if item.get("enabled", True)]
     for analytic in analytics:
         for event in events:
@@ -329,13 +398,10 @@ def build_candidate_queue(
             if _analytic_matches(analytic, event):
                 asset = str(event.get("asset") or "unknown")
                 grouped.setdefault((analytic["id"], asset), []).append(event)
-                matched_ids_by_asset.setdefault(asset, set()).add(analytic["id"])
-                matched_groups_by_asset.setdefault(asset, set()).add(str(analytic.get("corroboration_group") or analytic["id"]))
 
     candidates: list[dict[str, Any]] = []
     for (analytic_id, asset), rows in grouped.items():
         analytic = next(item for item in analytics if item["id"] == analytic_id)
-        independent = max(0, len(matched_groups_by_asset.get(asset, set())) - 1)
         score = int(analytic["base_priority"]) + min(10, int(analytic["specificity"]) // 10)
         reasons = [
             f"base analytic priority {analytic['base_priority']}",
@@ -345,16 +411,15 @@ def build_candidate_queue(
             repeat_bonus = min(9, (len(rows) - 1) * 3)
             score += repeat_bonus
             reasons.append(f"repeat observation contribution {repeat_bonus}")
-        if independent:
-            corroboration_bonus = min(30, independent * 15)
-            score += corroboration_bonus
-            reasons.append(f"independent behavior corroboration contribution {corroboration_bonus}")
         score = min(100, score)
-        disposition = "corroborated" if score >= 70 and independent else "observed"
-        candidates.append(_behavior_candidate(analytic, asset, rows, score, disposition, reasons))
+        candidates.append(_behavior_candidate(analytic, asset, rows, score, "observed", reasons))
 
     reference_time = _coerce_time(now) if now is not None else datetime.now(timezone.utc)
     for indicator in indicators.get("indicators", []):
+        if not _indicator_is_candidate_safe(indicator, indicators.get("catalog_version")):
+            continue
+        if _parse_time(indicator["created_at"], f"indicator {indicator.get('id')}.created_at") > reference_time:
+            continue
         expires = indicator.get("expires_at")
         if expires and _parse_time(expires, f"indicator {indicator.get('id')}.expires_at") <= reference_time:
             continue
@@ -369,13 +434,23 @@ def build_candidate_queue(
             identifier = str(indicator["id"])
             candidate_id = _candidate_id("indicator", identifier, asset)
             follow_up = ["Validate the indicator source and investigate the cited event and adjacent activity."]
+            classification = str(indicator.get("classification") or "suspicious")
             candidates.append({
                 "candidate_id": candidate_id,
                 "kind": "trusted_indicator", "indicator_id": identifier,
                 "analytic_id": None, "title": f"Trusted indicator observed: {identifier}",
                 "description": f"An exact {indicator.get('type')} indicator supplied by {indicator.get('source')} was observed.",
+                "base_priority_score": score,
                 "priority_score": score, "priority_tier": "critical",
                 "disposition": "observed", "customer_visible": True,
+                "classification": classification,
+                "classification_reason": (
+                    "Explicit current exact trusted indicator met the malicious admission gate."
+                    if classification == "malicious"
+                    else "Current exact trusted indicator is reportable as suspicious."
+                ),
+                "classification_policy_version": 1,
+                "classification_history": [],
                 "evidence_ids": _evidence_ids(rows), "assets": [asset],
                 "first_observed": _observed_bounds(rows)[0], "last_observed": _observed_bounds(rows)[1],
                 "score_reasons": [
@@ -386,8 +461,15 @@ def build_candidate_queue(
                 "follow_up": follow_up, "follow_ups": _follow_up_records(candidate_id, follow_up),
                 "finding_ids": [],
                 "indicator_source": indicator.get("source"), "indicator_confidence": indicator.get("confidence"),
-                "indicator_type": indicator.get("type"), "indicator_value": indicator.get("value"),
+                "indicator_type": indicator.get("type"),
+                "indicator_value": _normalize_indicator(
+                    str(indicator.get("type")), str(indicator.get("value")),
+                ),
+                "indicator_catalog_version": indicators.get("catalog_version"),
+                "indicator_created_at": indicator.get("created_at"),
                 "indicator_expires_at": indicator.get("expires_at"),
+                "indicator_matched_at": reference_time.isoformat(),
+                "indicator_match_type": "exact", "indicator_current_at_match": True,
             })
     return sorted(
         candidates,
@@ -405,19 +487,27 @@ def customer_visible_candidates(candidates: list[dict[str, Any]]) -> list[dict[s
 
 def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge fresh detections without erasing investigation decisions or follow-up history."""
-    prior_by_id = {str(item.get("candidate_id")): item for item in previous if item.get("candidate_id")}
+    prior_by_id = {
+        str(item.get("candidate_id")): migrate_candidate(item)
+        for item in previous if item.get("candidate_id")
+    }
     merged = []
     refreshed_ids = set()
-    disposition_rank = {"observed": 0, "investigating": 1, "corroborated": 2}
     terminal = {"benign_likely", "dismissed", "unresolved"}
     for fresh in current:
-        item = dict(fresh)
+        item = migrate_candidate(fresh)
         prior = prior_by_id.get(str(item.get("candidate_id")))
         refreshed_ids.add(str(item.get("candidate_id")))
         if prior:
             prior_disposition = str(prior.get("disposition") or "observed")
             fresh_disposition = str(item.get("disposition") or "observed")
-            if prior_disposition in terminal or disposition_rank.get(prior_disposition, 0) > disposition_rank.get(fresh_disposition, 0):
+            # Preserve analyst-owned terminal decisions and an in-progress
+            # investigation.  ``corroborated`` is derived from the current
+            # evidence relationships, so carrying it across refreshes can
+            # leave a candidate promoted after its relationship disappears.
+            if prior_disposition in terminal or (
+                prior_disposition == "investigating" and fresh_disposition == "observed"
+            ):
                 item["disposition"] = prior_disposition
             item["evidence_ids"] = sorted(set(prior.get("evidence_ids", [])) | set(item.get("evidence_ids", [])))
             observed = [value for value in (prior.get("first_observed"), item.get("first_observed")) if value]
@@ -437,18 +527,69 @@ def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str
             item["follow_ups"] = preserved
             for field in ("disposition_history", "telemetry_gaps"):
                 if prior.get(field): item[field] = list(prior[field])
-        merged.append(item)
+            rank = {"anomalous": 0, "suspicious": 1, "malicious": 2}
+            fresh_history = [
+                dict(row) for row in item.get("classification_history", [])
+                if isinstance(row, dict)
+            ]
+            explicit_downgrade = any(
+                row.get("rule") == "explicit_benign_evidence_only" for row in fresh_history
+            )
+            if (
+                rank[str(prior["classification"])] > rank[str(item["classification"])]
+                and not explicit_downgrade
+            ):
+                for field in (
+                    "classification", "classification_reason", "classification_policy_version",
+                ):
+                    if prior.get(field) is not None:
+                        item[field] = prior[field]
+            combined_history = [
+                dict(row) for row in prior.get("classification_history", [])
+                if isinstance(row, dict)
+            ]
+            for row in fresh_history:
+                if row not in combined_history:
+                    combined_history.append(row)
+            item["classification_history"] = combined_history
+        merged.append(refresh_investigation_status(item))
     # A bounded re-analysis may not reproduce a previously observed candidate
     # (for example after context retention or source availability changes).
     # Preserve it until an explicit analyst disposition closes it.
-    merged.extend(dict(item, follow_ups=[dict(entry, history=list(entry.get("history", [])))
-        for entry in item.get("follow_ups", [])]) for item in previous
+    merged.extend(_retained_candidate_without_derived_corroboration(item) for item in previous
         if str(item.get("candidate_id")) not in refreshed_ids)
     return sorted(merged, key=lambda item: (-int(item.get("priority_score", 0)),
         0 if item.get("kind") == "trusted_indicator" else 1, str(item.get("candidate_id"))))
 
 
-def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) -> dict[str, Any] | None:
+def _retained_candidate_without_derived_corroboration(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Keep investigation history without carrying an unavailable relationship."""
+    item = migrate_candidate(candidate)
+    item["follow_ups"] = [dict(entry, history=list(entry.get("history", [])))
+        for entry in candidate.get("follow_ups", [])]
+    bonus = max(0, min(20, int(item.get("corroboration_bonus", 0) or 0)))
+    fallback_base = max(0, int(item.get("priority_score", 0) or 0) - bonus)
+    score = max(0, min(100, int(item.get("base_priority_score", fallback_base) or 0)))
+    item["base_priority_score"] = score
+    item["corroboration_bonus"] = 0
+    item["priority_score"] = score
+    item["priority_tier"] = "critical" if score >= 90 else (
+        "high" if score >= 70 else ("medium" if score >= 40 else "low")
+    )
+    item["related_candidates"] = []
+    item["corroboration_reasons"] = []
+    item["score_reasons"] = [str(reason) for reason in item.get("score_reasons", [])
+        if not str(reason).startswith("evidence-backed corroboration contribution ")]
+    if str(item.get("disposition") or "observed") == "corroborated":
+        item["disposition"] = "observed"
+    return refresh_investigation_status(item)
+
+
+def _predicate_query(
+    predicate: dict[str, Any],
+    bindings: dict[str, list[str]],
+    field_capabilities: dict[str, list[str]] | None = None,
+) -> dict[str, Any] | None:
     fields = bindings.get(predicate.get("role"), [])
     if not fields:
         return None
@@ -456,19 +597,69 @@ def _predicate_query(predicate: dict[str, Any], bindings: dict[str, list[str]]) 
     values = predicate.get("values", [])
     clauses = []
     for field in fields[:4]:
+        types = set(field_capabilities.get(field, [])) if field_capabilities is not None else set()
+        strict = field_capabilities is not None
         if operator == "exists":
-            clauses.append({"exists": {"field": field}})
+            if not strict or types:
+                clauses.append({"exists": {"field": field}})
         elif operator == "equals_any":
-            clauses.append({"terms": {field: values[:20]}})
+            if not strict:
+                clauses.append({"terms": {field: values[:20]}})
+            elif types and types <= _PHRASE_FIELD_TYPES and types & _TEXT_FIELD_TYPES:
+                clauses.extend({"match_phrase": {field: value}} for value in values[:20])
+            elif (coerced := _coerce_exact_values(values[:20], types)) is not None:
+                clauses.append({"terms": {field: coerced}})
         elif operator == "path_prefix_any":
-            clauses.extend({"prefix": {field: value}} for value in values[:12])
+            if not strict or (types and types <= _PREFIX_FIELD_TYPES):
+                clauses.extend({"prefix": {field: value}} for value in values[:12])
+            if strict and types and types <= _PHRASE_FIELD_TYPES and types & _TEXT_FIELD_TYPES:
+                clauses.extend({"match_phrase": {field: value}} for value in values[:12])
         elif operator in {"contains_any", "ends_with_any"}:
-            clauses.extend({"match_phrase": {field: value}} for value in values[:12])
+            if not strict or (types and types <= _PHRASE_FIELD_TYPES and types & _TEXT_FIELD_TYPES):
+                clauses.extend({"match_phrase": {field: value}} for value in values[:12])
         else:
             continue
     if not clauses:
         return None
     return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
+
+
+def _coerce_exact_values(values: list[Any], types: set[str]) -> list[Any] | None:
+    """Return values safe for every concrete field type, or fail closed."""
+    if not types:
+        return None
+    raw = [str(value).strip() for value in values]
+    if not raw or any(not value for value in raw):
+        return None
+    if types <= _EXACT_STRING_FIELD_TYPES:
+        return raw
+    if types <= _INTEGER_FIELD_TYPES:
+        if any(not re.fullmatch(r"[+-]?\d+", value) for value in raw):
+            return None
+        return [int(value) for value in raw]
+    if types <= (_INTEGER_FIELD_TYPES | _FLOAT_FIELD_TYPES):
+        try:
+            parsed = [float(value) for value in raw]
+        except ValueError:
+            return None
+        return parsed if all(math.isfinite(value) for value in parsed) else None
+    if types == {"boolean"}:
+        if any(value.lower() not in {"true", "false"} for value in raw):
+            return None
+        return [value.lower() == "true" for value in raw]
+    if types <= ({"ip"} | _EXACT_STRING_FIELD_TYPES) and "ip" in types:
+        try:
+            return [str(ipaddress.ip_address(value)) for value in raw]
+        except ValueError:
+            return None
+    if types <= (_DATE_FIELD_TYPES | _EXACT_STRING_FIELD_TYPES) and types & _DATE_FIELD_TYPES:
+        try:
+            for value in raw:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return raw
+    return None
 
 
 def _analytic_matches(analytic: dict[str, Any], event: dict[str, Any]) -> bool:
@@ -548,6 +739,28 @@ def _indicator_matches(indicator: dict[str, Any], event: dict[str, Any]) -> bool
     return expected in observed
 
 
+def _indicator_is_candidate_safe(indicator: dict[str, Any], catalog_version: Any = None) -> bool:
+    """Fail closed when callers bypass the validated local-indicator loader."""
+    classification = str(indicator.get("classification") or "suspicious")
+    confidence = indicator.get("confidence")
+    if classification not in {"suspicious", "malicious"}:
+        return False
+    if not _nonempty_string(indicator.get("source")) or not _nonempty_string(indicator.get("created_at")):
+        return False
+    try:
+        created = _parse_time(str(indicator["created_at"]), "indicator.created_at")
+        expires = (_parse_time(str(indicator["expires_at"]), "indicator.expires_at")
+            if indicator.get("expires_at") else None)
+    except CatalogValidationError:
+        return False
+    if not isinstance(confidence, int) or isinstance(confidence, bool) or not 0 <= confidence <= 100:
+        return False
+    return classification != "malicious" or bool(
+        confidence >= 90 and expires is not None and created < expires
+        and _nonempty_string(catalog_version)
+    )
+
+
 def _normalize_indicator(kind: str, value: str) -> str:
     value = value.strip().lower()
     if kind == "path":
@@ -594,13 +807,49 @@ def _behavior_candidate(
     tier = "critical" if score >= 90 else ("high" if score >= 70 else ("medium" if score >= 40 else "low"))
     candidate_id = _candidate_id("behavior", analytic["id"], asset)
     follow_up = analytic.get("follow_up", [])
+    policy = dict(analytic["classification_policy"])
+    evidence_ids = _evidence_ids(rows)
+    enough_owned_evidence = len(set(evidence_ids)) >= int(policy["minimum_owned_evidence"])
+    matched_context_roles = sorted({
+        str(role)
+        for role in policy.get("required_context_roles", [])
+        if any(
+            _predicate_matches(predicate, row)
+            for row in rows
+            for group in ("all", "any")
+            for predicate in analytic.get("match", {}).get(group, [])
+            if predicate.get("role") == role
+        )
+    })
+    context_satisfied = set(policy.get("required_context_roles", [])) <= set(matched_context_roles)
+    singular_allowed = bool(policy.get("single_record_reportable")) or len(set(evidence_ids)) > 1
+    classification = (
+        str(policy["default_classification"])
+        if enough_owned_evidence and context_satisfied and singular_allowed
+        else "anomalous"
+    )
+    classification_reason = (
+        str(policy["policy_reason"])
+        if enough_owned_evidence
+        else "Insufficient distinct owned evidence for the reviewed analytic policy."
+    )
     return {
         "candidate_id": candidate_id,
         "kind": "behavior", "analytic_id": analytic["id"], "indicator_id": None,
+        "corroboration_group": str(analytic.get("corroboration_group") or analytic["id"]),
+        "analytic_source": analytic.get("source"),
         "title": analytic["title"], "description": analytic["description"],
+        "base_priority_score": score,
         "priority_score": score, "priority_tier": tier, "disposition": disposition,
-        "customer_visible": bool(score >= 70 and disposition == "corroborated"),
-        "evidence_ids": _evidence_ids(rows), "assets": [asset],
+        "classification": classification,
+        "classification_reason": classification_reason,
+        "classification_policy_version": policy["policy_version"],
+        "classification_policy": policy,
+        "matched_context_roles": matched_context_roles,
+        "classification_history": [],
+        "analytic_provenance": list(analytic.get("provenance", [])),
+        "customer_visible": classification == "suspicious",
+        "evidence_ids": evidence_ids, "assets": [asset],
         "first_observed": _observed_bounds(rows)[0], "last_observed": _observed_bounds(rows)[1],
         "score_reasons": reasons, "attack_techniques": analytic.get("attack_techniques", []),
         "benign_explanations": analytic.get("benign_explanations", []),
@@ -609,8 +858,13 @@ def _behavior_candidate(
     }
 
 
-def _aggregate_events(summary: dict[str, Any]) -> list[dict[str, Any]]:
+def _aggregate_events(
+    summary: dict[str, Any], evidence: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     out = []
+    evidence_by_id = {
+        str(event.get("evidence_id")): event for event in evidence or [] if event.get("evidence_id")
+    }
     aggregate_signals = summary.get("aggregate_signals")
     if isinstance(aggregate_signals, dict):
         for signal, rows in aggregate_signals.items():
@@ -620,26 +874,41 @@ def _aggregate_events(summary: dict[str, Any]) -> list[dict[str, Any]]:
                     refs.append(row["sample_evidence_id"])
                 asset = (row.get("asset") or row.get("source") or row.get("destination")
                     or row.get("user") or "unknown")
-                out.append(_aggregate_event(str(signal), asset, *refs))
+                out.append(_aggregate_event(str(signal), asset, *refs, evidence_by_id=evidence_by_id))
         return out
     host_profile = summary.get("host_profile", {})
     for row in host_profile.get("authentication_sequences", []) or []:
-        out.append(_aggregate_event("auth_failures_then_success", row.get("source") or row.get("user"), row.get("sample_evidence_id")))
+        out.append(_aggregate_event("auth_failures_then_success", row.get("source") or row.get("user"),
+            row.get("sample_evidence_id"), evidence_by_id=evidence_by_id))
     network = summary.get("network_profile", {})
     for row in network.get("high_fanout", []) or []:
-        out.append(_aggregate_event("high_fanout", row.get("source"), *(row.get("sample_evidence_ids") or [])))
+        out.append(_aggregate_event("high_fanout", row.get("source"), *(row.get("sample_evidence_ids") or []),
+            evidence_by_id=evidence_by_id))
     for row in network.get("periodic_edge_candidates", []) or []:
-        out.append(_aggregate_event("periodic_edge", row.get("source"), *(row.get("sample_evidence_ids") or [])))
+        out.append(_aggregate_event("periodic_edge", row.get("source"), *(row.get("sample_evidence_ids") or []),
+            evidence_by_id=evidence_by_id))
     for row in network.get("low_frequency_external_destinations", []) or []:
-        out.append(_aggregate_event("rare_external_destination", row.get("destination"), *(row.get("sample_evidence_ids") or [])))
+        out.append(_aggregate_event("rare_external_destination", row.get("destination"),
+            *(row.get("sample_evidence_ids") or []), evidence_by_id=evidence_by_id))
     return out
 
 
-def _aggregate_event(signal: str, asset: Any, *evidence_ids: Any) -> dict[str, Any]:
+def _aggregate_event(
+    signal: str,
+    asset: Any,
+    *evidence_ids: Any,
+    evidence_by_id: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     supporting = list(dict.fromkeys(str(value) for value in evidence_ids if value))
+    observed = sorted(
+        str((evidence_by_id or {}).get(identifier, {}).get("observed_at"))
+        for identifier in supporting
+        if (evidence_by_id or {}).get(identifier, {}).get("observed_at")
+    )
     return {
         "evidence_id": supporting[0] if supporting else f"AGG-{signal}",
-        "source": "aggregate", "observed_at": "", "asset": str(asset or "unknown"),
+        "source": "aggregate", "observed_at": observed[0] if observed else "",
+        "supporting_observed_at": observed, "asset": str(asset or "unknown"),
         "observation": signal, "supporting_evidence_ids": supporting,
         "raw": {"aggregate": {"signal": signal, "supporting_evidence_ids": supporting}},
     }
@@ -668,7 +937,12 @@ def _evidence_ids(rows: list[dict[str, Any]]) -> list[str]:
 
 
 def _observed_bounds(rows: list[dict[str, Any]]) -> tuple[str | None, str | None]:
-    values = sorted(str(row.get("observed_at")) for row in rows if row.get("observed_at"))
+    values = sorted(
+        str(value)
+        for row in rows
+        for value in ([row.get("observed_at")] + list(row.get("supporting_observed_at") or []))
+        if value
+    )
     return (values[0], values[-1]) if values else (None, None)
 
 
@@ -727,6 +1001,7 @@ def compile_elasticsearch_indicator_seed(
     bindings: dict[str, list[str]],
     timestamp_field: str,
     time_range: dict[str, str] | None,
+    field_capabilities: dict[str, list[str]] | None = None,
 ) -> dict[str, Any] | None:
     """Compile a trusted exact indicator into a strict field-bound query."""
     roles_by_type = {
@@ -749,7 +1024,23 @@ def compile_elasticsearch_indicator_seed(
     value = str(indicator.get("value") or "").strip()
     if not value:
         return None
-    should = [{"term": {field: value}} for field in list(dict.fromkeys(fields))[:8]]
+    kind = str(indicator.get("type") or "")
+    if kind == "ip":
+        try:
+            value = str(ipaddress.ip_address(value))
+        except ValueError:
+            return None
+    should = []
+    for field in list(dict.fromkeys(fields))[:8]:
+        types = set(field_capabilities.get(field, [])) if field_capabilities is not None else set()
+        if field_capabilities is None:
+            should.append({"term": {field: value}})
+        elif types and types <= _PHRASE_FIELD_TYPES and types & _TEXT_FIELD_TYPES:
+            should.append({"match_phrase": {field: value}})
+        elif (coerced := _coerce_exact_values([value], types)) is not None:
+            should.append({"term": {field: coerced[0]}})
+    if not should:
+        return None
     body: dict[str, Any] = {"should": should, "minimum_should_match": 1}
     if time_range:
         body["filter"] = [{"range": {timestamp_field: dict(time_range)}}]

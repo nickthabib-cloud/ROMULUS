@@ -4,6 +4,29 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 
 ## Unreleased
 
+### Reportable behavior classification and analyst delivery
+
+- Added reviewed catalog classification policies and separated candidate truth (`anomalous`, `suspicious`, `malicious`) from investigation status, priority, and confidence. Numeric score, ATT&CK mapping, or model output cannot promote classification.
+- Made high-specificity singular suspicious behavior reportable when its deterministic catalog policy explicitly permits one owned record. Restricted malicious admission to current exact trusted indicators with complete provenance and confidence of at least 90.
+- Reworked Word and text deliverables around normalized malicious and suspicious report items with exact citations, follow-up outcomes, benign alternatives, coverage gaps, and recommended analyst actions. Explicit finding links are the only de-duplication authority.
+- Added finalized, analyst-readable `reports/anomalous/` lead queues for unresolved anomalous-only candidates. Report manifests now require and verify the exact two- or three-artifact generation before compact cleanup.
+- Added an evidence-constrained `Hypothesis: Possible Activity Narrative`. The model can select only accepted item/evidence/relationship IDs, possible order, and confidence; it has no factual prose field. ROMULUS renders the hypothesis and limitations from canonical records, while deterministic admission rejects unknown/invisible citations, repeated placement, disconnected clusters, and unauthorized fields.
+- Hardened finalized reporting and cleanup: anomaly-only working sections cannot leak into the primary report, every report citation must resolve, findings link to candidates only through explicit IDs, persisted narrative selectors are re-admitted before rendering, malformed manifests block cleanup, and compact retention verifies the exact manifest generation before removing hunt-scoped working data.
+- Hardened the malicious trusted-indicator migration gate to require a stable indicator ID, a supported type, and a canonical exact value in addition to current lifecycle provenance.
+- Compact retention preserves primary reports, optional anomaly reports, reportable cited evidence, admitted narrative, and bounded coverage summaries while removing anomaly-only evidence, raw working queries/logs, model case/response bulk, and checkpoints.
+- Added generic synthetic regressions for classification history, singular admission, malicious gating, two-stream reporting, report verification, narrative hallucination resistance, model failure/capacity fallback, and hunt-scoped cleanup without evaluated-dataset identities or expected paths.
+
+### Evidence-grounded investigator and critic
+
+- Added a bounded, deterministic case file that exposes only prioritized telemetry-backed candidates, their cited evidence, factual path context, exact scheduler outcomes, and coverage gaps to model reasoning.
+- Split reasoning into an investigator proposal pass and an independent critic pass over the same case. Neither response mutates hunt state; code admits only critic-approved items whose identifiers, citations, entities, mappings, anchors, source fields, query constraints, and execution identity validate.
+- Permitted evidence-grounded competing hypotheses only after a lead exists and only when an approved discriminating search creates a new scheduler task. Undirected candidate-free hunts still make no model call and create no hypothesis.
+- Reserved two external-call slots before starting the pair, discarded investigator output when the critic failed, kept model priority fields out of scheduler order, and made duplicate or invalid searches incapable of committing an orphan hypothesis.
+- Added technical-only aggregate reasoning coverage for calls, admissions, rejections, rejection reasons, and availability gaps. Customer Word reports omit case files, proposals, critic payloads, identifiers, and internal role terminology.
+- Extended report-gated compact retention to keep only the aggregate reasoning summary while removing the detailed reasoning history and complete investigator/critic working payloads.
+- Added synthetic adversarial tests without embedding knowledge from the newly authorized Russell Mitchell holdout. That telemetry remains reserved for the next blind read-only evaluation milestone.
+- Final review made candidate ownership authoritative for existing-hypothesis searches, rejected explicit entities not present in cited evidence or deterministic scope, prevented scope-free directed hypotheses from being supported by unrelated records, required findings to inherit the validated hypothesis mapping, and made reasoning admission an all-or-nothing state commit with current-cycle scheduler metadata.
+
 ### Adaptive evidence-grounded stopping
 
 - Replaced duplicated post-analysis/post-reasoning branches with one deterministic router. Critical/high searches retain priority, grounded reasoning runs before lower-value breadth, the last external-call slot remains available for queued telemetry work, and model `continue_investigation` advice cannot override the measured frontier.

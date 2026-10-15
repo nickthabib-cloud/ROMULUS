@@ -4,6 +4,8 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from romulus.config import Settings
 from romulus.store import Store
@@ -160,8 +162,6 @@ class SchedulerExecutionTests(unittest.TestCase):
             self.assertEqual(state["termination_reason"],"coverage_closure_reached")
 
     def test_final_reasoning_assessment_refreshes_ledger_and_closes_coverage(self):
-        from types import SimpleNamespace
-        from unittest.mock import patch
         from romulus.investigation.scheduler import begin_search_task, record_search_outcome
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
@@ -180,17 +180,18 @@ class SchedulerExecutionTests(unittest.TestCase):
                 "timed_out":False,"shard_failures":0,"incomplete":False})
             engine.use_ollama=True
             engine._register_investigation_tasks=lambda current: None
-            engine._call=lambda *args,**kwargs:{"assessments":[{
-                "hypothesis_id":"H-001","status":"inconclusive",
-                "evidence_ids":["EV-ANCHOR"],"rationale":"Cited evidence assessed."}],
-                "findings":[],"new_hypotheses":[],"searches":[],
-                "continue_investigation":False,"reasoning":"Coverage assessed."}
-
-            fake_ollama=SimpleNamespace(Ollama=object,
-                model_evidence_context=lambda evidence,limit:list(evidence)[:limit])
+            investigator={"assessments":[{
+                "proposal_id":"P-ASSESS","hypothesis_id":"H-001","status":"inconclusive",
+                "evidence_ids":["EV-ANCHOR"],"observation":"One cited process event is visible.",
+                "interpretation":"The retained event is insufficient to resolve the hypothesis.",
+                "benign_alternatives":["Expected administration"],"rationale":"Cited evidence assessed."}],
+                "findings":[],"new_hypotheses":[],"searches":[],"summary":"Coverage assessed."}
+            calls=[]
+            fake_ollama=_grounded_model_module(investigator,_grounded_critic(investigator),calls)
             with patch.dict("sys.modules",{"romulus.agent.ollama":fake_ollama}):
                 result=engine._reason(state)
 
+            self.assertEqual(calls,["investigator","critic"])
             self.assertTrue(result["coverage"]["hypothesis_coverage"]["closure_ready"],
                 result["reasoning_history"][-1])
             self.assertEqual(result["termination_reason"],"coverage_closure_reached")
@@ -531,6 +532,20 @@ def _discovery_state():
         }
     )
     state["es_fields_by_class"] = {"host": list(state["es_fields"]), "network": []}
+    state["es_field_capabilities"] = {
+        "@timestamp": ["date"],
+        "message": ["text"],
+        "process.name": ["keyword"],
+        "process.executable": ["keyword"],
+        "process.command_line": ["text"],
+        "host.name": ["keyword"],
+        "source.ip": ["ip"],
+        "destination.ip": ["ip"],
+    }
+    state["es_field_capabilities_by_class"] = {
+        "host": dict(state["es_field_capabilities"]),
+        "network": {},
+    }
     return state
 
 
@@ -1021,7 +1036,415 @@ def _investigation_state():
     return state
 
 
+def _grounded_cycle_state():
+    from romulus.investigation.progress import initialize_progress
+    from romulus.investigation.scheduler import initialize_scheduler
+
+    state = _investigation_state()
+    state.update({
+        "depth": 0,
+        "tool_calls": 0,
+        "reasoning_history": [],
+        "stage_history": [],
+        "findings": [],
+        "correlations": [],
+        "source_health": {"host": True, "network": True},
+        "investigation_graph": {"version": 1, "nodes": [], "edges": [], "paths": [], "summary": {}},
+    })
+    candidate = state["candidate_leads"][0]
+    candidate["attack_techniques"] = ["T1059.001"]
+    candidate["benign_explanations"] = ["Authorized administration"]
+    initialize_scheduler(state)
+    initialize_progress(state)
+    return state
+
+
+def _grounded_hypothesis(proposal_id="P-HYP"):
+    return {
+        "proposal_id": proposal_id,
+        "candidate_id": "CL-CRITICAL",
+        "evidence_ids": ["EV-ANCHOR"],
+        "title": "The observed PowerShell event may have an unexpected parent",
+        "technique_id": "T1059.001",
+        "explanation": "The retained candidate supports a testable competing process-lineage explanation.",
+        "expected_host": ["An unexpected parent or sibling process near the anchor"],
+        "expected_network": [],
+        "falsifying_observations": ["The lineage belongs to an approved administration job"],
+        "benign_explanations": ["Authorized administration"],
+        "analytic_goal": "Determine whether the cited PowerShell lineage is expected.",
+    }
+
+
+def _grounded_search(proposal_id="P-SEARCH", hypothesis_ref="P-HYP", **updates):
+    value = {
+        "proposal_id": proposal_id,
+        "source": "elasticsearch",
+        "hypothesis_ref": hypothesis_ref,
+        "intent": "Search backward for the parent of the cited process.",
+        "direction": "backward",
+        "discriminating_goal": "Distinguish approved administration from unexpected execution.",
+        "candidate_id": "CL-CRITICAL",
+        "follow_up_id": "FU-CRITICAL",
+        "terms": ["rundll32.exe"],
+        "fields": ["process.name"],
+        "ips": [],
+        "hostnames": [],
+        "ports": [],
+        "protocols": [],
+        "event_codes": [],
+        "index_class": "host",
+        "anchor_evidence_ids": ["EV-ANCHOR"],
+        "native_query_language": "none",
+        "native_query": "",
+    }
+    value.update(updates)
+    return value
+
+
+def _grounded_investigator(*, hypothesis=None, search=None):
+    return {
+        "assessments": [],
+        "new_hypotheses": [hypothesis or _grounded_hypothesis()],
+        "searches": [search or _grounded_search()],
+        "findings": [],
+        "summary": "One grounded competing explanation requires a discriminating search.",
+    }
+
+
+def _grounded_critic(investigator, *, reject=()):
+    proposal_ids = [row["proposal_id"] for key in
+        ("assessments", "new_hypotheses", "searches", "findings")
+        for row in investigator.get(key, [])]
+    return {"reviews": [{
+        "proposal_id": proposal_id,
+        "decision": "reject" if proposal_id in reject else "accept",
+        "issue_codes": ["unsupported_causality"] if proposal_id in reject else [],
+        "rationale": "Rejected by the independent critic." if proposal_id in reject
+            else "Grounded and testable.",
+    } for proposal_id in proposal_ids]}
+
+
+def _grounded_model_module(investigator, critic, calls, *, critic_error=None):
+    class Model:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def investigate_case(self, case_file, source_fields, max_searches=3, max_hypotheses=3):
+            calls.append("investigator")
+            return copy.deepcopy(investigator)
+
+        def criticize_case(self, case_file, investigator_output):
+            calls.append("critic")
+            if critic_error:
+                raise critic_error
+            return copy.deepcopy(critic)
+
+    return SimpleNamespace(Ollama=Model, model_evidence_context=lambda evidence, limit: list(evidence)[:limit])
+
+
 class SchedulerInvestigationWorkflowTests(unittest.TestCase):
+    def test_directed_hypothesis_without_entity_scope_cannot_be_supported_or_published(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); state = _investigation_state()
+            hypothesis = next(row for row in state["hypotheses"]
+                if row["hypothesis_id"] == "H-COVERAGE")
+            state["network"] = [
+                {"evidence_id": "EV-DNS-1", "source": "arkime", "asset": "dns-01",
+                    "raw": {"source": {"ip": "10.0.0.10"}, "destination": {"ip": "10.0.0.53"}}},
+                {"evidence_id": "EV-DNS-2", "source": "arkime", "asset": "dns-02",
+                    "raw": {"source": {"ip": "10.0.0.11"}, "destination": {"ip": "10.0.0.53"}}},
+            ]
+            refs = {"EV-DNS-1", "EV-DNS-2"}
+
+            engine._apply_model_assessments(state, {"assessments": [{
+                "hypothesis_id": "H-COVERAGE", "status": "supported",
+                "evidence_ids": sorted(refs), "rationale": "Unrelated DNS proves execution."}]}, refs)
+            engine._publish_model_findings(state, [{
+                "hypothesis_id": "H-COVERAGE", "title": "PowerShell activity",
+                "technique_id": hypothesis["technique_id"],
+                "observation": "Two DNS records supposedly prove PowerShell activity.",
+                "interpretation": "This should not survive deterministic entity admission.",
+                "evidence_ids": sorted(refs), "confidence": "moderate",
+                "alternatives": ["Routine DNS"], "follow_up": ["Review the host."],
+            }], refs)
+
+            self.assertEqual(hypothesis["model_assessment"]["status"], "inconclusive")
+            self.assertEqual(hypothesis["model_assessment"]["evidence_ids"], [])
+            self.assertEqual(state.get("findings", []), [])
+
+    def test_reasoning_commit_failure_leaves_no_partial_model_state_or_stale_plan_admission(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state(); state["lead_catalog"] = []
+            state["coverage"]["model_search_planning"] = [{
+                "phase": "prior", "accepted_proposal_ids": ["P-SEARCH"],
+                "accepted": 1, "proposed": 1, "rejected_or_duplicate": 0,
+            }]
+            investigator = _grounded_investigator(); calls = []
+            before = copy.deepcopy({key: state.get(key) for key in
+                ("hypotheses", "search_tasks", "search_queue", "candidate_leads", "findings")})
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator, _grounded_critic(investigator), calls)
+            }), patch.object(engine, "_register_model_searches",
+                side_effect=RuntimeError("registration failed")):
+                working = engine._run_grounded_reasoning(
+                    state, state["coverage"]["search_fields"])
+
+            after = {key: state.get(key) for key in
+                ("hypotheses", "search_tasks", "search_queue", "candidate_leads", "findings")}
+            self.assertEqual(after, before)
+            self.assertEqual(calls, ["investigator", "critic"])
+            self.assertIsNone(working["admission"])
+            self.assertEqual(working["registered_task_ids"], [])
+            self.assertIn("reasoning_commit_RuntimeError", working["model_error"])
+
+    def test_finding_persistence_failure_rolls_back_assessment_and_finding_state(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state(); state["lead_catalog"] = []
+            second = copy.deepcopy(state["host"][0]); second["evidence_id"] = "EV-ANCHOR-2"
+            second["observed_at"] = "2024-11-13T11:00:01Z"
+            state["host"].append(second)
+            state["candidate_leads"][0]["evidence_ids"].append("EV-ANCHOR-2")
+            investigator = {
+                "assessments": [{"proposal_id": "P-ASSESS", "hypothesis_id": "H-CANDIDATE",
+                    "status": "supported", "evidence_ids": ["EV-ANCHOR", "EV-ANCHOR-2"],
+                    "observation": "Two candidate-owned process records.",
+                    "interpretation": "The existing hypothesis remains testable.",
+                    "benign_alternatives": ["Authorized administration"],
+                    "rationale": "Both records share the candidate host."}],
+                "new_hypotheses": [], "searches": [],
+                "findings": [{"proposal_id": "P-FIND", "hypothesis_id": "H-CANDIDATE",
+                    "title": "Candidate-backed PowerShell activity", "technique_id": "T1059.001",
+                    "observation": "Two candidate records support continued review.",
+                    "interpretation": "The activity remains a suspected lead.",
+                    "evidence_ids": ["EV-ANCHOR", "EV-ANCHOR-2"], "confidence": "moderate",
+                    "confidence_justification": "Two matching records.",
+                    "alternatives": ["Authorized administration"],
+                    "follow_up": ["Validate with the asset owner."]}],
+                "summary": "Candidate-owned evidence was reviewed.",
+            }
+            calls = []; before_hypotheses = copy.deepcopy(state["hypotheses"])
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator, _grounded_critic(investigator), calls)
+            }), patch.object(engine.store, "upsert_finding", side_effect=OSError("disk full")):
+                working = engine._run_grounded_reasoning(
+                    state, state["coverage"]["search_fields"])
+
+            self.assertEqual(state["hypotheses"], before_hypotheses)
+            self.assertEqual(state["findings"], [])
+            self.assertIsNone(working["admission"])
+            self.assertIn("reasoning_commit_OSError", working["model_error"])
+
+    def test_grounded_reasoning_runs_investigator_then_critic_and_admits_only_approved_items(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state(); state["lead_catalog"] = []
+            accepted_hypothesis = _grounded_hypothesis()
+            rejected_hypothesis = _grounded_hypothesis("P-HYP-REJECT")
+            rejected_hypothesis["title"] = "Rejected competing explanation"
+            investigator = {
+                "assessments": [],
+                "new_hypotheses": [accepted_hypothesis, rejected_hypothesis],
+                "searches": [
+                    _grounded_search(),
+                    _grounded_search("P-SEARCH-REJECT", "P-HYP-REJECT", terms=["wscript.exe"]),
+                ],
+                "findings": [],
+                "summary": "Two theories were proposed; only one survived review.",
+            }
+            critic = _grounded_critic(investigator,
+                reject={"P-HYP-REJECT", "P-SEARCH-REJECT"})
+            calls = []
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(investigator, critic, calls)
+            }):
+                result = engine._reason(state)
+
+            self.assertEqual(calls, ["investigator", "critic"])
+            model_hypotheses = [row for row in result["hypotheses"]
+                if row.get("basis") == "model_grounded_competing"]
+            self.assertEqual(len(model_hypotheses), 1)
+            self.assertEqual(model_hypotheses[0]["proposal_id"], "P-HYP")
+            model_tasks = [row for row in result["search_tasks"].values()
+                if "model_proposal" in row.get("origins", [])]
+            self.assertEqual(len(model_tasks), 1)
+            self.assertEqual(model_tasks[0]["hypothesis_ids"], [model_hypotheses[0]["hypothesis_id"]])
+            summary = result["coverage"]["reasoning_summary"]
+            self.assertEqual(summary["investigator_calls"], 1)
+            self.assertEqual(summary["critic_calls"], 1)
+            self.assertEqual(summary["proposed_hypotheses"], 2)
+            self.assertEqual(summary["admitted_hypotheses"], 1)
+            self.assertGreaterEqual(summary["rejected_hypotheses"], 1)
+            working = result["reasoning_history"][-1]["grounded_reasoning"]
+            self.assertEqual(working["investigator"]["summary"], investigator["summary"])
+            self.assertEqual(len(working["critic"]["reviews"]), 4)
+
+    def test_empty_investigator_output_does_not_spend_an_external_critic_call(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state(); state["lead_catalog"] = []
+            investigator = {"assessments":[],"new_hypotheses":[],"searches":[],
+                "findings":[],"summary":"No grounded proposal is warranted."}
+            calls = []
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator,{"reviews":[]},calls)
+            }):
+                working = engine._run_grounded_reasoning(
+                    state,state["coverage"]["search_fields"])
+
+            self.assertEqual(calls,["investigator"])
+            self.assertEqual(working["critic"],{"reviews":[]})
+            self.assertEqual(working["investigator"]["summary"],"No grounded proposal is warranted.")
+            self.assertEqual(working["admission"]["summary"]["proposals_received"],0)
+            summary=state["coverage"]["reasoning_summary"]
+            self.assertEqual(summary["investigator_calls"],1)
+            self.assertEqual(summary["critic_calls"],0)
+            self.assertEqual(summary["unavailable_passes"],0)
+
+    def test_critic_rejection_changes_no_hypothesis_search_finding_or_graph_fact(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state(); state["lead_catalog"] = []
+            investigator = _grounded_investigator()
+            critic = _grounded_critic(investigator, reject={"P-HYP", "P-SEARCH"})
+            calls = []
+            before = copy.deepcopy({key: state.get(key) for key in
+                ("hypotheses", "search_tasks", "findings", "investigation_graph")})
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(investigator, critic, calls)
+            }):
+                result = engine._reason(state)
+
+            self.assertEqual(calls, ["investigator", "critic"])
+            after = {key: result.get(key) for key in
+                ("hypotheses", "search_tasks", "findings", "investigation_graph")}
+            self.assertEqual(after, before)
+            self.assertEqual(result["coverage"]["reasoning_summary"]["admitted_hypotheses"], 0)
+
+    def test_critic_failure_discards_investigator_output_and_continues_deterministic_candidate_work(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state()
+            investigator = _grounded_investigator()
+            calls = []
+            existing_ids = [row["hypothesis_id"] for row in state["hypotheses"]]
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator, {}, calls, critic_error=RuntimeError("critic unavailable"))
+            }):
+                result = engine._reason(state)
+
+            self.assertEqual(calls, ["investigator", "critic"])
+            self.assertEqual([row["hypothesis_id"] for row in result["hypotheses"]], existing_ids)
+            self.assertFalse(any("model_proposal" in row.get("origins", [])
+                for row in result["search_tasks"].values()))
+            self.assertTrue(any("candidate_follow_up" in row.get("origins", [])
+                for row in result["search_tasks"].values()))
+            summary = result["coverage"]["reasoning_summary"]
+            self.assertEqual(summary["unavailable_passes"], 1)
+            self.assertEqual(summary["admitted_hypotheses"], 0)
+            self.assertIsNotNone(result["reasoning_history"][-1]["grounded_reasoning"]["investigator"])
+            self.assertIsNone(result["reasoning_history"][-1]["grounded_reasoning"]["critic"])
+
+    def test_one_remaining_external_call_does_not_start_an_unreviewable_investigator_pass(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            engine.settings = replace(engine.settings, max_tool_calls=5)
+            state = _grounded_cycle_state(); state.update({"tool_calls": 4, "lead_catalog": []})
+            investigator = _grounded_investigator(); calls = []
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator, _grounded_critic(investigator), calls)
+            }):
+                result = engine._reason(state)
+
+            self.assertEqual(calls, [])
+            self.assertEqual(result["tool_calls"], 4)
+            self.assertFalse(any(row.get("reasoning_stage") in
+                {"grounded_investigator", "grounded_critic"} for row in result["tool_runs"]))
+            self.assertEqual(result["coverage"]["reasoning_summary"]["unavailable_passes"], 1)
+
+    def test_new_hypothesis_is_rejected_if_its_search_fails_existing_validation_or_deduplication(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state(); state["lead_catalog"] = []
+            invalid_search = _grounded_search(source="tshark", fields=["process.name"])
+            investigator = _grounded_investigator(search=invalid_search)
+            calls = []
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator, _grounded_critic(investigator), calls)
+            }):
+                result = engine._reason(state)
+
+            self.assertEqual(calls, ["investigator", "critic"])
+            self.assertFalse(any(row.get("basis") == "model_grounded_competing"
+                for row in result["hypotheses"]))
+            self.assertFalse(any("model_proposal" in row.get("origins", [])
+                for row in result["search_tasks"].values()))
+            summary = result["coverage"]["reasoning_summary"]
+            self.assertEqual(summary["admitted_hypotheses"], 0)
+            self.assertGreaterEqual(summary["rejected_hypotheses"], 1)
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); state = _grounded_cycle_state(); state["lead_catalog"] = []
+            existing_search = _grounded_search()
+            existing_search["hypothesis_id"] = "H-CANDIDATE"
+            existing_search.pop("hypothesis_ref")
+            engine._register_model_searches(state, [existing_search], "setup")
+            original_task_ids = set(state["search_tasks"])
+            state["coverage"]["model_search_planning"] = []
+            engine.use_ollama = True
+            investigator = _grounded_investigator(); calls = []
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator, _grounded_critic(investigator), calls)
+            }):
+                result = engine._reason(state)
+
+            self.assertEqual(set(result["search_tasks"]), original_task_ids)
+            self.assertFalse(any(row.get("basis") == "model_grounded_competing"
+                for row in result["hypotheses"]))
+            self.assertFalse(any(str(owner).startswith("H-AI-") for task in result["search_tasks"].values()
+                for owner in task.get("hypothesis_ids", [])))
+
+    def test_model_priority_fields_cannot_change_scheduler_order(self):
+        from romulus.investigation.scheduler import select_search_tasks
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine = _engine(Path(directory)); engine.use_ollama = True
+            state = _grounded_cycle_state()
+            search = _grounded_search(priority_tier=-100, priority_score=999999)
+            investigator = _grounded_investigator(search=search); calls = []
+
+            with patch.dict("sys.modules", {
+                "romulus.agent.ollama": _grounded_model_module(
+                    investigator, _grounded_critic(investigator), calls)
+            }):
+                result = engine._reason(state)
+
+            ordered = select_search_tasks(result, phase="investigation", limit=20)
+            candidate_task = next(row for row in ordered
+                if "candidate_follow_up" in row.get("origins", []))
+            model_task = next(row for row in ordered
+                if "model_proposal" in row.get("origins", []))
+            self.assertEqual(candidate_task["priority_tier"], 1)
+            self.assertEqual(model_task["priority_tier"], 3)
+            self.assertLess(ordered.index(candidate_task), ordered.index(model_task))
+
     def test_model_finding_requires_a_supported_hypothesis_and_two_matching_records(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             engine=_engine(Path(directory)); state=_investigation_state()
@@ -1074,6 +1497,7 @@ class SchedulerInvestigationWorkflowTests(unittest.TestCase):
                 "alternatives":["Expected software update traffic."],"follow_up":["Identify the owning process."]}
 
             engine._publish_model_findings(state,[{**base,"technique_id":"T1110"}],set(base["evidence_ids"]))
+            engine._publish_model_findings(state,[{**base,"technique_id":"unmapped"}],set(base["evidence_ids"]))
             engine._publish_model_findings(state,[{**base,"technique_id":"T1046"}],set(base["evidence_ids"]))
 
             self.assertEqual(state["findings"],[])

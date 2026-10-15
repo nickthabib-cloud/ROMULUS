@@ -2,6 +2,192 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-13 — schema-aware deterministic discovery and encoded-DNS promotion
+
+### Implemented behavior
+
+- Elasticsearch inventory now preserves concrete capabilities only for queryable leaf fields, including multifields while excluding object containers and complete nested subtrees. Host behavior and trusted-indicator seeds compile by mapped type; incompatible or unvalidated field/operator combinations fail closed and remain visible as unsupported coverage.
+- Pre-capability resumable checkpoints refresh mappings before scheduler recovery, rebuild typed field and index classes, and invalidate queued untyped behavior/indicator searches. If refresh fails, explicit empty capability maps prevent fallback to the legacy compiler.
+- DNS entropy examines every payload label. A generic encoded-DNS burst candidate requires at least five distinct high-entropy labels supported by five distinct cited evidence records from one explicit source to one conservative suffix within ten minutes. Duplicate rows, repeated labels, split sources, split suffixes, low entropy, missing sources, and wide windows do not qualify.
+- Candidate-owned DNS names, response codes, and byte counts can enter the bounded reasoning case file. The signal creates a candidate and candidate-backed hypothesis, never a finding by itself. Runtime code and tests contain no evaluated-dataset entity, timestamp, tool, command, or attack sequence.
+
+### Review and local proof
+
+- Review found and regression-tested nested-field leakage, incompatible exact-value coercion, mixed text/keyword behavior, missing-source fallback, strongest-label masking, duplicate-evidence matching, LangGraph state loss, and legacy-resume fallback. Final re-review found no remaining Critical or Important issue.
+- The exact local candidate passed all 285 tests available locally with eight expected optional-dependency skips, `python -m compileall -q romulus tests`, and `git diff --check`.
+
+### Exact VM and live query proof
+
+- Commit `c0d523d5f6cc311796c97f3f1890ebaeb699f746` was archived with SHA-256 `91CAC482A10DABA3EADDB1D12B3FE9B3FE7E4D9CCB0434E85F4A31AA6535F821`; the digest matched locally and on the development VM.
+- The exact archive passed all 285 dependency-complete VM tests with no skips and passed `compileall`. Configured `doctor` was fully green for the pinned ATT&CK catalog, `qwen3:8b`, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark 4.2.2, all thirteen captures, and writable operational paths.
+- A read-only live compatibility probe inventoried 612 typed host leaf fields and compiled 31 generic behavior searches. All 31 executed against the configured index with size one and zero query failures; six returned at least one record: reverse-shell construction, curl/wget piped to a shell, security-log removal/truncation, download followed by execution-oriented command, encoded/obfuscated interpreter command, and SSH/utility port forwarding.
+- Those six matches are retrieval proof, not validated findings or proof that each belongs to the attack. Eleven catalog analytics were explicitly unsupported by the current schema rather than being emitted as broken queries. No trusted indicators were configured, no hunt was launched, and no telemetry or service configuration was modified.
+- The exact remote checkout, archive, probe, and local transfer artifacts were removed after proof. Operational hunt data, reports, logs, and telemetry were not deleted.
+
+### Scope boundary
+
+This milestone repairs the host-query failure mode and promotes repeated encoded DNS generically. It does not prove full attack-path recall. The next work must use the known attack story only as an external coverage matrix: for every stage, establish generic collection, detection, connection, and honest observability semantics, with unrelated synthetic variants and benign controls before scoring this dataset.
+
+## 2026-10-13 — evidence-scoped attack discovery promotion (reviewed, VM-proven, live result partial)
+
+### Implemented behavior
+
+- Candidate-owned Arkime and TShark follow-ups now require one validated primary IP or hostname together with the applicable bounded protocol/port behavior. Missing candidate entities fail closed; coverage-only work may retain a behavior-only selector.
+- Behavior candidates no longer receive an asset-wide "independent behavior" bonus. Corroboration requires distinct analytic groups, distinct cited evidence records, a shared typed structured entity, parseable timestamps within 1,800 seconds, and an explicit non-causality caveat. Bonuses are idempotent and capped at twenty points; score or relationship changes do not publish findings.
+- Hypothesis creation uses a deterministic diverse frontier: no more than two candidates per analytic group in one pass, up to two cited sub-threshold exploration candidates, and protected precedence for trusted indicators and critical candidates. Represented candidates are filtered before later passes, so excluded work remains eligible instead of being discarded.
+- Reasoning case files prefer candidates owned by unresolved hypotheses. Each visible candidate exposes at most six deterministically selected owned records plus its full `evidence_total`; hidden owned records do not become valid model citations. Visible relationship records are limited to selected candidates and evidence.
+- Aggregate candidate observation bounds are derived from their cited source evidence. Runtime logic and tests contain no evaluated-dataset identity, tool, command, timestamp, attack sequence, or oracle label.
+
+### RED/GREEN and local proof
+
+- Query-scope regressions first showed that candidate pivots omitted their entity and could become protocol-wide. Relationship regressions then showed the missing triage boundary, empty aggregate timestamps, and same-record/same-asset self-corroboration. Frontier regressions reproduced scan-group crowding, one-pass candidate exhaustion, preferred-work loss, critical displacement by exploration, and oversized candidate disappearance.
+- A generic end-to-end fixture used eight unrelated scanner sources, a distinct high-entropy DNS observation, and a separate host-execution observation. Thirty-four records produced ten deterministic candidates. The first hypothesis frontier included the distinct DNS behavior, admitted no more than two scan candidates, recorded the DNS/host relationship with its two source evidence IDs, compiled the scan candidate's Arkime task with its primary IP plus TCP/UDP behavior, and published no finding merely from score or association.
+- The integration proof passed immediately after the three component slices were wired. Its assertions are still pre-milestone regressions: the original implementation lacked relationships and entity-scoped pivots and allowed repetitive scan candidates to crowd the DNS behavior from the first frontier.
+- Review-driven regressions additionally proved that stale candidate citations cannot occupy the frontier, derived corroboration disappears when its evidence relationship disappears, uncapped base scores survive relationship recalculation, partial bonus loss recomputes disposition and customer visibility, prior-only candidates cannot retain unavailable promotion, preferred unresolved work is not starved, every selected candidate receives a bounded evidence anchor, and hidden relationships cannot leak through case-file score or prose.
+- The final whole-branch review of `9452c65..26f5462` found no remaining Critical or Important issue. The exact local candidate `26f54625c9d32a23e20903f5d5af66bc37ebd6f3` passed all 265 tests with seven expected dependency-gated skips, `python -m compileall -q romulus tests`, and `git diff --check`.
+
+### Exact dependency-complete and configured-source proof
+
+- The exact candidate archive had SHA-256 `7125BA63EF152B4BB97EE9F4C0CE56936BBE0B9E8CBDC6E2B287F24D4B19B15E`, which matched locally and on the development VM.
+- The archive passed all 265 dependency-complete VM tests with no skips and passed `compileall`.
+- Configured `doctor` was fully green for the pinned ATT&CK v19.2 catalog, `qwen3:8b` and its structured schema, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark 4.2.2, all thirteen configured captures, and isolated writable runtime directories. No service configuration or operational telemetry was changed.
+
+### Bounded generic live validation
+
+- Hunt `HUNT-6798563291` received only a broad undirected objective over all retained telemetry. No attack identity, indicator, account, host, tool, command, timestamp, technique sequence, or external storyline was supplied to the runtime. Validation overrides allowed 120 external calls, 40 analyst rounds, four stagnant cycles, and 2,700 seconds.
+- Deterministic discovery ran before any model call. It planned 24 host and 16 network tasks, persisted 30,927 unique source records, and retained a 2,500-record network context. Seventeen host catalog searches failed with Elasticsearch `BadRequestError`; no host event reached analysis. Network coverage was partial: Elasticsearch retained 500 of 750,635 matching events, Arkime retained 20,000 of 919,254 broad sessions, and each configured-capture sweep retained 500 records from much larger matches.
+- Analysis created 23 behavior candidates and twelve candidate-backed hypotheses, but zero qualifying candidate relationships, zero model assessments, zero findings, and zero attack-path edges. It correctly surfaced `192.168.230.122` as a `T1046 Network Service Discovery` fan-out candidate citing four records and summarizing eight destinations across 34 ports. That is a genuine attack-related lead, but it remained unassessed and unconnected.
+- The retained report also contained conspicuous long encoded DNS labels and transferred spreadsheet/document names associated with the same environment. Those records remained raw evidence rather than a DNS-transfer/exfiltration candidate. DNS brute-force discovery, endpoint password-cracking activity, web foothold, interactive shell, and privileged action were not surfaced as conclusions.
+- The first investigator/critic pair took 711,130 ms and 255,338 ms. It admitted no model-authored search or finding; deterministic work selected three candidate tasks and executed one Arkime pivot. The second pair took 953,855 ms and 202,671 ms, admitted three searches, and executed one Elasticsearch pivot returning zero records. The workflow then started another reasoning pass after only one pivot. The operator interrupted that pass at the declared 45-minute validation boundary because the streaming call had no total-turn deadline; resume with an exhausted safety budget produced an honest `partial / incomplete_investigation` report.
+
+### Responsible-layer diagnosis
+
+- **Search compilation:** semantic roles are bound by field name without retaining Elasticsearch field capabilities. Text predicates can therefore emit `match_phrase` clauses against incompatible keyword or numeric mappings. The live failure rate shows that expanding catalog strings alone would not repair host discovery; bindings and compilation must become mapping-type aware and live-query compatible.
+- **Deterministic coverage:** the library can recognize scan fan-out but does not yet promote obvious DNS brute force/tunneling and other time-window aggregates robustly. Rare attack evidence can remain only in raw capped samples. Generic credential-access, foothold, shell, privilege, DNS-enumeration, and transfer analytics require schema-aware coverage and benign controls rather than dataset-specific signatures.
+- **Sampling and pivots:** broad PCAP sweeps are expensive and lossy. Candidate-owned searches must replace repeated whole-capture breadth sooner, and a requested analytic must run only on a source capable of answering it. One network candidate received a process-ancestry intent routed to Arkime, demonstrating a source/analytic contract mismatch.
+- **Reasoning cadence and runtime:** two model pairs consumed roughly 35 minutes while only two candidate pivots executed. Reasoning after every single pivot does not narrow this frontier efficiently. High-value deterministic tasks should be drained in a bounded batch before synthesis, case files should be smaller, and each streaming reasoning call needs a total-turn deadline derived from remaining hunt time.
+- **Partial-chain semantics:** a scan, staging behavior, suspicious access, or exfiltration preparation may be the strongest supported result even when later stages are absent. Future path construction must search backward and forward through shared typed entities and time, report supported partial chains plus missing links, and never force a complete kill chain.
+
+### Reporting, retention, and cleanup
+
+- The final DOCX and technical TXT reports reopened successfully. Their SHA-256 digests are `81BD1D13BA6DE2134A9C3192F0D429373FB59A5732536B977147D00A2E04940F` and `3DB39C45C8B7B5E5A03984580842EECC5BB179D481EF3213EBDD641DBA5729A6`.
+- Compact finalization retained the report pair and removed every hunt evidence row, detailed task/model payload, checkpoint, and hunt-scoped working log row; zero evidence and zero findings remained because no finding cited support. The remote archive, isolated checkout/runtime, superseded archive, and local transfer archive were removed after verification.
+
+### Scope boundary
+
+This milestone improves candidate diversity, evidence-scoped pivots, and corroboration integrity, but the live result does **not** establish acceptable attack discovery or path recall. The next slice must repair schema-aware host queries, promote network aggregates such as DNS enumeration/transfer from complete statistics rather than incidental samples, drain deterministic pivots before expensive synthesis, enforce total reasoning deadlines, and construct evidence-backed partial paths. Identity continuity across NAT/VPN leases and richer process/session lineage remain additional work.
+
+## 2026-10-13 — evidence-grounded reasoning contract hardening (no new hunt)
+
+### Implemented behavior
+
+- The model no longer authors bookkeeping IDs. ROMULUS assigns stable, globally unique proposal IDs only after a complete structured response parses, then resolves bounded `NEW-HYPOTHESIS-N` references before independent critic review and deterministic admission.
+- Ollama structured responses are assembled from NDJSON streaming so the read timeout detects a stalled connection rather than rejecting active inference. Malformed events, premature EOF, data after terminal completion, provider length stops, and incomplete JSON all fail closed.
+- The investigator retains up to three new hypotheses and three searches per pass while using tighter field and array limits and a conservative estimated schema envelope below 18,000 characters. An empty proposal set no longer spends a critic call.
+- Citation, evidence ownership, causal-language, finding, critic-coverage, and atomic-admission gates were not relaxed. No Russell Mitchell entity, indicator, attack step, oracle timestamp, or attack-specific rule was added.
+
+### Review and local proof
+
+- RED/GREEN coverage proves deterministic ID assignment, new-hypothesis/search linkage through actual admission, complete valid responses beyond the former 24,000-character slice, NDJSON assembly, explicit provider completion, malformed and truncated failure modes, the schema-size envelope, and empty-proposal accounting.
+- Fresh review first exposed unresolved positional hypothesis references and later exposed acceptance of EOF without `done:true`; both were reproduced with failing regressions before correction. Final whole-diff re-review found no remaining Critical or Important issue.
+- The complete local suite passed all 237 tests with seven expected dependency-gated skips. Python `compileall` and `git diff --check` passed.
+
+### Exact dependency-complete and configured-model proof
+
+- The first exact candidate, commit `92848dc36a120ab91250c802432f87d739ca3fe4`, matched its VM archive digest and passed all 235 then-current tests with no skips, compilation, and configured diagnostics. Its live investigator still timed out on the non-streaming path; a streamed diagnostic then reached the 5,200-token provider cap with incomplete JSON. The observed schema could permit roughly 38,000 serialized characters with one existing hypothesis, establishing output-envelope mismatch rather than context allocation as the root cause.
+- Final candidate commit `e1d285ff2690a84ab9f597a57138d0613e1dbd33` was archived with SHA-256 `7588D85F93F3360EC66522D37CB9430C2D05ABE97E95F285A2150A764FF0DBEF`, which matched locally and on the VM. A fresh shell passed all 237 dependency-complete tests with no skips and passed `compileall`. One earlier test invocation inherited deployment environment variables and was discarded as contaminated rather than counted as proof.
+- Configured `doctor` was fully green for `qwen3:8b`, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark, all 13 configured captures, and isolated writable runtime directories.
+- A generic synthetic production-adapter probe, with no hunt and no oracle facts, completed the investigator in 75.26 seconds and critic in 24.29 seconds. It returned one assessment, one new hypothesis, two searches, and one finding. All five assigned IDs were present and unique, and critic coverage exactly matched them. Deterministic admission accepted the assessment and two searches while rejecting the unsupported hypothesis and finding, demonstrating the intended hallucination-resistant boundary.
+
+### Scope boundary
+
+This milestone proves the investigator/critic transport and structured admission contract, not attack discovery. No hunt was launched and no telemetry was modified. Generic candidate promotion, cross-source correlation, and temporal attack-path construction remain the next milestone.
+
+## 2026-10-13 — retrieval contract hardening (local/VM proof; no new hunt)
+
+### Implemented behavior
+
+- Elasticsearch mappings can belong to both host and network telemetry families when their fields support both roles. Timestamp and index availability are preserved independently for each family; an explicit mission window still fails closed when no supported timestamp is mapped.
+- Each record from a dual-family index is admitted exactly once. Network modules/categories retain network precedence, endpoint and authentication semantics route to host, and sparse host event context is preserved without converting source/destination firewall schemas into host telemetry.
+- `doctor` and the TShark runtime now use one canonical path validator. It requires an existing regular file inside a configured directory and accepts canonical `.pcap`/`.pcapng` names plus numeric generated suffixes such as `.pcap.1642684647`; arbitrary extensions and paths outside the allowlist remain rejected.
+- The implementation and tests contain no Russell Mitchell indicator, entity, attack step, tool, technique sequence, or oracle timestamp. The live dataset was used only to verify the generic source contract after blind evaluation.
+
+### Review and local proof
+
+- Focused RED/GREEN regressions cover mixed mapping membership, timestamp propagation, discovery registration, exact document routing, authentication records with and without categories, sparse Windows event-code records, explicit network-category precedence, firewall-only mappings, missing-timestamp failure, capture-name boundaries, allowlist escape, and diagnostic/runtime parity.
+- Review repeatedly challenged the classification boundary and exposed network-first dual-index routing, authentication compatibility, category-less `system.auth` routing, and explicit network-category precedence. Each material finding received a failing regression before correction. Final re-review found no remaining Critical or Important issue.
+- The complete local suite passed all 231 tests with seven expected dependency-gated skips. All 12 retrieval-contract tests, Python `compileall`, and `git diff --check` passed.
+
+### Exact dependency-complete and live source proof
+
+- Initial exact candidate `7b87478e505211cbad2f0a2463b5b22e7bd6a5c9` matched its archive digest on the VM. A first run was invalidated because deployment environment values were loaded before tests. The clean rerun then exposed a real dependency-only live-graph routing regression: a sparse host event mapped to both families but reached network analytics. The responsible routing layer was corrected and reviewed rather than weakening the integration assertion.
+- Final runtime commit `4c7dda551c1ddc07faeac352d5d341f9d8ebff55` was archived with SHA-256 `F0DA4EE989950D9F209C69E21A4B33B3CB07F99973F9710D9F7DD94FC47D9228`, which matched locally and on the VM. The exact archive passed all 231 dependency-complete tests with no skips and passed `compileall`.
+- Configured diagnostics were fully green for the timezone, dependencies, pinned Enterprise ATT&CK v19.2 catalog, `qwen3:8b` structured reasoning preparation, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark 4.2.2, all 13 configured captures, and isolated writable runtime directories. No secret was displayed and no service configuration changed.
+- A separate read-only assertion passed all 13 configured capture paths through the runtime validator. A live mapping assertion found one dual-family index and confirmed a supported timestamp in both host and network field inventories. No hunt was launched and no telemetry was modified.
+- The exact VM archives, checkouts, isolated runtimes, and local transfer archives were removed after proof. Only this validation record and the ignored implementation ledger remain.
+
+## 2026-10-13 — blind Russell Mitchell generalization evaluation (partial; no validated attack path)
+
+### Evaluation boundary and exact candidate
+
+- ROMULUS received only a broad undirected hunt objective and the operator-authorized mission window. No attack identity, host, account, domain, product, vulnerability, command, filename, technique, or sequence from the external oracle was supplied to the runtime. The oracle was first consulted after the hunt was finalized and compacted.
+- Exact candidate commit `5bdc888b941eb3e568db4e53f20cf3bd6e743ccb` was archived with SHA-256 `031BDFD972FDD80CC0F94F13C91ED18C5FE81EF173DDE84114309C6EFD38892D`; the digest matched locally and on the development VM. Configured read-only diagnostics were green for the model and structured schemas, Elasticsearch, Arkime, TShark, all configured captures, the pinned ATT&CK catalog, timezone, and isolated writable directories.
+- Hunt `HUNT-65EE9C609B` ran from the exact isolated candidate with production backstops of 3,600 seconds, 40 analyst rounds, 500 external calls, and three stagnant cycles. It stopped after 1,546,254 ms, 35 calls, and nine rounds as `partial / incomplete_investigation` with `no_productive_frontier`; it did not reach coverage closure.
+- The pre-model invariant held: deterministic telemetry produced candidates before any model call. The run created 20 behavior candidates and eight candidate-derived hypotheses. No model proposal, assessment, search, finding, or attack-path edge was admitted.
+
+### Blind result and oracle scoring
+
+- Final customer finding and attack-stage recall was **0/7**. ROMULUS published zero findings and zero supported attack paths, so precision is undefined rather than 100%. It made no unsupported final finding and assigned no incorrect technique to a final finding.
+- Candidate-stage recall was **1/7**: a deterministic `T1046 Network Service Discovery` candidate correctly surfaced the attacker IP `192.168.230.122` and its scan/fan-out behavior, but it remained unassessed. The report's raw evidence also contained the distinctive DNS-transfer traffic, so raw-evidence visibility was **2/7** for reconnaissance and DNS exfiltration; that exfiltration was not promoted into a finding or path. A separate early high-entropy-DNS candidate mapped to `T1071.004` was unassessed and was not established as the oracle's exfiltration.
+- Entity recall was limited to the attacker IP and nearby network endpoints. The attacker identity, compromised account, web-service account, WordPress foothold, password-cracking activity, reverse shell, and privileged action were not surfaced as hunt conclusions. No attack relationships or temporal stage sequence were constructed, so relationship and reported temporal-ordering recall were zero.
+- The report accurately disclosed that the hunt was incomplete, host telemetry was not searched, network retrieval was partial, model reasoning was unavailable, source errors remained, and no conclusion about the absence of suspicious activity was supported. This honest fail-closed result is materially better than a hallucinated chain, but it does not satisfy the threat-hunting objective.
+
+### Responsible-layer diagnosis
+
+- **Retrieval:** host inventory inspected one 695-field mapping but reported no usable timestamp field, registered no executable host discovery task, and returned zero host events. Initial Elasticsearch network retrieval did use timestamped data, so this is a field-role/inventory compatibility defect rather than proof that the dataset lacks time. Eight host follow-ups were consequently finalized as `budget_limited`. Network coverage was also heavily capped: Elasticsearch returned 500 of 154,043 matching events, Arkime discovery returned 20,000 of 610,789, and most Arkime pivots returned 20,000 from much larger totals.
+- **Source contract:** diagnostics accepted all 13 configured capture paths, while runtime validation rejected 11 capture names containing suffixes after `.pcap`; only two direct capture names executed. Doctor and runtime therefore disagree about valid configured captures, causing avoidable network loss.
+- **Candidate generation and normalization:** the correct attacker scan became a candidate, but readily visible DNS-transfer records were left in raw evidence instead of becoming a correlated exfiltration candidate. The foothold, discovery, credential, shell, and privilege-escalation stages had no usable host retrieval path and were never promoted.
+- **Hypothesis reasoning:** all nine grounded-investigator calls failed closed because structured Ollama output was either truncated or violated global proposal-ID requirements. The critic was never called. Deterministic work continued safely, but the reasoning layer contributed no hypothesis refinement, competing explanation, discriminating search, assessment, or finding.
+- **Correlation and admission:** no correlation or attack-path edge was built. Admission correctly rejected unusable model output and allowed no unsupported claim through; reporting then truthfully described the partial state. The primary failures are upstream retrieval, candidate promotion, and model-contract robustness, not report honesty.
+
+### Reporting, retention, and cleanup
+
+- Final reports `HUNT-65EE9C609B-20261013T113354Z.docx` and `.txt` reopened successfully. Their SHA-256 digests are `BE29B71D5204A4682F5695BB88E09C56BD9173C97682E4A0AF376CEDB95CA531` and `2ADDC699C104DB5D858A1185FA3AF183945A12F36E6269A2F832837707CF5921`. They contain the hunt identity, exact partial outcome, source/model limitations, scheduler and progress aggregates, and no raw model prompt or query body.
+- Compact retention removed all 111,777 working evidence rows, 35 audit rows, the checkpoint, detailed reasoning/model payloads, host/network working arrays, tools, tasks/outcomes, queries, and progress detail. No finding, evidence, checkpoint, or write row remained because no finding had cited support. Only the ignored final report pair was preserved locally, consistent with the operator's request not to retain disposable hunt bulk.
+- The exact remote archive, isolated checkout, runtime, hunt log, and diagnostic log plus the local transfer archive were resolved and removed. Operational telemetry and service configuration were not changed.
+- Because the oracle has now been consulted, this dataset is a regression corpus for subsequent generic fixes, not a fresh holdout. Any fix must be developed from general behavior with unrelated synthetic variants and benign controls; no oracle-specific indicator or sequence may enter runtime code, prompts, selectors, catalogs, tests, or fixtures.
+
+## 2026-10-13 — evidence-grounded investigator and critic (local/VM proof; holdout remains blind)
+
+### Implemented behavior
+
+- Undirected candidate-free hunts still create no hypothesis and make no model call. Once a telemetry-backed lead exists, ROMULUS builds a bounded case file containing only visible candidates, their owned evidence, factual path context, exact search outcomes, and coverage gaps.
+- The investigator and critic are separate structured model calls over the same case. Neither response changes hunt state directly. Deterministic admission requires a known critic decision and validates proposal identifiers, evidence/candidate ownership, entity overlap, ATT&CK ownership, falsifiers and benign alternatives, search anchors, source fields, and query constraints.
+- A competing model hypothesis is committed only when an approved discriminating search creates a new scheduler task. Invalid or duplicate searches cannot commit an orphan hypothesis. Model priority fields cannot change scheduler order.
+- ROMULUS reserves capacity for both calls before starting the pair. Investigator output is discarded when the critic is unavailable, and deterministic candidate work continues.
+- The technical text report records aggregate calls, admissions, rejections, rejection reasons, and availability gaps without raw case files, proposal identifiers, prompts, query bodies, or critic payloads. The customer Word report contains only customer-facing findings and coverage.
+- Compact retention preserves `coverage.reasoning_summary` when it exists while removing detailed reasoning history and all case/investigator/critic working payloads. Legacy and offline state without a summary remains absent rather than inventing zero historical calls.
+
+### Exact local and dependency-complete proof
+
+- The complete post-review local suite passed all 219 tests with seven expected dependency-gated skips. Six focused review regressions passed, as did the broader reasoning/admission gates, Python `compileall`, and `git diff --check`.
+- Fresh whole-branch review found no Critical issues and four Important admission/atomicity gaps: cross-candidate evidence borrowing, anchorless directed support, mapped hypotheses publishing unmapped findings, and partially committed or stale reasoning state after failure. One permitted RED-to-GREEN fix pass corrected all four in commit `2c42c0d44f08e40a52c9bea435cfe307816eb243`. A Minor aggregate-report issue remains deferred: a later successful reasoning call can clear `last_gap`, so `unavailable_passes` may be nonzero while the final availability-gap list is empty.
+- Exact candidate commit `2c42c0d44f08e40a52c9bea435cfe307816eb243` was archived with SHA-256 `EA2D19203F8DA51B791F4769155265C6D9BF406467BA4F73E25FDC10E322B87E`; the digest matched on Windows and the development VM.
+- The exact archive passed all 219 dependency-complete VM tests with no skips and passed `compileall`.
+- An initial diagnostic invocation lacked the deployment `.env` and failed closed on unavailable credentials. After loading the existing deployment configuration without copying or displaying it, diagnostics were fully green: America/New_York mission time, all Python dependencies, the pinned Enterprise ATT&CK v19.2 catalog, `qwen3:8b` plus both structured reasoning schemas, one allowlisted Elasticsearch index, Arkime with 919,300 sessions, TShark 4.2.2, all configured Russell Mitchell captures, and writable runtime directories. No service configuration was changed.
+
+### Disposable compact-retention proof
+
+- Synthetic offline investigation `HUNT-A7A9450BFA` completed as `evidence_supported_lead` with `coverage_closure_reached`, generated one DOCX and one TXT report, and compacted successfully in an isolated `/tmp` runtime from the exact final candidate.
+- Both reports reopened successfully. The technical report contained `INVESTIGATOR AND CRITIC COVERAGE` and truthfully stated that the offline run had no grounded investigator/critic aggregate; compact state likewise omitted `reasoning_summary` rather than inventing prior calls. Populated-summary preservation and customer/technical audience separation passed in the dependency-complete report/retention tests.
+- Compact state retained two cited evidence records and one finding. It removed `reasoning_history`, host/network arrays, tool runs, search tasks/outcomes, queries, case/proposal/critic payloads, and every checkpoint/write row.
+- The validation archive, extracted checkout, and synthetic runtime were isolated from operational state and removed after proof. Operational reports, hunt state, logs, and telemetry were not modified by the synthetic hunt or cleanup.
+
+### Blind-evaluation boundary and limitation
+
+- No Russell Mitchell holdout identity, indicator, hostname, command, tool, timestamp, attack step, or oracle label was added to runtime code, prompts, catalogs, tests, or fixtures. Diagnostics verified source availability only; this milestone did not execute a hunt against the newly loaded telemetry.
+- The synthetic offline fixture cannot evaluate live model judgment or recall against a real attack. This milestone proves bounded reasoning, fail-closed admission, reporting, and retention mechanics. The authorized read-only Russell Mitchell hunt remains the next blind Milestone 9 evaluation, after branch review and integration.
+
 ## 2026-10-13 — adaptive evidence-grounded stopping (local/VM proof; no live holdout hunt)
 
 ### Implemented behavior

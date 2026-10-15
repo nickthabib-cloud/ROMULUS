@@ -9,6 +9,14 @@ from .store import Store
 from .models import utc_now
 from .investigation.workflow import HuntEngine
 
+
+def _configured_pcap_ready(path: Path, allowed_dirs: tuple[Path, ...]) -> bool:
+    from .tools.tshark_client import approve_capture_path
+    try: approve_capture_path(path,allowed_dirs)
+    except (OSError,ValueError): return False
+    return True
+
+
 def doctor(settings: Settings) -> int:
     print(f"ROMULUS {__version__} deployment diagnostics (configured values; connectivity is checked now)")
     checks=[]
@@ -71,9 +79,8 @@ def doctor(settings: Settings) -> int:
     for d in settings.pcap_allowed_dirs:
         present=d.is_dir(); checks.append(present); print(f"{'OK' if present else 'MISSING'} PCAP allowed directory: {d}")
     for p in settings.pcap_files:
-        try: approved=any(p.resolve().is_relative_to(d.resolve()) for d in settings.pcap_allowed_dirs)
-        except OSError: approved=False
-        usable=p.is_file() and approved; checks.append(usable); print(f"{'OK' if usable else 'UNAVAILABLE/NOT ALLOWLISTED'} configured PCAP: {p}")
+        usable=_configured_pcap_ready(p,settings.pcap_allowed_dirs)
+        checks.append(usable); print(f"{'OK' if usable else 'UNAVAILABLE/NOT ALLOWLISTED'} configured PCAP: {p}")
     for d in (settings.data_dir,settings.logs_dir,settings.reports_dir):
         try: d.mkdir(parents=True,exist_ok=True); probe=d/".romulus-write-check"; probe.write_text("ok"); probe.unlink(); checks.append(True); print(f"OK writable directory: {d}")
         except OSError: checks.append(False); print(f"UNWRITABLE directory: {d}")
