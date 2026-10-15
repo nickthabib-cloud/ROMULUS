@@ -432,6 +432,23 @@ class SchedulerDiscoveryWorkflowTests(unittest.TestCase):
                 any(item["source"] == "tshark" and item["source_targets"] == [str(pcap)] for item in tasks)
             )
 
+    def test_directed_plan_and_model_context_receive_bounded_attack_references(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            engine, state, _ = self._prepared(Path(directory))
+            state["objective"] = "Investigate suspicious PowerShell execution"
+            state["mission_mode"] = "directed"
+            state.setdefault("reasoning_history", [])
+            state.setdefault("stage_history", [])
+            state.setdefault("lead_catalog", [])
+            state.setdefault("hypotheses", [])
+
+            planned = engine._plan(state)
+
+            references = planned["coverage"]["attack_knowledge"]["planning_references"]
+            self.assertTrue(references)
+            self.assertLessEqual(len(references), 12)
+            self.assertTrue(all("technique_id" in row for row in references))
+
     def test_tight_directed_budget_reaches_deterministic_search_before_model_reasoning(self):
         import types
         from unittest.mock import patch

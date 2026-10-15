@@ -14,7 +14,7 @@ from ..config import Settings, safe_url
 from ..models import Evidence, Finding, Hypothesis, encode, utc_now
 from ..store import Store
 from ..intelligence.knowledge import hypotheses_for, TECHNIQUES, ATTACK_RELEASE, ATTACK_RELEASE_DATE, ATTACK_DOMAIN
-from ..intelligence.attack_catalog import load_attack_catalog
+from ..intelligence.attack_catalog import bounded_attack_context, load_attack_catalog
 from ..intelligence.correlate import correlate
 from ..intelligence.investigation_graph import build_investigation_graph, derive_finding_paths
 from ..intelligence.analytics import summarize_evidence, build_coverage_ledger
@@ -23,6 +23,8 @@ from ..intelligence.behavior_catalog import (
     load_behavior_catalog, load_local_indicators, resolve_semantic_fields, applicable_analytics,
     compile_elasticsearch_seed, compile_elasticsearch_indicator_seed, build_candidate_queue, merge_candidate_queue,
 )
+from ..intelligence.search_matrix import compile_search_matrix, load_search_matrix
+from ..intelligence.reference_intelligence import attach_capability_context, compile_capability_index
 from ..tools.elasticsearch_client import ElasticsearchAdapter, validate_query
 from ..tools.arkime_client import ArkimeAdapter
 from ..tools.tshark_client import TSharkAdapter
@@ -129,6 +131,8 @@ class HuntState(TypedDict, total=False):
     local_model_note: str; report_paths: list[str]; mapping_errors: list[dict]
     depth: int; tool_calls: int; mode: str; tool_runs: list[dict]
     source_errors: list[dict]; es_fields_by_class: dict[str,list[str]]
+    es_field_metadata_by_class: dict[str,dict[str,dict[str,Any]]]
+    es_index_field_metadata: dict[str,dict[str,dict[str,Any]]]
     es_indices_by_class: dict[str,list[str]]
     source_health: dict[str,bool]
     lead_catalog: list[dict]; completed_leads: list[str]
@@ -150,6 +154,9 @@ class HuntEngine:
         self._seen_evidence_keys: dict[str,set[str]]={}
         self.behavior_catalog=load_behavior_catalog()
         self.local_indicators=load_local_indicators()
+        self.capability_index=compile_capability_index(
+            self.behavior_catalog.get("behavior_packs", {}).get("capabilities", {}).get("records", [])
+        )
 
     def run(self, objective: str, hunt_id: str | None=None, _resume: bool=False) -> dict[str, Any]:
         if not objective or len(objective)>2000: raise ValueError("Mission must contain 1 to 2000 characters")
@@ -163,6 +170,7 @@ class HuntEngine:
                 "queries":[],"coverage":{},"source_errors":[],"started_at":utc_now(),"started_epoch":time.time(),"depth":0,
                 "tool_calls":0,"mode":"offline" if self.offline else "live","tool_runs":[],"lead_catalog":[],
                 "completed_leads":[],"reasoning_history":[],"stage_history":[],"es_fields_by_class":{},
+                "es_field_metadata_by_class":{},"es_index_field_metadata":{},
                 "es_indices_by_class":{},
                 "analytic_summary":{},"search_artifacts":[],"evidence_keys":[],"candidate_leads":[],
                 "pivot_results":[],
@@ -171,7 +179,8 @@ class HuntEngine:
                 "behavior_catalog_status":{
                     "catalog_version":self.behavior_catalog.get("catalog_version"),
                     "analytics":len(self.behavior_catalog.get("analytics",[])),
-                    "trusted_indicators":len(self.local_indicators.get("indicators",[]))}}
+                    "trusted_indicators":len(self.local_indicators.get("indicators",[])),
+                    "behavior_packs":self.behavior_catalog.get("pack_status",{})}}
         state.setdefault("sampling_policy",sampling_policy(self.settings))
         initialize_scheduler(state)
         if _resume:
@@ -433,9 +442,12 @@ class HuntEngine:
                     hypothesis["basis_details"]="Offline validation hypothesis is constrained by the operator's explicit direction."
             else:
                 s["hypotheses"]=[]
+            planning_references=bounded_attack_context(s["objective"],
+                [h.get("technique_id") for h in s.get("hypotheses",[]) if h.get("technique_id")],limit=12)
             s["coverage"]={"host":"synthetic fixture searched","network":"synthetic fixture searched","time_scope":"synthetic fixture timestamps",
                 "attack_knowledge":{"domain":ATTACK_DOMAIN,"release":ATTACK_RELEASE,"release_date":ATTACK_RELEASE_DATE,
-                    "official_catalog_techniques":attack_catalog_metadata.get("technique_count",0)}}
+                    "official_catalog_techniques":attack_catalog_metadata.get("technique_count",0),
+                    "planning_references":planning_references}}
             offline_leads=_lead_catalog(s["hypotheses"])
             s["lead_catalog"]=[next((lead for lead in offline_leads if lead.get("source")=="host"),offline_leads[0])] if offline_leads else []
             self._stage(s,"plan","completed",{"hypotheses":len(s["hypotheses"]),"mode":"offline"})
@@ -460,6 +472,9 @@ class HuntEngine:
         for hypothesis in s["hypotheses"]:
             hypothesis["basis"]="operator_direction"
             hypothesis["basis_details"]="Initial hypothesis is allowed because the operator supplied a specific behavior, technique, entity, or indicator."
+        planning_references=bounded_attack_context(s["objective"],
+            [h.get("technique_id") for h in s["hypotheses"] if h.get("technique_id")],limit=12)
+        common_coverage["attack_knowledge"]["planning_references"]=planning_references
         s["coverage"]={**common_coverage,"hypotheses_total":len(s["hypotheses"])}
         s["lead_catalog"]=_lead_catalog(s["hypotheses"])
         s["reasoning_history"].append({"stage":"mission_hypothesis_plan","basis":"operator_direction","planning_method":planning_basis,
@@ -497,11 +512,14 @@ class HuntEngine:
         if mappings is None:
             s["coverage"]["host"]="indices discovered; mapping retrieval failed"
             s["es_fields"]=[]; s["es_fields_by_class"]={}; s["es_indices_by_class"]={}
+            s["es_field_metadata_by_class"]={}; s["es_index_field_metadata"]={}
             s.setdefault("source_health",{})["host"]=False
             self._stage(s,"host_inventory","failed",{"matched_indices":len(names)})
             return self._save(s)
         s["es_fields"]=_field_names(mappings); s["es_fields_by_class"]=_field_names_by_class(mappings)
         s["es_indices_by_class"]=_index_names_by_class(mappings)
+        s["es_index_field_metadata"]=_index_field_metadata(mappings)
+        s["es_field_metadata_by_class"]=_field_metadata_by_class(mappings)
         fields=s.get("es_fields",[]); field_classes=s.get("es_fields_by_class",{})
         index_classes=s.get("es_indices_by_class",{})
         classified_fields=isinstance(field_classes,dict) and bool(field_classes)
@@ -582,23 +600,43 @@ class HuntEngine:
             if field in host_fields),None)
         host_ready=bool(names and host_fields and (not mission_range or timestamp))
         s.setdefault("source_health",{})["host"]=host_ready
-        behavior_seeds=[]; indicator_seeds=[]; behavior_unsupported=[]; indicator_unsupported=[]
+        behavior_seeds=[]; indicator_seeds=[]; matrix_seeds=[]
+        behavior_unsupported=[]; indicator_unsupported=[]; matrix_unsupported=[]
+        matrix_catalog={}
         if host_ready:
+            all_index_metadata=s.get("es_index_field_metadata",{})
+            host_index_metadata={name:all_index_metadata[name] for name in host_names if name in all_index_metadata}
             indicator_limit=min(12,max(1,self.settings.max_tool_calls//10))
             indicator_seeds,indicator_unsupported=_indicator_seed_queries(
                 self.local_indicators,host_fields,timestamp or "@timestamp",mission_range,indicator_limit)
             behavior_limit=min(32,max(1,self.settings.max_tool_calls//5))
+            behavior_field_metadata=s.get("es_field_metadata_by_class",{}).get("host",{})
             behavior_seeds,behavior_unsupported=_behavior_seed_queries(
-                self.behavior_catalog,host_fields,timestamp or "@timestamp",mission_range,behavior_limit)
+                self.behavior_catalog,host_fields,timestamp or "@timestamp",mission_range,behavior_limit,
+                behavior_field_metadata,host_index_metadata)
+            try:
+                matrix_catalog=load_search_matrix()
+                matrix_limit=min(32,max(1,self.settings.max_tool_calls//4))
+                matrix_seeds,matrix_unsupported=compile_search_matrix(
+                    matrix_catalog,host_index_metadata,timestamp or "@timestamp",mission_range,limit=matrix_limit)
+            except Exception as exc:
+                matrix_unsupported=[{"id":"search-matrix-catalog","reason":type(exc).__name__,"missing_roles":[]}]
             seed_size=min(25,self.settings.max_results)
             for origin,seeds,id_field in (("trusted_indicator",indicator_seeds,"indicator_id"),
-                                          ("behavior_catalog",behavior_seeds,"analytic_id")):
+                                          ("behavior_catalog",behavior_seeds,"analytic_id"),
+                                          ("search_matrix",matrix_seeds,"analytic_id")):
                 for seed in seeds:
                     task_id,_=register_search_task(s,{"source":"elasticsearch","source_family":"host",
-                        "source_targets":host_names,"phase":"discovery","origin":origin,
-                        "intent":f"Deterministic {origin.replace('_',' ')} discovery: {seed.get(id_field)}",
+                        "source_targets":seed.get("source_targets") or host_names,
+                        "phase":"discovery","origin":origin,
+                        "intent":(f"{seed.get('title')}: " if seed.get("title") else
+                            f"Deterministic {origin.replace('_',' ')} discovery: ") + str(seed.get(id_field)),
                         "query_spec":{"query":seed["query"],"size":seed_size},"time_range":task_range,
-                        "candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],"anchor_evidence_ids":[]})
+                        "candidate_priority":seed.get("priority_tier"),"base_priority":seed.get("base_priority"),
+                        "candidate_ids":[],"follow_up_ids":[],"hypothesis_ids":[],"anchor_evidence_ids":[],
+                        "analytic_ids":list(seed.get("analytic_ids") or
+                            ([seed.get("analytic_id")] if origin=="behavior_catalog" and seed.get("analytic_id") else [])),
+                        "signature_ids":list(seed.get("signature_ids") or [])})
                     if task_id not in registered: registered.append(task_id)
             surveys=_host_survey_queries(s.get("hypotheses",[]),host_fields,timestamp or "@timestamp",mission_range,
                 s.get("objective",""),10)
@@ -629,10 +667,21 @@ class HuntEngine:
         s["behavior_catalog_status"]={"catalog_version":self.behavior_catalog.get("catalog_version"),
             "analytics":len(self.behavior_catalog.get("analytics",[])),
             "trusted_indicators":len(self.local_indicators.get("indicators",[])),
+            "behavior_packs":self.behavior_catalog.get("pack_status",{}),
             "behavior_searches_planned":len(behavior_seeds),"indicator_searches_planned":len(indicator_seeds),
+            "search_matrix_version":matrix_catalog.get("catalog_version"),
+            "search_matrix_signatures_available":sum(len(rows) for rows in matrix_catalog.get("signature_sets",{}).values()),
+            "search_matrix_signatures_planned":sum(len(seed.get("signature_ids",[])) for seed in matrix_seeds),
+            "search_matrix_batches_planned":len(matrix_seeds),
             "searches_executed":0,"returned":0,"failures":0,"unsupported_analytics":behavior_unsupported,
-            "unsupported_indicators":indicator_unsupported,"semantic_bindings":bindings}
+            "unsupported_indicators":indicator_unsupported,"unsupported_search_matrix":matrix_unsupported,
+            "semantic_bindings":bindings}
         s.setdefault("coverage",{})["behavior_catalog"]=s["behavior_catalog_status"]
+        s["coverage"]["search_matrix"]={"catalog_version":matrix_catalog.get("catalog_version"),
+            "signature_sets":len(matrix_catalog.get("signature_sets",{})),
+            "signatures_available":s["behavior_catalog_status"]["search_matrix_signatures_available"],
+            "signatures_planned":s["behavior_catalog_status"]["search_matrix_signatures_planned"],
+            "batches_planned":len(matrix_seeds),"unsupported":matrix_unsupported}
 
         network_fields=list(field_classes.get("network",[])) if classified_fields else []
         network_indices=(list(index_classes.get("network",[])) if classified_indices else
@@ -747,11 +796,16 @@ class HuntEngine:
         s["coverage"]["host_count"]=len(s.get("host",[])); s["coverage"]["network_count"]=len(s.get("network",[]))
         behavior_outcomes=[item for item in outcomes if s.get("search_tasks",{}).get(item.get("task_id"),{}).get("origin")
             in {"behavior_catalog","trusted_indicator"}]
+        matrix_outcomes=[item for item in outcomes if s.get("search_tasks",{}).get(item.get("task_id"),{}).get("origin")=="search_matrix"]
         if s.get("behavior_catalog_status") is not None:
             s["behavior_catalog_status"]["searches_executed"]=len(behavior_outcomes)
             s["behavior_catalog_status"]["returned"]=sum(int(item.get("returned_total") or 0) for item in behavior_outcomes)
             s["behavior_catalog_status"]["failures"]=sum(item.get("status") not in {"completed","partial"} for item in behavior_outcomes)
             s["coverage"]["behavior_catalog"]=s["behavior_catalog_status"]
+        matrix_status=s.setdefault("coverage",{}).setdefault("search_matrix",{})
+        matrix_status.update({"searches_executed":len(matrix_outcomes),
+            "returned":sum(int(item.get("returned_total") or 0) for item in matrix_outcomes),
+            "failures":sum(item.get("status") not in {"completed","partial"} for item in matrix_outcomes)})
         self._stage(s,"discovery","partial" if any(item.get("status")!="completed" for item in outcomes) else "completed",
             {"tasks":len(outcomes),"host_tasks":len(host),"network_tasks":len(network)})
         return self._save(s)
@@ -799,6 +853,12 @@ class HuntEngine:
         field_classes=s.get("es_fields_by_class",{})
         coverage["search_field_classes"]={key:candidate_fields("elasticsearch",value)
             for key,value in field_classes.items() if value}
+        field_metadata=s.get("es_field_metadata_by_class",{})
+        coverage["search_field_mappings"]={}
+        for group,fields in coverage["search_field_classes"].items():
+            group_metadata=field_metadata.get(group,{}) if isinstance(field_metadata,dict) else {}
+            coverage["search_field_mappings"][group]={field:group_metadata[field]
+                for field in fields[:80] if field in group_metadata}
         if _state_mission_mode(s)=="undirected" and not s.get("candidate_leads"):
             coverage["model_initial_search_plan"]="deferred: undirected mission has no telemetry-backed candidate"
         elif not source_fields:
@@ -871,25 +931,62 @@ class HuntEngine:
                 if classified_indices else [name for name in all_names if group in name.lower()])
             if not names and group=="host": names=[name for name in all_names if "network" not in name.lower()] or all_names
             if not names: raise ValueError(f"No configured Elasticsearch index matched index_class={group}")
-            actual_fields=(by_class.get(group) if group in {"host","network"} else s.get("es_fields",[])) or s.get("es_fields",[])
-            timestamp=next((field for field in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
-                if field in actual_fields),None)
-            if effective_range and not timestamp: raise ValueError("No mapped timestamp field is available to enforce the search window")
             if source=="host":
+                actual_fields=(by_class.get(group) if group in {"host","network"} else s.get("es_fields",[])) or s.get("es_fields",[])
+                timestamp=next((field for field in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
+                    if field in actual_fields),None)
+                if effective_range and not timestamp: raise ValueError("No mapped timestamp field is available to enforce the search window")
                 query=_lead_host_query(plan,actual_fields,timestamp or s.get("timestamp_field","@timestamp"),effective_range,{})
+                if query is None: raise ValueError("Investigation lead has no mapped Elasticsearch selectors")
+                proposals.append({"source":"elasticsearch","source_family":"host","source_targets":names,
+                    "phase":"investigation","origin":origin,"intent":intent,
+                    "query_spec":{"query":query,"size":min(500,self.settings.max_results)},
+                    "time_range":task_range,**owners})
+                return proposals
             else:
-                scoped={**plan,"index_class":group,"fields":[field for field in plan.get("fields",[]) if field in actual_fields]}
-                if scoped.get("terms") and not scoped["fields"]:
-                    scoped["fields"]=[field for field in TEXT_FIELDS if field in actual_fields][:4]
-                query=None
-                if plan.get("native_query_language")=="elasticsearch_dsl" and plan.get("native_query"):
-                    query=compile_native_es(plan["native_query"],actual_fields,timestamp or s.get("timestamp_field","@timestamp"),effective_range)
-                if query is None: query=compile_es(scoped,actual_fields,timestamp or s.get("timestamp_field","@timestamp"),effective_range)
-            if query is None: raise ValueError("Investigation lead has no mapped Elasticsearch selectors")
-            proposals.append({"source":"elasticsearch","source_family":"network" if group=="network" else "host",
-                "source_targets":names,"phase":"investigation","origin":origin,"intent":intent,
-                "query_spec":{"query":query,"size":min(500,self.settings.max_results)},
-                "time_range":task_range,**owners})
+                class_fields=(by_class.get(group) if group in {"host","network"} else s.get("es_fields",[])) or s.get("es_fields",[])
+                class_metadata=s.get("es_field_metadata_by_class",{}).get(group,{})
+                index_metadata=s.get("es_index_field_metadata",{})
+                network_indexes=set(index_classes.get("network",[])) if isinstance(index_classes,dict) else set()
+                grouped_queries={}
+                for index_name in names:
+                    mapping=index_metadata.get(index_name,{}) if isinstance(index_metadata,dict) else {}
+                    actual_fields=sorted(mapping) if mapping else list(class_fields)
+                    field_metadata=mapping if mapping else (class_metadata or None)
+                    timestamp=next((field for field in ("@timestamp","timestamp","event.created","event.ingested","event.start","winlog.time_created")
+                        if field in actual_fields and (not field_metadata or field_metadata.get(field,{}).get("searchable",False))),None)
+                    if effective_range and not timestamp:
+                        continue
+                    scoped={**plan,"index_class":group,"fields":[field for field in plan.get("fields",[]) if field in actual_fields]}
+                    if scoped.get("terms") and not scoped["fields"]:
+                        scoped["fields"]=[field for field in TEXT_FIELDS if field in actual_fields]
+                    query=None
+                    if plan.get("native_query_language")=="elasticsearch_dsl" and plan.get("native_query"):
+                        try:
+                            query=compile_native_es(plan["native_query"],actual_fields,
+                                timestamp or s.get("timestamp_field","@timestamp"),effective_range,field_metadata)
+                        except (ValueError,TypeError,KeyError):
+                            # Mapping-aware rejection preserves the validated selectors.
+                            # The deterministic compiler provides a bounded fallback.
+                            query=None
+                    if query is None:
+                        try:
+                            query=compile_es(scoped,actual_fields,timestamp or s.get("timestamp_field","@timestamp"),
+                                effective_range,field_metadata)
+                        except (ValueError,TypeError,KeyError):
+                            continue
+                    family=("network" if group=="network" or
+                        (group=="all" and (index_name in network_indexes or "network" in index_name.lower())) else "host")
+                    key=json.dumps({"source_family":family,"query":query},sort_keys=True,separators=(",",":"))
+                    row=grouped_queries.setdefault(key,{"source_family":family,"query":query,"source_targets":[]})
+                    row["source_targets"].append(index_name)
+                if not grouped_queries:
+                    raise ValueError("No Elasticsearch index had usable mapped selectors and a searchable time field")
+                for row in grouped_queries.values():
+                    proposals.append({"source":"elasticsearch","source_family":row["source_family"],
+                        "source_targets":sorted(set(row["source_targets"])),"phase":"investigation","origin":origin,
+                        "intent":intent,"query_spec":{"query":row["query"],"size":min(500,self.settings.max_results)},
+                        "time_range":task_range,**owners})
             return proposals
 
         if source not in {"network","arkime","tshark"}: raise ValueError("Unsupported investigation source")
@@ -997,7 +1094,7 @@ class HuntEngine:
                 "operator-directed mission and completed deterministic discovery",
                 lambda:Ollama(self.settings).propose_searches(s.get("objective",""),s.get("hypotheses",[]),
                     visible_evidence,source_fields,6,_search_history_summary(s),"initial",
-                    coverage.get("search_field_classes",{})),len) or []
+                    coverage.get("search_field_classes",{}),coverage.get("search_field_mappings",{})),len) or []
         except Exception as exc:
             plan_status["status"]="failed"; plan_status["error"]=type(exc).__name__; return registered
         accepted=self._register_model_searches(s,searches,"initial",
@@ -1178,6 +1275,8 @@ class HuntEngine:
         previous_candidates=(merge_candidate_queue(persisted_candidates,list(s.get("candidate_leads",[])))
             if persisted_candidates else list(s.get("candidate_leads",[])))
         fresh_candidates=build_candidate_queue(analysis_evidence,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
+        fresh_candidates=attach_capability_context(
+            fresh_candidates,analysis_evidence,self.capability_index,limit=5)
         full_candidates=merge_candidate_queue(previous_candidates,fresh_candidates)
         self.store.replace_candidates(s["hunt_id"],full_candidates)
         s["candidate_leads"]=_candidate_working_set(full_candidates,MAX_STATE_CANDIDATES)
@@ -1442,6 +1541,9 @@ class HuntEngine:
                 visible_evidence_ids={e.get("evidence_id") for e in model_evidence_context(_all_evidence(s),12) if e.get("evidence_id")}
                 visible_candidate_ids={x.get("candidate_id") for x in s.get("candidate_leads",[])[:12] if x.get("candidate_id")}
                 model_coverage=dict(s.get("coverage",{}))
+                model_coverage["attack_references"]=bounded_attack_context(s["objective"],
+                    [technique for candidate in s.get("candidate_leads",[])[:12]
+                        for technique in candidate.get("attack_techniques",[])],limit=12)
                 model_coverage["candidate_queue"]=[{"candidate_id":c.get("candidate_id"),"title":str(c.get("title",""))[:120],
                     "priority_score":c.get("priority_score"),"priority_tier":c.get("priority_tier"),
                     "disposition":c.get("disposition"),"evidence_ids":c.get("evidence_ids",[])[:5],
@@ -2104,12 +2206,44 @@ def _lead_host_query(lead,fields,timestamp_field,time_range,state):
 
 def _field_names(mapping):
     fields=set()
-    def walk(props,prefix=""):
-        for name,desc in props.items():
-            full=(prefix+"."+name).strip("."); fields.add(full)
-            if isinstance(desc,dict) and isinstance(desc.get("properties"),dict): walk(desc["properties"],full)
-    for entry in mapping.values(): walk(entry.get("mappings",{}).get("properties",{}))
+    for entry in mapping.values():
+        fields.update(_mapping_entry_field_metadata(entry))
     return sorted(fields)
+
+
+def _mapping_entry_field_metadata(entry):
+    """Flatten Elasticsearch property and multi-field mappings with queryability."""
+    result={}
+    def walk(properties,prefix=""):
+        for name,desc in properties.items():
+            if not isinstance(desc,dict): continue
+            full=(prefix+"."+name).strip(".")
+            field_type=str(desc.get("type") or ("object" if isinstance(desc.get("properties"),dict) else "unknown"))
+            searchable=desc.get("index",True) is not False and field_type not in {"object","nested","binary","unknown"}
+            result[full]={"types":[field_type],"searchable":bool(searchable)}
+            multi=desc.get("fields")
+            if isinstance(multi,dict): walk(multi,full)
+            children=desc.get("properties")
+            if isinstance(children,dict): walk(children,full)
+    walk(entry.get("mappings",{}).get("properties",{}))
+    return result
+
+
+def _index_field_metadata(mapping):
+    return {str(index):_mapping_entry_field_metadata(entry) for index,entry in mapping.items()}
+
+
+def _field_metadata_by_class(mapping):
+    grouped={"host":{},"network":{},"other":{}}
+    for index,entry in mapping.items():
+        category=_mapping_category(index,entry)
+        target=grouped.setdefault(category,{})
+        for field,metadata in _mapping_entry_field_metadata(entry).items():
+            prior=target.get(field,{"types":[],"searchable":False})
+            prior["types"]=sorted(set(prior.get("types",[])+metadata.get("types",[])))
+            prior["searchable"]=bool(prior.get("searchable") or metadata.get("searchable"))
+            target[field]=prior
+    return {key:value for key,value in grouped.items() if value}
 
 
 def _mapping_category(name,entry):
@@ -2572,27 +2706,65 @@ def _is_broad_objective(text):
         "malicious actors across all available","all available historical host and network","do not assume one technique"))
 
 
-def _behavior_seed_queries(catalog, fields, timestamp_field, time_range, limit=32):
-    """Build a bounded, priority-ordered set of portable behavior searches."""
-    bindings = resolve_semantic_fields(fields)
-    applicable, unsupported = applicable_analytics(catalog, bindings, "elasticsearch")
-    compiled = []
-    for analytic in applicable:
-        query = compile_elasticsearch_seed(analytic, bindings, timestamp_field, time_range)
-        if query is None:
-            unsupported.append({"id": analytic["id"], "missing_roles": [], "reason": "predicate requires post-collection evaluation"})
+def _behavior_seed_queries(catalog, fields, timestamp_field, time_range, limit=32,
+                           field_metadata=None, index_field_metadata=None):
+    """Compile per-index behavior DSL, then merge only byte-identical batches."""
+    mappings=index_field_metadata if isinstance(index_field_metadata,dict) and index_field_metadata else {
+        "":field_metadata if isinstance(field_metadata,dict) and field_metadata else None}
+    by_query={}
+    unsupported=[]
+    for index_name,metadata in sorted(mappings.items()):
+        effective_metadata=metadata if isinstance(metadata,dict) and metadata else None
+        index_fields=sorted(effective_metadata) if effective_metadata else list(fields)
+        if not index_fields:
             continue
-        compiled.append({
-            "analytic_id": analytic["id"], "title": analytic["title"],
-            "base_priority": analytic["base_priority"], "query": query,
-        })
-    compiled.sort(key=lambda item: (-int(item["base_priority"]), item["analytic_id"]))
-    selected = compiled[:max(0, int(limit))]
-    temp_seed = next((item for item in compiled if item["analytic_id"] == "BH-XPLAT-001"), None)
-    if temp_seed and temp_seed not in selected and selected:
-        selected[-1] = temp_seed
-        selected.sort(key=lambda item: (-int(item["base_priority"]), item["analytic_id"]))
-    return selected, sorted(unsupported, key=lambda item: item["id"])
+        bindings=resolve_semantic_fields(index_fields)
+        applicable,unavailable=applicable_analytics(catalog,bindings,"elasticsearch")
+        unsupported.extend(dict(row,index=index_name) for row in unavailable)
+        actual_timestamp=timestamp_field if timestamp_field in index_fields else None
+        timestamp_metadata=effective_metadata.get(actual_timestamp,{}) if effective_metadata and actual_timestamp else {}
+        if time_range and (not actual_timestamp or (effective_metadata and not timestamp_metadata.get("searchable",False))):
+            unsupported.append({"id":"behavior-time-range","index":index_name,
+                "missing_roles":["event.time"],"reason":"no searchable timestamp field for the required hunt window"})
+            continue
+        compiled=[]
+        for analytic in applicable:
+            query=compile_elasticsearch_seed(analytic,bindings,actual_timestamp or timestamp_field,
+                time_range,effective_metadata)
+            if query is None:
+                unsupported.append({"id":analytic["id"],"index":index_name,"missing_roles":[],
+                    "reason":"predicate could not be compiled for this mapping"})
+                continue
+            try:
+                validate_query(query)
+            except (TypeError,ValueError) as exc:
+                unsupported.append({"id":analytic["id"],"index":index_name,"missing_roles":[],
+                    "reason":f"compiled DSL rejected: {type(exc).__name__}"})
+                continue
+            compiled.append({"analytic_id":analytic["id"],"title":analytic["title"],
+                "base_priority":int(analytic["base_priority"]),"query":query})
+        compiled.sort(key=lambda item:(-item["base_priority"],item["analytic_id"]))
+        for batch_number,offset in enumerate(range(0,len(compiled),20),start=1):
+            rows=compiled[offset:offset+20]
+            queries=[item["query"] for item in rows]
+            query=queries[0] if len(queries)==1 else {"bool":{"should":queries,"minimum_should_match":1}}
+            serialized=json.dumps(query,sort_keys=True,separators=(",",":"))
+            batch=by_query.setdefault(serialized,{"query":query,"source_targets":[],"analytic_ids":set(),
+                "base_priority":0,"title":"Active behavior signatures"})
+            if index_name:
+                batch["source_targets"].append(index_name)
+            batch["analytic_ids"].update(item["analytic_id"] for item in rows)
+            batch["base_priority"]=max(batch["base_priority"],max(item["base_priority"] for item in rows))
+    batches=[]
+    for serialized,batch in by_query.items():
+        ids=sorted(batch["analytic_ids"])
+        digest=hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+        batches.append({"analytic_id":f"behavior-pack-{digest}","analytic_ids":ids,
+            "title":f"Active behavior signatures ({len(ids)} rules)",
+            "base_priority":batch["base_priority"],"query":batch["query"],
+            "source_targets":sorted(set(batch["source_targets"]))})
+    batches.sort(key=lambda item:(-int(item["base_priority"]),item["analytic_id"]))
+    return batches[:max(0,int(limit))],sorted(unsupported,key=lambda item:(str(item.get("id","")),str(item.get("index",""))))
 
 
 def _indicator_seed_queries(indicators, fields, timestamp_field, time_range, limit=12):

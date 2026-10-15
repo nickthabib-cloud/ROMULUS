@@ -33,6 +33,32 @@ def load_attack_catalog(path: Path = CATALOG_PATH) -> dict[str, Any]:
     return value
 
 
+def _compact_reference(row: dict[str, Any]) -> dict[str, Any]:
+    strategies = row.get("detection_strategies", []) or []
+    analytics = [analytic for strategy in strategies[:3] for analytic in (strategy.get("analytics", []) or [])[:2]]
+    components = []
+    mutable = []
+    for analytic in analytics:
+        component = analytic.get("data_component")
+        if isinstance(component, dict) and component.get("name") and component["name"] not in components:
+            components.append(component["name"])
+        for value in analytic.get("mutable_elements", []) or []:
+            text = (
+                value.get("field") or value.get("name") or value.get("description")
+                if isinstance(value, dict)
+                else value
+            )
+            if text and str(text) not in mutable:
+                mutable.append(str(text)[:120])
+    return {
+        "technique_id": row.get("technique_id"), "name": row.get("name"), "url": row.get("url"),
+        "tactic": (row.get("tactics") or [""])[0], "tactics": row.get("tactics", []),
+        "platforms": row.get("platforms", []), "is_subtechnique": bool(row.get("is_subtechnique")),
+        "detection_strategies": [strategy.get("name") for strategy in strategies[:4] if strategy.get("name")],
+        "data_components": components[:6], "mutable_elements": mutable[:6],
+    }
+
+
 def reference_seeds(objective: str, limit: int = 36, path: Path = CATALOG_PATH) -> list[dict[str, Any]]:
     """Select a compact relevant and tactic-diverse planning view."""
     catalog = load_attack_catalog(path)
@@ -46,30 +72,6 @@ def reference_seeds(objective: str, limit: int = 36, path: Path = CATALOG_PATH) 
                                          "look", "malicious", "network", "possible", "review", "search", "suspected",
                                          "telemetry", "threat"}}
 
-    def compact(row: dict) -> dict:
-        strategies = row.get("detection_strategies", []) or []
-        analytics = [analytic for strategy in strategies[:3] for analytic in (strategy.get("analytics", []) or [])[:2]]
-        components = []
-        mutable = []
-        for analytic in analytics:
-            component = analytic.get("data_component")
-            if isinstance(component, dict) and component.get("name") and component["name"] not in components:
-                components.append(component["name"])
-            for value in analytic.get("mutable_elements", []) or []:
-                text = (
-                    value.get("field") or value.get("name") or value.get("description")
-                    if isinstance(value, dict)
-                    else value
-                )
-                if text and str(text) not in mutable: mutable.append(str(text)[:120])
-        return {
-            "technique_id": row.get("technique_id"), "name": row.get("name"), "url": row.get("url"),
-            "tactic": (row.get("tactics") or [""])[0], "tactics": row.get("tactics", []),
-            "platforms": row.get("platforms", []), "is_subtechnique": bool(row.get("is_subtechnique")),
-            "detection_strategies": [strategy.get("name") for strategy in strategies[:4] if strategy.get("name")],
-            "data_components": components[:6], "mutable_elements": mutable[:6],
-        }
-
     def score(row: dict) -> tuple[int, int, str]:
         text = " ".join([str(row.get("name") or ""), str(row.get("description") or ""),
                          " ".join(str(x.get("name") or "") for x in row.get("detection_strategies", []) or [])]).lower()
@@ -82,11 +84,11 @@ def reference_seeds(objective: str, limit: int = 36, path: Path = CATALOG_PATH) 
         for technique_id in BROAD_PRIORITY_IDS:
             row = by_id.get(technique_id)
             if row:
-                selected.append(compact(row)); seen.add(technique_id)
+                selected.append(_compact_reference(row)); seen.add(technique_id)
                 if len(selected) >= limit: return selected
     for row in sorted(techniques, key=score, reverse=True):
         if score(row)[0] <= 0 or row.get("technique_id") in seen: continue
-        selected.append(compact(row)); seen.add(row.get("technique_id"))
+        selected.append(_compact_reference(row)); seen.add(row.get("technique_id"))
         if len(selected) >= min(12, limit): break
 
     by_tactic: dict[str, list[dict]] = {}
@@ -99,7 +101,39 @@ def reference_seeds(objective: str, limit: int = 36, path: Path = CATALOG_PATH) 
             while by_tactic[tactic] and by_tactic[tactic][0].get("technique_id") in seen:
                 by_tactic[tactic].pop(0)
             if by_tactic[tactic]:
-                row = by_tactic[tactic].pop(0); selected.append(compact(row)); seen.add(row.get("technique_id")); progressed = True
+                row = by_tactic[tactic].pop(0); selected.append(_compact_reference(row)); seen.add(row.get("technique_id")); progressed = True
                 if len(selected) >= limit: break
         if not progressed: break
     return selected[:limit]
+
+
+def bounded_attack_context(
+    objective: str,
+    technique_ids: list[str] | tuple[str, ...] = (),
+    limit: int = 12,
+    path: Path = CATALOG_PATH,
+) -> list[dict[str, Any]]:
+    """Return exact requested techniques first, then a relevant bounded reference view."""
+    bounded = max(0, min(int(limit), 36))
+    if not bounded:
+        return []
+    techniques = [row for row in load_attack_catalog(path).get("techniques", []) if isinstance(row, dict)]
+    by_id = {str(row.get("technique_id")): row for row in techniques if row.get("technique_id")}
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for technique_id in technique_ids:
+        normalized = str(technique_id or "").strip()
+        row = by_id.get(normalized)
+        if row is not None and normalized not in seen:
+            selected.append(_compact_reference(row))
+            seen.add(normalized)
+            if len(selected) >= bounded:
+                return selected
+    for row in reference_seeds(objective, limit=bounded, path=path):
+        technique_id = str(row.get("technique_id") or "")
+        if technique_id and technique_id not in seen:
+            selected.append(row)
+            seen.add(technique_id)
+            if len(selected) >= bounded:
+                break
+    return selected
