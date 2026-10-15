@@ -8,6 +8,7 @@ This directory separates authoritative machine data, generated operator inventor
 - [common-indicator-research.md](common-indicator-research.md) explains the research model, prioritization principles, sources, and implementation boundaries.
 - [elasticsearch-dsl-search-matrix.md](elasticsearch-dsl-search-matrix.md) explains the field-aware Elasticsearch matrix and the query quality controls.
 - [windows-event-log-threat-hunting.md](windows-event-log-threat-hunting.md) explains Windows event coverage, useful event relationships, and collection limitations.
+- [2026-10-15-secondary-project-audit.md](2026-10-15-secondary-project-audit.md) records the independent repository audit, repairs, and remaining verification limits.
 
 ## Machine sources
 

@@ -1,6 +1,6 @@
 # ROMULUS Elasticsearch DSL Search Matrix
 
-**Reviewed:** 2026-10-15  
+**Reviewed:** 2026-10-15
 **Purpose:** document the source selectors, behavior signatures, query format, and validation changes used by ROMULUS when planning Elasticsearch searches.
 
 ## How the DSL reaches the search

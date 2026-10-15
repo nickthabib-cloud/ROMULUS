@@ -112,6 +112,12 @@
       "class": "operator_document",
       "owner": "Windows event research",
       "consumers": ["docs/research/README.md", "romulus/intelligence/windows_event_catalog.json"]
+    },
+    {
+      "path": "docs/research/2026-10-15-secondary-project-audit.md",
+      "class": "operator_document",
+      "owner": "secondary repository audit",
+      "consumers": ["docs/research/README.md"]
     }
   ]
 }

@@ -92,6 +92,8 @@ def _ordered(
         if index == len(candidates):
             return chosen
         for event in candidates[index]:
+            if _already_chosen(event, chosen):
+                continue
             if chosen and event["time"] < chosen[-1]["time"]:
                 continue
             trial = chosen + [event]
@@ -117,6 +119,8 @@ def _unordered(
         for position in range(offset, len(populated)):
             _, rows = populated[position]
             for event in rows:
+                if _already_chosen(event, chosen):
+                    continue
                 trial = chosen + [event]
                 times = [row["time"] for row in trial]
                 if (max(times) - min(times)).total_seconds() > window_seconds:
@@ -127,6 +131,14 @@ def _unordered(
                         return found
         return []
     return walk(0, [])
+
+
+def _already_chosen(event: dict[str, Any], chosen: list[dict[str, Any]]) -> bool:
+    identifier = str(event.get("evidence_id") or "")
+    return any(
+        (identifier and identifier == str(row.get("evidence_id") or "")) or event is row
+        for row in chosen
+    )
 
 
 def _joins_hold(events: list[dict[str, Any]], joins: list[str], join_mode: str) -> bool:
@@ -249,6 +261,16 @@ def _derived_signals(text: str, raw: dict[str, Any]) -> set[str]:
     for signal, needles in patterns.items():
         if any(needle in text for needle in needles):
             signals.add(signal)
+    if _nested(raw, "process.command_line") is not None or _nested(raw, "process.executable") is not None:
+        signals.update(("execute", "host_behavior"))
+    if any(_nested(raw, field) is not None for field in ("source.ip", "destination.ip", "ip.src", "ip.dst")):
+        signals.add("network_connection")
+    event_code = str(_nested(raw, "event.code") or _nested(raw, "winlog.event_id") or "")
+    event_outcome = str(_nested(raw, "event.outcome") or "").lower()
+    if event_code == "4625" or event_outcome in {"failure", "failed"}:
+        signals.add("failed_attempts")
+    if event_code == "4624" or event_outcome in {"success", "succeeded"}:
+        signals.add("alternate_method_success")
     command = text.strip()
     exact_commands = {
         "id": r"(?:^|\s)id(?:\s|$)", "whoami": r"\bwhoami\b", "groups": r"\bgroups\b",
@@ -283,6 +305,8 @@ def _values(event: dict[str, Any], raw: dict[str, Any], fields: tuple[str, ...],
 
 
 def _nested(value: dict[str, Any], path: str) -> Any:
+    if isinstance(value, dict) and path in value:
+        return value[path]
     current: Any = value
     for part in path.split("."):
         if not isinstance(current, dict) or part not in current:

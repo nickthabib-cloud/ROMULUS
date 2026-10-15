@@ -206,6 +206,7 @@ class CustomerWordReportTests(unittest.TestCase):
                 "Intelligence execution",
                 "636 executable",
                 "266 reference only",
+                "Absence of findings does not prove that the environment is free of malicious activity.",
             ):
                 self.assertIn(expected, word_text)
 

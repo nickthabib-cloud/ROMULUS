@@ -1,7 +1,7 @@
 # ROMULUS common behavioral indicator research corpus
 
-**Date:** 2026-10-15  
-**Status:** Authoritative research input with generated runtime packs and an operator inventory.  
+**Date:** 2026-10-15
+**Status:** Authoritative research input with generated runtime packs and an operator inventory.
 **Size:** 3,863 candidate records: 902 curated behavioral indicators, 485 LOLBAS capability records, 731 GTFOBins capability records, and 1,745 indexed ATT&CK detection analytics.
 
 ## Objective

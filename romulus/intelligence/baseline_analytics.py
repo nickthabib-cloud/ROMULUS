@@ -16,6 +16,7 @@ MAX_BASELINE_EVENTS = 10_000
 MAX_SCOPES = 10_000
 MAX_VALUES_PER_SCOPE = 2_000
 MAX_VALUE_SCOPES = 2_000
+MAX_DISTINCT_VALUES = 20_000
 MAX_EVIDENCE_IDS = 40
 PRIMITIVES = {"first_seen", "prevalence", "deviation"}
 
@@ -47,6 +48,8 @@ def evaluate_baselines(
             incomplete = sorted(set(incomplete + ["event_limit"]))
         eligible = _eligible(events, execution)
         state = states.get(identifier) if isinstance(states.get(identifier), dict) else {}
+        if state.get("storage_limited"):
+            incomplete = sorted(set(incomplete + ["baseline_history_limit"]))
         selected, detail, ready = _match(eligible, execution, state)
         if ready:
             ready_count += 1
@@ -106,6 +109,7 @@ def build_baseline_updates(
         state = deepcopy(states.get(identifier)) if isinstance(states.get(identifier), dict) else {}
         state.setdefault("schema_version", 1)
         state.setdefault("observations", 0)
+        limit_reasons = set(state.get("storage_limit_reasons") or [])
         primitive = execution.get("primitive")
         if primitive in {"first_seen", "prevalence"}:
             scope_values = state.setdefault("scope_values", {})
@@ -117,21 +121,31 @@ def build_baseline_updates(
                 if not scope or not value:
                     continue
                 if scope not in scope_values and len(scope_values) >= MAX_SCOPES:
+                    limit_reasons.add("scope_values")
+                    continue
+                if value not in value_scopes and len(value_scopes) >= MAX_DISTINCT_VALUES:
+                    limit_reasons.add("distinct_values")
+                    continue
+                prior_scopes = set(value_scopes.get(value, []))
+                if scope not in prior_scopes and len(prior_scopes) >= MAX_VALUE_SCOPES:
+                    limit_reasons.add("value_scopes")
                     continue
                 values = scope_values.setdefault(scope, {})
                 if value not in values and len(values) >= MAX_VALUES_PER_SCOPE:
+                    limit_reasons.add("values_per_scope")
                     continue
                 values[value] = int(values.get(value, 0)) + 1
-                scopes = set(value_scopes.get(value, []))
-                if scope in scopes or len(scopes) < MAX_VALUE_SCOPES:
-                    scopes.add(scope)
-                    value_scopes[value] = sorted(scopes)
+                prior_scopes.add(scope)
+                value_scopes[value] = sorted(prior_scopes)
                 added += 1
             state["observations"] = int(state.get("observations") or 0) + added
         elif primitive == "deviation":
             current = _measurements(eligible, execution)
             metrics = state.setdefault("metrics", {})
             for scope, (metric, _) in current.items():
+                if scope not in metrics and len(metrics) >= MAX_SCOPES:
+                    limit_reasons.add("metric_scopes")
+                    continue
                 summary = metrics.setdefault(scope, {"n": 0, "mean": 0.0, "m2": 0.0})
                 n = int(summary.get("n") or 0) + 1
                 mean = float(summary.get("mean") or 0.0)
@@ -140,6 +154,9 @@ def build_baseline_updates(
                 m2 = float(summary.get("m2") or 0.0) + delta * (metric - mean)
                 summary.update({"n": n, "mean": mean, "m2": m2})
                 state["observations"] = int(state.get("observations") or 0) + 1
+        if limit_reasons:
+            state["storage_limited"] = True
+            state["storage_limit_reasons"] = sorted(limit_reasons)
         updates[identifier] = state
     return updates
 
@@ -373,6 +390,8 @@ def _scalar(row: dict[str, Any], path: str) -> str:
 
 
 def _nested(value: dict[str, Any], path: str) -> Any:
+    if isinstance(value, dict) and path in value:
+        return value[path]
     current: Any = value
     for part in path.split("."):
         if not isinstance(current, dict) or part not in current:

@@ -499,7 +499,7 @@ def _docx(s,path):
         para(line)
     if not intelligence_lines:
         para("No intelligence execution coverage was recorded.")
-    para("This assessment applies only to the specified time range and the telemetry listed above. No finding is not proof that the environment is free of malicious activity.")
+    para("This assessment applies only to the specified time range and the telemetry listed above. Absence of findings does not prove that the environment is free of malicious activity.")
 
     heading("MITRE ATT&CK Context")
     if attack_rows:

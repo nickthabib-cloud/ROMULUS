@@ -340,6 +340,8 @@ def _source_family(event: dict[str, Any], raw: dict[str, Any]) -> str:
 
 
 def _nested(value: dict[str, Any], path: str) -> Any:
+    if isinstance(value, dict) and path in value:
+        return value[path]
     current: Any = value
     for part in path.split("."):
         if not isinstance(current, dict) or part not in current:

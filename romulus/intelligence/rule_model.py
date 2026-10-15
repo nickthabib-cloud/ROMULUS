@@ -92,13 +92,3 @@ class SourceStage:
             "any": [item.as_mapping() for item in self.any],
             "none": [item.as_mapping() for item in self.none],
         }
-
-
-def stage_from_analytic(analytic: dict[str, Any]) -> SourceStage:
-    source = str(analytic.get("source") or "")
-    return SourceStage.from_mapping({
-        "stage_id": analytic.get("stage_id") or f"{analytic.get('id', 'analytic')}:{source}",
-        "source": source,
-        "query_language": analytic.get("source_language") or SOURCE_QUERY_LANGUAGES.get(source),
-        "match": analytic.get("match"),
-    })

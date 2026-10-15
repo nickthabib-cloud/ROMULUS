@@ -473,6 +473,14 @@ class WorkflowIntegrationTests(unittest.TestCase):
                 store.load_state("HUNT-QUEUE")["candidate_leads"][0]["candidate_id"],
                 result["candidate_leads"][0]["candidate_id"],
             )
+            self.assertEqual(
+                result["coverage"]["sequence_analytics"]["by_rule"]["CUR-CORE-0009"]["state"],
+                "no_match",
+            )
+            self.assertEqual(
+                result["coverage"]["aggregate_analytics"]["by_rule"]["CUR-IDENTITY-0363"]["state"],
+                "no_match",
+            )
 
 
 class CandidateReportingTests(unittest.TestCase):

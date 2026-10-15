@@ -35,6 +35,22 @@ def rule(identifier, primitive, **execution):
 
 
 class AggregateEvaluationTests(unittest.TestCase):
+    def test_flat_dotted_fields_are_evaluated_like_nested_fields(self):
+        from romulus.intelligence.aggregate_analytics import evaluate_aggregates
+
+        evidence = [{
+            "evidence_id": "E-FLAT", "observed_at": "2026-10-15T12:00:00Z",
+            "source": "arkime", "source_family": "network",
+            "raw": {"source.ip": "10.0.0.1", "destination.ip": "192.0.2.10"},
+        }]
+        definition = rule("flat", "fanout", group_by=["source.ip"],
+                          distinct_field="destination.ip",
+                          threshold={"operator": "gte", "value": 1})
+
+        matches, _ = evaluate_aggregates(evidence, [definition], None)
+
+        self.assertEqual([row["analytic_id"] for row in matches], ["flat"])
+
     def test_count_distinct_count_fanout_rate_and_volume(self):
         from romulus.intelligence.aggregate_analytics import evaluate_aggregates
 

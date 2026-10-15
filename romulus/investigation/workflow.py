@@ -1289,13 +1289,13 @@ class HuntEngine:
         sequence_candidates,sequence_coverage=evaluate_sequences(
             analysis_evidence,
             self.behavior_catalog.get("behavior_packs",{}).get("sequences",{}).get("records",[]),
-            list(s.get("search_outcomes",[])),
+            None if self.offline else list(s.get("search_outcomes",[])),
         )
         fresh_candidates.extend(sequence_candidates)
         aggregate_candidates,aggregate_coverage=evaluate_aggregates(
             analysis_evidence,
             self.behavior_catalog.get("behavior_packs",{}).get("aggregates",{}).get("records",[]),
-            list(s.get("search_outcomes",[])),
+            None if self.offline else list(s.get("search_outcomes",[])),
         )
         fresh_candidates.extend(aggregate_candidates)
         baseline_definitions=self.behavior_catalog.get("behavior_packs",{}).get("baselines",{}).get("records",[])
@@ -1962,11 +1962,6 @@ class HuntEngine:
         print(f"[ROMULUS] termination={s['termination_reason']} outcome={s['outcome']} tools={s.get('tool_calls',0)}")
         return self._save(s)
 
-    def _summarize(self,objective,observations):
-        from ..agent.ollama import Ollama
-        return Ollama(self.settings).summarize(objective,observations)
-
-
 def _attach_finding_paths(state):
     graph=state.setdefault("investigation_graph",{"version":1,"nodes":[],"edges":[],"paths":[],"summary":{}})
     paths=derive_finding_paths(graph,state.get("findings",[]))
@@ -1977,30 +1972,6 @@ def _attach_finding_paths(state):
     for finding in state.get("findings",[]):
         finding["attack_path_ids"]=path_ids_by_finding.get(finding.get("finding_id"),[])
     return state
-
-
-def _normalize_hypotheses(values):
-    if not isinstance(values,list): return []
-    out=[]
-    for item in values[:20]:
-        if not isinstance(item,dict): continue
-        title=_clean_string(item.get("title"),140)
-        rationale=_clean_string(item.get("rationale"),500)
-        if len(title)<5 or len(rationale)<10: continue
-        technique=item.get("technique_id")
-        if technique not in TECHNIQUES: technique="unmapped"
-        meta=TECHNIQUES.get(technique,{})
-        def strings(key,limit=8): return _clean_string_list(item.get(key),limit,140)
-        benign=_clean_string_list(item.get("benign_explanations"),6,180) or ["authorized administration or expected application activity"]
-        priority=item.get("priority") if isinstance(item.get("priority"),int) and 1<=item["priority"]<=5 else 3
-        hypothesis=Hypothesis("H-AI-"+f"{len(out)+1:02d}",title,technique,rationale,
-            strings("expected_host") or meta.get("host",[]),strings("expected_network") or meta.get("network",[]),benign,
-            tactics=meta.get("tactics",[]),detection_strategies=meta.get("detection_strategies",[]),
-            data_components=strings("required_data_components",6) or meta.get("data_components",[]),
-            analytic_goal=_clean_string(item.get("analytic_goal"),400) or meta.get("analytic_goal",""),
-            mutable_elements=meta.get("mutable_elements",[]),priority=priority)
-        out.append(encode(hypothesis))
-    return out
 
 
 def _mission_is_directed(objective):
@@ -2495,21 +2466,6 @@ def _within_minutes(left,right,minutes):
     except (ValueError,TypeError,OverflowError): return False
 
 
-def _timestamp_bounds(events,padding_minutes=0):
-    stamps=[]
-    for event in events:
-        try:
-            value=event.get("observed_at")
-            if not value: continue
-            stamp=datetime.fromisoformat(str(value).replace("Z","+00:00"))
-            if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=timezone.utc)
-            stamps.append(stamp.astimezone(timezone.utc))
-        except (ValueError,TypeError,OverflowError): continue
-    if not stamps: return None
-    pad=timedelta(minutes=padding_minutes)
-    return (min(stamps)-pad).isoformat(timespec="seconds"),(max(stamps)+pad).isoformat(timespec="seconds")
-
-
 def _event_text(event):
     raw=event.get("raw",{}) if isinstance(event.get("raw",{}),dict) else {}
     parts=[str(event.get("observation","")),str(raw.get("message","")),json.dumps(raw,ensure_ascii=False)]
@@ -2533,15 +2489,6 @@ def _time_filter(objective,lookback_hours,time_zone="UTC"):
     if len(found)>=2: return {"gte":_explicit_iso(found[0],False,time_zone),"lte":_explicit_iso(found[1],True,time_zone)}
     if found: return {"gte":_explicit_iso(found[0],False,time_zone),"lte":"now"}
     return {"gte":f"now-{lookback_hours}h","lte":"now"}
-
-
-def _arkime_time_window(objective,time_zone="UTC"):
-    found=_explicit_dates(objective)
-    if not found: return None,None
-    try:
-        now=int(datetime.now(timezone.utc).timestamp()*1000)
-        return _explicit_epoch(found[0],False,1000,time_zone),_explicit_epoch(found[1],True,1000,time_zone) if len(found)>1 else now
-    except (ValueError,OverflowError): return None,None
 
 
 def _pcap_time_filter(dates,time_zone="UTC"):

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def event(identifier, process, *, host="host-1", value=None):
@@ -24,6 +25,23 @@ def definition(identifier, primitive, **execution):
 
 
 class BaselineEvaluationTests(unittest.TestCase):
+    def test_flat_dotted_fields_are_evaluated_like_nested_fields(self):
+        from romulus.intelligence.baseline_analytics import evaluate_baselines
+
+        rule = definition("first", "first_seen", scope_fields=["host.name"],
+                          value_fields=["process.name"], warmup_min=1)
+        state = {"first": {"schema_version": 1, "observations": 1,
+                           "scope_values": {"host-1": {"cmd.exe": 1}}}}
+        row = {
+            "evidence_id": "E-FLAT", "observed_at": "2026-10-15T12:00:00Z",
+            "source": "elasticsearch", "source_family": "host",
+            "raw": {"host.name": "host-1", "process.name": "pwsh.exe"},
+        }
+
+        matches, _ = evaluate_baselines([row], [rule], state, None)
+
+        self.assertEqual([candidate["analytic_id"] for candidate in matches], ["first"])
+
     def test_first_seen_waits_for_warmup_then_matches_new_value(self):
         from romulus.intelligence.baseline_analytics import evaluate_baselines
 
@@ -95,6 +113,34 @@ class BaselineEvaluationTests(unittest.TestCase):
 
         self.assertIn("cmd.exe", updates["first"]["scope_values"]["host-1"])
         self.assertNotIn("evil.exe", updates["first"]["scope_values"]["host-1"])
+
+    def test_persisted_value_and_metric_dimensions_are_bounded(self):
+        from romulus.intelligence.baseline_analytics import build_baseline_updates, evaluate_baselines
+
+        first = definition("first", "first_seen", scope_fields=["host.name"],
+                           value_fields=["process.name"], warmup_min=1)
+        deviation = definition("bytes", "deviation", scope_fields=["host.name"],
+                               aggregation="sum", measure_field="network.bytes",
+                               warmup_min=1, multiplier=2.0, zscore=2.0, minimum=1)
+        evidence = [event("E1", "one.exe", host="host-1", value=10),
+                    event("E2", "two.exe", host="host-2", value=20)]
+
+        with patch("romulus.intelligence.baseline_analytics.MAX_DISTINCT_VALUES", 1), \
+             patch("romulus.intelligence.baseline_analytics.MAX_SCOPES", 1):
+            updates = build_baseline_updates(evidence, [first, deviation], {}, set())
+
+        self.assertLessEqual(len(updates["first"]["value_scopes"]), 1)
+        self.assertLessEqual(len(updates["first"]["scope_values"]), 1)
+        self.assertLessEqual(len(updates["bytes"]["metrics"]), 1)
+        self.assertTrue(updates["first"]["storage_limited"])
+        self.assertTrue(updates["bytes"]["storage_limited"])
+
+        _, coverage = evaluate_baselines(
+            [event("E3", "one.exe", host="host-1")], [first],
+            {"first": updates["first"]}, None,
+        )
+        self.assertEqual(coverage["by_rule"]["first"]["state"], "partial")
+        self.assertIn("baseline_history_limit", coverage["by_rule"]["first"]["incomplete_sources"])
 
     def test_store_update_is_versioned_and_idempotent_per_hunt(self):
         from romulus.store import Store

@@ -1,7 +1,7 @@
 # Windows Event Log Threat Hunting: Coverage and Priorities
 
-**Research date:** 2026-10-15  
-**Scope:** Windows Security, PowerShell, Sysmon, Defender, and supporting telemetry for ROMULUS hunts.  
+**Research date:** 2026-10-15
+**Scope:** Windows Security, PowerShell, Sysmon, Defender, and supporting telemetry for ROMULUS hunts.
 **Use:** Defensive detection design and telemetry coverage review. Event IDs are not treated as standalone proof of compromise.
 
 ## Executive view

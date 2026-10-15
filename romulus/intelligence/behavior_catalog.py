@@ -195,7 +195,6 @@ def load_behavior_catalog(
         "sequence_loaded": len(packs["sequences"].get("records", [])),
         "aggregate_loaded": len(packs["aggregates"].get("records", [])),
         "baseline_loaded": len(packs["baselines"].get("records", [])),
-        "capability_references": len(packs["capabilities"].get("records", [])),
         "executable_curated": packs["manifest"].get("execution_states", {}).get("curated_executable", len(direct)),
         "capability_references": packs["manifest"].get("execution_states", {}).get("capability_references", 0),
         "reference_only_sequences": sum(row.get("supported") is not True for row in packs["sequences"].get("records", [])),
@@ -557,10 +556,6 @@ def build_candidate_queue(
             str(item.get("candidate_id")),
         ),
     )
-
-
-def customer_visible_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [item for item in candidates if item.get("customer_visible")]
 
 
 def merge_candidate_queue(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[dict[str, Any]]:
