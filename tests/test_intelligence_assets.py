@@ -81,6 +81,38 @@ class IntelligenceAssetAuditTests(unittest.TestCase):
             self.assertEqual(result["status"], "error")
             self.assertTrue(any("retired asset" in error for error in result["errors"]))
 
+    def test_generated_priority_inventory_matches_current_execution_state(self):
+        from scripts.build_intelligence_docs import build_priority_inventory
+
+        expected = build_priority_inventory(ROOT)
+        actual = (ROOT / "docs/research/indicator-priority-inventory.md").read_text(encoding="utf-8")
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.count("- `CUR-"), 902)
+        self.assertIn("636 executable", actual)
+        self.assertIn("266 reference only", actual)
+        self.assertNotIn("not loaded", actual.lower())
+
+    def test_research_index_links_every_owned_operator_document(self):
+        registry = json.loads((ROOT / "romulus/intelligence/intelligence_assets.json").read_text(encoding="utf-8"))
+        index = (ROOT / "docs/research/README.md").read_text(encoding="utf-8")
+        owned = [row["path"] for row in registry["assets"] if row["class"] == "operator_document"]
+
+        for path in owned:
+            self.assertIn(Path(path).name, index)
+
+    def test_research_documents_do_not_claim_executable_packs_are_inert(self):
+        prohibited = (
+            "sequences, 206 aggregate patterns, and 58 baseline patterns are loaded as unsupported",
+            "all 902 records in this section are not loaded",
+            "sequence, aggregate, and baseline entries are retained with coverage status but are not evaluated",
+            "common-indicator-index.csv",
+        )
+        content = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "docs/research").glob("*.md"))
+
+        for phrase in prohibited:
+            self.assertNotIn(phrase.lower(), content.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

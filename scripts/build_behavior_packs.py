@@ -334,7 +334,6 @@ def compile_packs(corpus: dict[str, Any], registry: dict[str, Any]) -> dict[str,
 
     sequences = [_sequence_rule(row,registry) for row in sorted(sequence_rows,key=lambda row:row["id"])]
     aggregates = [_aggregate_rule(row, registry) for row in sorted(aggregate_rows, key=lambda row: row["id"])]
-    unsupported = registry["unsupported_semantics"]
     baselines = [_baseline_rule(row, registry) for row in sorted(baseline_rows, key=lambda row: row["id"])]
     capabilities_pack = {
         "schema_version": "2.0.0",
@@ -365,10 +364,10 @@ def write_packs(packs: dict[str, Any], output_dir: Path, corpus: dict[str, Any])
     active_aggregates = sum(row.get("activation_mode") == "active" for row in packs["aggregates"]["records"])
     active_baselines = sum(row.get("activation_mode") == "active" for row in packs["baselines"]["records"])
     active = active_direct + active_sequences + active_aggregates + active_baselines
-    observe = EXPECTED["curated_behavioral_indicator"] - active
-    executable = sum(row.get("supported") is True for name in ("direct","sequences","aggregates","baselines")
+    observe_direct = len(packs["direct"]["records"]) - active_direct
+    reference_only_curated = sum(row.get("supported") is not True for name in ("sequences","aggregates","baselines")
         for row in packs[name]["records"])
-    unsupported_count = sum(row.get("supported") is not True for name in ("sequences","aggregates","baselines")
+    executable = sum(row.get("supported") is True for name in ("direct","sequences","aggregates","baselines")
         for row in packs[name]["records"])
     manifest = {
         "manifest_version": "1.0.0",
@@ -377,7 +376,8 @@ def write_packs(packs: dict[str, Any], output_dir: Path, corpus: dict[str, Any])
         "source_status": corpus.get("status"),
         "source_counts": EXPECTED,
         "pack_counts": counts,
-        "curated_activation": {"active": active, "observe_or_unsupported": observe},
+        "curated_activation": {"active": active, "observe": observe_direct,
+            "reference_only": reference_only_curated},
         "direct_activation": {"active": active_direct, "observe": len(packs["direct"]["records"])-active_direct},
         "sequence_activation": {"active": active_sequences,
             "reference_only": len(packs["sequences"]["records"])-active_sequences},
@@ -386,9 +386,9 @@ def write_packs(packs: dict[str, Any], output_dir: Path, corpus: dict[str, Any])
         "baseline_activation": {"active": active_baselines,
             "reference_only": len(packs["baselines"]["records"])-active_baselines},
         "execution_states": {
-            "executable": executable,
-            "unsupported": unsupported_count,
-            "reference_only": len(packs["capabilities"]["records"]),
+            "curated_executable": executable,
+            "curated_reference_only": reference_only_curated,
+            "capability_references": len(packs["capabilities"]["records"]),
         },
         "observe_score_ceiling": 39,
         "source_hashes": {

@@ -74,6 +74,61 @@ def _analytic_lines(summary):
         lines.append(f"- Periodicity candidate {periodic.get('source')} → {periodic.get('destination')}:{periodic.get('port')}: {periodic.get('observations')} observations, mean {periodic.get('mean_interval_seconds')}s, CV {periodic.get('interval_cv')}; sample={_join_text(periodic.get('sample_evidence_ids'))}.")
     return lines
 
+
+def _intelligence_coverage_lines(state):
+    """Summarize rule execution without dumping the per-rule coverage ledger."""
+    coverage = state.get("coverage", {}) if isinstance(state.get("coverage"), dict) else {}
+    status = state.get("behavior_catalog_status", {})
+    if not isinstance(status, dict):
+        status = {}
+    packs = status.get("behavior_packs", {})
+    if not isinstance(packs, dict):
+        packs = {}
+    lines = []
+    if packs:
+        total = int(packs.get("curated_total") or 0)
+        executable = int(packs.get("executable_curated") or 0)
+        reference_only = int(packs.get("reference_only_curated") or max(0, total - executable))
+        active = sum(int(packs.get(key) or 0) for key in (
+            "active_direct", "active_sequences", "active_aggregates", "active_baselines"
+        ))
+        observe = int(packs.get("observe_curated") or 0)
+        lines.append(
+            f"Curated intelligence: loaded={total}; {executable} executable "
+            f"({active} active, {observe} observe only); {reference_only} reference only; "
+            f"capability references={int(packs.get('capability_references') or 0)}; "
+            f"searches executed={int(status.get('searches_executed') or 0)}."
+        )
+    for label, key in (
+        ("Sequence analytics", "sequence_analytics"),
+        ("Aggregate analytics", "aggregate_analytics"),
+        ("Baseline analytics", "baseline_analytics"),
+    ):
+        block = coverage.get(key, {})
+        if not isinstance(block, dict) or not block:
+            continue
+        by_rule = block.get("by_rule", {})
+        if not isinstance(by_rule, dict):
+            by_rule = {}
+        state_counts = {}
+        for row in by_rule.values():
+            value = row.get("state", "unknown") if isinstance(row, dict) else "unknown"
+            state_counts[value] = state_counts.get(value, 0) + 1
+        evaluated = sum(count for value, count in state_counts.items() if value != "reference_only")
+        matched = state_counts.get("matched", 0) + state_counts.get("matched_partial", 0)
+        partial = state_counts.get("partial", 0) + state_counts.get("matched_partial", 0)
+        no_match = state_counts.get("no_match", 0)
+        warming = state_counts.get("warming", 0)
+        lines.append(
+            f"{label}: loaded={int(block.get('total') or 0)}; "
+            f"executable={int(block.get('executable') or 0)}; evaluated={evaluated}; "
+            f"matched={matched}; partial={partial}; no match={no_match}; warming={warming}; "
+            f"reference only={int(block.get('reference_only') or 0)}; "
+            f"events evaluated={int(block.get('evaluated_events') or 0)}; "
+            f"event limit reached={bool(block.get('event_limit_reached'))}."
+        )
+    return lines
+
 def _candidate_line(candidate):
     return (
         f"- {candidate.get('candidate_id')} {candidate.get('title')} "
@@ -160,7 +215,14 @@ def _content(s):
         f"Elapsed: {s.get('duration_ms','not recorded')} ms",
         f"Tool calls: {s.get('tool_calls',0)} / {s.get('coverage',{}).get('tool_call_limit','not recorded')}; analyst rounds: {s.get('depth',0)} / {s.get('coverage',{}).get('depth_limit','not recorded')}",
         f"ATT&CK knowledge baseline: {ATTACK_DOMAIN} {ATTACK_RELEASE} ({ATTACK_RELEASE_DATE})","", "OBJECTIVE AND SCOPE",s.get("objective",""),"", "DATA SOURCES AND COVERAGE"]
-    lines += [f"- {k}: {v}" for k,v in s.get("coverage",{}).items() if k not in {"search_fields","analytic_summary","hypothesis_coverage","recent_search_artifacts"}]
+    verbose_coverage = {
+        "search_fields", "analytic_summary", "hypothesis_coverage", "recent_search_artifacts",
+        "behavior_catalog", "search_matrix", "sequence_analytics", "aggregate_analytics",
+        "baseline_analytics",
+    }
+    lines += [f"- {k}: {v}" for k,v in s.get("coverage",{}).items() if k not in verbose_coverage]
+    lines += ["", "INTELLIGENCE EXECUTION"]
+    lines += [f"- {line}" for line in _intelligence_coverage_lines(s)] or ["No intelligence execution coverage was recorded."]
     lines += ["", "REASONING AND INVESTIGATION STAGES"]
     for stage in s.get("stage_history",[]): lines.append(f"- {stage.get('timestamp')} {stage.get('stage')}: {stage.get('status')}; details={stage.get('details')}.")
     for stage in s.get("reasoning_history",[]):
@@ -431,6 +493,12 @@ def _docx(s,path):
     cells=scope.add_row().cells; set_cell_text(cells[0],"Collection limitations",True)
     set_cell_text(cells[1]," ".join(limitations)+" See the technical TXT report for details.")
     format_table(scope)
+    doc.add_heading("Intelligence execution",level=2)
+    intelligence_lines=_intelligence_coverage_lines(s)
+    for line in intelligence_lines:
+        para(line)
+    if not intelligence_lines:
+        para("No intelligence execution coverage was recorded.")
     para("This assessment applies only to the specified time range and the telemetry listed above. No finding is not proof that the environment is free of malicious activity.")
 
     heading("MITRE ATT&CK Context")

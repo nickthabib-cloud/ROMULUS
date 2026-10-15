@@ -11,16 +11,17 @@
   "corpus_version": "2026-10-15",
   "curated_activation": {
     "active": 160,
-    "observe_or_unsupported": 742
+    "observe": 476,
+    "reference_only": 266
   },
   "direct_activation": {
     "active": 73,
     "observe": 476
   },
   "execution_states": {
-    "executable": 636,
-    "reference_only": 1216,
-    "unsupported": 266
+    "capability_references": 1216,
+    "curated_executable": 636,
+    "curated_reference_only": 266
   },
   "manifest_version": "1.0.0",
   "observe_score_ceiling": 39,

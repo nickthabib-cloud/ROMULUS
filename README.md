@@ -33,6 +33,8 @@ The reported Arkime `pcapDir=/dev/shm/arkime-raw` expiry error is a separate sto
 
 The editable starting behavior list, trusted IOC file, scoring policy, and extension instructions are documented in [docs/behavior-analytics.md](docs/behavior-analytics.md).
 
+The [intelligence document index](docs/research/README.md) explains the authoritative sources, generated files, research notes, and the meaning of each runtime state. The generated [priority inventory](docs/research/indicator-priority-inventory.md) lists all 902 curated behaviors by name, priority, and current state without exposing query JSON. Of those behaviors, 636 have reviewed executable semantics and 266 remain reference only with a named gap. Live reports distinguish loaded rules from rules that were executable, actually evaluated, matched, partial because of source limits, or still warming a baseline.
+
 ## Project components
 
 `romulus/agent/` contains the local model interface. `romulus/investigation/` owns the single-agent graph, unified scheduler, safe selector validation, source-query compilers, bounded evidence context, and budgets. `romulus/tools/` contains deterministic read-only source adapters. `romulus/intelligence/` holds normalization, the pinned official ATT&CK catalog, curated query-enrichment layer, behavioral analytics, and deterministic correlation. `romulus/store.py` persists the complete unique evidence set, hunt state, and events. `romulus/reporting/` creates reports. The model assesses existing evidence-backed hypotheses and proposes searches; code validates citations, entities, ATT&CK ownership, query parameters, source constraints, and priority before acting or publishing a finding.

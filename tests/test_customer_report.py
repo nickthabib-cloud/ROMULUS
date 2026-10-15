@@ -21,6 +21,31 @@ class CustomerWordReportTests(unittest.TestCase):
                 "host": "available; 123 events examined",
                 "network": "available; 18 sessions examined",
                 "tool_call_limit": 20,
+                "sequence_analytics": {
+                    "total": 89, "executable": 26, "reference_only": 63,
+                    "matched": 1, "evaluated_events": 141, "event_limit_reached": False,
+                    "by_rule": {
+                        "CUR-SEQ-001": {"state": "matched"},
+                        "CUR-SEQ-002": {"state": "partial"},
+                        "CUR-SEQ-003": {"state": "reference_only"},
+                    },
+                },
+                "aggregate_analytics": {
+                    "total": 206, "executable": 18, "reference_only": 188,
+                    "matched": 0, "evaluated_events": 141, "event_limit_reached": False,
+                    "by_rule": {
+                        "CUR-AGG-001": {"state": "no_match"},
+                        "CUR-AGG-002": {"state": "reference_only"},
+                    },
+                },
+                "baseline_analytics": {
+                    "total": 58, "executable": 43, "reference_only": 15,
+                    "matched": 0, "evaluated_events": 141, "event_limit_reached": False,
+                    "by_rule": {
+                        "CUR-BASE-001": {"state": "warming"},
+                        "CUR-BASE-002": {"state": "reference_only"},
+                    },
+                },
                 "scheduler_gaps": [{"phase":"report_finalization","reason":"tool_call_budget",
                     "budget_limited_task_count":3,
                     "budget_limited_task_ids":["ST-BUDGET-001","ST-BUDGET-002"]}],
@@ -132,6 +157,20 @@ class CustomerWordReportTests(unittest.TestCase):
                     "fallback_reason": "arkime_offset_limit"}}],
             "scheduler_history": [{"event": "investigation_budget_gap", "unserved_families": ["network"]}],
             "source_errors": [],
+            "behavior_catalog_status": {
+                "behavior_packs": {
+                    "curated_total": 902,
+                    "executable_curated": 636,
+                    "active_direct": 73,
+                    "active_sequences": 26,
+                    "active_aggregates": 18,
+                    "active_baselines": 43,
+                    "observe_curated": 476,
+                    "reference_only_curated": 266,
+                    "capability_references": 1216,
+                },
+                "searches_executed": 7,
+            },
         }
 
     def test_word_is_concise_customer_report_and_text_keeps_technical_record(self):
@@ -164,6 +203,9 @@ class CustomerWordReportTests(unittest.TestCase):
                 "Supported Attack Path",
                 "EV-RAW-001",
                 "incomplete, nonrepresentative bounded retrieval",
+                "Intelligence execution",
+                "636 executable",
+                "266 reference only",
             ):
                 self.assertIn(expected, word_text)
 
@@ -193,6 +235,10 @@ class CustomerWordReportTests(unittest.TestCase):
             self.assertIn("CL-HIGH",technical_text)
             self.assertIn("budget-limited=ST-BUDGET-001, ST-BUDGET-002",technical_text)
             self.assertIn("total=3; omitted=1",technical_text)
+            self.assertIn("Sequence analytics: loaded=89; executable=26; evaluated=2", technical_text)
+            self.assertIn("Aggregate analytics: loaded=206; executable=18; evaluated=1", technical_text)
+            self.assertIn("Baseline analytics: loaded=58; executable=43; evaluated=1", technical_text)
+            self.assertNotIn("'by_rule':", technical_text)
             self.assertNotIn("DO-NOT-REPORT-SECRET",technical_text)
 
             self.assertGreaterEqual(len(document.tables), 3)

@@ -1,0 +1,999 @@
+# ROMULUS Intelligence Priority Inventory
+
+**Generated from the authoritative corpus and behavior packs on 2026-10-15.**
+
+This is the plain-language list of all 902 curated behaviors. It omits query JSON and predicate details. Research priority says how quickly a matching behavior deserves review; runtime status says how ROMULUS currently uses it.
+
+## Runtime summary
+
+- 636 executable curated behaviors: 160 active and 476 observe only.
+- 266 reference only curated behaviors with a named missing-semantics reason.
+- 1216 capability references provide bounded context and never create or score findings.
+- ATT&CK references provide planning and mapping context and never count as observed behavior.
+- Loaded, executable, executed, matched, partial, and reference only are separate states. A live hunt reports actual execution and source completeness.
+
+## Status terms
+
+- **Active:** executable and eligible for normal candidate priority.
+- **Observe only:** executable with a score ceiling; it cannot become customer visible by itself.
+- **Executable sequence or aggregate:** evaluated against complete normalized evidence with its declared joins or thresholds.
+- **Executable baseline:** evaluated after warm up against history learned only from completed hunts.
+- **Reference only:** retained research that lacks enough exact semantics to run safely.
+
+## All curated behaviors
+
+### Critical priority (7)
+
+#### cross-platform
+
+- `CUR-CORE-0005` Downloaded payload made executable and launched — critical; executable sequence (sequence)
+- `CUR-CORE-0006` Remote download piped directly to an interpreter — critical; active direct rule
+- `CUR-CORE-0010` Sensitive file access followed by outbound transfer — critical; executable sequence (sequence)
+- `CUR-CORE-0011` Security logging impaired near suspicious execution — critical; executable sequence (sequence)
+- `CUR-CORE-0013` Credential access followed by remote authentication — critical; executable sequence (sequence)
+
+#### linux
+
+- `CUR-CORE-0003` Linux credential files copied or archived together — critical; active direct rule
+- `CUR-CORE-0008` Shell connected through a device or socket primitive — critical; active direct rule
+
+### High priority (358)
+
+#### aws-cloud
+
+- `CUR-AWS-0425` AWS security-relevant API action: StopLogging — high; observe-only direct rule
+- `CUR-AWS-0426` AWS security-relevant API action: DeleteTrail — high; observe-only direct rule
+- `CUR-AWS-0432` AWS security-relevant API action: DeleteDetector — high; observe-only direct rule
+- `CUR-AWS-0444` AWS security-relevant API action: CreateAccessKey — high; observe-only direct rule
+- `CUR-AWS-0451` AWS security-relevant API action: AttachUserPolicy — high; observe-only direct rule
+- `CUR-AWS-0452` AWS security-relevant API action: AttachRolePolicy — high; observe-only direct rule
+- `CUR-AWS-0453` AWS security-relevant API action: PutUserPolicy — high; observe-only direct rule
+- `CUR-AWS-0454` AWS security-relevant API action: PutRolePolicy — high; observe-only direct rule
+- `CUR-AWS-0458` AWS security-relevant API action: UpdateAssumeRolePolicy — high; observe-only direct rule
+- `CUR-AWS-0464` AWS security-relevant API action: AssumeRole — high; observe-only direct rule
+- `CUR-AWS-0470` AWS security-relevant API action: GetSecretValue — high; observe-only direct rule
+- `CUR-AWS-0471` AWS security-relevant API action: BatchGetSecretValue — high; observe-only direct rule
+- `CUR-AWS-0475` AWS security-relevant API action: Decrypt — high; observe-only direct rule
+- `CUR-AWS-0480` AWS security-relevant API action: PutBucketPublicAccessBlock — high; observe-only direct rule
+- `CUR-AWS-0481` AWS security-relevant API action: DeleteBucketPublicAccessBlock — high; observe-only direct rule
+- `CUR-AWS-0508` AWS security-relevant API action: ScheduleKeyDeletion — high; observe-only direct rule
+
+#### azure-cloud
+
+- `CUR-AZURE-0520` Azure or Entra security-relevant action: Microsoft.Authorization/roleAssignments/write — high; observe-only direct rule
+- `CUR-AZURE-0521` Azure or Entra security-relevant action: Microsoft.Authorization/roleAssignments/delete — high; observe-only direct rule
+- `CUR-AZURE-0523` Azure or Entra security-relevant action: Microsoft.Insights/diagnosticSettings/delete — high; observe-only direct rule
+- `CUR-AZURE-0533` Azure or Entra security-relevant action: Microsoft.Compute/virtualMachines/runCommand/action — high; observe-only direct rule
+- `CUR-AZURE-0540` Azure or Entra security-relevant action: Microsoft.Storage/storageAccounts/listKeys/action — high; observe-only direct rule
+- `CUR-AZURE-0559` Azure or Entra security-relevant action: Add service principal credentials — high; observe-only direct rule
+- `CUR-AZURE-0561` Azure or Entra security-relevant action: Consent to application — high; observe-only direct rule
+- `CUR-AZURE-0564` Azure or Entra security-relevant action: Update Conditional Access policy — high; observe-only direct rule
+- `CUR-AZURE-0565` Azure or Entra security-relevant action: Delete Conditional Access policy — high; observe-only direct rule
+- `CUR-AZURE-0566` Azure or Entra security-relevant action: Set federation settings on domain — high; observe-only direct rule
+
+#### cross-platform
+
+- `CUR-CORE-0012` New persistence followed by first external connection — high; reference only (missing canonical signal translation)
+- `CUR-CORE-0014` Discovery burst followed by remote service use — high; executable sequence (sequence)
+- `CUR-CORE-0015` Temporary-path executable followed by persistence — high; executable sequence (sequence)
+
+#### cross-source-correlation
+
+- `CUR-SEQ-0830` Privilege escalation followed by credential-store access — high; executable sequence (sequence)
+- `CUR-SEQ-0835` Privilege grant followed by secret or key access — high; reference only (missing canonical signal translation)
+- `CUR-SEQ-0836` Application credential addition followed by service-principal authentication — high; reference only (missing canonical signal translation)
+- `CUR-SEQ-0844` RDP login followed by credential dumping — high; reference only (missing canonical signal translation)
+- `CUR-SEQ-0851` Audit service stop followed by sensitive file access — high; executable sequence (sequence)
+- `CUR-SEQ-0855` Security exclusion creation followed by payload execution — high; reference only (missing canonical signal translation)
+- `CUR-SEQ-0857` Sensitive process access followed by dump-file creation — high; reference only (missing canonical signal translation)
+- `CUR-SEQ-0859` Volume shadow copy creation followed by directory database access — high; reference only (missing canonical signal translation)
+- `CUR-SEQ-0869` Cloud logging impairment followed by control-plane changes — high; reference only (missing canonical signal translation)
+- `CUR-SEQ-0874` Kubernetes secret enumeration followed by external connection — high; reference only (missing canonical signal translation)
+- `CUR-SEQ-0876` RBAC privilege grant followed by privileged pod creation — high; reference only (missing canonical signal translation)
+- `CUR-SEQ-0883` IDS alert correlated with endpoint execution on the same asset — high; executable sequence (sequence)
+- `CUR-SEQ-0900` Database enumeration followed by export or dump — high; reference only (missing canonical signal translation)
+
+#### gcp-cloud
+
+- `CUR-GCP-0573` Google Cloud security-relevant action: SetIamPolicy — high; observe-only direct rule
+- `CUR-GCP-0575` Google Cloud security-relevant action: google.iam.admin.v1.CreateServiceAccountKey — high; observe-only direct rule
+- `CUR-GCP-0577` Google Cloud security-relevant action: google.iam.credentials.v1.GenerateAccessToken — high; observe-only direct rule
+- `CUR-GCP-0580` Google Cloud security-relevant action: google.logging.v2.ConfigServiceV2.DeleteSink — high; observe-only direct rule
+- `CUR-GCP-0583` Google Cloud security-relevant action: google.logging.v2.ConfigServiceV2.UpdateExclusion — high; observe-only direct rule
+- `CUR-GCP-0589` Google Cloud security-relevant action: v1.compute.instances.setMetadata — high; observe-only direct rule
+- `CUR-GCP-0596` Google Cloud security-relevant action: v1.compute.snapshots.setIamPolicy — high; observe-only direct rule
+- `CUR-GCP-0597` Google Cloud security-relevant action: v1.compute.images.setIamPolicy — high; observe-only direct rule
+- `CUR-GCP-0599` Google Cloud security-relevant action: google.cloud.secretmanager.v1.SecretManagerService.AccessSecretVersion — high; observe-only direct rule
+- `CUR-GCP-0600` Google Cloud security-relevant action: google.cloud.kms.v1.KeyManagementService.Decrypt — high; observe-only direct rule
+- `CUR-GCP-0601` Google Cloud security-relevant action: google.cloud.kms.v1.KeyManagementService.SetIamPolicy — high; observe-only direct rule
+- `CUR-GCP-0606` Google Cloud security-relevant action: storage.buckets.setIamPolicy — high; observe-only direct rule
+- `CUR-GCP-0610` Google Cloud security-relevant action: google.container.v1.ClusterManager.SetIamPolicy — high; observe-only direct rule
+
+#### identity
+
+- `CUR-IDENTITY-0363` Identity anomaly or control change: password spray across many accounts — high; executable aggregate (distinct count)
+- `CUR-IDENTITY-0364` Identity anomaly or control change: many failures then success — high; executable aggregate (transition)
+- `CUR-IDENTITY-0365` Identity anomaly or control change: impossible travel — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0366` Identity anomaly or control change: atypical country or region — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0367` Identity anomaly or control change: new asn for identity — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0368` Identity anomaly or control change: anonymous proxy or tor signin — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0369` Identity anomaly or control change: new device for privileged user — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0370` Identity anomaly or control change: new user agent for service principal — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0371` Identity anomaly or control change: legacy authentication success — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0372` Identity anomaly or control change: mfa fatigue repeated prompts — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0373` Identity anomaly or control change: mfa method added then used — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0374` Identity anomaly or control change: mfa disabled — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0375` Identity anomaly or control change: conditional access policy disabled — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0376` Identity anomaly or control change: conditional access exclusion added — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0377` Identity anomaly or control change: authentication strength weakened — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0378` Identity anomaly or control change: password reset by unusual actor — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0379` Identity anomaly or control change: password reset then immediate signin — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0380` Identity anomaly or control change: dormant account reactivated — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0381` Identity anomaly or control change: disabled account enabled — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0382` Identity anomaly or control change: guest account added — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0383` Identity anomaly or control change: external identity promoted — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0384` Identity anomaly or control change: privileged role assigned — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0385` Identity anomaly or control change: privileged role activated at unusual time — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0386` Identity anomaly or control change: permanent admin role assignment — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0387` Identity anomaly or control change: admin group membership changed — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0388` Identity anomaly or control change: role assignment then sensitive action — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0389` Identity anomaly or control change: new application registration — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0390` Identity anomaly or control change: new service principal — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0391` Identity anomaly or control change: application owner added — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0392` Identity anomaly or control change: application secret added — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0393` Identity anomaly or control change: application certificate added — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0394` Identity anomaly or control change: federated credential added — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0395` Identity anomaly or control change: high privilege oauth consent — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0396` Identity anomaly or control change: admin consent granted — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0397` Identity anomaly or control change: consent grant by nonstandard actor — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0398` Identity anomaly or control change: service principal signin from new ip — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0399` Identity anomaly or control change: managed identity used from unexpected resource — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0400` Identity anomaly or control change: token replay from distinct ips — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0401` Identity anomaly or control change: same token used from distant locations — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0402` Identity anomaly or control change: refresh token used after password reset — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0403` Identity anomaly or control change: sign in without expected mfa — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0404` Identity anomaly or control change: device code flow abuse pattern — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0405` Identity anomaly or control change: mailbox forwarding rule created — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0406` Identity anomaly or control change: inbox rule hides security mail — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0407` Identity anomaly or control change: mailbox delegation added — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0408` Identity anomaly or control change: transport rule created — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0409` Identity anomaly or control change: mailbox export started — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0410` Identity anomaly or control change: saml federation setting changed — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0411` Identity anomaly or control change: domain federation changed — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0412` Identity anomaly or control change: new identity provider added — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0413` Identity anomaly or control change: signing certificate changed — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0414` Identity anomaly or control change: password hash sync configuration changed — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0415` Identity anomaly or control change: break glass account used — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0416` Identity anomaly or control change: service account interactive signin — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0417` Identity anomaly or control change: human account client credential flow — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0418` Identity anomaly or control change: service principal high failure rate — high; executable aggregate (rate)
+- `CUR-IDENTITY-0419` Identity anomaly or control change: cross tenant access policy weakened — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0420` Identity anomaly or control change: risky user dismissed by unusual actor — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0421` Identity anomaly or control change: audit log export or diagnostic setting removed — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0422` Identity anomaly or control change: provisioning agent changed — high; reference only (missing explicit aggregate semantics)
+- `CUR-IDENTITY-0423` Identity anomaly or control change: bulk group membership change — high; executable aggregate (count)
+- `CUR-IDENTITY-0424` Identity anomaly or control change: bulk user download or directory read — high; executable aggregate (count)
+
+#### kubernetes
+
+- `CUR-K8S-0620` Kubernetes security signal: create privileged pod — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0621` Kubernetes security signal: create pod with hostpath — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0622` Kubernetes security signal: create pod with hostnetwork — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0623` Kubernetes security signal: create pod with hostpid — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0624` Kubernetes security signal: create pod with hostipc — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0625` Kubernetes security signal: add sys admin capability — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0626` Kubernetes security signal: add sys ptrace capability — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0627` Kubernetes security signal: run container as root — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0628` Kubernetes security signal: disable seccomp — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0629` Kubernetes security signal: set apparmor unconfined — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0630` Kubernetes security signal: mount container runtime socket — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0631` Kubernetes security signal: pod exec — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0632` Kubernetes security signal: pod attach — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0633` Kubernetes security signal: pod portforward — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0634` Kubernetes security signal: ephemeral container added — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0635` Kubernetes security signal: debug container started — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0636` Kubernetes security signal: container shell spawned — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0637` Kubernetes security signal: get secret — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0638` Kubernetes security signal: list secrets — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0639` Kubernetes security signal: watch secrets — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0640` Kubernetes security signal: service account token read — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0641` Kubernetes security signal: create service account token — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0642` Kubernetes security signal: kubeconfig read — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0643` Kubernetes security signal: create clusterrolebinding — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0644` Kubernetes security signal: bind cluster admin — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0645` Kubernetes security signal: modify clusterrole — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0646` Kubernetes security signal: grant impersonate — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0647` Kubernetes security signal: impersonated api request — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0648` Kubernetes security signal: anonymous api request — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0649` Kubernetes security signal: create mutating webhook — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0650` Kubernetes security signal: create validating webhook — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0651` Kubernetes security signal: modify admission configuration — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0652` Kubernetes security signal: delete network policy — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0653` Kubernetes security signal: weaken pod security policy — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0654` Kubernetes security signal: create daemonset — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0655` Kubernetes security signal: unexpected daemonset rollout — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0656` Kubernetes security signal: create cronjob — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0657` Kubernetes security signal: create job with shell — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0658` Kubernetes security signal: image changed to latest — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0659` Kubernetes security signal: image from unapproved registry — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0660` Kubernetes security signal: delete audit policy — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0661` Kubernetes security signal: audit webhook failure — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0662` Kubernetes security signal: excessive audit drops — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0663` Kubernetes security signal: delete security namespace — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0664` Kubernetes security signal: delete runtime detection agent — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0665` Kubernetes security signal: node proxy request — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0666` Kubernetes security signal: kubelet anonymous access — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0667` Kubernetes security signal: etcd direct access — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0668` Kubernetes security signal: etcd snapshot created — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0669` Kubernetes security signal: cluster certificate signing request approved — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0670` Kubernetes security signal: container reads host proc — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0671` Kubernetes security signal: container reads host etc shadow — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0672` Kubernetes security signal: container accesses cloud metadata — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0673` Kubernetes security signal: container crypto mining — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0674` Kubernetes security signal: container reverse shell — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0675` Kubernetes security signal: cross namespace secret access — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0676` Kubernetes security signal: service account used from new namespace — high; reference only (missing explicit aggregate semantics)
+- `CUR-K8S-0677` Kubernetes security signal: mass secret enumeration — high; executable aggregate (distinct count)
+- `CUR-K8S-0678` Kubernetes security signal: bulk pod exec — high; executable aggregate (count)
+- `CUR-K8S-0679` Kubernetes security signal: rare user agent to apiserver — high; reference only (missing explicit aggregate semantics)
+
+#### linux
+
+- `CUR-CORE-0001` Linux enumeration toolkit execution — high; active direct rule
+- `CUR-CORE-0002` Linux shadow password file read by a display or parsing utility — high; active direct rule
+- `CUR-CORE-0004` Linux host firewall drop, reject, flush, or policy change — high; active direct rule
+- `CUR-CORE-0007` Interactive pseudo-terminal spawned from a constrained shell — high; active direct rule
+- `CUR-CORE-0009` Privilege discovery command cluster on one Linux asset — high; executable sequence (sequence)
+
+#### linux-endpoint
+
+- `CUR-LNX-CMD-0134` curl | shell — high; observe-only direct rule
+- `CUR-LNX-CMD-0135` wget | shell — high; observe-only direct rule
+- `CUR-LNX-CMD-0139` Shell over /dev/tcp — high; observe-only direct rule
+- `CUR-LNX-CMD-0140` Netcat execution mode — high; observe-only direct rule
+- `CUR-LNX-CMD-0142` FIFO-backed shell — high; observe-only direct rule
+- `CUR-LNX-CMD-0182` Stop audit service — high; observe-only direct rule
+- `CUR-LNX-CMD-0187` Default firewall drop — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0082` Sensitive Linux path accessed: /etc/shadow — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0083` Sensitive Linux path accessed: /etc/gshadow — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0084` Sensitive Linux path accessed: /etc/passwd — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0085` Sensitive Linux path accessed: /etc/group — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0086` Sensitive Linux path accessed: /etc/sudoers — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0087` Sensitive Linux path accessed: /etc/sudoers.d/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0088` Sensitive Linux path accessed: /etc/security/opasswd — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0089` Sensitive Linux path accessed: /etc/pam.d/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0090` Sensitive Linux path accessed: /root/.ssh/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0091` Sensitive Linux path accessed: /.ssh/id_rsa — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0092` Sensitive Linux path accessed: /.ssh/id_ed25519 — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0093` Sensitive Linux path accessed: /.ssh/authorized_keys — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0094` Sensitive Linux path accessed: /.ssh/known_hosts — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0095` Sensitive Linux path accessed: /.gnupg/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0096` Sensitive Linux path accessed: /.aws/credentials — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0097` Sensitive Linux path accessed: /.azure/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0098` Sensitive Linux path accessed: /.config/gcloud/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0099` Sensitive Linux path accessed: /.kube/config — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0100` Sensitive Linux path accessed: /var/run/secrets/kubernetes.io/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0101` Sensitive Linux path accessed: /run/secrets/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0102` Sensitive Linux path accessed: /.docker/config.json — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0103` Sensitive Linux path accessed: /etc/krb5.keytab — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0104` Sensitive Linux path accessed: /etc/krb5.conf — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0105` Sensitive Linux path accessed: /etc/ssh/sshd_config — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0106` Sensitive Linux path accessed: /etc/openvpn/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0107` Sensitive Linux path accessed: /etc/wireguard/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0108` Sensitive Linux path accessed: /etc/vault.d/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0109` Sensitive Linux path accessed: /proc/*/environ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0110` Sensitive Linux path accessed: /proc/*/cmdline — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0111` Sensitive Linux path accessed: /proc/*/mem — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0112` Sensitive Linux path accessed: /proc/kcore — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0113` Sensitive Linux path accessed: /var/lib/sss/db/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0114` Sensitive Linux path accessed: /var/lib/waagent/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0115` Sensitive Linux path accessed: /var/lib/cloud/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0116` Sensitive Linux path accessed: /.bash_history — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0117` Sensitive Linux path accessed: /.zsh_history — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0118` Sensitive Linux path accessed: /.python_history — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0119` Sensitive Linux path accessed: /.mysql_history — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0120` Sensitive Linux path accessed: /.psql_history — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0121` Sensitive Linux path accessed: /.rediscli_history — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0122` Sensitive Linux path accessed: /var/lib/mysql/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0123` Sensitive Linux path accessed: /var/lib/postgresql/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0124` Sensitive Linux path accessed: /var/lib/etcd/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0125` Sensitive Linux path accessed: /etc/gitlab/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0126` Sensitive Linux path accessed: /opt/gitlab/embedded/service/gitlab-rails/config/secrets.yml — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0127` Sensitive Linux path accessed: /etc/ansible/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0128` Sensitive Linux path accessed: /etc/puppet/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0129` Sensitive Linux path accessed: /etc/chef/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0130` Sensitive Linux path accessed: /var/lib/jenkins/credentials.xml — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0131` Sensitive Linux path accessed: /etc/salt/pki/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0132` Sensitive Linux path accessed: /var/lib/docker/ — high; observe-only direct rule
+- `CUR-LNX-SENSITIVE-0133` Sensitive Linux path accessed: /var/run/docker.sock — high; observe-only direct rule
+- `CUR-LNX-TOOL-0016` Named Linux or cross-platform offensive utility observed: linpeas — high; active direct rule
+- `CUR-LNX-TOOL-0017` Named Linux or cross-platform offensive utility observed: linpeas.sh — high; active direct rule
+- `CUR-LNX-TOOL-0018` Named Linux or cross-platform offensive utility observed: linenum — high; active direct rule
+- `CUR-LNX-TOOL-0019` Named Linux or cross-platform offensive utility observed: linux-exploit-suggester — high; active direct rule
+- `CUR-LNX-TOOL-0020` Named Linux or cross-platform offensive utility observed: linux-smart-enumeration — high; active direct rule
+- `CUR-LNX-TOOL-0021` Named Linux or cross-platform offensive utility observed: unix-privesc-check — high; active direct rule
+- `CUR-LNX-TOOL-0022` Named Linux or cross-platform offensive utility observed: pspy — high; active direct rule
+- `CUR-LNX-TOOL-0023` Named Linux or cross-platform offensive utility observed: traitor — high; active direct rule
+- `CUR-LNX-TOOL-0024` Named Linux or cross-platform offensive utility observed: les.sh — high; active direct rule
+- `CUR-LNX-TOOL-0025` Named Linux or cross-platform offensive utility observed: mimipenguin — high; active direct rule
+- `CUR-LNX-TOOL-0026` Named Linux or cross-platform offensive utility observed: laZagne — high; active direct rule
+- `CUR-LNX-TOOL-0027` Named Linux or cross-platform offensive utility observed: pypykatz — high; active direct rule
+- `CUR-LNX-TOOL-0028` Named Linux or cross-platform offensive utility observed: trufflehog — high; active direct rule
+- `CUR-LNX-TOOL-0029` Named Linux or cross-platform offensive utility observed: gitleaks — high; active direct rule
+- `CUR-LNX-TOOL-0030` Named Linux or cross-platform offensive utility observed: gitrob — high; active direct rule
+- `CUR-LNX-TOOL-0031` Named Linux or cross-platform offensive utility observed: deepce — high; active direct rule
+- `CUR-LNX-TOOL-0032` Named Linux or cross-platform offensive utility observed: amicontained — high; active direct rule
+- `CUR-LNX-TOOL-0033` Named Linux or cross-platform offensive utility observed: enum4linux — high; active direct rule
+- `CUR-LNX-TOOL-0034` Named Linux or cross-platform offensive utility observed: enum4linux-ng — high; active direct rule
+- `CUR-LNX-TOOL-0035` Named Linux or cross-platform offensive utility observed: bloodhound-python — high; active direct rule
+- `CUR-LNX-TOOL-0036` Named Linux or cross-platform offensive utility observed: kerbrute — high; active direct rule
+- `CUR-LNX-TOOL-0037` Named Linux or cross-platform offensive utility observed: impacket — high; active direct rule
+- `CUR-LNX-TOOL-0038` Named Linux or cross-platform offensive utility observed: secretsdump — high; active direct rule
+- `CUR-LNX-TOOL-0039` Named Linux or cross-platform offensive utility observed: psexec.py — high; active direct rule
+- `CUR-LNX-TOOL-0040` Named Linux or cross-platform offensive utility observed: wmiexec.py — high; active direct rule
+- `CUR-LNX-TOOL-0041` Named Linux or cross-platform offensive utility observed: smbexec.py — high; active direct rule
+- `CUR-LNX-TOOL-0042` Named Linux or cross-platform offensive utility observed: atexec.py — high; active direct rule
+- `CUR-LNX-TOOL-0043` Named Linux or cross-platform offensive utility observed: dcomexec.py — high; active direct rule
+- `CUR-LNX-TOOL-0044` Named Linux or cross-platform offensive utility observed: crackmapexec — high; active direct rule
+- `CUR-LNX-TOOL-0045` Named Linux or cross-platform offensive utility observed: netexec — high; active direct rule
+- `CUR-LNX-TOOL-0046` Named Linux or cross-platform offensive utility observed: responder — high; active direct rule
+- `CUR-LNX-TOOL-0047` Named Linux or cross-platform offensive utility observed: inveigh — high; active direct rule
+- `CUR-LNX-TOOL-0048` Named Linux or cross-platform offensive utility observed: bettercap — high; active direct rule
+- `CUR-LNX-TOOL-0049` Named Linux or cross-platform offensive utility observed: mitm6 — high; active direct rule
+- `CUR-LNX-TOOL-0050` Named Linux or cross-platform offensive utility observed: chisel — high; active direct rule
+- `CUR-LNX-TOOL-0051` Named Linux or cross-platform offensive utility observed: ligolo — high; active direct rule
+- `CUR-LNX-TOOL-0052` Named Linux or cross-platform offensive utility observed: ligolo-ng — high; active direct rule
+- `CUR-LNX-TOOL-0053` Named Linux or cross-platform offensive utility observed: frp — high; active direct rule
+- `CUR-LNX-TOOL-0054` Named Linux or cross-platform offensive utility observed: frpc — high; active direct rule
+- `CUR-LNX-TOOL-0055` Named Linux or cross-platform offensive utility observed: frps — high; active direct rule
+- `CUR-LNX-TOOL-0056` Named Linux or cross-platform offensive utility observed: socat — high; active direct rule
+- `CUR-LNX-TOOL-0057` Named Linux or cross-platform offensive utility observed: ncat — high; active direct rule
+- `CUR-LNX-TOOL-0058` Named Linux or cross-platform offensive utility observed: netcat — high; active direct rule
+- `CUR-LNX-TOOL-0059` Named Linux or cross-platform offensive utility observed: tcpdump — high; active direct rule
+- `CUR-LNX-TOOL-0060` Named Linux or cross-platform offensive utility observed: tshark — high; active direct rule
+- `CUR-LNX-TOOL-0061` Named Linux or cross-platform offensive utility observed: masscan — high; active direct rule
+- `CUR-LNX-TOOL-0062` Named Linux or cross-platform offensive utility observed: nmap — high; active direct rule
+- `CUR-LNX-TOOL-0063` Named Linux or cross-platform offensive utility observed: zmap — high; active direct rule
+- `CUR-LNX-TOOL-0064` Named Linux or cross-platform offensive utility observed: hydra — high; active direct rule
+- `CUR-LNX-TOOL-0065` Named Linux or cross-platform offensive utility observed: medusa — high; active direct rule
+- `CUR-LNX-TOOL-0066` Named Linux or cross-platform offensive utility observed: john — high; active direct rule
+- `CUR-LNX-TOOL-0067` Named Linux or cross-platform offensive utility observed: hashcat — high; active direct rule
+- `CUR-LNX-TOOL-0068` Named Linux or cross-platform offensive utility observed: sqlmap — high; active direct rule
+- `CUR-LNX-TOOL-0069` Named Linux or cross-platform offensive utility observed: nikto — high; active direct rule
+- `CUR-LNX-TOOL-0070` Named Linux or cross-platform offensive utility observed: feroxbuster — high; active direct rule
+- `CUR-LNX-TOOL-0071` Named Linux or cross-platform offensive utility observed: gobuster — high; active direct rule
+- `CUR-LNX-TOOL-0072` Named Linux or cross-platform offensive utility observed: ffuf — high; active direct rule
+- `CUR-LNX-TOOL-0073` Named Linux or cross-platform offensive utility observed: dirsearch — high; active direct rule
+- `CUR-LNX-TOOL-0074` Named Linux or cross-platform offensive utility observed: wpscan — high; active direct rule
+- `CUR-LNX-TOOL-0075` Named Linux or cross-platform offensive utility observed: whatweb — high; active direct rule
+- `CUR-LNX-TOOL-0076` Named Linux or cross-platform offensive utility observed: nuclei — high; active direct rule
+- `CUR-LNX-TOOL-0077` Named Linux or cross-platform offensive utility observed: metasploit — high; active direct rule
+- `CUR-LNX-TOOL-0078` Named Linux or cross-platform offensive utility observed: msfconsole — high; active direct rule
+- `CUR-LNX-TOOL-0079` Named Linux or cross-platform offensive utility observed: meterpreter — high; active direct rule
+- `CUR-LNX-TOOL-0080` Named Linux or cross-platform offensive utility observed: sliver — high; active direct rule
+- `CUR-LNX-TOOL-0081` Named Linux or cross-platform offensive utility observed: havoc — high; active direct rule
+
+#### macos-endpoint
+
+- `CUR-MAC-0324` TCC database access — high; observe-only direct rule
+- `CUR-MAC-0325` TCC service reset or modification — high; observe-only direct rule
+- `CUR-MAC-0326` Keychain enumeration — high; observe-only direct rule
+- `CUR-MAC-0327` Keychain dump or unlock — high; observe-only direct rule
+- `CUR-MAC-0328` Browser credential store access — high; observe-only direct rule
+- `CUR-MAC-0332` Disable Gatekeeper — high; observe-only direct rule
+- `CUR-MAC-0356` Credential prompt imitation marker — high; observe-only direct rule
+- `CUR-MAC-0358` Sudoers change — high; observe-only direct rule
+- `CUR-MAC-0359` DYLD library injection — high; observe-only direct rule
+- `CUR-MAC-0362` Cloud credential path access — high; observe-only direct rule
+
+#### windows-endpoint
+
+- `CUR-WIN-CMD-0236` ProcDump LSASS target — high; observe-only direct rule
+- `CUR-WIN-CMD-0238` Registry SAM hive save — high; observe-only direct rule
+- `CUR-WIN-CMD-0239` Registry SECURITY hive save — high; observe-only direct rule
+- `CUR-WIN-CMD-0240` Registry SYSTEM hive save — high; observe-only direct rule
+- `CUR-WIN-CMD-0243` VSSAdmin shadow copy delete — high; observe-only direct rule
+- `CUR-WIN-CMD-0244` WMIC shadow copy delete — high; observe-only direct rule
+- `CUR-WIN-CMD-0247` Clear Windows event log — high; observe-only direct rule
+- `CUR-WIN-CMD-0248` PowerShell clear event log — high; observe-only direct rule
+- `CUR-WIN-CMD-0249` Defender exclusion change — high; observe-only direct rule
+- `CUR-WIN-CMD-0250` Disable Defender protection — high; observe-only direct rule
+- `CUR-WIN-CMD-0278` DCSync marker — high; observe-only direct rule
+- `CUR-WIN-CMD-0279` Golden or silver ticket marker — high; observe-only direct rule
+- `CUR-WIN-PATH-0284` Sensitive Windows path accessed or changed: C:\Windows\System32\config\SAM — high; observe-only direct rule
+- `CUR-WIN-PATH-0285` Sensitive Windows path accessed or changed: C:\Windows\System32\config\SECURITY — high; observe-only direct rule
+- `CUR-WIN-PATH-0286` Sensitive Windows path accessed or changed: C:\Windows\System32\config\SYSTEM — high; observe-only direct rule
+- `CUR-WIN-PATH-0287` Sensitive Windows path accessed or changed: C:\Windows\NTDS\ntds.dit — high; observe-only direct rule
+- `CUR-WIN-PATH-0288` Sensitive Windows path accessed or changed: C:\Windows\System32\winevt\Logs\Security.evtx — high; observe-only direct rule
+- `CUR-WIN-PATH-0289` Sensitive Windows path accessed or changed: C:\Windows\System32\winevt\Logs\Sysmon.evtx — high; observe-only direct rule
+- `CUR-WIN-PATH-0290` Sensitive Windows path accessed or changed: C:\Windows\System32\drivers\etc\hosts — high; observe-only direct rule
+- `CUR-WIN-PATH-0291` Sensitive Windows path accessed or changed: C:\Windows\System32\Tasks\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0292` Sensitive Windows path accessed or changed: C:\Windows\Tasks\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0293` Sensitive Windows path accessed or changed: C:\Windows\Temp\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0294` Sensitive Windows path accessed or changed: C:\Users\Public\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0295` Sensitive Windows path accessed or changed: C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0296` Sensitive Windows path accessed or changed: AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0297` Sensitive Windows path accessed or changed: AppData\Local\Google\Chrome\User Data\Default\Login Data — high; observe-only direct rule
+- `CUR-WIN-PATH-0298` Sensitive Windows path accessed or changed: AppData\Roaming\Mozilla\Firefox\Profiles\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0299` Sensitive Windows path accessed or changed: AppData\Local\Microsoft\Edge\User Data\Default\Login Data — high; observe-only direct rule
+- `CUR-WIN-PATH-0300` Sensitive Windows path accessed or changed: AppData\Roaming\Microsoft\Credentials\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0301` Sensitive Windows path accessed or changed: AppData\Local\Microsoft\Credentials\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0302` Sensitive Windows path accessed or changed: AppData\Roaming\Microsoft\Protect\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0303` Sensitive Windows path accessed or changed: AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt — high; observe-only direct rule
+- `CUR-WIN-PATH-0304` Sensitive Windows path accessed or changed: .aws\credentials — high; observe-only direct rule
+- `CUR-WIN-PATH-0305` Sensitive Windows path accessed or changed: .azure\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0306` Sensitive Windows path accessed or changed: .kube\config — high; observe-only direct rule
+- `CUR-WIN-PATH-0307` Sensitive Windows path accessed or changed: C:\ProgramData\Microsoft\Crypto\RSA\MachineKeys\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0308` Sensitive Windows path accessed or changed: C:\Windows\System32\spool\drivers\color\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0309` Sensitive Windows path accessed or changed: C:\Windows\System32\wbem\Repository\ — high; observe-only direct rule
+- `CUR-WIN-PATH-0310` Sensitive Windows path accessed or changed: C:\Windows\System32\GroupPolicy\Machine\Registry.pol — high; observe-only direct rule
+- `CUR-WIN-PATH-0311` Sensitive Windows path accessed or changed: C:\Windows\System32\inetsrv\config\applicationHost.config — high; observe-only direct rule
+- `CUR-WIN-PATH-0312` Sensitive Windows path accessed or changed: web.config — high; observe-only direct rule
+
+### Medium priority (479)
+
+#### aws-cloud
+
+- `CUR-AWS-0427` AWS security-relevant API action: UpdateTrail — medium; observe-only direct rule
+- `CUR-AWS-0428` AWS security-relevant API action: PutEventSelectors — medium; observe-only direct rule
+- `CUR-AWS-0429` AWS security-relevant API action: PutInsightSelectors — medium; observe-only direct rule
+- `CUR-AWS-0430` AWS security-relevant API action: DeleteEventDataStore — medium; observe-only direct rule
+- `CUR-AWS-0431` AWS security-relevant API action: StopEventDataStoreIngestion — medium; observe-only direct rule
+- `CUR-AWS-0433` AWS security-relevant API action: UpdateDetector — medium; observe-only direct rule
+- `CUR-AWS-0434` AWS security-relevant API action: DisassociateFromAdministratorAccount — medium; observe-only direct rule
+- `CUR-AWS-0435` AWS security-relevant API action: DeleteMembers — medium; observe-only direct rule
+- `CUR-AWS-0436` AWS security-relevant API action: DisableOrganizationAdminAccount — medium; observe-only direct rule
+- `CUR-AWS-0437` AWS security-relevant API action: DeleteIPSet — medium; observe-only direct rule
+- `CUR-AWS-0438` AWS security-relevant API action: DeleteThreatIntelSet — medium; observe-only direct rule
+- `CUR-AWS-0439` AWS security-relevant API action: StopConfigurationRecorder — medium; observe-only direct rule
+- `CUR-AWS-0440` AWS security-relevant API action: DeleteConfigurationRecorder — medium; observe-only direct rule
+- `CUR-AWS-0441` AWS security-relevant API action: DeleteDeliveryChannel — medium; observe-only direct rule
+- `CUR-AWS-0442` AWS security-relevant API action: PutConfigurationRecorder — medium; observe-only direct rule
+- `CUR-AWS-0443` AWS security-relevant API action: DeleteRetentionConfiguration — medium; observe-only direct rule
+- `CUR-AWS-0445` AWS security-relevant API action: UpdateAccessKey — medium; observe-only direct rule
+- `CUR-AWS-0446` AWS security-relevant API action: CreateLoginProfile — medium; observe-only direct rule
+- `CUR-AWS-0447` AWS security-relevant API action: UpdateLoginProfile — medium; observe-only direct rule
+- `CUR-AWS-0448` AWS security-relevant API action: DeleteVirtualMFADevice — medium; observe-only direct rule
+- `CUR-AWS-0449` AWS security-relevant API action: DeactivateMFADevice — medium; observe-only direct rule
+- `CUR-AWS-0450` AWS security-relevant API action: ResyncMFADevice — medium; observe-only direct rule
+- `CUR-AWS-0455` AWS security-relevant API action: CreatePolicyVersion — medium; observe-only direct rule
+- `CUR-AWS-0456` AWS security-relevant API action: SetDefaultPolicyVersion — medium; observe-only direct rule
+- `CUR-AWS-0457` AWS security-relevant API action: AddUserToGroup — medium; observe-only direct rule
+- `CUR-AWS-0459` AWS security-relevant API action: CreateRole — medium; observe-only direct rule
+- `CUR-AWS-0460` AWS security-relevant API action: CreateUser — medium; observe-only direct rule
+- `CUR-AWS-0461` AWS security-relevant API action: CreateSAMLProvider — medium; observe-only direct rule
+- `CUR-AWS-0462` AWS security-relevant API action: UpdateSAMLProvider — medium; observe-only direct rule
+- `CUR-AWS-0463` AWS security-relevant API action: CreateOpenIDConnectProvider — medium; observe-only direct rule
+- `CUR-AWS-0465` AWS security-relevant API action: GetFederationToken — medium; observe-only direct rule
+- `CUR-AWS-0466` AWS security-relevant API action: GetSessionToken — medium; observe-only direct rule
+- `CUR-AWS-0467` AWS security-relevant API action: ConsoleLogin — medium; observe-only direct rule
+- `CUR-AWS-0468` AWS security-relevant API action: GetCallerIdentity — medium; observe-only direct rule
+- `CUR-AWS-0469` AWS security-relevant API action: DecodeAuthorizationMessage — medium; observe-only direct rule
+- `CUR-AWS-0472` AWS security-relevant API action: GetParameter — medium; observe-only direct rule
+- `CUR-AWS-0473` AWS security-relevant API action: GetParameters — medium; observe-only direct rule
+- `CUR-AWS-0474` AWS security-relevant API action: GetParametersByPath — medium; observe-only direct rule
+- `CUR-AWS-0476` AWS security-relevant API action: GenerateDataKey — medium; observe-only direct rule
+- `CUR-AWS-0477` AWS security-relevant API action: ExportCertificate — medium; observe-only direct rule
+- `CUR-AWS-0478` AWS security-relevant API action: PutBucketPolicy — medium; observe-only direct rule
+- `CUR-AWS-0479` AWS security-relevant API action: PutBucketAcl — medium; observe-only direct rule
+- `CUR-AWS-0482` AWS security-relevant API action: DeleteBucketPolicy — medium; observe-only direct rule
+- `CUR-AWS-0483` AWS security-relevant API action: GetObject — medium; observe-only direct rule
+- `CUR-AWS-0484` AWS security-relevant API action: ListObjects — medium; observe-only direct rule
+- `CUR-AWS-0485` AWS security-relevant API action: CopyObject — medium; observe-only direct rule
+- `CUR-AWS-0486` AWS security-relevant API action: CreateSnapshot — medium; observe-only direct rule
+- `CUR-AWS-0487` AWS security-relevant API action: ModifySnapshotAttribute — medium; observe-only direct rule
+- `CUR-AWS-0488` AWS security-relevant API action: CopySnapshot — medium; observe-only direct rule
+- `CUR-AWS-0489` AWS security-relevant API action: CreateImage — medium; observe-only direct rule
+- `CUR-AWS-0490` AWS security-relevant API action: ModifyImageAttribute — medium; observe-only direct rule
+- `CUR-AWS-0491` AWS security-relevant API action: ExportImage — medium; observe-only direct rule
+- `CUR-AWS-0492` AWS security-relevant API action: CreateVolume — medium; observe-only direct rule
+- `CUR-AWS-0493` AWS security-relevant API action: AuthorizeSecurityGroupIngress — medium; observe-only direct rule
+- `CUR-AWS-0494` AWS security-relevant API action: AuthorizeSecurityGroupEgress — medium; observe-only direct rule
+- `CUR-AWS-0495` AWS security-relevant API action: CreateNetworkAclEntry — medium; observe-only direct rule
+- `CUR-AWS-0496` AWS security-relevant API action: ReplaceNetworkAclEntry — medium; observe-only direct rule
+- `CUR-AWS-0497` AWS security-relevant API action: CreateRoute — medium; observe-only direct rule
+- `CUR-AWS-0498` AWS security-relevant API action: ReplaceRoute — medium; observe-only direct rule
+- `CUR-AWS-0499` AWS security-relevant API action: ModifyInstanceAttribute — medium; observe-only direct rule
+- `CUR-AWS-0500` AWS security-relevant API action: RunInstances — medium; observe-only direct rule
+- `CUR-AWS-0501` AWS security-relevant API action: SendCommand — medium; observe-only direct rule
+- `CUR-AWS-0502` AWS security-relevant API action: StartSession — medium; observe-only direct rule
+- `CUR-AWS-0503` AWS security-relevant API action: PutParameter — medium; observe-only direct rule
+- `CUR-AWS-0504` AWS security-relevant API action: UpdateFunctionCode — medium; observe-only direct rule
+- `CUR-AWS-0505` AWS security-relevant API action: CreateFunction — medium; observe-only direct rule
+- `CUR-AWS-0506` AWS security-relevant API action: AddPermission — medium; observe-only direct rule
+- `CUR-AWS-0507` AWS security-relevant API action: DisableKey — medium; observe-only direct rule
+- `CUR-AWS-0509` AWS security-relevant API action: PutKeyPolicy — medium; observe-only direct rule
+- `CUR-AWS-0510` AWS security-relevant API action: CreateGrant — medium; observe-only direct rule
+- `CUR-AWS-0511` AWS security-relevant API action: DisableKeyRotation — medium; observe-only direct rule
+- `CUR-AWS-0512` AWS security-relevant API action: DeleteAlias — medium; observe-only direct rule
+- `CUR-AWS-0513` AWS security-relevant API action: UpdateAlias — medium; observe-only direct rule
+- `CUR-AWS-0514` AWS security-relevant API action: DeleteLogGroup — medium; observe-only direct rule
+- `CUR-AWS-0515` AWS security-relevant API action: DeleteLogStream — medium; observe-only direct rule
+- `CUR-AWS-0516` AWS security-relevant API action: PutRetentionPolicy — medium; observe-only direct rule
+- `CUR-AWS-0517` AWS security-relevant API action: DeleteMetricFilter — medium; observe-only direct rule
+- `CUR-AWS-0518` AWS security-relevant API action: DeleteSubscriptionFilter — medium; observe-only direct rule
+- `CUR-AWS-0519` AWS security-relevant API action: PutSubscriptionFilter — medium; observe-only direct rule
+
+#### azure-cloud
+
+- `CUR-AZURE-0522` Azure or Entra security-relevant action: Microsoft.Authorization/roleDefinitions/write — medium; observe-only direct rule
+- `CUR-AZURE-0524` Azure or Entra security-relevant action: Microsoft.Insights/diagnosticSettings/write — medium; observe-only direct rule
+- `CUR-AZURE-0525` Azure or Entra security-relevant action: Microsoft.Insights/activityLogAlerts/delete — medium; observe-only direct rule
+- `CUR-AZURE-0526` Azure or Entra security-relevant action: Microsoft.Security/pricings/write — medium; observe-only direct rule
+- `CUR-AZURE-0527` Azure or Entra security-relevant action: Microsoft.Security/automations/delete — medium; observe-only direct rule
+- `CUR-AZURE-0528` Azure or Entra security-relevant action: Microsoft.Security/assessments/delete — medium; observe-only direct rule
+- `CUR-AZURE-0529` Azure or Entra security-relevant action: Microsoft.KeyVault/vaults/accessPolicies/write — medium; observe-only direct rule
+- `CUR-AZURE-0530` Azure or Entra security-relevant action: Microsoft.KeyVault/vaults/secrets/read — medium; observe-only direct rule
+- `CUR-AZURE-0531` Azure or Entra security-relevant action: Microsoft.KeyVault/vaults/keys/decrypt/action — medium; observe-only direct rule
+- `CUR-AZURE-0532` Azure or Entra security-relevant action: Microsoft.KeyVault/vaults/purge/action — medium; observe-only direct rule
+- `CUR-AZURE-0534` Azure or Entra security-relevant action: Microsoft.Compute/virtualMachines/extensions/write — medium; observe-only direct rule
+- `CUR-AZURE-0535` Azure or Entra security-relevant action: Microsoft.Compute/snapshots/write — medium; observe-only direct rule
+- `CUR-AZURE-0536` Azure or Entra security-relevant action: Microsoft.Compute/disks/beginGetAccess/action — medium; observe-only direct rule
+- `CUR-AZURE-0537` Azure or Entra security-relevant action: Microsoft.Network/networkSecurityGroups/securityRules/write — medium; observe-only direct rule
+- `CUR-AZURE-0538` Azure or Entra security-relevant action: Microsoft.Network/virtualNetworks/subnets/write — medium; observe-only direct rule
+- `CUR-AZURE-0539` Azure or Entra security-relevant action: Microsoft.Network/publicIPAddresses/write — medium; observe-only direct rule
+- `CUR-AZURE-0541` Azure or Entra security-relevant action: Microsoft.Storage/storageAccounts/regenerateKey/action — medium; observe-only direct rule
+- `CUR-AZURE-0542` Azure or Entra security-relevant action: Microsoft.Storage/storageAccounts/write — medium; observe-only direct rule
+- `CUR-AZURE-0543` Azure or Entra security-relevant action: Microsoft.ContainerService/managedClusters/listClusterAdminCredential/action — medium; observe-only direct rule
+- `CUR-AZURE-0544` Azure or Entra security-relevant action: Microsoft.ContainerService/managedClusters/accessProfiles/listCredential/action — medium; observe-only direct rule
+- `CUR-AZURE-0545` Azure or Entra security-relevant action: Microsoft.Web/sites/config/list/action — medium; observe-only direct rule
+- `CUR-AZURE-0546` Azure or Entra security-relevant action: Microsoft.Web/sites/publishxml/action — medium; observe-only direct rule
+- `CUR-AZURE-0547` Azure or Entra security-relevant action: Microsoft.Web/sites/config/write — medium; observe-only direct rule
+- `CUR-AZURE-0548` Azure or Entra security-relevant action: Microsoft.Web/sites/functions/action — medium; observe-only direct rule
+- `CUR-AZURE-0549` Azure or Entra security-relevant action: Microsoft.Automation/automationAccounts/runbooks/write — medium; observe-only direct rule
+- `CUR-AZURE-0550` Azure or Entra security-relevant action: Microsoft.Automation/automationAccounts/jobs/write — medium; observe-only direct rule
+- `CUR-AZURE-0551` Azure or Entra security-relevant action: Microsoft.Logic/workflows/write — medium; observe-only direct rule
+- `CUR-AZURE-0552` Azure or Entra security-relevant action: Microsoft.ManagedIdentity/userAssignedIdentities/assign/action — medium; observe-only direct rule
+- `CUR-AZURE-0553` Azure or Entra security-relevant action: Microsoft.ManagedIdentity/userAssignedIdentities/write — medium; observe-only direct rule
+- `CUR-AZURE-0554` Azure or Entra security-relevant action: Add member to role — medium; observe-only direct rule
+- `CUR-AZURE-0555` Azure or Entra security-relevant action: Add eligible member to role — medium; observe-only direct rule
+- `CUR-AZURE-0556` Azure or Entra security-relevant action: Add member to group — medium; observe-only direct rule
+- `CUR-AZURE-0557` Azure or Entra security-relevant action: Add owner to application — medium; observe-only direct rule
+- `CUR-AZURE-0558` Azure or Entra security-relevant action: Add owner to service principal — medium; observe-only direct rule
+- `CUR-AZURE-0560` Azure or Entra security-relevant action: Update application - Certificates and secrets management — medium; observe-only direct rule
+- `CUR-AZURE-0562` Azure or Entra security-relevant action: Add delegated permission grant — medium; observe-only direct rule
+- `CUR-AZURE-0563` Azure or Entra security-relevant action: Disable Strong Authentication — medium; observe-only direct rule
+- `CUR-AZURE-0567` Azure or Entra security-relevant action: Add federated domain — medium; observe-only direct rule
+- `CUR-AZURE-0568` Azure or Entra security-relevant action: Update domain — medium; observe-only direct rule
+- `CUR-AZURE-0569` Azure or Entra security-relevant action: Reset user password — medium; observe-only direct rule
+- `CUR-AZURE-0570` Azure or Entra security-relevant action: Enable account — medium; observe-only direct rule
+- `CUR-AZURE-0571` Azure or Entra security-relevant action: Register security info — medium; observe-only direct rule
+- `CUR-AZURE-0572` Azure or Entra security-relevant action: Update authentication methods policy — medium; observe-only direct rule
+
+#### cross-source-correlation
+
+- `CUR-SEQ-0822` Download followed by execution of the same file — medium; executable sequence (sequence)
+- `CUR-SEQ-0823` Download followed by persistence creation — medium; executable sequence (sequence)
+- `CUR-SEQ-0824` Download followed by firewall, audit, EDR, or policy change — medium; executable sequence (sequence)
+- `CUR-SEQ-0825` Archive creation followed by outbound upload — medium; executable sequence (sequence)
+- `CUR-SEQ-0826` Sensitive file reads followed by archive creation — medium; executable sequence (sequence)
+- `CUR-SEQ-0827` Credential access followed by remote authentication — medium; executable sequence (sequence)
+- `CUR-SEQ-0828` System enumeration followed by local exploit probing — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0829` Privilege discovery followed by sudo, SUID, token, or role change — medium; executable sequence (sequence)
+- `CUR-SEQ-0831` Account creation followed by privileged group membership — medium; executable sequence (sequence)
+- `CUR-SEQ-0832` Account creation followed by remote login — medium; executable sequence (sequence)
+- `CUR-SEQ-0833` Password reset followed by successful authentication from a new location — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0834` MFA method change followed by sensitive access — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0837` OAuth consent followed by mailbox or file access — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0838` Inbox rule creation followed by external mail forwarding — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0839` Remote authentication followed by host or domain discovery — medium; executable sequence (sequence)
+- `CUR-SEQ-0840` Remote authentication followed by payload transfer — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0841` Remote authentication followed by service or scheduled-task creation — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0842` SMB file write followed by remote service start — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0843` WMI network activity followed by remote process creation — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0845` SSH or shell access followed by PTY upgrade — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0846` Office child process followed by network retrieval — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0847` Browser child shell followed by persistence — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0848` Web server child shell followed by external connection — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0849` Interpreter activity followed by security-control disablement — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0850` Event-log clearing near suspicious execution — medium; executable sequence (sequence)
+- `CUR-SEQ-0852` Firewall deny or drop rule followed by command-and-control traffic — medium; executable sequence (sequence)
+- `CUR-SEQ-0853` Resolver change followed by a new external destination — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0854` Proxy configuration change followed by unusual upload — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0856` New driver load followed by process tampering — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0858` SAM, SYSTEM, or SECURITY hive save followed by archive creation — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0860` Scheduled task creation followed by its first execution — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0861` New service followed by external network activity — medium; executable sequence (sequence)
+- `CUR-SEQ-0862` Autorun change followed by execution after logon or reboot — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0863` Cron modification followed by shell execution — medium; executable sequence (sequence)
+- `CUR-SEQ-0864` Systemd unit write followed by enable and start — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0865` Launch item write followed by launchctl bootstrap — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0866` Authorized key addition followed by key-based login — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0867` Cloud access-key creation followed by broad API activity — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0868` Role assumption followed by multi-region enumeration — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0870` Storage resource made public followed by bulk reads — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0871` Snapshot sharing followed by external account access — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0872` VM startup metadata change followed by new process execution — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0873` Function code update followed by first-seen egress — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0875` Pod exec followed by host-path or runtime-socket access — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0877` Container download followed by shell or executable launch — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0878` Container metadata access followed by cloud API use — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0879` Network scan followed by application error or exploit signature — medium; executable sequence (sequence)
+- `CUR-SEQ-0880` Rare DNS query followed by periodic connections — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0881` Periodic command traffic followed by large egress — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0882` Rare TLS fingerprint correlated with suspicious endpoint process — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0884` First-seen process connects to first-seen destination — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0885` New user-host relationship followed by privileged action — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0886` Three or more weak anomalies share actor, asset, and short window — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0887` Telemetry loss followed by high-risk administrative change — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0888` System time change followed by audit discontinuity — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0889` Staging archive deleted after outbound transfer — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0890` Offensive tool or payload deleted shortly after use — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0891` Persistence object created, executed once, then removed — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0892` Repeated failures followed by success through another protocol or credential — medium; executable sequence (sequence)
+- `CUR-SEQ-0893` Same rare command appears on multiple hosts in a short window — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0894` One source authenticates to many accounts — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0895` One account authenticates to many assets — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0896` Service account configuration changes followed by interactive use — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0897` Security product discovery followed by impairment — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0898` Backup enumeration followed by deletion or encryption — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0899` File-share discovery followed by high rename or write volume — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0901` Browser credential access followed by cloud authentication — medium; reference only (missing canonical signal translation)
+- `CUR-SEQ-0902` Keychain access followed by SSH to a new destination — medium; reference only (missing canonical signal translation)
+
+#### gcp-cloud
+
+- `CUR-GCP-0574` Google Cloud security-relevant action: google.iam.admin.v1.CreateServiceAccount — medium; observe-only direct rule
+- `CUR-GCP-0576` Google Cloud security-relevant action: google.iam.admin.v1.UploadServiceAccountKey — medium; observe-only direct rule
+- `CUR-GCP-0578` Google Cloud security-relevant action: google.iam.credentials.v1.SignBlob — medium; observe-only direct rule
+- `CUR-GCP-0579` Google Cloud security-relevant action: google.iam.credentials.v1.SignJwt — medium; observe-only direct rule
+- `CUR-GCP-0581` Google Cloud security-relevant action: google.logging.v2.ConfigServiceV2.UpdateSink — medium; observe-only direct rule
+- `CUR-GCP-0582` Google Cloud security-relevant action: google.logging.v2.ConfigServiceV2.DeleteBucket — medium; observe-only direct rule
+- `CUR-GCP-0584` Google Cloud security-relevant action: google.cloud.audit.v1.UpdateAuditConfig — medium; observe-only direct rule
+- `CUR-GCP-0585` Google Cloud security-relevant action: google.monitoring.v3.AlertPolicyService.DeleteAlertPolicy — medium; observe-only direct rule
+- `CUR-GCP-0586` Google Cloud security-relevant action: v1.compute.firewalls.insert — medium; observe-only direct rule
+- `CUR-GCP-0587` Google Cloud security-relevant action: v1.compute.firewalls.patch — medium; observe-only direct rule
+- `CUR-GCP-0588` Google Cloud security-relevant action: v1.compute.routes.insert — medium; observe-only direct rule
+- `CUR-GCP-0590` Google Cloud security-relevant action: v1.compute.projects.setCommonInstanceMetadata — medium; observe-only direct rule
+- `CUR-GCP-0591` Google Cloud security-relevant action: v1.compute.instances.setServiceAccount — medium; observe-only direct rule
+- `CUR-GCP-0592` Google Cloud security-relevant action: v1.compute.instances.addAccessConfig — medium; observe-only direct rule
+- `CUR-GCP-0593` Google Cloud security-relevant action: v1.compute.instances.insert — medium; observe-only direct rule
+- `CUR-GCP-0594` Google Cloud security-relevant action: v1.compute.instances.attachDisk — medium; observe-only direct rule
+- `CUR-GCP-0595` Google Cloud security-relevant action: v1.compute.disks.createSnapshot — medium; observe-only direct rule
+- `CUR-GCP-0598` Google Cloud security-relevant action: v1.compute.images.insert — medium; observe-only direct rule
+- `CUR-GCP-0602` Google Cloud security-relevant action: storage.objects.get — medium; observe-only direct rule
+- `CUR-GCP-0603` Google Cloud security-relevant action: storage.objects.list — medium; observe-only direct rule
+- `CUR-GCP-0604` Google Cloud security-relevant action: storage.objects.create — medium; observe-only direct rule
+- `CUR-GCP-0605` Google Cloud security-relevant action: storage.setIamPermissions — medium; observe-only direct rule
+- `CUR-GCP-0607` Google Cloud security-relevant action: storage.hmacKeys.create — medium; observe-only direct rule
+- `CUR-GCP-0608` Google Cloud security-relevant action: google.container.v1.ClusterManager.GetCluster — medium; observe-only direct rule
+- `CUR-GCP-0609` Google Cloud security-relevant action: google.container.v1.ClusterManager.UpdateCluster — medium; observe-only direct rule
+- `CUR-GCP-0611` Google Cloud security-relevant action: google.cloud.functions.v1.CloudFunctionsService.CreateFunction — medium; observe-only direct rule
+- `CUR-GCP-0612` Google Cloud security-relevant action: google.cloud.functions.v1.CloudFunctionsService.UpdateFunction — medium; observe-only direct rule
+- `CUR-GCP-0613` Google Cloud security-relevant action: google.cloud.run.v1.Services.ReplaceService — medium; observe-only direct rule
+- `CUR-GCP-0614` Google Cloud security-relevant action: google.pubsub.v1.Publisher.Publish — medium; observe-only direct rule
+- `CUR-GCP-0615` Google Cloud security-relevant action: google.bigquery.v2.JobService.InsertJob — medium; observe-only direct rule
+- `CUR-GCP-0616` Google Cloud security-relevant action: google.admin.AdminService.updateSSOSettings — medium; observe-only direct rule
+- `CUR-GCP-0617` Google Cloud security-relevant action: google.admin.AdminService.createRoleAssignment — medium; observe-only direct rule
+- `CUR-GCP-0618` Google Cloud security-relevant action: google.admin.AdminService.updateUser — medium; observe-only direct rule
+- `CUR-GCP-0619` Google Cloud security-relevant action: google.admin.AdminService.authorizeApiClientAccess — medium; observe-only direct rule
+
+#### linux-endpoint
+
+- `CUR-LNX-CMD-0136` Base64 decode to shell — medium; observe-only direct rule
+- `CUR-LNX-CMD-0137` OpenSSL decode or decrypt — medium; observe-only direct rule
+- `CUR-LNX-CMD-0138` Python PTY spawn — medium; observe-only direct rule
+- `CUR-LNX-CMD-0141` Socat process execution — medium; observe-only direct rule
+- `CUR-LNX-CMD-0143` Background nohup execution — medium; observe-only direct rule
+- `CUR-LNX-CMD-0144` Detached setsid execution — medium; observe-only direct rule
+- `CUR-LNX-CMD-0145` Memory-backed executable path — medium; observe-only direct rule
+- `CUR-LNX-CMD-0146` memfd execution — medium; observe-only direct rule
+- `CUR-LNX-CMD-0147` Dynamic linker preload — medium; observe-only direct rule
+- `CUR-LNX-CMD-0148` Dynamic audit library — medium; observe-only direct rule
+- `CUR-LNX-CMD-0149` Python import from remote or inline code — medium; observe-only direct rule
+- `CUR-LNX-CMD-0150` Perl inline execution — medium; observe-only direct rule
+- `CUR-LNX-CMD-0151` Ruby inline execution — medium; observe-only direct rule
+- `CUR-LNX-CMD-0152` PHP inline execution — medium; observe-only direct rule
+- `CUR-LNX-CMD-0153` Awk system command — medium; observe-only direct rule
+- `CUR-LNX-CMD-0154` Find exec action — medium; observe-only direct rule
+- `CUR-LNX-CMD-0155` Xargs shell execution — medium; observe-only direct rule
+- `CUR-LNX-CMD-0156` Environment shell execution — medium; observe-only direct rule
+- `CUR-LNX-CMD-0157` SSH remote command — medium; observe-only direct rule
+- `CUR-LNX-CMD-0158` SCP transfer — medium; observe-only direct rule
+- `CUR-LNX-CMD-0159` Rsync over remote shell — medium; observe-only direct rule
+- `CUR-LNX-CMD-0160` SSH local or remote port forwarding — medium; observe-only direct rule
+- `CUR-LNX-CMD-0161` Create cron entry — medium; observe-only direct rule
+- `CUR-LNX-CMD-0162` Write cron directory — medium; observe-only direct rule
+- `CUR-LNX-CMD-0163` Create systemd service — medium; observe-only direct rule
+- `CUR-LNX-CMD-0164` Create systemd timer — medium; observe-only direct rule
+- `CUR-LNX-CMD-0165` User systemd persistence — medium; observe-only direct rule
+- `CUR-LNX-CMD-0166` Modify shell startup — medium; observe-only direct rule
+- `CUR-LNX-CMD-0167` Add SSH authorized key — medium; observe-only direct rule
+- `CUR-LNX-CMD-0168` Modify sudoers — medium; observe-only direct rule
+- `CUR-LNX-CMD-0169` Create or alter user — medium; observe-only direct rule
+- `CUR-LNX-CMD-0170` Set UID zero — medium; observe-only direct rule
+- `CUR-LNX-CMD-0171` Change setuid bit — medium; observe-only direct rule
+- `CUR-LNX-CMD-0172` Enumerate SUID files — medium; observe-only direct rule
+- `CUR-LNX-CMD-0173` Enumerate file capabilities — medium; observe-only direct rule
+- `CUR-LNX-CMD-0174` Assign dangerous file capability — medium; observe-only direct rule
+- `CUR-LNX-CMD-0175` Load kernel module — medium; observe-only direct rule
+- `CUR-LNX-CMD-0176` Unload kernel module — medium; observe-only direct rule
+- `CUR-LNX-CMD-0177` Trace another process — medium; observe-only direct rule
+- `CUR-LNX-CMD-0178` Read process memory — medium; observe-only direct rule
+- `CUR-LNX-CMD-0179` Create core dump — medium; observe-only direct rule
+- `CUR-LNX-CMD-0180` Clear shell history — medium; observe-only direct rule
+- `CUR-LNX-CMD-0181` Delete or truncate logs — medium; observe-only direct rule
+- `CUR-LNX-CMD-0183` Delete audit rules — medium; observe-only direct rule
+- `CUR-LNX-CMD-0184` Disable SELinux — medium; observe-only direct rule
+- `CUR-LNX-CMD-0185` Disable AppArmor — medium; observe-only direct rule
+- `CUR-LNX-CMD-0186` Flush firewall rules — medium; observe-only direct rule
+- `CUR-LNX-CMD-0188` Add firewall drop — medium; observe-only direct rule
+- `CUR-LNX-CMD-0189` Change resolver configuration — medium; observe-only direct rule
+- `CUR-LNX-CMD-0190` Change default route — medium; observe-only direct rule
+- `CUR-LNX-CMD-0191` Enable packet forwarding — medium; observe-only direct rule
+- `CUR-LNX-CMD-0192` Create network namespace — medium; observe-only direct rule
+- `CUR-LNX-CMD-0193` Enter another namespace — medium; observe-only direct rule
+- `CUR-LNX-CMD-0194` Mount host filesystem — medium; observe-only direct rule
+- `CUR-LNX-CMD-0195` Archive broad filesystem paths — medium; observe-only direct rule
+- `CUR-LNX-CMD-0196` Fast compression for staging — medium; observe-only direct rule
+- `CUR-LNX-CMD-0197` Secure-delete invocation — medium; observe-only direct rule
+- `CUR-LNX-CMD-0198` Time-stomp from reference file — medium; observe-only direct rule
+- `CUR-LNX-CMD-0199` Set immutable attribute — medium; observe-only direct rule
+- `CUR-LNX-CMD-0200` Remove immutable attribute — medium; observe-only direct rule
+- `CUR-LNX-CMD-0201` Crypto-mining process marker — medium; observe-only direct rule
+- `CUR-LNX-CMD-0202` Container runtime socket use — medium; observe-only direct rule
+- `CUR-LNX-CMD-0203` Kubernetes service account token read — medium; observe-only direct rule
+- `CUR-LNX-CMD-0204` Cloud instance metadata request — medium; observe-only direct rule
+- `CUR-LNX-CMD-0205` Interactive command loop from web process — medium; observe-only direct rule
+- `CUR-LNX-CMD-0206` Shell execution from deleted binary — medium; observe-only direct rule
+
+#### macos-endpoint
+
+- `CUR-MAC-0313` AppleScript shell execution — medium; observe-only direct rule
+- `CUR-MAC-0314` JavaScript for Automation execution — medium; observe-only direct rule
+- `CUR-MAC-0315` LaunchAgent creation — medium; observe-only direct rule
+- `CUR-MAC-0316` LaunchDaemon creation — medium; observe-only direct rule
+- `CUR-MAC-0317` System LaunchDaemon change — medium; observe-only direct rule
+- `CUR-MAC-0318` Launch item load — medium; observe-only direct rule
+- `CUR-MAC-0319` Login item change — medium; observe-only direct rule
+- `CUR-MAC-0320` Periodic script persistence — medium; observe-only direct rule
+- `CUR-MAC-0321` Cron persistence — medium; observe-only direct rule
+- `CUR-MAC-0322` SSH authorized key persistence — medium; observe-only direct rule
+- `CUR-MAC-0323` Shell profile persistence — medium; observe-only direct rule
+- `CUR-MAC-0329` Directory Services user creation — medium; observe-only direct rule
+- `CUR-MAC-0330` Add user to admin group — medium; observe-only direct rule
+- `CUR-MAC-0331` Authorization database change — medium; observe-only direct rule
+- `CUR-MAC-0333` Remove quarantine attribute — medium; observe-only direct rule
+- `CUR-MAC-0334` Ad hoc code signing — medium; observe-only direct rule
+- `CUR-MAC-0335` Disable System Integrity Protection marker — medium; observe-only direct rule
+- `CUR-MAC-0336` Load kernel extension — medium; observe-only direct rule
+- `CUR-MAC-0337` Unload security extension — medium; observe-only direct rule
+- `CUR-MAC-0338` PF firewall change — medium; observe-only direct rule
+- `CUR-MAC-0339` Flush DNS cache — medium; observe-only direct rule
+- `CUR-MAC-0340` Proxy setting change — medium; observe-only direct rule
+- `CUR-MAC-0341` Remote Apple Events — medium; observe-only direct rule
+- `CUR-MAC-0342` Screen capture utility — medium; observe-only direct rule
+- `CUR-MAC-0343` Clipboard collection — medium; observe-only direct rule
+- `CUR-MAC-0344` Camera capture marker — medium; observe-only direct rule
+- `CUR-MAC-0345` Microphone capture marker — medium; observe-only direct rule
+- `CUR-MAC-0346` Disk image creation or mount — medium; observe-only direct rule
+- `CUR-MAC-0347` Package installation — medium; observe-only direct rule
+- `CUR-MAC-0348` Remote file download — medium; observe-only direct rule
+- `CUR-MAC-0349` Download then open — medium; observe-only direct rule
+- `CUR-MAC-0350` Inline Python execution — medium; observe-only direct rule
+- `CUR-MAC-0351` PTY shell spawn — medium; observe-only direct rule
+- `CUR-MAC-0352` Reverse shell device — medium; observe-only direct rule
+- `CUR-MAC-0353` Unified log deletion — medium; observe-only direct rule
+- `CUR-MAC-0354` Shell history deletion — medium; observe-only direct rule
+- `CUR-MAC-0355` FileVault status or key query — medium; observe-only direct rule
+- `CUR-MAC-0357` SSH configuration change — medium; observe-only direct rule
+- `CUR-MAC-0360` Task-port or debugger attachment — medium; observe-only direct rule
+- `CUR-MAC-0361` Archive user data — medium; observe-only direct rule
+
+#### network
+
+- `CUR-NET-0680` Network anomaly or suspicious relationship: dns high nxdomain rate — medium; executable aggregate (ratio)
+- `CUR-NET-0681` Network anomaly or suspicious relationship: dns many unique subdomains — medium; executable aggregate (distinct count)
+- `CUR-NET-0682` Network anomaly or suspicious relationship: dns long high entropy labels — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0683` Network anomaly or suspicious relationship: dns txt query spike — medium; executable aggregate (count)
+- `CUR-NET-0684` Network anomaly or suspicious relationship: dns rare record type — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0685` Network anomaly or suspicious relationship: dns newly seen domain — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0686` Network anomaly or suspicious relationship: dns rare tld — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0687` Network anomaly or suspicious relationship: dns fast flux answers — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0688` Network anomaly or suspicious relationship: dns domain generation pattern — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0689` Network anomaly or suspicious relationship: dns dynamic dns domain — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0690` Network anomaly or suspicious relationship: dns direct external resolver — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0691` Network anomaly or suspicious relationship: dns over https from unexpected process — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0692` Network anomaly or suspicious relationship: dns query then no follow on connection — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0693` Network anomaly or suspicious relationship: dns many hosts same rare domain — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0694` Network anomaly or suspicious relationship: dns tunneling bidirectional volume — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0695` Network anomaly or suspicious relationship: dns answer private or loopback anomaly — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0696` Network anomaly or suspicious relationship: periodic outbound beacon — medium; executable aggregate (periodicity)
+- `CUR-NET-0697` Network anomaly or suspicious relationship: low jitter beacon — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0698` Network anomaly or suspicious relationship: long lived low throughput connection — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0699` Network anomaly or suspicious relationship: rare external destination — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0700` Network anomaly or suspicious relationship: first seen country or asn — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0701` Network anomaly or suspicious relationship: outbound to nonstandard port — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0702` Network anomaly or suspicious relationship: protocol port mismatch — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0703` Network anomaly or suspicious relationship: tls on unusual port — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0704` Network anomaly or suspicious relationship: cleartext protocol on encrypted port — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0705` Network anomaly or suspicious relationship: direct ip http request — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0706` Network anomaly or suspicious relationship: http host ip mismatch — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0707` Network anomaly or suspicious relationship: rare user agent — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0708` Network anomaly or suspicious relationship: empty or missing user agent — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0709` Network anomaly or suspicious relationship: scripted http client from server — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0710` Network anomaly or suspicious relationship: http post without prior get — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0711` Network anomaly or suspicious relationship: large http upload — medium; executable aggregate (volume)
+- `CUR-NET-0712` Network anomaly or suspicious relationship: high outbound to inbound ratio — medium; executable aggregate (ratio)
+- `CUR-NET-0713` Network anomaly or suspicious relationship: many small encrypted connections — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0714` Network anomaly or suspicious relationship: tls self signed certificate — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0715` Network anomaly or suspicious relationship: tls expired certificate — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0716` Network anomaly or suspicious relationship: tls sni certificate mismatch — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0717` Network anomaly or suspicious relationship: tls rare ja3 or ja4 — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0718` Network anomaly or suspicious relationship: tls no sni from user workstation — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0719` Network anomaly or suspicious relationship: tls ech or doh visibility loss — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0720` Network anomaly or suspicious relationship: tls certificate shared across rare hosts — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0721` Network anomaly or suspicious relationship: tls new issuer for service — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0722` Network anomaly or suspicious relationship: tls version downgrade — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0723` Network anomaly or suspicious relationship: certificate validity unusually short — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0724` Network anomaly or suspicious relationship: network destination fanout — medium; executable aggregate (fanout)
+- `CUR-NET-0725` Network anomaly or suspicious relationship: network port fanout — medium; executable aggregate (fanout)
+- `CUR-NET-0726` Network anomaly or suspicious relationship: horizontal scan — medium; executable aggregate (fanout)
+- `CUR-NET-0727` Network anomaly or suspicious relationship: vertical scan — medium; executable aggregate (fanout)
+- `CUR-NET-0728` Network anomaly or suspicious relationship: slow scan — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0729` Network anomaly or suspicious relationship: internal asset scanning external ranges — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0730` Network anomaly or suspicious relationship: new lateral protocol pair — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0731` Network anomaly or suspicious relationship: smb admin share access — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0732` Network anomaly or suspicious relationship: smb remote service file drop — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0733` Network anomaly or suspicious relationship: smb many auth failures — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0734` Network anomaly or suspicious relationship: rdp new source destination pair — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0735` Network anomaly or suspicious relationship: rdp session from server — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0736` Network anomaly or suspicious relationship: winrm new source destination pair — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0737` Network anomaly or suspicious relationship: ssh new source destination pair — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0738` Network anomaly or suspicious relationship: ssh password failures then success — medium; executable aggregate (transition)
+- `CUR-NET-0739` Network anomaly or suspicious relationship: ssh unusual client version — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0740` Network anomaly or suspicious relationship: ldap broad directory search — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0741` Network anomaly or suspicious relationship: ldap sensitive attribute query — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0742` Network anomaly or suspicious relationship: kerberos service ticket burst — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0743` Network anomaly or suspicious relationship: kerberos encryption downgrade — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0744` Network anomaly or suspicious relationship: ntlm usage where kerberos expected — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0745` Network anomaly or suspicious relationship: dcerpc remote service pattern — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0746` Network anomaly or suspicious relationship: wmi network activity — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0747` Network anomaly or suspicious relationship: database connection from user workstation — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0748` Network anomaly or suspicious relationship: large outbound archive transfer — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0749` Network anomaly or suspicious relationship: cloud storage upload from server — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0750` Network anomaly or suspicious relationship: ftp or sftp first use — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0751` Network anomaly or suspicious relationship: icmp tunneling pattern — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0752` Network anomaly or suspicious relationship: dns or http payload entropy high — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0753` Network anomaly or suspicious relationship: data egress after archive creation — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0754` Network anomaly or suspicious relationship: tor exit or relay connection — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0755` Network anomaly or suspicious relationship: commercial tunnel service connection — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0756` Network anomaly or suspicious relationship: remote access tool network signature — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0757` Network anomaly or suspicious relationship: multiple hosts contact same new destination — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0758` Network anomaly or suspicious relationship: sinkhole or ids alert correlated with endpoint — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0759` Network anomaly or suspicious relationship: suricata drop or reject for host — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0760` Network anomaly or suspicious relationship: suricata protocol anomaly burst — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0761` Network anomaly or suspicious relationship: zeek weird event burst — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0762` Network anomaly or suspicious relationship: capture loss during incident window — medium; reference only (missing explicit aggregate semantics)
+- `CUR-NET-0763` Network anomaly or suspicious relationship: sudden network silence after security change — medium; reference only (missing explicit aggregate semantics)
+
+#### windows-endpoint
+
+- `CUR-WIN-CMD-0207` Encoded PowerShell — medium; observe-only direct rule
+- `CUR-WIN-CMD-0208` PowerShell expression execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0209` PowerShell remote download — medium; observe-only direct rule
+- `CUR-WIN-CMD-0210` PowerShell hidden window — medium; observe-only direct rule
+- `CUR-WIN-CMD-0211` PowerShell execution-policy bypass — medium; observe-only direct rule
+- `CUR-WIN-CMD-0212` PowerShell reflection or dynamic assembly load — medium; observe-only direct rule
+- `CUR-WIN-CMD-0213` AMSI bypass marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0214` ETW bypass marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0215` Regsvr32 remote scriptlet — medium; observe-only direct rule
+- `CUR-WIN-CMD-0216` Rundll32 JavaScript execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0217` Rundll32 DLL export execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0218` MSHTA remote or script execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0219` MSBuild project execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0220` InstallUtil execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0221` Regasm or Regsvcs proxy execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0222` WMIC remote process create — medium; observe-only direct rule
+- `CUR-WIN-CMD-0223` WMI event subscription creation — medium; observe-only direct rule
+- `CUR-WIN-CMD-0224` Remote service creation — medium; observe-only direct rule
+- `CUR-WIN-CMD-0225` Scheduled task creation — medium; observe-only direct rule
+- `CUR-WIN-CMD-0226` BITS job creation or transfer — medium; observe-only direct rule
+- `CUR-WIN-CMD-0227` Certutil download — medium; observe-only direct rule
+- `CUR-WIN-CMD-0228` Certutil decode — medium; observe-only direct rule
+- `CUR-WIN-CMD-0229` Esentutl copy or download — medium; observe-only direct rule
+- `CUR-WIN-CMD-0230` Msiexec remote package — medium; observe-only direct rule
+- `CUR-WIN-CMD-0231` CMSTP INF execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0232` ODBCConf DLL execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0233` Control Panel item execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0234` HTML Help execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0235` RunDLL32 comsvcs dump — medium; observe-only direct rule
+- `CUR-WIN-CMD-0237` Task Manager dump target — medium; observe-only direct rule
+- `CUR-WIN-CMD-0241` NTDSUtil snapshot or IFM — medium; observe-only direct rule
+- `CUR-WIN-CMD-0242` VSSAdmin shadow copy create — medium; observe-only direct rule
+- `CUR-WIN-CMD-0245` Disable recovery with BCDEdit — medium; observe-only direct rule
+- `CUR-WIN-CMD-0246` Delete backup catalog — medium; observe-only direct rule
+- `CUR-WIN-CMD-0251` Firewall disable or rule change — medium; observe-only direct rule
+- `CUR-WIN-CMD-0252` Enable RDP in registry — medium; observe-only direct rule
+- `CUR-WIN-CMD-0253` Create local user — medium; observe-only direct rule
+- `CUR-WIN-CMD-0254` Add user to administrators — medium; observe-only direct rule
+- `CUR-WIN-CMD-0255` Domain trust discovery — medium; observe-only direct rule
+- `CUR-WIN-CMD-0256` Domain controller discovery — medium; observe-only direct rule
+- `CUR-WIN-CMD-0257` Kerberos ticket listing or purge — medium; observe-only direct rule
+- `CUR-WIN-CMD-0258` Kerberos roasting marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0259` Mimikatz marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0260` SafetyKatz marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0261` LaZagne marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0262` SharpHound or BloodHound collector — medium; observe-only direct rule
+- `CUR-WIN-CMD-0263` ADFind reconnaissance — medium; observe-only direct rule
+- `CUR-WIN-CMD-0264` PsExec remote execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0265` WinRM remote execution — medium; observe-only direct rule
+- `CUR-WIN-CMD-0266` Remote desktop shadowing — medium; observe-only direct rule
+- `CUR-WIN-CMD-0267` SSH remote command on Windows — medium; observe-only direct rule
+- `CUR-WIN-CMD-0268` Alternate data stream write — medium; observe-only direct rule
+- `CUR-WIN-CMD-0269` CAB archive staging — medium; observe-only direct rule
+- `CUR-WIN-CMD-0270` Archive staging with tar — medium; observe-only direct rule
+- `CUR-WIN-CMD-0271` Robocopy broad collection — medium; observe-only direct rule
+- `CUR-WIN-CMD-0272` Clipboard collection — medium; observe-only direct rule
+- `CUR-WIN-CMD-0273` Screen capture — medium; observe-only direct rule
+- `CUR-WIN-CMD-0274` Named-pipe creation utility marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0275` Process injection marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0276` Reflective PE loading marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0277` Token manipulation marker — medium; observe-only direct rule
+- `CUR-WIN-CMD-0280` Exchange mailbox export request — medium; observe-only direct rule
+- `CUR-WIN-CMD-0281` Office macro child shell — medium; observe-only direct rule
+- `CUR-WIN-CMD-0282` Browser child PowerShell — medium; observe-only direct rule
+- `CUR-WIN-CMD-0283` Web server child command shell — medium; observe-only direct rule
+
+### Low priority (58)
+
+#### behavioral-baseline
+
+- `CUR-BASE-0764` Baseline deviation: first seen process on host — low; executable baseline (first seen)
+- `CUR-BASE-0765` Baseline deviation: rare process for peer group — low; executable baseline (prevalence)
+- `CUR-BASE-0766` Baseline deviation: first seen parent child pair — low; executable baseline (first seen)
+- `CUR-BASE-0767` Baseline deviation: rare parent child pair — low; executable baseline (prevalence)
+- `CUR-BASE-0768` Baseline deviation: first seen command line shape — low; executable baseline (first seen)
+- `CUR-BASE-0769` Baseline deviation: rare command for user — low; executable baseline (prevalence)
+- `CUR-BASE-0770` Baseline deviation: unsigned binary on normally signed host — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0771` Baseline deviation: binary hash seen on one host — low; executable baseline (prevalence)
+- `CUR-BASE-0772` Baseline deviation: process runs from new path — low; executable baseline (first seen)
+- `CUR-BASE-0773` Baseline deviation: system binary runs from user writable path — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0774` Baseline deviation: first seen service — low; executable baseline (first seen)
+- `CUR-BASE-0775` Baseline deviation: first seen scheduled task — low; executable baseline (first seen)
+- `CUR-BASE-0776` Baseline deviation: first seen autorun — low; executable baseline (first seen)
+- `CUR-BASE-0777` Baseline deviation: first seen kernel module — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0778` Baseline deviation: first seen driver — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0779` Baseline deviation: first seen login item — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0780` Baseline deviation: first seen user on host — low; executable baseline (first seen)
+- `CUR-BASE-0781` Baseline deviation: dormant user activity — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0782` Baseline deviation: service account interactive use — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0783` Baseline deviation: user logs into new asset class — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0784` Baseline deviation: privileged action new for user — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0785` Baseline deviation: first seen source ip for account — low; executable baseline (first seen)
+- `CUR-BASE-0786` Baseline deviation: first seen country for account — low; executable baseline (first seen)
+- `CUR-BASE-0787` Baseline deviation: first seen device for account — low; executable baseline (first seen)
+- `CUR-BASE-0788` Baseline deviation: new authentication protocol for account — low; executable baseline (first seen)
+- `CUR-BASE-0789` Baseline deviation: new mfa method for account — low; executable baseline (first seen)
+- `CUR-BASE-0790` Baseline deviation: authentication at unusual hour — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0791` Baseline deviation: authentication volume spike — low; executable baseline (deviation)
+- `CUR-BASE-0792` Baseline deviation: failure rate spike — low; executable baseline (deviation)
+- `CUR-BASE-0793` Baseline deviation: new admin relationship — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0794` Baseline deviation: new application consent relationship — low; executable baseline (first seen)
+- `CUR-BASE-0795` Baseline deviation: first seen domain — low; executable baseline (first seen)
+- `CUR-BASE-0796` Baseline deviation: first seen external ip — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0797` Baseline deviation: first seen asn — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0798` Baseline deviation: first seen destination port — low; executable baseline (first seen)
+- `CUR-BASE-0799` Baseline deviation: new protocol for host — low; executable baseline (first seen)
+- `CUR-BASE-0800` Baseline deviation: new sni for process — low; executable baseline (first seen)
+- `CUR-BASE-0801` Baseline deviation: rare tls fingerprint for host — low; executable baseline (prevalence)
+- `CUR-BASE-0802` Baseline deviation: outbound bytes above host baseline — low; executable baseline (deviation)
+- `CUR-BASE-0803` Baseline deviation: connection duration above baseline — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0804` Baseline deviation: connection count above baseline — low; executable baseline (deviation)
+- `CUR-BASE-0805` Baseline deviation: dns volume above baseline — low; executable baseline (deviation)
+- `CUR-BASE-0806` Baseline deviation: nxdomain rate above baseline — low; executable baseline (deviation)
+- `CUR-BASE-0807` Baseline deviation: destination fanout above baseline — low; executable baseline (deviation)
+- `CUR-BASE-0808` Baseline deviation: internal scan rate above baseline — low; reference only (missing explicit baseline semantics)
+- `CUR-BASE-0809` Baseline deviation: file write volume above baseline — low; executable baseline (deviation)
+- `CUR-BASE-0810` Baseline deviation: file rename rate above baseline — low; executable baseline (deviation)
+- `CUR-BASE-0811` Baseline deviation: archive creation volume above baseline — low; executable baseline (deviation)
+- `CUR-BASE-0812` Baseline deviation: cloud api new for principal — low; executable baseline (first seen)
+- `CUR-BASE-0813` Baseline deviation: cloud region new for principal — low; executable baseline (first seen)
+- `CUR-BASE-0814` Baseline deviation: cloud resource type new for principal — low; executable baseline (first seen)
+- `CUR-BASE-0815` Baseline deviation: cloud error rate spike — low; executable baseline (deviation)
+- `CUR-BASE-0816` Baseline deviation: secret access new for principal — low; executable baseline (first seen)
+- `CUR-BASE-0817` Baseline deviation: container image new for cluster — low; executable baseline (first seen)
+- `CUR-BASE-0818` Baseline deviation: kubernetes user agent new for actor — low; executable baseline (first seen)
+- `CUR-BASE-0819` Baseline deviation: pod exec new for actor — low; executable baseline (first seen)
+- `CUR-BASE-0820` Baseline deviation: namespace access new for service account — low; executable baseline (first seen)
+- `CUR-BASE-0821` Baseline deviation: rare api verb resource pair — low; executable baseline (prevalence)
