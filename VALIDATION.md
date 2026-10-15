@@ -2,6 +2,27 @@
 
 This file records engineering validation performed against the development deployment. It is evidence of observed behavior, not an operational authorization or a claim that the environment is clean.
 
+## 2026-10-14 — complete evidence anomaly escalation
+
+### Implemented behavior
+
+- Deterministic analysis now loads all unique evidence persisted for the hunt. Only checkpoint graphs and model inputs remain bounded.
+- Candidate evidence and exact structured entity matches are promoted into bounded context with a hard maximum of 200 new records per analysis pass.
+- Linux audit `EXECVE` arguments become structured process fields when hexadecimal content is valid printable UTF-8. Original source text remains intact.
+- General network analytics now emit cited DNS query fan-out, HTTP path fan-out, recognized scanner user-agent, and scan-then-reverse-connection signals.
+- Candidate priority records the fixed expected-noise penalty alongside base, specificity, repetition, and independent corroboration contributions.
+
+### Focused proof
+
+- A regression persisted eleven network records while retaining only the first two in hunt state. Complete-evidence analysis still detected the later high-port-fan-out candidate and promoted all nine later candidate/entity-related records, including the reverse-direction connection, into context.
+- Aggregate fixtures independently exercise all four new network deviations and retain their supporting evidence IDs. A separate ranking fixture proves a high-noise analytic receives a twelve-point deduction relative to otherwise equivalent low-noise behavior.
+- The focused candidate, catalog, normalization, and complete-evidence suites pass 47 tests with one expected dependency-gated skip.
+- The complete local suite passes 175 tests with six expected dependency-gated skips. `compileall` and `git diff --check` also pass.
+
+### Remaining proof
+
+- Fresh whole-change review, dependency-complete deployment checks, and the requested live hunt are recorded below when completed.
+
 ## 2026-10-12 — representative bounded retrieval (local/VM proof; no new live hunt)
 
 ### Implemented behavior

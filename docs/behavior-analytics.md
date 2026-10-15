@@ -15,7 +15,7 @@ Use semantic roles such as `process.command_line`, `process.executable`, `file.p
 
 Allowed predicate operators are `contains_any`, `equals_any`, `ends_with_any`, `path_prefix_any`, `regex`, `exists`, and `lookalike_process`.
 
-A weak anomaly should have a low `base_priority`, high `expected_noise`, realistic benign explanations, and explicit corroboration requirements. Execution from a temporary directory is the reference example. A specific composite such as a reverse shell can start higher, but it remains an investigative lead until supported by evidence.
+A weak anomaly should have a low `base_priority`, high `expected_noise`, realistic benign explanations, and explicit corroboration requirements. Execution from a temporary directory is the reference example. A specific composite such as a reverse shell can start higher, but it remains an investigative lead until supported by evidence. Candidate scoring subtracts a fixed expected-noise penalty of 0 for low, 6 for medium, or 12 for high noise and records that contribution in `score_reasons`.
 
 To add an analytic:
 
@@ -58,6 +58,8 @@ Behavior and indicator matches enter the persisted `candidate_leads` working lis
 - Only trusted or corroborated high-priority entries appear in the customer-facing prioritized-lead section.
 
 Scores and their reasons are stored with every candidate so an analyst can see why it moved.
+
+Deterministic summaries and catalog matching use every unique evidence record persisted for the hunt. The checkpoint and model context remains bounded. When a medium-or-higher candidate appears, ROMULUS promotes its cited evidence and records sharing exact structured entities into that context, with a maximum of 200 promoted records per analysis pass. This prevents an early full context bucket from hiding later anomalies while keeping checkpoint growth bounded.
 
 ## Validation
 

@@ -4,6 +4,15 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 
 ## Unreleased
 
+### Complete evidence analysis and general anomaly escalation
+
+- Made the persisted SQLite evidence table authoritative for deterministic summaries, behavior matching, and hypothesis evidence selection. Checkpoint and model context stays bounded, and coverage now distinguishes persisted, retained, and candidate-promoted records.
+- Added bounded promotion of candidate citations and exact structured entity matches so later related activity reaches correlation and reasoning even after an early context bucket is full.
+- Normalized Linux audit `EXECVE` arguments, including printable UTF-8 hexadecimal values, into derived process fields while preserving the original message and provenance.
+- Replaced the broad download-to-shell seed with a downloader-and-shell composite and added safe hexadecimal command-token alternatives for raw audit fields.
+- Added cited DNS query fan-out, HTTP path fan-out, scanner user-agent, and scan-then-reverse-connection signals without scenario identities, indicators, filenames, commands, or timestamps.
+- Applied fixed, explainable expected-noise penalties of 0, 6, or 12 points during candidate scoring.
+
 ### Representative bounded telemetry retrieval
 
 - Replaced earliest-only capped retention with source-native representative retrieval: Elasticsearch time strata inside one PIT, Arkime stable rank windows, and deterministic TShark reservoirs over the complete matching stream.

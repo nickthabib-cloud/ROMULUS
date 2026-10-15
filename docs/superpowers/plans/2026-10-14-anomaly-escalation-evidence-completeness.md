@@ -43,19 +43,19 @@
 - Produces: `normalize_elasticsearch_event(hit: dict) -> dict` and analyzer-compatible hexadecimal prefix clauses from `_predicate_query`.
 - Consumes: Existing `_add_es_hit`, semantic role bindings, and catalog predicate evaluation.
 
-- [ ] **Step 1: Write failing audit normalization and seed-shape tests**
+- [x] **Step 1: Write failing audit normalization and seed-shape tests**
 
 Assert that a hex-encoded `EXECVE` argument becomes `process.command_line`, invalid hex remains untouched, and `BH-LNX-003` compiles as downloader AND shell with a `6375726c` prefix alternative.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `python -m unittest tests.test_evidence_analysis tests.test_behavior_catalog -v`
 
-- [ ] **Step 3: Implement normalization and composite seed compilation**
+- [x] **Step 3: Implement normalization and composite seed compilation**
 
 Add derived fields before `_bounded` persistence. Add hex prefixes only for raw audit text aliases and alphanumeric command tokens of at least three characters.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run: `python -m unittest tests.test_evidence_analysis tests.test_behavior_catalog -v`
 
@@ -69,19 +69,19 @@ Run: `python -m unittest tests.test_evidence_analysis tests.test_behavior_catalo
 - Produces: `HuntEngine._analysis_evidence(state) -> tuple[list[dict], list[dict]]` and `HuntEngine._promote_candidate_context(state, evidence, candidates, limit=200) -> int`.
 - Consumes: `Store.list_evidence`, `build_candidate_queue`, and existing bounded hunt context.
 
-- [ ] **Step 1: Write failing completeness and promotion tests**
+- [x] **Step 1: Write failing completeness and promotion tests**
 
 Create late network anomalies after a tiny context cap. Assert that analysis detects them from SQLite and promotes exact candidate and entity-related records into `state["network"]`.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `python -m unittest tests.test_evidence_analysis -v`
 
-- [ ] **Step 3: Implement complete deterministic analysis and bounded promotion**
+- [x] **Step 3: Implement complete deterministic analysis and bounded promotion**
 
 Use complete evidence for summaries, candidate matching, and hypothesis evidence selection. Continue to build correlations and graphs only from bounded context after promotion.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run: `python -m unittest tests.test_evidence_analysis -v`
 
@@ -98,19 +98,19 @@ Run: `python -m unittest tests.test_evidence_analysis -v`
 - Produces: aggregate signals `dns_query_fanout`, `http_path_fanout`, `web_scanner_user_agent`, and `scan_then_reverse_connection`.
 - Consumes: normalized structured network roles and existing aggregate candidate machinery.
 
-- [ ] **Step 1: Write failing signal and ordering tests**
+- [x] **Step 1: Write failing signal and ordering tests**
 
 Assert thresholds, bounded citations, shared-entity corroboration, and expected-noise deductions of 0, 6, and 12.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `python -m unittest tests.test_evidence_analysis tests.test_behavior_catalog -v`
 
-- [ ] **Step 3: Implement signals, catalog entries, and score reasons**
+- [x] **Step 3: Implement signals, catalog entries, and score reasons**
 
 Use distinct structured values and chronological peer-direction records. Keep every signal list bounded by the summary limit.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run: `python -m unittest tests.test_evidence_analysis tests.test_behavior_catalog -v`
 
@@ -126,11 +126,11 @@ Run: `python -m unittest tests.test_evidence_analysis tests.test_behavior_catalo
 - Consumes: Tasks 1-3.
 - Produces: durable architecture and validation records.
 
-- [ ] **Step 1: Update architecture and validation documentation**
+- [x] **Step 1: Update architecture and validation documentation**
 
 Record the persisted-evidence boundary, promotion behavior, generic anomaly signals, and measured test results.
 
-- [ ] **Step 2: Run complete verification**
+- [x] **Step 2: Run complete verification**
 
 Run: `python -m unittest discover -s tests`
 
