@@ -1,0 +1,3369 @@
+{
+  "records": [
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_process_on_host.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0764",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_process_on_host"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen process on host"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: rare_process_for_peer_group.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0765",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "rare_process_for_peer_group"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: rare process for peer group"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_parent_child_pair.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0766",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_parent_child_pair"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen parent child pair"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: rare_parent_child_pair.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0767",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "rare_parent_child_pair"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: rare parent child pair"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_command_line_shape.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0768",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_command_line_shape"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen command line shape"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: rare_command_for_user.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0769",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "rare_command_for_user"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: rare command for user"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: unsigned_binary_on_normally_signed_host.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0770",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "unsigned_binary_on_normally_signed_host"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: unsigned binary on normally signed host"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: binary_hash_seen_on_one_host.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0771",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "binary_hash_seen_on_one_host"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: binary hash seen on one host"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: process_runs_from_new_path.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0772",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "process_runs_from_new_path"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: process runs from new path"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: system_binary_runs_from_user_writable_path.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0773",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "system_binary_runs_from_user_writable_path"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: system binary runs from user writable path"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_service.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0774",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_service"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen service"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_scheduled_task.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0775",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_scheduled_task"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen scheduled task"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_autorun.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0776",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_autorun"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen autorun"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_kernel_module.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0777",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_kernel_module"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen kernel module"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_driver.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0778",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_driver"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen driver"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_login_item.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0779",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_login_item"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen login item"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_user_on_host.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0780",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_user_on_host"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen user on host"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: dormant_user_activity.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0781",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "dormant_user_activity"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: dormant user activity"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: service_account_interactive_use.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0782",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "service_account_interactive_use"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: service account interactive use"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: user_logs_into_new_asset_class.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0783",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "user_logs_into_new_asset_class"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: user logs into new asset class"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: privileged_action_new_for_user.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0784",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "privileged_action_new_for_user"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: privileged action new for user"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_source_ip_for_account.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0785",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_source_ip_for_account"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen source ip for account"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_country_for_account.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0786",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_country_for_account"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen country for account"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_device_for_account.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0787",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_device_for_account"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen device for account"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: new_authentication_protocol_for_account.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0788",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "new_authentication_protocol_for_account"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: new authentication protocol for account"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: new_mfa_method_for_account.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0789",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "new_mfa_method_for_account"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: new mfa method for account"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: authentication_at_unusual_hour.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0790",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "authentication_at_unusual_hour"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: authentication at unusual hour"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: authentication_volume_spike.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0791",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "authentication_volume_spike"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: authentication volume spike"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: failure_rate_spike.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0792",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "failure_rate_spike"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: failure rate spike"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: new_admin_relationship.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0793",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "new_admin_relationship"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: new admin relationship"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: new_application_consent_relationship.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0794",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "new_application_consent_relationship"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: new application consent relationship"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_domain.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0795",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_domain"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen domain"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_external_ip.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0796",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_external_ip"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen external ip"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_asn.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0797",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_asn"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen asn"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: first_seen_destination_port.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0798",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "first_seen_destination_port"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: first seen destination port"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: new_protocol_for_host.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0799",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "new_protocol_for_host"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: new protocol for host"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: new_sni_for_process.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0800",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "new_sni_for_process"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: new sni for process"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: rare_tls_fingerprint_for_host.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0801",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "rare_tls_fingerprint_for_host"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: rare tls fingerprint for host"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: outbound_bytes_above_host_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0802",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "outbound_bytes_above_host_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: outbound bytes above host baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: connection_duration_above_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0803",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "connection_duration_above_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: connection duration above baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: connection_count_above_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0804",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "connection_count_above_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: connection count above baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: dns_volume_above_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0805",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "dns_volume_above_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: dns volume above baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: nxdomain_rate_above_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0806",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "nxdomain_rate_above_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: nxdomain rate above baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: destination_fanout_above_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0807",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "destination_fanout_above_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: destination fanout above baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: internal_scan_rate_above_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0808",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "internal_scan_rate_above_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: internal scan rate above baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: file_write_volume_above_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0809",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "file_write_volume_above_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: file write volume above baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: file_rename_rate_above_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0810",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "file_rename_rate_above_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: file rename rate above baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: archive_creation_volume_above_baseline.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0811",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "archive_creation_volume_above_baseline"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: archive creation volume above baseline"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: cloud_api_new_for_principal.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0812",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "cloud_api_new_for_principal"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: cloud api new for principal"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: cloud_region_new_for_principal.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0813",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "cloud_region_new_for_principal"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: cloud region new for principal"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: cloud_resource_type_new_for_principal.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0814",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "cloud_resource_type_new_for_principal"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: cloud resource type new for principal"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: cloud_error_rate_spike.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0815",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "cloud_error_rate_spike"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: cloud error rate spike"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: secret_access_new_for_principal.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0816",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "secret_access_new_for_principal"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: secret access new for principal"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: container_image_new_for_cluster.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0817",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "container_image_new_for_cluster"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: container image new for cluster"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: kubernetes_user_agent_new_for_actor.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0818",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "kubernetes_user_agent_new_for_actor"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: kubernetes user agent new for actor"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: pod_exec_new_for_actor.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0819",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "pod_exec_new_for_actor"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: pod exec new for actor"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: namespace_access_new_for_service_account.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0820",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "namespace_access_new_for_service_account"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: namespace access new for service account"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078",
+        "T1059",
+        "T1071"
+      ],
+      "base_score": 25,
+      "benign_explanations": [
+        "Authorized administration, software deployment, troubleshooting, or security testing."
+      ],
+      "description": "An entity differs materially from its own historical baseline or its peer group. Observed marker: rare_api_verb_resource_pair.",
+      "domain": "behavioral-baseline",
+      "escalation_conditions": [
+        "Combine with a concrete suspicious behavior, sensitive target, privilege, external destination, or multiple simultaneous deviations."
+      ],
+      "expected_noise": "high",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-BASE-0821",
+      "observables": [
+        {
+          "operator": "equals_any",
+          "role": "aggregate.signal",
+          "values": [
+            "rare_api_verb_resource_pair"
+          ]
+        }
+      ],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "low",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [],
+      "romulus_compatibility": "requires_aggregate_or_baseline_engine",
+      "signal_type": "baseline_deviation",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK"
+      ],
+      "specificity": 40,
+      "support_reason": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "execution",
+        "credential-access",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "sufficient historical telemetry with stable entity identifiers and coverage accounting"
+      ],
+      "title": "Baseline deviation: rare api verb resource pair"
+    }
+  ],
+  "schema_version": "1.0.0"
+}

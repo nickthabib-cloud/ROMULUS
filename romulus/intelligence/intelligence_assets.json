@@ -1,0 +1,117 @@
+{
+  "schema_version": "1.0.0",
+  "retired_assets": [
+    "docs/research/common-indicator-index.csv",
+    "romulus/intelligence/behavior_packs/references.json"
+  ],
+  "assets": [
+    {
+      "path": "docs/research/common-indicator-corpus.json",
+      "class": "authoritative_input",
+      "owner": "indicator corpus research",
+      "consumers": ["scripts/build_behavior_packs.py", "scripts/build_intelligence_docs.py"]
+    },
+    {
+      "path": "scripts/behavior_pack_translations.json",
+      "class": "authoritative_input",
+      "owner": "behavior pack translation registry",
+      "consumers": ["scripts/build_behavior_packs.py"]
+    },
+    {
+      "path": "romulus/intelligence/attack_catalog.json",
+      "class": "authoritative_input",
+      "owner": "pinned MITRE ATT&CK catalog",
+      "consumers": ["romulus/intelligence/attack_catalog.py", "scripts/build_behavior_packs.py"]
+    },
+    {
+      "path": "romulus/intelligence/behavior_catalog.json",
+      "class": "runtime_configuration",
+      "owner": "compatibility behavior catalog",
+      "consumers": ["romulus/intelligence/behavior_catalog.py"]
+    },
+    {
+      "path": "romulus/intelligence/behavior_catalog.schema.json",
+      "class": "runtime_configuration",
+      "owner": "behavior catalog schema",
+      "consumers": ["docs/behavior-analytics.md", "scripts/audit_intelligence_assets.py"]
+    },
+    {
+      "path": "romulus/intelligence/windows_event_catalog.json",
+      "class": "runtime_configuration",
+      "owner": "Windows event behavior catalog",
+      "consumers": ["romulus/intelligence/behavior_catalog.py"]
+    },
+    {
+      "path": "romulus/intelligence/search_matrix_catalog.json",
+      "class": "runtime_configuration",
+      "owner": "Elasticsearch search matrix",
+      "consumers": ["romulus/intelligence/search_matrix.py"]
+    },
+    {
+      "path": "romulus/intelligence/local_indicators.json",
+      "class": "runtime_configuration",
+      "owner": "operator trusted indicators",
+      "consumers": ["romulus/intelligence/behavior_catalog.py"]
+    },
+    {
+      "path": "romulus/intelligence/behavior_packs/direct.json",
+      "class": "generated_runtime",
+      "owner": "scripts/build_behavior_packs.py",
+      "consumers": ["romulus/intelligence/behavior_catalog.py"]
+    },
+    {
+      "path": "romulus/intelligence/behavior_packs/sequences.json",
+      "class": "generated_runtime",
+      "owner": "scripts/build_behavior_packs.py",
+      "consumers": ["romulus/intelligence/sequence_analytics.py"]
+    },
+    {
+      "path": "romulus/intelligence/behavior_packs/aggregates.json",
+      "class": "generated_runtime",
+      "owner": "scripts/build_behavior_packs.py",
+      "consumers": ["romulus/intelligence/aggregate_analytics.py"]
+    },
+    {
+      "path": "romulus/intelligence/behavior_packs/baselines.json",
+      "class": "generated_runtime",
+      "owner": "scripts/build_behavior_packs.py",
+      "consumers": ["romulus/intelligence/baseline_analytics.py"]
+    },
+    {
+      "path": "romulus/intelligence/behavior_packs/capabilities.json",
+      "class": "generated_runtime",
+      "owner": "scripts/build_behavior_packs.py",
+      "consumers": ["romulus/intelligence/reference_intelligence.py"]
+    },
+    {
+      "path": "romulus/intelligence/behavior_packs/manifest.json",
+      "class": "generated_runtime",
+      "owner": "scripts/build_behavior_packs.py",
+      "consumers": ["romulus/intelligence/behavior_packs/__init__.py", "scripts/audit_intelligence_assets.py"]
+    },
+    {
+      "path": "docs/research/common-indicator-research.md",
+      "class": "operator_document",
+      "owner": "indicator research narrative",
+      "consumers": ["docs/research/README.md"]
+    },
+    {
+      "path": "docs/research/indicator-priority-inventory.md",
+      "class": "operator_document",
+      "owner": "scripts/build_intelligence_docs.py",
+      "consumers": ["docs/research/README.md", "README.md"]
+    },
+    {
+      "path": "docs/research/elasticsearch-dsl-search-matrix.md",
+      "class": "operator_document",
+      "owner": "Elasticsearch matrix research",
+      "consumers": ["docs/research/README.md", "romulus/intelligence/search_matrix_catalog.json"]
+    },
+    {
+      "path": "docs/research/windows-event-log-threat-hunting.md",
+      "class": "operator_document",
+      "owner": "Windows event research",
+      "consumers": ["docs/research/README.md", "romulus/intelligence/windows_event_catalog.json"]
+    }
+  ]
+}

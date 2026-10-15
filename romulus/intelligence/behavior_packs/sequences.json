@@ -1,0 +1,5508 @@
+{
+  "records": [
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1105",
+        "T1059"
+      ],
+      "base_score": 92,
+      "benign_explanations": [
+        "Approved installer or deployment automation."
+      ],
+      "description": "High-value sequence that should be elevated when the stated conditions are observed.",
+      "domain": "cross-platform",
+      "escalation_conditions": [
+        "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
+      ],
+      "expected_noise": "low",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-CORE-0005",
+      "observables": [],
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "priority": "critical",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "ordered": [
+            "download from external source",
+            "write to local path",
+            "chmod executable",
+            "execute same path"
+          ],
+          "same_asset": true,
+          "within_minutes": 15
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "ATOMIC_RED_TEAM"
+      ],
+      "specificity": 88,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "process, file, and network telemetry"
+      ],
+      "title": "Downloaded payload made executable and launched"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1069",
+        "T1087",
+        "T1082",
+        "T1012"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Administrator troubleshooting, configuration management, or authorized assessment."
+      ],
+      "description": "High-value sequence that should be elevated when the stated conditions are observed.",
+      "domain": "linux",
+      "escalation_conditions": [
+        "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-CORE-0009",
+      "observables": [],
+      "platforms": [
+        "linux"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "of": [
+            "id",
+            "whoami",
+            "groups",
+            "sudo -l",
+            "uname -a",
+            "cat /etc/os-release",
+            "find SUID files",
+            "getcap -r",
+            "list cron",
+            "list services"
+          ],
+          "same_actor": true,
+          "same_asset": true,
+          "unordered_any": 4,
+          "within_minutes": 10
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "ATOMIC_RED_TEAM"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "privilege-escalation"
+      ],
+      "telemetry_requirements": [
+        "process command lines"
+      ],
+      "title": "Privilege discovery command cluster on one Linux asset"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1005",
+        "T1041"
+      ],
+      "base_score": 92,
+      "benign_explanations": [
+        "Approved backup, migration, or incident-response collection."
+      ],
+      "description": "High-value cross source that should be elevated when the stated conditions are observed.",
+      "domain": "cross-platform",
+      "escalation_conditions": [
+        "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
+      ],
+      "expected_noise": "low",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-CORE-0010",
+      "observables": [],
+      "platforms": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "priority": "critical",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "ordered": [
+            "sensitive file read or archive",
+            "unusual outbound connection or upload"
+          ],
+          "same_actor": true,
+          "same_asset": true,
+          "within_minutes": 30
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "cross_source",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "ATOMIC_RED_TEAM"
+      ],
+      "specificity": 88,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "collection",
+        "exfiltration"
+      ],
+      "telemetry_requirements": [
+        "file/process telemetry and network flow"
+      ],
+      "title": "Sensitive file access followed by outbound transfer"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1685",
+        "T1070"
+      ],
+      "base_score": 92,
+      "benign_explanations": [
+        "Approved logging maintenance with a documented change window."
+      ],
+      "description": "High-value sequence that should be elevated when the stated conditions are observed.",
+      "domain": "cross-platform",
+      "escalation_conditions": [
+        "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
+      ],
+      "expected_noise": "low",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-CORE-0011",
+      "observables": [],
+      "platforms": [
+        "windows",
+        "linux",
+        "macos",
+        "cloud"
+      ],
+      "priority": "critical",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "ordered_any_direction": [
+            "logging service stop/config change/log deletion",
+            "suspicious execution or credential access"
+          ],
+          "same_actor_or_asset": true,
+          "within_minutes": 20
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "ATOMIC_RED_TEAM"
+      ],
+      "specificity": 88,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "defense-impairment"
+      ],
+      "telemetry_requirements": [
+        "process, service, configuration, and audit health telemetry"
+      ],
+      "title": "Security logging impaired near suspicious execution"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1547",
+        "T1053",
+        "T1071"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment or software update."
+      ],
+      "description": "High-value cross source that should be elevated when the stated conditions are observed.",
+      "domain": "cross-platform",
+      "escalation_conditions": [
+        "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
+      ],
+      "expected_noise": "low",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-CORE-0012",
+      "observables": [],
+      "platforms": [
+        "windows",
+        "linux",
+        "macos",
+        "cloud"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "ordered": [
+            "new persistence object",
+            "persisted process starts",
+            "first-seen external destination"
+          ],
+          "same_asset": true,
+          "within_minutes": 60
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "cross_source",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "ATOMIC_RED_TEAM"
+      ],
+      "specificity": 88,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "persistence",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "configuration, process, and network telemetry"
+      ],
+      "title": "New persistence followed by first external connection"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1003",
+        "T1021",
+        "T1078"
+      ],
+      "base_score": 92,
+      "benign_explanations": [
+        "Authorized credential recovery followed by administration."
+      ],
+      "description": "High-value cross source that should be elevated when the stated conditions are observed.",
+      "domain": "cross-platform",
+      "escalation_conditions": [
+        "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
+      ],
+      "expected_noise": "low",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-CORE-0013",
+      "observables": [],
+      "platforms": [
+        "windows",
+        "linux",
+        "macos",
+        "identity"
+      ],
+      "priority": "critical",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "ordered": [
+            "credential store access or dump",
+            "new remote authentication using same account or asset"
+          ],
+          "within_minutes": 60
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "cross_source",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "ATOMIC_RED_TEAM"
+      ],
+      "specificity": 88,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "credential-access",
+        "lateral-movement"
+      ],
+      "telemetry_requirements": [
+        "endpoint credential-access signal and authentication logs"
+      ],
+      "title": "Credential access followed by remote authentication"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1046",
+        "T1021"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Authorized inventory, orchestration, vulnerability scanning, or administration."
+      ],
+      "description": "High-value sequence that should be elevated when the stated conditions are observed.",
+      "domain": "cross-platform",
+      "escalation_conditions": [
+        "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-CORE-0014",
+      "observables": [],
+      "platforms": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "ordered": [
+            "network or account discovery burst",
+            "SMB, RDP, WinRM, SSH, WMI, or remote-service connection"
+          ],
+          "same_actor_or_asset": true,
+          "within_minutes": 30
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "ATOMIC_RED_TEAM"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "discovery",
+        "lateral-movement"
+      ],
+      "telemetry_requirements": [
+        "process, authentication, and network telemetry"
+      ],
+      "title": "Discovery burst followed by remote service use"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1204.002",
+        "T1547",
+        "T1053"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Installer or software updater."
+      ],
+      "description": "High-value sequence that should be elevated when the stated conditions are observed.",
+      "domain": "cross-platform",
+      "escalation_conditions": [
+        "Increase confidence for unusual actor, rare asset, privileged context, external network activity, or independent corroboration."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-CORE-0015",
+      "observables": [],
+      "platforms": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "ordered": [
+            "execution from temporary or shared-memory path",
+            "new service, task, autorun, cron, or launch item"
+          ],
+          "same_asset": true,
+          "within_minutes": 30
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "ATOMIC_RED_TEAM"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence"
+      ],
+      "telemetry_requirements": [
+        "process and persistence telemetry"
+      ],
+      "title": "Temporary-path executable followed by persistence"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'download then execute' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0822",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "download_then_execute"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Download followed by execution of the same file"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'download then persistence' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0823",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "download_then_persistence"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Download followed by persistence creation"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'download then security change' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0824",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "download_then_security_change"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Download followed by firewall, audit, EDR, or policy change"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'archive then upload' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0825",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "archive_then_upload"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Archive creation followed by outbound upload"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'sensitive read then archive' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0826",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "sensitive_read_then_archive"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Sensitive file reads followed by archive creation"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'sensitive read then remote login' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0827",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "sensitive_read_then_remote_login"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Credential access followed by remote authentication"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'enumeration then exploit check' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0828",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "enumeration_then_exploit_check"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "System enumeration followed by local exploit probing"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'enumeration then privilege change' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0829",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "enumeration_then_privilege_change"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Privilege discovery followed by sudo, SUID, token, or role change"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'privilege change then credential access' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0830",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "privilege_change_then_credential_access"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Privilege escalation followed by credential-store access"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'new user then admin group' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0831",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "new_user_then_admin_group"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Account creation followed by privileged group membership"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'new user then remote login' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0832",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "new_user_then_remote_login"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Account creation followed by remote login"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'password reset then new location login' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0833",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "password_reset_then_new_location_login"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Password reset followed by successful authentication from a new location"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'mfa change then sensitive access' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0834",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "mfa_change_then_sensitive_access"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "MFA method change followed by sensitive access"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'role assignment then secret access' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0835",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "role_assignment_then_secret_access"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Privilege grant followed by secret or key access"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'app credential then service principal login' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0836",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "app_credential_then_service_principal_login"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Application credential addition followed by service-principal authentication"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'oauth consent then mail access' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0837",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "oauth_consent_then_mail_access"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "OAuth consent followed by mailbox or file access"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'inbox rule then external forward' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0838",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "inbox_rule_then_external_forward"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Inbox rule creation followed by external mail forwarding"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'remote login then discovery' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0839",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "remote_login_then_discovery"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Remote authentication followed by host or domain discovery"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'remote login then payload transfer' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0840",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "remote_login_then_payload_transfer"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Remote authentication followed by payload transfer"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'remote login then service creation' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0841",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "remote_login_then_service_creation"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Remote authentication followed by service or scheduled-task creation"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'smb write then service start' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0842",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "smb_write_then_service_start"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "SMB file write followed by remote service start"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'wmi connection then process create' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0843",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "wmi_connection_then_process_create"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "WMI network activity followed by remote process creation"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'rdp login then credential dump' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0844",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "rdp_login_then_credential_dump"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "RDP login followed by credential dumping"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'ssh login then pty upgrade' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0845",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "ssh_login_then_pty_upgrade"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "SSH or shell access followed by PTY upgrade"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'office child then download' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0846",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "office_child_then_download"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Office child process followed by network retrieval"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'browser child shell then persistence' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0847",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "browser_child_shell_then_persistence"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Browser child shell followed by persistence"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'webserver child shell then external connection' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0848",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "webserver_child_shell_then_external_connection"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Web server child shell followed by external connection"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'script interpreter then security disable' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0849",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "script_interpreter_then_security_disable"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Interpreter activity followed by security-control disablement"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'event log clear then execution' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0850",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "event_log_clear_then_execution"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Event-log clearing near suspicious execution"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'audit stop then sensitive read' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0851",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "audit_stop_then_sensitive_read"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Audit service stop followed by sensitive file access"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'firewall drop then c2' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0852",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "firewall_drop_then_c2"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Firewall deny or drop rule followed by command-and-control traffic"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'dns change then new c2' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0853",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "dns_change_then_new_c2"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Resolver change followed by a new external destination"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'proxy change then data egress' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0854",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "proxy_change_then_data_egress"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Proxy configuration change followed by unusual upload"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'defender exclusion then payload execution' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0855",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "defender_exclusion_then_payload_execution"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Security exclusion creation followed by payload execution"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'driver load then process tampering' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0856",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "driver_load_then_process_tampering"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "New driver load followed by process tampering"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'process access then dump file' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0857",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "process_access_then_dump_file"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Sensitive process access followed by dump-file creation"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'registry hive save then archive' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0858",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "registry_hive_save_then_archive"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "SAM, SYSTEM, or SECURITY hive save followed by archive creation"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'shadow copy then ntds access' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0859",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "shadow_copy_then_ntds_access"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Volume shadow copy creation followed by directory database access"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'scheduled task then first run' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0860",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "scheduled_task_then_first_run"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Scheduled task creation followed by its first execution"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'service creation then network connection' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0861",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "service_creation_then_network_connection"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "New service followed by external network activity"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'autorun write then child process' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0862",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "autorun_write_then_child_process"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Autorun change followed by execution after logon or reboot"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'cron write then shell' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0863",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "cron_write_then_shell"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Cron modification followed by shell execution"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'systemd unit write then enable start' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0864",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "systemd_unit_write_then_enable_start"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Systemd unit write followed by enable and start"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'launch agent write then launchctl' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0865",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "launch_agent_write_then_launchctl"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Launch item write followed by launchctl bootstrap"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'ssh key write then key login' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0866",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "ssh_key_write_then_key_login"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Authorized key addition followed by key-based login"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'cloud key create then api burst' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0867",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "cloud_key_create_then_api_burst"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Cloud access-key creation followed by broad API activity"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'cloud role assume then region fanout' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0868",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "cloud_role_assume_then_region_fanout"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Role assumption followed by multi-region enumeration"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'cloud logging disable then resource change' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0869",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "cloud_logging_disable_then_resource_change"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Cloud logging impairment followed by control-plane changes"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'bucket public then bulk download' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0870",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "bucket_public_then_bulk_download"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Storage resource made public followed by bulk reads"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'snapshot share then external account access' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0871",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "snapshot_share_then_external_account_access"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Snapshot sharing followed by external account access"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'vm metadata change then new process' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0872",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "vm_metadata_change_then_new_process"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "VM startup metadata change followed by new process execution"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'serverless code update then external connection' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0873",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "serverless_code_update_then_external_connection"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Function code update followed by first-seen egress"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'k8s secret list then external connection' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0874",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "k8s_secret_list_then_external_connection"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Kubernetes secret enumeration followed by external connection"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'k8s exec then host mount' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0875",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "k8s_exec_then_host_mount"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Pod exec followed by host-path or runtime-socket access"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'k8s rbac grant then privileged pod' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0876",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "k8s_rbac_grant_then_privileged_pod"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "RBAC privilege grant followed by privileged pod creation"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'container download then shell' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0877",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "container_download_then_shell"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Container download followed by shell or executable launch"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'container metadata then cloud api' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0878",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "container_metadata_then_cloud_api"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Container metadata access followed by cloud API use"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'scan then exploit response' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0879",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "scan_then_exploit_response"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Network scan followed by application error or exploit signature"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'dns then beacon' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0880",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "dns_then_beacon"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Rare DNS query followed by periodic connections"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'beacon then large upload' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0881",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "beacon_then_large_upload"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Periodic command traffic followed by large egress"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'tls anomaly then endpoint execution' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0882",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "tls_anomaly_then_endpoint_execution"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Rare TLS fingerprint correlated with suspicious endpoint process"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'ids alert then host behavior' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0883",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "ids_alert_then_host_behavior"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "IDS alert correlated with endpoint execution on the same asset"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'rare process then rare destination' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0884",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "rare_process_then_rare_destination"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "First-seen process connects to first-seen destination"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'rare user then rare host then privilege' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0885",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "rare_user_then_rare_host_then_privilege"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "New user-host relationship followed by privileged action"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'multiple weak signals same actor' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0886",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "multiple_weak_signals_same_actor"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Three or more weak anomalies share actor, asset, and short window"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'telemetry gap then high risk change' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0887",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "telemetry_gap_then_high_risk_change"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Telemetry loss followed by high-risk administrative change"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'time change then log gap' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0888",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "time_change_then_log_gap"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "System time change followed by audit discontinuity"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'archive delete after upload' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0889",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "archive_delete_after_upload"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Staging archive deleted after outbound transfer"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'tool cleanup after activity' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0890",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "tool_cleanup_after_activity"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Offensive tool or payload deleted shortly after use"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'persistence removed after single run' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0891",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "persistence_removed_after_single_run"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Persistence object created, executed once, then removed"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'failed attempts then alternate method success' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0892",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "failed_attempts_then_alternate_method_success"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Repeated failures followed by success through another protocol or credential"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'multi host same command' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0893",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "multi_host_same_command"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Same rare command appears on multiple hosts in a short window"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'multi account same source' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0894",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "multi_account_same_source"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "One source authenticates to many accounts"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'one account many hosts' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0895",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "one_account_many_hosts"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "One account authenticates to many assets"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'service account changes then human login' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0896",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "service_account_changes_then_human_login"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Service account configuration changes followed by interactive use"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'security tool query then disable' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0897",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "security_tool_query_then_disable"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Security product discovery followed by impairment"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'backup discovery then backup deletion' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0898",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "backup_discovery_then_backup_deletion"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Backup enumeration followed by deletion or encryption"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'share discovery then mass file change' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0899",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "share_discovery_then_mass_file_change"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "File-share discovery followed by high rename or write volume"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 75,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'database discovery then dump' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0900",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "high",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "database_discovery_then_dump"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Database enumeration followed by export or dump"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'browser store read then cloud login' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0901",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "browser_store_read_then_cloud_login"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Browser credential access followed by cloud authentication"
+    },
+    {
+      "activation_mode": "observe",
+      "attack_techniques": [
+        "T1078"
+      ],
+      "base_score": 50,
+      "benign_explanations": [
+        "Approved deployment, administration, incident response, backup, or security testing can form a similar sequence."
+      ],
+      "description": "Correlate the ordered behavior 'keychain read then new ssh' on the same actor, asset, object, or destination within a bounded time window.",
+      "domain": "cross-source-correlation",
+      "escalation_conditions": [
+        "Shorter interval, privileged actor, sensitive target, external destination, first-seen relationship, or additional independent evidence."
+      ],
+      "expected_noise": "medium",
+      "follow_up": [
+        "Review actor, process ancestry, target, prevalence, timing, and nearby activity."
+      ],
+      "id": "CUR-SEQ-0902",
+      "observables": [],
+      "platforms": [
+        "cross-platform"
+      ],
+      "priority": "medium",
+      "record_type": "curated_behavioral_indicator",
+      "relationship_logic": [
+        {
+          "default_window_minutes": 30,
+          "entity_constraints": [
+            "same actor when available",
+            "same asset or target",
+            "shared object, path, account, address, or destination"
+          ],
+          "ordered": true,
+          "pattern": "keychain_read_then_new_ssh"
+        }
+      ],
+      "romulus_compatibility": "requires_sequence_engine",
+      "signal_type": "sequence",
+      "source_refs": [
+        "MITRE_ATTACK",
+        "SIGMA",
+        "ELASTIC_RULES",
+        "MICROSOFT_SYSMON",
+        "ZEEK",
+        "SURICATA"
+      ],
+      "specificity": 65,
+      "support_reason": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+      "supported": false,
+      "tactics": [
+        "execution",
+        "persistence",
+        "credential-access",
+        "lateral-movement",
+        "command-and-control"
+      ],
+      "telemetry_requirements": [
+        "at least two compatible event families with normalized entities and timestamps"
+      ],
+      "title": "Keychain access followed by SSH to a new destination"
+    }
+  ],
+  "schema_version": "1.0.0"
+}

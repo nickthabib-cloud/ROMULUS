@@ -1,0 +1,23 @@
+{
+  "translation_version": "1.0.0",
+  "direct_roles": {
+    "event.action": "event.action",
+    "file.path": "file.path",
+    "process.command_line": "process.command_line"
+  },
+  "operators": {
+    "contains_any": "contains_any",
+    "equals_any": "equals_any"
+  },
+  "activation_policy": {
+    "active_priorities": ["critical", "high"],
+    "active_noise": ["low"],
+    "direct_active_limit": 73,
+    "observe_score_ceiling": 39
+  },
+  "unsupported_semantics": {
+    "sequence": "No explicit canonical stage-signal translation and shared-entity join is defined yet.",
+    "aggregate": "The record names an aggregate marker but does not define executable filters, grouping, window, measure, sample minimum, and threshold.",
+    "baseline_deviation": "The record names a baseline marker but does not define historical state, peer group, warm-up, threshold, and contamination controls."
+  }
+}
