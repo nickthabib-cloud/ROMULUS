@@ -35,6 +35,35 @@ from .scheduler import (initialize_scheduler, register_search_task, select_searc
 from .sampling import sampling_policy
 from .synthetic import sample_evidence
 
+MAX_STATE_CANDIDATES=100
+MAX_RETAINED_REPORTABLE_CANDIDATES=20
+_EXHAUSTED_FOLLOW_UP_STATUSES={"completed","not_applicable","skipped_due_gap","blocked"}
+
+
+def _candidate_working_set(candidates,limit=MAX_STATE_CANDIDATES):
+    """Choose bounded work while retaining the strongest reportable results."""
+    def remaining(candidate):
+        follow_ups=candidate.get("follow_ups",[]) or []
+        return any(str(item.get("status") or "pending") not in _EXHAUSTED_FOLLOW_UP_STATUSES
+            for item in follow_ups)
+    def rank(item):
+        return (
+        -int(item.get("priority_score",0) or 0),
+        0 if item.get("kind")=="trusted_indicator" else 1,
+        str(item.get("candidate_id") or ""),
+        )
+    limit=max(0,int(limit))
+    ordered=sorted(candidates,key=rank)
+    reportable=[item for item in ordered if item.get("customer_visible")
+        or item.get("kind")=="trusted_indicator" or bool(item.get("finding_ids"))]
+    retained=reportable[:min(limit,MAX_RETAINED_REPORTABLE_CANDIDATES)]
+    retained_ids={str(item.get("candidate_id") or "") for item in retained}
+    unfinished=[item for item in ordered if str(item.get("candidate_id") or "") not in retained_ids
+        and remaining(item)]
+    exhausted=[item for item in ordered if str(item.get("candidate_id") or "") not in retained_ids
+        and not remaining(item)]
+    return (retained+unfinished+exhausted)[:limit]
+
 
 def _scheduled_time_bounds(time_range):
     if not isinstance(time_range,dict): return None,None
@@ -151,7 +180,7 @@ class HuntEngine:
             requeued=recover_interrupted_tasks(state)
             state.setdefault("coverage",{})["scheduler_resume"]={"requeued_task_ids":requeued,
                 "migration_version":state.get("scheduler_migration_version")}
-        self.store.save_state(hunt_id,state)
+        self._save(state)
         checkpoint_conn=None
         try:
             app,checkpoint_conn=self._graph()
@@ -215,6 +244,12 @@ class HuntEngine:
         return g.compile(checkpointer=checkpoint,interrupt_before=interrupt_before or []),connection
 
     def _save(self,s):
+        candidates=list(s.get("candidate_leads",[]))
+        self.store.upsert_candidates(s["hunt_id"],candidates)
+        candidate_count=self.store.candidate_count(s["hunt_id"])
+        if candidate_count>len(candidates) or len(candidates)>MAX_STATE_CANDIDATES:
+            s["candidate_leads"]=_candidate_working_set(
+                self.store.list_candidates(s["hunt_id"]),MAX_STATE_CANDIDATES)
         self.store.save_state(s["hunt_id"],s)
         self.store.prune_checkpoints(s["hunt_id"],keep=1)
         return s
@@ -1139,9 +1174,13 @@ class HuntEngine:
         analysis_evidence=analysis_host+analysis_network
         s["analytic_summary"]=summarize_evidence(analysis_host,analysis_network)
         s.setdefault("coverage",{})["analytic_summary"]=s["analytic_summary"]
-        previous_candidates=list(s.get("candidate_leads",[]))
+        persisted_candidates=self.store.list_candidates(s["hunt_id"])
+        previous_candidates=(merge_candidate_queue(persisted_candidates,list(s.get("candidate_leads",[])))
+            if persisted_candidates else list(s.get("candidate_leads",[])))
         fresh_candidates=build_candidate_queue(analysis_evidence,self.behavior_catalog,self.local_indicators,s["analytic_summary"])
-        s["candidate_leads"]=merge_candidate_queue(previous_candidates,fresh_candidates)
+        full_candidates=merge_candidate_queue(previous_candidates,fresh_candidates)
+        self.store.replace_candidates(s["hunt_id"],full_candidates)
+        s["candidate_leads"]=_candidate_working_set(full_candidates,MAX_STATE_CANDIDATES)
         promoted=self._promote_candidate_context(s,analysis_evidence,s["candidate_leads"])
         context_evidence=s.get("host",[])+s.get("network",[])
         s["correlations"]=correlate(s.get("host",[]),s.get("network",[]))
@@ -1158,10 +1197,18 @@ class HuntEngine:
             s.setdefault("reasoning_history",[]).append({"stage":"candidate_hypothesis_creation","basis":"observed_candidate",
                 "hypotheses":[{"id":h.get("hypothesis_id"),"candidate_ids":h.get("basis_candidate_ids"),
                     "evidence_ids":h.get("basis_evidence_ids")} for h in new_hypotheses]})
+        priority_counts={tier:sum(item.get("priority_tier")==tier for item in full_candidates)
+            for tier in ("critical","high","medium","low")}
+        kind_counts={kind:sum(item.get("kind")==kind for item in full_candidates)
+            for kind in sorted({str(item.get("kind") or "unknown") for item in full_candidates})}
         s["coverage"]["behavior_candidates"]={
-            "total":len(s["candidate_leads"]),
-            "customer_visible":sum(bool(item.get("customer_visible")) for item in s["candidate_leads"]),
-            "unresolved_low_priority":sum(item.get("priority_tier")=="low" and item.get("disposition")=="observed" for item in s["candidate_leads"])}
+            "total":len(full_candidates),
+            "retained_in_state":len(s["candidate_leads"]),
+            "state_limit":MAX_STATE_CANDIDATES,
+            "priority_tiers":priority_counts,
+            "kinds":kind_counts,
+            "customer_visible":sum(bool(item.get("customer_visible")) for item in full_candidates),
+            "unresolved_low_priority":sum(item.get("priority_tier")=="low" and item.get("disposition")=="observed" for item in full_candidates)}
         for hypothesis in s.get("hypotheses",[]):
             relevant=[e for e in analysis_evidence if _relevant(hypothesis["technique_id"],e)]
             # Heuristic matches are candidate context for the model, not an
@@ -1176,18 +1223,20 @@ class HuntEngine:
         self._publish_tooling_leads(s)
         _link_candidates_to_findings(s)
         _attach_finding_paths(s)
+        full_candidates=merge_candidate_queue(full_candidates,s.get("candidate_leads",[]))
+        self.store.replace_candidates(s["hunt_id"],full_candidates)
         host_available=self.offline or bool(s.get("source_health",{}).get("host"))
         network_available=self.offline or bool(s.get("source_health",{}).get("network"))
         ledger=build_coverage_ledger(s.get("hypotheses",[]),s.get("search_tasks",{}),s.get("search_outcomes",[]),
-            host_available,network_available,s.get("candidate_leads",[]))
+            host_available,network_available,full_candidates)
         s["coverage"]["hypothesis_coverage"]=ledger
         signals=len(s["analytic_summary"].get("behavioral_observations",[]))
         self._stage(s,"evidence_analysis","completed",{"host_events":len(analysis_host),"network_events":len(analysis_network),
             "checkpoint_context_events":len(context_evidence),"promoted_context_events":promoted,
             "correlations":len(s["correlations"]),"behavioral_observations":signals,
-            "behavior_candidates":len(s.get("candidate_leads",[])),"findings":len(s.get("findings",[])),
+            "behavior_candidates":len(full_candidates),"retained_candidates":len(s.get("candidate_leads",[])),"findings":len(s.get("findings",[])),
             "high_priority_tested":ledger.get("high_priority_tested"),"high_priority_total":ledger.get("high_priority_total")})
-        print(f"[ROMULUS] analysis stage: persisted_evidence={len(analysis_evidence)} context_evidence={len(context_evidence)} promoted={promoted} analytic_observations={signals} behavior_candidates={len(s.get('candidate_leads',[]))} correlations={len(s['correlations'])} findings={len(s.get('findings',[]))} high_priority_tested={ledger.get('high_priority_tested')}/{ledger.get('high_priority_total')}")
+        print(f"[ROMULUS] analysis stage: persisted_evidence={len(analysis_evidence)} context_evidence={len(context_evidence)} promoted={promoted} analytic_observations={signals} behavior_candidates={len(full_candidates)} retained_candidates={len(s.get('candidate_leads',[]))} correlations={len(s['correlations'])} findings={len(s.get('findings',[]))} high_priority_tested={ledger.get('high_priority_tested')}/{ledger.get('high_priority_total')}")
         return self._save(s)
 
     def _publish_smb_lead(self,s):

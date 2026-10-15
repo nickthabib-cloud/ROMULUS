@@ -49,7 +49,7 @@ Supported types are `sha256`, `sha1`, `md5`, `domain`, `ip`, `path`, `process`, 
 
 ## Candidate priority
 
-Behavior and indicator matches enter the persisted `candidate_leads` working list.
+Behavior and indicator matches enter a complete per-hunt candidate catalog in SQLite. Hunt state carries a deterministic working list of at most 100 candidates so checkpoints and model inputs do not grow with the number of matching assets. Up to 20 of the strongest trusted, customer-visible, or finding-linked candidates remain available to reporting; remaining capacity prioritizes unfinished work so completed or exhausted entries rotate behind untested entries. Coverage calculates closure over the complete catalog while retaining at most 100 detailed rows and records complete totals by priority and candidate kind.
 
 - Trusted current exact indicators enter the critical tier.
 - Specific behavior with an independent behavior on the same asset can become corroborated and customer-visible.
@@ -57,7 +57,7 @@ Behavior and indicator matches enter the persisted `candidate_leads` working lis
 - Low and unresolved entries remain in the technical candidate appendix.
 - Only trusted or corroborated high-priority entries appear in the customer-facing prioritized-lead section.
 
-Scores and their reasons are stored with every candidate so an analyst can see why it moved.
+Scores and their reasons are stored with every candidate so an analyst can see why it moved. Scoring uses every matching row, while each candidate keeps at most 40 representative evidence IDs and records the complete match count separately. Dispositions and follow-up history from the working list are written back to the complete catalog before the next analysis pass.
 
 Deterministic summaries and catalog matching use every unique evidence record persisted for the hunt. The checkpoint and model context remains bounded. When a medium-or-higher candidate appears, ROMULUS promotes its cited evidence and records sharing exact structured entities into that context, with a maximum of 200 promoted records per analysis pass. This prevents an early full context bucket from hiding later anomalies while keeping checkpoint growth bounded.
 

@@ -16,7 +16,9 @@ class Store:
         with self._db() as db:
             db.executescript("""CREATE TABLE IF NOT EXISTS investigations(id TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS evidence(id TEXT PRIMARY KEY, investigation_id TEXT NOT NULL, item TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY, investigation_id TEXT NOT NULL, item TEXT NOT NULL);""")
+            CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY, investigation_id TEXT NOT NULL, item TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS candidates(investigation_id TEXT NOT NULL, id TEXT NOT NULL, item TEXT NOT NULL,
+                PRIMARY KEY(investigation_id,id));""")
     @contextmanager
     def _db(self):
         db = sqlite3.connect(self.db_path,timeout=30); db.row_factory = sqlite3.Row
@@ -42,6 +44,29 @@ class Store:
     def evidence_count(self, hunt_id: str) -> int:
         with self._db() as db:
             row=db.execute("SELECT COUNT(*) FROM evidence WHERE investigation_id=?",(hunt_id,)).fetchone()
+            return int(row[0]) if row else 0
+    def replace_candidates(self, hunt_id: str, items: list[dict[str, Any]]) -> None:
+        """Atomically replace the complete candidate catalog for a hunt."""
+        rows=[(hunt_id,str(item["candidate_id"]),json.dumps(item))
+            for item in items if item.get("candidate_id")]
+        with self._db() as db:
+            db.execute("DELETE FROM candidates WHERE investigation_id=?",(hunt_id,))
+            if rows:
+                db.executemany("INSERT INTO candidates(investigation_id,id,item) VALUES(?,?,?)",rows)
+    def upsert_candidates(self, hunt_id: str, items: list[dict[str, Any]]) -> None:
+        """Persist changed shortlist entries without discarding non-shortlisted candidates."""
+        rows=[(hunt_id,str(item["candidate_id"]),json.dumps(item))
+            for item in items if item.get("candidate_id")]
+        if not rows: return
+        with self._db() as db:
+            db.executemany("INSERT OR REPLACE INTO candidates(investigation_id,id,item) VALUES(?,?,?)",rows)
+    def list_candidates(self, hunt_id: str) -> list[dict[str, Any]]:
+        with self._db() as db:
+            return [json.loads(row[0]) for row in db.execute(
+                "SELECT item FROM candidates WHERE investigation_id=? ORDER BY rowid",(hunt_id,))]
+    def candidate_count(self, hunt_id: str) -> int:
+        with self._db() as db:
+            row=db.execute("SELECT COUNT(*) FROM candidates WHERE investigation_id=?",(hunt_id,)).fetchone()
             return int(row[0]) if row else 0
     def upsert_finding(self, hunt_id: str, item: dict[str, Any], event: str = "created") -> None:
         with self._db() as db: db.execute("INSERT OR REPLACE INTO findings VALUES(?,?,?)", (item["finding_id"], hunt_id, json.dumps(item)))
@@ -79,6 +104,7 @@ class Store:
                     (hunt_id,*sorted(retained)))
             else:
                 db.execute("DELETE FROM evidence WHERE investigation_id=?",(hunt_id,))
+            db.execute("DELETE FROM candidates WHERE investigation_id=?",(hunt_id,))
             db.execute(
                 "INSERT INTO investigations VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",
                 (hunt_id,json.dumps(state),utc_now()))

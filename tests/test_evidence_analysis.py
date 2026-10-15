@@ -75,6 +75,139 @@ class BehaviorSeedPrecisionTests(unittest.TestCase):
 
 
 class CompleteEvidenceAnalysisTests(unittest.TestCase):
+    def test_full_candidate_catalog_is_persisted_while_checkpoint_queue_is_bounded(self):
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.models import Evidence, encode
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.from_env(),
+                home=root,
+                data_dir=root / "data",
+                logs_dir=root / "logs",
+                reports_dir=root / "reports",
+                context_evidence_per_source=2,
+            )
+            store = Store(settings.data_dir, settings.logs_dir)
+            engine = HuntEngine(settings, store, offline=True, use_ollama=False)
+            engine.behavior_catalog = {"catalog_version": "test", "analytics": [{
+                "id": "BH-TEST-TEMP", "title": "Temporary executable",
+                "description": "Executable observed below /tmp.", "enabled": True,
+                "source": "elasticsearch", "match": {"all": [], "any": [{
+                    "role": "process.executable", "operator": "path_prefix_any",
+                    "values": ["/tmp/"],
+                }], "none": []},
+                "base_priority": 80, "specificity": 50, "expected_noise": "low",
+                "attack_techniques": ["T1204.002"], "benign_explanations": [],
+                "follow_up": ["Review the process context."],
+                "corroboration_group": "test-temp",
+            }]}
+            engine.local_indicators = {"indicators": []}
+            state = {
+                "hunt_id": "HUNT-BOUNDED-CANDIDATES",
+                "objective": "general hunt",
+                "host": [], "network": [], "evidence": [],
+                "hypotheses": [], "findings": [], "correlations": [],
+                "coverage": {}, "candidate_leads": [], "lead_catalog": [],
+                "completed_leads": [], "pivot_results": [], "queries": [],
+                "tool_runs": [], "stage_history": [], "source_errors": [],
+                "search_tasks": {}, "search_outcomes": [], "evidence_keys": [],
+                "source_health": {"host": True, "network": True},
+            }
+            for index in range(130):
+                engine._record_evidence(state, encode(Evidence.create(
+                    "elasticsearch",
+                    f"temporary executable on host-{index:03d}",
+                    observed_at=f"2026-10-14T14:{index // 60:02d}:{index % 60:02d}Z",
+                    asset=f"host-{index:03d}",
+                    provenance={"index": "host-events", "document_id": str(index), "domain": "host"},
+                    raw={"host": {"name": f"host-{index:03d}"},
+                         "process": {"executable": "/tmp/tool"}},
+                )))
+
+            result = engine._analyze(state)
+
+            self.assertEqual(store.candidate_count(state["hunt_id"]), 130)
+            self.assertEqual(len(store.list_candidates(state["hunt_id"])), 130)
+            self.assertEqual(len(result["candidate_leads"]), 100)
+            self.assertEqual(result["coverage"]["behavior_candidates"]["total"], 130)
+            self.assertEqual(result["coverage"]["behavior_candidates"]["retained_in_state"], 100)
+            self.assertEqual(result["coverage"]["behavior_candidates"]["state_limit"], 100)
+            ledger = result["coverage"]["hypothesis_coverage"]
+            self.assertEqual(ledger["actionable_candidates"], 130)
+            self.assertEqual(ledger["open_candidate_count"], 130)
+            self.assertEqual(len(ledger["open_candidate_ids"]), 100)
+            self.assertEqual(len(ledger["candidate_rows"]), 100)
+            self.assertTrue(ledger["candidate_details_truncated"])
+
+    def test_save_bounds_legacy_state_and_rotates_exhausted_candidates(self):
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(Settings.from_env(), home=root, data_dir=root / "data",
+                logs_dir=root / "logs", reports_dir=root / "reports")
+            store = Store(settings.data_dir, settings.logs_dir)
+            engine = HuntEngine(settings, store, offline=True, use_ollama=False)
+            candidates = []
+            for index in range(101):
+                status = "completed" if index == 0 else "pending"
+                candidates.append({
+                    "candidate_id": f"CL-{index:03d}", "kind": "behavior",
+                    "priority_score": 90, "priority_tier": "critical",
+                    "disposition": "investigating", "evidence_ids": [],
+                    "follow_ups": [{"follow_up_id": f"FU-{index:03d}",
+                        "status": status, "history": []}],
+                })
+            state = {"hunt_id": "HUNT-LEGACY-CANDIDATES", "candidate_leads": candidates}
+
+            result = engine._save(state)
+
+            retained = {item["candidate_id"] for item in result["candidate_leads"]}
+            self.assertEqual(store.candidate_count(state["hunt_id"]), 101)
+            self.assertEqual(len(result["candidate_leads"]), 100)
+            self.assertNotIn("CL-000", retained)
+            self.assertIn("CL-100", retained)
+
+    def test_working_set_retains_completed_reportable_candidate_while_rotating_work(self):
+        from romulus.config import Settings
+        from romulus.investigation.workflow import HuntEngine
+        from romulus.store import Store
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            settings = replace(Settings.from_env(), home=root, data_dir=root / "data",
+                logs_dir=root / "logs", reports_dir=root / "reports")
+            store = Store(settings.data_dir, settings.logs_dir)
+            engine = HuntEngine(settings, store, offline=True, use_ollama=False)
+            candidates = []
+            for index in range(102):
+                completed = index in {0, 1}
+                candidates.append({
+                    "candidate_id": f"CL-{index:03d}",
+                    "kind": "trusted_indicator" if index == 0 else "behavior",
+                    "customer_visible": index == 0,
+                    "priority_score": 95 if index == 0 else 90,
+                    "priority_tier": "critical", "disposition": "corroborated",
+                    "finding_ids": ["F-REPORTABLE"] if index == 0 else [],
+                    "evidence_ids": [],
+                    "follow_ups": [{"follow_up_id": f"FU-{index:03d}",
+                        "status": "completed" if completed else "pending", "history": []}],
+                })
+            state = {"hunt_id": "HUNT-REPORTABLE-CANDIDATE", "candidate_leads": candidates}
+
+            result = engine._save(state)
+
+            retained = {item["candidate_id"] for item in result["candidate_leads"]}
+            self.assertEqual(len(retained), 100)
+            self.assertIn("CL-000", retained)
+            self.assertNotIn("CL-001", retained)
+
     def test_analysis_uses_persisted_evidence_and_promotes_candidate_context(self):
         from romulus.config import Settings
         from romulus.investigation.workflow import HuntEngine

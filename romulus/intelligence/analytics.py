@@ -188,6 +188,8 @@ def build_coverage_ledger(
             "finding_ids":candidate.get("finding_ids",[]),"telemetry_gaps":candidate.get("telemetry_gaps",[]),
             "closed":closed})
     actionable_candidates = [item for item in candidate_rows if item["actionable"]]
+    open_candidate_ids=[item["candidate_id"] for item in actionable_candidates if not item["closed"]]
+    candidate_detail_limit=100
     hypothesis_ready = all(bool(item["closed"]) for item in high)
     candidate_ready = all(item["closed"] for item in actionable_candidates)
     return {"rows":rows,"high_priority_total":len(high),
@@ -195,8 +197,13 @@ def build_coverage_ledger(
         "high_priority_closed":sum(bool(item["closed"]) for item in high),
         "untested_hypotheses":[item["hypothesis_id"] for item in rows
             if not item["executed_analytics"] and not item["telemetry_gaps"]],
-        "candidate_rows":candidate_rows,"actionable_candidates":len(actionable_candidates),
-        "open_candidate_ids":[item["candidate_id"] for item in actionable_candidates if not item["closed"]],
+        "candidate_rows":candidate_rows[:candidate_detail_limit],
+        "candidate_rows_total":len(candidate_rows),
+        "candidate_detail_limit":candidate_detail_limit,
+        "candidate_details_truncated":len(candidate_rows)>candidate_detail_limit,
+        "actionable_candidates":len(actionable_candidates),
+        "open_candidate_count":len(open_candidate_ids),
+        "open_candidate_ids":open_candidate_ids[:candidate_detail_limit],
         "hypothesis_closure_ready":hypothesis_ready,"candidate_closure_ready":candidate_ready,
         "closure_ready":hypothesis_ready and candidate_ready}
 

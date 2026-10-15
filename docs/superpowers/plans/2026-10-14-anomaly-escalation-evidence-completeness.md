@@ -138,10 +138,10 @@ Run: `python -m compileall -q romulus tests`
 
 Run: `git diff --check`
 
-- [ ] **Step 3: Request a fresh whole-change code review**
+- [x] **Step 3: Request a fresh whole-change code review**
 
 Review for missed evidence, unsafe query broadening, false correlation, unbounded state growth, and scenario leakage. Fix Critical or Important findings test-first.
 
-- [ ] **Step 4: Record completion evidence**
+- [x] **Step 4: Record completion evidence**
 
 Update the plan checkboxes and `VALIDATION.md` with commands and outcomes.

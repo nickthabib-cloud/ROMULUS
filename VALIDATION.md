@@ -11,17 +11,21 @@ This file records engineering validation performed against the development deplo
 - Linux audit `EXECVE` arguments become structured process fields when hexadecimal content is valid printable UTF-8. Original source text remains intact.
 - General network analytics now emit cited DNS query fan-out, HTTP path fan-out, recognized scanner user-agent, and scan-then-reverse-connection signals.
 - Candidate priority records the fixed expected-noise penalty alongside base, specificity, repetition, and independent corroboration contributions.
+- The complete candidate catalog is stored separately from hunt state. Checkpoints retain at most 100 deterministically ranked candidates, reserve at most 20 places for the strongest reportable results, rotate other completed or exhausted work behind pending work, and calculate closure over the complete catalog. Candidate detail inside coverage is also capped at 100 while aggregate coverage records the full total, open/actionable counts, priority distribution, and candidate-kind distribution.
 
 ### Focused proof
 
 - A regression persisted eleven network records while retaining only the first two in hunt state. Complete-evidence analysis still detected the later high-port-fan-out candidate and promoted all nine later candidate/entity-related records, including the reverse-direction connection, into context.
 - Aggregate fixtures independently exercise all four new network deviations and retain their supporting evidence IDs. A separate ranking fixture proves a high-noise analytic receives a twelve-point deduction relative to otherwise equivalent low-noise behavior.
-- The focused candidate, catalog, normalization, and complete-evidence suites pass 47 tests with one expected dependency-gated skip.
-- The complete local suite passes 175 tests with six expected dependency-gated skips. `compileall` and `git diff --check` also pass.
+- The focused candidate, catalog, normalization, complete-evidence, retention, and report suites pass 81 tests with one expected dependency-gated skip.
+- Scale regressions persist 130 per-asset candidates, prove all 130 remain in the SQLite candidate catalog and closure totals, prove hunt state and coverage detail retain at most 100, rotate an exhausted candidate behind pending work, keep a completed trusted result available to both reports, and bound a legacy oversized candidate list during save/resume.
+- The complete local suite passes 184 tests with six expected dependency-gated skips. `compileall` and `git diff --check` also pass.
+- Fresh review found no Critical issues and identified five Important boundary cases. Focused regressions now prove that quoted hexadecimal-looking arguments remain literal, candidate citations stay capped at 40 while complete match counts drive scoring, ordinary six-peer HTTPS traffic does not become a reversal signal, later valid same-peer multi-port probes remain detectable, promotion excludes process-only cross-host matches and favors time-adjacent same-host evidence, and bounded fan-out output retains the strongest source.
+- Follow-up scale reviews identified fixed-prefix candidate starvation, legacy resumed-state growth, unbounded closure detail, and loss of completed reportable indicators during rotation. Each issue received a failing regression before correction. The final fresh review found no remaining Critical or Important issues.
 
 ### Remaining proof
 
-- Fresh whole-change review, dependency-complete deployment checks, and the requested live hunt are recorded below when completed.
+- Dependency-complete deployment checks and the requested live hunt are recorded below when completed.
 
 ## 2026-10-12 — representative bounded retrieval (local/VM proof; no new live hunt)
 

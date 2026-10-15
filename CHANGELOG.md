@@ -12,6 +12,8 @@ All notable ROMULUS changes are recorded here. Dates use the project maintainer'
 - Replaced the broad download-to-shell seed with a downloader-and-shell composite and added safe hexadecimal command-token alternatives for raw audit fields.
 - Added cited DNS query fan-out, HTTP path fan-out, scanner user-agent, and scan-then-reverse-connection signals without scenario identities, indicators, filenames, commands, or timestamps.
 - Applied fixed, explainable expected-noise penalties of 0, 6, or 12 points during candidate scoring.
+- Review hardening keeps candidate citations capped while scoring all matches, leaves quoted audit arguments literal, restricts scan reversal to a multi-port probe against the callback peer, promotes only exact host/IP/asset context in temporal-priority order, and ranks bounded cardinality results by anomaly strength.
+- Moved the complete per-hunt candidate catalog into SQLite and limited checkpoint state to 100 candidates. Exhausted entries rotate behind unfinished work, while bounded reserved capacity keeps the strongest trusted, customer-visible, or finding-linked results in reports. Legacy resumed lists are bounded on save, and closure evaluates the complete catalog while retaining bounded detail. Aggregate coverage preserves complete totals by priority and kind, while working-list dispositions and follow-up history synchronize back to the catalog.
 
 ### Representative bounded telemetry retrieval
 
