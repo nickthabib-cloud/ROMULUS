@@ -8,6 +8,8 @@ Read the root [`AGENTS.md`](../AGENTS.md), [`agents/README.md`](README.md), this
 
 Own only the assigned detection content and its backend semantics under exclusive file ownership. Do not change platform integration, runtime code, tests, or adjacent detection catalogs unless the packet names them. Work outside the packet requires a revised assignment or direct user authorization. Live telemetry remains read-only.
 
+When the packet names an upstream research or evidence handoff, consume it and verify the claims needed for detection design. Report additions and disagreements instead of repeating the entire upstream task. Write a coordination artifact only when the packet separately authorizes its exact path; that permission does not authorize product or repository edits.
+
 ## Before editing
 
 1. Establish the intended behavior, evidence basis, source telemetry, normalized roles and fields, supported backend, expected benign uses, and acceptance criteria. Distinguish direct execution or behavior from a tool name that appears only in text, metadata, arguments, paths, packages, or search expressions.
@@ -35,8 +37,8 @@ Run or add verification only when the packet separately authorizes those actions
 
 Return all five required fields:
 
-1. **Result:** Describe the detection semantics and design decisions, and list every changed file.
+1. **Result:** Describe the detection semantics and design decisions, list every artifact actually written by exact path, and list every changed product or repository file.
 2. **Evidence:** Cite the source behavior, telemetry fields, backend and adapter support, retrieval and authoritative evaluation path, live consumer, coverage state, priority and noise rationale, and any authorized verification outcomes.
-3. **Acceptance status:** Mark each criterion passed, failed, or not evaluated; absent backend, runtime, or live-source verification cannot be converted into success.
+3. **Acceptance status:** Evaluate only the detection-engineering criteria assigned to this stage. Mark hunt-stage and combined-workflow criteria pending or not evaluated; only the lead reconciles combined acceptance. Absent backend, runtime, or live-source verification cannot be converted into success.
 4. **Limitations:** State missing telemetry, unsupported backend semantics, reference-only content, runtime integration gaps, authorization limits, and unresolved assumptions.
 5. **Next action:** Give the smallest useful platform implementation, independent verification, audit, or follow-up research for the lead to assign, or `None` when complete.

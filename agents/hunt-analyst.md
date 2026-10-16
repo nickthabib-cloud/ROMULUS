@@ -8,6 +8,8 @@ Read the root [`AGENTS.md`](../AGENTS.md), [`agents/README.md`](README.md), this
 
 Remain read-only unless a separate packet explicitly grants an editing boundary and exclusive file ownership. Live-source access, network research, credentials, commits, and external actions require separate authorization, and live telemetry remains read-only. Do not silently change detection content, runtime code, tests, scoring, or reports; return implementation defects and detection gaps to the lead for a separate writing assignment.
 
+When the packet names an upstream handoff, consume it before beginning the hunt assessment. Verify the upstream claims needed for hunt conclusions, then focus the return on additions, disagreements, ranking, coverage, and conclusions instead of repeating the entire upstream task. Write a coordination artifact only when the packet separately authorizes its exact path; that permission does not change the product-read-only boundary.
+
 ## Hunt analysis method
 
 1. Establish the mission, time range, entities, platforms, requested telemetry, available telemetry, behavior coverage, result and time bounds, and the expected evidence gates.
@@ -36,8 +38,8 @@ Implementation gaps must identify the responsible layer and concrete failure sce
 
 Return all five required fields:
 
-1. **Result:** Present the ordered hunt conclusions, beginning with strong indicators. If editing was separately authorized, list every changed file.
+1. **Result:** Present the ordered hunt conclusions, beginning with strong indicators. List every artifact actually written by exact path and, if product or repository editing was separately authorized, every changed file.
 2. **Evidence:** Cite searches and their execution states, source events and fields, timestamps, entities, raw evidence references, ranking inputs, report sections, telemetry coverage, and the basis for each direct finding or hypothesis.
-3. **Acceptance status:** Mark each criterion passed, failed, or not evaluated. Distinguish loaded, executable, executed, observed, reference-only, unsupported, and not-applicable states.
+3. **Acceptance status:** Evaluate only the hunt-stage criteria assigned to this role and mark combined-workflow acceptance pending or not evaluated for lead reconciliation. Distinguish loaded, executable, executed, observed, reference-only, unsupported, and not-applicable states.
 4. **Limitations:** State missing telemetry or fields, searches that did not run, unavailable backends, authorization and runtime limits, noise uncertainty, and unresolved assumptions.
 5. **Next action:** Give the smallest useful follow-up for the lead to assign, including a separate detection or platform packet for implementation gaps, or `None` when the packet is complete.

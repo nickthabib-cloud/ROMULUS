@@ -36,9 +36,9 @@ High-impact changes to query generation, scoring, persistence, evidence gates, o
 
 ## Task packets and authorization
 
-Copy [`task-template.md`](task-template.md) for every delegated assignment. Complete all ten assignment fields: mission, why it matters, verified current state, scope, exclusions, required deliverables, acceptance criteria, authorized actions, ROMULUS quality focus, and return format.
+Copy [`task-template.md`](task-template.md) into a distinct role-specific packet for every delegated agent turn. Do not reuse one completed packet for different roles or turns. A shared immutable scenario or evidence envelope may be referenced by multiple packets, but it does not replace each role's own mission, deliverables, authorized actions, stage-specific acceptance criteria, or return path. Complete all ten assignment fields: mission, why it matters, verified current state, scope, exclusions, required deliverables, acceptance criteria, authorized actions, ROMULUS quality focus, and return format. Name the exact path of every file-backed deliverable.
 
-The user or lead's assignment authorizes the agent to act within the completed packet. The agent does not ask again for permissions already granted there. Work outside the packet requires a revised assignment or direct user authorization. Authorization must explicitly cover edits, test creation, test execution, network research, live-source access, commits, and external actions.
+The user or lead's assignment authorizes the agent to act within the completed packet. The agent does not ask again for permissions already granted there. Work outside the packet requires a revised assignment or direct user authorization. Authorization must explicitly cover tracked product or repository edits, coordination artifact or report writes, test creation, test execution, network research, live-source access, commits, and external actions. Product or repository edits and coordination artifacts are separate permissions, and every allowed coordination artifact must have an exact path. A product-read-only assignment may authorize an ignored scratch report at that path without authorizing tracked-file edits.
 
 ## Read-only and writing boundaries
 
@@ -47,6 +47,7 @@ The user or lead's assignment authorizes the agent to act within the completed p
 - Platform developers own assigned code and integration files and verify how their change becomes reachable at runtime.
 - Test engineers add or run tests only when the packet separately authorizes each action.
 - The lead may directly handle trivial documentation or coordination work when authorized. Other product edits go to the appropriate writing role.
+- A coordination artifact or report write is limited to the exact path authorized in the packet and does not expand product or repository edit authority.
 - Live telemetry stays read-only. Network research, live-source access, commits, and external actions require explicit authorization.
 
 ## Concurrency and file ownership
@@ -68,7 +69,8 @@ The lead assigns explicit file ownership, resolves conflicting recommendations, 
 1. The threat researcher returns prioritized candidates with sources, telemetry, expected benign uses, narrowing conditions, provenance, and limitations.
 2. The lead selects approved candidates for a separate detection-engineering packet.
 3. The detection engineer defines backend-valid semantics, evidence requirements, priority, noise controls, coverage status, and the live consumer.
-4. As authorized, the tester verifies behavior and the auditor independently reviews the change; the lead reconciles both results.
+4. Each downstream role consumes the named upstream handoff, verifies the claims needed for its own stage, and reports additions, disagreements, and stage-specific conclusions instead of repeating the entire upstream task.
+5. As authorized, the tester verifies behavior and the auditor independently reviews the change; the lead reconciles both results.
 
 ### Runtime integration
 
@@ -84,16 +86,16 @@ The lead assigns explicit file ownership, resolves conflicting recommendations, 
 
 ### Hunt analysis
 
-1. The hunt analyst reviews mission inputs, searches, results, ranking, evidence, telemetry coverage, and reporting.
+1. The hunt analyst consumes the named upstream handoff, verifies the claims needed for hunt assessment, and focuses on additions, disagreements, ranking, coverage, and conclusions rather than repeating the upstream analysis.
 2. Add a threat researcher for unfamiliar behavior when authorized.
 3. The analyst reports strong indicators first, then weak context, likely noise, gaps, searches that did not run, and follow-up work. Any attack-path hypothesis appears last and distinguishes evidence from inference.
 4. The lead creates a separate implementation packet for any detection or runtime defect found during the hunt.
 
 ## Agent return contract and lead reconciliation
 
-Every return contains five fields: **Result**, **Evidence**, **Acceptance status**, **Limitations**, and **Next action**. Writing agents also list every changed file. Review agents order findings by severity and include file and line references, the failure scenario, evidence, and a suggested correction. An agent must not turn absent verification into a success claim.
+Every return contains five fields: **Result**, **Evidence**, **Acceptance status**, **Limitations**, and **Next action**. Every return lists each artifact actually written by exact path; writing agents also list every changed product or repository file. Review agents order findings by severity and include file and line references, the failure scenario, evidence, and a suggested correction. An agent must not turn absent verification into a success claim. Upstream roles evaluate only their stage and mark downstream and combined-workflow criteria pending or not evaluated. Downstream roles evaluate their own stage and report deltas from the upstream handoff. Only the lead reconciles and decides combined acceptance.
 
-The lead confirms which agents actually ran, compares each return with its packet, reconciles conflicting recommendations, and checks the applicable ROMULUS quality gates: provenance, telemetry, backend validity, runtime reachability, evidence meaning, priority, noise control, correlation, coverage truth, and reporting. The lead reports combined evidence and limitations and decides whether acceptance criteria passed; a role's completion alone is not proof of correctness or live effectiveness.
+The lead confirms which agents actually ran, compares each return with its role-specific packet, reconciles conflicting recommendations, and checks the applicable ROMULUS quality gates: provenance, telemetry, backend validity, runtime reachability, evidence meaning, priority, noise control, correlation, coverage truth, and reporting. The lead alone reports combined evidence and limitations and decides whether combined acceptance criteria passed; a role's completion alone is not proof of correctness or live effectiveness.
 
 ## Failure and blocking behavior
 
