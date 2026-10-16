@@ -42,7 +42,8 @@ The user or lead's assignment authorizes the agent to act within the completed p
 
 ## Read-only and writing boundaries
 
-- Threat researchers, independent auditors, and hunt analysts are read-only unless a task packet explicitly grants a different boundary.
+- Threat researchers and hunt analysts are read-only unless a task packet explicitly grants a different boundary.
+- Independent auditors remain read-only on the implementation under review. A task packet cannot authorize an auditor, as part of an audit, to edit implementation files, review-target files, the index, or branch state. An auditor may write only a coordination or review artifact at an exact path explicitly authorized in the packet; that permission does not grant product or implementation edit authority.
 - Detection engineers own assigned detection content and its backend semantics; they do not imply that present or loaded content ran.
 - Platform developers own assigned code and integration files and verify how their change becomes reachable at runtime.
 - Test engineers add or run tests only when the packet separately authorizes each action.
@@ -54,7 +55,7 @@ The user or lead's assignment authorizes the agent to act within the completed p
 
 Use no more concurrency than the environment provides, and work in dependency-ordered waves. Only one agent owns a file set during an editing wave. Detection and platform changes may proceed concurrently only when their file scopes do not overlap and their interface is already defined. Tester and auditor review may proceed concurrently once the working change is available.
 
-The lead assigns explicit file ownership, resolves conflicting recommendations, and never asks agents to merge competing edits blindly. Read-only roles may inspect overlapping paths, but they must not modify them without a revised packet and exclusive ownership.
+The lead assigns explicit file ownership, resolves conflicting recommendations, and never asks agents to merge competing edits blindly. Read-only roles may inspect overlapping paths. Threat researchers and hunt analysts may modify files only with a revised packet and exclusive ownership. Independent auditors cannot receive ownership of implementation files, review-target files, the index, or branch state as part of an audit; their only permitted write is the exact coordination or review artifact path authorized in the packet.
 
 ## Workflow recipes
 
