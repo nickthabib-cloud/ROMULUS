@@ -1,4 +1,5 @@
 # ROMULUS
+IMPORTANT: reach out to me (Nick) before downloading anything because I've been meaning a lot of backaches learning how to best do this, so this main reposity branch may not be the most up to date functional branch.
 
 ROMULUS is a single-agent defensive threat-hunting application. It accepts a broad or focused mission, inspects configured telemetry schemas, registers every evidence search in one persisted scheduler, interprets and correlates evidence, then continues while measured evidence, candidate, path, or coverage progress supports another useful step. A focused mission may create operator-directed hypotheses immediately. A broad mission first runs deterministic discovery and creates hypotheses only after a telemetry-backed candidate exists. It records provenance, classifies observed behavior as anomalous, suspicious, or malicious under reviewed deterministic policies, builds cited paths when the evidence supports them, and writes analyst-facing reports. The offline demonstration uses synthetic events.
 
