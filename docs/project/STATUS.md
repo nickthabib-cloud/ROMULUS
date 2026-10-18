@@ -2,7 +2,15 @@
 
 ## Resume here
 
-_Last updated: 2026-10-18 by Codex._
+_Last updated: 2026-10-18 by Claude (lead)._
+
+- **M1 reviewer gate: FAILED (2026-10-18). Not merged.** Two independent reviews found 10 Blocking defects.
+  - Claude fixed core B1–B5 and the `.env` inline-comment session-secret bug in `7d019b9`. `2663e1d` merges auditd split long-argv EXECVE records (32 linpeas records in the attack window had been silently mishandled), scopes partiality per event family, and fixes `deploy.ps1`, which had silently uploaded a stale archive.
+  - Model-off lab hunt `h20261018-221847-d52592`: `completed_within_scope`, 102,457 exec records evaluated, 0 normalization errors, 0 broken citations.
+  - **Open, assigned to Codex in `Claude-Codex.md` ("M1 GATE FIX ROUND"):** core B6 (routine shapes hide indicator events) and B7 (quoted shell operators parsed as real operators), plus investigator B1 (`ids_alerts` host entity queries the sensor field), B2 (no lease owner fencing) and B3 (fallback parks hide seeds).
+  - Claude doesn't edit the shell parser or the investigator: an assistant-side safety check stopped that work.
+  - Important findings from the gate are still open (the next round after these Blocking items): I2/I3 (sequence order, interpreter-from-stdin requirement), I5 (per-target source failure handling, retries), I7 (typed events/raw copies shared across hunts), I8/I9 (Markdown newlines, CLI ANSI escapes), I10 (context items absent from the manifest), I12/I13 (index-name substring scoping, naive timestamps), I14 (no ingestion watermark), I15 (`ignore_above`), and investigator I1–I7.
+  - After Codex's round: re-run the reviewer gate; merge `codex/model-investigator` into `m1/thin-slice` only if it passes.
 
 - **Current milestone:** M1, implemented and locally tested on branch `codex/model-investigator`; the investigator and its pivot fix round are integration tested on the VM. Reviewer and owner-demo gates remain open.
 - **State:**
