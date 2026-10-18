@@ -51,7 +51,7 @@ Coverage cells are written at every stage that can lose information (compile, ex
 | `evidence` | Raw references, normalizers per event family, entities | planned |
 | `detect` | Playbook/rule loader and evaluators, coverage ledger | planned |
 | `decide` | Admission gates, lanes, priority, triage, suppressions | planned |
-| `agent` | Case queue, brief builder, Ollama client, proposal validation, pivot tools | planned |
+| `agent` | Case queue, brief builder, Ollama client, proposal validation, pivot tools | [M1 design](../design/model-investigator.md) |
 | `correlate` | Entity graph, edges, attack path | planned |
 | `report` | Manifest, renderers, recommendations | planned |
 | `web` | FastAPI app, templates, static (vendored) assets, auth | planned |
@@ -64,7 +64,8 @@ Other top-level directories: `content/` (playbooks, rules, fixtures, vendored AT
 
 - `web` and `cli` may import anything below them, but nothing imports `web` or `cli`.
 - `detect`, `decide`, `correlate`, and `report` never import `sources` adapters directly. They work on stored typed data.
-- `agent` reaches sources only through `sources.compile` with typed `SearchIntent`s.
+- `agent` emits validated typed pivots without importing adapters. The hunt-layer executor described in
+  [ADR-003](../adr/ADR-003-agent-pivot-executor-boundary.md) converts them to `SearchIntent`s and owns source access.
 - `store` imports no domain logic packages.
 
 Update this section and `LAYER_RULES` in `scripts/archmap.py` together.
