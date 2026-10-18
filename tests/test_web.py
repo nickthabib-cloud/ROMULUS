@@ -21,6 +21,8 @@ def client(tmp_path, monkeypatch):
     pw = secrets.token_urlsafe(18)
     create_user(repo.engine, "analyst1", pw, "analyst")
     src_repo, cid = _repo_with_finding(claim_suffix=' <script>alert(1)</script><img src=x onerror=alert(2)>')
+    src_repo.set_hunt_state("h1", "running")
+    src_repo.set_hunt_state("h1", "completed_within_scope", detection_result="reportable_findings")
     # copy the seeded hunt into the app DB
     from romulus.store import schema as t
     with src_repo.engine.connect() as a, repo.engine.begin() as b:
@@ -29,7 +31,8 @@ def client(tmp_path, monkeypatch):
             if rows:
                 b.execute(table.insert(), rows)
     repo.audit("system", "hunt.agent_summary", "h1", {
-        "status": "budget_exhausted", "unworked_count": 3, "model_calls": 4, "pivots": 2,
+        "status": "budget_exhausted", "partial": True, "partial_pivots": 1,
+        "unworked_count": 3, "model_calls": 4, "pivots": 2,
     })
     return TestClient(app), pw, cid
 
@@ -94,5 +97,7 @@ def test_hunt_page_shows_latest_agent_status_and_unworked_count(client):
     page = c.get("/hunts/h1")
 
     assert page.status_code == 200
+    assert "completed_within_scope" in page.text
     assert "budget_exhausted" in page.text
     assert "3 unworked" in page.text
+    assert "1 partial pivot" in page.text

@@ -148,7 +148,8 @@ def _add_investigation(repo, seed_id, *, hostile=""):
     })
     _copy_candidate(repo, seed_id, "pivot-candidate", source_case_id=case_id)
     repo.audit("system", "hunt.agent_summary", "h1", {
-        "status": "completed", "unworked_count": 0, "model_calls": 1, "pivots": 1,
+        "status": "completed", "partial": True, "partial_pivots": 1,
+        "unworked_count": 0, "model_calls": 1, "pivots": 1,
     })
     return case_id
 
@@ -197,3 +198,20 @@ def test_model_conclusion_is_separate_from_machine_claim_and_markdown_shows_chai
     assert "<script>" not in markdown
     assert "&lt;script&gt;" not in markdown  # renderer uses Markdown escaping, not raw HTML entities
     assert "\\<script\\>" in markdown
+
+
+def test_completed_hunt_report_keeps_partial_pivot_gaps_in_investigations():
+    repo, seed_id = _repo_with_finding()
+    repo.set_hunt_state("h1", "running")
+    repo.set_hunt_state("h1", "completed_within_scope", detection_result="reportable_findings")
+    _add_investigation(repo, seed_id)
+
+    manifest = publish_revision(repo, "h1", "test")
+    markdown = render(manifest)
+
+    assert manifest["execution_state"] == "completed_within_scope"
+    assert manifest["agent"]["partial"] is True
+    assert manifest["investigations"]["summary"]["partial_pivots"] == 1
+    assert manifest["investigations"]["pivot_gaps"][0]["status"] == "partial"
+    assert "Execution state | completed\\_within\\_scope" in markdown
+    assert "Partial pivot steps | 1" in markdown

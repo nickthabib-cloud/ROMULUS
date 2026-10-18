@@ -77,8 +77,8 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
     partial_reasons = partial_reasons or list(sweep_summary.get("partial_reasons") or [])
     sweep_complete = bool(sweep_summary.get("complete"))
     missing_summary = not sweep_summary
-    agent_partial = bool(agent_summary.get("partial")) or agent_summary.get("status") in {"unavailable", "failed"}
-    partial = missing_summary or not sweep_complete or agent_partial
+    agent_status = agent_summary.get("status")
+    partial = missing_summary or not sweep_complete or agent_status == "unavailable"
     counts, result = _detection_result(repo, hunt_id)
     reasons = partial_reasons[:10]
     if missing_summary:
@@ -90,7 +90,7 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
     if agent_summary.get("stop_reason"):
         reasons.append(f"agent: {agent_summary['stop_reason']}")
     repo.audit("system", "hunt.agent_summary", hunt_id, agent_summary)
-    state = "partial" if partial else "completed_within_scope"
+    state = "failed" if agent_status == "failed" else ("partial" if partial else "completed_within_scope")
     repo.set_hunt_state(
         hunt_id, state, detection_result=result, stop_reason="; ".join(reasons),
     )

@@ -158,13 +158,55 @@ def test_agent_budget_exhaustion_does_not_make_complete_sweep_partial(tmp_path, 
     repo.set_hunt_state("h1", "partial", stop_reason="model interrupted")
     monkeypatch.setattr(hunt_run, "Investigator", FakeInvestigator)
     FakeInvestigator.result = {
-        "status": "budget_exhausted", "partial": False, "stop_reason": "agent total-step budget exhausted",
-        "unworked_count": 2,
+        "status": "budget_exhausted", "partial": True, "partial_pivots": 1,
+        "stop_reason": "agent total-step budget exhausted", "unworked_count": 2,
     }
 
     result = hunt_run.resume_hunt(settings, "h1")
 
     assert result["execution_state"] == "completed_within_scope"
+    assert result["detection_result"] == "no_qualifying_observation_in_assessed_scope"
+    stored = hunt_run.open_repo(settings)
+    assert stored.get_hunt("h1")["execution_state"] == "completed_within_scope"
+    assert stored.latest_audit("h1", "hunt.agent_summary")["detail"]["partial"] is True
+
+
+def test_unexpected_agent_failure_marks_hunt_failed_instead_of_partial(tmp_path, monkeypatch):
+    settings = Settings(home=tmp_path)
+    repo = _new_hunt(settings)
+    repo.claim_hunt("h1", 1, now=START)
+    repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True})
+    repo.set_hunt_state("h1", "partial", stop_reason="agent interrupted")
+    monkeypatch.setattr(hunt_run, "Investigator", FakeInvestigator)
+    FakeInvestigator.result = {
+        "status": "failed", "partial": True, "stop_reason": "investigator invariant failed",
+        "unworked_count": 2,
+    }
+
+    result = hunt_run.resume_hunt(settings, "h1")
+
+    assert result["execution_state"] == "failed"
+    assert hunt_run.open_repo(settings).get_hunt("h1")["execution_state"] == "failed"
+
+
+def test_cli_status_shows_completed_hunt_and_agent_partial_pivots(monkeypatch, capsys, tmp_path):
+    settings = Settings(home=tmp_path)
+    repo = _new_hunt(settings)
+    repo.claim_hunt("h1", 60)
+    repo.audit("system", "hunt.agent_summary", "h1", {
+        "status": "completed", "partial": True, "partial_pivots": 1, "unworked_count": 0,
+    })
+    repo.set_hunt_state("h1", "completed_within_scope",
+                        detection_result="no_qualifying_observation_in_assessed_scope")
+    monkeypatch.setattr(cli, "load_settings", lambda _path: settings)
+
+    code = cli.main(["hunt", "status", "h1"])
+
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "completed_within_scope" in output
+    assert "agent=completed" in output
+    assert "partial_pivots=1" in output
 
 
 def test_cli_exposes_hunt_resume_and_prints_result(monkeypatch, capsys, tmp_path):

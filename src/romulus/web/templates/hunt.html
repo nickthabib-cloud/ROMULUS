@@ -14,7 +14,8 @@
 <section id="agent-summary">
   <h2>Model investigator</h2>
   <p><b>{{ agent.status }}</b> · {{ agent.unworked_count or 0 }} unworked seed(s)
-    · {{ agent.model_calls or 0 }} model call(s) · {{ agent.pivots or 0 }} pivot(s)</p>
+    · {{ agent.model_calls or 0 }} model call(s) · {{ agent.pivots or 0 }} pivot(s)
+    · {{ agent.partial_pivots or 0 }} partial pivot(s)</p>
   {% if agent.stop_reason %}<p class="help">{{ agent.stop_reason }}</p>{% endif %}
 </section>
 {% endif %}

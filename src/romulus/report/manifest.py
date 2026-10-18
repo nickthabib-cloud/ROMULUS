@@ -86,6 +86,7 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
     case_rows = []
     pivot_proposals = 0
     executed_pivots = 0
+    pivot_gaps = []
     for case in cases:
         steps = repo.case_steps(case["id"])
         seed_ids: list[str] = []
@@ -109,6 +110,13 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
             pivot_proposals += 1
             if step["accepted"] and step.get("result_digest") is not None:
                 executed_pivots += 1
+                result = step["result_digest"]
+                if result.get("status") in {"partial", "failed"}:
+                    pivot_gaps.append({
+                        "case_id": case["id"], "step": step["n"], "tool": decision.get("tool"),
+                        "status": result.get("status"), "reasons": result.get("reasons") or [],
+                        "coverage": result.get("coverage") or [],
+                    })
             pivot_steps.append({
                 "n": step["n"], "tool": decision.get("tool"), "hypothesis": decision.get("hypothesis"),
                 "evidence_ids": decision.get("evidence_ids") or [], "arguments": decision.get("arguments") or {},
@@ -142,6 +150,7 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
             "status": agent.get("status", "unknown"),
             "cases": len(case_rows), "model_calls": total_calls, "pivots": executed_pivots,
             "pivot_proposals": pivot_proposals,
+            "partial_pivots": len(pivot_gaps),
             "contributed_candidates": len(discovered_ids), "unworked_count": len(unworked),
         },
         "model_contribution": {
@@ -158,6 +167,7 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
         "incomplete_case_ids": sorted(
             case["id"] for case in case_rows if case["status"] not in CONCLUDED_CASE_STATUSES
         ),
+        "pivot_gaps": pivot_gaps,
         "cases": case_rows,
     }
 

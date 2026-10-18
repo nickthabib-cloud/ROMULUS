@@ -370,6 +370,10 @@ class Investigator:
             step for case in cases for step in self.repo.case_steps(case["id"])
             if (step.get("decision") or {}).get("action") == "pivot" and step.get("accepted")
         ]
+        partial_pivot_steps = [
+            step for step in pivot_steps
+            if (step.get("result_digest") or {}).get("status") in {"partial", "failed"}
+        ]
         duplicate_pivots = [
             step for case in cases for step in self.repo.case_steps(case["id"])
             if (step.get("decision") or {}).get("action") == "pivot" and not step.get("accepted")
@@ -388,6 +392,7 @@ class Investigator:
             "unworked_count": len(unworked),
             "model_calls": len(calls),
             "pivots": len(pivot_steps),
+            "partial_pivots": len(partial_pivot_steps),
             "duplicate_pivots_blocked": len(duplicate_pivots),
         }
 

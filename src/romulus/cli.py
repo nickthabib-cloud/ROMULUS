@@ -63,7 +63,8 @@ def cmd_hunt(args) -> int:
                 print(f"  [{c['lane'].upper():6}] {c['rule_id']}: {c['claim'][:180]}", flush=True)
         res = run_hunt(s, hid, agent=not args.no_agent, on_candidate=show)
         print(json.dumps(res, indent=2, default=str) if args.json else
-              f"done: {res['detection_result']} lanes={res['lanes']} stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }")
+              f"done: {res['execution_state']} {res['detection_result']} lanes={res['lanes']} "
+              f"stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }")
         return EXIT_OK
     if args.action == "resume":
         result = resume_hunt(s, args.hunt_id)
@@ -83,7 +84,8 @@ def cmd_hunt(args) -> int:
                 agent = agent_audit["detail"] if agent_audit else {}
                 print(f"{h['id']}  {h['execution_state']:24} {h['detection_result'] or '-':40} "
                       f"lanes={repo.lane_counts(h['id'])} agent={agent.get('status', '-')} "
-                      f"unworked={agent.get('unworked_count', '-')}")
+                      f"unworked={agent.get('unworked_count', '-')} "
+                      f"partial_pivots={agent.get('partial_pivots', 0)}")
         return EXIT_OK
     return EXIT_USAGE
 
