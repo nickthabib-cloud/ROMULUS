@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 
 from romulus.agent.brief import BuiltBrief
 from romulus.agent.models import AgentDecision, EntityRef
 from romulus.agent.tools import parse_tool_request
-from romulus.sources.models import Window
+
+
+class HuntWindow(Protocol):
+    start: datetime
+    end: datetime
 
 
 @dataclass
@@ -29,7 +34,7 @@ def _observer_only_host(value: str, brief: BuiltBrief) -> bool:
 
 
 def validate_decision(decision: AgentDecision, brief_context: BuiltBrief,
-                      hunt_window: Window) -> ValidationResult:
+                      hunt_window: HuntWindow) -> ValidationResult:
     errors: list[str] = []
     request = None
 
