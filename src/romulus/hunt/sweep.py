@@ -6,10 +6,10 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
-from romulus.decide.policy import decide
 from romulus.detect.base import Match, Playbook
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import normalize_hits
+from romulus.hunt.publish import publish_match
 from romulus.sources.es import ElasticClient
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, Window
@@ -38,8 +38,8 @@ def plan_partitions(client: ElasticClient, target: str, contract: FieldContract,
     parts: list[tuple[Window, int]] = []
     cur_start, cur_n = None, 0
     for b in h.buckets:
-        bs = max(datetime.fromisoformat(b["key"].replace("Z", "+00:00")), window.start)
-        be = min(datetime.fromisoformat(b["key"].replace("Z", "+00:00")) + timedelta(seconds=BUCKET_SECONDS),
+        bs = max(datetime.fromisoformat(b["key"]), window.start)
+        be = min(datetime.fromisoformat(b["key"]) + timedelta(seconds=BUCKET_SECONDS),
                  window.end)
         if bs >= be:
             continue
@@ -68,20 +68,9 @@ class Sweep:
 
     # -------------------------------------------------------------------------------------
     def _publish(self, m: Match, task_id: str | None, raw_sources: dict[str, dict]):
-        d = decide(m, self.hunt_id)
-        self.repo.save_evidence(self.hunt_id, m.events, raw_sources, task_id)
-        row = {"id": d.candidate_id, "hunt_id": self.hunt_id, "rule_id": m.playbook_id,
-               "rule_version": next(p.version for p in self.pack if p.id == m.playbook_id),
-               "claim": m.claim, "claim_type": m.claim_type, "event_ids": [e.id for e in m.events],
-               "predicate_fields": [{"field": p.field, "value": p.value, "origin": p.origin} for p in m.predicate],
-               "entities": [list(x) for x in m.entities], "ts": m.ts, "severity": d.severity,
-               "confidence": d.confidence, "lane": d.lane, "priority": d.priority,
-               "priority_reasons": d.priority_reasons, "gate_results": d.gates,
-               "benign_alternatives": list(next(p.benign for p in self.pack if p.id == m.playbook_id)),
-               "next_checks": list(next(p.next_checks for p in self.pack if p.id == m.playbook_id)),
-               "source_case_id": None}
-        row["gate_results"] = {**d.gates, "_notes": d.notes}
-        if self.repo.save_candidate(row):
+        playbook = next(playbook for playbook in self.pack if playbook.id == m.playbook_id)
+        row = publish_match(self.repo, self.hunt_id, playbook, m, task_id, raw_sources)
+        if row is not None:
             self.stats["candidates"] += 1
             self.on_candidate(row)
 
