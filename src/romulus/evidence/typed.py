@@ -8,6 +8,10 @@ from typing import Any
 
 from pydantic import BaseModel
 
+NETWORK_OBSERVER_FAMILIES = {
+    "net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session",
+}
+
 
 class Outcome(StrEnum):
     success = "success"
@@ -52,7 +56,8 @@ class TypedEvent(BaseModel):
         """(kind, value, role) for entity linking."""
         out = []
         if self.host:
-            out.append(("host", self.host, "host"))
+            role = "observer" if self.family in NETWORK_OBSERVER_FAMILIES else "host"
+            out.append(("host", self.host, role))
         for name, kind, role in (("user.name", "account", "actor"), ("process.user", "account", "actor"),
                                  ("source.ip", "ip", "src"), ("destination.ip", "ip", "dst"),
                                  ("dns.question.name", "domain", "subject"), ("url.domain", "domain", "subject"),
