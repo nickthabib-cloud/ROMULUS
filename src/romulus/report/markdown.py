@@ -22,6 +22,10 @@ def fence(text: str, lang: str = "text") -> str:
     return f"{f}{lang}\n{text}\n{f}"
 
 
+def _anchor(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]+", "-", value)
+
+
 def outcome_sentence(m: dict) -> str:
     n = len(m["findings"])
     urgent_high = sum(1 for f in m["findings"] if f["lane"] in ("urgent", "high"))
@@ -53,8 +57,8 @@ def render(m: dict, banner: str = BANNER) -> str:
            f"| Stop reason | {esc(m['stop_reason'])} |",
            f"| Broken citations | {m['integrity']['broken_citations']} |", ""]
     if not m["integrity"]["finalizable"]:
-        out += ["> **Degraded report:** one or more citations could not be resolved to retained evidence. "
-                "Those findings are listed with the broken citation marked.", ""]
+        out += [("> **Degraded report:** one or more citations could not be resolved to retained evidence. "
+                 "Those findings are listed with the broken citation marked."), ""]
 
     out += ["## Findings and leads", "", "Ranked: urgent, then high, then investigative leads; by priority within a lane.", "",
             "| # | Lane | Severity | Confidence | Time (UTC) | Rule | Claim |", "|---|---|---|---|---|---|---|"]
@@ -69,10 +73,13 @@ def render(m: dict, banner: str = BANNER) -> str:
                 f"**Claim.** {esc(f['claim'])}", "",
                 f"- Finding ID: `{f['id']}` · rule version {esc(f['rule_version'])} · claim type {esc(f['claim_type'])}",
                 f"- Observed at: {esc(f['observed_at'])} UTC",
-                f"- Severity **{f['severity']}**, confidence **{f['confidence']}**, priority {f['priority']:.0f} "
-                f"({esc('; '.join(f['priority_reasons']))})",
+                (f"- Severity **{f['severity']}**, confidence **{f['confidence']}**, priority {f['priority']:.0f} "
+                 f"({esc('; '.join(f['priority_reasons']))})"),
                 f"- Analyst status: {esc(f['analyst_status'])}",
                 f"- Entities: {esc(', '.join(f'{k}:{v} ({r})' for k, v, r in f['entities']))}", ""]
+        if f.get("source_case_id"):
+            out += [(f"- Investigator chain: [case `{esc(f['source_case_id'])}`]"
+                     f"(#case-{_anchor(f['source_case_id'])})"), ""]
         out += ["**Predicate fields (what the claim rests on)**", "", "| Field | Value | Origin |", "|---|---|---|"]
         for p in f["predicate_fields"]:
             v = json.dumps(p["value"], ensure_ascii=False)
@@ -91,14 +98,75 @@ def render(m: dict, banner: str = BANNER) -> str:
             out.append(f"| … | {len(f['citations']) - 25} more citations in the JSON manifest | | | |")
         out.append("")
 
+    investigations = m.get("investigations") or {
+        "summary": {}, "seed_partition": {}, "cases": [], "unworked_seed_ids": [],
+        "model_contribution": {}, "incomplete_case_ids": [],
+    }
+    inv_summary = investigations["summary"]
+    partitions = investigations["seed_partition"]
+    contributions = investigations["model_contribution"]
+    out += [
+        "## Investigations", "",
+        ("Model conclusions are recorded as cited analyst guidance. They remain separate from deterministic "
+         "machine claims, lanes, and coverage results."), "",
+        "| Item | Value |", "|---|---|",
+        f"| Status | {esc(inv_summary.get('status', 'unknown'))} |",
+        f"| Cases | {inv_summary.get('cases', 0)} |",
+        f"| Model calls | {contributions.get('model_calls', 0)} |",
+        f"| Pivot steps | {contributions.get('pivot_steps', 0)} |",
+        f"| Pivot-discovered candidates | {contributions.get('contributed_candidates', inv_summary.get('contributed_candidates', 0))} |",
+        f"| Unworked seeds | {inv_summary.get('unworked_count', 0)} |", "",
+        "**Seed accounting**", "",
+        f"- Concluded: {esc(', '.join(partitions.get('concluded', [])) or 'none')}",
+        f"- Assigned but unfinished: {esc(', '.join(partitions.get('assigned_unfinished', [])) or 'none')}",
+        f"- Unassigned: {esc(', '.join(partitions.get('unassigned', [])) or 'none')}", "",
+    ]
+    for case in investigations["cases"]:
+        out += [
+            f'<a id="case-{_anchor(case["id"])}"></a>', "",
+            f"### Case {esc(case['id'])}: {esc(case['title'])}", "",
+            f"- Status: **{esc(case['status'])}** · steps {case['steps_used']}/{case['step_budget']}",
+            f"- Seeds: {esc(', '.join(case['seed_candidate_ids']) or 'none (spawned case)')}",
+            f"- Entities: {esc(json.dumps(case['entities'], ensure_ascii=False, sort_keys=True))}",
+            f"- Hypotheses: {esc('; '.join(case['hypotheses']) or 'none')}",
+        ]
+        contributed = case.get("contributed_candidate_ids") or []
+        if contributed:
+            links = ", ".join(f"[{esc(candidate)}](#f-{candidate})" for candidate in contributed)
+            out.append(f"- Pivot-discovered machine candidates: {links}")
+        conclusion = case.get("conclusion")
+        if conclusion:
+            out += ["", "**Model conclusion (separate from machine decision)**", "",
+                    f"- Conclusion: {esc(conclusion.get('model_conclusion', ''))}",
+                    f"- Reasoning: {esc(conclusion.get('reasoning', ''))}",
+                    f"- Cited evidence: {esc(', '.join(conclusion.get('evidence_ids') or []) or 'none')}",
+                    f"- Benign alternatives: {esc('; '.join(conclusion.get('benign_alternatives') or []) or 'none')}",
+                    "- This is a model assessment; it does not alter any deterministic claim or lane."]
+        out += ["", "**Pivot chain**", ""]
+        if not case["pivot_steps"]:
+            out.append("- No pivot steps recorded.")
+        for step in case["pivot_steps"]:
+            result = step.get("result") or {}
+            out += [
+                (f"- Step {step['n']}: `{esc(step.get('tool') or 'unknown')}` · "
+                 f"{'accepted' if step['accepted'] else 'rejected'}"),
+                f"  - Hypothesis: {esc(step.get('hypothesis') or '')}",
+                f"  - Cited evidence: {esc(', '.join(step.get('evidence_ids') or []) or 'none')}",
+                f"  - Arguments: {esc(json.dumps(step.get('arguments') or {}, ensure_ascii=False, sort_keys=True))}",
+                f"  - Result: {esc(json.dumps(result, ensure_ascii=False, sort_keys=True))}",
+            ]
+            if step.get("rejection"):
+                out.append(f"  - Rejection: {esc(step['rejection'])}")
+        out.append("")
+
     out += ["## Coverage", "",
-            "A negative statement applies only where a rule's coverage is `complete`. `unresolved` means at least one "
-            "partition was partial, failed, or had records missing required fields.", "",
+            ("A negative statement applies only where a rule's coverage is `complete`. `unresolved` means at least one "
+             "partition was partial, failed, or had records missing required fields."), "",
             "| Rule | Records evaluated | Negative claim | Cell states |", "|---|---|---|---|"]
     for r in m["coverage"]["rules"]:
         out.append(f"| {esc(r['rule_id'])} | {r['records_evaluated']} | {esc(r['negative_claim'])} | "
                    f"{esc(json.dumps(r['states'], sort_keys=True))} |")
-    out += ["", f"Context-only items (not listed above): {m['context_items']}. They remain in the JSON manifest "
-                "and the database.", "",
+    out += ["", (f"Context-only items (not listed above): {m['context_items']}. They remain in the JSON manifest "
+                 "and the database."), "",
             "## Versions", "", fence(json.dumps(m["versions"], indent=2, sort_keys=True), "json"), "", banner, ""]
     return "\n".join(out)
