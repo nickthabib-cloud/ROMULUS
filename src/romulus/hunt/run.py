@@ -56,7 +56,8 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     return hid
 
 
-def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient) -> dict:
+def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient,
+               owner_token: str | None = None) -> dict:
     hunt_id = hunt["id"]
     manifest = hunt["manifest"]
     contracts = {}
@@ -66,7 +67,7 @@ def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient) -> di
         if recorded and profile.id != recorded["id"]:
             repo.audit("system", "source_profile_changed", hunt_id, {
                 "target": target, "now": profile.id, "manifest": recorded["id"],
-            })
+            }, owner_token=owner_token)
         contracts[target] = contract
     return contracts
 
@@ -80,7 +81,8 @@ def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
 
 
 def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
-            *, stats: dict | None = None, partial_reasons: list[str] | None = None) -> dict:
+            *, stats: dict | None = None, partial_reasons: list[str] | None = None,
+            owner_token: str | None = None) -> dict:
     partial_reasons = partial_reasons or list(sweep_summary.get("partial_reasons") or [])
     sweep_complete = bool(sweep_summary.get("complete"))
     missing_summary = not sweep_summary
@@ -96,10 +98,13 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         reasons.append("sweep coverage partial")
     if agent_summary.get("stop_reason"):
         reasons.append(f"agent: {agent_summary['stop_reason']}")
-    repo.audit("system", "hunt.agent_summary", hunt_id, agent_summary)
+    repo.audit(
+        "system", "hunt.agent_summary", hunt_id, agent_summary, owner_token=owner_token,
+    )
     state = "failed" if agent_status == "failed" else ("partial" if partial else "completed_within_scope")
     repo.set_hunt_state(
-        hunt_id, state, detection_result=result, stop_reason="; ".join(reasons),
+        hunt_id, state, owner_token=owner_token,
+        detection_result=result, stop_reason="; ".join(reasons),
     )
     return {
         "hunt_id": hunt_id,
@@ -113,13 +118,14 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
 
 
 def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str,
-                      contracts: dict, window: Window) -> dict:
-    executor = PivotExecutor(repo, client, hunt_id, contracts)
+                      contracts: dict, window: Window, owner_token: str) -> dict:
     def heartbeat():
-        repo.heartbeat_hunt(hunt_id, _lease_seconds(s))
+        repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
+
+    executor = PivotExecutor(repo, client, hunt_id, contracts, heartbeat=heartbeat)
 
     return Investigator(
-        s, repo, executor, hunt_id, window, heartbeat=heartbeat,
+        s, repo, executor, hunt_id, window, heartbeat=heartbeat, owner_token=owner_token,
     ).run()
 
 
@@ -128,21 +134,30 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
         raise KeyError(hunt_id)
-    repo.claim_hunt(hunt_id, _lease_seconds(s))
+    claimed = repo.claim_hunt(hunt_id, _lease_seconds(s))
+    owner_token = claimed["lease_owner"]
     h = repo.get_hunt(hunt_id)
     m = h["manifest"]
     window = Window(start=datetime.fromisoformat(m["window"]["start"]), end=datetime.fromisoformat(m["window"]["end"]))
     client = ElasticClient(s)
     try:
-        contracts = _contracts(s, repo, h, client)
+        contracts = _contracts(s, repo, h, client, owner_token)
     except Exception as exc:
         repo.audit("system", "hunt.sweep_summary", hunt_id, {
             "finished": False, "complete": False, "partial_reasons": [], "stats": {},
             "error": f"source preflight error: {exc}",
-        })
-        repo.set_hunt_state(hunt_id, "failed", stop_reason=f"source preflight error: {exc}")
+        }, owner_token=owner_token)
+        repo.set_hunt_state(
+            hunt_id, "failed", owner_token=owner_token,
+            stop_reason=f"source preflight error: {exc}",
+        )
         raise
-    sweep = Sweep(repo, client, hunt_id, window, contracts, on_candidate)
+    def heartbeat():
+        repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
+
+    sweep = Sweep(
+        repo, client, hunt_id, window, contracts, on_candidate, heartbeat=heartbeat,
+    )
     try:
         for target in m["targets"]:
             sweep.run_target(target)
@@ -151,8 +166,10 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
         repo.audit("system", "hunt.sweep_summary", hunt_id, {
             "finished": False, "complete": False, "partial_reasons": sweep.partial_reasons,
             "stats": sweep.stats, "error": str(e),
-        })
-        repo.set_hunt_state(hunt_id, "failed", stop_reason=f"sweep error: {e}")
+        }, owner_token=owner_token)
+        repo.set_hunt_state(
+            hunt_id, "failed", owner_token=owner_token, stop_reason=f"sweep error: {e}",
+        )
         raise
     sweep_summary = {
         "finished": True,
@@ -160,7 +177,9 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
         "partial_reasons": sweep.partial_reasons,
         "stats": sweep.stats,
     }
-    repo.audit("system", "hunt.sweep_summary", hunt_id, sweep_summary)
+    repo.audit(
+        "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,
+    )
     agent_summary = {
         "status": "disabled", "partial": False,
         "stop_reason": "model investigator disabled (model-off run)",
@@ -168,7 +187,9 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
     }
     if agent:
         try:
-            agent_summary = _run_investigator(s, repo, client, hunt_id, contracts, window)
+            agent_summary = _run_investigator(
+                s, repo, client, hunt_id, contracts, window, owner_token,
+            )
         except Exception as exc:
             log.exception("investigator failed")
             agent_summary = {
@@ -177,7 +198,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
             }
     return _finish(
         repo, hunt_id, agent_summary, sweep_summary,
-        stats=sweep.stats, partial_reasons=sweep.partial_reasons,
+        stats=sweep.stats, partial_reasons=sweep.partial_reasons, owner_token=owner_token,
     )
 
 
@@ -189,11 +210,14 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         raise KeyError(hunt_id)
     sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")
     sweep_summary = dict(sweep_audit["detail"]) if sweep_audit else {}
+    if hunt["execution_state"] == "running" and not sweep_summary.get("finished"):
+        raise RuntimeError("running hunt cannot resume because the sweep did not finish")
     if sweep_summary and not sweep_summary.get("finished"):
         raise RuntimeError("hunt cannot resume agent work because the sweep did not finish")
     if hunt["execution_state"] == "failed" and not sweep_summary.get("finished"):
         raise RuntimeError("failed hunt cannot resume because the sweep did not finish")
-    repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True)
+    claimed = repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True)
+    owner_token = claimed["lease_owner"]
     hunt = repo.get_hunt(hunt_id)
     manifest = hunt["manifest"]
     window = Window(
@@ -201,13 +225,17 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         end=datetime.fromisoformat(manifest["window"]["end"]),
     )
     client = ElasticClient(s)
-    contracts = _contracts(s, repo, hunt, client)
+    contracts = _contracts(s, repo, hunt, client, owner_token)
     try:
-        agent_summary = _run_investigator(s, repo, client, hunt_id, contracts, window)
+        agent_summary = _run_investigator(
+            s, repo, client, hunt_id, contracts, window, owner_token,
+        )
     except Exception as exc:
         log.exception("resumed investigator failed")
         agent_summary = {
             "status": "failed", "partial": True, "stop_reason": f"investigator error: {exc}",
             "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
         }
-    return _finish(repo, hunt_id, agent_summary, sweep_summary)
+    return _finish(
+        repo, hunt_id, agent_summary, sweep_summary, owner_token=owner_token,
+    )

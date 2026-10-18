@@ -38,6 +38,49 @@ def test_active_lease_refuses_resume_and_expired_lease_is_reclaimed():
     assert repo.latest_audit("h1", "hunt.resume_stale")["detail"]["previous_state"] == "running"
 
 
+def test_displaced_worker_cannot_heartbeat_or_write_investigator_state():
+    repo = _repo()
+    first = repo.claim_hunt("h1", lease_seconds=60, now=T)
+    second = repo.claim_hunt(
+        "h1", lease_seconds=60, resume=True, now=T + timedelta(seconds=61),
+    )
+
+    assert first["lease_owner"] != second["lease_owner"]
+    with pytest.raises(RuntimeError, match="lease ownership lost"):
+        repo.heartbeat_hunt("h1", 60, owner_token=first["lease_owner"])
+    with pytest.raises(RuntimeError, match="lease ownership lost"):
+        repo.create_case(_case_row(), owner_token=first["lease_owner"])
+
+    assert repo.create_case(_case_row(), owner_token=second["lease_owner"]) is True
+    repo.append_case_step(
+        "case-1", 0, {"action": "seed"}, True, owner_token=second["lease_owner"],
+    )
+    stale_writes = [
+        lambda: repo.update_case("case-1", owner_token=first["lease_owner"], title="stale"),
+        lambda: repo.append_case_step(
+            "case-1", 1, {"action": "close"}, True, owner_token=first["lease_owner"],
+        ),
+        lambda: repo.update_case_step(
+            "case-1", 0, owner_token=first["lease_owner"], rejection="stale",
+        ),
+        lambda: repo.save_model_call({
+            "id": "stale-call", "hunt_id": "h1", "case_id": "case-1", "purpose": "triage",
+            "model": "test", "options": {}, "prompt_digest": "p", "status": "ok",
+        }, owner_token=first["lease_owner"]),
+        lambda: repo.audit(
+            "stale-worker", "hunt.agent_summary", "h1", {},
+            owner_token=first["lease_owner"],
+        ),
+    ]
+    for write in stale_writes:
+        with pytest.raises(RuntimeError, match="lease ownership lost"):
+            write()
+
+    assert repo.case("case-1")["title"] == "seed"
+    assert [step["n"] for step in repo.case_steps("case-1")] == [0]
+    assert repo.model_calls(hunt_id="h1") == []
+
+
 @pytest.mark.parametrize("state", ["partial", "failed"])
 def test_partial_and_failed_hunts_can_transition_back_to_running(state):
     repo = _repo()

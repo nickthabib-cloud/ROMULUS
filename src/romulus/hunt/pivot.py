@@ -247,11 +247,19 @@ class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
 
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str,
-                 contracts: dict[str, FieldContract]):
+                 contracts: dict[str, FieldContract], heartbeat=None):
         self.repo = repo
         self.client = client
         self.hunt_id = hunt_id
         self.contracts = contracts
+        self.heartbeat = heartbeat or (lambda: None)
+
+    def _execute(self, intent: SearchIntent, contract: FieldContract, *, pit=None) -> SearchOutcome:
+        self.heartbeat()
+        outcome = (execute(self.client, intent, contract) if pit is None
+                   else execute(self.client, intent, contract, pit=pit))
+        self.heartbeat()
+        return outcome
 
     def _intents(self, request: ToolRequest) -> list[SearchIntent]:
         args = request.arguments
@@ -326,7 +334,7 @@ class PivotExecutor:
         leaves = []
         while pending:
             current = pending.popleft()
-            outcome = execute(self.client, current, contract)
+            outcome = self._execute(current, contract)
             if _is_capped(outcome.reasons) and (current.window.end - current.window.start) > MIN_PIVOT_SPLIT * 2:
                 projected_leaves = len(leaves) + len(pending) + 2
                 if projected_leaves <= MAX_PIVOT_PARTITIONS:
@@ -375,7 +383,7 @@ class PivotExecutor:
         try:
             with self.client.point_in_time(intent.target) as pit:
                 head_intent = intent.model_copy(update={"order": "asc"})
-                head = execute(self.client, head_intent, contract, pit=pit)
+                head = self._execute(head_intent, contract, pit=pit)
                 attempts.append((head_intent, head))
                 if (head.completeness == Completeness.complete and not head.reasons
                         and _safe_sample_interval(head, head_intent, contract) is not None):
@@ -385,7 +393,7 @@ class PivotExecutor:
                     )], []
 
                 tail_intent = intent.model_copy(update={"order": "desc"})
-                tail = execute(self.client, tail_intent, contract, pit=pit)
+                tail = self._execute(tail_intent, contract, pit=pit)
                 attempts.append((tail_intent, tail))
                 if (tail.completeness == Completeness.complete and not tail.reasons
                         and _safe_sample_interval(tail, tail_intent, contract) is not None):
@@ -405,8 +413,8 @@ class PivotExecutor:
                         "window": Window(start=anchor_ts, end=intent.window.end),
                         "order": "asc",
                     })
-                    attempts.append((before, execute(self.client, before, contract, pit=pit)))
-                    attempts.append((after, execute(self.client, after, contract, pit=pit)))
+                    attempts.append((before, self._execute(before, contract, pit=pit)))
+                    attempts.append((after, self._execute(after, contract, pit=pit)))
         except SourceError as exc:
             reasons = sorted(set(initial.reasons + planning_reasons + [
                 "pivot_shared_pit_error", "source_error",

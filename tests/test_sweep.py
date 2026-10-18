@@ -80,6 +80,27 @@ def test_failed_partition_is_recorded_not_dropped(monkeypatch):
     assert s.partial_reasons and all(c["state"] == "executed_failed" for c in repo.rule_cells("h1"))
 
 
+def test_partition_heartbeats_before_and_after_source_execution(monkeypatch):
+    calls = []
+
+    def fake_execute(client, intent, contract):
+        calls.append("execute")
+        return _complete(intent, [])
+
+    monkeypatch.setattr(sw, "execute", fake_execute)
+    repo = _repo()
+    sweep = sw.Sweep(
+        repo, FakeClient(), "h1", Window(start=START, end=START + timedelta(minutes=5)),
+        {"x": None}, heartbeat=lambda: calls.append("heartbeat"),
+    )
+
+    sweep.run_partition(
+        "x", None, [], Window(start=START, end=START + timedelta(minutes=5)), est=0,
+    )
+
+    assert calls == ["heartbeat", "execute", "heartbeat"]
+
+
 # ---------------------------------------------------------------- M1 gate regressions (B2, B3, B5)
 def _complete(intent, records):
     now = datetime.now(UTC)

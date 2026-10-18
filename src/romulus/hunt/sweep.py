@@ -64,10 +64,12 @@ def plan_partitions(client: ElasticClient, target: str, contract: FieldContract,
 
 class Sweep:
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
-                 contracts: dict[str, FieldContract], on_candidate: Callable[[dict], None] | None = None):
+                 contracts: dict[str, FieldContract], on_candidate: Callable[[dict], None] | None = None,
+                 heartbeat: Callable[[], None] | None = None):
         self.repo, self.client, self.hunt_id, self.window = repo, client, hunt_id, window
         self.contracts = contracts
         self.on_candidate = on_candidate or (lambda c: None)
+        self.heartbeat = heartbeat or (lambda: None)
         self.pack: list[Playbook] = fresh_pack()
         self.partial_reasons: list[str] = []
         self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0}
@@ -105,7 +107,9 @@ class Sweep:
         contract = self.contracts[target]
         filters = self._filters_for(target)
         try:
+            self.heartbeat()
             parts = plan_partitions(self.client, target, contract, self.window, filters)
+            self.heartbeat()
         except Exception as e:  # noqa: BLE001 - one source failing must not hide the others
             reason = f"partition planning failed: {e}"[:300]
             self.partial_reasons.append(f"{target}: {reason}")
@@ -119,6 +123,7 @@ class Sweep:
             self.run_partition(target, contract, filters, w, est)
 
     def run_partition(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window, est: int):
+        self.heartbeat()
         if est > PARTITION_MAX_DOCS and (w.end - w.start) > MIN_SPLIT * 2:
             # exact histogram count already exceeds the limit: subdivide before fetching anything
             a, b = self._split(target, w)
@@ -135,6 +140,7 @@ class Sweep:
         # is safe (attempts are counted and visible).
         self.repo.update_task(tid, "leased", attempt=True)
         out = execute(self.client, intent, contract)
+        self.heartbeat()
         capped = any(r.startswith("cap:") for r in out.reasons)
         if capped and (w.end - w.start) > MIN_SPLIT * 2:
             # Capped: never accept a partial partition when it can be subdivided. Split in half
@@ -217,10 +223,12 @@ class Sweep:
                     keep[r.key] = raw_sources[r.key]
 
     def finalize(self):
+        self.heartbeat()
         agg_raw = getattr(self, "_agg_raw", {})
         for pb in self.pack:
             if pb.kind != "aggregate":
                 continue
+            self.heartbeat()
             ms = pb.finalize()
             for m in ms:
                 self._publish(m, None, agg_raw)

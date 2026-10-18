@@ -27,6 +27,7 @@ class Investigator:
     def __init__(self, settings: Settings, repo: Repo, pivot_executor: Any, hunt_id: str,
                  window: Any, model_client: Any | None = None,
                  heartbeat: Callable[[], None] | None = None,
+                 owner_token: str | None = None,
                  clock: Callable[[], float] | None = None):
         self.settings = settings
         self.repo = repo
@@ -35,6 +36,7 @@ class Investigator:
         self.window = window
         self.model = model_client or OllamaClient(settings)
         self.heartbeat = heartbeat or (lambda: None)
+        self.owner_token = owner_token
         self.clock = clock or monotonic
         hunt = repo.get_hunt(hunt_id)
         if hunt is None:
@@ -93,12 +95,13 @@ class Investigator:
                 "entities": [entity.model_dump(mode="json") for entity in cluster.entities],
                 "hypotheses": [],
                 "step_budget": self.per_case_budget,
-            })
+            }, owner_token=self.owner_token)
             if created:
                 self.repo.append_case_step(
                     cluster.id, 0,
                     {"action": "seed", "seed_candidate_ids": cluster.seed_candidate_ids},
                     True,
+                    owner_token=self.owner_token,
                 )
                 assigned.update(cluster.seed_candidate_ids)
         return all_seed_ids
@@ -156,7 +159,7 @@ class Investigator:
             "validation": validation_data,
             "status": status or result.status,
             "at": utcnow(),
-        })
+        }, owner_token=self.owner_token)
         return call_id
 
     def _record_exception(self, case: dict, step_n: int, brief, error: str) -> None:
@@ -168,9 +171,12 @@ class Investigator:
         call_id = self._record_call(case, step_n, brief, result, None)
         self.repo.append_case_step(
             case["id"], step_n, {"action": "model_error", "error": error}, False,
-            rejection=error, model_call_id=call_id,
+            rejection=error, model_call_id=call_id, owner_token=self.owner_token,
         )
-        self.repo.update_case(case["id"], steps_used=int(case["steps_used"]) + 1)
+        self.repo.update_case(
+            case["id"], owner_token=self.owner_token,
+            steps_used=int(case["steps_used"]) + 1,
+        )
 
     def _call_once(self, case: dict, retry_errors: tuple[str, ...]) -> tuple[str, Any]:
         step_n = self._next_step_number(case["id"])
@@ -178,22 +184,29 @@ class Investigator:
             self.repo, case["id"], tool_catalog(), self.settings.ollama_num_ctx,
             retry_errors=retry_errors,
         )
+        self.heartbeat()
         try:
             result = self.model.chat_json(
                 self.settings.ollama_model_triage, brief.system, brief.user,
                 decision_schema(), max_out=900,
             )
         except ModelUnavailable as exc:
+            self.heartbeat()
             self._record_exception(case, step_n, brief, str(exc))
             return "unavailable", str(exc)
+
+        self.heartbeat()
 
         if not result.ok and result.status in {"truncated", "too_large", "error"}:
             call_id = self._record_call(case, step_n, brief, result, None)
             self.repo.append_case_step(
                 case["id"], step_n, {"action": "model_error", "status": result.status}, False,
-                rejection=result.error, model_call_id=call_id,
+                rejection=result.error, model_call_id=call_id, owner_token=self.owner_token,
             )
-            self.repo.update_case(case["id"], steps_used=int(case["steps_used"]) + 1)
+            self.repo.update_case(
+                case["id"], owner_token=self.owner_token,
+                steps_used=int(case["steps_used"]) + 1,
+            )
             return "unavailable", result.error or result.status
 
         decision = None
@@ -225,9 +238,12 @@ class Investigator:
         self.repo.append_case_step(
             case["id"], step_n, stored_decision, accepted,
             rejection="; ".join(parse_errors) if parse_errors else None,
-            model_call_id=call_id, task_id=pending_id,
+            model_call_id=call_id, task_id=pending_id, owner_token=self.owner_token,
         )
-        self.repo.update_case(case["id"], steps_used=int(case["steps_used"]) + 1)
+        self.repo.update_case(
+            case["id"], owner_token=self.owner_token,
+            steps_used=int(case["steps_used"]) + 1,
+        )
         self.heartbeat()
         if not accepted:
             return "rejected", parse_errors
@@ -288,20 +304,30 @@ class Investigator:
                 case["id"], step_n,
                 task_id=result.task_ids[0] if result.task_ids else None,
                 result_digest=result.model_dump(mode="json"),
+                owner_token=self.owner_token,
             )
             hypotheses = list(case.get("hypotheses") or [])
             if decision.hypothesis and decision.hypothesis not in hypotheses:
                 hypotheses.append(decision.hypothesis)
             self.repo.update_case(
-                case["id"], hypotheses=hypotheses,
+                case["id"], owner_token=self.owner_token, hypotheses=hypotheses,
                 entities=self._merge_entities(case, result.entities),
             )
         elif decision.action == "escalate":
-            self.repo.update_case(case["id"], status="escalated", summary=self._conclusion(decision))
+            self.repo.update_case(
+                case["id"], owner_token=self.owner_token,
+                status="escalated", summary=self._conclusion(decision),
+            )
         elif decision.action == "close":
-            self.repo.update_case(case["id"], status="closed", summary=self._conclusion(decision))
+            self.repo.update_case(
+                case["id"], owner_token=self.owner_token,
+                status="closed", summary=self._conclusion(decision),
+            )
         elif decision.action == "park_as_lead":
-            self.repo.update_case(case["id"], status="parked", summary=self._conclusion(decision))
+            self.repo.update_case(
+                case["id"], owner_token=self.owner_token,
+                status="parked", summary=self._conclusion(decision),
+            )
         elif decision.action == "spawn" and decision.entity is not None:
             if len(self.repo.cases(self.hunt_id)) < self.max_cases:
                 child_id = "case-" + digest({
@@ -313,13 +339,14 @@ class Investigator:
                     "priority": max(0.0, float(case["priority"]) - 0.01),
                     "entities": [decision.entity.model_dump(mode="json")], "hypotheses": [],
                     "step_budget": self.per_case_budget,
-                })
+                }, owner_token=self.owner_token)
                 if created:
                     self.repo.append_case_step(
                         child_id, 0,
                         {"action": "spawn_seed", "parent_case_id": case["id"],
                          "evidence_ids": decision.evidence_ids},
                         True,
+                        owner_token=self.owner_token,
                     )
 
     def _replay_pending(self) -> None:
@@ -335,6 +362,7 @@ class Investigator:
                 step["case_id"], step["n"],
                 task_id=result.task_ids[0] if result.task_ids else step["task_id"],
                 result_digest=result.model_dump(mode="json"),
+                owner_token=self.owner_token,
             )
             case = self.repo.case(step["case_id"])
             if case is not None:
@@ -342,14 +370,16 @@ class Investigator:
                 if decision.hypothesis and decision.hypothesis not in hypotheses:
                     hypotheses.append(decision.hypothesis)
                 self.repo.update_case(
-                    case["id"], hypotheses=hypotheses,
+                    case["id"], owner_token=self.owner_token, hypotheses=hypotheses,
                     entities=self._merge_entities(case, result.entities),
                 )
             self.heartbeat()
 
     def _mark_budget_exhausted(self) -> None:
         for case in self.repo.cases(self.hunt_id, statuses=["open"]):
-            self.repo.update_case(case["id"], status="budget_exhausted")
+            self.repo.update_case(
+                case["id"], owner_token=self.owner_token, status="budget_exhausted",
+            )
 
     def _summary(self, status: str, reason: str, all_seed_ids: list[str], partial: bool = False) -> dict:
         cases = self.repo.cases(self.hunt_id)
@@ -415,7 +445,9 @@ class Investigator:
 
             for case in open_cases:
                 if int(case["steps_used"]) >= min(int(case["step_budget"]), self.per_case_budget):
-                    self.repo.update_case(case["id"], status="budget_exhausted")
+                    self.repo.update_case(
+                        case["id"], owner_token=self.owner_token, status="budget_exhausted",
+                    )
             open_cases = self.repo.cases(self.hunt_id, statuses=["open"])
             if not open_cases:
                 return self._summary("budget_exhausted", "all open cases exhausted their step budgets", all_seed_ids)
@@ -442,7 +474,7 @@ class Investigator:
                 retry_errors = tuple(value)
                 if rejected >= 2:
                     self.repo.update_case(
-                        case["id"], status="parked",
+                        case["id"], owner_token=self.owner_token, status="parked",
                         summary=json.dumps({
                             "model_conclusion": "deterministic_fallback_park",
                             "reasoning": "validation failed twice",

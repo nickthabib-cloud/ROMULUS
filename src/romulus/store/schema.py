@@ -33,6 +33,7 @@ hunt = Table(
     Column("ended_at", DateTime(timezone=True)),
     Column("heartbeat_at", DateTime(timezone=True)),
     Column("lease_until", DateTime(timezone=True)),
+    Column("lease_owner", String),
 )
 
 source_profile = Table(

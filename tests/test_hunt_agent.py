@@ -99,8 +99,18 @@ def test_resume_refuses_an_active_lease(tmp_path):
     settings = Settings(home=tmp_path)
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", lease_seconds=600)
+    repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True})
 
     with pytest.raises(RuntimeError, match="active lease"):
+        hunt_run.resume_hunt(settings, "h1")
+
+
+def test_resume_refuses_running_hunt_without_finished_sweep_summary(tmp_path):
+    settings = Settings(home=tmp_path)
+    repo = _new_hunt(settings)
+    repo.claim_hunt("h1", lease_seconds=1, now=START)
+
+    with pytest.raises(RuntimeError, match="sweep did not finish"):
         hunt_run.resume_hunt(settings, "h1")
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
@@ -45,10 +46,24 @@ class Repo:
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(select(t.hunt).order_by(t.hunt.c.created_at.desc())).mappings()]
 
+    @staticmethod
+    def _fence_lease(c, hunt_id: str, owner_token: str | None) -> None:
+        """Take SQLite's write lock while proving this worker still owns the hunt lease."""
+        if owner_token is None:
+            return
+        fenced = c.execute(t.hunt.update().where(
+            t.hunt.c.id == hunt_id,
+            t.hunt.c.execution_state == "running",
+            t.hunt.c.lease_owner == owner_token,
+        ).values(lease_owner=t.hunt.c.lease_owner))
+        if fenced.rowcount != 1:
+            raise RuntimeError(f"hunt {hunt_id} lease ownership lost")
+
     def claim_hunt(self, hunt_id: str, lease_seconds: int, resume: bool = False,
-                   now: datetime | None = None) -> dict:
+                   now: datetime | None = None, owner_token: str | None = None) -> dict:
         """Claim a planned hunt or safely reclaim a resumable hunt."""
         now = now or utcnow()
+        owner_token = owner_token or uuid.uuid4().hex
         lease_until = now + timedelta(seconds=lease_seconds)
         with write_txn(self.engine) as c:
             current = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
@@ -74,6 +89,7 @@ class Repo:
                 "execution_state": "running",
                 "heartbeat_at": now,
                 "lease_until": lease_until,
+                "lease_owner": owner_token,
                 "ended_at": None,
             }
             if state == "planned":
@@ -94,15 +110,19 @@ class Repo:
             claimed = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             return dict(claimed)
 
-    def heartbeat_hunt(self, hunt_id: str, lease_seconds: int, now: datetime | None = None) -> dict:
+    def heartbeat_hunt(self, hunt_id: str, lease_seconds: int, now: datetime | None = None,
+                       *, owner_token: str | None = None) -> dict:
         now = now or utcnow()
         with write_txn(self.engine) as c:
-            state = c.execute(select(t.hunt.c.execution_state).where(t.hunt.c.id == hunt_id)).scalar_one()
-            if state != "running":
-                raise RuntimeError(f"hunt {hunt_id} is not running")
-            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(
+            conditions = [t.hunt.c.id == hunt_id, t.hunt.c.execution_state == "running"]
+            if owner_token is not None:
+                conditions.append(t.hunt.c.lease_owner == owner_token)
+            updated = c.execute(t.hunt.update().where(*conditions).values(
                 heartbeat_at=now, lease_until=now + timedelta(seconds=lease_seconds),
             ))
+            if updated.rowcount != 1:
+                reason = "lease ownership lost" if owner_token is not None else "is not running"
+                raise RuntimeError(f"hunt {hunt_id} {reason}")
             row = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             return dict(row)
 
@@ -122,8 +142,10 @@ class Repo:
         "failed": {"running"},
     }
 
-    def set_hunt_state(self, hunt_id: str, state: str, actor: str = "system", **extra):
+    def set_hunt_state(self, hunt_id: str, state: str, actor: str = "system",
+                       owner_token: str | None = None, **extra):
         with write_txn(self.engine) as c:
+            self._fence_lease(c, hunt_id, owner_token)
             cur = c.execute(select(t.hunt.c.execution_state).where(t.hunt.c.id == hunt_id)).scalar_one()
             if state != cur and state not in self.VALID.get(cur, set()):
                 raise ValueError(f"invalid hunt transition {cur} -> {state}")
@@ -133,6 +155,7 @@ class Repo:
             if state in ("completed_within_scope", "partial", "failed", "canceled"):
                 vals["ended_at"] = utcnow()
                 vals["lease_until"] = None
+                vals["lease_owner"] = None
             c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(**vals))
             c.execute(t.audit_event.insert().values(at=utcnow(), actor=actor, action=f"hunt.{state}", hunt_id=hunt_id,
                                                     detail={k: str(v) for k, v in extra.items()}))
@@ -249,13 +272,14 @@ class Repo:
                 t.disposition_event.c.candidate_id == cid).order_by(t.disposition_event.c.id)).mappings()]
 
     # ---- investigator state ----------------------------------------------------------------
-    def create_case(self, row: dict) -> bool:
+    def create_case(self, row: dict, *, owner_token: str | None = None) -> bool:
         now = utcnow()
         values = {
             "status": "open", "steps_used": 0, "hypotheses": [],
             "created_at": now, "updated_at": now, **row,
         }
         with write_txn(self.engine) as c:
+            self._fence_lease(c, row["hunt_id"], owner_token)
             result = c.execute(insert(t.case).values(**values).on_conflict_do_nothing(index_elements=["id"]))
             return result.rowcount == 1
 
@@ -272,23 +296,28 @@ class Repo:
         with self.engine.connect() as c:
             return [dict(row) for row in c.execute(query).mappings()]
 
-    def update_case(self, case_id: str, **values) -> None:
+    def update_case(self, case_id: str, *, owner_token: str | None = None, **values) -> None:
         allowed = {"title", "status", "priority", "entities", "hypotheses", "steps_used", "step_budget", "summary"}
         unknown = set(values) - allowed
         if unknown:
             raise ValueError(f"unknown case fields: {sorted(unknown)}")
         with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.case.c.hunt_id).where(t.case.c.id == case_id)).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
             c.execute(t.case.update().where(t.case.c.id == case_id).values(**values, updated_at=utcnow()))
 
     def append_case_step(self, case_id: str, n: int, decision: dict, accepted: bool,
                          rejection: str | None = None, model_call_id: str | None = None,
-                         task_id: str | None = None, result_digest: dict | None = None) -> int:
+                         task_id: str | None = None, result_digest: dict | None = None,
+                         owner_token: str | None = None) -> int:
         values = {
             "case_id": case_id, "n": n, "decision": decision, "accepted": int(accepted),
             "rejection": rejection, "model_call_id": model_call_id, "task_id": task_id,
             "result_digest": result_digest, "at": utcnow(),
         }
         with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.case.c.hunt_id).where(t.case.c.id == case_id)).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
             c.execute(insert(t.case_step).values(**values).on_conflict_do_nothing(
                 index_elements=["case_id", "n"],
             ))
@@ -296,7 +325,8 @@ class Repo:
                 t.case_step.c.case_id == case_id, t.case_step.c.n == n,
             )).scalar_one()
 
-    def update_case_step(self, case_id: str, n: int, **values) -> None:
+    def update_case_step(self, case_id: str, n: int, *, owner_token: str | None = None,
+                         **values) -> None:
         allowed = {"model_call_id", "decision", "accepted", "rejection", "task_id", "result_digest"}
         unknown = set(values) - allowed
         if unknown:
@@ -304,6 +334,8 @@ class Repo:
         if "accepted" in values:
             values["accepted"] = int(values["accepted"])
         with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.case.c.hunt_id).where(t.case.c.id == case_id)).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
             c.execute(t.case_step.update().where(
                 t.case_step.c.case_id == case_id, t.case_step.c.n == n,
             ).values(**values))
@@ -323,9 +355,10 @@ class Repo:
         with self.engine.connect() as c:
             return [dict(row) for row in c.execute(query).mappings()]
 
-    def save_model_call(self, row: dict) -> bool:
+    def save_model_call(self, row: dict, *, owner_token: str | None = None) -> bool:
         values = {"at": utcnow(), **row}
         with write_txn(self.engine) as c:
+            self._fence_lease(c, row["hunt_id"], owner_token)
             result = c.execute(insert(t.model_call).values(**values).on_conflict_do_nothing(index_elements=["id"]))
             return result.rowcount == 1
 
@@ -373,7 +406,10 @@ class Repo:
                              .group_by(t.candidate.c.lane)).all()
             return {lane: n for lane, n in rows}
 
-    def audit(self, actor: str, action: str, hunt_id: str | None = None, detail: dict | None = None):
+    def audit(self, actor: str, action: str, hunt_id: str | None = None, detail: dict | None = None,
+              *, owner_token: str | None = None):
         with write_txn(self.engine) as c:
+            if hunt_id is not None:
+                self._fence_lease(c, hunt_id, owner_token)
             c.execute(t.audit_event.insert().values(at=utcnow(), actor=actor, action=action, hunt_id=hunt_id,
                                                     detail=detail or {}))

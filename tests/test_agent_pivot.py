@@ -241,6 +241,33 @@ def test_family_filter_requires_the_exact_contract_operator():
     assert intents == []
 
 
+def test_pivot_heartbeats_before_and_after_source_execution(monkeypatch):
+    calls = []
+
+    def fake_execute(_client, intent, _contract, *, pit=None):
+        calls.append("execute")
+        return SearchOutcome(
+            target=intent.target, fingerprint="fp", started_at=START, ended_at=START,
+            completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+        )
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
+        "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+    })}
+    request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
+        entity=EntityRef(kind="host", value="video", role="host"), start=START, end=END,
+    ))
+    executor = PivotExecutor(
+        _repo(), FakeClient(), "h1", contracts, heartbeat=lambda: calls.append("heartbeat"),
+    )
+
+    result = executor.run("case-1", request)
+
+    assert result.status == "complete"
+    assert calls == ["heartbeat", "execute", "heartbeat"]
+
+
 def test_partial_pivot_retains_events_and_publishes_direct_matches(monkeypatch):
     event = _process_event()
 
