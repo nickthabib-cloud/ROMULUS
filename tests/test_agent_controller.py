@@ -6,6 +6,7 @@ from romulus.agent.controller import Investigator
 from romulus.agent.models import PivotResult
 from romulus.agent.ollama import ModelResult, ModelUnavailable
 from romulus.config import Settings
+from romulus.evidence.typed import TypedEvent
 from romulus.sources.models import Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -40,6 +41,13 @@ def _candidate(repo: Repo, cid: str, host: str, priority: float, *, ip: str | No
         "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
         "source_case_id": None,
     })
+
+
+def _evidence(repo: Repo, event_id: str, ts: datetime) -> None:
+    repo.save_evidence("h1", [TypedEvent(
+        id=event_id, family="process_exec", ts=ts, host="video",
+        fields={}, raw=[], normalizer="test@1",
+    )], {}, None)
 
 
 def _result(parsed: dict, *, duration=5) -> ModelResult:
@@ -77,9 +85,11 @@ class QueueModel:
 class RecordingExecutor:
     def __init__(self):
         self.calls = []
+        self.anchors = []
 
-    def run(self, case_id, request):
+    def run(self, case_id, request, *, anchor_ts=None):
         self.calls.append((case_id, request.tool))
+        self.anchors.append(anchor_ts)
         return PivotResult(status="complete", task_ids=[f"task-{case_id}"], duration_ms=10)
 
 
@@ -105,6 +115,19 @@ def test_scheduler_gives_each_case_one_call_before_depth():
     assert summary["status"] == "budget_exhausted"
     assert len({case_id for case_id, _tool in executor.calls}) == 2
     assert [case["steps_used"] for case in repo.cases("h1")] == [1, 1]
+
+
+def test_accepted_pivot_receives_anchor_from_cited_persisted_evidence():
+    repo = _repo(total=1)
+    _candidate(repo, "c1", "video", 50)
+    anchor = START + timedelta(minutes=2)
+    _evidence(repo, "event-c1", anchor)
+    model = QueueModel([_result(_host_pivot("video", "event-c1"))])
+    executor = RecordingExecutor()
+
+    _investigator(repo, model, executor).run()
+
+    assert executor.anchors == [anchor]
 
 
 def test_two_rejections_count_against_budget_then_park_deterministically():
@@ -183,6 +206,8 @@ def test_model_outage_leaves_case_open_for_resume():
 def test_resume_replays_accepted_pivot_without_a_result_before_new_model_calls():
     repo = _repo(total=1)
     _candidate(repo, "c1", "video", 50)
+    anchor = START + timedelta(minutes=2)
+    _evidence(repo, "event-c1", anchor)
     case_id = "case-existing"
     repo.create_case({
         "id": case_id, "hunt_id": "h1", "seed_candidate_id": "c1", "title": "existing",
@@ -198,6 +223,7 @@ def test_resume_replays_accepted_pivot_without_a_result_before_new_model_calls()
     summary = _investigator(repo, model, executor).run()
 
     assert executor.calls == [(case_id, "entity_timeline")]
+    assert executor.anchors == [anchor]
     assert repo.case_steps(case_id)[1]["result_digest"]["status"] == "complete"
     assert model.calls == 0
     assert summary["status"] == "budget_exhausted"

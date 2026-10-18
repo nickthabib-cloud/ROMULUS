@@ -99,6 +99,42 @@ def _field_value(fields: dict, name: str):
     return value
 
 
+def _compact_value(value: Any, *, depth: int = 0) -> Any:
+    """Bound hostile nested telemetry by both value length and collection cardinality."""
+    if depth >= 3:
+        return "<nested value omitted>"
+    if isinstance(value, str):
+        return _truncate(value, 80)
+    if isinstance(value, (list, tuple)):
+        compact = [_compact_value(item, depth=depth + 1) for item in value[:8]]
+        if len(value) > 8:
+            compact.append(f"<{len(value) - 8} more items>")
+        return compact
+    if isinstance(value, dict):
+        items = sorted(value.items(), key=lambda item: str(item[0]))
+        compact = {
+            str(key): _compact_value(item, depth=depth + 1)
+            for key, item in items[:8]
+        }
+        if len(items) > 8:
+            compact["__romulus_omitted_keys__"] = len(items) - 8
+        return compact
+    return value
+
+
+def _compact_anchor(view: dict) -> dict:
+    fields = view.get("fields") or {}
+    return {
+        key: value for key, value in {
+            "id": view.get("id"), "family": view.get("family"), "ts": view.get("ts"),
+            "host": view.get("host"), "outcome": view.get("outcome"),
+            "fields": {
+                name: _compact_value(fields[name]) for name in sorted(fields)[:4]
+            },
+        }.items() if value not in (None, {}, [])
+    }
+
+
 def _render(system: str, data: dict) -> tuple[str, int]:
     telemetry = json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
     user = (
@@ -146,6 +182,16 @@ def build_brief(repo: Repo, case_id: str, tool_catalog: dict, num_ctx: int, max_
             if summary.get("id") and summary["id"] not in seen_evidence:
                 evidence_views.append(summary)
                 seen_evidence.add(summary["id"])
+    anchor_event_ids: list[str] = []
+    for step in reversed(steps):
+        result = step.get("result_digest") or {}
+        if result.get("anchor_event_ids"):
+            anchor_event_ids = [str(event_id) for event_id in result["anchor_event_ids"][:4]]
+            break
+    evidence_by_id = {str(view.get("id")): view for view in evidence_views if view.get("id")}
+    anchor_neighborhood = [
+        evidence_by_id[event_id] for event_id in anchor_event_ids if event_id in evidence_by_id
+    ]
     entities = _entity_refs(case.get("entities") or [])
     for candidate in candidates:
         entities.extend(_entity_refs(candidate.get("entities") or []))
@@ -189,6 +235,7 @@ def build_brief(repo: Repo, case_id: str, tool_catalog: dict, num_ctx: int, max_
         "case": case_view,
         "candidates": candidate_view,
         "prior_steps": step_view,
+        "anchor_neighborhood": anchor_neighborhood,
         "evidence_summaries": evidence_views[:16],
         "tool_catalog": tool_catalog,
         "validation_retry_errors": list(retry_errors),
@@ -226,12 +273,25 @@ def build_brief(repo: Repo, case_id: str, tool_catalog: dict, num_ctx: int, max_
         user, token_estimate = _render(system, data)
     if token_estimate + max_out > num_ctx:
         data["evidence_summaries"] = []
-        data["prior_steps"] = [{
-            "n": step.get("n"),
-            "action": (step.get("decision") or {}).get("action"),
-            "accepted": step.get("accepted"),
-            "rejection": step.get("rejection"),
-        } for step in data["prior_steps"][-4:]]
+        data["anchor_neighborhood"] = [
+            _compact_anchor(view) for view in data["anchor_neighborhood"][:1]
+        ]
+        compact_steps = []
+        for step in data["prior_steps"][-4:]:
+            result = step.get("result_digest") or {}
+            compact_result = {
+                key: result.get(key)
+                for key in ("status", "reasons", "matched_event_count", "coverage")
+                if result.get(key) is not None
+            }
+            compact_steps.append({
+                "n": step.get("n"),
+                "action": (step.get("decision") or {}).get("action"),
+                "accepted": step.get("accepted"),
+                "rejection": step.get("rejection"),
+                "result_digest": compact_result or None,
+            })
+        data["prior_steps"] = compact_steps
         data["case"]["entities"] = data["case"].get("entities", [])[:20]
         data["case"]["hypotheses"] = data["case"].get("hypotheses", [])[-4:]
         data["candidates"] = data["candidates"][:4]

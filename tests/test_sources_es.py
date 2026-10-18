@@ -1,4 +1,5 @@
 """ES adapter safety, compiler strictness, and completeness accounting."""
+import json
 from datetime import UTC, datetime
 
 import httpx
@@ -69,6 +70,79 @@ def test_window_is_half_open_utc():
     assert set(rng) >= {"gte", "lt"} and "lte" not in rng and "gt" not in rng
     with pytest.raises(ValueError):
         Window(start=datetime(2024, 1, 2, tzinfo=UTC), end=datetime(2024, 1, 1, tzinfo=UTC))
+
+
+def test_raw_retrieval_order_is_typed_and_compiled():
+    q = compile_es(SearchIntent(kind="raw", target="idx", window=W, order="desc"), C)
+
+    assert q.body["sort"] == [
+        {"@timestamp": {"order": "desc", "format": "strict_date_optional_time_nanos"}},
+        {"_shard_doc": "desc"},
+    ]
+
+
+def test_pit_retrieval_preserves_compiled_descending_order():
+    seen = []
+
+    def handler(req: httpx.Request):
+        if req.url.path.endswith("/_pit") and req.method == "POST":
+            return httpx.Response(200, json={"id": "pit1"})
+        if req.url.path == "/_pit":
+            return httpx.Response(200, json={"succeeded": True})
+        if req.url.path == "/":
+            return httpx.Response(200, json={"version": {"number": "9.5.5"}})
+        seen.append(json.loads(req.content))
+        return httpx.Response(200, json={
+            "pit_id": "pit1", "timed_out": False, "_shards": {"failed": 0},
+            "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []},
+        })
+
+    client = ElasticClient(Settings(es_url="http://es"), transport=httpx.MockTransport(handler))
+    execute(client, SearchIntent(kind="raw", target="idx", window=W, order="desc"), C)
+
+    assert seen[0]["sort"] == [
+        {"@timestamp": {"order": "desc", "format": "strict_date_optional_time_nanos"}},
+        {"_shard_doc": "desc"},
+    ]
+
+
+def test_execute_calls_can_share_one_rotating_pit_session():
+    opened = []
+    searched_pits = []
+    deleted = []
+
+    def handler(req: httpx.Request):
+        body = json.loads(req.content) if req.content else {}
+        if req.url.path == "/idx/_pit" and req.method == "POST":
+            opened.append(req.url.path)
+            return httpx.Response(200, json={"id": "pit1"})
+        if req.url.path == "/_search":
+            searched_pits.append(body["pit"]["id"])
+            next_pit = "pit2" if len(searched_pits) == 1 else "pit3"
+            return httpx.Response(200, json={
+                "pit_id": next_pit,
+                "timed_out": False,
+                "_shards": {"failed": 0},
+                "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []},
+            })
+        if req.url.path == "/_pit" and req.method == "DELETE":
+            deleted.append(body["id"])
+            return httpx.Response(200, json={"succeeded": True})
+        if req.url.path == "/":
+            return httpx.Response(200, json={"version": {"number": "9.5.5"}})
+        raise AssertionError(f"unexpected request {req.method} {req.url.path}")
+
+    client = ElasticClient(Settings(es_url="http://es"), transport=httpx.MockTransport(handler))
+    intent = SearchIntent(kind="raw", target="idx", window=W)
+
+    with client.point_in_time("idx") as pit:
+        first = execute(client, intent, C, pit=pit)
+        second = execute(client, intent, C, pit=pit)
+
+    assert first.completeness == second.completeness == Completeness.complete
+    assert opened == ["/idx/_pit"]
+    assert searched_pits == ["pit1", "pit2"]
+    assert deleted == ["pit3"]
 
 
 def _pit_transport(pages, total, relation="eq", shard_fail=False):

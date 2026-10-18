@@ -1,7 +1,7 @@
 """Report manifest integrity, revisions, renderer agreement and output safety."""
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from romulus.decide.policy import decide
 from romulus.detect import host
@@ -116,7 +116,23 @@ def _add_investigation(repo, seed_id, *, hostile=""):
         "action": "pivot", "tool": "process_tree", "evidence_ids": ["ev1"],
         "arguments": {"host": "web01", "process_id": 10},
     }, True, task_id="pivot-task", result_digest={
-        "status": "complete", "event_ids": ["ev1"], "candidate_ids": ["pivot-candidate"],
+        "status": "partial", "event_ids": ["ev1"], "candidate_ids": ["pivot-candidate"],
+        "reasons": ["cap:10<total:20"], "coverage": [{
+            "target": "romulus-host-x", "start": T.isoformat(),
+            "end": (T + timedelta(minutes=5)).isoformat(), "status": "partial",
+            "reasons": ["cap:10<total:20"], "returned": 10, "total": 20,
+            "covered_ranges": [{
+                "start": T.isoformat(), "end": (T + timedelta(minutes=1)).isoformat(),
+                "start_inclusive": True, "end_inclusive": False,
+                "reason": "ascending prefix retrieved",
+            }],
+            "unresolved_ranges": [{
+                "start": (T + timedelta(minutes=1)).isoformat(),
+                "end": (T + timedelta(minutes=5)).isoformat(),
+                "start_inclusive": True, "end_inclusive": True,
+                "reason": "middle remains unresolved",
+            }],
+        }],
         "event_summaries": [{"id": "ev1", "fields": {"process.argv": hostile}}],
         "duration_ms": 20,
     })
@@ -173,6 +189,11 @@ def test_model_conclusion_is_separate_from_machine_claim_and_markdown_shows_chai
     assert "## Investigations" in markdown
     assert case_id in markdown and "process\\_tree" in markdown
     assert "model assessment; it does not alter" in markdown
+    assert "Covered/partial ranges" in markdown
+    assert "Fully covered subranges" in markdown
+    assert "Unresolved subranges" in markdown
+    assert "middle remains unresolved" in markdown
+    assert r"cap:10\<total:20" in markdown
     assert "<script>" not in markdown
     assert "&lt;script&gt;" not in markdown  # renderer uses Markdown escaping, not raw HTML entities
     assert "\\<script\\>" in markdown

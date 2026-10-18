@@ -73,7 +73,15 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
         raise CompileError("intent target does not match contract target")
     query = build_query(intent, contract)
     if intent.kind == "raw":
-        body = {"query": query}
+        body = {
+            "query": query,
+            "sort": [
+                {contract.time_field: {
+                    "order": intent.order, "format": "strict_date_optional_time_nanos",
+                }},
+                {"_shard_doc": intent.order},
+            ],
+        }
     elif intent.kind == "aggregate":
         if not intent.group_by:
             raise CompileError("aggregate intent needs group_by")

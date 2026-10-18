@@ -53,7 +53,14 @@ class SearchIntent(BaseModel):
     group_by: list[str] = []                     # aggregate
     interval_seconds: int | None = None          # histogram
     max_records: int = Field(default=10_000, ge=1, le=2_000_000)
+    order: Literal["asc", "desc"] = "asc"       # raw retrieval order; never model supplied
     purpose: str = ""
+
+    @model_validator(mode="after")
+    def _raw_order_only(self):
+        if self.kind != "raw" and self.order != "asc":
+            raise ValueError("descending order is only valid for raw retrieval")
+        return self
 
 
 class CompiledQuery(BaseModel):

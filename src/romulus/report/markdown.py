@@ -156,6 +156,38 @@ def render(m: dict, banner: str = BANNER) -> str:
                 f"  - Arguments: {esc(json.dumps(step.get('arguments') or {}, ensure_ascii=False, sort_keys=True))}",
                 f"  - Result: {esc(json.dumps(result, ensure_ascii=False, sort_keys=True))}",
             ]
+            coverage = result.get("coverage") or []
+            if coverage:
+                out.append("  - Covered/partial ranges (UTC; outer bounds are attempted ranges):")
+                for segment in coverage:
+                    reasons = "; ".join(segment.get("reasons") or []) or "none"
+                    out.append(
+                        f"    - {esc(segment.get('target', 'unknown'))}: "
+                        f"{esc(segment.get('start', ''))} → {esc(segment.get('end', ''))} · "
+                        f"**{esc(segment.get('status', 'unknown'))}** · "
+                        f"returned {segment.get('returned', 0)}/{esc(segment.get('total'))} · "
+                        f"reasons: {esc(reasons)}"
+                    )
+                    covered = segment.get("covered_ranges") or []
+                    if covered:
+                        out.append("      - Fully covered subranges:")
+                        for item in covered:
+                            left = "[" if item.get("start_inclusive", True) else "("
+                            right = "]" if item.get("end_inclusive", False) else ")"
+                            out.append(
+                                f"        - {left}{esc(item.get('start', ''))}, "
+                                f"{esc(item.get('end', ''))}{right}: {esc(item.get('reason', ''))}"
+                            )
+                    unresolved = segment.get("unresolved_ranges") or []
+                    if unresolved:
+                        out.append("      - Unresolved subranges:")
+                        for item in unresolved:
+                            left = "[" if item.get("start_inclusive", True) else "("
+                            right = "]" if item.get("end_inclusive", False) else ")"
+                            out.append(
+                                f"        - {left}{esc(item.get('start', ''))}, "
+                                f"{esc(item.get('end', ''))}{right}: {esc(item.get('reason', ''))}"
+                            )
             if step.get("rejection"):
                 out.append(f"  - Rejection: {esc(step['rejection'])}")
         out.append("")

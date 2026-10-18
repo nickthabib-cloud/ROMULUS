@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,6 +22,11 @@ class SourceError(RuntimeError):
     def __init__(self, message: str, retryable: bool = False):
         super().__init__(message)
         self.retryable = retryable
+
+
+@dataclass
+class PitSession:
+    id: str
 
 
 _IDX = r"[A-Za-z0-9_.*,\-]+"
@@ -125,6 +132,19 @@ class ElasticClient:
     def mapping(self, index: str) -> dict:
         return self.request("GET", f"/{index}/_mapping")
 
+    @contextmanager
+    def point_in_time(self, target: str):
+        session = PitSession(
+            self.request("POST", f"/{target}/_pit", params={"keep_alive": "2m"})["id"],
+        )
+        try:
+            yield session
+        finally:
+            try:
+                self.request("DELETE", "/_pit", {"id": session.id})
+            except SourceError:
+                pass
+
     # -- search ----------------------------------------------------------------------------
     def run(self, q: CompiledQuery) -> tuple[SearchOutcome, dict | None]:
         """Execute a single-request (aggregate/histogram) query. Returns (outcome shell, response)."""
@@ -143,25 +163,32 @@ class ElasticClient:
                              reasons=reasons, total=total.get("value"),
                              total_relation=total.get("relation", "unknown")), d
 
-    def iterate(self, q: CompiledQuery, max_records: int, page_size: int = 2000
+    def iterate(self, q: CompiledQuery, max_records: int, page_size: int = 2000,
+                pit: PitSession | None = None,
                 ) -> Iterator[tuple[list[dict], dict]]:
         """Exhaustive raw retrieval with PIT + search_after. Yields (hits, page_meta).
 
         Raises SourceError on failure; the caller records partial coverage.
         """
-        pit = self.request("POST", f"/{q.target}/_pit", params={"keep_alive": "2m"})["id"]
+        owned = pit is None
+        session = pit or PitSession(
+            self.request("POST", f"/{q.target}/_pit", params={"keep_alive": "2m"})["id"],
+        )
         try:
             body = dict(q.body)
             body["size"] = min(page_size, max_records)
-            body["pit"] = {"id": pit, "keep_alive": "2m"}
-            body["sort"] = [{"@timestamp": {"order": "asc", "format": "strict_date_optional_time_nanos"}},
-                            {"_shard_doc": "asc"}]
+            body["pit"] = {"id": session.id, "keep_alive": "2m"}
+            body.setdefault(
+                "sort",
+                [{"@timestamp": {"order": "asc", "format": "strict_date_optional_time_nanos"}},
+                 {"_shard_doc": "asc"}],
+            )
             body["track_total_hits"] = True
             fetched = 0
             while True:
                 d = self.request("POST", "/_search", body)
-                pit = d.get("pit_id", pit)
-                body["pit"]["id"] = pit
+                session.id = d.get("pit_id", session.id)
+                body["pit"]["id"] = session.id
                 hits = d.get("hits", {}).get("hits", [])
                 meta = {
                     "problems": _response_problems(d),
@@ -177,10 +204,11 @@ class ElasticClient:
                     return
                 body["search_after"] = hits[-1]["sort"]
         finally:
-            try:
-                self.request("DELETE", "/_pit", {"id": pit})
-            except SourceError:
-                pass
+            if owned:
+                try:
+                    self.request("DELETE", "/_pit", {"id": session.id})
+                except SourceError:
+                    pass
 
     def search_raw(self, q: CompiledQuery) -> dict:
         return self.request("POST", f"/{q.target}/_search", q.body)

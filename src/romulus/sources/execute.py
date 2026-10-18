@@ -11,7 +11,7 @@ from romulus.sources.profile import FieldContract
 MAX_COMPOSITE_PAGES = 500
 
 
-def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract) -> SearchOutcome:
+def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract, *, pit=None) -> SearchOutcome:
     q = compile_es(intent, contract, client.settings.es_flavor)
     started = datetime.now(UTC)
 
@@ -22,10 +22,13 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
     try:
         if intent.kind == "raw":
             records, reasons, total, rel = [], [], None, "unknown"
-            for hits, meta in client.iterate(q, intent.max_records):
+            for hits, meta in client.iterate(q, intent.max_records, pit=pit):
                 reasons += meta["problems"]
                 total, rel = meta["total"], meta["total_relation"]
-                records += [{"_id": h["_id"], "_index": h["_index"], "_source": h["_source"]} for h in hits]
+                records += [{
+                    "_id": h["_id"], "_index": h["_index"], "_source": h["_source"],
+                    "_sort": h.get("sort"),
+                } for h in hits]
             if total is not None and len(records) < total:
                 reasons.append(f"cap:{intent.max_records}<total:{total}")
             if rel != "eq":

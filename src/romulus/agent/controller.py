@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from time import monotonic
 from typing import Any
 
@@ -221,10 +222,35 @@ class Investigator:
             "resolution_needed": decision.resolution_needed,
         }, sort_keys=True)
 
+    def _anchor_time(self, decision: AgentDecision, request: Any) -> datetime | None:
+        """Use the first cited event inside the requested window as the pivot's sampling anchor."""
+        rows = {row["id"]: row for row in self.repo.events_by_ids(decision.evidence_ids)}
+        start = request.arguments.start.astimezone(UTC)
+        end = request.arguments.end.astimezone(UTC)
+        for event_id in decision.evidence_ids:
+            row = rows.get(event_id)
+            if row is None:
+                continue
+            value = row.get("ts")
+            if isinstance(value, str):
+                try:
+                    value = datetime.fromisoformat(value)
+                except ValueError:
+                    continue
+            if not isinstance(value, datetime):
+                continue
+            value = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+            if start <= value < end:
+                return value
+        return None
+
     def _execute_action(self, case: dict, decision: AgentDecision,
                         validation: ValidationResult, step_n: int) -> None:
         if decision.action == "pivot":
-            result: PivotResult = self.pivot_executor.run(case["id"], validation.request)
+            result: PivotResult = self.pivot_executor.run(
+                case["id"], validation.request,
+                anchor_ts=self._anchor_time(decision, validation.request),
+            )
             self.partial_pivot |= result.status in {"partial", "failed"}
             self.repo.update_case_step(
                 case["id"], step_n,
@@ -268,7 +294,10 @@ class Investigator:
         for step in self.repo.pending_case_steps(self.hunt_id):
             decision = AgentDecision.model_validate(step["decision"])
             request = parse_tool_request(decision)
-            result: PivotResult = self.pivot_executor.run(step["case_id"], request)
+            result: PivotResult = self.pivot_executor.run(
+                step["case_id"], request,
+                anchor_ts=self._anchor_time(decision, request),
+            )
             self.partial_pivot |= result.status in {"partial", "failed"}
             self.repo.update_case_step(
                 step["case_id"], step["n"],
