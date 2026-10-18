@@ -13,6 +13,25 @@ _REDIRECTS = {">", ">>", "<", "2>", "2>>", "&>", ">|", "1>", "1>>"}
 _PUNCTUATION = "|&;<>"
 
 
+def _contains_unquoted_heredoc(script: str) -> bool:
+    quote: str | None = None
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if char == "\\" and quote != "'" and index + 1 < len(script):
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif quote is None and script.startswith("<<", index):
+            return True
+        index += 1
+    return False
+
+
 def _quote_aware_input(script: str) -> tuple[str, dict[int, str]]:
     """Protect quoted punctuation and expose unquoted newlines as command separators."""
     protected: dict[int, str] = {}
@@ -31,7 +50,11 @@ def _quote_aware_input(script: str) -> tuple[str, dict[int, str]]:
     while index < len(script):
         char = script[index]
         if char == "\\" and quote != "'" and index + 1 < len(script):
-            out.extend((char, script[index + 1]))
+            escaped = script[index + 1]
+            if quote is None and escaped in sentinels:
+                out.append(sentinels[escaped])
+            else:
+                out.extend((char, escaped))
             index += 2
             continue
         if char in {"'", '"'}:
@@ -40,6 +63,11 @@ def _quote_aware_input(script: str) -> tuple[str, dict[int, str]]:
             elif quote == char:
                 quote = None
             out.append(char)
+        elif quote is None and char == "#" and (index == 0 or script[index - 1].isspace()
+                                                  or script[index - 1] in _PUNCTUATION):
+            while index < len(script) and script[index] != "\n":
+                index += 1
+            continue
         elif quote is not None and char in sentinels:
             out.append(sentinels[char])
         elif quote is None and char == "\n":
@@ -78,6 +106,8 @@ class ParsedScript:
 def parse_script(script: str) -> ParsedScript:
     """Parse a POSIX-ish shell script. Unparseable input returns ok=False (callers must treat the
     claim as unknown, never as a match)."""
+    if _contains_unquoted_heredoc(script):
+        return ParsedScript(pipelines=[], ok=False, error="heredoc syntax is not modelled")
     try:
         prepared, protected = _quote_aware_input(script)
         lex = shlex.shlex(prepared, posix=True, punctuation_chars=_PUNCTUATION)
