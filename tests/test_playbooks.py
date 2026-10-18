@@ -40,12 +40,12 @@ def test_web_user_routine_shapes_collapse_and_injection_escalates():
     injected = exec_ev(["sh", "-c", "/usr/bin/zmu -A -a -m ;echo payload | python3 -"], user="www-data")
     stdin_shell = exec_ev(["/bin/sh"], user="www-data")
     m = run(host.WebServiceSpawnsInterpreter, routine + [injected, stdin_shell])
-    lanes = {x.claim.split("(argv: ")[-1][:30]: x.proposed_lane for x in m}
     assert sum(1 for x in m if x.proposed_lane == "context") == 1           # 50 routine runs -> 1 context item
+    # command chaining after an application helper: high
     assert [x for x in m if "zmu" in x.claim][0].proposed_lane == "high"
-    assert [x for x in m if x.claim.endswith("time(s) in the window.") and "'sh'" in x.claim
-            and "/bin/sh)" in x.claim][0].proposed_lane == "high"
-    assert lanes
+    # web account running an interpreter that reads commands from stdin: RCE-shaped -> urgent
+    stdin_item = [x for x in m if "(argv: /bin/sh)" in x.claim][0]
+    assert stdin_item.proposed_lane == "urgent" and stdin_item.severity == "critical"
 
 
 def test_python_decoded_exec_indicator_is_parsed_not_substring():
