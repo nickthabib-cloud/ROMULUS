@@ -90,6 +90,26 @@ def cmd_findings(args) -> int:
     return EXIT_OK
 
 
+def cmd_report(args) -> int:
+    from romulus.hunt.run import open_repo
+    from romulus.report.manifest import publish_revision
+    from romulus.report.markdown import render
+    s = load_settings(_env_file(args))
+    repo = open_repo(s)
+    user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
+    m = publish_revision(repo, args.hunt_id, actor=f"cli:{user}")
+    out_dir = s.reports_dir / args.hunt_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{m['revision']['id']}"
+    jpath, mpath = out_dir / f"{stem}.json", out_dir / f"{stem}.md"
+    jpath.write_text(json.dumps(m, indent=2, sort_keys=True), encoding="utf-8")
+    mpath.write_text(render(m), encoding="utf-8")
+    print(f"revision {m['revision']['number']}: {len(m['findings'])} findings/leads, "
+          f"broken citations={m['integrity']['broken_citations']}")
+    print(f"  {jpath}\n  {mpath}")
+    return EXIT_OK if m["integrity"]["finalizable"] else EXIT_FAIL
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="romulus", description="ROMULUS threat hunting")
     p.add_argument("--env-file", help="path to .env (default: $ROMULUS_HOME/.env)")
@@ -107,10 +127,12 @@ def main(argv: list[str] | None = None) -> int:
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])
+    rp = sub.add_parser("report", help="publish a new immutable report revision (JSON + technical Markdown)")
+    rp.add_argument("hunt_id")
     args = p.parse_args(argv)
     if args.cmd == "hunt" and args.action == "start" and not (args.start and args.end):
         p.error("hunt start needs --start and --end")
-    handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings}
+    handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report}
     return handlers[args.cmd](args)
 
 

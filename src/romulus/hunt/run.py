@@ -67,10 +67,18 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
     except Exception as e:  # noqa: BLE001 - recorded, hunt marked failed, re-raised
         repo.set_hunt_state(hunt_id, "failed", stop_reason=f"sweep error: {e}")
         raise
-    agent_summary = None
+    agent_summary = {"status": "disabled", "partial": False, "stop_reason": "model investigator disabled (model-off run)"}
     if agent:
-        from romulus.agent.controller import Investigator
-        agent_summary = Investigator(s, repo, client, hunt_id, contracts, window).run()
+        try:
+            from romulus.agent.controller import Investigator
+        except ImportError:
+            # Honest state: the investigator is not available in this build; leads stay unworked.
+            agent_summary = {"status": "not_available", "partial": False,
+                             "stop_reason": "model investigator not available in this build; leads were not "
+                                            "investigated by the agent"}
+            repo.audit("system", "agent.not_available", hunt_id)
+        else:
+            agent_summary = Investigator(s, repo, client, hunt_id, contracts, window).run()
     counts = repo.lane_counts(hunt_id)
     partial = bool(sweep.partial_reasons) or (agent_summary or {}).get("partial", False)
     reportable = counts.get("urgent", 0) + counts.get("high", 0)
@@ -79,6 +87,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
     reason = "; ".join(sweep.partial_reasons[:10]) or "frontier complete"
     if agent_summary and agent_summary.get("stop_reason"):
         reason += f"; agent: {agent_summary['stop_reason']}"
+    repo.audit("system", "hunt.agent_summary", hunt_id, agent_summary)
     repo.set_hunt_state(hunt_id, "partial" if partial else "completed_within_scope", detection_result=result,
                         stop_reason=reason)
     return {"hunt_id": hunt_id, "stats": sweep.stats, "lanes": counts, "detection_result": result,
