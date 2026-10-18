@@ -18,9 +18,9 @@ Each pivot persists its tasks and retained evidence. Normalized pivot events run
 
 ## Cases, fairness, and budgets
 
-Non-context candidates are clustered deterministically by a primary shared entity and a fixed UTC time bucket. Entity precedence is host, account, destination IP, source IP, then domain; candidates without a usable entity remain individual seeds. Each selected case durably records every clustered seed ID in its system-created initial step.
+Non-context candidates are clustered deterministically by a primary shared entity and a 15-minute UTC time bucket. Entity precedence is host, account, destination IP, source IP, then domain; candidates without a usable entity remain individual seeds. Each selected case durably records every clustered seed ID in its system-created initial step.
 
-Clusters are ordered by lane, priority, and time. At most the manifest's `max_cases` clusters are activated. Every seed outside those clusters is preserved in an explicit unassigned-seed list. The scheduler works cases round-robin by fewest steps used and then priority, so each eligible case receives breadth before any case consumes deeper pivots. Per-case and total-step budgets are enforced; unfinished cases and every unworked seed are listed in the agent summary and report.
+Clusters are ordered by lane, priority, and time. At most the manifest's `max_cases` clusters are activated. Every seed outside those clusters is preserved in an explicit unassigned-seed list. The scheduler works cases round-robin by fewest steps used and then priority, so each eligible case receives breadth before any case consumes deeper pivots. Per-case and total-step budgets are enforced. Reporting partitions every non-context seed into concluded, assigned-but-unfinished, or unassigned work; the latter two are the complete unworked-seed list.
 
 ## Model safety and failure behavior
 
