@@ -2,13 +2,23 @@
 from datetime import UTC, datetime, timedelta
 
 from romulus.agent.models import EntityRef
-from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest, ProcessTreeArgs, ProcessTreeRequest
+from romulus.agent.tools import (
+    AuthActivityArgs,
+    AuthActivityRequest,
+    EntityTimelineArgs,
+    EntityTimelineRequest,
+    IdsAlertsArgs,
+    IdsAlertsRequest,
+    ProcessTreeArgs,
+    ProcessTreeRequest,
+)
 from romulus.detect.host import CredentialStoreRead
 from romulus.detect.registry import fresh_direct_pack
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import pivot as pivot_module
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.publish import publish_match
+from romulus.sources.compile import compile_es
 from romulus.sources.models import Completeness, SearchOutcome
 from romulus.sources.profile import contract_from_types
 from romulus.store.db import make_engine, migrate
@@ -99,6 +109,13 @@ def test_ip_timeline_queries_both_network_sides_and_safe_journal_superset(monkey
 
     assert result.status == "complete"
     network = next(intent for intent in seen if "network" in intent.target)
+    assert [(p.field, p.op, p.value) for p in network.filters] == [
+        ("event.dataset", "in", [
+            "suricata.eve.alert", "suricata.eve.flow", "suricata.eve.netflow",
+            "suricata.eve.dns", "suricata.eve.http", "suricata.eve.fileinfo",
+            "suricata.eve.tls", "suricata.eve.ssh",
+        ]),
+    ]
     assert [[(p.field, p.op, p.value) for p in group] for group in network.any_of] == [
         [("source.ip", "eq", "203.0.113.8")],
         [("destination.ip", "eq", "203.0.113.8")],
@@ -107,6 +124,86 @@ def test_ip_timeline_queries_both_network_sides_and_safe_journal_superset(monkey
     assert [(p.field, p.op, p.value) for p in journal.filters] == [
         ("event.dataset", "eq", "systemd.journal"),
     ]
+
+
+def test_each_tool_compiles_source_filters_for_only_the_families_it_summarizes():
+    contracts = {
+        "romulus-network-x": contract_from_types("romulus-network-x", {
+            "@timestamp": "date", "source.ip": "ip", "destination.ip": "ip",
+            "event.dataset": "keyword", "host.name": "keyword",
+        }),
+        "romulus-host-x": contract_from_types("romulus-host-x", {
+            "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+        }),
+    }
+    executor = PivotExecutor(_repo(), FakeClient(), "h1", contracts)
+    requests = [
+        EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
+            entity=EntityRef(kind="host", value="video", role="host"), start=START, end=END,
+        )),
+        AuthActivityRequest(tool="auth_activity", arguments=AuthActivityArgs(
+            entity=EntityRef(kind="host", value="video", role="host"), start=START, end=END,
+        )),
+        ProcessTreeRequest(tool="process_tree", arguments=ProcessTreeArgs(
+            host="video", process_id=123, start=START, end=END,
+        )),
+        IdsAlertsRequest(tool="ids_alerts", arguments=IdsAlertsArgs(
+            entity=EntityRef(kind="ip", value="203.0.113.8", role="src"), start=START, end=END,
+        )),
+    ]
+
+    by_tool = {request.tool: executor._intents(request) for request in requests}
+
+    expected = {
+        "entity_timeline": ["linux.audit", "systemd.journal", "apache.access", "apache.error"],
+        "auth_activity": "systemd.journal",
+        "process_tree": "linux.audit",
+        "ids_alerts": "suricata.eve.alert",
+    }
+    for tool, intents in by_tool.items():
+        assert len(intents) == 1
+        compiled = compile_es(intents[0], contracts[intents[0].target])
+        filters = compiled.body["query"]["bool"]["filter"]
+        family_clause = filters[1]
+        if isinstance(expected[tool], list):
+            assert family_clause == {"terms": {"event.dataset": expected[tool]}}
+        else:
+            assert family_clause == {"term": {"event.dataset": expected[tool]}}
+
+
+def test_family_filter_is_required_instead_of_falling_back_to_broad_entity_query(monkeypatch):
+    called = False
+
+    def fake_execute(*_args):
+        nonlocal called
+        called = True
+        raise AssertionError("broad source query must not execute")
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    contracts = {"romulus-network-x": contract_from_types("romulus-network-x", {
+        "@timestamp": "date", "source.ip": "ip", "destination.ip": "ip",
+    })}
+    request = IdsAlertsRequest(tool="ids_alerts", arguments=IdsAlertsArgs(
+        entity=EntityRef(kind="ip", value="203.0.113.8", role="src"), start=START, end=END,
+    ))
+
+    result = PivotExecutor(_repo(), FakeClient(), "h1", contracts).run("case-1", request)
+
+    assert result.status == "unsupported"
+    assert called is False
+
+
+def test_family_filter_requires_the_exact_contract_operator():
+    contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
+        "@timestamp": "date", "event.dataset": "boolean", "host.name": "keyword",
+    })}
+    request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
+        entity=EntityRef(kind="host", value="video", role="host"), start=START, end=END,
+    ))
+
+    intents = PivotExecutor(_repo(), FakeClient(), "h1", contracts)._intents(request)
+
+    assert intents == []
 
 
 def test_partial_pivot_retains_events_and_publishes_direct_matches(monkeypatch):

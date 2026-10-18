@@ -31,7 +31,7 @@ def _suricata_record():
     return {
         "_id": "suricata-1", "_index": "romulus-network-x",
         "_source": {"@timestamp": START.isoformat(),
-                    "event": {"dataset": "suricata.eve", "original": json.dumps(eve)},
+                    "event": {"dataset": "suricata.eve.alert", "original": json.dumps(eve)},
                     "host": {"name": "sensor"},
                     "message": json.dumps(eve)},
     }
@@ -122,6 +122,7 @@ def test_attacker_ip_to_auth_host_to_process_finding_has_full_cited_chain(monkey
     contracts = {
         "romulus-network-x": contract_from_types("romulus-network-x", {
             "@timestamp": "date", "source.ip": "ip", "destination.ip": "ip",
+            "event.dataset": "keyword",
         }),
         "romulus-host-x": contract_from_types("romulus-host-x", {
             "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
@@ -129,7 +130,7 @@ def test_attacker_ip_to_auth_host_to_process_finding_has_full_cited_chain(monkey
     }
 
     def fake_execute(_client, intent, _contract):
-        filters = {(predicate.field, predicate.value) for predicate in intent.filters}
+        filters = [(predicate.field, predicate.value) for predicate in intent.filters]
         if "network" in intent.target:
             records = [network_record]
         elif ("event.dataset", "systemd.journal") in filters:

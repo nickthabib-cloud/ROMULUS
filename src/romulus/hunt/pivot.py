@@ -25,14 +25,20 @@ from romulus.store.repo import Repo
 MAX_PIVOT_RECORDS = 10_000
 MAX_EVENT_SUMMARIES = 50
 MAX_SUMMARY_FIELDS = 16
+HOST_TIMELINE_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
+NETWORK_TIMELINE_DATASETS = [
+    "suricata.eve.alert", "suricata.eve.flow", "suricata.eve.netflow", "suricata.eve.dns",
+    "suricata.eve.http", "suricata.eve.fileinfo", "suricata.eve.tls", "suricata.eve.ssh",
+]
+SURICATA_ALERT_DATASET = "suricata.eve.alert"
 
 
 def _is_network(target: str) -> bool:
     return "network" in target.lower()
 
 
-def _supports(contract: FieldContract, field: str) -> bool:
-    return contract.supports(field, "eq")
+def _supports(contract: FieldContract, field: str, op: str = "eq") -> bool:
+    return contract.supports(field, op)
 
 
 def _event_entities(event: TypedEvent) -> list[EntityRef]:
@@ -72,8 +78,10 @@ class PivotExecutor:
             if isinstance(request, EntityTimelineRequest):
                 entity = args.entity
                 if entity.kind == "ip" and network:
-                    if not (_supports(contract, "source.ip") and _supports(contract, "destination.ip")):
+                    if not (_supports(contract, "event.dataset", "in")
+                            and _supports(contract, "source.ip") and _supports(contract, "destination.ip")):
                         continue
+                    filters = [Predicate(field="event.dataset", op="in", value=NETWORK_TIMELINE_DATASETS)]
                     any_of = [
                         [Predicate(field="source.ip", op="eq", value=entity.value)],
                         [Predicate(field="destination.ip", op="eq", value=entity.value)],
@@ -82,8 +90,12 @@ class PivotExecutor:
                     if not _supports(contract, "event.dataset"):
                         continue
                     filters = [Predicate(field="event.dataset", op="eq", value="systemd.journal")]
-                elif entity.kind == "host" and not network and _supports(contract, "host.name"):
-                    filters = [Predicate(field="host.name", op="eq", value=entity.value)]
+                elif (entity.kind == "host" and not network
+                      and _supports(contract, "event.dataset", "in") and _supports(contract, "host.name")):
+                    filters = [
+                        Predicate(field="event.dataset", op="in", value=HOST_TIMELINE_DATASETS),
+                        Predicate(field="host.name", op="eq", value=entity.value),
+                    ]
                 else:
                     continue
             elif isinstance(request, AuthActivityRequest):
@@ -102,8 +114,9 @@ class PivotExecutor:
                     Predicate(field="host.name", op="eq", value=args.host),
                 ]
             elif isinstance(request, IdsAlertsRequest):
-                if not network:
+                if not network or not _supports(contract, "event.dataset"):
                     continue
+                filters = [Predicate(field="event.dataset", op="eq", value=SURICATA_ALERT_DATASET)]
                 if args.entity.kind == "ip":
                     if not (_supports(contract, "source.ip") and _supports(contract, "destination.ip")):
                         continue
@@ -112,7 +125,7 @@ class PivotExecutor:
                         [Predicate(field="destination.ip", op="eq", value=args.entity.value)],
                     ]
                 elif _supports(contract, "host.name"):
-                    filters = [Predicate(field="host.name", op="eq", value=args.entity.value)]
+                    filters.append(Predicate(field="host.name", op="eq", value=args.entity.value))
                 else:
                     continue
 
