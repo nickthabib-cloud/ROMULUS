@@ -10,6 +10,44 @@ from dataclasses import dataclass, field
 
 _OPERATORS = {"|", "||", "&&", ";", "&", "|&"}
 _REDIRECTS = {">", ">>", "<", "2>", "2>>", "&>", ">|", "1>", "1>>"}
+_PUNCTUATION = "|&;<>"
+
+
+def _quote_aware_input(script: str) -> tuple[str, dict[int, str]]:
+    """Protect quoted punctuation and expose unquoted newlines as command separators."""
+    protected: dict[int, str] = {}
+    used = set(script)
+    next_codepoint = 0xE000
+    for char in _PUNCTUATION:
+        while chr(next_codepoint) in used:
+            next_codepoint += 1
+        protected[next_codepoint] = char
+        next_codepoint += 1
+    sentinels = {char: chr(codepoint) for codepoint, char in protected.items()}
+
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if char == "\\" and quote != "'" and index + 1 < len(script):
+            out.extend((char, script[index + 1]))
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            out.append(char)
+        elif quote is not None and char in sentinels:
+            out.append(sentinels[char])
+        elif quote is None and char == "\n":
+            out.append(" ; ")
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out), protected
 
 
 @dataclass
@@ -41,7 +79,8 @@ def parse_script(script: str) -> ParsedScript:
     """Parse a POSIX-ish shell script. Unparseable input returns ok=False (callers must treat the
     claim as unknown, never as a match)."""
     try:
-        lex = shlex.shlex(script, posix=True, punctuation_chars="|&;<>")
+        prepared, protected = _quote_aware_input(script)
+        lex = shlex.shlex(prepared, posix=True, punctuation_chars=_PUNCTUATION)
         lex.whitespace_split = True
         lex.commenters = ""
         tokens = list(lex)
@@ -53,6 +92,9 @@ def parse_script(script: str) -> ParsedScript:
     cmd = Command(argv=[])
     pending_redirect: str | None = None
 
+    def literal(token: str) -> str:
+        return token.translate(protected)
+
     def close_cmd():
         nonlocal cmd
         if cmd.argv or cmd.redirects:
@@ -61,7 +103,7 @@ def parse_script(script: str) -> ParsedScript:
 
     for i, tok in enumerate(tokens):
         if pending_redirect:
-            cmd.redirects.append((pending_redirect, tok))
+            cmd.redirects.append((pending_redirect, literal(tok)))
             pending_redirect = None
             continue
         # shlex splits "2>" into "2", ">" — rejoin fd-prefixed redirects
@@ -80,7 +122,7 @@ def parse_script(script: str) -> ParsedScript:
                 pipelines.append(current)
             current = Pipeline(commands=[])
             continue
-        cmd.argv.append(tok)
+        cmd.argv.append(literal(tok))
     if pending_redirect:
         return ParsedScript(pipelines=[], ok=False, error="dangling redirect")
     close_cmd()

