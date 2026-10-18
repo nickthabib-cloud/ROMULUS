@@ -4,13 +4,13 @@
 
 _Last updated: 2026-10-18 by lead._
 
-- **Current milestone:** pre-M1 (project setup complete; M1 not started).
-- **State:** spec rewritten and owner-reviewed; lab surveyed; team, agents, and project docs created; no product code yet.
+- **Current milestone:** M1 in progress, on branch `m1/thin-slice` (last commit b97b869).
+- **State:** config, SQLite store and migrations, read-only ES adapter, compiler, `doctor`, normalizers, the 14-playbook pack, decision policy, the sweep engine and the `hunt`/`findings` CLI are done. 95 tests pass locally. A live model-off sweep over SL700 e_a (10:00–17:30 UTC, 1.59M records, about 150 s) finds most AttackMate steps: 18 urgent/high and 47 leads. Agent loop started: `agent/ollama.py` is written but uncommitted; `agent/tools.py` is not written.
 - **Next three actions:**
-  1. Owner installs Git for Windows (`winget install --id Git.Git -e`) and `uv` (see ENVIRONMENT.md). Then the lead runs `git init` with an initial commit and creates a matching bare repo or deploy path on the VM.
-  2. M1 step 1: package skeleton (`pyproject.toml`, `src/romulus/`), config loading from `.env`, `doctor` against ES, Arkime, Ollama, and TShark on the VM.
-  3. M1 step 2: ES source profile and field contract from the live `romulus-*-sl700-e-a` mapping; the first typed normalizers (linux.audit, apache.access, suricata.eve.*).
-- **Blockers:** none for M1. Git and uv are missing on Windows (owner install).
+  1. Write the pivot tools (`agent/tools.py`), brief builder and controller (`agent/controller.py`; `hunt/run.py` already calls `Investigator`).
+  2. Report manifest plus JSON/Markdown renderers; minimal web UI.
+  3. Reviewer pass on M1; owner demo.
+- **Blockers:** an automated safety check on the assistant side interrupted generation of the agent pivot-tool module twice; check with the owner on how to proceed.
 - **Owner decisions pending:**
   - Load SL700 `f_a` as the holdout (download ≈3.7 GB from Zenodo).
   - Separate Malcolm VM (≈16 GiB) for M4.
