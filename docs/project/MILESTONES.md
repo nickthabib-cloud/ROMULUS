@@ -6,18 +6,18 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 
 ## M1: thin end-to-end slice (spec §17)
 
-- [ ] Package skeleton, `uv` lockfile, `.env.example`, config loader with secret redaction (§4)
-- [ ] SQLite plus Alembic migrations for M1 tables; hunt manifest immutable after start (§8, §1 reproducibility)
-- [ ] `doctor`: ES, Arkime, Ollama, TShark, disk, DB, least-privilege check (refuses superuser) (§4, §14)
-- [ ] ES adapter: read-only HTTP allowlist with a write-trap test; PIT plus `search_after`; aggregations with completeness flags (§6)
-- [ ] Source profile plus field contract generated from the live lab mapping (§6)
-- [ ] Typed normalizers: `linux.audit` (EXECVE argv), `apache.access`, `systemd.journal` (auth subset), `suricata.eve.{alert,flow,dns,http}` (§8)
-- [ ] ~5 host and ~3 network playbooks with fixtures, including adversarial negatives (§7, §9)
-- [ ] Finding admission plus lanes; standalone findings published immediately (§10)
-- [ ] Agent loop: case queue, brief builder, schema-validated decision, 3–4 pivot tools, rejection logging, context-budget and truncation check (§11)
-- [ ] Web UI: login, hunt list, live hunt view (SSE), finding detail with highlighted raw evidence (§5)
-- [ ] Report manifest plus JSON plus technical Markdown renderer (§13)
-- [ ] Deployed to the VM; a hunt over SL700 e_a produces cited findings and at least one agent pivot chain (demo)
+- [~] Package skeleton, `.env.example`, config loader with secret redaction (§4). Evidence: `src/romulus/config.py`. **Open:** the uv lockfile; uv can't use the Windows Store Python, so generate the lock on the VM.
+- [x] SQLite plus Alembic migrations; hunt manifest fixed at creation; profile drift is audited (§8). Evidence: migration `0001`, `hunt/manifest.py`, `hunt/run.py`.
+- [x] `doctor`, integration tested on the VM 2026-10-18: ES 9.5.5 `romulus_reader` read-only; Arkime, Ollama, TShark, DB and `.env` mode all OK; refuses superuser accounts.
+- [x] ES adapter: allowlist plus write-trap tests (`tests/test_sources_es.py`); PIT plus `search_after`; composite aggregations; cap, shard and lower-bound totals become partial.
+- [x] Source profile and field contract from the live mapping (`sources/profile.py`); `text` fields refuse `contains`, which would not be a retrieval superset.
+- [x] Typed normalizers, live-verified with 0 errors on 1.79M records: audit exec groups (EXECVE+SYSCALL+CWD), journal sshd/sudo (audit copies flagged as duplicates), apache access/error, Suricata EVE.
+- [x] 14 playbooks with positive and adversarial-negative fixtures (`tests/test_playbooks.py`). Stack counting, a sequence rule, aggregate grouping.
+- [~] Admission and lanes (`decide/policy.py`). Direct rules publish while the sweep runs; aggregate rules publish at sweep end.
+- [ ] Agent loop. **Not implemented.** Only `agent/ollama.py` exists (structured output, num_ctx, truncation detection). See STATUS blockers.
+- [x] Web UI: login (argon2, rate limit), CSRF, CSP; hunt list; live SSE view; finding detail with highlighted predicate fields and retained raw records; triage; reports (`tests/test_web.py`).
+- [x] Report manifest (immutable revisions, citation resolution, degraded mode) plus JSON plus technical Markdown (`tests/test_report.py`).
+- [~] Deployed to the VM; hunt `h20261018-181953-decca8` produced cited findings with 0 broken citations. **No agent pivot chain**, because the investigator isn't implemented.
 - [ ] `reviewer` milestone review: no Blocking findings open
 - [ ] Owner demo recorded in STATUS.md
 

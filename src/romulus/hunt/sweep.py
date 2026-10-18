@@ -23,26 +23,36 @@ PARTITION_MAX_DOCS = 120_000
 HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
 
 
+BUCKET_SECONDS = 300
+MIN_SPLIT = timedelta(seconds=5)
+
+
 def plan_partitions(client: ElasticClient, target: str, contract: FieldContract, window: Window,
                     filters: list[Predicate]) -> list[tuple[Window, int]]:
-    """Hourly histogram, splitting dense hours so no partition exceeds PARTITION_MAX_DOCS."""
+    """5-minute histogram with exact counts; merge consecutive buckets up to PARTITION_MAX_DOCS.
+    A single bucket above the limit becomes its own partition and is split adaptively at run time."""
     h = execute(client, SearchIntent(kind="histogram", target=target, window=window, filters=filters,
-                                     interval_seconds=3600), contract)
+                                     interval_seconds=BUCKET_SECONDS), contract)
     if h.completeness != Completeness.complete:
         raise RuntimeError(f"cannot plan partitions for {target}: {h.reasons} {h.error}")
     parts: list[tuple[Window, int]] = []
+    cur_start, cur_n = None, 0
     for b in h.buckets:
-        start = max(datetime.fromisoformat(b["key"].replace("Z", "+00:00")), window.start)
-        end = min(start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1), window.end)
-        if start >= end:
+        bs = max(datetime.fromisoformat(b["key"].replace("Z", "+00:00")), window.start)
+        be = min(datetime.fromisoformat(b["key"].replace("Z", "+00:00")) + timedelta(seconds=BUCKET_SECONDS),
+                 window.end)
+        if bs >= be:
             continue
         n = b["count"]
-        k = max(1, -(-n // PARTITION_MAX_DOCS))
-        step = (end - start) / k
-        for i in range(k):
-            s = start + step * i
-            e = end if i == k - 1 else start + step * (i + 1)
-            parts.append((Window(start=s, end=e), n // k))
+        if cur_start is not None and cur_n + n > PARTITION_MAX_DOCS:
+            parts.append((Window(start=cur_start, end=bs), cur_n))
+            cur_start, cur_n = None, 0
+        if cur_start is None:
+            cur_start = bs
+        cur_n += n
+        last_end = be
+    if cur_start is not None:
+        parts.append((Window(start=cur_start, end=last_end), cur_n))
     return parts
 
 
@@ -89,9 +99,15 @@ class Sweep:
             self.run_partition(target, contract, filters, w, est)
 
     def run_partition(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window, est: int):
+        if est > PARTITION_MAX_DOCS and (w.end - w.start) > MIN_SPLIT * 2:
+            # exact histogram count already exceeds the limit: subdivide before fetching anything
+            mid = w.start + (w.end - w.start) / 2
+            self.run_partition(target, contract, filters, Window(start=w.start, end=mid), est // 2)
+            self.run_partition(target, contract, filters, Window(start=mid, end=w.end), est - est // 2)
+            return
         pkey = w.key()
-        intent = SearchIntent(kind="raw", target=target, window=w, filters=filters,
-                              max_records=max(1000, int(est * 1.5) + 1000), purpose="sweep")
+        cap = max(PARTITION_MAX_DOCS, int(est * 1.2) + 1000)
+        intent = SearchIntent(kind="raw", target=target, window=w, filters=filters, max_records=cap, purpose="sweep")
         tid = "t-" + digest({"h": self.hunt_id, "target": target, "w": pkey})[:20]
         self.repo.upsert_task(tid, self.hunt_id, "sweep", "sweep", intent.model_dump(mode="json"), tid)
         # No skip-on-resume: aggregate playbooks must consume every partition again or their
@@ -99,6 +115,19 @@ class Sweep:
         # is safe (attempts are counted and visible).
         self.repo.update_task(tid, "leased", attempt=True)
         out = execute(self.client, intent, contract)
+        capped = any(r.startswith("cap:") for r in out.reasons)
+        if capped and (w.end - w.start) > MIN_SPLIT * 2:
+            # Capped: never accept a partial partition when it can be subdivided. Split in half
+            # and evaluate each half; this task is recorded as superseded by its children.
+            mid = w.start + (w.end - w.start) / 2
+            self.repo.update_task(tid, "split", outcome={"completeness": out.completeness, "reasons": out.reasons,
+                                                         "total": out.total, "returned": out.returned,
+                                                         "children": [f"{w.start.isoformat()}/{mid.isoformat()}",
+                                                                      f"{mid.isoformat()}/{w.end.isoformat()}"]})
+            half = (out.total or est) // 2
+            self.run_partition(target, contract, filters, Window(start=w.start, end=mid), half)
+            self.run_partition(target, contract, filters, Window(start=mid, end=w.end), half)
+            return
         self.stats["partitions"] += 1
         self.stats["records"] += out.returned
         self.repo.update_task(tid, "executed", outcome={"completeness": out.completeness, "reasons": out.reasons,

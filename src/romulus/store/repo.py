@@ -80,8 +80,13 @@ class Repo:
         with self.engine.connect() as c:
             return c.execute(select(t.task.c.state).where(t.task.c.id == task_id)).scalar()
 
+    TASK_STATES = {"planned", "queued", "leased", "executed", "ingested", "evaluated", "failed", "partial",
+                   "budget_limited", "unsupported", "not_applicable", "canceled", "split"}
+
     def update_task(self, task_id: str, state: str, outcome: dict | None = None, error: str | None = None,
                     attempt: bool = False):
+        if state not in self.TASK_STATES:
+            raise ValueError(f"unknown task state {state}")
         with write_txn(self.engine) as c:
             vals: dict[str, Any] = {"state": state, "updated_at": utcnow()}
             if outcome is not None:

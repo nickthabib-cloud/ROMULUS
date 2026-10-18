@@ -4,13 +4,22 @@
 
 _Last updated: 2026-10-18 by lead._
 
-- **Current milestone:** M1 in progress, on branch `m1/thin-slice` (last commit b97b869).
-- **State:** config, SQLite store and migrations, read-only ES adapter, compiler, `doctor`, normalizers, the 14-playbook pack, decision policy, the sweep engine and the `hunt`/`findings` CLI are done. 95 tests pass locally. A live model-off sweep over SL700 e_a (10:00–17:30 UTC, 1.59M records, about 150 s) finds most AttackMate steps: 18 urgent/high and 47 leads. Agent loop started: `agent/ollama.py` is written but uncommitted; `agent/tools.py` is not written.
+- **Current milestone:** M1, mostly done, on branch `m1/thin-slice`. Everything except the model investigator is implemented and integration tested on the VM.
+- **State:**
+  - Sweep → decisions → coverage ledger → report manifest (immutable revisions, citation integrity) → technical Markdown/JSON → web UI (login, live stream, finding detail with highlighted raw evidence, triage, reports).
+  - 107 tests pass locally and on the VM.
+  - Lab hunt `h20261018-181953-decca8` (SL700 e_a, 10:00–17:30 UTC): `completed_within_scope`, 1,791,438 records evaluated, 0 parse errors, 7 urgent / 11 high / 79 leads / 504 context, 0 broken citations.
+  - Web UI: `http://192.168.36.128:8443` (plain HTTP lab exception); restart with `scripts/web-restart.sh`.
+- **Model investigator:**
+  - **Not implemented.** `agent/ollama.py` (structured-output client with truncation detection) exists.
+  - The pivot-tool and controller modules were not written: an automated safety check on the assistant side stopped that generation twice, and the assistant was instructed not to retry it. Owner permission does not change that.
+  - `hunt/run.py` records `agent.status = not_available` and reports leads as not agent-investigated.
+  - This needs an owner decision on how the investigator gets built (see Owner decisions pending).
 - **Next three actions:**
-  1. Write the pivot tools (`agent/tools.py`), brief builder and controller (`agent/controller.py`; `hunt/run.py` already calls `Investigator`).
-  2. Report manifest plus JSON/Markdown renderers; minimal web UI.
-  3. Reviewer pass on M1; owner demo.
-- **Blockers:** an automated safety check on the assistant side interrupted generation of the agent pivot-tool module twice; check with the owner on how to proceed.
+  1. Owner creates their web account (see CLAUDE.md commands) and reviews the UI and the report.
+  2. `reviewer` pass on M1 (semantics, coverage, web security), then fix Blocking items.
+  3. Owner decision on the model investigator path, then M2 (gold inventory and evaluation harness via eval-custodian).
+- **Blockers:** the model investigator, as above.
 - **Owner decisions pending:**
   - Load SL700 `f_a` as the holdout (download ≈3.7 GB from Zenodo).
   - Separate Malcolm VM (≈16 GiB) for M4.
@@ -43,4 +52,16 @@ _Last updated: 2026-10-18 by lead._
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
 
+- **2026-10-18 (M1 build)**:
+  - Built the M1 slice except the investigator.
+  - Live findings drove fixes:
+    - auditd hex decoding of numeric fields
+    - per-hunt candidate identity
+    - stack counting for web-user executions (23,619 → 1 context item per routine shape)
+    - downloader→interpreter sequence rule (the cron and SSH-key persistence)
+    - per-host grouping of firewall changes
+    - per-source/destination grouping of Suricata alerts
+    - empty-argv handling
+    - adaptive partition splitting (two capped partitions in the attack window previously left ~200k records unevaluated, correctly reported as partial)
+  - Verified against AttackMate ground truth informally (eval-custodian has not scored it yet). Missed: discovery commands after the SSH login (agent-pivot territory) and the editor-based cron edit (no file-write telemetry rule). Found: every other step.
 - **2026-10-18**: Created the project folder. Critiqued and rewrote the Codex master prompt (no LangGraph; agent-centric loop; aggregation-first sweep; web UI; DOCX/Markdown reports; ICS/Zeek/Malcolm; measured model bakeoff). Surveyed the VM, ES, Arkime, and Ollama (facts in ENVIRONMENT.md). Located the e_a ground truth (AttackMate) and extracted it to `/home/user/romulus-eval/sl700_e_a/`. Confirmed no ICS protocols in SL700 PCAPs. Set up the dedicated SSH key and `romulus-vm` alias. Defined the team (lead plus four agents) and the project docs.

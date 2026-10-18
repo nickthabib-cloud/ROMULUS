@@ -31,6 +31,15 @@ Defensive, AI-assisted threat-hunting tool for USAF CPT analysts. A deterministi
 Filled in as they come to exist. Keep this list accurate.
 
 - Architecture map: `python scripts/archmap.py` (write) / `python scripts/archmap.py --check` (CI gate)
+- Local tests (Windows): `.\.venv\Scripts\python -m pytest -q -p no:warnings`
+- Deploy to VM: `powershell -File scripts/deploy.ps1` (add `-SkipInstall` when dependencies are unchanged)
+- On the VM (`R=/home/user/romulus-v2; $R/venv/bin/romulus --env-file $R/.env ...`):
+  - `doctor`
+  - `hunt start --start <ISO> --end <ISO> [--no-agent]`, `hunt status [id]`
+  - `findings <hunt> [--lane urgent --lane high]`
+  - `report <hunt>`
+  - `user add <name> --role lead|analyst` (interactive; run with `ssh -t`)
+  - Web UI: `bash $R/app/scripts/web-restart.sh` → `http://192.168.36.128:8443`
 
 ## Working rules
 
