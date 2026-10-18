@@ -215,9 +215,10 @@ def test_ids_alerts_rejects_host_entity_without_querying_sensor_host_name(monkey
         "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
         "source.ip": "ip", "destination.ip": "ip",
     })}
-    request = IdsAlertsRequest(tool="ids_alerts", arguments=IdsAlertsArgs(
+    hostile_args = IdsAlertsArgs.model_construct(
         entity=EntityRef(kind="host", value="video", role="host"), start=START, end=END,
-    ))
+    )
+    request = IdsAlertsRequest(tool="ids_alerts", arguments=hostile_args)
 
     executor = PivotExecutor(_repo(), FakeClient(), "h1", contracts)
     result = executor.run("case-1", request)

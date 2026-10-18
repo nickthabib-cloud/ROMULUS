@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from romulus.agent.cases import cluster_seed_candidates
 from romulus.agent.models import AgentDecision, EntityRef
-from romulus.agent.tools import parse_tool_request
+from romulus.agent.tools import parse_tool_request, tool_catalog
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 
 T = datetime(2024, 11, 18, 14, 29, 59, tzinfo=UTC)
@@ -78,3 +78,20 @@ def test_auth_activity_schema_accepts_only_account_or_host_entities():
 
     with pytest.raises(ValidationError, match="entity"):
         parse_tool_request(decision)
+
+
+def test_ids_alerts_schema_and_catalog_accept_only_ip_entities():
+    decision = AgentDecision(
+        action="pivot", tool="ids_alerts",
+        arguments={"entity": {"kind": "host", "value": "inetfw", "role": "observer"},
+                   "start": T, "end": T + timedelta(minutes=5)},
+        hypothesis="host alerts", expected_true="IDS alert", expected_false="no IDS alert",
+        reasoning="Check the named sensor.",
+    )
+
+    with pytest.raises(ValidationError, match="IP"):
+        parse_tool_request(decision)
+    assert tool_catalog()["ids_alerts"] == {
+        "arguments": "entity {kind: ip, value, role}, start, end",
+        "purpose": "retrieve IDS alerts for a known IP",
+    }

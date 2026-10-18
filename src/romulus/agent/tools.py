@@ -52,8 +52,8 @@ class IdsAlertsArgs(_WindowArgs):
     @field_validator("entity")
     @classmethod
     def _ids_entity(cls, value: EntityRef) -> EntityRef:
-        if value.kind not in ("host", "ip"):
-            raise ValueError("entity must be a host or IP")
+        if value.kind != "ip":
+            raise ValueError("entity must be an IP")
         return value
 
 
@@ -111,8 +111,8 @@ def tool_catalog() -> dict:
             "purpose": "retrieve process events for a process ID already present in case evidence",
         },
         "ids_alerts": {
-            "arguments": "entity {kind: host|ip, value, role}, start, end",
-            "purpose": "retrieve IDS alerts for a known host or IP",
+            "arguments": "entity {kind: ip, value, role}, start, end",
+            "purpose": "retrieve IDS alerts for a known IP",
         },
     }
 
