@@ -1,0 +1,100 @@
+"""Compile typed SearchIntents into validated backend queries through the FieldContract."""
+from __future__ import annotations
+
+import ipaddress
+import re
+
+from romulus.sources.models import CompiledQuery, Predicate, SearchIntent
+from romulus.sources.profile import FieldContract
+from romulus.store.db import digest
+
+
+class CompileError(ValueError):
+    """The intent cannot be compiled exactly; never silently loosened."""
+
+
+_WILDCARD_META = re.compile(r"([*?\\])")
+
+
+def _escape_wildcard(s: str) -> str:
+    return _WILDCARD_META.sub(r"\\\1", s)
+
+
+def _pred(p: Predicate, contract: FieldContract) -> dict:
+    spec = contract.spec(p.field)
+    if spec is None:
+        raise CompileError(f"field {p.field!r} not in field contract for {contract.target}")
+    if p.op not in spec.ops:
+        raise CompileError(f"op {p.op!r} not supported on {p.field} ({spec.type}) with superset guarantee")
+    f = spec.native
+    v = p.value
+    if p.op == "eq":
+        return {"term": {f: v}}
+    if p.op == "in":
+        if not isinstance(v, list) or not v or len(v) > 1000:
+            raise CompileError("'in' needs a non-empty list of at most 1000 values")
+        return {"terms": {f: v}}
+    if p.op == "exists":
+        return {"exists": {"field": f}}
+    if p.op == "missing":
+        return {"bool": {"must_not": [{"exists": {"field": f}}]}}
+    if p.op == "prefix":
+        return {"prefix": {f: {"value": str(v)}}}
+    if p.op == "contains":
+        if not isinstance(v, str) or not v:
+            raise CompileError("'contains' needs a non-empty string")
+        # case_insensitive keeps retrieval a superset of case-insensitive local evaluators
+        return {"wildcard": {f: {"value": f"*{_escape_wildcard(v)}*", "case_insensitive": True}}}
+    if p.op == "gte":
+        return {"range": {f: {"gte": v}}}
+    if p.op == "lt":
+        return {"range": {f: {"lt": v}}}
+    if p.op == "cidr":
+        ipaddress.ip_network(str(v), strict=False)  # validates
+        return {"term": {f: str(v)}}
+    raise CompileError(f"unknown op {p.op}")
+
+
+def build_query(intent: SearchIntent, contract: FieldContract) -> dict:
+    tf = contract.time_field
+    must = [{"range": {tf: {"gte": intent.window.start.isoformat(), "lt": intent.window.end.isoformat(),
+                            "format": "strict_date_optional_time"}}}]
+    must += [_pred(p, contract) for p in intent.filters]
+    query: dict = {"bool": {"filter": must}}
+    if intent.any_of:
+        groups = [{"bool": {"filter": [_pred(p, contract) for p in g]}} for g in intent.any_of]
+        query["bool"]["should"] = groups
+        query["bool"]["minimum_should_match"] = 1
+    return query
+
+
+def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "elasticsearch") -> CompiledQuery:
+    if intent.target != contract.target:
+        raise CompileError("intent target does not match contract target")
+    query = build_query(intent, contract)
+    if intent.kind == "raw":
+        body = {"query": query}
+    elif intent.kind == "aggregate":
+        if not intent.group_by:
+            raise CompileError("aggregate intent needs group_by")
+        sources = []
+        for g in intent.group_by:
+            spec = contract.spec(g)
+            if spec is None or not spec.aggregatable:
+                raise CompileError(f"field {g!r} is not aggregatable on {contract.target}")
+            sources.append({g: {"terms": {"field": spec.native, "missing_bucket": True}}})
+        body = {"size": 0, "query": query, "track_total_hits": True,
+                "aggs": {"g": {"composite": {"size": 1000, "sources": sources},
+                               "aggs": {"first": {"min": {"field": contract.time_field}},
+                                        "last": {"max": {"field": contract.time_field}}}}}}
+    elif intent.kind == "histogram":
+        sec = intent.interval_seconds or 3600
+        body = {"size": 0, "query": query, "track_total_hits": True,
+                "aggs": {"h": {"date_histogram": {"field": contract.time_field, "fixed_interval": f"{sec}s",
+                                                  "min_doc_count": 0,
+                                                  "extended_bounds": {"min": intent.window.start.isoformat(),
+                                                                      "max": intent.window.end.isoformat()}}}}}
+    else:
+        raise CompileError(f"unknown intent kind {intent.kind}")
+    fp = digest({"target": intent.target, "kind": intent.kind, "body": body})
+    return CompiledQuery(backend=flavor, target=intent.target, body=body, fingerprint=fp)
