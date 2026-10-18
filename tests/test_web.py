@@ -33,6 +33,7 @@ def client(tmp_path, monkeypatch):
     repo.audit("system", "hunt.agent_summary", "h1", {
         "status": "budget_exhausted", "partial": True, "partial_pivots": 1,
         "unworked_count": 3, "model_calls": 4, "pivots": 2,
+        "analyst_flags": [{"case_id": "case-1", "reason": "Analyst review required"}],
     })
     return TestClient(app), pw, cid
 
@@ -101,3 +102,4 @@ def test_hunt_page_shows_latest_agent_status_and_unworked_count(client):
     assert "budget_exhausted" in page.text
     assert "3 unworked" in page.text
     assert "1 partial pivot" in page.text
+    assert "Analyst review required" in page.text

@@ -20,7 +20,7 @@ from romulus.store.db import digest, utcnow
 from romulus.store.repo import Repo
 
 _CONCLUDED = {"closed", "parked", "escalated"}
-_UNFINISHED = {"open", "budget_exhausted"}
+_UNFINISHED = {"open", "budget_exhausted", "fallback_parked"}
 
 
 class Investigator:
@@ -395,6 +395,19 @@ class Investigator:
                 unfinished.update(seeds)
         unassigned = set(all_seed_ids) - assigned
         unworked = unfinished | unassigned
+        analyst_flags = []
+        for case in cases:
+            if case["status"] != "fallback_parked":
+                continue
+            try:
+                case_summary = json.loads(case.get("summary") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                case_summary = {}
+            flag = case_summary.get("analyst_flag") or {
+                "reason": "validation_fallback",
+                "message": "Repeated invalid model output requires analyst review.",
+            }
+            analyst_flags.append({"case_id": case["id"], **flag})
         calls = self.repo.model_calls(hunt_id=self.hunt_id)
         pivot_steps = [
             step for case in cases for step in self.repo.case_steps(case["id"])
@@ -420,22 +433,33 @@ class Investigator:
             "unassigned_seed_ids": sorted(unassigned),
             "unworked_seed_ids": sorted(unworked),
             "unworked_count": len(unworked),
+            "fallback_parked_count": len(analyst_flags),
+            "analyst_flags": analyst_flags,
             "model_calls": len(calls),
             "pivots": len(pivot_steps),
             "partial_pivots": len(partial_pivot_steps),
             "duplicate_pivots_blocked": len(duplicate_pivots),
         }
 
+    def _completed_summary(self, all_seed_ids: list[str]) -> dict:
+        if self.repo.cases(self.hunt_id, statuses=["fallback_parked"]):
+            return self._summary(
+                "completed",
+                "all runnable cases ended; fallback-parked cases require analyst review",
+                all_seed_ids,
+            )
+        return self._summary("completed", "all selected cases concluded", all_seed_ids)
+
     def run(self) -> dict:
         all_seed_ids = self._seed_cases()
         self._replay_pending()
         if not self.repo.cases(self.hunt_id, statuses=["open"]):
-            return self._summary("completed", "all selected cases concluded", all_seed_ids)
+            return self._completed_summary(all_seed_ids)
 
         while True:
             open_cases = self.repo.cases(self.hunt_id, statuses=["open"])
             if not open_cases:
-                return self._summary("completed", "all selected cases concluded", all_seed_ids)
+                return self._completed_summary(all_seed_ids)
             if self._wall_exhausted():
                 self._mark_budget_exhausted()
                 return self._summary("budget_exhausted", "agent wall-clock budget exhausted", all_seed_ids)
@@ -473,12 +497,29 @@ class Investigator:
                 rejected += 1
                 retry_errors = tuple(value)
                 if rejected >= 2:
+                    injection_related = any(
+                        "untrusted instruction-like telemetry" in error
+                        for error in retry_errors
+                    )
+                    analyst_flag = {
+                        "reason": (
+                            "untrusted_instruction_telemetry"
+                            if injection_related else "validation_fallback"
+                        ),
+                        "message": (
+                            "untrusted instruction-like telemetry contributed to rejected model output; "
+                            "analyst review is required."
+                            if injection_related else
+                            "Model output failed validation twice; analyst review is required."
+                        ),
+                    }
                     self.repo.update_case(
-                        case["id"], owner_token=self.owner_token, status="parked",
+                        case["id"], owner_token=self.owner_token, status="fallback_parked",
                         summary=json.dumps({
                             "model_conclusion": "deterministic_fallback_park",
                             "reasoning": "validation failed twice",
                             "validation_errors": list(retry_errors),
+                            "analyst_flag": analyst_flag,
                         }, sort_keys=True),
                     )
                     break

@@ -143,10 +143,13 @@ def test_two_rejections_count_against_budget_then_park_deterministically():
 
     case = repo.cases("h1")[0]
     assert summary["status"] == "completed"
-    assert case["status"] == "parked"
+    assert case["status"] == "fallback_parked"
     assert case["steps_used"] == 2
     assert [step["accepted"] for step in repo.case_steps(case["id"])[1:]] == [0, 0]
     assert "validation failed twice" in case["summary"]
+    assert summary["unworked_seed_ids"] == ["c1"]
+    assert summary["unworked_count"] == 1
+    assert summary["analyst_flags"][0]["case_id"] == case["id"]
 
 
 def test_spawn_is_bounded_by_max_cases():
@@ -250,7 +253,7 @@ def test_duplicate_normalized_pivot_is_not_executed_and_falls_back_after_two_rej
     proposal_steps = repo.case_steps(case["id"])[1:]
     assert executor.calls == [(case["id"], "entity_timeline")]
     assert case["steps_used"] == 3
-    assert case["status"] == "parked"
+    assert case["status"] == "fallback_parked"
     assert [step["accepted"] for step in proposal_steps] == [1, 0, 0]
     assert all("duplicate pivot" in step["rejection"] for step in proposal_steps[1:])
     assert summary["duplicate_pivots_blocked"] == 2
@@ -273,4 +276,4 @@ def test_duplicate_pivot_ignores_non_query_entity_role():
     case = repo.cases("h1")[0]
     assert executor.calls == [(case["id"], "entity_timeline")]
     assert summary["duplicate_pivots_blocked"] == 2
-    assert case["status"] == "parked"
+    assert case["status"] == "fallback_parked"

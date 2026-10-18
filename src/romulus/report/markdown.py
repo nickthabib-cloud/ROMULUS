@@ -100,7 +100,7 @@ def render(m: dict, banner: str = BANNER) -> str:
 
     investigations = m.get("investigations") or {
         "summary": {}, "seed_partition": {}, "cases": [], "unworked_seed_ids": [],
-        "model_contribution": {}, "incomplete_case_ids": [],
+        "model_contribution": {}, "incomplete_case_ids": [], "analyst_flags": [],
     }
     inv_summary = investigations["summary"]
     partitions = investigations["seed_partition"]
@@ -117,12 +117,21 @@ def render(m: dict, banner: str = BANNER) -> str:
         f"| Partial pivot steps | {inv_summary.get('partial_pivots', 0)} |",
         f"| Rejected pivot proposals | {max(0, contributions.get('pivot_proposals', 0) - contributions.get('pivot_steps', 0))} |",
         f"| Pivot-discovered candidates | {contributions.get('contributed_candidates', inv_summary.get('contributed_candidates', 0))} |",
-        f"| Unworked seeds | {inv_summary.get('unworked_count', 0)} |", "",
+        f"| Unworked seeds | {inv_summary.get('unworked_count', 0)} |",
+        f"| Analyst flags | {inv_summary.get('analyst_flags', 0)} |", "",
         "**Seed accounting**", "",
         f"- Concluded: {esc(', '.join(partitions.get('concluded', [])) or 'none')}",
         f"- Assigned but unfinished: {esc(', '.join(partitions.get('assigned_unfinished', [])) or 'none')}",
         f"- Unassigned: {esc(', '.join(partitions.get('unassigned', [])) or 'none')}", "",
     ]
+    analyst_flags = investigations.get("analyst_flags") or []
+    if analyst_flags:
+        out += ["**Analyst review required**", ""]
+        for flag in analyst_flags:
+            out.append(
+                f"- Case {esc(flag.get('case_id', 'unknown'))}: {esc(flag.get('message', ''))}"
+            )
+        out.append("")
     for case in investigations["cases"]:
         out += [
             f'<a id="case-{_anchor(case["id"])}"></a>', "",

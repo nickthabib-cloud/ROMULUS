@@ -204,7 +204,8 @@ def test_cli_status_shows_completed_hunt_and_agent_partial_pivots(monkeypatch, c
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", 60)
     repo.audit("system", "hunt.agent_summary", "h1", {
-        "status": "completed", "partial": True, "partial_pivots": 1, "unworked_count": 0,
+        "status": "completed", "partial": True, "partial_pivots": 1, "unworked_count": 1,
+        "analyst_flags": [{"case_id": "case-1", "reason": "analyst review required"}],
     })
     repo.set_hunt_state("h1", "completed_within_scope",
                         detection_result="no_qualifying_observation_in_assessed_scope")
@@ -216,7 +217,9 @@ def test_cli_status_shows_completed_hunt_and_agent_partial_pivots(monkeypatch, c
     assert code == 0
     assert "completed_within_scope" in output
     assert "agent=completed" in output
+    assert "unworked=1" in output
     assert "partial_pivots=1" in output
+    assert "analyst_flags=1" in output
 
 
 def test_cli_exposes_hunt_resume_and_prints_result(monkeypatch, capsys, tmp_path):

@@ -17,6 +17,10 @@
     · {{ agent.model_calls or 0 }} model call(s) · {{ agent.pivots or 0 }} pivot(s)
     · {{ agent.partial_pivots or 0 }} partial pivot(s)</p>
   {% if agent.stop_reason %}<p class="help">{{ agent.stop_reason }}</p>{% endif %}
+  {% if agent.analyst_flags %}
+  <h3>Analyst review required</h3>
+  <ul>{% for flag in agent.analyst_flags %}<li><b>{{ flag.case_id }}</b>: {{ flag.message or flag.reason }}</li>{% endfor %}</ul>
+  {% endif %}
 </section>
 {% endif %}
 

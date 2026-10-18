@@ -129,6 +129,7 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
     pivot_proposals = 0
     executed_pivots = 0
     pivot_gaps = []
+    analyst_flags = []
     for case in cases:
         steps = repo.case_steps(case["id"])
         seed_ids: list[str] = []
@@ -166,13 +167,24 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
                 "task_id": step.get("task_id"), "result": step.get("result_digest"),
             })
         calls = repo.model_calls(case_id=case["id"])
+        conclusion = _case_conclusion(case.get("summary"))
+        case_flags = []
+        if case["status"] == "fallback_parked":
+            stored_flag = (conclusion or {}).get("analyst_flag") or {
+                "reason": "validation_fallback",
+                "message": "Repeated invalid model output requires analyst review.",
+            }
+            flag = {"case_id": case["id"], **stored_flag}
+            case_flags.append(flag)
+            analyst_flags.append(flag)
         case_rows.append({
             "id": case["id"], "title": case["title"], "status": case["status"],
             "priority": case["priority"], "seed_candidate_ids": seed_ids,
             "entities": case["entities"], "hypotheses": case["hypotheses"],
             "steps_used": case["steps_used"], "step_budget": case["step_budget"],
             "pivot_steps": pivot_steps,
-            "conclusion": _case_conclusion(case.get("summary")),
+            "conclusion": conclusion,
+            "analyst_flags": case_flags,
             "contributed_candidate_ids": sorted(contributed.get(case["id"], [])),
             "model_calls": [{
                 "id": call["id"], "purpose": call["purpose"], "model": call["model"],
@@ -194,6 +206,7 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
             "pivot_proposals": pivot_proposals,
             "partial_pivots": len(pivot_gaps),
             "contributed_candidates": len(discovered_ids), "unworked_count": len(unworked),
+            "analyst_flags": len(analyst_flags),
         },
         "model_contribution": {
             "model_calls": total_calls, "pivot_steps": executed_pivots,
@@ -206,6 +219,7 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
             "unassigned": unassigned,
         },
         "unworked_seed_ids": unworked,
+        "analyst_flags": analyst_flags,
         "incomplete_case_ids": sorted(
             case["id"] for case in case_rows if case["status"] not in CONCLUDED_CASE_STATUSES
         ),

@@ -78,7 +78,8 @@ def cmd_hunt(args) -> int:
         else:
             agent = result["agent"]
             print(f"resumed: {result['execution_state']} agent={agent['status']} "
-                  f"unworked={agent.get('unworked_count', 0)}")
+                  f"unworked={agent.get('unworked_count', 0)} "
+                  f"analyst_flags={len(agent.get('analyst_flags') or [])}")
         return EXIT_OK
     if args.action == "status":
         repo = open_repo(s)
@@ -90,7 +91,8 @@ def cmd_hunt(args) -> int:
                 print(f"{h['id']}  {h['execution_state']:24} {h['detection_result'] or '-':40} "
                       f"lanes={repo.lane_counts(h['id'])} agent={agent.get('status', '-')} "
                       f"unworked={agent.get('unworked_count', '-')} "
-                      f"partial_pivots={agent.get('partial_pivots', 0)}")
+                      f"partial_pivots={agent.get('partial_pivots', 0)} "
+                      f"analyst_flags={len(agent.get('analyst_flags') or [])}")
         return EXIT_OK
     return EXIT_USAGE
 

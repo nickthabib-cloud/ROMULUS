@@ -177,7 +177,7 @@ case = Table(
     Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
     Column("seed_candidate_id", String),
     Column("title", Text, nullable=False),
-    Column("status", String, nullable=False),           # open | parked | escalated | closed | budget_exhausted
+    Column("status", String, nullable=False),           # open | parked | fallback_parked | escalated | closed | budget_exhausted
     Column("priority", Float, nullable=False),
     Column("entities", JSON, nullable=False),
     Column("hypotheses", JSON, nullable=False),
