@@ -71,13 +71,39 @@ def group_audit(hits: list[dict]) -> tuple[dict[tuple[str, float, int], list[tup
     return groups, errors
 
 
+def merge_execve(execs: list[tuple[dict, AuditRecord]]) -> tuple[dict, AuditRecord]:
+    """auditd splits an exec with a very long argv across several EXECVE records: the first carries
+    argc, continuations carry later aN fields. Merge them. Two records both carrying argc, or the same
+    argument field with different values, are ambiguous and raise (never silently pick one)."""
+    if len(execs) == 1:
+        return execs[0]
+    heads = [(h, r) for h, r in execs if "argc" in r.raw_fields]
+    if len(heads) != 1:
+        raise AuditParseError(f"ambiguous exec event: {len(heads)} EXECVE records carry argc")
+    h_head, r_head = heads[0]
+    raw, fields = dict(r_head.raw_fields), dict(r_head.fields)
+    for _h, r in execs:
+        if r is r_head:
+            continue
+        for k, v in r.raw_fields.items():
+            if k in raw and raw[k] != v:
+                raise AuditParseError(f"conflicting EXECVE continuation for {k}")
+            raw[k] = v
+            fields[k] = r.fields[k]
+    merged = AuditRecord(type="EXECVE", ts=r_head.ts, serial=r_head.serial, fields=fields, raw_fields=raw,
+                         enriched=r_head.enriched)
+    return h_head, merged
+
+
 def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent:
     """Build one process_exec event from the EXECVE record plus whatever companions are present.
     Missing SYSCALL means uid/ppid/success are unknown (caveat), not defaulted."""
-    by_type = {r.type: (h, r) for h, r in members if r.type in EXEC_COMPANIONS}
-    if "EXECVE" not in by_type:
+    by_type = {r.type: (h, r) for h, r in members if r.type in EXEC_COMPANIONS and r.type != "EXECVE"}
+    execs = [(h, r) for h, r in members if r.type == "EXECVE"]
+    if not execs:
         raise Skip("no EXECVE record in group")
-    h_exec, r_exec = by_type["EXECVE"]
+    h_exec, r_exec = merge_execve(execs)
+    by_type["EXECVE"] = (h_exec, r_exec)
     argv = execve_argv(r_exec)
     refs = [_ref(h) for h, r in members if r.type in EXEC_COMPANIONS]
     nid = h_exec["_id"]
@@ -304,7 +330,9 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
     errors.extend(audit_errors)
     for (host, _ts, _serial), members in groups.items():
         types = {r.type for _, r in members}
-        dup = sorted(t for t in types if sum(1 for _, r in members if r.type == t) > 1 and t in EXEC_COMPANIONS)
+        # EXECVE may legitimately repeat (long-argv continuation records; merged in normalize_exec_group)
+        dup = sorted(t for t in types if sum(1 for _, r in members if r.type == t) > 1
+                     and t in EXEC_COMPANIONS and t != "EXECVE")
         if dup:
             errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
             continue

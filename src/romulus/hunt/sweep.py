@@ -21,6 +21,12 @@ log = logging.getLogger("romulus.sweep")
 
 PARTITION_MAX_DOCS = 120_000
 HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
+NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
+DATASET_FAMILIES = {"linux.audit": {"process_exec"}, "systemd.journal": {"auth", "privilege_use"},
+                    "apache.access": {"http_access"}, "apache.error": {"web_error"},
+                    **{f"suricata.eve.{t}": NET_FAMILIES for t in ("alert", "flow", "netflow", "dns", "http",
+                                                                  "fileinfo", "tls", "ssh")}}
+ALL_FAMILIES = frozenset({"*"})
 
 
 BUCKET_SECONDS = 300
@@ -169,7 +175,17 @@ class Sweep:
             self.partial_reasons.append(f"{target} {pkey}: {out.reasons or ''} normalization_errors={len(errors)}"
                                         + (f" unsupported_records={sum(unsupported.values())}" if unsupported else ""))
         families = {e.family for e in events}
+        # Which event families the problems could have hidden. A retrieval problem affects every
+        # rule; a normalization error affects only families its dataset feeds; an unsupported
+        # dataset could hold anything, so it affects every rule.
+        affected = ALL_FAMILIES if (out.completeness != Completeness.complete or unsupported) else set()
+        for _rid, msg in errors:
+            if affected is ALL_FAMILIES:
+                break
+            fams = DATASET_FAMILIES.get(msg.split(":", 1)[0].strip())
+            affected = ALL_FAMILIES if fams is None else affected | fams
         for pb in self.pack:
+            rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing = pb.evaluated, pb.missing_required
             matches = pb.consume(events)
             for m in matches:
@@ -180,13 +196,13 @@ class Sweep:
             evaluated = pb.evaluated - before_eval
             missing = pb.missing_required - before_missing
             if not (set(pb.families) & families) and evaluated == 0:
-                state = "not_applicable_no_events" if not partial else "evaluated_partial"
+                state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
             elif pb.kind == "aggregate":
-                state = "evaluated_partial" if (partial or missing) else "evaluated_complete"
+                state = "evaluated_partial" if (rule_partial or missing) else "evaluated_complete"
             elif matches:
-                state = "match_on_partial" if partial else "matched"
+                state = "match_on_partial" if rule_partial else "matched"
             else:
-                state = "evaluated_partial" if (partial or missing) else "no_match_complete"
+                state = "evaluated_partial" if (rule_partial or missing) else "no_match_complete"
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, state, len(matches), evaluated,
                                     {"missing_required": missing, "reasons": out.reasons})
         self.repo.update_task(tid, "evaluated")

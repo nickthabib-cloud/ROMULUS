@@ -34,3 +34,6 @@ build/
 
 # local agent settings
 .claude/settings.local.json
+
+# written by scripts/deploy.ps1 on the VM
+DEPLOYED_COMMIT

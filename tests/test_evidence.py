@@ -160,3 +160,19 @@ def test_journal_without_original_is_an_error():
     h["_source"]["event"].pop("original")
     events, skips, errors = normalize_hits([h])
     assert events == [] and errors and "missing authoritative" in errors[0][1]
+
+
+def test_long_argv_split_across_execve_records_is_merged():
+    # real auditd behaviour (seen in the lab): argc on the first record, later aN on continuations
+    head = 'type=EXECVE msg=audit(1731940398.711:39823): argc=4 a0="find" a1="/bin" a2="-name"'
+    cont = 'type=EXECVE msg=audit(1731940398.711:39823):  a3="x.conf"'
+    events, _, errors = normalize_hits([hit("h1", "linux.audit", head), hit("h2", "linux.audit", cont)])
+    assert errors == [] and events[0].get("process.argv") == ["find", "/bin", "-name", "x.conf"]
+    assert {r.native_id for r in events[0].raw} == {"h1", "h2"}
+
+
+def test_conflicting_execve_continuation_is_an_error():
+    head = 'type=EXECVE msg=audit(1731940398.711:39824): argc=2 a0="cat" a1="a"'
+    cont = 'type=EXECVE msg=audit(1731940398.711:39824):  a1="b"'
+    events, _, errors = normalize_hits([hit("c1", "linux.audit", head), hit("c2", "linux.audit", cont)])
+    assert events == [] and errors and "conflicting" in errors[0][1]

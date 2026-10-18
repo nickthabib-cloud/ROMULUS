@@ -146,3 +146,17 @@ def test_firewall_drop_citations_resolve_on_a_fresh_database(monkeypatch):
     cites = rm._citations(repo, fw[0])
     assert cites and all(c["status"] == "retained" for c in cites), cites
     assert build_manifest is not None
+
+
+def test_audit_errors_make_only_process_rules_partial(monkeypatch):
+    bad = {"_id": "bad", "_index": "romulus-host-x", "_source": {
+        "@timestamp": "2024-11-18T14:00:01Z", "message": "type=EXECVE garbage", "host": {"name": "video"},
+        "event": {"dataset": "linux.audit", "original": "type=EXECVE garbage"}}}
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, [bad]))
+    repo = _repo()
+    s = sw.Sweep(repo, FakeClient(), "h1", Window(start=START, end=START + timedelta(minutes=5)), {"x": None})
+    s.run_partition("romulus-host-x", None, [], Window(start=START, end=START + timedelta(minutes=5)), est=1)
+    cells = {c["rule_id"]: c["state"] for c in repo.rule_cells("h1")}
+    assert cells["host.credential_store_read"] == "evaluated_partial"        # process_exec rule
+    assert cells["net.suricata_alert_stack"] == "not_applicable_no_events"   # unaffected family
+    assert s.partial_reasons                                                  # hunt still records it
