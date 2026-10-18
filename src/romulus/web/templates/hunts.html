@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Hunts</h1>
+{% if request.query_params.get('deleted') %}<p class="ok">Hunt {{ request.query_params.get('deleted') }} was permanently deleted.</p>{% endif %}
 {% if request.query_params.get('started') %}<p class="ok">Hunt started in the background. It appears below within a few seconds.</p>{% endif %}
 <table class="grid">
 <thead><tr><th>Hunt</th><th>Created</th><th>By</th><th>Execution</th><th>Result</th><th>Urgent</th><th>High</th><th>Leads</th></tr></thead>

@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
-from sqlalchemy import Engine, and_, func, or_, select
+from sqlalchemy import Engine, and_, func, or_, select, true
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
@@ -125,6 +125,92 @@ class Repo:
                 raise RuntimeError(f"hunt {hunt_id} {reason}")
             row = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             return dict(row)
+
+    FINISHED_STATES = {"completed_within_scope", "partial", "failed", "canceled"}
+
+    def delete_hunt(self, hunt_id: str, actor: str, now: datetime | None = None) -> dict[str, int]:
+        """Permanently delete one hunt and everything only it owns. Evidence that another hunt still
+        cites is kept and handed to that hunt; shared raw copies are kept while any event cites them.
+        Refuses a hunt that may still be executing. An audit record of the deletion is kept."""
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            h = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().first()
+            if h is None:
+                raise KeyError(hunt_id)
+            lease_until = h.get("lease_until")
+            if lease_until is not None and lease_until.tzinfo is None:
+                lease_until = lease_until.replace(tzinfo=UTC)
+            live = lease_until is not None and lease_until > now
+            if h["execution_state"] not in self.FINISHED_STATES and live:
+                raise ValueError(f"hunt {hunt_id} is {h['execution_state']} with a live worker lease; "
+                                 f"let it finish (or wait for the lease to expire) before deleting")
+
+            # events this hunt stored that other hunts' candidates still cite: keep, reassign owner
+            mine = {r.id for r in c.execute(select(t.typed_event.c.id).where(t.typed_event.c.hunt_id == hunt_id))}
+            cited_by: dict[str, str] = {}
+            for cid_hunt, eids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)
+                                            .where(t.candidate.c.hunt_id != hunt_id)):
+                for eid in eids or []:
+                    if eid in mine:
+                        cited_by.setdefault(eid, cid_hunt)
+            for eid, owner in cited_by.items():
+                c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(hunt_id=owner))
+            drop_events = mine - set(cited_by)
+
+            # raw copies referenced only by the events being dropped
+            candidate_raw: set[str] = set()
+            for (raw_ids,) in c.execute(select(t.typed_event.c.raw_ids).where(t.typed_event.c.id.in_(drop_events))):
+                candidate_raw.update(raw_ids or [])
+            still_used: set[str] = set()
+            if candidate_raw:
+                for (raw_ids,) in c.execute(select(t.typed_event.c.raw_ids).where(
+                        t.typed_event.c.id.not_in(drop_events) if drop_events else true())):
+                    still_used.update(set(raw_ids or []) & candidate_raw)
+            drop_raw = candidate_raw - still_used
+
+            task_ids = select(t.task.c.id).where(t.task.c.hunt_id == hunt_id)
+            case_ids = select(t.case.c.id).where(t.case.c.hunt_id == hunt_id)
+            cand_ids = select(t.candidate.c.id).where(t.candidate.c.hunt_id == hunt_id)
+            ent_ids = select(t.entity.c.id).where(t.entity.c.hunt_id == hunt_id)
+            counts: dict[str, int] = {}
+
+            def rm(name, stmt):
+                counts[name] = c.execute(stmt).rowcount or 0
+
+            # detach shared rows from this hunt's tasks and children before removing them
+            c.execute(t.raw_record.update().where(t.raw_record.c.first_task_id.in_(task_ids))
+                      .values(first_task_id=None))
+            c.execute(t.hunt.update().where(t.hunt.c.parent_hunt_id == hunt_id).values(parent_hunt_id=None))
+            rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
+            rm("candidates", t.candidate.delete().where(t.candidate.c.hunt_id == hunt_id))
+            rm("case_steps", t.case_step.delete().where(t.case_step.c.case_id.in_(case_ids)))
+            rm("model_calls", t.model_call.delete().where(t.model_call.c.hunt_id == hunt_id))
+            rm("cases", t.case.delete().where(t.case.c.hunt_id == hunt_id))
+            rm("entity_links", t.event_entity.delete().where(or_(t.event_entity.c.entity_id.in_(ent_ids),
+                                                                 t.event_entity.c.event_id.in_(drop_events))))
+            rm("entities", t.entity.delete().where(t.entity.c.hunt_id == hunt_id))
+            rm("typed_events", t.typed_event.delete().where(t.typed_event.c.id.in_(drop_events)))
+            rm("raw_records", t.raw_record.delete().where(t.raw_record.c.id.in_(drop_raw)))
+            rm("normalization_errors", t.normalization_error.delete().where(t.normalization_error.c.hunt_id == hunt_id))
+            rm("rule_cells", t.rule_run.delete().where(t.rule_run.c.hunt_id == hunt_id))
+            rm("tasks", t.task.delete().where(t.task.c.hunt_id == hunt_id))
+            rm("report_revisions", t.report_manifest.delete().where(t.report_manifest.c.hunt_id == hunt_id))
+            rm("source_profiles", t.source_profile.delete().where(t.source_profile.c.hunt_id == hunt_id))
+            c.execute(t.hunt.delete().where(t.hunt.c.id == hunt_id))
+            counts["events_kept_for_other_hunts"] = len(cited_by)
+            # the deletion itself stays auditable (audit_event has no foreign key to hunt)
+            c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.delete", hunt_id=hunt_id,
+                                                    detail={k: str(v) for k, v in counts.items()}))
+            return counts
+
+    def deletion_preview(self, hunt_id: str) -> dict[str, int]:
+        with self.engine.connect() as c:
+            def n(table, col):
+                return c.execute(select(func.count()).select_from(table).where(col == hunt_id)).scalar_one()
+            return {"candidates": n(t.candidate, t.candidate.c.hunt_id),
+                    "typed_events": n(t.typed_event, t.typed_event.c.hunt_id),
+                    "tasks": n(t.task, t.task.c.hunt_id), "cases": n(t.case, t.case.c.hunt_id),
+                    "report_revisions": n(t.report_manifest, t.report_manifest.c.hunt_id)}
 
     def latest_audit(self, hunt_id: str, action: str) -> dict | None:
         query = (select(t.audit_event)

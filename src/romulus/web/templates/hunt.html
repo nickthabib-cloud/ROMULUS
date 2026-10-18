@@ -74,6 +74,10 @@
 {% endfor %}
 </tbody></table></details>
 
+{% if user.r == 'lead' %}
+<p class="danger-zone"><a class="btn-danger" href="/hunts/{{ h.id }}/delete">Delete hunt…</a></p>
+{% endif %}
+
 <h2 id="reports">Reports</h2>
 <form method="post" action="/hunts/{{ h.id }}/report"><input type="hidden" name="csrf" value="{{ csrf }}">
 <button type="submit">Publish new report revision</button></form>

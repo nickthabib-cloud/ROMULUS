@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Delete {{ h.id }} · ROMULUS{% endblock %}
+{% block content %}
+<p><a href="/hunts/{{ h.id }}">← back to hunt {{ h.id }}</a></p>
+<section class="card danger">
+  <h1>Delete hunt {{ h.id }}?</h1>
+  <p class="warn"><b>This permanently deletes the hunt and cannot be undone.</b></p>
+  <ul>
+    <li>Window (UTC): {{ h.manifest.window.start }} → {{ h.manifest.window.end }}</li>
+    <li>State: {{ h.execution_state }} · result: {{ h.detection_result or '—' }}</li>
+    <li>Findings and leads: urgent {{ lanes.get('urgent', 0) }}, high {{ lanes.get('high', 0) }},
+        leads {{ lanes.get('lead', 0) }}, context {{ lanes.get('context', 0) }} ({{ preview.candidates }} total),
+        including every analyst triage decision recorded on them</li>
+    <li>{{ preview.report_revisions }} report revision(s) and their downloadable files</li>
+    <li>{{ preview.cases }} investigation case(s), {{ preview.tasks }} search task(s), {{ preview.typed_events }} stored event(s)</li>
+  </ul>
+  <p class="help">Evidence that another hunt still cites is kept for that hunt. A record that this hunt was deleted,
+    by whom and when, stays in the audit log.</p>
+  <form method="post" action="/hunts/{{ h.id }}/delete" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="confirm" value="{{ h.id }}">
+    <button type="submit" class="btn-danger">Delete permanently</button>
+    <a href="/hunts/{{ h.id }}">Cancel</a>
+  </form>
+</section>
+{% endblock %}

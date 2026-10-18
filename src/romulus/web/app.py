@@ -200,6 +200,47 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         repo.add_disposition(cid, f"web:{u['u']}", status, note.strip()[:2000] or None)
         return RedirectResponse(f"/findings/{cid}", status_code=303)
 
+    # ------------------------------------------------------------------ deletion
+    def need_lead(request: Request) -> dict:
+        u = need(request)
+        if u.get("r") != "lead":
+            raise HTTPException(403, "only a lead account can delete hunts")
+        return u
+
+    @app.get("/hunts/{hunt_id}/delete", response_class=HTMLResponse)
+    def delete_confirm(request: Request, hunt_id: str):
+        u = need_lead(request)
+        h = repo.get_hunt(hunt_id)
+        if h is None:
+            raise HTTPException(404)
+        return page(request, "delete_hunt.html", u, h=h, preview=repo.deletion_preview(hunt_id),
+                    lanes=repo.lane_counts(hunt_id))
+
+    @app.post("/hunts/{hunt_id}/delete")
+    def delete_hunt(request: Request, hunt_id: str, csrf: str = Form(""), confirm: str = Form("")):
+        u = need_lead(request)
+        if not csrf_ok(u, csrf):
+            raise HTTPException(403, "bad CSRF token")
+        if confirm != hunt_id:
+            raise HTTPException(400, "deletion not confirmed")
+        try:
+            counts = repo.delete_hunt(hunt_id, actor=f"web:{u['u']}")
+        except KeyError:
+            raise HTTPException(404) from None
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from None
+        # generated report files for this hunt, path-checked to stay inside the reports directory
+        rdir = (s.reports_dir / hunt_id).resolve()
+        if s.reports_dir.resolve() in rdir.parents and rdir.is_dir():
+            import shutil
+            shutil.rmtree(rdir, ignore_errors=True)
+        try:
+            with repo.engine.connect() as c:          # return freed pages to the filesystem
+                c.exec_driver_sql("VACUUM")
+        except Exception:  # noqa: BLE001 - space reclaim is best-effort; the deletion already committed
+            pass
+        return RedirectResponse(f"/?deleted={hunt_id}&removed={counts.get('candidates', 0)}", status_code=303)
+
     # ------------------------------------------------------------------ reports
     @app.post("/hunts/{hunt_id}/report")
     def make_report(request: Request, hunt_id: str, csrf: str = Form("")):
