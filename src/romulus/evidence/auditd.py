@@ -4,7 +4,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-_HEADER = re.compile(r"^type=(?P<type>[A-Z_]+)\s+msg=audit\((?P<ts>[0-9.]+):(?P<serial>\d+)\):\s?(?P<body>.*)$", re.S)
+_HEADER = re.compile(r"^(?:node=\S+\s+)?type=(?P<type>[A-Z_]+)\s+msg=audit\((?P<ts>[0-9.]+):(?P<serial>\d+)\):\s?"
+                     r"(?P<body>.*)$", re.DOTALL)
 _HEX = re.compile(r"^[0-9A-Fa-f]+$")
 _ARG = re.compile(r"^a(\d+)(?:\[(\d+)\])?$")
 # auditd hex-encodes only "untrusted string" fields; numeric fields (argc, pid, a0 of SYSCALL...) never.

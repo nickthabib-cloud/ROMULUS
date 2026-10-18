@@ -54,8 +54,13 @@ def cmd_hunt(args) -> int:
     if args.action == "start":
         start, end = _parse_time(args.start, s.mission_timezone), _parse_time(args.end, s.mission_timezone)
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
-        hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style, hypothesis=args.hypothesis or "",
-                          original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone})
+        try:
+            hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style,
+                              hypothesis=args.hypothesis or "",
+                              original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone})
+        except ValueError as e:
+            print(f"hunt not created: {e}", file=sys.stderr)
+            return EXIT_FAIL
         print(f"hunt {hid} created [{start.isoformat()}, {end.isoformat()})")
 
         def show(c):

@@ -82,6 +82,12 @@ class Playbook:
     def finalize(self) -> list[Match]:
         return []
 
+    def retained_events(self) -> list[TypedEvent]:
+        """Every event an aggregate playbook may still cite at finalize. The sweep keeps raw copies of
+        exactly these, so no published citation can point at a raw record that was never retained."""
+        groups = getattr(self, "groups", {}) or {}
+        return [e for evs in groups.values() for e in evs]
+
 
 def outcome_phrase(e: TypedEvent) -> str:
     if e.outcome == Outcome.success:

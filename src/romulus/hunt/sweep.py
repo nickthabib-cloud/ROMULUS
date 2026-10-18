@@ -80,19 +80,44 @@ class Sweep:
         return []
 
     # -------------------------------------------------------------------------------------
+    def _mark_all(self, target: str, pkey: str, state: str, detail: dict | None = None):
+        """Write the same coverage state for every rule on one (target, partition)."""
+        for pb in self.pack:
+            self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, state, 0, 0, detail or {})
+
+    def _split(self, target: str, w: Window) -> tuple[Window, Window]:
+        """Record children as planned *before* the parent is superseded, so a crash between the two
+        leaves visible unexecuted work rather than a silent gap."""
+        mid = w.start + (w.end - w.start) / 2
+        a, b = Window(start=w.start, end=mid), Window(start=mid, end=w.end)
+        self._mark_all(target, a.key(), "planned")
+        self._mark_all(target, b.key(), "planned")
+        self._mark_all(target, w.key(), "split", {"children": [a.key(), b.key()]})
+        return a, b
+
     def run_target(self, target: str):
         contract = self.contracts[target]
         filters = self._filters_for(target)
-        parts = plan_partitions(self.client, target, contract, self.window, filters)
+        try:
+            parts = plan_partitions(self.client, target, contract, self.window, filters)
+        except Exception as e:  # noqa: BLE001 - one source failing must not hide the others
+            reason = f"partition planning failed: {e}"[:300]
+            self.partial_reasons.append(f"{target}: {reason}")
+            self._mark_all(target, f"plan:{self.window.key()}", "executed_failed", {"error": reason})
+            return
+        # persist every planned (rule x target x partition) cell first: anything never executed
+        # stays visibly 'planned' and can never be read as a complete negative
+        for w, _est in parts:
+            self._mark_all(target, w.key(), "planned")
         for w, est in parts:
             self.run_partition(target, contract, filters, w, est)
 
     def run_partition(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window, est: int):
         if est > PARTITION_MAX_DOCS and (w.end - w.start) > MIN_SPLIT * 2:
             # exact histogram count already exceeds the limit: subdivide before fetching anything
-            mid = w.start + (w.end - w.start) / 2
-            self.run_partition(target, contract, filters, Window(start=w.start, end=mid), est // 2)
-            self.run_partition(target, contract, filters, Window(start=mid, end=w.end), est - est // 2)
+            a, b = self._split(target, w)
+            self.run_partition(target, contract, filters, a, est // 2)
+            self.run_partition(target, contract, filters, b, est - est // 2)
             return
         pkey = w.key()
         cap = max(PARTITION_MAX_DOCS, int(est * 1.2) + 1000)
@@ -114,8 +139,9 @@ class Sweep:
                                                          "children": [f"{w.start.isoformat()}/{mid.isoformat()}",
                                                                       f"{mid.isoformat()}/{w.end.isoformat()}"]})
             half = (out.total or est) // 2
-            self.run_partition(target, contract, filters, Window(start=w.start, end=mid), half)
-            self.run_partition(target, contract, filters, Window(start=mid, end=w.end), half)
+            a, b = self._split(target, w)
+            self.run_partition(target, contract, filters, a, half)
+            self.run_partition(target, contract, filters, b, half)
             return
         self.stats["partitions"] += 1
         self.stats["records"] += out.returned
@@ -134,9 +160,14 @@ class Sweep:
         for k, v in skips.items():
             self.stats["skips"][k] = self.stats["skips"].get(k, 0) + v
         raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
-        partial = out.completeness != Completeness.complete or bool(errors)
+        # records retrieved but of a dataset/event type no normalizer supports: we cannot say what
+        # they contain, so no rule may claim a complete negative over this partition
+        unsupported = {k: v for k, v in skips.items()
+                       if k.startswith("dataset:") or k.startswith("suricata event_type")}
+        partial = out.completeness != Completeness.complete or bool(errors) or bool(unsupported)
         if partial:
-            self.partial_reasons.append(f"{target} {pkey}: {out.reasons or ''} normalization_errors={len(errors)}")
+            self.partial_reasons.append(f"{target} {pkey}: {out.reasons or ''} normalization_errors={len(errors)}"
+                                        + (f" unsupported_records={sum(unsupported.values())}" if unsupported else ""))
         families = {e.family for e in events}
         for pb in self.pack:
             before_eval, before_missing = pb.evaluated, pb.missing_required
@@ -161,15 +192,13 @@ class Sweep:
         self.repo.update_task(tid, "evaluated")
 
     def _retain_aggregate_raw(self, pb: Playbook, raw_sources: dict[str, dict]):
-        groups = getattr(pb, "groups", {})
         keep = getattr(self, "_agg_raw", None)
         if keep is None:
             keep = self._agg_raw = {}
-        for evs in groups.values():
-            for e in evs:
-                for r in e.raw:
-                    if r.key in raw_sources and r.key not in keep:
-                        keep[r.key] = raw_sources[r.key]
+        for e in pb.retained_events():
+            for r in e.raw:
+                if r.key in raw_sources and r.key not in keep:
+                    keep[r.key] = raw_sources[r.key]
 
     def finalize(self):
         agg_raw = getattr(self, "_agg_raw", {})
@@ -179,9 +208,18 @@ class Sweep:
             ms = pb.finalize()
             for m in ms:
                 self._publish(m, None, agg_raw)
-            cells = [c for c in self.repo.rule_cells(self.hunt_id) if c["rule_id"] == pb.id]
-            any_partial = any(c["state"] in ("evaluated_partial", "executed_failed") for c in cells)
-            state = ("match_on_partial" if ms else "evaluated_partial") if any_partial else \
-                    ("matched" if ms else "no_match_complete")
-            self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state, len(ms),
-                                    sum(c["evaluated"] for c in cells))
+            cells = [c for c in self.repo.rule_cells(self.hunt_id)
+                     if c["rule_id"] == pb.id and c["target"] != "*" and c["state"] != "split"]
+            any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")
+                              for c in cells)
+            evaluated = sum(c["evaluated"] or 0 for c in cells)
+            if any_partial or not cells:
+                state = "match_on_partial" if ms else "evaluated_partial"
+            elif ms:
+                state = "matched"
+            elif evaluated == 0:
+                # nothing of this rule's families was in scope: that is not a negative
+                state = "not_applicable_no_events"
+            else:
+                state = "no_match_complete"
+            self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state, len(ms), evaluated)

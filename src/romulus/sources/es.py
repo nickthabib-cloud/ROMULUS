@@ -124,9 +124,16 @@ class ElasticClient:
         return self.request("POST", "/_security/user/_has_privileges", body)
 
     def resolve(self, pattern: str) -> list[str]:
+        """Concrete searchable targets for a pattern: indices plus data streams (searched by stream
+        name; backing indices are excluded so nothing is counted twice). Aliases are used only when
+        the pattern matches nothing else, for the same reason."""
         d = self.request("GET", f"/_resolve/index/{pattern}")
-        names = [i["name"] for i in d.get("indices", [])]
-        names += [a["name"] for a in d.get("aliases", [])]
+        streams = [s["name"] for s in d.get("data_streams", [])]
+        backing = {b for s in d.get("data_streams", []) for b in s.get("backing_indices", [])}
+        indices = [i["name"] for i in d.get("indices", []) if i["name"] not in backing]
+        names = indices + streams
+        if not names:
+            names = [a["name"] for a in d.get("aliases", [])]
         return sorted(set(names))
 
     def mapping(self, index: str) -> dict:

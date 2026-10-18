@@ -22,6 +22,14 @@ def parse_env_file(path: Path) -> dict[str, str]:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
+        else:
+            # unquoted values: an inline comment starts at "#" at the beginning or after whitespace
+            if value.startswith("#"):
+                value = ""
+            else:
+                for sep in (" #", "\t#"):
+                    if sep in value:
+                        value = value.split(sep, 1)[0].rstrip()
         out[key.strip()] = value
     return out
 

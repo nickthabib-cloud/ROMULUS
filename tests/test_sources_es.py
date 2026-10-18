@@ -179,3 +179,25 @@ def test_shard_failure_and_lower_bound_totals_are_partial():
     client = ElasticClient(Settings(es_url="http://es"), transport=_pit_transport([[1]], 10000, relation="gte"))
     out = execute(client, SearchIntent(kind="raw", target="idx", window=W), C)
     assert out.completeness == Completeness.partial
+
+
+def _resolve_client(payload):
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=payload))
+    return ElasticClient(Settings(es_url="http://es"), transport=transport)
+
+
+def test_resolve_includes_data_streams_without_double_counting_backing_indices():
+    c = _resolve_client({"indices": [{"name": ".ds-logs-a-000001"}, {"name": "plain-idx"}],
+                         "aliases": [{"name": "alias-x"}],
+                         "data_streams": [{"name": "logs-a", "backing_indices": [".ds-logs-a-000001"]}]})
+    assert c.resolve("*") == ["logs-a", "plain-idx"]
+
+
+def test_resolve_empty_pattern_is_empty_and_hunt_creation_refuses(tmp_path, monkeypatch):
+    from romulus.hunt import run as hr
+    assert _resolve_client({"indices": [], "aliases": [], "data_streams": []}).resolve("nothing-*") == []
+    monkeypatch.setattr(hr.ElasticClient, "resolve", lambda self, p: [])
+    s = Settings(home=tmp_path, es_index_patterns=["nothing-*"])
+    with pytest.raises(ValueError, match="resolves to no index"):
+        hr.create_hunt(s, W.start, W.end, created_by="t")
+    assert hr.open_repo(s).list_hunts() == []

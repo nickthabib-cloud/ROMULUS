@@ -120,3 +120,43 @@ def test_shell_script_extraction():
     assert shell_script_of(["bash", "-lc", "id"]) == "id"
     assert shell_script_of(["bash", "script.sh"]) is None
     assert shell_script_of(["python3", "-c", "print(1)"]) is None
+
+
+# ---------------------------------------------------------------- M1 gate regressions (B1, I4)
+def test_unparseable_audit_record_is_an_error_not_a_silent_drop():
+    truncated = 'type=EXECVE msg=audit(1731950250.320:900): argc=3 a0="sh" a1="-c" a2="curl http://x | s'
+    events, skips, errors = normalize_hits([hit("t1", "linux.audit", truncated)])
+    assert events == [] and errors and "unparseable" in errors[0][1]
+
+
+def test_audit_record_missing_raw_text_is_an_error():
+    h = hit("m1", "linux.audit", "x")
+    h["_source"]["event"].pop("original")
+    h["_source"].pop("message")
+    events, skips, errors = normalize_hits([h])
+    assert events == [] and errors and "missing authoritative" in errors[0][1]
+
+
+def test_node_prefixed_audit_records_parse():
+    rec = parse_record("node=web01 " + EXECVE_HEX)
+    assert rec.type == "EXECVE" and rec.serial == 76806
+
+
+def test_same_serial_different_timestamp_are_separate_events():
+    a = 'type=EXECVE msg=audit(1731950000.000:500): argc=2 a0="cat" a1="/etc/shadow"'
+    b = 'type=EXECVE msg=audit(1731959999.000:500): argc=1 a0="ls"'
+    events, _, errors = normalize_hits([hit("x1", "linux.audit", a), hit("x2", "linux.audit", b)])
+    assert errors == [] and sorted(e.get("process.argv")[0] for e in events) == ["cat", "ls"]
+
+
+def test_ambiguous_duplicate_group_is_an_error():
+    a = 'type=EXECVE msg=audit(1731950000.000:501): argc=1 a0="cat"'
+    events, _, errors = normalize_hits([hit("d1", "linux.audit", a), hit("d2", "linux.audit", a)])
+    assert events == [] and errors and "ambiguous" in errors[0][1]
+
+
+def test_journal_without_original_is_an_error():
+    h = hit("j9", "systemd.journal", "Accepted publickey for root from 203.0.113.5 port 1 ssh2")
+    h["_source"]["event"].pop("original")
+    events, skips, errors = normalize_hits([h])
+    assert events == [] and errors and "missing authoritative" in errors[0][1]

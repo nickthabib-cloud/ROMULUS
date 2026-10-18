@@ -70,8 +70,9 @@ def verify(engine, username: str, password: str, client: str, limiter: RateLimit
 
 class Sessions:
     def __init__(self, secret: str):
-        if len(secret) < 16:
-            raise ValueError("ROMULUS_SECRET_KEY must be set (16+ chars) to serve the web UI")
+        if len(secret) < 32 or secret.lstrip().startswith("#") or " " in secret:
+            raise ValueError("ROMULUS_SECRET_KEY must be a random value of 32+ characters without spaces "
+                             "(e.g. python -c \"import secrets;print(secrets.token_urlsafe(32))\")")
         self.s = URLSafeTimedSerializer(secret, salt="romulus-session")
 
     def issue(self, user: dict) -> str:

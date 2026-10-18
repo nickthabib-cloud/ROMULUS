@@ -387,6 +387,10 @@ class FirewallRuleChange(Playbook):
         self.routine_n: dict[tuple, int] = defaultdict(int)
         self.groups = self.routine
 
+    def retained_events(self):
+        # direct block/unblock matches are published at finalize too: their raw copies must be kept
+        return super().retained_events() + [e for m in self.direct for e in m.events]
+
     def consume(self, events):
         for e in self.applicable(events):
             argv = e.get("process.argv")

@@ -49,16 +49,26 @@ def _get(src: dict, path: str):
 EXEC_COMPANIONS = {"EXECVE", "SYSCALL", "CWD", "PROCTITLE"}
 
 
-def group_audit(hits: list[dict]) -> dict[tuple[str, int], list[tuple[dict, AuditRecord]]]:
-    groups: dict[tuple[str, int], list[tuple[dict, AuditRecord]]] = defaultdict(list)
+def group_audit(hits: list[dict]) -> tuple[dict[tuple[str, float, int], list[tuple[dict, AuditRecord]]],
+                                           list[tuple[str, str]]]:
+    """Group audit records into events by (host, audit timestamp, serial). Records that cannot be
+    parsed, or lack the authoritative raw text, are returned as errors: they are never dropped
+    silently, because a dropped exec record would make a negative look complete."""
+    groups: dict[tuple[str, float, int], list[tuple[dict, AuditRecord]]] = defaultdict(list)
+    errors: list[tuple[str, str]] = []
     for h in hits:
         src = h["_source"]
-        try:
-            rec = parse_record(src.get("event", {}).get("original") or src.get("message", ""))
-        except AuditParseError:
+        raw = _get(src, "event.original") or src.get("message")
+        if not raw:
+            errors.append((h["_id"], "linux.audit: missing authoritative event.original/message"))
             continue
-        groups[(_get(src, "host.name") or "", rec.serial)].append((h, rec))
-    return groups
+        try:
+            rec = parse_record(raw)
+        except AuditParseError as e:
+            errors.append((h["_id"], f"linux.audit: unparseable record: {e}"))
+            continue
+        groups[(_get(src, "host.name") or "", rec.ts, rec.serial)].append((h, rec))
+    return groups, errors
 
 
 def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent:
@@ -125,10 +135,16 @@ _SUDO = re.compile(r"^\s*(?P<user>\S+) : (?:(?P<fail>.*?incorrect password attem
 
 def normalize_journal(hit: dict) -> TypedEvent:
     src = hit["_source"]
+    original = _get(src, "event.original")
+    if not original:
+        # without the structured journal record we cannot tell an sshd login from anything else
+        raise ValueError("journal record missing authoritative event.original")
     try:
-        j = json.loads(_get(src, "event.original") or "{}")
+        j = json.loads(original)
     except json.JSONDecodeError as e:
         raise ValueError(f"journal event.original is not JSON: {e}") from e
+    if not isinstance(j, dict):
+        raise ValueError("journal event.original is not a JSON object")
     if j.get("_TRANSPORT") == "audit" or j.get("SYSLOG_IDENTIFIER") == "audit":
         raise Skip("journal copy of an audit record (normalized from linux.audit)")
     ident = j.get("SYSLOG_IDENTIFIER") or j.get("_COMM")
@@ -284,8 +300,14 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
             skips[s.reason] += 1
         except (ValueError, KeyError, TypeError) as e:
             errors.append((h["_id"], f"{ds}: {e}"))
-    for (host, _serial), members in group_audit(audit_hits).items():
+    groups, audit_errors = group_audit(audit_hits)
+    errors.extend(audit_errors)
+    for (host, _ts, _serial), members in groups.items():
         types = {r.type for _, r in members}
+        dup = sorted(t for t in types if sum(1 for _, r in members if r.type == t) > 1 and t in EXEC_COMPANIONS)
+        if dup:
+            errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
+            continue
         if "EXECVE" not in types:
             skips["audit group without EXECVE (not an exec event)"] += 1
             continue

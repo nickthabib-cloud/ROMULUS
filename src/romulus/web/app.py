@@ -135,8 +135,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         cands.sort(key=lambda c: (LANE_ORDER.get(c["lane"], 9), -c["priority"], str(c["ts"])))
         if not lane:
             cands = [c for c in cands if c["lane"] != "context"]
-        from romulus.report.manifest import _coverage
-        cov = _coverage(repo.rule_cells(hunt_id))
+        from romulus.report.manifest import coverage_for_hunt
+        cov = coverage_for_hunt(repo, hunt_id)
         with repo.engine.connect() as c:
             from sqlalchemy import select
 

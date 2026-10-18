@@ -35,8 +35,15 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     window = Window(start=start, end=end)
     client = ElasticClient(s)
     profiles, targets = {}, []
+    if not s.es_index_patterns:
+        raise ValueError("no ES_INDEX_PATTERNS configured: nothing to hunt")
     for pat in s.es_index_patterns:
-        for target in client.resolve(pat):
+        resolved = client.resolve(pat)
+        if not resolved:
+            # a configured source that is absent must never become an empty "completed" hunt
+            raise ValueError(f"source pattern {pat!r} resolves to no index or data stream; fix the "
+                             f"configuration or remove the pattern before hunting")
+        for target in resolved:
             prof, _contract = build_profile(client, target)
             profiles[target] = prof.model_dump(mode="json")
             targets.append(target)

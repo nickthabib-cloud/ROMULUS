@@ -41,21 +41,63 @@ def _citations(repo: Repo, cand: dict) -> list[dict]:
     return cites
 
 
-def _coverage(cells: list[dict]) -> dict:
+UNRESOLVED_STATES = ("planned", "executed_failed", "evaluated_partial", "match_on_partial")
+
+
+def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None,
+              sweep_finished: bool = True) -> dict:
+    """Per-rule negative claim. 'complete' requires: the sweep finished, every manifest target has
+    cells for the rule, no cell is planned/failed/partial, and at least one complete no-match.
+    Anything less is 'unresolved' with the reason; absence of data is 'not applicable', never a
+    negative."""
+    cells = [c for c in cells if c["state"] != "split"]          # superseded by their children
     by_rule: dict[str, Counter] = defaultdict(Counter)
     evaluated: Counter = Counter()
+    rule_targets: dict[str, set] = defaultdict(set)
     for c in cells:
         by_rule[c["rule_id"]][c["state"]] += 1
-        evaluated[c["rule_id"]] += c["evaluated"] or 0
+        if c["target"] != "*":
+            evaluated[c["rule_id"]] += c["evaluated"] or 0
+            rule_targets[c["rule_id"]].add(c["target"])
+    for rid in rule_ids or []:
+        by_rule.setdefault(rid, Counter())
     rows = []
     for rule, states in sorted(by_rule.items()):
-        partial = sum(n for s, n in states.items() if "partial" in s or "failed" in s)
+        reasons = []
+        if not sweep_finished:
+            reasons.append("sweep did not finish")
+        missing = sorted(set(targets or []) - rule_targets[rule])
+        if missing:
+            reasons.append(f"no evaluation recorded for target(s) {missing}")
+        bad = {s: n for s, n in states.items() if s in UNRESOLVED_STATES}
+        if bad:
+            reasons.append("partial, failed or unexecuted partitions " + ", ".join(f"{s}={n}" for s, n in bad.items()))
+        if not states:
+            reasons.append("never evaluated")
+        matched = any(s.startswith("match") for s in states)
+        if matched:
+            claim = "none (rule matched)" + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
+        elif reasons:
+            claim = "unresolved: " + "; ".join(reasons)
+        elif states.get("no_match_complete") and not (states.get("not_applicable_no_events") and
+                                                      set(states) <= {"not_applicable_no_events"}):
+            claim = "complete"
+        else:
+            claim = "not applicable to the data in scope"
         rows.append({"rule_id": rule, "states": dict(states), "records_evaluated": evaluated[rule],
-                     "negative_claim": "none (rule matched)" if any(s.startswith("match") for s in states) else
-                                       "complete" if partial == 0 and states.get("no_match_complete") else
-                                       "unresolved: partial or unevaluated partitions" if partial else
-                                       "not applicable to the data in scope"})
+                     "negative_claim": claim})
     return {"rules": rows}
+
+
+def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
+    """Coverage with the hunt's own targets, rule pack and sweep completion applied."""
+    h = repo.get_hunt(hunt_id) or {}
+    hm = h.get("manifest") or {}
+    sweep = repo.latest_audit(hunt_id, "hunt.sweep_summary")
+    finished = bool(sweep and (sweep.get("detail") or {}).get("finished", (sweep.get("detail") or {}).get("complete")))
+    return _coverage(repo.rule_cells(hunt_id), targets=hm.get("targets"),
+                     rule_ids=[p["id"] for p in (hm.get("pack") or {}).get("playbooks", [])],
+                     sweep_finished=finished)
 
 
 def _case_conclusion(summary: str | None) -> dict | None:
@@ -218,7 +260,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "lane_counts": dict(lane_counts),
         "findings": findings,
         "context_items": lane_counts.get("context", 0),
-        "coverage": _coverage(repo.rule_cells(hunt_id)),
+        "coverage": coverage_for_hunt(repo, hunt_id),
         "tasks": {s: n for s, n in tasks},
         "agent": agent or {"status": "unknown"},
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
