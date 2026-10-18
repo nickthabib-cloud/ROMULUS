@@ -193,9 +193,38 @@ def test_family_filter_is_required_instead_of_falling_back_to_broad_entity_query
         entity=EntityRef(kind="ip", value="203.0.113.8", role="src"), start=START, end=END,
     ))
 
-    result = PivotExecutor(_repo(), FakeClient(), "h1", contracts).run("case-1", request)
+    executor = PivotExecutor(_repo(), FakeClient(), "h1", contracts)
+    result = executor.run("case-1", request)
 
     assert result.status == "unsupported"
+    assert called is False
+
+
+def test_ids_alerts_rejects_host_entity_without_querying_sensor_host_name(monkeypatch):
+    called = False
+
+    def fake_execute(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("network host.name identifies the sensor, not the investigated host")
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    contracts = {"romulus-network-x": contract_from_types("romulus-network-x", {
+        "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+        "source.ip": "ip", "destination.ip": "ip",
+    })}
+    request = IdsAlertsRequest(tool="ids_alerts", arguments=IdsAlertsArgs(
+        entity=EntityRef(kind="host", value="video", role="host"), start=START, end=END,
+    ))
+
+    executor = PivotExecutor(_repo(), FakeClient(), "h1", contracts)
+    result = executor.run("case-1", request)
+
+    assert result.status == "unsupported"
+    assert result.reasons == [
+        "ids_alerts requires an IP entity; network host.name identifies the observer sensor",
+    ]
+    assert executor._intents(request) == []
     assert called is False
 
 

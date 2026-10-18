@@ -303,18 +303,15 @@ class PivotExecutor:
             elif isinstance(request, IdsAlertsRequest):
                 if not network or not _supports(contract, "event.dataset"):
                     continue
-                filters = [Predicate(field="event.dataset", op="eq", value=SURICATA_ALERT_DATASET)]
-                if args.entity.kind == "ip":
-                    if not (_supports(contract, "source.ip") and _supports(contract, "destination.ip")):
-                        continue
-                    any_of = [
-                        [Predicate(field="source.ip", op="eq", value=args.entity.value)],
-                        [Predicate(field="destination.ip", op="eq", value=args.entity.value)],
-                    ]
-                elif _supports(contract, "host.name"):
-                    filters.append(Predicate(field="host.name", op="eq", value=args.entity.value))
-                else:
+                if args.entity.kind != "ip":
                     continue
+                filters = [Predicate(field="event.dataset", op="eq", value=SURICATA_ALERT_DATASET)]
+                if not (_supports(contract, "source.ip") and _supports(contract, "destination.ip")):
+                    continue
+                any_of = [
+                    [Predicate(field="source.ip", op="eq", value=args.entity.value)],
+                    [Predicate(field="destination.ip", op="eq", value=args.entity.value)],
+                ]
 
             intents.append(SearchIntent(
                 kind="raw", target=target, window=window, filters=filters, any_of=any_of,
@@ -545,6 +542,10 @@ class PivotExecutor:
             if anchor_ts.tzinfo is None:
                 raise ValueError("pivot anchor must be timezone-aware")
             anchor_ts = anchor_ts.astimezone(UTC)
+        if isinstance(request, IdsAlertsRequest) and request.arguments.entity.kind != "ip":
+            return PivotResult(status="unsupported", reasons=[
+                "ids_alerts requires an IP entity; network host.name identifies the observer sensor",
+            ])
         intents = self._intents(request)
         if not intents:
             return PivotResult(status="unsupported", reasons=["no compatible source contract"])
