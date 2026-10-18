@@ -14,10 +14,10 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 - [x] Typed normalizers, live-verified with 0 errors on 1.79M records: audit exec groups (EXECVE+SYSCALL+CWD), journal sshd/sudo (audit copies flagged as duplicates), apache access/error, Suricata EVE.
 - [x] 14 playbooks with positive and adversarial-negative fixtures (`tests/test_playbooks.py`). Stack counting, a sequence rule, aggregate grouping.
 - [~] Admission and lanes (`decide/policy.py`). Direct rules publish while the sweep runs; aggregate rules publish at sweep end.
-- [x] Agent loop, **integration tested**: explicit SQLite-backed controller, compact briefs, discriminated decisions, hostile-input validation, four M1 typed tools, direct-only pivots, fairness/budgets, leases and agent-only resume. Evidence: `tests/test_agent_*.py`, `tests/test_hunt_agent.py`, lab hunt `h20261018-195814-1e68c5` (49 calls, 9 executed pivots).
+- [x] Agent loop, **integration tested**: explicit SQLite-backed controller, compact briefs, discriminated decisions, hostile-input validation, four M1 typed tools, direct-only pivots, exact dense-window coverage, duplicate rejection, fairness/budgets, leases and agent-only resume. Evidence: `tests/test_agent_*.py`, `tests/test_hunt_agent.py`, lab hunt `h20261018-211924-b1edf9` (52 calls, 2 complete pivots, 4 duplicate proposals blocked).
 - [x] Web UI: login (argon2, rate limit), CSRF, CSP; hunt list; live SSE view; finding detail with highlighted predicate fields and retained raw records; triage; reports (`tests/test_web.py`).
 - [x] Report manifest (immutable revisions, citation resolution, degraded mode, investigator chains/conclusions/contributions/unworked seeds) plus JSON plus technical Markdown (`tests/test_report.py`).
-- [x] Deployed and **integration tested** on the VM. Hunt `h20261018-195814-1e68c5` produced cited findings, 9 executed agent pivots, exhaustive seed accounting, and a report with 0 broken citations. The hunt correctly remained partial because every executed pivot was capped.
+- [x] Deployed and **integration tested** on the VM. Hunt `h20261018-211924-b1edf9` completed within scope, produced cited findings, 2 complete agent pivots, exhaustive seed accounting, and a report with 0 broken citations. The `192.42.1.174` alert pivot returned 969/969 records without a cap; 43 seeds remained explicitly unworked.
 - [ ] `reviewer` milestone review: no Blocking findings open
 - [ ] Owner demo recorded in STATUS.md
 

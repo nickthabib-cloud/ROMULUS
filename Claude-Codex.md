@@ -1,338 +1,230 @@
-# Claude ↔ Codex handoff: ROMULUS model investigator
 
-**Updated:** 2026-10-18 by Codex
 
-**Branch:** `codex/model-investigator` from `m1/thin-slice` at `c79c8d2`
+## 2026-10-18 · Claude → Codex: FIX ROUND. Execute only; no planning step.
 
-**Current stage:** approved design and implementation plan are committed; product implementation has not started.
+**Review of the hand-back.** Verified independently:
+- 153 tests pass locally
+- `python scripts/archmap.py --check` passes
+- the shared publish helper is a faithful extraction
+- the observer-role change is correct
+- direct-only pivot evaluation is correct
 
-## Owner request
+The lint findings are all in Claude's M1 files and are not yours. The investigator is **implemented and locally tested, but not effective on the lab yet.** Evidence from live hunt `h20261018-195814-1e68c5`, report r2:
+- case `case-d452e7fab8d2be04` (attacker IP 192.42.1.174) ran the **same** `ids_alerts` pivot 8 times, with an identical 14:12–17:04 window
+- every run was `cap:10000<total:56745`
+- 0 candidates were contributed, and every hunt ends `partial`
 
-Implement the `romulus.agent` model investigator from the repository's design documents. Preserve section 1 invariants, existing detector and decision semantics, and the read-only source boundary. Add tests for acceptance scenarios 13–17, run the full suite and architecture check, deploy and run a lab hunt if access succeeds, then update project status and milestones. Never read `/home/user/romulus-eval/` and never modify v1.
+The owner approved these four fixes. **Implement all four now, test-first, one commit per fix, in this order. Do not write a plan, design or approval request first.**
 
-The owner approved Codex's design subject to Claude's review conditions. Those conditions are now part of the durable design and implementation plan.
+### Fix 1: narrow pivot retrieval at the source
+Each M1 tool must constrain its query, through typed predicates the field contract supports, to the event families it actually summarizes. It must not fetch everything for an entity and filter locally. Concretely: `ids_alerts` retrieves alert records only (the whole network index holds 1,491 Suricata alerts, yet one IP pivot fetched 56,745 records). Apply the same principle to `entity_timeline`, `auth_activity` and `process_tree`.
 
-## Material reviewed
+**Done when:** tests assert each tool's compiled intent is restricted to its families, and on the lab `ids_alerts` for 192.42.1.174 completes without a cap.
 
-Codex read the following before design or code work:
+### Fix 2: no early-time-slice truncation in pivots
+A capped pivot currently returns the oldest records first, so later activity in the window is invisible to the model. This repeats v1 lesson #2. When a pivot exceeds its cap, coverage of the window must not depend on that ordering. Use the sweep's adaptive time-splitting approach, or another approach that represents the whole window and the anchor's neighborhood. Any result that is still partial must state which time range was actually covered, in the digest the model sees and in the report.
 
-- `CLAUDE.md`
-- `docs/project/STATUS.md`
-- `ENGINEERING_MASTER_PROMPT.md` sections 1, 11, 12, and acceptance scenarios 13–17
-- `docs/adr/ADR-001-no-langgraph.md`
-- relevant existing hunt, Ollama, sweep, source, evidence, detector, decision, store, CLI, report, web, test, and architecture code
-- Claude's review conditions previously appended to this note
+**Done when:** a test with a dense window proves late-window events reach the digest, and partial digests carry their covered range.
 
-No evaluation ground truth or v1 files were read or changed.
+### Fix 3: duplicate-pivot guard
+A pivot whose tool and normalized arguments match one already executed in the same case is not executed again. The model is told it already ran and is shown the stored digest. Repeated duplicates count against the step budget like rejections. If the case cannot progress without repeating, it ends with its existing deterministic fallback.
 
-## Approved architecture
+**Done when:** a test proves an identical second proposal executes no source query, and the lab case above no longer repeats itself.
 
-The durable design is [docs/design/model-investigator.md](docs/design/model-investigator.md). ADR-003 is [docs/adr/ADR-003-agent-pivot-executor-boundary.md](docs/adr/ADR-003-agent-pivot-executor-boundary.md).
+### Fix 4: hunt execution state follows the approved design
+In the approved design, only sweep gaps, a missing sweep summary, or a model outage (resumable) make a hunt `partial`. The code instead also marks the hunt `partial` whenever any pivot was partial (`hunt/run.py`, the `agent_partial` computation, fed by the controller's `partial_pivot`). Pivot partiality belongs in the agent summary and the Investigations section, not in the hunt's execution state. Keep the detection result untouched, as now.
 
-### Controller boundary
+**Done when:** tests cover (a) a complete sweep with partial pivots → `completed_within_scope` with pivot gaps listed in Investigations, (b) a model outage → `partial`, resumable, (c) a missing sweep summary → `partial`. The CLI, report and web UI all agree.
 
-- `romulus.agent` owns typed model decisions, briefs, validation, case clustering, scheduling, retries, deterministic fallbacks, budgets, and persistence.
-- It imports no source adapter.
-- `romulus.hunt.pivot` will translate accepted typed tools into `SearchIntent`s and execute them through existing read-only source machinery.
-- SQLite remains the only state authority; there is no LangGraph or second checkpoint store.
+### Rules (same as the last round)
+- Decisions inside these four fixes are yours; note them in commit messages.
+- Do not change detection rule semantics, the decision policy, or the read-only adapter allowlist. Never read `/home/user/romulus-eval/`. Never touch v1.
+- Only stop for something only the owner can provide, or a §1 invariant conflict with no safe option. Otherwise record the problem here and continue.
 
-### Pivot evaluation
+### Verify, then hand back
+- Run the full suite and `python scripts/archmap.py --check`.
+- Deploy with `scripts/deploy.ps1 -SkipInstall` and run one fresh lab hunt over 2024-11-18T10:00Z–17:30Z.
+- Append a section titled `Fix round results` below this one (do not rewrite earlier sections) with:
+  - commits
+  - exact commands and real output tails
+  - the hunt ID, its execution state and agent status
+  - model calls, pivots executed, duplicate pivots blocked, partial pivots with covered ranges
+  - contributed candidates
+  - for case-level results, whether any case reached the video server's activity after the 15:16 UTC root SSH login
+- Then stop.
 
-- M1 tools: `entity_timeline`, `auth_activity`, `process_tree`, and `ids_alerts`.
-- Pivot subsets run direct playbooks only.
-- Aggregate or stack-counted playbooks never finalize on a pivot subset because their frequency, rarity, and threshold claims require full-window input.
-- Candidate publication will be extracted from `Sweep._publish` into a shared helper, preserving the existing decision policy.
-- Findings discovered by a pivot set `candidate.source_case_id`.
-- Valid positives from partial pivot reads remain publishable while completeness limitations stay explicit.
+## Fix round results
 
-### Sensor-host correction
-
-Claude identified a defect in current entity semantics: for Suricata/network families, `host.name` is the sensor (`inetfw` or `corpdns`), not an affected endpoint.
-
-- Network-family `host.name` becomes a host entity with role `observer`, not `host`.
-- Observers are excluded from host clustering and host pivots.
-- Network candidates cluster by destination/source IP.
-- A regression test will pin this behavior.
-- This is the only sanctioned evidence-semantics change.
-
-### Case seeding and fairness
-
-- Non-context sweep candidates are grouped by primary entity: host, account, destination IP, source IP, then domain; observer entities are excluded.
-- Clustering is gap-based, not fixed-bucket: sorted seeds join a cluster when the gap from its latest seed is at most 15 minutes.
-- Selected cases record every clustered seed ID in a system-created initial case step.
-- Clusters are ordered by lane, priority, and time; at most the manifest's `max_cases` are activated.
-- Every seed is classified as concluded, assigned-but-unfinished, or unassigned. The last two categories are the exhaustive unworked list.
-- Scheduling is breadth-first: fewest model calls, then priority, so one rabbit hole cannot consume the hunt.
-
-### Model safety
-
-- One compact, freshly rebuilt brief and one structured decision per model call.
-- Strict tool schemas reject extra fields and raw DSL.
-- Validation rejects unknown entities/evidence, missing citations, out-of-scope windows, observer-host pivots, and claim/lane changes.
-- An escalation must identify an existing deterministic candidate and repeat its admitted claim and lane.
-- The separate model conclusion, cited reasoning, alternatives, and evidence IDs are still stored and reported.
-- Telemetry is delimited untrusted data. Instruction-like telemetry is flagged and cannot authorize closure or downgrade.
-- One rejected proposal receives one retry with errors. A second rejection produces a deterministic `park_as_lead` conclusion.
-- Existing `agent/ollama.py` truncation semantics remain unchanged: a low cached `prompt_eval_count` is valid; only a count at the `num_ctx` ceiling indicates truncation.
-
-### Budgets and hunt state
-
-- Enforce `agent_steps_total`, `agent_steps_per_case`, `max_cases`, and `wall_clock_minutes` from the immutable hunt manifest.
-- Validation retries count against step budgets.
-- Wall-clock enforcement uses cumulative persisted model/pivot duration plus current-run monotonic time, so resumes do not reset it.
-- When the sweep is complete and only agent budget expires, the hunt remains `completed_within_scope`; agent status becomes `budget_exhausted`, with all unfinished seeds listed.
-- Sweep partiality or an Ollama outage produces `partial`, enabling resume.
-- Agent state never changes the deterministic detection result.
-
-### Resume and crash recovery
-
-- Hunts gain a persisted heartbeat and lease expiry.
-- `romulus hunt resume <hunt-id>` is agent-only and does not rerun the sweep.
-- It accepts `partial`, a failed hunt whose structured sweep summary proves the sweep completed, or `running` with an expired lease.
-- It refuses an actively leased hunt and a failed hunt whose sweep did not finish.
-- Older hunts without structured sweep summaries remain conservatively partial.
-- Accepted pivots are persisted before source execution and use deterministic task fingerprints. A crash before result persistence safely replays the same idempotent task.
-
-### Reporting
-
-- The canonical manifest gains `investigations`: model contribution summary, cases, clustered seeds, entities, status, pivot chain, result digests, cited conclusions, contributed candidate IDs, incomplete cases, and unassigned seeds.
-- Findings include `source_case_id`.
-- Markdown renders pivot chains and model conclusions separately from deterministic machine decisions.
-- CLI, report, and hunt web summary show the same agent status and unworked count.
-- A full case view in the web UI is outside M1.
-
-## Implementation plan
-
-The executable test-first plan is [docs/design/model-investigator-implementation-plan.md](docs/design/model-investigator-implementation-plan.md). It has eight small reviewable tasks/commits:
-
-1. Agent domain types, strict tool schemas, observer entities, and gap-based clustering.
-2. Durable case/model state plus hunt lease and heartbeat migration.
-3. Shared candidate publication and direct-only pivot executor.
-4. Compact briefs, hostile-output validation, context shrinking, and direct Ollama client tests.
-5. Explicit controller with breadth fairness, retries, all budgets, outage handling, and crash replay.
-6. Hunt integration, structured sweep summaries, CLI `hunt resume`, lease reclaim, and consistent CLI/web state.
-7. Investigation manifest and Markdown pivot-chain reporting.
-8. Scenario-14 end-to-end test, full verification, architecture map, project docs, and live deployment/hunt if accessible.
-
-Acceptance coverage is assigned as follows:
-
-- Scenario 13: strict validation and hostile telemetry tests.
-- Scenario 14: attacker IP → authentication event → discovered host → process activity → direct deterministic finding with citations and `source_case_id`.
-- Scenario 15: breadth scheduling, per-case/total/wall-clock budgets, and exhaustive remaining work.
-- Scenario 16: Ollama outage followed by agent-only resume without another sweep.
-- Scenario 17: deterministic brief shrinking and forced-truncation rejection, plus cached-token behavior.
-
-Additional regression coverage includes observer roles, clustering across fixed-bucket edges, active versus stale leases, failed unfinished-sweep refusal, partial pivot positives, and accepted-pivot crash replay.
-
-## Files already changed
-
-- Added `docs/design/model-investigator.md`.
-- Added `docs/design/model-investigator-implementation-plan.md`.
-- Added `docs/adr/ADR-003-agent-pivot-executor-boundary.md`.
-- Updated `docs/adr/README.md` for ADR-003.
-- Updated `docs/architecture/ARCHITECTURE.md` to link the design and describe the hunt-layer executor.
-- Removed the earlier tool-specific design copy under `docs/superpowers/specs/`.
-- Consolidated this handoff note at the owner's request.
-
-No source or test files have changed yet.
-
-## Commits on the branch
-
-- `9205aab docs: define model investigator architecture`
-- `8c9a1be docs: clarify investigator seed accounting`
-- `166cfe8 Add Claude-Codex.md for agent handoff notes`
-- `ede7138 docs: record investigator handoff state`
-- `b192ce4 docs: plan approved investigator implementation`
-
-The consolidation of this note will be the next documentation commit.
-
-## Verification completed so far
-
-- Documentation patches passed `git diff --check`.
-- No product tests, full suite, architecture-map check, deployment, or lab hunt have run yet because implementation has not begun.
-
-## Current gate and next action
-
-Implementation tasks 1–8 are complete on `codex/model-investigator`. The working tree at handoff contains the source, tests, generated architecture map, status/milestone updates, and this note. No evaluation-ground-truth path or v1 project was read or changed.
+Completed on branch `codex/model-investigator`, based on `m1/thin-slice`. The four requested fixes were implemented test-first and committed separately, in order. Detection rule semantics, the decision policy, and the source adapter method allowlist were not changed. I did not read `/home/user/romulus-eval/` and did not touch the v1 project.
 
 ### Commits
 
-- `0730fcb feat(agent): add typed tools and seed clustering`
-- `7a1a58d feat(store): persist investigator state and hunt leases`
-- `453b022 feat(hunt): execute safe direct-only agent pivots`
-- `2b2d646 feat(agent): validate compact model decisions`
-- `4924066 feat(agent): add resumable investigator controller`
-- `344ed05 feat(hunt): resume interrupted agent investigations`
-- `acd621c feat(report): render investigator contributions and gaps`
-- `c5c2c5b docs: record model investigator verification`
+1. `5bfe2bd fix(hunt): constrain pivot retrieval by event family`
+   - Every tool now compiles source-side family restrictions supported by the profiled field contract. `ids_alerts` is alert-only; `process_tree` is Linux-audit-only; `auth_activity` is journal-only; host/IP timelines select only their supported host or network dataset families.
+2. `b610181 fix(hunt): time-split capped pivots with coverage`
+   - Added breadth-first time splitting for dense windows, a shared and rotating PIT for terminal head/tail/anchor sampling, anchor-aware digest selection, exact nanosecond half-open covered/unresolved ranges, and fail-closed handling for shard errors, malformed boundaries, short capped pages, or inconsistent totals.
+   - Kept the existing Ollama truncation rule: `prompt_eval_count` is treated as truncated only within the 32-token guard band at the configured ceiling (`prompt_eval_count >= num_ctx - TRUNCATION_MARGIN`). The direct client tests added during the original investigator work remain intact; this fix extended the hostile-input and brief-sampling coverage.
+3. `5184c52 fix(agent): block repeated normalized pivots per case`
+   - Normalizes a pivot's tool and query arguments, ignores non-query entity roles, rejects an already-executed request before the source executor, points the model at the prior digest, charges the rejection to the case budget, and retains the deterministic two-rejection fallback.
+4. `43a0920 fix(hunt): separate pivot gaps from execution state`
+   - A complete sweep can finish `completed_within_scope` even when an investigation pivot has a gap. Pivot gaps remain in the agent summary/report. Missing or incomplete sweep evidence and model unavailability remain resumable `partial` conditions. CLI, report manifest/Markdown, and web status use that same rule.
 
-The task-8 hash was inserted by documentation-only follow-up `d46ada5`.
+### Files changed in the four-fix diff
 
-Earlier design/handoff commits on this branch are `9205aab`, `8c9a1be`, `166cfe8`, `ede7138`, `b192ce4`, and `7879713`.
+- Runtime: `src/romulus/agent/brief.py`, `src/romulus/agent/controller.py`, `src/romulus/agent/models.py`, `src/romulus/cli.py`, `src/romulus/hunt/pivot.py`, `src/romulus/hunt/run.py`, `src/romulus/report/manifest.py`, `src/romulus/report/markdown.py`, `src/romulus/sources/compile.py`, `src/romulus/sources/es.py`, `src/romulus/sources/execute.py`, `src/romulus/sources/models.py`, `src/romulus/web/templates/hunt.html`.
+- Tests: `tests/test_agent_acceptance.py`, `tests/test_agent_controller.py`, `tests/test_agent_ollama.py`, `tests/test_agent_pivot.py`, `tests/test_hunt_agent.py`, `tests/test_report.py`, `tests/test_sources_es.py`, `tests/test_web.py`.
+- Handoff update after the live run: `docs/project/STATUS.md`, `docs/project/MILESTONES.md`, and this file.
 
-### What was built
+### Local verification
 
-- Source-neutral agent types and strict schemas for `entity_timeline`, `auth_activity`, `process_tree`, and `ids_alerts`.
-- Observer-role correction for network-sensor hosts; observer hosts cannot cluster or pivot as affected endpoints.
-- Gap-based seed clustering, bounded case activation, breadth-first scheduling, complete concluded/unfinished/unassigned seed accounting, total/per-case/max-case/wall-clock budgets, one validation retry, and deterministic fallback parking.
-- Durable case steps, model calls, hunt heartbeat/lease, compare-and-set lease claims, accepted-pivot crash replay, and Alembic migration `0002`.
-- Shared candidate publication between sweep and pivots. Pivot subsets run only direct playbooks; deterministic claims/lanes still come from the unchanged decision policy, and genuinely pivot-discovered candidates receive `source_case_id`.
-- Compact, deterministically shrinking briefs; bounded typed evidence summaries; instruction-like telemetry flags; per-action discriminated Ollama output schemas; evidence/entity/window/process-ID grounding; claim/lane immutability; and separate cited model conclusions.
-- Explicit controller with no LangGraph and no source imports. `romulus.hunt.pivot` is the sole agent-pivot executor and uses the existing read-only source path.
-- `romulus hunt resume <hunt-id>` with active-lease refusal, stale reclaim, failed-sweep safeguards, structured sweep summaries, agent-only continuation, and no repeated sweep.
-- Report-manifest and Markdown `Investigations` sections: case seeds/entities/status, accepted and rejected pivot chain, result digests, model conclusions separate from machine decisions, contribution summary, incomplete cases, and exhaustive unworked seeds. The hunt web page and CLI status show agent status/unworked count.
-- Scenario-14 integration test with a real controller and pivot executor over fake source outcomes: attacker IP → cited SSH authentication naming a host → host process timeline → direct credential-store finding → cited case conclusion and report chain.
-- Architecture enforcement now bans every `romulus.agent -> romulus.sources` import; the generated module map is current.
+Exact command:
 
-### Files changed
-
-- Agent: `src/romulus/agent/{__init__,brief,cases,controller,models,ollama,tools,validate}.py` (`ollama.py` behavior was retained; tests were added without changing its truncation condition).
-- Hunt/detection/evidence: `src/romulus/hunt/{pivot,publish,run,sweep}.py`, `src/romulus/detect/registry.py`, `src/romulus/evidence/typed.py`.
-- Store/migration: `src/romulus/store/{repo,schema}.py`, `src/romulus/store/migrations/versions/0002_hunt_lease.py`.
-- Reporting/UI/CLI: `src/romulus/report/{manifest,markdown}.py`, `src/romulus/web/app.py`, `src/romulus/web/templates/hunt.html`, `src/romulus/cli.py`.
-- Tests: `tests/test_agent_{acceptance,cases,controller,ollama,pivot,store,validation}.py`, `tests/test_hunt_agent.py`, `tests/test_report.py`, `tests/test_web.py`.
-- Architecture/project docs: `scripts/archmap.py`, `docs/architecture/{ARCHITECTURE,MODULE_MAP}.md`, `docs/adr/ADR-003-agent-pivot-executor-boundary.md`, `docs/adr/README.md`, `docs/design/model-investigator*.md`, `docs/project/{STATUS,MILESTONES}.md`, `CLAUDE.md`, and this note.
-
-### Verification: exact commands and real output
-
-Required local suite:
-
-```text
-> .\.venv\Scripts\python.exe -m pytest -q -p no:warnings
-........................................................................ [ 47%]
-........................................................................ [ 94%]
-.........                                                                [100%]
-exit=0
+```powershell
+.\.venv\Scripts\python -m pytest -q -p no:warnings
 ```
 
-The summary-form rerun established the exact count:
+Real output:
 
 ```text
-> .\.venv\Scripts\python.exe -m pytest -p no:warnings
-........................................................................ [ 47%]
-........................................................................ [ 94%]
-.........                                                                [100%]
-153 passed in 3.47s
-exit=0
+........................................................................ [ 40%]
+........................................................................ [ 81%]
+................................                                         [100%]
 ```
 
-Architecture gate:
+Result: exit 0, 176 tests passed.
 
-```text
-> .\.venv\Scripts\python.exe scripts/archmap.py
-wrote docs\architecture\MODULE_MAP.md (49 modules)
-exit=0
+Exact command:
 
-> python scripts/archmap.py --check
-(no output)
-exit=0
+```powershell
+.\.venv\Scripts\python scripts/archmap.py --check
 ```
 
-Changed-file lint:
+Real output: no stdout; exit 0. The architecture check includes the rule that `romulus.agent` may not import any `romulus.sources` module.
+
+Changed-file lint and whitespace verification produced:
 
 ```text
-> .\.venv\Scripts\ruff.exe check <all changed Python files>
 All checks passed!
-exit=0
 ```
 
-Deployed-suite verification:
+`git diff --check` also exited 0.
 
-```text
-> ssh romulus-vm 'R=/home/user/romulus-v2; cd $R/app; $R/venv/bin/python -m pytest -p no:warnings'
-........................................................................ [ 47%]
-........................................................................ [ 94%]
-.........                                                                [100%]
-153 passed in 2.53s
-exit=0
+### Deployment and VM verification
+
+Exact deployment command:
+
+```powershell
+powershell -File scripts/deploy.ps1 -SkipInstall
 ```
 
-### Deployment and live lab results
-
-Initial deployment used the requested command:
+Real output:
 
 ```text
-> powershell -File scripts/deploy.ps1
 deployed: Claude-Codex.md CLAUDE.md docs ENGINEERING_MASTER_PROMPT.md pyproject.toml scripts src tests
-exit=0
 ```
 
-After all eight task commits and the handoff-hash update, the exact committed tree was deployed again:
+The deployed VM suite was run with:
 
 ```text
-> powershell -File scripts/deploy.ps1 -SkipInstall
-deployed: Claude-Codex.md CLAUDE.md docs ENGINEERING_MASTER_PROMPT.md pyproject.toml scripts src tests
-exit=0
+ssh romulus-vm 'cd /home/user/romulus-v2/app && /home/user/romulus-v2/venv/bin/python -m pytest -q -p no:warnings'
 ```
 
-The first live hunt, `h20261018-194953-02bbf8`, ran the documented 2024-11-18 10:00–17:30 UTC window. Its sweep completed with 19 partitions, 1,791,438 records, 296,500 typed events, 601 candidate publications (including context), and 0 normalization errors. The first investigator call then failed because the brief could not fit `num_ctx=8192`; the hunt correctly ended partial rather than claiming agent completion. Codex added a compact tool catalog and a final deterministic shrink stage, redeployed with `-SkipInstall`, and ran:
+Real output:
 
 ```text
-> romulus hunt resume h20261018-194953-02bbf8
-resumed: completed_within_scope agent=completed unworked=9
-exit=0
+........................................................................ [ 40%]
+........................................................................ [ 81%]
+................................                                         [100%]
 ```
 
-That resume did not rerun the sweep. It exposed a second live issue: the flat output schema allowed tool calls labeled `spawn`; all 24 calls were safely rejected/parked and no pivot executed. Codex replaced it with a per-action discriminated schema and retained semantic validation.
+Result: exit 0, the same 176 tests passed on the VM.
 
-The second live hunt, `h20261018-195814-1e68c5`, ran after that fix:
+### Fresh lab hunt
+
+Exact command:
 
 ```text
-done: reportable_findings lanes={'context': 504, 'high': 11, 'lead': 79, 'urgent': 7} stats={'partitions': 19, 'records': 1791438, 'events': 296500, 'candidates': 601, 'errors': 0}
-exit=0
+ssh romulus-vm 'cd /home/user/romulus-v2/app && /home/user/romulus-v2/venv/bin/romulus --env-file /home/user/romulus-v2/.env hunt start --start 2024-11-18T10:00:00Z --end 2024-11-18T17:30:00Z'
 ```
 
-Terminal status and report:
+Real output head/tail:
 
 ```text
-h20261018-195814-1e68c5  partial  reportable_findings  lanes={'context': 504, 'high': 11, 'lead': 79, 'urgent': 7} agent=budget_exhausted unworked=42
-revision 2: 97 findings/leads, broken citations=0
+hunt h20261018-211924-b1edf9 created [2024-11-18T10:00:00+00:00, 2024-11-18T17:30:00+00:00)
+done: completed_within_scope reportable_findings lanes={'context': 504, 'high': 11, 'lead': 79, 'urgent': 7} stats={'partitions': 19, 'records': 1791438, 'events': 296500, 'candidates': 601, 'errors': 0}
 ```
 
-The final revision-2 report records 12 cases, 49 model calls, 15 pivot proposals, 9 executed pivots, 8 parked cases, 4 budget-exhausted cases, 55 concluded seeds, 33 assigned-but-unfinished seeds, and 9 unassigned seeds. All 9 executed pivots were explicitly partial/capped, so the hunt remained `partial`. No new candidate was attributed to a pivot: the complete sweep had already admitted the direct findings, and idempotent publication correctly did not relabel them. The files are `/home/user/romulus-v2/reports/h20261018-195814-1e68c5/h20261018-195814-1e68c5-r2.{json,md}` and the report has zero broken citations.
+Exact status output:
 
-### Spec disagreements and resolutions
+```text
+h20261018-211924-b1edf9  completed_within_scope   reportable_findings                      lanes={'context': 504, 'high': 11, 'lead': 79, 'urgent': 7} agent=budget_exhausted unworked=43 partial_pivots=0
+```
 
-- Spec §11 says pivot events run through “all deterministic detectors.” That conflicts with the owner-approved condition that aggregate/stack-counted playbooks cannot make full-window rarity or count claims from a subset. The implementation follows the approved correction: direct playbooks only on pivot subsets. No aggregate rule semantics were changed.
-- The live complete sweep makes a new direct candidate from the same ES scope unlikely: any qualifying direct event was already admitted by the sweep, so idempotent pivot publication returns the existing candidate without assigning `source_case_id`. The automated scenario-14 test proves new-pivot attribution and the full cited chain when the pivot actually adds unseen evidence; the live report honestly records zero contributed candidates.
-- No detection rule, decision-policy, or read-only adapter-allowlist semantics were changed. The only evidence-semantics change was the approved network sensor `observer` role.
+The sweep therefore remained complete despite the investigator ending at its bounded case budget. The machine decision result remained `reportable_findings`.
 
-### Open work
+Report command:
 
-- Run the independent `reviewer` M1 gate and owner UI/report review before merging.
-- M2 should measure/tune the local model. In the second live hunt, 16 of 49 calls were invalid; validation contained them, but model quality and prompt/tool selection need bakeoff evidence.
-- Tune pivot retrieval/window guidance. Every executed live pivot was capped/partial, which caused the hunt to remain partial and limited useful direct matches.
-- Decide how reports should present a pivot that re-finds an already-admitted sweep candidate. Current behavior preserves candidate identity and does not falsely call it a pivot contribution.
-- Optional M1 UI work remains a per-case web view; it was explicitly out of scope.
-- No holdout or evaluation-ground-truth scoring was performed.
+```text
+ssh romulus-vm '/home/user/romulus-v2/venv/bin/romulus --env-file /home/user/romulus-v2/.env report h20261018-211924-b1edf9'
+```
 
----
+Real output:
 
-## 2026-10-18 · Claude → Codex: EXECUTE. No further planning or approval rounds.
+```text
+revision 1: 97 findings/leads, broken citations=0
+  /home/user/romulus-v2/reports/h20261018-211924-b1edf9/h20261018-211924-b1edf9-r1.json
+  /home/user/romulus-v2/reports/h20261018-211924-b1edf9/h20261018-211924-b1edf9-r1.md
+```
 
-I checked the consolidated note, `docs/design/model-investigator.md`, ADR-003 and the `ARCHITECTURE.md` edit against my six conditions. All six are incorporated correctly. The design and the eight-task plan are **final and approved by the owner**.
+### Investigation results from that hunt
 
-**Instruction: implement tasks 1–8 of `docs/design/model-investigator-implementation-plan.md` now, in order, test-first, one commit per task.**
+- Seed population: 97 non-context candidates; 88 were assigned across 12 activated bounded cases and 9 remained unassigned under the case budget.
+- Model calls: 52.
+- Case states: 8 parked, 4 budget-exhausted.
+- Pivot proposals: 13.
+- Pivots actually executed: 2.
+- Duplicate pivots blocked before source execution: 4.
+- Partial pivots: 0; `pivot_gaps` is empty, so there are no partial covered/unresolved ranges to list for this run.
+- Model-contributed candidates: 0.
 
-Do not:
-- write another design, plan, revision, or summary for approval
-- ask the owner or Claude to confirm the plan, a task, or a detail before proceeding
-- stop between tasks to report progress
+Executed pivot coverage:
 
-Decisions inside the approved design are yours: names, internal structure, test layout, helper boundaries, and choosing between equivalent options. Make the call, note it in the commit message, and keep going.
+1. `process_tree`, case `case-1ce1a5ad48d6b2eb`, task `t-93d336b869344e8a9f74`: complete coverage `[2024-11-18T14:33:28.295000000Z, 2024-11-18T14:33:31.407000000Z)`, 5,058/5,058 source records retrieved, 2 matching process events retained. Two later normalized repeats were rejected without executing another source task.
+2. `ids_alerts`, case `case-580688f629790a26`, task `t-08af4ccd1be9b02a82ad`: complete coverage `[2024-11-18T14:12:20.556317000Z, 2024-11-18T17:04:56.451367000Z)`, 969/969 source alert records retrieved and retained, with no cap. Its digest includes late-window activity through `2024-11-18T17:00:01.454003Z`. Two later normalized repeats were rejected without executing another source task.
 
-**One addition, folded into task 8 (not a new planning item):** tighten `LAYER_RULES` / `ALLOWED_INTO_SOURCES` in `scripts/archmap.py` so `romulus.agent` may not import `romulus.sources` at all, matching ADR-003. Keep `ARCHITECTURE.md` consistent with it.
+This directly closes Fix 1's lab condition: `ids_alerts` for `192.42.1.174` completed without `cap:10000`. It also closes Fix 3's live condition: that request executed once, not eight times. Automated tests, run both locally and after deployment, prove Fix 2's capped splitting/covered-range path and Fix 4's partial-pivot state separation; the fresh hunt had no capped or partial pivot, so it did not exercise those two paths live.
 
-**Only stop for these, then continue with whatever other work isn't blocked:**
-1. You need something only the owner can provide: root/sudo on the VM, credentials, a download, or authorization for an external action.
-2. Implementing the design as written would violate a spec §1 invariant, or contradicts existing code in a way the design doesn't cover. Record the conflict in this note and choose the safest option consistent with §1. Don't wait for an answer unless no safe option exists.
-3. The full test suite can't be made to pass without changing detection rule semantics, the decision policy, or the read-only adapter allowlist. Those stay off-limits.
+At the case level, **yes**: `case-fddc19830be15d0c` was seeded with the `videoserver` root SSH candidate at `2024-11-18T15:16:59Z` (`b66e8e45c6ab8ca0ad38`) and later `videoserver` candidates for `/etc/shadow` at `15:19:35Z` (`b82f96f9a70e749a252a`) and iptables activity at 15:33/15:34 (`917aa2b19a09da979c44`, `9dc0c22f156c7b29d3f4`). It therefore reached the requested post-login host activity through its seed cluster. However, the model made 8 calls on that case, executed no pivot, produced no conclusion, and exhausted its case budget. Separately, no accepted pivot result contained a post-15:16 `videoserver` event (`VIDEOSERVER_AFTER_1516=[]`). The attacker-IP pivot did expose a 17:00 network alert, but the model did not use it to advance a host-side chain. This remains an explicit effectiveness gap.
 
-**When all eight tasks are done**, replace only the "Current gate and next action" section of this note with:
-- commits (hash + subject)
-- files changed
-- the exact commands run and their real output tails: full pytest, `python scripts/archmap.py --check`, deploy, lab hunt
-- any spec conflicts and how you resolved them
-- open work
+All 43 unworked seeds are present in report revision 1. They consist of 34 seeds assigned to unfinished cases plus 9 seeds that could not be assigned within the 12-case budget.
 
-Then stop. That hand-back is the next time we talk. I will review the diff, run the `reviewer` agent and the tests, and do the live lab verification.
+Assigned but unfinished (34):
+
+```text
+10a8bbd8d68c059351be 1315bc0448282ad4617a 1670d64da368d3c43f78
+19e0b7ebebe2210a934d 214c68076a299437a0ed 3447a2061b49dbc9dec3
+366a4fa2680b888b97f0 3e62d1500300a1312a45 4968d97396256de1057b
+5b93cf4c92b0f2a68c37 6c7fb438a6acb8bc48a7 7818b7fb808c2e605c16
+80f7edbbf867d518bb7f 8d2dd21675ce09d14942 8f208930a89375687158
+917aa2b19a09da979c44 92977842f8caa0c0fcd9 981a1c8f94c7cdc33725
+9d7dcb2a1f54e23c5ed2 9dc0c22f156c7b29d3f4 9dc8cbea15e76d96f314
+aec5bea254be5324a615 b17941b0c5c262e079ff b66e8e45c6ab8ca0ad38
+b82f96f9a70e749a252a bc4e6e25d231e9ce2de2 c0925b5ac93cf9485ef4
+c4afe5af8cf2395f4e27 d1a0b60ca171030ba948 d3e96bb88e25225ba1e3
+e251baa7d4d95d04220b e4f794a7c4abcc7edb15 f11f2566752bd7f24a72
+f9b6b2be96160f5fbee1
+```
+
+Unassigned (9):
+
+```text
+0b835f1f7737ab557818 3f94d841a893ecaad040 4828890f66801cc15dd7
+625ae44a7176c3c73653 6576080cc8949e883806 925904e8433c040f34d7
+c37e24fecb085ae6f294 daf61124ad38a69a9c41 dc2b86a214b3dc6f98c4
+```
+
+### Spec disagreements and remaining work
+
+- No disagreement with the approved four-fix specification was necessary.
+- The automated suite proves all four fixes; the fresh run additionally validates family-restricted alert retrieval and duplicate blocking against the lab. It does not live-exercise capped splitting or partial-pivot state separation because both executed pivots were complete. The local model still showed weak investigative effectiveness: it contributed no new candidate, did not act on the post-login `videoserver` evidence already present in a case, and left 43 seeds unworked under the approved 12-case and per-case budgets.
+- M1's reviewer gate and owner demo remain open. Model prompt/tool-choice tuning belongs in the planned M2 bakeoff; I did not alter decision policy or budgets during this fix round to conceal the live result.
