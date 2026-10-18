@@ -1,0 +1,91 @@
+"""Durable investigator state, idempotent steps, and hunt lease recovery."""
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from romulus.store.db import make_engine, migrate
+from romulus.store.repo import Repo
+
+T = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
+
+
+def _repo() -> Repo:
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"budgets": {}}, "digest", "test")
+    return repo
+
+
+def _case_row():
+    return {
+        "id": "case-1", "hunt_id": "h1", "seed_candidate_id": "cand-1", "title": "seed",
+        "priority": 50.0, "entities": [["host", "video", "host"]], "hypotheses": [], "step_budget": 8,
+    }
+
+
+def test_active_lease_refuses_resume_and_expired_lease_is_reclaimed():
+    repo = _repo()
+    claimed = repo.claim_hunt("h1", lease_seconds=60, now=T)
+    assert claimed["execution_state"] == "running"
+    assert claimed["lease_until"].replace(tzinfo=UTC) == T + timedelta(seconds=60)
+
+    with pytest.raises(RuntimeError, match="active lease"):
+        repo.claim_hunt("h1", lease_seconds=60, resume=True, now=T + timedelta(seconds=59))
+
+    reclaimed = repo.claim_hunt("h1", lease_seconds=60, resume=True, now=T + timedelta(seconds=61))
+    assert reclaimed["lease_until"].replace(tzinfo=UTC) == T + timedelta(seconds=121)
+    assert repo.latest_audit("h1", "hunt.resume_stale")["detail"]["previous_state"] == "running"
+
+
+@pytest.mark.parametrize("state", ["partial", "failed"])
+def test_partial_and_failed_hunts_can_transition_back_to_running(state):
+    repo = _repo()
+    repo.claim_hunt("h1", 60, now=T)
+    repo.set_hunt_state("h1", state, stop_reason="interrupted")
+
+    claimed = repo.claim_hunt("h1", 60, resume=True, now=T + timedelta(minutes=1))
+
+    assert claimed["execution_state"] == "running"
+    assert claimed["ended_at"] is None
+
+
+def test_case_creation_and_steps_are_idempotent_and_pending_work_is_visible():
+    repo = _repo()
+    assert repo.create_case(_case_row()) is True
+    assert repo.create_case(_case_row()) is False
+    assert len(repo.cases("h1")) == 1
+
+    sid = repo.append_case_step("case-1", 0, {"action": "seed", "seed_candidate_ids": ["cand-1"]}, True)
+    assert repo.append_case_step("case-1", 0, {"action": "seed"}, True) == sid
+    repo.append_case_step("case-1", 1, {"action": "pivot", "tool": "entity_timeline"}, True,
+                          task_id="task-1")
+    assert [s["n"] for s in repo.pending_case_steps("h1")] == [1]
+
+    repo.update_case_step("case-1", 1, result_digest={"event_ids": ["e1"], "duration_ms": 25})
+    assert repo.pending_case_steps("h1") == []
+    assert repo.case_steps("case-1")[-1]["result_digest"]["event_ids"] == ["e1"]
+
+
+def test_model_calls_are_ordered_and_elapsed_time_includes_pivots():
+    repo = _repo()
+    repo.create_case(_case_row())
+    repo.append_case_step("case-1", 0, {"action": "seed"}, True,
+                          result_digest={"duration_ms": 20})
+    base = {
+        "hunt_id": "h1", "case_id": "case-1", "purpose": "triage", "model": "test",
+        "options": {}, "prompt_digest": "p", "status": "ok",
+    }
+    repo.save_model_call({**base, "id": "call-2", "duration_ms": 12, "at": T + timedelta(seconds=2)})
+    repo.save_model_call({**base, "id": "call-1", "duration_ms": 8, "at": T + timedelta(seconds=1)})
+
+    assert [c["id"] for c in repo.model_calls(case_id="case-1")] == ["call-1", "call-2"]
+    assert repo.agent_elapsed_ms("h1") == 40
+
+
+def test_terminal_state_clears_the_worker_lease():
+    repo = _repo()
+    repo.claim_hunt("h1", 60, now=T)
+    repo.set_hunt_state("h1", "completed_within_scope")
+
+    assert repo.get_hunt("h1")["lease_until"] is None

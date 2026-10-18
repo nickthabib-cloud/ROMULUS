@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, ClassVar
 
 from sqlalchemy import Engine, func, select
 from sqlalchemy.dialects.sqlite import insert
@@ -44,9 +45,74 @@ class Repo:
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(select(t.hunt).order_by(t.hunt.c.created_at.desc())).mappings()]
 
-    VALID = {"planned": {"running", "canceled"}, "running": {"paused", "completed_within_scope", "partial", "failed",
-                                                             "canceled"},
-             "paused": {"running", "canceled", "partial"}, "partial": {"running"}, "failed": {"running"}}
+    def claim_hunt(self, hunt_id: str, lease_seconds: int, resume: bool = False,
+                   now: datetime | None = None) -> dict:
+        """Claim a planned hunt or safely reclaim a resumable hunt."""
+        now = now or utcnow()
+        lease_until = now + timedelta(seconds=lease_seconds)
+        with write_txn(self.engine) as c:
+            current = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
+            state = current["execution_state"]
+            action = "hunt.claim"
+            if resume:
+                if state == "running":
+                    current_lease = current["lease_until"]
+                    if current_lease is not None:
+                        if current_lease.tzinfo is None:
+                            current_lease = current_lease.replace(tzinfo=UTC)
+                        if current_lease > now:
+                            raise RuntimeError(f"hunt {hunt_id} has an active lease")
+                    action = "hunt.resume_stale"
+                elif state in {"partial", "failed"}:
+                    action = "hunt.resume"
+                else:
+                    raise ValueError(f"hunt {hunt_id} in state {state} cannot be resumed")
+            elif state != "planned":
+                raise ValueError(f"hunt {hunt_id} in state {state} cannot be claimed")
+
+            values: dict[str, Any] = {
+                "execution_state": "running",
+                "heartbeat_at": now,
+                "lease_until": lease_until,
+                "ended_at": None,
+            }
+            if state == "planned":
+                values["started_at"] = now
+            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(**values))
+            c.execute(t.audit_event.insert().values(
+                at=now, actor="system", action=action, hunt_id=hunt_id,
+                detail={"previous_state": state, "lease_seconds": lease_seconds},
+            ))
+            claimed = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
+            return dict(claimed)
+
+    def heartbeat_hunt(self, hunt_id: str, lease_seconds: int, now: datetime | None = None) -> dict:
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            state = c.execute(select(t.hunt.c.execution_state).where(t.hunt.c.id == hunt_id)).scalar_one()
+            if state != "running":
+                raise RuntimeError(f"hunt {hunt_id} is not running")
+            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(
+                heartbeat_at=now, lease_until=now + timedelta(seconds=lease_seconds),
+            ))
+            row = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
+            return dict(row)
+
+    def latest_audit(self, hunt_id: str, action: str) -> dict | None:
+        query = (select(t.audit_event)
+                 .where(t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == action)
+                 .order_by(t.audit_event.c.id.desc()))
+        with self.engine.connect() as c:
+            row = c.execute(query).mappings().first()
+            return dict(row) if row else None
+
+    VALID: ClassVar = {
+        "planned": {"running", "canceled"},
+        "running": {"paused", "completed_within_scope", "partial", "failed", "canceled"},
+        "paused": {"running", "canceled", "partial"},
+        "partial": {"running"},
+        "failed": {"running"},
+    }
 
     def set_hunt_state(self, hunt_id: str, state: str, actor: str = "system", **extra):
         with write_txn(self.engine) as c:
@@ -58,6 +124,7 @@ class Repo:
                 vals["started_at"] = utcnow()
             if state in ("completed_within_scope", "partial", "failed", "canceled"):
                 vals["ended_at"] = utcnow()
+                vals["lease_until"] = None
             c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(**vals))
             c.execute(t.audit_event.insert().values(at=utcnow(), actor=actor, action=f"hunt.{state}", hunt_id=hunt_id,
                                                     detail={k: str(v) for k, v in extra.items()}))
@@ -80,8 +147,10 @@ class Repo:
         with self.engine.connect() as c:
             return c.execute(select(t.task.c.state).where(t.task.c.id == task_id)).scalar()
 
-    TASK_STATES = {"planned", "queued", "leased", "executed", "ingested", "evaluated", "failed", "partial",
-                   "budget_limited", "unsupported", "not_applicable", "canceled", "split"}
+    TASK_STATES: ClassVar = {
+        "planned", "queued", "leased", "executed", "ingested", "evaluated", "failed", "partial",
+        "budget_limited", "unsupported", "not_applicable", "canceled", "split",
+    }
 
     def update_task(self, task_id: str, state: str, outcome: dict | None = None, error: str | None = None,
                     attempt: bool = False):
@@ -170,6 +239,108 @@ class Repo:
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(select(t.disposition_event).where(
                 t.disposition_event.c.candidate_id == cid).order_by(t.disposition_event.c.id)).mappings()]
+
+    # ---- investigator state ----------------------------------------------------------------
+    def create_case(self, row: dict) -> bool:
+        now = utcnow()
+        values = {
+            "status": "open", "steps_used": 0, "hypotheses": [],
+            "created_at": now, "updated_at": now, **row,
+        }
+        with write_txn(self.engine) as c:
+            result = c.execute(insert(t.case).values(**values).on_conflict_do_nothing(index_elements=["id"]))
+            return result.rowcount == 1
+
+    def case(self, case_id: str) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.case).where(t.case.c.id == case_id)).mappings().first()
+            return dict(row) if row else None
+
+    def cases(self, hunt_id: str, statuses: list[str] | None = None) -> list[dict]:
+        query = select(t.case).where(t.case.c.hunt_id == hunt_id)
+        if statuses:
+            query = query.where(t.case.c.status.in_(statuses))
+        query = query.order_by(t.case.c.priority.desc(), t.case.c.created_at, t.case.c.id)
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(query).mappings()]
+
+    def update_case(self, case_id: str, **values) -> None:
+        allowed = {"title", "status", "priority", "entities", "hypotheses", "steps_used", "step_budget", "summary"}
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"unknown case fields: {sorted(unknown)}")
+        with write_txn(self.engine) as c:
+            c.execute(t.case.update().where(t.case.c.id == case_id).values(**values, updated_at=utcnow()))
+
+    def append_case_step(self, case_id: str, n: int, decision: dict, accepted: bool,
+                         rejection: str | None = None, model_call_id: str | None = None,
+                         task_id: str | None = None, result_digest: dict | None = None) -> int:
+        values = {
+            "case_id": case_id, "n": n, "decision": decision, "accepted": int(accepted),
+            "rejection": rejection, "model_call_id": model_call_id, "task_id": task_id,
+            "result_digest": result_digest, "at": utcnow(),
+        }
+        with write_txn(self.engine) as c:
+            c.execute(insert(t.case_step).values(**values).on_conflict_do_nothing(
+                index_elements=["case_id", "n"],
+            ))
+            return c.execute(select(t.case_step.c.id).where(
+                t.case_step.c.case_id == case_id, t.case_step.c.n == n,
+            )).scalar_one()
+
+    def update_case_step(self, case_id: str, n: int, **values) -> None:
+        allowed = {"model_call_id", "decision", "accepted", "rejection", "task_id", "result_digest"}
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"unknown case step fields: {sorted(unknown)}")
+        if "accepted" in values:
+            values["accepted"] = int(values["accepted"])
+        with write_txn(self.engine) as c:
+            c.execute(t.case_step.update().where(
+                t.case_step.c.case_id == case_id, t.case_step.c.n == n,
+            ).values(**values))
+
+    def case_steps(self, case_id: str) -> list[dict]:
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(select(t.case_step).where(
+                t.case_step.c.case_id == case_id,
+            ).order_by(t.case_step.c.n)).mappings()]
+
+    def pending_case_steps(self, hunt_id: str) -> list[dict]:
+        query = (select(t.case_step)
+                 .join(t.case, t.case.c.id == t.case_step.c.case_id)
+                 .where(t.case.c.hunt_id == hunt_id, t.case_step.c.accepted == 1,
+                        t.case_step.c.task_id.is_not(None), t.case_step.c.result_digest.is_(None))
+                 .order_by(t.case_step.c.case_id, t.case_step.c.n))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(query).mappings()]
+
+    def save_model_call(self, row: dict) -> bool:
+        values = {"at": utcnow(), **row}
+        with write_txn(self.engine) as c:
+            result = c.execute(insert(t.model_call).values(**values).on_conflict_do_nothing(index_elements=["id"]))
+            return result.rowcount == 1
+
+    def model_calls(self, hunt_id: str | None = None, case_id: str | None = None) -> list[dict]:
+        query = select(t.model_call)
+        if hunt_id is not None:
+            query = query.where(t.model_call.c.hunt_id == hunt_id)
+        if case_id is not None:
+            query = query.where(t.model_call.c.case_id == case_id)
+        query = query.order_by(t.model_call.c.at, t.model_call.c.id)
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(query).mappings()]
+
+    def agent_elapsed_ms(self, hunt_id: str) -> int:
+        with self.engine.connect() as c:
+            model_ms = c.execute(select(func.coalesce(func.sum(t.model_call.c.duration_ms), 0)).where(
+                t.model_call.c.hunt_id == hunt_id,
+            )).scalar_one()
+            digests = c.execute(select(t.case_step.c.result_digest).join(
+                t.case, t.case.c.id == t.case_step.c.case_id,
+            ).where(t.case.c.hunt_id == hunt_id, t.case_step.c.result_digest.is_not(None))).scalars()
+            pivot_ms = sum(int(digest.get("duration_ms", 0)) for digest in digests if isinstance(digest, dict))
+            return int(model_ms) + pivot_ms
 
     # ---- coverage ---------------------------------------------------------------------------
     def set_rule_cell(self, hunt_id: str, rule_id: str, version: str, target: str, partition: str, state: str,

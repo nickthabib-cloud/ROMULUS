@@ -2,7 +2,18 @@
 from __future__ import annotations
 
 from sqlalchemy import (
-    JSON, Column, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Table, Text, UniqueConstraint,
+    JSON,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
 )
 
 metadata = MetaData()
@@ -20,6 +31,8 @@ hunt = Table(
     Column("stop_reason", Text),
     Column("started_at", DateTime(timezone=True)),
     Column("ended_at", DateTime(timezone=True)),
+    Column("heartbeat_at", DateTime(timezone=True)),
+    Column("lease_until", DateTime(timezone=True)),
 )
 
 source_profile = Table(
@@ -204,8 +217,9 @@ case_step = Table(
     Column("accepted", Integer, nullable=False),
     Column("rejection", Text),
     Column("task_id", String),
-    Column("result_digest", JSON),
+    Column("result_digest", JSON(none_as_null=True)),
     Column("at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("case_id", "n", name="uq_case_step_n"),
 )
 
 report_manifest = Table(
