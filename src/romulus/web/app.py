@@ -109,7 +109,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             raise HTTPException(403, "bad CSRF token")
         try:
             for v in (start, end):
-                datetime.fromisoformat(v.replace("Z", "+00:00"))
+                datetime.fromisoformat(v)
         except ValueError:
             raise HTTPException(400, "start/end must be ISO 8601 times") from None
         if style not in ("broad", "directed"):
@@ -119,9 +119,9 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         if hypothesis.strip():
             cmd += ["--hypothesis", hypothesis.strip()[:500]]
         s.logs_dir.mkdir(parents=True, exist_ok=True)
-        log = open(s.logs_dir / f"hunt-{datetime.now():%Y%m%d-%H%M%S}.log", "ab")
         env = {**os.environ, "USER": f"web:{u['u']}"}
-        subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)  # noqa: S603
+        with open(s.logs_dir / f"hunt-{datetime.now():%Y%m%d-%H%M%S}.log", "ab") as log:
+            subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
         repo.audit(f"web:{u['u']}", "web.hunt_start", detail={"start": start, "end": end, "style": style})
         return RedirectResponse("/?started=1", status_code=303)
 
@@ -139,12 +139,15 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         cov = _coverage(repo.rule_cells(hunt_id))
         with repo.engine.connect() as c:
             from sqlalchemy import select
+
             from romulus.store import schema as t
             reports = c.execute(select(t.report_manifest.c.id, t.report_manifest.c.revision,
                                        t.report_manifest.c.created_at).where(t.report_manifest.c.hunt_id == hunt_id)
                                 .order_by(t.report_manifest.c.revision.desc())).mappings().all()
+        agent_audit = repo.latest_audit(hunt_id, "hunt.agent_summary")
+        agent_summary = agent_audit["detail"] if agent_audit else None
         return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
-                    coverage=cov["rules"], tasks=repo.tasks(hunt_id), reports=reports)
+                    coverage=cov["rules"], tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary)
 
     @app.get("/hunts/{hunt_id}/stream")
     async def stream(request: Request, hunt_id: str):

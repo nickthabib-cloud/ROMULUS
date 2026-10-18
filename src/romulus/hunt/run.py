@@ -4,8 +4,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from romulus.agent.controller import Investigator
 from romulus.config import Settings
 from romulus.hunt.manifest import build_manifest, new_hunt_id
+from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.sweep import Sweep
 from romulus.sources.es import ElasticClient
 from romulus.sources.models import Window
@@ -14,6 +16,7 @@ from romulus.store.db import digest, make_engine, migrate
 from romulus.store.repo import Repo
 
 log = logging.getLogger("romulus.hunt")
+HUNT_LEASE_SECONDS = 600
 
 
 def open_repo(s: Settings) -> Repo:
@@ -42,53 +45,150 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     return hid
 
 
+def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient) -> dict:
+    hunt_id = hunt["id"]
+    manifest = hunt["manifest"]
+    contracts = {}
+    for target in manifest["targets"]:
+        profile, contract = build_profile(client, target)
+        recorded = manifest.get("source_profiles", {}).get(target)
+        if recorded and profile.id != recorded["id"]:
+            repo.audit("system", "source_profile_changed", hunt_id, {
+                "target": target, "now": profile.id, "manifest": recorded["id"],
+            })
+        contracts[target] = contract
+    return contracts
+
+
+def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
+    counts = repo.lane_counts(hunt_id)
+    reportable = counts.get("urgent", 0) + counts.get("high", 0)
+    result = ("reportable_findings" if reportable else "leads_only" if counts.get("lead") else
+              "no_qualifying_observation_in_assessed_scope")
+    return counts, result
+
+
+def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
+            *, stats: dict | None = None, partial_reasons: list[str] | None = None) -> dict:
+    partial_reasons = partial_reasons or list(sweep_summary.get("partial_reasons") or [])
+    sweep_complete = bool(sweep_summary.get("complete"))
+    missing_summary = not sweep_summary
+    agent_partial = bool(agent_summary.get("partial")) or agent_summary.get("status") in {"unavailable", "failed"}
+    partial = missing_summary or not sweep_complete or agent_partial
+    counts, result = _detection_result(repo, hunt_id)
+    reasons = partial_reasons[:10]
+    if missing_summary:
+        reasons.append("sweep summary missing; coverage remains conservatively partial")
+    elif sweep_complete:
+        reasons.append("frontier complete")
+    else:
+        reasons.append("sweep coverage partial")
+    if agent_summary.get("stop_reason"):
+        reasons.append(f"agent: {agent_summary['stop_reason']}")
+    repo.audit("system", "hunt.agent_summary", hunt_id, agent_summary)
+    state = "partial" if partial else "completed_within_scope"
+    repo.set_hunt_state(
+        hunt_id, state, detection_result=result, stop_reason="; ".join(reasons),
+    )
+    return {
+        "hunt_id": hunt_id,
+        "execution_state": state,
+        "stats": stats or sweep_summary.get("stats") or {},
+        "lanes": counts,
+        "detection_result": result,
+        "partial_reasons": partial_reasons,
+        "agent": agent_summary,
+    }
+
+
+def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str,
+                      contracts: dict, window: Window) -> dict:
+    executor = PivotExecutor(repo, client, hunt_id, contracts)
+    def heartbeat():
+        repo.heartbeat_hunt(hunt_id, HUNT_LEASE_SECONDS)
+
+    return Investigator(
+        s, repo, executor, hunt_id, window, heartbeat=heartbeat,
+    ).run()
+
+
 def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -> dict:
     repo = open_repo(s)
-    h = repo.get_hunt(hunt_id)
-    if h is None:
+    hunt = repo.get_hunt(hunt_id)
+    if hunt is None:
         raise KeyError(hunt_id)
+    repo.claim_hunt(hunt_id, HUNT_LEASE_SECONDS)
+    h = repo.get_hunt(hunt_id)
     m = h["manifest"]
     window = Window(start=datetime.fromisoformat(m["window"]["start"]), end=datetime.fromisoformat(m["window"]["end"]))
     client = ElasticClient(s)
-    contracts = {}
-    for target in m["targets"]:
-        prof, contract = build_profile(client, target)
-        if prof.id != m["source_profiles"][target]["id"]:
-            # mapping or content changed since the manifest was fixed: proceed, but say so
-            repo.audit("system", "source_profile_changed", hunt_id, {"target": target, "now": prof.id,
-                                                                   "manifest": m["source_profiles"][target]["id"]})
-        contracts[target] = contract
-    repo.set_hunt_state(hunt_id, "running")
+    contracts = _contracts(s, repo, h, client)
     sweep = Sweep(repo, client, hunt_id, window, contracts, on_candidate)
     try:
         for target in m["targets"]:
             sweep.run_target(target)
         sweep.finalize()
-    except Exception as e:  # noqa: BLE001 - recorded, hunt marked failed, re-raised
+    except Exception as e:
+        repo.audit("system", "hunt.sweep_summary", hunt_id, {
+            "finished": False, "complete": False, "partial_reasons": sweep.partial_reasons,
+            "stats": sweep.stats, "error": str(e),
+        })
         repo.set_hunt_state(hunt_id, "failed", stop_reason=f"sweep error: {e}")
         raise
-    agent_summary = {"status": "disabled", "partial": False, "stop_reason": "model investigator disabled (model-off run)"}
+    sweep_summary = {
+        "finished": True,
+        "complete": not sweep.partial_reasons,
+        "partial_reasons": sweep.partial_reasons,
+        "stats": sweep.stats,
+    }
+    repo.audit("system", "hunt.sweep_summary", hunt_id, sweep_summary)
+    agent_summary = {
+        "status": "disabled", "partial": False,
+        "stop_reason": "model investigator disabled (model-off run)",
+        "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
+    }
     if agent:
         try:
-            from romulus.agent.controller import Investigator
-        except ImportError:
-            # Honest state: the investigator is not available in this build; leads stay unworked.
-            agent_summary = {"status": "not_available", "partial": False,
-                             "stop_reason": "model investigator not available in this build; leads were not "
-                                            "investigated by the agent"}
-            repo.audit("system", "agent.not_available", hunt_id)
-        else:
-            agent_summary = Investigator(s, repo, client, hunt_id, contracts, window).run()
-    counts = repo.lane_counts(hunt_id)
-    partial = bool(sweep.partial_reasons) or (agent_summary or {}).get("partial", False)
-    reportable = counts.get("urgent", 0) + counts.get("high", 0)
-    result = ("reportable_findings" if reportable else "leads_only" if counts.get("lead") else
-              "no_qualifying_observation_in_assessed_scope")
-    reason = "; ".join(sweep.partial_reasons[:10]) or "frontier complete"
-    if agent_summary and agent_summary.get("stop_reason"):
-        reason += f"; agent: {agent_summary['stop_reason']}"
-    repo.audit("system", "hunt.agent_summary", hunt_id, agent_summary)
-    repo.set_hunt_state(hunt_id, "partial" if partial else "completed_within_scope", detection_result=result,
-                        stop_reason=reason)
-    return {"hunt_id": hunt_id, "stats": sweep.stats, "lanes": counts, "detection_result": result,
-            "partial_reasons": sweep.partial_reasons, "agent": agent_summary}
+            agent_summary = _run_investigator(s, repo, client, hunt_id, contracts, window)
+        except Exception as exc:
+            log.exception("investigator failed")
+            agent_summary = {
+                "status": "failed", "partial": True, "stop_reason": f"investigator error: {exc}",
+                "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
+            }
+    return _finish(
+        repo, hunt_id, agent_summary, sweep_summary,
+        stats=sweep.stats, partial_reasons=sweep.partial_reasons,
+    )
+
+
+def resume_hunt(s: Settings, hunt_id: str) -> dict:
+    """Resume only persisted investigator work; the deterministic sweep is never re-run."""
+    repo = open_repo(s)
+    hunt = repo.get_hunt(hunt_id)
+    if hunt is None:
+        raise KeyError(hunt_id)
+    sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")
+    sweep_summary = dict(sweep_audit["detail"]) if sweep_audit else {}
+    if sweep_summary and not sweep_summary.get("finished"):
+        raise RuntimeError("hunt cannot resume agent work because the sweep did not finish")
+    if hunt["execution_state"] == "failed" and not sweep_summary.get("finished"):
+        raise RuntimeError("failed hunt cannot resume because the sweep did not finish")
+    repo.claim_hunt(hunt_id, HUNT_LEASE_SECONDS, resume=True)
+    hunt = repo.get_hunt(hunt_id)
+    manifest = hunt["manifest"]
+    window = Window(
+        start=datetime.fromisoformat(manifest["window"]["start"]),
+        end=datetime.fromisoformat(manifest["window"]["end"]),
+    )
+    client = ElasticClient(s)
+    contracts = _contracts(s, repo, hunt, client)
+    try:
+        agent_summary = _run_investigator(s, repo, client, hunt_id, contracts, window)
+    except Exception as exc:
+        log.exception("resumed investigator failed")
+        agent_summary = {
+            "status": "failed", "partial": True, "stop_reason": f"investigator error: {exc}",
+            "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
+        }
+    return _finish(repo, hunt_id, agent_summary, sweep_summary)

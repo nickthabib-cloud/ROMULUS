@@ -37,7 +37,7 @@ def cmd_doctor(args) -> int:
 def _parse_time(value: str, tz: str):
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=ZoneInfo(tz))
     return dt.astimezone(ZoneInfo("UTC"))
@@ -45,7 +45,8 @@ def _parse_time(value: str, tz: str):
 
 def cmd_hunt(args) -> int:
     import logging
-    from romulus.hunt.run import create_hunt, open_repo, run_hunt
+
+    from romulus.hunt.run import create_hunt, open_repo, resume_hunt, run_hunt
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     logging.getLogger("alembic").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -64,13 +65,25 @@ def cmd_hunt(args) -> int:
         print(json.dumps(res, indent=2, default=str) if args.json else
               f"done: {res['detection_result']} lanes={res['lanes']} stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }")
         return EXIT_OK
+    if args.action == "resume":
+        result = resume_hunt(s, args.hunt_id)
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            agent = result["agent"]
+            print(f"resumed: {result['execution_state']} agent={agent['status']} "
+                  f"unworked={agent.get('unworked_count', 0)}")
+        return EXIT_OK
     if args.action == "status":
         repo = open_repo(s)
         hunts = [repo.get_hunt(args.hunt_id)] if args.hunt_id else repo.list_hunts()
         for h in hunts:
             if h:
+                agent_audit = repo.latest_audit(h["id"], "hunt.agent_summary")
+                agent = agent_audit["detail"] if agent_audit else {}
                 print(f"{h['id']}  {h['execution_state']:24} {h['detection_result'] or '-':40} "
-                      f"lanes={repo.lane_counts(h['id'])}")
+                      f"lanes={repo.lane_counts(h['id'])} agent={agent.get('status', '-')} "
+                      f"unworked={agent.get('unworked_count', '-')}")
         return EXIT_OK
     return EXIT_USAGE
 
@@ -112,6 +125,7 @@ def cmd_report(args) -> int:
 
 def cmd_user(args) -> int:
     import getpass
+
     from romulus.hunt.run import open_repo
     from romulus.web.auth import create_user
     repo = open_repo(load_settings(_env_file(args)))
@@ -131,6 +145,7 @@ def cmd_user(args) -> int:
 
 def cmd_web(args) -> int:
     import uvicorn
+
     from romulus.web.app import create_app
     env = _env_file(args)
     s = load_settings(env)
@@ -150,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor", help="check sources, privileges, model endpoint, tools and storage")
     hp = sub.add_parser("hunt", help="create/run hunts and show status")
-    hp.add_argument("action", choices=["start", "status"])
+    hp.add_argument("action", choices=["start", "resume", "status"])
     hp.add_argument("hunt_id", nargs="?")
     hp.add_argument("--start")
     hp.add_argument("--end")
@@ -170,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if args.cmd == "hunt" and args.action == "start" and not (args.start and args.end):
         p.error("hunt start needs --start and --end")
+    if args.cmd == "hunt" and args.action == "resume" and not args.hunt_id:
+        p.error("hunt resume needs a hunt id")
     handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report,
                 "user": cmd_user, "web": cmd_web}
     return handlers[args.cmd](args)

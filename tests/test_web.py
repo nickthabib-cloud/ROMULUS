@@ -28,6 +28,9 @@ def client(tmp_path, monkeypatch):
             rows = [dict(r) for r in a.execute(table.select()).mappings()]
             if rows:
                 b.execute(table.insert(), rows)
+    repo.audit("system", "hunt.agent_summary", "h1", {
+        "status": "budget_exhausted", "unworked_count": 3, "model_calls": 4, "pivots": 2,
+    })
     return TestClient(app), pw, cid
 
 
@@ -82,3 +85,14 @@ def test_report_path_traversal_refused(client):
     _login(c, pw)
     assert c.get("/reports/h1/..%2F..%2Fetc%2Fpasswd.md").status_code == 404
     assert c.get("/reports/h1/h1-r1.txt").status_code == 404
+
+
+def test_hunt_page_shows_latest_agent_status_and_unworked_count(client):
+    c, pw, _ = client
+    _login(c, pw)
+
+    page = c.get("/hunts/h1")
+
+    assert page.status_code == 200
+    assert "budget_exhausted" in page.text
+    assert "3 unworked" in page.text

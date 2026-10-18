@@ -10,6 +10,15 @@
   {% if h.stop_reason %}<div class="wide"><span class="label">Stop reason</span> {{ h.stop_reason }}</div>{% endif %}
 </div>
 
+{% if agent %}
+<section id="agent-summary">
+  <h2>Model investigator</h2>
+  <p><b>{{ agent.status }}</b> · {{ agent.unworked_count or 0 }} unworked seed(s)
+    · {{ agent.model_calls or 0 }} model call(s) · {{ agent.pivots or 0 }} pivot(s)</p>
+  {% if agent.stop_reason %}<p class="help">{{ agent.stop_reason }}</p>{% endif %}
+</section>
+{% endif %}
+
 <div class="lanes">
   {% for ln in ['urgent', 'high', 'lead', 'context'] %}
   <a class="lane l-{{ ln }} {% if lane == ln %}sel{% endif %}" href="?lane={{ ln }}">{{ ln }} <b>{{ lanes.get(ln, 0) }}</b></a>
