@@ -114,7 +114,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     """Stack-counted: routine shapes collapse into one context item; rare shapes become leads and
     are escalated only when typed argv indicators are present (rarity alone is not suspicion)."""
     id = "host.web_service_spawns_interpreter"
-    version = "2"
+    version = "3"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -133,19 +133,38 @@ class WebServiceSpawnsInterpreter(Playbook):
         self.counts: dict[tuple, int] = defaultdict(int)
 
     def consume(self, events):
+        matches = []
         for e in self.applicable(events):
             user, argv = e.get("process.user"), e.get("process.argv")
             if user not in WEB_SERVICE_USERS or not argv or basename(argv[0]) not in INTERPRETERS:
+                continue
+            indicators = interpreter_indicators(argv)
+            if indicators:
+                matches.append(self._event_match(e, user, argv, indicators))
                 continue
             key = (e.host, user, command_shape(argv))
             self.counts[key] += 1
             if len(self.shapes[key]) < 20:
                 self.shapes[key].append(e)
-        return []
+        return matches
 
     @property
     def groups(self):
         return self.shapes
+
+    def _event_match(self, e, user, argv, indicators, count=None):
+        rce_shaped = any(("decoded data" in item) or ("stdin" in item) for item in indicators)
+        lane, severity = (("urgent", "critical") if rce_shaped else
+                          ("high", "high") if indicators else ("lead", "medium"))
+        count_text = f" This command shape occurred {count} time(s) in the window." if count is not None else ""
+        claim = (f"A process execution event on {e.host} records account '{user}' executing "
+                 f"'{basename(argv[0])}' (argv: {_argv_summary(argv)}); {outcome_phrase(e)}.{count_text}")
+        match = Match(
+            self.id, claim, self.claim_type, [e], [pf(e, "process.user"), pf(e, "process.argv")],
+            e.ts, severity, lane, "high" if e.outcome == Outcome.success else "medium", _exec_entities(e),
+        )
+        match.notes += [f"indicator: {item}" for item in indicators] or ["rare shape without typed indicators"]
+        return match
 
     def finalize(self):
         out = []
@@ -161,16 +180,7 @@ class WebServiceSpawnsInterpreter(Playbook):
                 continue
             for e in evs:
                 argv = e.get("process.argv")
-                ind = interpreter_indicators(argv)
-                rce_shaped = any(("decoded data" in i) or ("stdin" in i) for i in ind)
-                lane, sev = ("urgent", "critical") if rce_shaped else ("high", "high") if ind else ("lead", "medium")
-                claim = (f"A process execution event on {e.host} records account '{user}' executing "
-                         f"'{basename(argv[0])}' (argv: {_argv_summary(argv)}); {outcome_phrase(e)}. "
-                         f"This command shape occurred {n} time(s) in the window.")
-                m = Match(self.id, claim, self.claim_type, [e], [pf(e, "process.user"), pf(e, "process.argv")],
-                          e.ts, sev, lane, "high" if e.outcome == Outcome.success else "medium", _exec_entities(e))
-                m.notes += [f"indicator: {i}" for i in ind] or ["rare shape without typed indicators"]
-                out.append(m)
+                out.append(self._event_match(e, user, argv, [], count=n))
         return out
 
 

@@ -48,6 +48,29 @@ def test_web_user_routine_shapes_collapse_and_injection_escalates():
     assert stdin_item.proposed_lane == "urgent" and stdin_item.severity == "critical"
 
 
+def test_common_stdin_shell_shape_keeps_every_indicator_event():
+    events = [exec_ev(["/bin/sh"], user="www-data") for _ in range(6)]
+    matches = run(host.WebServiceSpawnsInterpreter, events)
+    assert len(matches) == 6
+    assert all(match.proposed_lane == "urgent" and match.severity == "critical" for match in matches)
+    assert all(match.events == [event] for match, event in zip(matches, events, strict=True))
+
+
+def test_indicator_after_shape_and_example_limits_is_not_hidden():
+    prefix = "padding = 'this prefix is deliberately longer than forty eight characters'\n"
+    benign_code = prefix + "print(padding)"
+    indicator_code = prefix + "exec(__import__('base64').b64decode('cHJpbnQoMSk='))"
+    events = [exec_ev(["python3", "-c", benign_code], user="www-data") for _ in range(20)]
+    indicator_event = exec_ev(["python3", "-c", indicator_code], user="www-data")
+
+    matches = run(host.WebServiceSpawnsInterpreter, events + [indicator_event])
+
+    assert sorted(match.proposed_lane for match in matches) == ["context", "urgent"]
+    urgent = next(match for match in matches if match.proposed_lane == "urgent")
+    assert urgent.events == [indicator_event]
+    assert any("decoded data" in note for note in urgent.notes)
+
+
 def test_python_decoded_exec_indicator_is_parsed_not_substring():
     from romulus.detect.host import interpreter_indicators
     assert interpreter_indicators(["python3", "-c", "exec(__import__('base64').b64decode('cHJpbnQoMSk='))"])
