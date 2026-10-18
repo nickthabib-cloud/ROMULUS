@@ -107,6 +107,29 @@ class Investigator:
         steps = self.repo.case_steps(case_id)
         return max((step["n"] for step in steps), default=0) + 1
 
+    def _executed_duplicate(self, case_id: str, request: Any) -> dict | None:
+        def semantic_key(item: Any) -> tuple:
+            args = item.arguments
+            window = (args.start.astimezone(UTC), args.end.astimezone(UTC))
+            entity = getattr(args, "entity", None)
+            if entity is not None:
+                return item.tool, window, entity.kind, entity.value
+            return item.tool, window, args.host, args.process_id
+
+        requested_key = semantic_key(request)
+        for step in self.repo.case_steps(case_id):
+            decision_data = step.get("decision") or {}
+            if (not step.get("accepted") or step.get("result_digest") is None
+                    or decision_data.get("action") != "pivot"):
+                continue
+            try:
+                prior_request = parse_tool_request(AgentDecision.model_validate(decision_data))
+            except (ValidationError, ValueError):
+                continue
+            if semantic_key(prior_request) == requested_key:
+                return step
+        return None
+
     def _record_call(self, case: dict, step_n: int, brief, result: ModelResult,
                      validation: ValidationResult | None, status: str | None = None) -> str:
         call_id = "mc-" + digest({"hunt": self.hunt_id, "case": case["id"], "step": step_n})[:20]
@@ -183,6 +206,15 @@ class Investigator:
         if decision is not None:
             validation = validate_decision(decision, brief, self.window)
             parse_errors = validation.errors
+            if validation.ok and decision.action == "pivot":
+                duplicate = self._executed_duplicate(case["id"], validation.request)
+                if duplicate is not None:
+                    error = (
+                        f"duplicate pivot: normalized request already executed at step {duplicate['n']}; "
+                        f"reuse prior_steps step {duplicate['n']} result_digest"
+                    )
+                    validation = ValidationResult(ok=False, errors=[error], request=validation.request)
+                    parse_errors = validation.errors
         accepted = bool(validation and validation.ok)
         result_status = result.status if accepted else "invalid"
         call_id = self._record_call(case, step_n, brief, result, validation, status=result_status)
@@ -338,6 +370,11 @@ class Investigator:
             step for case in cases for step in self.repo.case_steps(case["id"])
             if (step.get("decision") or {}).get("action") == "pivot" and step.get("accepted")
         ]
+        duplicate_pivots = [
+            step for case in cases for step in self.repo.case_steps(case["id"])
+            if (step.get("decision") or {}).get("action") == "pivot" and not step.get("accepted")
+            and "duplicate pivot:" in (step.get("rejection") or "")
+        ]
         return {
             "status": status,
             "partial": partial or self.partial_pivot,
@@ -351,6 +388,7 @@ class Investigator:
             "unworked_count": len(unworked),
             "model_calls": len(calls),
             "pivots": len(pivot_steps),
+            "duplicate_pivots_blocked": len(duplicate_pivots),
         }
 
     def run(self) -> dict:

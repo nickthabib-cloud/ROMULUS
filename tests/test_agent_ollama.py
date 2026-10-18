@@ -127,3 +127,46 @@ def test_minimum_safe_brief_preserves_anchor_neighborhood_evidence():
     assert [event["id"] for event in telemetry["anchor_neighborhood"]] == ["event-1"]
     assert len(telemetry["anchor_neighborhood"][0]["fields"]["process.argv"]) < 2_000
     assert brief.token_estimate + 900 <= 1450
+
+
+class OldDuplicateBriefRepo(LargeBriefRepo):
+    def case(self, case_id):
+        case = super().case(case_id)
+        return {**case, "steps_used": 15}
+
+    def case_steps(self, _case_id):
+        huge = "routine telemetry field " * 500
+        steps = [{
+            "n": 0, "decision": {"action": "seed", "seed_candidate_ids": ["cand-1"]},
+            "accepted": True, "result_digest": None,
+        }, {
+            "n": 1, "decision": {"action": "pivot", "tool": "entity_timeline"},
+            "accepted": True, "result_digest": {
+                "status": "partial", "reasons": ["PINNED-DIGEST"],
+                "matched_event_count": 20, "coverage": [{
+                    "target": "romulus-host-x", "start": "2024-11-18T14:00:00Z",
+                    "end": "2024-11-18T14:10:00Z", "status": "partial",
+                    "reasons": ["PINNED-DIGEST"], "returned": 10, "total": 20,
+                }],
+            },
+        }]
+        steps.extend({
+            "n": n, "decision": {"action": "pivot", "hypothesis": huge},
+            "accepted": False, "rejection": huge, "result_digest": None,
+        } for n in range(2, 16))
+        return steps
+
+
+def test_minimum_safe_retry_brief_pins_old_duplicate_result_digest():
+    brief = build_brief(
+        OldDuplicateBriefRepo(), "case-1", {"tools": ["entity_timeline"]},
+        num_ctx=2000, max_out=900,
+        retry_errors=("duplicate pivot: normalized request already executed at step 1",),
+    )
+
+    assert "minimum_safe_brief" in brief.shrink_actions
+    telemetry = json.loads(brief.user.split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split("\n</", 1)[0])
+    pinned = next(step for step in telemetry["prior_steps"] if step["n"] == 1)
+    assert pinned["result_digest"]["status"] == "partial"
+    assert pinned["result_digest"]["reasons"] == ["PINNED-DIGEST"]
+    assert brief.token_estimate + 900 <= 2000

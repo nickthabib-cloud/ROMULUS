@@ -15,6 +15,7 @@ _INSTRUCTION = re.compile(
     r"do not investigate|assistant\s*:|developer\s*:)\b",
     re.IGNORECASE,
 )
+_DUPLICATE_STEP = re.compile(r"already executed at step (\d+)")
 
 
 @dataclass
@@ -60,6 +61,22 @@ def _truncate(value: Any, limit: int) -> Any:
     if isinstance(value, dict):
         return {key: _truncate(item, limit) for key, item in value.items()}
     return value
+
+
+def _retry_step_numbers(retry_errors: tuple[str, ...]) -> set[int]:
+    return {
+        int(match.group(1))
+        for error in retry_errors
+        for match in _DUPLICATE_STEP.finditer(error)
+    }
+
+
+def _select_steps(steps: list[dict], limit: int, pinned_numbers: set[int]) -> list[dict]:
+    pinned = [step for step in steps if step.get("n") in pinned_numbers]
+    pinned_ids = {step.get("n") for step in pinned}
+    recent = [step for step in steps if step.get("n") not in pinned_ids]
+    remaining = max(0, limit - len(pinned))
+    return sorted(pinned + (recent[-remaining:] if remaining else []), key=lambda step: step.get("n", -1))
 
 
 def _flag_instructions(candidates: list[dict], steps: list[dict],
@@ -227,10 +244,12 @@ def build_brief(repo: Repo, case_id: str, tool_catalog: dict, num_ctx: int, max_
         for key in ("id", "claim", "lane", "priority", "event_ids", "entities", "benign_alternatives",
                     "next_checks", "source_case_id", "ts")
     } for candidate in candidates[:12]]
-    step_view = [{
+    all_step_views = [{
         "n": step["n"], "decision": step.get("decision"), "accepted": bool(step.get("accepted")),
         "rejection": step.get("rejection"), "result_digest": step.get("result_digest"),
-    } for step in steps[-12:]]
+    } for step in steps]
+    pinned_step_numbers = _retry_step_numbers(retry_errors)
+    step_view = _select_steps(all_step_views, 12, pinned_step_numbers)
     data = _truncate({
         "case": case_view,
         "candidates": candidate_view,
@@ -260,7 +279,7 @@ def build_brief(repo: Repo, case_id: str, tool_catalog: dict, num_ctx: int, max_
         shrink_actions.append("truncate_strings_400")
         user, token_estimate = _render(system, data)
     if token_estimate + max_out > num_ctx:
-        data["prior_steps"] = data["prior_steps"][-6:]
+        data["prior_steps"] = _select_steps(data["prior_steps"], 6, pinned_step_numbers)
         data["candidates"] = [{
             "id": candidate.get("id"), "claim": candidate.get("claim"), "lane": candidate.get("lane"),
             "event_ids": (candidate.get("event_ids") or [])[:3],
@@ -277,7 +296,7 @@ def build_brief(repo: Repo, case_id: str, tool_catalog: dict, num_ctx: int, max_
             _compact_anchor(view) for view in data["anchor_neighborhood"][:1]
         ]
         compact_steps = []
-        for step in data["prior_steps"][-4:]:
+        for step in _select_steps(data["prior_steps"], 4, pinned_step_numbers):
             result = step.get("result_digest") or {}
             compact_result = {
                 key: result.get(key)

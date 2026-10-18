@@ -73,9 +73,11 @@ class QueueModel:
     def __init__(self, results):
         self.results = list(results)
         self.calls = 0
+        self.users = []
 
     def chat_json(self, *_args, **_kwargs):
         self.calls += 1
+        self.users.append(_args[2])
         item = self.results.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -227,3 +229,48 @@ def test_resume_replays_accepted_pivot_without_a_result_before_new_model_calls()
     assert repo.case_steps(case_id)[1]["result_digest"]["status"] == "complete"
     assert model.calls == 0
     assert summary["status"] == "budget_exhausted"
+
+
+def test_duplicate_normalized_pivot_is_not_executed_and_falls_back_after_two_rejections():
+    repo = _repo(total=3, per_case=3)
+    _candidate(repo, "c1", "video", 50)
+    original = _host_pivot("video", "event-c1")
+    duplicate = _host_pivot("video", "event-c1")
+    duplicate["arguments"] = {
+        "end": "2024-11-18T14:10:00Z",
+        "entity": {"role": "host", "value": "video", "kind": "host"},
+        "start": "2024-11-18T14:00:00Z",
+    }
+    model = QueueModel([_result(original), _result(duplicate), _result(duplicate)])
+    executor = RecordingExecutor()
+
+    summary = _investigator(repo, model, executor).run()
+
+    case = repo.cases("h1")[0]
+    proposal_steps = repo.case_steps(case["id"])[1:]
+    assert executor.calls == [(case["id"], "entity_timeline")]
+    assert case["steps_used"] == 3
+    assert case["status"] == "parked"
+    assert [step["accepted"] for step in proposal_steps] == [1, 0, 0]
+    assert all("duplicate pivot" in step["rejection"] for step in proposal_steps[1:])
+    assert summary["duplicate_pivots_blocked"] == 2
+    assert "deterministic_fallback_park" in case["summary"]
+    assert "already executed at step 1" in model.users[2]
+    assert "task-" + case["id"] in model.users[2]
+
+
+def test_duplicate_pivot_ignores_non_query_entity_role():
+    repo = _repo(total=3, per_case=3)
+    _candidate(repo, "c1", "video", 50)
+    original = _host_pivot("video", "event-c1")
+    duplicate = _host_pivot("video", "event-c1")
+    duplicate["arguments"]["entity"]["role"] = "attacker-controlled"
+    model = QueueModel([_result(original), _result(duplicate), _result(duplicate)])
+    executor = RecordingExecutor()
+
+    summary = _investigator(repo, model, executor).run()
+
+    case = repo.cases("h1")[0]
+    assert executor.calls == [(case["id"], "entity_timeline")]
+    assert summary["duplicate_pivots_blocked"] == 2
+    assert case["status"] == "parked"
