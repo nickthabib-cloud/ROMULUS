@@ -94,3 +94,25 @@ def tool_schema() -> dict:
     """JSON schema supplied to the model for pivot argument validation."""
     return _REQUEST.json_schema()
 
+
+def tool_catalog() -> dict:
+    """Compact model-facing catalog; strict validation still uses ``tool_schema``."""
+    return {
+        "entity_timeline": {
+            "arguments": "entity {kind: host|ip, value, role}, start, end",
+            "purpose": "retrieve a cited host or IP timeline within the hunt window",
+        },
+        "auth_activity": {
+            "arguments": "entity {kind: host|account, value, role}, start, end",
+            "purpose": "retrieve authentication and privilege activity",
+        },
+        "process_tree": {
+            "arguments": "host, process_id, start, end",
+            "purpose": "retrieve process events for a process ID already present in case evidence",
+        },
+        "ids_alerts": {
+            "arguments": "entity {kind: host|ip, value, role}, start, end",
+            "purpose": "retrieve IDS alerts for a known host or IP",
+        },
+    }
+

@@ -114,6 +114,7 @@ def render(m: dict, banner: str = BANNER) -> str:
         f"| Cases | {inv_summary.get('cases', 0)} |",
         f"| Model calls | {contributions.get('model_calls', 0)} |",
         f"| Pivot steps | {contributions.get('pivot_steps', 0)} |",
+        f"| Rejected pivot proposals | {max(0, contributions.get('pivot_proposals', 0) - contributions.get('pivot_steps', 0))} |",
         f"| Pivot-discovered candidates | {contributions.get('contributed_candidates', inv_summary.get('contributed_candidates', 0))} |",
         f"| Unworked seeds | {inv_summary.get('unworked_count', 0)} |", "",
         "**Seed accounting**", "",

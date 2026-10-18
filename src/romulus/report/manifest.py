@@ -84,7 +84,8 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
     concluded: list[str] = []
     unfinished: list[str] = []
     case_rows = []
-    total_pivots = 0
+    pivot_proposals = 0
+    executed_pivots = 0
     for case in cases:
         steps = repo.case_steps(case["id"])
         seed_ids: list[str] = []
@@ -105,7 +106,9 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
             decision = step.get("decision") or {}
             if decision.get("action") != "pivot":
                 continue
-            total_pivots += 1
+            pivot_proposals += 1
+            if step["accepted"] and step.get("result_digest") is not None:
+                executed_pivots += 1
             pivot_steps.append({
                 "n": step["n"], "tool": decision.get("tool"), "hypothesis": decision.get("hypothesis"),
                 "evidence_ids": decision.get("evidence_ids") or [], "arguments": decision.get("arguments") or {},
@@ -137,11 +140,13 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
     return {
         "summary": {
             "status": agent.get("status", "unknown"),
-            "cases": len(case_rows), "model_calls": total_calls, "pivots": total_pivots,
+            "cases": len(case_rows), "model_calls": total_calls, "pivots": executed_pivots,
+            "pivot_proposals": pivot_proposals,
             "contributed_candidates": len(discovered_ids), "unworked_count": len(unworked),
         },
         "model_contribution": {
-            "model_calls": total_calls, "pivot_steps": total_pivots,
+            "model_calls": total_calls, "pivot_steps": executed_pivots,
+            "pivot_proposals": pivot_proposals,
             "candidate_ids": discovered_ids,
         },
         "seed_partition": {

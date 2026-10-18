@@ -81,6 +81,20 @@ def test_outage_then_resume_continues_agent_without_rerunning_sweep(tmp_path, mo
     assert hunt_run.open_repo(settings).get_hunt("h1")["execution_state"] == "completed_within_scope"
 
 
+def test_source_preflight_failure_does_not_leave_a_live_running_lease(tmp_path, monkeypatch):
+    settings = Settings(home=tmp_path)
+    _new_hunt(settings)
+    monkeypatch.setattr(hunt_run, "_contracts", lambda *_args: (_ for _ in ()).throw(RuntimeError("mapping down")))
+
+    with pytest.raises(RuntimeError, match="mapping down"):
+        hunt_run.run_hunt(settings, "h1")
+
+    repo = hunt_run.open_repo(settings)
+    assert repo.get_hunt("h1")["execution_state"] == "failed"
+    assert repo.get_hunt("h1")["lease_until"] is None
+    assert repo.latest_audit("h1", "hunt.sweep_summary")["detail"]["finished"] is False
+
+
 def test_resume_refuses_an_active_lease(tmp_path):
     settings = Settings(home=tmp_path)
     repo = _new_hunt(settings)

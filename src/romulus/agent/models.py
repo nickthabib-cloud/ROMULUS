@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 EntityKind = Literal["host", "account", "ip", "domain"]
 ToolName = Literal["entity_timeline", "auth_activity", "process_tree", "ids_alerts"]
@@ -51,6 +51,68 @@ class AgentDecision(BaseModel):
     benign_alternatives: list[str] = Field(default_factory=list)
     resolution_needed: str = ""
     entity: EntityRef | None = None
+
+
+class _DecisionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class PivotDecisionOutput(_DecisionOutput):
+    action: Literal["pivot"]
+    tool: ToolName
+    arguments: dict[str, Any]
+    hypothesis: str = Field(min_length=1)
+    expected_true: str = Field(min_length=1)
+    expected_false: str = Field(min_length=1)
+    evidence_ids: list[str] = Field(min_length=1)
+
+
+class EscalateDecisionOutput(_DecisionOutput):
+    action: Literal["escalate"]
+    candidate_id: str = Field(min_length=1)
+    claim: str = Field(min_length=1)
+    proposed_lane: Literal["urgent", "high", "lead", "context"]
+    evidence_ids: list[str] = Field(min_length=1)
+    reasoning: str = Field(min_length=1)
+    benign_alternatives: list[str] = Field(default_factory=list)
+
+
+class ParkDecisionOutput(_DecisionOutput):
+    action: Literal["park_as_lead"]
+    evidence_ids: list[str] = Field(min_length=1)
+    reasoning: str = Field(min_length=1)
+    resolution_needed: str = Field(min_length=1)
+
+
+class CloseDecisionOutput(_DecisionOutput):
+    action: Literal["close"]
+    evidence_ids: list[str] = Field(min_length=1)
+    reasoning: str = Field(min_length=1)
+
+
+class SpawnDecisionOutput(_DecisionOutput):
+    action: Literal["spawn"]
+    entity: EntityRef
+    evidence_ids: list[str] = Field(min_length=1)
+    reasoning: str = Field(min_length=1)
+
+
+DecisionOutput = Annotated[
+    PivotDecisionOutput | EscalateDecisionOutput | ParkDecisionOutput | CloseDecisionOutput | SpawnDecisionOutput,
+    Field(discriminator="action"),
+]
+_DECISION_OUTPUT = TypeAdapter(DecisionOutput)
+
+
+def parse_decision_output(value: Any) -> AgentDecision:
+    """Enforce per-action required fields before semantic admission."""
+    parsed = _DECISION_OUTPUT.validate_python(value)
+    return AgentDecision.model_validate(parsed.model_dump())
+
+
+def decision_schema() -> dict:
+    """Conditional JSON schema used by Ollama structured output."""
+    return _DECISION_OUTPUT.json_schema()
 
 
 class PivotResult(BaseModel):

@@ -35,7 +35,7 @@ Filled in as they come to exist. Keep this list accurate.
 - Deploy to VM: `powershell -File scripts/deploy.ps1` (add `-SkipInstall` when dependencies are unchanged)
 - On the VM (`R=/home/user/romulus-v2; $R/venv/bin/romulus --env-file $R/.env ...`):
   - `doctor`
-  - `hunt start --start <ISO> --end <ISO> [--no-agent]`, `hunt status [id]`
+  - `hunt start --start <ISO> --end <ISO> [--no-agent]`, `hunt resume <id>`, `hunt status [id]`
   - `findings <hunt> [--lane urgent --lane high]`
   - `report <hunt>`
   - `user add <name> --role lead|analyst` (interactive; run with `ssh -t`)

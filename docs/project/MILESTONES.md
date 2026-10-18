@@ -7,17 +7,17 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 ## M1: thin end-to-end slice (spec §17)
 
 - [~] Package skeleton, `.env.example`, config loader with secret redaction (§4). Evidence: `src/romulus/config.py`. **Open:** the uv lockfile; uv can't use the Windows Store Python, so generate the lock on the VM.
-- [x] SQLite plus Alembic migrations; hunt manifest fixed at creation; profile drift is audited (§8). Evidence: migration `0001`, `hunt/manifest.py`, `hunt/run.py`.
+- [x] SQLite plus Alembic migrations; hunt manifest fixed at creation; profile drift is audited (§8). Evidence: migrations `0001` and `0002`, `hunt/manifest.py`, `hunt/run.py`, `tests/test_agent_store.py`.
 - [x] `doctor`, integration tested on the VM 2026-10-18: ES 9.5.5 `romulus_reader` read-only; Arkime, Ollama, TShark, DB and `.env` mode all OK; refuses superuser accounts.
 - [x] ES adapter: allowlist plus write-trap tests (`tests/test_sources_es.py`); PIT plus `search_after`; composite aggregations; cap, shard and lower-bound totals become partial.
 - [x] Source profile and field contract from the live mapping (`sources/profile.py`); `text` fields refuse `contains`, which would not be a retrieval superset.
 - [x] Typed normalizers, live-verified with 0 errors on 1.79M records: audit exec groups (EXECVE+SYSCALL+CWD), journal sshd/sudo (audit copies flagged as duplicates), apache access/error, Suricata EVE.
 - [x] 14 playbooks with positive and adversarial-negative fixtures (`tests/test_playbooks.py`). Stack counting, a sequence rule, aggregate grouping.
 - [~] Admission and lanes (`decide/policy.py`). Direct rules publish while the sweep runs; aggregate rules publish at sweep end.
-- [ ] Agent loop. **Not implemented.** Only `agent/ollama.py` exists (structured output, num_ctx, truncation detection). See STATUS blockers.
+- [x] Agent loop, **integration tested**: explicit SQLite-backed controller, compact briefs, discriminated decisions, hostile-input validation, four M1 typed tools, direct-only pivots, fairness/budgets, leases and agent-only resume. Evidence: `tests/test_agent_*.py`, `tests/test_hunt_agent.py`, lab hunt `h20261018-195814-1e68c5` (49 calls, 9 executed pivots).
 - [x] Web UI: login (argon2, rate limit), CSRF, CSP; hunt list; live SSE view; finding detail with highlighted predicate fields and retained raw records; triage; reports (`tests/test_web.py`).
-- [x] Report manifest (immutable revisions, citation resolution, degraded mode) plus JSON plus technical Markdown (`tests/test_report.py`).
-- [~] Deployed to the VM; hunt `h20261018-181953-decca8` produced cited findings with 0 broken citations. **No agent pivot chain**, because the investigator isn't implemented.
+- [x] Report manifest (immutable revisions, citation resolution, degraded mode, investigator chains/conclusions/contributions/unworked seeds) plus JSON plus technical Markdown (`tests/test_report.py`).
+- [x] Deployed and **integration tested** on the VM. Hunt `h20261018-195814-1e68c5` produced cited findings, 9 executed agent pivots, exhaustive seed accounting, and a report with 0 broken citations. The hunt correctly remained partial because every executed pivot was capped.
 - [ ] `reviewer` milestone review: no Blocking findings open
 - [ ] Owner demo recorded in STATUS.md
 

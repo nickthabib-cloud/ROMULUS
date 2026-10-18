@@ -2,24 +2,26 @@
 
 ## Resume here
 
-_Last updated: 2026-10-18 by lead._
+_Last updated: 2026-10-18 by Codex._
 
-- **Current milestone:** M1, mostly done, on branch `m1/thin-slice`. Everything except the model investigator is implemented and integration tested on the VM.
+- **Current milestone:** M1, implemented and locally tested on branch `codex/model-investigator`; the investigator is also integration tested on the VM. Reviewer and owner-demo gates remain open.
 - **State:**
   - Sweep → decisions → coverage ledger → report manifest (immutable revisions, citation integrity) → technical Markdown/JSON → web UI (login, live stream, finding detail with highlighted raw evidence, triage, reports).
-  - 107 tests pass locally and on the VM.
+  - The local suite includes acceptance scenarios 13–17, hostile input, budget/fairness, lease/resume, crash replay, direct-only pivots, and investigation reporting.
   - Lab hunt `h20261018-181953-decca8` (SL700 e_a, 10:00–17:30 UTC): `completed_within_scope`, 1,791,438 records evaluated, 0 parse errors, 7 urgent / 11 high / 79 leads / 504 context, 0 broken citations.
+  - Investigator lab hunt `h20261018-195814-1e68c5`: the complete sweep evaluated 1,791,438 records and 296,500 typed events with 0 errors; the model made 49 calls and executed 9 pivots. Eight cases parked after two invalid proposals, four exhausted their case budgets, and every one of 97 seeds was accounted for (55 concluded, 33 assigned unfinished, 9 unassigned). All executed pivots were explicitly partial, so the hunt ended `partial`; the report had 0 broken citations.
   - Web UI: `http://192.168.36.128:8443` (plain HTTP lab exception); restart with `scripts/web-restart.sh`.
 - **Model investigator:**
-  - **Not implemented.** `agent/ollama.py` (structured-output client with truncation detection) exists.
-  - The pivot-tool and controller modules were not written: an automated safety check on the assistant side stopped that generation twice, and the assistant was instructed not to retry it. Owner permission does not change that.
-  - `hunt/run.py` records `agent.status = not_available` and reports leads as not agent-investigated.
-  - This needs an owner decision on how the investigator gets built (see Owner decisions pending).
+  - **Implemented, locally tested, and integration tested.** The explicit controller uses SQLite state, clustered cases, breadth-first scheduling, typed tools, strict validation, one retry plus deterministic fallback, cumulative budgets, Ollama truncation checks, and durable model/case/pivot records.
+  - `romulus hunt resume <hunt-id>` performs agent-only recovery under an active/stale lease policy and never reruns the sweep. New hunts retain a structured sweep summary.
+  - Pivot subsets run direct playbooks only through the hunt-layer executor. Aggregate playbooks remain full-window only. Pivot publications use the sweep's shared deterministic policy and set `source_case_id` for genuinely new candidates.
+  - Reports contain an Investigations section with seed accounting, case status, pivot chain/results, cited model conclusions separate from machine decisions, contributions, and incomplete work.
+  - Live model quality remains a measured risk: on `h20261018-195814-1e68c5`, 16 of 49 calls were invalid and all 9 executed pivots were capped/partial. No new candidate was attributed to a pivot because the complete sweep had already admitted the applicable direct findings.
 - **Next three actions:**
-  1. Owner creates their web account (see CLAUDE.md commands) and reviews the UI and the report.
-  2. `reviewer` pass on M1 (semantics, coverage, web security), then fix Blocking items.
-  3. Owner decision on the model investigator path, then M2 (gold inventory and evaluation harness via eval-custodian).
-- **Blockers:** the model investigator, as above.
+  1. Run the `reviewer` M1 gate, with special attention to model proposal quality, pivot caps, lease behavior, and report semantics.
+  2. Owner reviews the web UI and live report, including the explicit 42-seed unworked list.
+  3. Begin M2 model bakeoff and evaluation; tune the compact prompt/tool choice against fixed tasks before changing the default model or budgets.
+- **Blockers:** no implementation blocker. M1 sign-off still requires reviewer and owner-demo gates.
 - **Owner decisions pending:**
   - Load SL700 `f_a` as the holdout (download ≈3.7 GB from Zenodo).
   - Separate Malcolm VM (≈16 GiB) for M4.
@@ -30,7 +32,7 @@ _Last updated: 2026-10-18 by lead._
 | Milestone | State | Evidence |
 |---|---|---|
 | Pre-M1 setup | done | this file, TEAM.md, `.claude/agents/`, ENVIRONMENT.md |
-| M1 thin end-to-end slice | not started | |
+| M1 thin end-to-end slice | integration tested | local acceptance suite; lab hunt `h20261018-195814-1e68c5`; reviewer and owner demo remain |
 | M2 evaluation and model bakeoff | not started | |
 | M3 full sources and coverage truth | not started | |
 | M4 detection depth (incl. Zeek, ICS, Malcolm) | not started | |
@@ -51,6 +53,13 @@ _Last updated: 2026-10-18 by lead._
 ## Session log
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
+
+- **2026-10-18 (model investigator)**:
+  - Implemented the eight-task investigator plan: source-neutral schemas and clustering; durable cases/model calls/leases; direct-only pivot execution; compact hostile-input-safe briefs; strict action and citation validation; explicit fair controller; agent-only resume; and investigation reporting.
+  - Added ADR-003 and enforced the boundary that `romulus.agent` cannot import any `romulus.sources` module; source access lives in `romulus.hunt.pivot`.
+  - Automated scenario 14 proves attacker IP → authentication host → host process → direct deterministic finding with citations and `source_case_id`. Scenarios 13, 15, 16, and 17 cover hostile inputs, budgets/fairness, outage/resume, and context/truncation behavior.
+  - First live run `h20261018-194953-02bbf8` exposed an oversized brief; deterministic final shrinking fixed it, and agent-only resume completed without rerunning the sweep. The same run exposed a flat output-schema ambiguity; per-action discriminated output schemas fixed tool calls mislabeled as `spawn`.
+  - Second live run `h20261018-195814-1e68c5` executed 9 model pivots and produced a zero-broken-citation report. It honestly ended partial because all executed pivots were capped; 42 seeds remained unworked and were listed exhaustively.
 
 - **2026-10-18 (M1 build)**:
   - Built the M1 slice except the investigator.

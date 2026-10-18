@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, and_, func, or_, select
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
@@ -78,7 +78,15 @@ class Repo:
             }
             if state == "planned":
                 values["started_at"] = now
-            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(**values))
+            claim_condition = and_(t.hunt.c.id == hunt_id, t.hunt.c.execution_state == state)
+            if state == "running":
+                claim_condition = and_(
+                    claim_condition,
+                    or_(t.hunt.c.lease_until.is_(None), t.hunt.c.lease_until <= now),
+                )
+            updated = c.execute(t.hunt.update().where(claim_condition).values(**values))
+            if updated.rowcount != 1:
+                raise RuntimeError(f"hunt {hunt_id} state or lease changed while claiming it")
             c.execute(t.audit_event.insert().values(
                 at=now, actor="system", action=action, hunt_id=hunt_id,
                 detail={"previous_state": state, "lease_seconds": lease_seconds},

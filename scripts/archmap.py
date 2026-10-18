@@ -22,9 +22,9 @@ LAYER_RULES: dict[str, set[str]] = {
     "decide": {"sources"},
     "correlate": {"sources"},
     "report": {"sources"},
+    "agent": {"sources"},
     "store": {"mission", "sources", "evidence", "detect", "decide", "agent", "correlate", "report", "worker"},
 }
-ALLOWED_INTO_SOURCES = {("agent", "sources.compile")}
 
 
 def module_name(path: Path) -> str:
@@ -80,10 +80,6 @@ def violations(imports: dict[str, set[str]]) -> list[str]:
                 banned = LAYER_RULES.get(src_pkg, set())
             if dst_pkg in banned:
                 out.append(f"{mod} imports {t} (layer rule: {src_pkg} must not import {dst_pkg})")
-            if dst_pkg == "sources" and src_pkg == "agent":
-                sub = ".".join(t.split(".")[1:3])
-                if (src_pkg, sub) not in ALLOWED_INTO_SOURCES:
-                    out.append(f"{mod} imports {t} (agent may only use sources.compile)")
     return sorted(out)
 
 

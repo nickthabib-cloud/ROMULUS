@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from romulus.agent.brief import BuiltBrief
 from romulus.agent.models import AgentDecision, EntityRef
-from romulus.agent.tools import parse_tool_request
+from romulus.agent.tools import ProcessTreeRequest, parse_tool_request
 
 
 class HuntWindow(Protocol):
@@ -67,6 +67,11 @@ def validate_decision(decision: AgentDecision, brief_context: BuiltBrief,
                     errors.append(f"unknown entity: host:{host}")
                 elif _observer_only_host(host, brief_context):
                     errors.append(f"observer host {host!r} cannot be used as an investigated host")
+            if (isinstance(request, ProcessTreeRequest)
+                    and (request.arguments.host, request.arguments.process_id) not in brief_context.known_process_ids):
+                errors.append(
+                    f"unknown process ID {request.arguments.process_id} on host {request.arguments.host!r}"
+                )
 
     elif decision.action == "escalate":
         candidate = brief_context.known_candidates.get(decision.candidate_id or "")

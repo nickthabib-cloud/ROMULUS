@@ -64,7 +64,7 @@ Other top-level directories: `content/` (playbooks, rules, fixtures, vendored AT
 
 - `web` and `cli` may import anything below them, but nothing imports `web` or `cli`.
 - `detect`, `decide`, `correlate`, and `report` never import `sources` adapters directly. They work on stored typed data.
-- `agent` emits validated typed pivots without importing adapters. The hunt-layer executor described in
+- `agent` emits validated typed pivots without importing any module under `romulus.sources`. The hunt-layer executor described in
   [ADR-003](../adr/ADR-003-agent-pivot-executor-boundary.md) converts them to `SearchIntent`s and owns source access.
 - `store` imports no domain logic packages.
 

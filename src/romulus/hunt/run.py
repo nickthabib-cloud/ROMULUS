@@ -19,6 +19,10 @@ log = logging.getLogger("romulus.hunt")
 HUNT_LEASE_SECONDS = 600
 
 
+def _lease_seconds(settings: Settings) -> int:
+    return max(HUNT_LEASE_SECONDS, settings.ollama_timeout_seconds + 120)
+
+
 def open_repo(s: Settings) -> Repo:
     e = make_engine(s.db_path)
     migrate(e)
@@ -105,7 +109,7 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
                       contracts: dict, window: Window) -> dict:
     executor = PivotExecutor(repo, client, hunt_id, contracts)
     def heartbeat():
-        repo.heartbeat_hunt(hunt_id, HUNT_LEASE_SECONDS)
+        repo.heartbeat_hunt(hunt_id, _lease_seconds(s))
 
     return Investigator(
         s, repo, executor, hunt_id, window, heartbeat=heartbeat,
@@ -117,12 +121,20 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
         raise KeyError(hunt_id)
-    repo.claim_hunt(hunt_id, HUNT_LEASE_SECONDS)
+    repo.claim_hunt(hunt_id, _lease_seconds(s))
     h = repo.get_hunt(hunt_id)
     m = h["manifest"]
     window = Window(start=datetime.fromisoformat(m["window"]["start"]), end=datetime.fromisoformat(m["window"]["end"]))
     client = ElasticClient(s)
-    contracts = _contracts(s, repo, h, client)
+    try:
+        contracts = _contracts(s, repo, h, client)
+    except Exception as exc:
+        repo.audit("system", "hunt.sweep_summary", hunt_id, {
+            "finished": False, "complete": False, "partial_reasons": [], "stats": {},
+            "error": f"source preflight error: {exc}",
+        })
+        repo.set_hunt_state(hunt_id, "failed", stop_reason=f"source preflight error: {exc}")
+        raise
     sweep = Sweep(repo, client, hunt_id, window, contracts, on_candidate)
     try:
         for target in m["targets"]:
@@ -174,7 +186,7 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         raise RuntimeError("hunt cannot resume agent work because the sweep did not finish")
     if hunt["execution_state"] == "failed" and not sweep_summary.get("finished"):
         raise RuntimeError("failed hunt cannot resume because the sweep did not finish")
-    repo.claim_hunt(hunt_id, HUNT_LEASE_SECONDS, resume=True)
+    repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True)
     hunt = repo.get_hunt(hunt_id)
     manifest = hunt["manifest"]
     window = Window(

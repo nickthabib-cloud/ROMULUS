@@ -10,9 +10,9 @@ from pydantic import ValidationError
 
 from romulus.agent.brief import build_brief
 from romulus.agent.cases import cluster_seed_candidates
-from romulus.agent.models import AgentDecision, EntityRef, PivotResult
+from romulus.agent.models import AgentDecision, EntityRef, PivotResult, decision_schema, parse_decision_output
 from romulus.agent.ollama import ModelResult, ModelUnavailable, OllamaClient
-from romulus.agent.tools import parse_tool_request, tool_schema
+from romulus.agent.tools import parse_tool_request, tool_catalog
 from romulus.agent.validate import ValidationResult, validate_decision
 from romulus.config import Settings
 from romulus.store.db import digest, utcnow
@@ -151,13 +151,13 @@ class Investigator:
     def _call_once(self, case: dict, retry_errors: tuple[str, ...]) -> tuple[str, Any]:
         step_n = self._next_step_number(case["id"])
         brief = build_brief(
-            self.repo, case["id"], tool_schema(), self.settings.ollama_num_ctx,
+            self.repo, case["id"], tool_catalog(), self.settings.ollama_num_ctx,
             retry_errors=retry_errors,
         )
         try:
             result = self.model.chat_json(
                 self.settings.ollama_model_triage, brief.system, brief.user,
-                AgentDecision.model_json_schema(), max_out=900,
+                decision_schema(), max_out=900,
             )
         except ModelUnavailable as exc:
             self._record_exception(case, step_n, brief, str(exc))
@@ -176,7 +176,7 @@ class Investigator:
         validation = None
         parse_errors: list[str] = []
         try:
-            decision = AgentDecision.model_validate(result.parsed)
+            decision = parse_decision_output(result.parsed)
         except ValidationError as exc:
             parse_errors = [f"invalid decision schema: {exc}"]
         if decision is not None:

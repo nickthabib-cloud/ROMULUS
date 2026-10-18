@@ -1,8 +1,11 @@
 """Strict semantic admission of untrusted model decisions (acceptance scenario 13)."""
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from pydantic import ValidationError
+
 from romulus.agent.brief import BuiltBrief
-from romulus.agent.models import AgentDecision, EntityRef
+from romulus.agent.models import AgentDecision, EntityRef, parse_decision_output
 from romulus.agent.validate import validate_decision
 from romulus.sources.models import Window
 
@@ -58,6 +61,15 @@ def test_rejects_raw_dsl_and_extra_tool_fields():
     assert any("arguments" in error or "extra" in error.lower() for error in result.errors)
 
 
+def test_structured_output_schema_cannot_label_a_tool_call_as_spawn():
+    with pytest.raises(ValidationError):
+        parse_decision_output({
+            "action": "spawn", "tool": "process_tree",
+            "arguments": {"host": "video", "process_id": 123, "start": START, "end": START},
+            "evidence_ids": ["event-1"], "reasoning": "Inspect this process.",
+        })
+
+
 def test_rejects_uncited_and_nonexistent_evidence():
     uncited = AgentDecision(
         action="escalate", candidate_id="cand-1", claim="A cited process read /etc/shadow.",
@@ -84,6 +96,22 @@ def test_rejects_out_of_scope_windows_and_observer_host_pivots():
 
     assert any("hunt window" in error for error in validate_decision(out_of_scope, _brief(), WINDOW).errors)
     assert any("observer" in error for error in validate_decision(observer, _brief(), WINDOW).errors)
+
+
+def test_process_tree_requires_a_process_id_present_in_cited_case_evidence():
+    brief = _brief()
+    brief.known_process_ids.add(("video", 123))
+    invented = AgentDecision(
+        action="pivot", tool="process_tree",
+        arguments={"host": "video", "process_id": 999, "start": START, "end": START + timedelta(minutes=10)},
+        hypothesis="Inspect the process lineage.", expected_true="A lineage is present.",
+        expected_false="No lineage is present.", evidence_ids=["event-1"],
+    )
+
+    result = validate_decision(invented, brief, WINDOW)
+
+    assert not result.ok
+    assert any("unknown process ID" in error for error in result.errors)
 
 
 def test_escalation_cannot_change_machine_claim_or_lane():
