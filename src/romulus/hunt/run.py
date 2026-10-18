@@ -227,7 +227,18 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         end=datetime.fromisoformat(manifest["window"]["end"]),
     )
     client = ElasticClient(s)
-    contracts = _contracts(s, repo, hunt, client, owner_token)
+    try:
+        contracts = _contracts(s, repo, hunt, client, owner_token)
+    except Exception as exc:
+        stop_reason = f"source preflight error: {exc}"
+        repo.audit("system", "hunt.agent_summary", hunt_id, {
+            "status": "failed", "partial": True, "stop_reason": stop_reason,
+            "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
+        }, owner_token=owner_token)
+        repo.set_hunt_state(
+            hunt_id, "failed", owner_token=owner_token, stop_reason=stop_reason,
+        )
+        raise
     try:
         agent_summary = _run_investigator(
             s, repo, client, hunt_id, contracts, window, owner_token,
