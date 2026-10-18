@@ -253,8 +253,10 @@ class Repo:
                                                   "profile": profile, "captured_at": utcnow()}], ["id"])
 
     # ---- tasks ------------------------------------------------------------------------------
-    def upsert_task(self, task_id: str, hunt_id: str, kind: str, owner: str, intent: dict, fp: str, priority=0.0):
+    def upsert_task(self, task_id: str, hunt_id: str, kind: str, owner: str, intent: dict, fp: str,
+                    priority=0.0, *, owner_token: str | None = None):
         with write_txn(self.engine) as c:
+            self._fence_lease(c, hunt_id, owner_token)
             _upsert_ignore(c, t.task, [{"id": task_id, "hunt_id": hunt_id, "kind": kind, "owner": owner,
                                         "intent": intent, "fingerprint": fp, "state": "planned",
                                         "priority": priority, "attempts": 0, "created_at": utcnow(),
@@ -270,10 +272,13 @@ class Repo:
     }
 
     def update_task(self, task_id: str, state: str, outcome: dict | None = None, error: str | None = None,
-                    attempt: bool = False):
+                    attempt: bool = False, *, owner_token: str | None = None):
         if state not in self.TASK_STATES:
             raise ValueError(f"unknown task state {state}")
         with write_txn(self.engine) as c:
+            if owner_token is not None:
+                hunt_id = c.execute(select(t.task.c.hunt_id).where(t.task.c.id == task_id)).scalar_one()
+                self._fence_lease(c, hunt_id, owner_token)
             vals: dict[str, Any] = {"state": state, "updated_at": utcnow()}
             if outcome is not None:
                 vals["outcome"] = outcome
@@ -289,10 +294,12 @@ class Repo:
                                                .order_by(t.task.c.created_at)).mappings()]
 
     # ---- evidence ---------------------------------------------------------------------------
-    def save_evidence(self, hunt_id: str, events: Iterable, raw_sources: dict[str, dict], task_id: str | None):
+    def save_evidence(self, hunt_id: str, events: Iterable, raw_sources: dict[str, dict], task_id: str | None,
+                      *, owner_token: str | None = None):
         """Persist typed events plus retained raw copies for every record they cite."""
         events = list(events)
         with write_txn(self.engine) as c:
+            self._fence_lease(c, hunt_id, owner_token)
             raw_rows, ev_rows, ent_rows, link_rows = [], [], {}, []
             for e in events:
                 for r in e.raw:
@@ -324,9 +331,10 @@ class Repo:
             return [dict(r) for r in c.execute(select(t.raw_record).where(t.raw_record.c.id.in_(ids))).mappings()]
 
     # ---- candidates -------------------------------------------------------------------------
-    def save_candidate(self, row: dict) -> bool:
+    def save_candidate(self, row: dict, *, owner_token: str | None = None) -> bool:
         """Insert once; returns True if new. Re-evaluation of the same evidence is idempotent."""
         with write_txn(self.engine) as c:
+            self._fence_lease(c, row["hunt_id"], owner_token)
             exists = c.execute(select(t.candidate.c.id).where(t.candidate.c.id == row["id"])).scalar()
             if exists:
                 return False

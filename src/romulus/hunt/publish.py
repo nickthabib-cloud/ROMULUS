@@ -8,10 +8,10 @@ from romulus.store.repo import Repo
 
 def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   task_id: str | None, raw_sources: dict[str, dict],
-                  source_case_id: str | None = None) -> dict | None:
+                  source_case_id: str | None = None, *, owner_token: str | None = None) -> dict | None:
     """Persist cited evidence and publish a machine-decided candidate once."""
     decision = decide(match, hunt_id)
-    repo.save_evidence(hunt_id, match.events, raw_sources, task_id)
+    repo.save_evidence(hunt_id, match.events, raw_sources, task_id, owner_token=owner_token)
     row = {
         "id": decision.candidate_id,
         "hunt_id": hunt_id,
@@ -36,4 +36,4 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         "next_checks": list(playbook.next_checks),
         "source_case_id": source_case_id,
     }
-    return row if repo.save_candidate(row) else None
+    return row if repo.save_candidate(row, owner_token=owner_token) else None

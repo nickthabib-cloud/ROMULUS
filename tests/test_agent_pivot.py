@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from romulus.agent.models import EntityRef
 from romulus.agent.tools import (
     AuthActivityArgs,
@@ -297,6 +299,49 @@ def test_partial_pivot_retains_events_and_publishes_direct_matches(monkeypatch):
     assert repo.candidate(result.candidate_ids[0])["source_case_id"] == "case-1"
     assert repo.tasks("h1")[0]["state"] == "evaluated"
     assert "shard_failures" in result.reasons
+
+
+def test_displaced_pivot_worker_cannot_write_after_normalization(monkeypatch):
+    repo = _repo()
+    first = repo.claim_hunt("h1", lease_seconds=60, now=START)
+    request = ProcessTreeRequest(tool="process_tree", arguments=ProcessTreeArgs(
+        host="video", process_id=123, start=START, end=END,
+    ))
+    contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
+        "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+    })}
+
+    def fake_execute(_client, intent, _contract, *, pit=None):
+        record = {
+            "_id": "event-1", "_index": intent.target,
+            "_source": {"event": {"dataset": "linux.audit"}},
+        }
+        return SearchOutcome(
+            target=intent.target, fingerprint="fp", started_at=START, ended_at=END,
+            completeness=Completeness.complete, total=1, total_relation="eq", returned=1,
+            records=[record],
+        )
+
+    def displacing_normalize(_records):
+        second = repo.claim_hunt(
+            "h1", lease_seconds=60, resume=True, now=START + timedelta(seconds=61),
+        )
+        repo.set_hunt_state("h1", "completed_within_scope", owner_token=second["lease_owner"])
+        return [_process_event()], {}, []
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    monkeypatch.setattr(pivot_module, "normalize_hits", displacing_normalize)
+    executor = PivotExecutor(
+        repo, FakeClient(), "h1", contracts, owner_token=first["lease_owner"],
+    )
+
+    with pytest.raises(RuntimeError, match="lease ownership lost"):
+        executor.run("case-1", request)
+
+    assert repo.events_by_ids(["event-1"]) == []
+    assert repo.raw_records(["romulus-host-x/event-1"]) == []
+    assert repo.candidates("h1") == []
+    assert repo.tasks("h1")[0]["state"] == "leased"
 
 
 def test_capped_dense_pivot_splits_and_late_event_reaches_time_spread_digest(monkeypatch):

@@ -247,12 +247,13 @@ class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
 
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str,
-                 contracts: dict[str, FieldContract], heartbeat=None):
+                 contracts: dict[str, FieldContract], heartbeat=None, owner_token: str | None = None):
         self.repo = repo
         self.client = client
         self.hunt_id = hunt_id
         self.contracts = contracts
         self.heartbeat = heartbeat or (lambda: None)
+        self.owner_token = owner_token
 
     def _execute(self, intent: SearchIntent, contract: FieldContract, *, pit=None) -> SearchOutcome:
         self.heartbeat()
@@ -577,8 +578,11 @@ class PivotExecutor:
             task_ids.append(task_id)
             task_input = intent.model_dump(mode="json")
             task_input["anchor_ts"] = anchor_ts.isoformat() if anchor_ts is not None else None
-            self.repo.upsert_task(task_id, self.hunt_id, "pivot", case_id, task_input, fingerprint)
-            self.repo.update_task(task_id, "leased", attempt=True)
+            self.repo.upsert_task(
+                task_id, self.hunt_id, "pivot", case_id, task_input, fingerprint,
+                owner_token=self.owner_token,
+            )
+            self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
             target_coverage: list[PivotCoverage] = []
             target_reasons: list[str] = []
             target_total = 0
@@ -614,7 +618,9 @@ class PivotExecutor:
                         for record in outcome.records
                     }
                     raw_sources.update(sources)
-                    self.repo.save_evidence(self.hunt_id, selected, sources, task_id)
+                    self.repo.save_evidence(
+                        self.hunt_id, selected, sources, task_id, owner_token=self.owner_token,
+                    )
                     retained.extend(selected)
                     status = "complete" if outcome.completeness == Completeness.complete and not errors else "partial"
                 incomplete |= status != "complete"
@@ -646,17 +652,22 @@ class PivotExecutor:
                 "coverage": [segment.model_dump(mode="json") for segment in target_coverage],
             }
             if target_successes == 0:
-                self.repo.update_task(task_id, "failed", outcome=outcome_digest, error=target_error)
+                self.repo.update_task(
+                    task_id, "failed", outcome=outcome_digest, error=target_error,
+                    owner_token=self.owner_token,
+                )
                 continue
-            self.repo.update_task(task_id, "executed", outcome=outcome_digest)
-            self.repo.update_task(task_id, "evaluated")
+            self.repo.update_task(
+                task_id, "executed", outcome=outcome_digest, owner_token=self.owner_token,
+            )
+            self.repo.update_task(task_id, "evaluated", owner_token=self.owner_token)
 
         candidate_ids: list[str] = []
         for playbook in fresh_direct_pack():
             for match in playbook.consume(retained):
                 row = publish_match(
                     self.repo, self.hunt_id, playbook, match, task_ids[0] if task_ids else None,
-                    raw_sources, source_case_id=case_id,
+                    raw_sources, source_case_id=case_id, owner_token=self.owner_token,
                 )
                 if row is not None:
                     candidate_ids.append(row["id"])

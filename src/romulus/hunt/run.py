@@ -122,7 +122,9 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
     def heartbeat():
         repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
 
-    executor = PivotExecutor(repo, client, hunt_id, contracts, heartbeat=heartbeat)
+    executor = PivotExecutor(
+        repo, client, hunt_id, contracts, heartbeat=heartbeat, owner_token=owner_token,
+    )
 
     return Investigator(
         s, repo, executor, hunt_id, window, heartbeat=heartbeat, owner_token=owner_token,
