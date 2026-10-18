@@ -32,6 +32,25 @@ def _contains_unquoted_heredoc(script: str) -> bool:
     return False
 
 
+def _contains_command_substitution(script: str) -> bool:
+    quote: str | None = None
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if char == "\\" and quote != "'" and index + 1 < len(script):
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        elif quote != "'" and (char == "`" or script.startswith("$(", index)):
+            return True
+        index += 1
+    return False
+
+
 def _quote_aware_input(script: str) -> tuple[str, dict[int, str]]:
     """Protect quoted punctuation and expose unquoted newlines as command separators."""
     protected: dict[int, str] = {}
@@ -108,6 +127,8 @@ def parse_script(script: str) -> ParsedScript:
     claim as unknown, never as a match)."""
     if _contains_unquoted_heredoc(script):
         return ParsedScript(pipelines=[], ok=False, error="heredoc syntax is not modelled")
+    if _contains_command_substitution(script):
+        return ParsedScript(pipelines=[], ok=False, error="command substitution is not modelled")
     try:
         prepared, protected = _quote_aware_input(script)
         lex = shlex.shlex(prepared, posix=True, punctuation_chars=_PUNCTUATION)

