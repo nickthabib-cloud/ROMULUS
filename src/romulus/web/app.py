@@ -1,0 +1,231 @@
+"""FastAPI application. Thin: reads the store, calls services, renders escaped templates."""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from romulus.config import Settings
+from romulus.decide.policy import LANE_ORDER
+from romulus.hunt.run import open_repo
+from romulus.report.manifest import publish_revision
+from romulus.report.markdown import render as render_md
+from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
+
+HERE = Path(__file__).resolve().parent
+COOKIE = "romulus_session"
+STATUSES = ("under_review", "confirmed_malicious", "benign", "expected_activity", "unresolved", "escalated")
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                               "frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
+    "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+    "Cache-Control": "no-store",
+}
+
+
+def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
+    repo = open_repo(s)
+    sessions = Sessions(s.secret_key.get_secret_value())
+    limiter = RateLimiter()
+    app = FastAPI(title="ROMULUS", docs_url=None, redoc_url=None, openapi_url=None)
+    app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+    tpl = Jinja2Templates(directory=HERE / "templates")
+    tpl.env.autoescape = True
+
+    @app.middleware("http")
+    async def headers(request: Request, call_next):
+        resp = await call_next(request)
+        for k, v in SECURITY_HEADERS.items():
+            resp.headers.setdefault(k, v)
+        return resp
+
+    def user_of(request: Request) -> dict | None:
+        return sessions.read(request.cookies.get(COOKIE))
+
+    def need(request: Request) -> dict:
+        u = user_of(request)
+        if u is None:
+            raise HTTPException(status_code=303, headers={"Location": "/login"})
+        return u
+
+    def page(request, name, user, **ctx):
+        return tpl.TemplateResponse(request, name, {"user": user, "csrf": user["csrf"] if user else "",
+                                                     "banner": "UNCLASSIFIED // FOR TRAINING USE", **ctx})
+
+    # ------------------------------------------------------------------ auth
+    @app.get("/login", response_class=HTMLResponse)
+    def login_form(request: Request, error: str = ""):
+        return tpl.TemplateResponse(request, "login.html", {"error": error, "user": None,
+                                                            "banner": "UNCLASSIFIED // FOR TRAINING USE"})
+
+    @app.post("/login")
+    def login(request: Request, username: str = Form(...), password: str = Form(...)):
+        client = request.client.host if request.client else "unknown"
+        u = verify(repo.engine, username, password, client, limiter)
+        if u is None:
+            repo.audit(username[:64], "web.login_failed", detail={"client": client})
+            return RedirectResponse("/login?error=1", status_code=303)
+        repo.audit(u["username"], "web.login", detail={"client": client})
+        resp = RedirectResponse("/", status_code=303)
+        resp.set_cookie(COOKIE, sessions.issue(u), httponly=True, samesite="strict",
+                        secure=bool(os.environ.get("ROMULUS_COOKIE_SECURE", "1") == "1" and s.web_tls_enabled))
+        return resp
+
+    @app.post("/logout")
+    def logout(request: Request, csrf: str = Form("")):
+        u = need(request)
+        if not csrf_ok(u, csrf):
+            raise HTTPException(403, "bad CSRF token")
+        resp = RedirectResponse("/login", status_code=303)
+        resp.delete_cookie(COOKIE)
+        return resp
+
+    # ------------------------------------------------------------------ hunts
+    @app.get("/", response_class=HTMLResponse)
+    def hunts(request: Request):
+        u = need(request)
+        rows = [{**h, "lanes": repo.lane_counts(h["id"])} for h in repo.list_hunts()]
+        return page(request, "hunts.html", u, hunts=rows)
+
+    @app.get("/hunts/new", response_class=HTMLResponse)
+    def new_hunt_form(request: Request):
+        u = need(request)
+        return page(request, "new_hunt.html", u, tz=s.mission_timezone, sources=s.es_index_patterns)
+
+    @app.post("/hunts")
+    def start_hunt(request: Request, start: str = Form(...), end: str = Form(...), style: str = Form("broad"),
+                   hypothesis: str = Form(""), csrf: str = Form("")):
+        u = need(request)
+        if not csrf_ok(u, csrf):
+            raise HTTPException(403, "bad CSRF token")
+        try:
+            for v in (start, end):
+                datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(400, "start/end must be ISO 8601 times") from None
+        if style not in ("broad", "directed"):
+            raise HTTPException(400, "bad style")
+        cmd = [sys.executable, "-m", "romulus.cli"] + (["--env-file", str(env_file)] if env_file else []) + \
+              ["hunt", "start", "--start", start, "--end", end, "--style", style]
+        if hypothesis.strip():
+            cmd += ["--hypothesis", hypothesis.strip()[:500]]
+        s.logs_dir.mkdir(parents=True, exist_ok=True)
+        log = open(s.logs_dir / f"hunt-{datetime.now():%Y%m%d-%H%M%S}.log", "ab")
+        env = {**os.environ, "USER": f"web:{u['u']}"}
+        subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)  # noqa: S603
+        repo.audit(f"web:{u['u']}", "web.hunt_start", detail={"start": start, "end": end, "style": style})
+        return RedirectResponse("/?started=1", status_code=303)
+
+    @app.get("/hunts/{hunt_id}", response_class=HTMLResponse)
+    def hunt_detail(request: Request, hunt_id: str, lane: str = ""):
+        u = need(request)
+        h = repo.get_hunt(hunt_id)
+        if h is None:
+            raise HTTPException(404)
+        cands = repo.candidates(hunt_id, [lane] if lane in LANE_ORDER else None)
+        cands.sort(key=lambda c: (LANE_ORDER.get(c["lane"], 9), -c["priority"], str(c["ts"])))
+        if not lane:
+            cands = [c for c in cands if c["lane"] != "context"]
+        from romulus.report.manifest import _coverage
+        cov = _coverage(repo.rule_cells(hunt_id))
+        with repo.engine.connect() as c:
+            from sqlalchemy import select
+            from romulus.store import schema as t
+            reports = c.execute(select(t.report_manifest.c.id, t.report_manifest.c.revision,
+                                       t.report_manifest.c.created_at).where(t.report_manifest.c.hunt_id == hunt_id)
+                                .order_by(t.report_manifest.c.revision.desc())).mappings().all()
+        return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
+                    coverage=cov["rules"], tasks=repo.tasks(hunt_id), reports=reports)
+
+    @app.get("/hunts/{hunt_id}/stream")
+    async def stream(request: Request, hunt_id: str):
+        need(request)
+        if repo.get_hunt(hunt_id) is None:
+            raise HTTPException(404)
+
+        async def gen():
+            seen: set[str] = set()
+            while not await request.is_disconnected():
+                h = repo.get_hunt(hunt_id)
+                fresh = [c for c in repo.candidates(hunt_id, ["urgent", "high", "lead"]) if c["id"] not in seen]
+                for c in sorted(fresh, key=lambda c: str(c["ts"])):
+                    seen.add(c["id"])
+                    yield "event: finding\ndata: " + json.dumps({"id": c["id"], "lane": c["lane"],
+                                                                 "rule": c["rule_id"], "claim": c["claim"][:300],
+                                                                 "ts": str(c["ts"])}) + "\n\n"
+                yield "event: state\ndata: " + json.dumps({"state": h["execution_state"],
+                                                           "lanes": repo.lane_counts(hunt_id)}) + "\n\n"
+                if h["execution_state"] not in ("planned", "running"):
+                    break
+                await asyncio.sleep(2)
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    # ------------------------------------------------------------------ findings
+    @app.get("/findings/{cid}", response_class=HTMLResponse)
+    def finding(request: Request, cid: str):
+        u = need(request)
+        c = repo.candidate(cid)
+        if c is None:
+            raise HTTPException(404)
+        events = repo.events_by_ids(c["event_ids"][:20])
+        raw_ids = [rid for e in events for rid in e["raw_ids"]]
+        raws = repo.raw_records(raw_ids[:40])
+        gates = dict(c["gate_results"])
+        notes = gates.pop("_notes", [])
+        pred_fields = {p["field"] for p in c["predicate_fields"]}
+        return page(request, "finding.html", u, c=c, gates=gates, notes=notes, events=events, raws=raws,
+                    pred_fields=pred_fields, dispositions=repo.dispositions(cid), statuses=STATUSES,
+                    pretty=lambda v: json.dumps(v, indent=2, ensure_ascii=False, sort_keys=True, default=str))
+
+    @app.post("/findings/{cid}/disposition")
+    def disposition(request: Request, cid: str, status: str = Form(...), note: str = Form(""),
+                    csrf: str = Form("")):
+        u = need(request)
+        if not csrf_ok(u, csrf):
+            raise HTTPException(403, "bad CSRF token")
+        if status not in STATUSES or repo.candidate(cid) is None:
+            raise HTTPException(400)
+        repo.add_disposition(cid, f"web:{u['u']}", status, note.strip()[:2000] or None)
+        return RedirectResponse(f"/findings/{cid}", status_code=303)
+
+    # ------------------------------------------------------------------ reports
+    @app.post("/hunts/{hunt_id}/report")
+    def make_report(request: Request, hunt_id: str, csrf: str = Form("")):
+        u = need(request)
+        if not csrf_ok(u, csrf):
+            raise HTTPException(403, "bad CSRF token")
+        m = publish_revision(repo, hunt_id, f"web:{u['u']}")
+        out = s.reports_dir / hunt_id
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"{m['revision']['id']}.json").write_text(json.dumps(m, indent=2, sort_keys=True), encoding="utf-8")
+        (out / f"{m['revision']['id']}.md").write_text(render_md(m), encoding="utf-8")
+        return RedirectResponse(f"/hunts/{hunt_id}#reports", status_code=303)
+
+    @app.get("/reports/{hunt_id}/{rev_id}.{ext}")
+    def get_report(request: Request, hunt_id: str, rev_id: str, ext: str):
+        need(request)
+        if ext not in ("md", "json") or not rev_id.startswith(hunt_id + "-r") or "/" in rev_id or ".." in rev_id:
+            raise HTTPException(404)
+        p = (s.reports_dir / hunt_id / f"{rev_id}.{ext}").resolve()
+        if s.reports_dir.resolve() not in p.parents or not p.exists():
+            raise HTTPException(404)
+        media = "text/markdown; charset=utf-8" if ext == "md" else "application/json"
+        return PlainTextResponse(p.read_text(encoding="utf-8"), media_type=media,
+                                 headers={"Content-Disposition": f'attachment; filename="{rev_id}.{ext}"'})
+
+    @app.exception_handler(HTTPException)
+    async def http_exc(request: Request, exc: HTTPException):
+        if exc.status_code == 303:
+            return RedirectResponse(exc.headers["Location"], status_code=303)
+        return PlainTextResponse(str(exc.detail), status_code=exc.status_code)
+
+    return app

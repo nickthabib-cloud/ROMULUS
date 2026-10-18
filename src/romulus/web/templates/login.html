@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Sign in · ROMULUS{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Sign in</h1>
+  {% if error %}<p class="err">Sign-in failed. Check your username and password, or wait a few minutes after repeated failures.</p>{% endif %}
+  <form method="post" action="/login">
+    <label>Username <input name="username" autocomplete="username" required></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Sign in</button>
+  </form>
+</section>
+{% endblock %}

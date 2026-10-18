@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Finding {{ c.id }} · ROMULUS{% endblock %}
+{% block content %}
+<p><a href="/hunts/{{ c.hunt_id }}">← hunt {{ c.hunt_id }}</a></p>
+<h1><span class="pill l-{{ c.lane }}">{{ c.lane }}</span> {{ c.rule_id }}</h1>
+<section class="card">
+  <p class="claim">{{ c.claim }}</p>
+  <div class="summary">
+    <div><span class="label">Severity</span> {{ c.severity }}</div>
+    <div><span class="label">Confidence</span> {{ c.confidence }}</div>
+    <div><span class="label">Priority</span> {{ '%.0f' % c.priority }} — {{ c.priority_reasons | join('; ') }}</div>
+    <div><span class="label">Observed (UTC)</span> {{ c.ts }}</div>
+    <div><span class="label">Claim type</span> {{ c.claim_type }}</div>
+    <div><span class="label">Rule version</span> {{ c.rule_version }}</div>
+  </div>
+</section>
+
+<h2>What the claim rests on</h2>
+<table class="grid">
+<thead><tr><th>Field</th><th>Value</th><th>Origin (record:field)</th></tr></thead>
+<tbody>{% for p in c.predicate_fields %}
+<tr><td class="mono">{{ p.field }}</td><td><pre class="val">{{ pretty(p.value) }}</pre></td><td class="mono small">{{ p.origin }}</td></tr>
+{% endfor %}</tbody></table>
+
+<h2>Admission gates</h2>
+<ul>{% for k, v in gates.items() %}<li><span class="mono">{{ k }}</span>: {{ v }}</li>{% endfor %}</ul>
+{% if notes %}<h2>Notes</h2><ul>{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>{% endif %}
+
+<div class="two">
+<div><h2>Benign alternatives to rule out</h2><ul>{% for b in c.benign_alternatives %}<li>{{ b }}</li>{% endfor %}</ul></div>
+<div><h2>Recommended next checks</h2><ul>{% for n in c.next_checks %}<li>{{ n }}</li>{% endfor %}</ul></div>
+</div>
+
+<h2>Triage</h2>
+<form method="post" action="/findings/{{ c.id }}/disposition" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <select name="status">{% for st in statuses %}<option value="{{ st }}">{{ st.replace('_', ' ') }}</option>{% endfor %}</select>
+  <input name="note" maxlength="2000" placeholder="reason / what you checked">
+  <button type="submit">Record</button>
+</form>
+<table class="grid small"><thead><tr><th>When (UTC)</th><th>Who</th><th>Status</th><th>Note</th></tr></thead>
+<tbody>{% for d in dispositions %}<tr><td>{{ d.at }}</td><td>{{ d.actor }}</td><td>{{ d.status }}</td><td>{{ d.note or '' }}</td></tr>{% endfor %}</tbody></table>
+
+<h2>Cited evidence ({{ events | length }} event(s))</h2>
+{% for e in events %}
+<details {% if loop.first %}open{% endif %}><summary class="mono">{{ e.family }} · {{ e.ts }} · {{ e.host }} · event {{ e.id }}</summary>
+<table class="grid small"><thead><tr><th>Typed field</th><th>Value</th><th>Origin</th></tr></thead><tbody>
+{% for name, f in e.event.fields.items() %}
+<tr class="{% if name in pred_fields %}hl{% endif %}"><td class="mono">{{ name }}</td><td><pre class="val">{{ pretty(f.value) }}</pre></td><td class="mono small">{{ f.origin }}</td></tr>
+{% endfor %}</tbody></table>
+{% if e.event.caveats %}<p class="warn">Caveats: {{ e.event.caveats | join('; ') }}</p>{% endif %}
+</details>
+{% endfor %}
+
+<h2>Retained raw records</h2>
+<p class="help">Exact copies retained when the finding was published. Digest and native ID let you re-locate the record in the source.</p>
+{% for r in raws %}
+<details><summary class="mono">{{ r.target }} / {{ r.native_id }} · sha256 {{ r.digest[:16] }}…</summary>
+<pre class="raw">{{ pretty(r.source) }}</pre></details>
+{% endfor %}
+{% endblock %}

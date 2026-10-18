@@ -110,6 +110,39 @@ def cmd_report(args) -> int:
     return EXIT_OK if m["integrity"]["finalizable"] else EXIT_FAIL
 
 
+def cmd_user(args) -> int:
+    import getpass
+    from romulus.hunt.run import open_repo
+    from romulus.web.auth import create_user
+    repo = open_repo(load_settings(_env_file(args)))
+    pw = getpass.getpass(f"Password for {args.username} (12+ chars): ")
+    if pw != getpass.getpass("Repeat password: "):
+        print("passwords do not match", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        create_user(repo.engine, args.username, pw, args.role)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_USAGE
+    repo.audit("cli", "user.create", detail={"username": args.username, "role": args.role})
+    print(f"created {args.role} account '{args.username}'")
+    return EXIT_OK
+
+
+def cmd_web(args) -> int:
+    import uvicorn
+    from romulus.web.app import create_app
+    env = _env_file(args)
+    s = load_settings(env)
+    host, _, port = s.web_bind.rpartition(":")
+    if not s.web_tls_enabled and host not in ("127.0.0.1", "localhost"):
+        print(f"WARNING: serving on {host} without TLS (lab exception). Set ROMULUS_WEB_TLS_CERT/KEY for TLS.",
+              file=sys.stderr)
+    uvicorn.run(create_app(s, env), host=host, port=int(port), log_level="info",
+                ssl_certfile=s.web_tls_cert or None, ssl_keyfile=s.web_tls_key or None, proxy_headers=False)
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="romulus", description="ROMULUS threat hunting")
     p.add_argument("--env-file", help="path to .env (default: $ROMULUS_HOME/.env)")
@@ -129,10 +162,16 @@ def main(argv: list[str] | None = None) -> int:
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])
     rp = sub.add_parser("report", help="publish a new immutable report revision (JSON + technical Markdown)")
     rp.add_argument("hunt_id")
+    up = sub.add_parser("user", help="manage web UI accounts")
+    up.add_argument("action", choices=["add"])
+    up.add_argument("username")
+    up.add_argument("--role", choices=["lead", "analyst"], default="analyst")
+    sub.add_parser("web", help="serve the browser UI on ROMULUS_WEB_BIND")
     args = p.parse_args(argv)
     if args.cmd == "hunt" and args.action == "start" and not (args.start and args.end):
         p.error("hunt start needs --start and --end")
-    handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report}
+    handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report,
+                "user": cmd_user, "web": cmd_web}
     return handlers[args.cmd](args)
 
 

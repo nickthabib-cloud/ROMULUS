@@ -29,6 +29,8 @@ def parse_env_file(path: Path) -> dict[str, str]:
 class Settings(BaseModel):
     home: Path = Path("/home/user/romulus-v2")
     web_bind: str = "127.0.0.1:8443"
+    web_tls_cert: str = ""
+    web_tls_key: str = ""
     secret_key: SecretStr = SecretStr("")
 
     ollama_url: str = "http://192.168.36.1:11434"
@@ -85,6 +87,10 @@ class Settings(BaseModel):
         return self.home / "logs"
 
     @property
+    def web_tls_enabled(self) -> bool:
+        return bool(self.web_tls_cert and self.web_tls_key)
+
+    @property
     def synthesis_model(self) -> str:
         return self.ollama_model_synthesis or self.ollama_model_triage
 
@@ -101,6 +107,7 @@ class Settings(BaseModel):
 
 ENV_MAP = {
     "ROMULUS_HOME": "home", "ROMULUS_WEB_BIND": "web_bind", "ROMULUS_SECRET_KEY": "secret_key",
+    "ROMULUS_WEB_TLS_CERT": "web_tls_cert", "ROMULUS_WEB_TLS_KEY": "web_tls_key",
     "OLLAMA_URL": "ollama_url", "OLLAMA_MODEL_TRIAGE": "ollama_model_triage",
     "OLLAMA_MODEL_SYNTHESIS": "ollama_model_synthesis", "OLLAMA_NUM_CTX": "ollama_num_ctx",
     "OLLAMA_TIMEOUT_SECONDS": "ollama_timeout_seconds", "OLLAMA_KEEP_ALIVE": "ollama_keep_alive",

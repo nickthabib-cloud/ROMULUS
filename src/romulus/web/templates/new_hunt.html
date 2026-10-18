@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>New hunt</h1>
+  <p class="help">Times without an offset are read as <b>{{ tz }}</b>. The window is half-open: the start is included, the end is not.
+  Sources: {{ sources | join(', ') }}.</p>
+  <form method="post" action="/hunts">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Start <input name="start" placeholder="2024-11-18T10:00:00Z" required></label>
+    <label>End <input name="end" placeholder="2024-11-18T17:30:00Z" required></label>
+    <label>Style
+      <select name="style"><option value="broad">Broad (sweep everything in scope)</option>
+      <option value="directed">Directed (hypothesis plus a reduced broad sweep)</option></select></label>
+    <label>Hypothesis (optional) <textarea name="hypothesis" rows="3" maxlength="500" placeholder="e.g. videoserver may have been compromised via its web application"></textarea></label>
+    <button type="submit">Start hunt</button>
+  </form>
+</section>
+{% endblock %}

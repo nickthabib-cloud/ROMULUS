@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Hunts</h1>
+{% if request.query_params.get('started') %}<p class="ok">Hunt started in the background. It appears below within a few seconds.</p>{% endif %}
+<table class="grid">
+<thead><tr><th>Hunt</th><th>Created</th><th>By</th><th>Execution</th><th>Result</th><th>Urgent</th><th>High</th><th>Leads</th></tr></thead>
+<tbody>
+{% for h in hunts %}
+<tr>
+  <td><a href="/hunts/{{ h.id }}">{{ h.id }}</a></td>
+  <td>{{ h.created_at.strftime('%Y-%m-%d %H:%M') if h.created_at else '' }}</td>
+  <td>{{ h.created_by }}</td>
+  <td><span class="state s-{{ h.execution_state }}">{{ h.execution_state }}</span></td>
+  <td>{{ h.detection_result or '—' }}</td>
+  <td class="n urgent">{{ h.lanes.get('urgent', 0) }}</td>
+  <td class="n high">{{ h.lanes.get('high', 0) }}</td>
+  <td class="n">{{ h.lanes.get('lead', 0) }}</td>
+</tr>
+{% else %}
+<tr><td colspan="8">No hunts yet. <a href="/hunts/new">Start one</a>.</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endblock %}
