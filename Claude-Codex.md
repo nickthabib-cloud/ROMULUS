@@ -166,6 +166,8 @@ Implementation tasks 1–8 are complete on `codex/model-investigator`. The worki
 - `acd621c feat(report): render investigator contributions and gaps`
 - `c5c2c5b docs: record model investigator verification`
 
+The task-8 hash was inserted by documentation-only follow-up `d46ada5`.
+
 Earlier design/handoff commits on this branch are `9205aab`, `8c9a1be`, `166cfe8`, `ede7138`, `b192ce4`, and `7879713`.
 
 ### What was built
@@ -241,7 +243,7 @@ Deployed-suite verification:
 ........................................................................ [ 47%]
 ........................................................................ [ 94%]
 .........                                                                [100%]
-153 passed in 2.76s
+153 passed in 2.53s
 exit=0
 ```
 
@@ -251,6 +253,14 @@ Initial deployment used the requested command:
 
 ```text
 > powershell -File scripts/deploy.ps1
+deployed: Claude-Codex.md CLAUDE.md docs ENGINEERING_MASTER_PROMPT.md pyproject.toml scripts src tests
+exit=0
+```
+
+After all eight task commits and the handoff-hash update, the exact committed tree was deployed again:
+
+```text
+> powershell -File scripts/deploy.ps1 -SkipInstall
 deployed: Claude-Codex.md CLAUDE.md docs ENGINEERING_MASTER_PROMPT.md pyproject.toml scripts src tests
 exit=0
 ```
@@ -276,10 +286,10 @@ Terminal status and report:
 
 ```text
 h20261018-195814-1e68c5  partial  reportable_findings  lanes={'context': 504, 'high': 11, 'lead': 79, 'urgent': 7} agent=budget_exhausted unworked=42
-revision 1: 97 findings/leads, broken citations=0
+revision 2: 97 findings/leads, broken citations=0
 ```
 
-The generated report records 12 cases, 49 model calls, 9 executed pivots, 8 parked cases, 4 budget-exhausted cases, 55 concluded seeds, 33 assigned-but-unfinished seeds, and 9 unassigned seeds. All 9 executed pivots were explicitly partial/capped, so the hunt remained `partial`. No new candidate was attributed to a pivot: the complete sweep had already admitted the direct findings, and idempotent publication correctly did not relabel them. The report paths are under `/home/user/romulus-v2/reports/h20261018-195814-1e68c5/` and both JSON/Markdown were generated with zero broken citations.
+The final revision-2 report records 12 cases, 49 model calls, 15 pivot proposals, 9 executed pivots, 8 parked cases, 4 budget-exhausted cases, 55 concluded seeds, 33 assigned-but-unfinished seeds, and 9 unassigned seeds. All 9 executed pivots were explicitly partial/capped, so the hunt remained `partial`. No new candidate was attributed to a pivot: the complete sweep had already admitted the direct findings, and idempotent publication correctly did not relabel them. The files are `/home/user/romulus-v2/reports/h20261018-195814-1e68c5/h20261018-195814-1e68c5-r2.{json,md}` and the report has zero broken citations.
 
 ### Spec disagreements and resolutions
 
