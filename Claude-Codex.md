@@ -164,7 +164,7 @@ Implementation tasks 1–8 are complete on `codex/model-investigator`. The worki
 - `4924066 feat(agent): add resumable investigator controller`
 - `344ed05 feat(hunt): resume interrupted agent investigations`
 - `acd621c feat(report): render investigator contributions and gaps`
-- Task 8: `docs: record model investigator verification` — hash is inserted by the documentation-only evidence follow-up after that commit exists.
+- `c5c2c5b docs: record model investigator verification`
 
 Earlier design/handoff commits on this branch are `9205aab`, `8c9a1be`, `166cfe8`, `ede7138`, `b192ce4`, and `7879713`.
 
