@@ -34,14 +34,83 @@ def cmd_doctor(args) -> int:
     return EXIT_FAIL if any(c.status == "fail" for c in checks) else EXIT_OK
 
 
+def _parse_time(value: str, tz: str):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(tz))
+    return dt.astimezone(ZoneInfo("UTC"))
+
+
+def cmd_hunt(args) -> int:
+    import logging
+    from romulus.hunt.run import create_hunt, open_repo, run_hunt
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    logging.getLogger("alembic").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    s = load_settings(_env_file(args))
+    if args.action == "start":
+        start, end = _parse_time(args.start, s.mission_timezone), _parse_time(args.end, s.mission_timezone)
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
+        hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style, hypothesis=args.hypothesis or "",
+                          original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone})
+        print(f"hunt {hid} created [{start.isoformat()}, {end.isoformat()})")
+
+        def show(c):
+            if c["lane"] in ("urgent", "high"):
+                print(f"  [{c['lane'].upper():6}] {c['rule_id']}: {c['claim'][:180]}", flush=True)
+        res = run_hunt(s, hid, agent=not args.no_agent, on_candidate=show)
+        print(json.dumps(res, indent=2, default=str) if args.json else
+              f"done: {res['detection_result']} lanes={res['lanes']} stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }")
+        return EXIT_OK
+    if args.action == "status":
+        repo = open_repo(s)
+        hunts = [repo.get_hunt(args.hunt_id)] if args.hunt_id else repo.list_hunts()
+        for h in hunts:
+            if h:
+                print(f"{h['id']}  {h['execution_state']:24} {h['detection_result'] or '-':40} "
+                      f"lanes={repo.lane_counts(h['id'])}")
+        return EXIT_OK
+    return EXIT_USAGE
+
+
+def cmd_findings(args) -> int:
+    from romulus.decide.policy import LANE_ORDER
+    from romulus.hunt.run import open_repo
+    repo = open_repo(load_settings(_env_file(args)))
+    rows = repo.candidates(args.hunt_id, args.lane or None)
+    rows.sort(key=lambda r: (LANE_ORDER.get(r["lane"], 9), -r["priority"], str(r["ts"])))
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+        return EXIT_OK
+    for r in rows:
+        print(f"{r['id']}  [{r['lane']:7}] sev={r['severity']:6} conf={r['confidence']:6} {r['ts']}  {r['rule_id']}")
+        print(f"    {r['claim']}")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="romulus", description="ROMULUS threat hunting")
     p.add_argument("--env-file", help="path to .env (default: $ROMULUS_HOME/.env)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor", help="check sources, privileges, model endpoint, tools and storage")
+    hp = sub.add_parser("hunt", help="create/run hunts and show status")
+    hp.add_argument("action", choices=["start", "status"])
+    hp.add_argument("hunt_id", nargs="?")
+    hp.add_argument("--start")
+    hp.add_argument("--end")
+    hp.add_argument("--style", default="broad", choices=["broad", "directed"])
+    hp.add_argument("--hypothesis")
+    hp.add_argument("--no-agent", action="store_true", help="deterministic sweep only (model-off)")
+    fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
+    fp.add_argument("hunt_id")
+    fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])
     args = p.parse_args(argv)
-    handlers = {"doctor": cmd_doctor}
+    if args.cmd == "hunt" and args.action == "start" and not (args.start and args.end):
+        p.error("hunt start needs --start and --end")
+    handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings}
     return handlers[args.cmd](args)
 
 
