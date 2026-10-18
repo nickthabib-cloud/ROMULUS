@@ -1,0 +1,36 @@
+# secrets and runtime
+.env
+*.env
+!.env.example
+/runtime/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+
+# evaluation ground truth never enters the repo
+eval/gold/
+eval/holdout/
+**/attackmate*.json
+
+# data
+*.pcap
+*.pcapng
+*.zip
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# reports generated during dev
+/reports/
+
+# local agent settings
+.claude/settings.local.json
