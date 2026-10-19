@@ -36,11 +36,23 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 - [ ] Per-rule × source × partition coverage ledger
 - [ ] Fault-injection suite: no false complete negatives (§9, gate 3)
 - [ ] Entity profiles plus full pivot catalog
+- [ ] Kernel-record Linux host rules (auditd PATH/CWD/watch) that can assure negatives (ADR-004)
+- [ ] Detection-breadth research started (spec §7 *Detection breadth*): vendored ATT&CK Enterprise and ICS STIX; a research register with the full technique walk and a disposition for every technique; a generated `docs/detection/ATTACK_COVERAGE.md` checked in CI. May start during M2.
 - [ ] Crash/resume tests at task transitions
 
-## M4: detection depth
+## M4: detection breadth and depth
 
-- [ ] Expanded playbook pack plus Sigma import (with upstream commit provenance)
+The scope is the whole research-driven catalog (spec §7 *Detection breadth*), not a short list. The examples in the spec are samples, not limits.
+
+- [ ] Playbooks and rules across every ATT&CK tactic for each supported telemetry family. Every observable technique has an active rule or a documented reason it has none.
+- [ ] Windows/AD normalizers and playbooks:
+  - Security, Sysmon, PowerShell, Defender, Task Scheduler, WMI, RDP;
+  - Kerberos and AD;
+  - field contracts from Winlogbeat and Elastic Agent profiles.
+- [ ] Corpus harvest recorded in the register, with licenses: SigmaHQ, CAR, Elastic and Splunk rules, Atomic Red Team, LOLBAS/GTFOBins/LOLDrivers, ET Open, CISA advisories.
+- [ ] Sigma import (with upstream commit provenance)
+- [ ] Offline indicator sets (STIX 2.1 / MISP / CSV), typed matching, provenance and age cited
+- [ ] Breadth datasets vetted and loaded (Windows/AD, network, ICS), with per-family evaluation results and per-rule precision
 - [ ] Zeek normalizers plus playbooks
 - [ ] OpenSearch/Malcolm source contract (fixtures; live pending until the Malcolm VM exists)
 - [ ] ICS playbooks plus baselines on public ICS PCAP fixtures; CCTV/RTSP Loss-of-View playbook on SL700
@@ -63,3 +75,7 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 - [ ] Backup/restore drill; offline wheelhouse install
 - [ ] Holdout pre-registered and run once; results published
 - [ ] Release gate review (§15 gates 1–9)
+
+## After M6: standing detection work
+
+Not a milestone that closes. Keep the research register current with each ATT&CK release and new advisories, add telemetry families and datasets as missions meet them, and keep every coverage-matrix gap visible until it is closed or retired with a reason.

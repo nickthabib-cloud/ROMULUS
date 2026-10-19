@@ -12,6 +12,15 @@ ROMULUS first runs a deterministic sweep over host and network telemetry: Elasti
 
 > **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 (evaluation harness and model bakeoff) is next. This is lab software under active development and is not yet validated for production missions. See [`docs/project/STATUS.md`](docs/project/STATUS.md) for the current state and [`docs/project/MILESTONES.md`](docs/project/MILESTONES.md) for the roadmap.
 
+## Detection scope
+
+The goal is to find any malicious activity the telemetry can show, on any mission network. The detection catalog is built from systematic research:
+- every MITRE ATT&CK Enterprise and ICS technique;
+- the public detection corpora (Sigma, CAR, Atomic Red Team, LOLBAS/GTFOBins, ET Open and others);
+- every telemetry family a hunt may meet: Windows, AD, Linux, macOS, identity and cloud logs, network devices, Zeek, Suricata, PCAP and ICS protocols.
+
+A generated ATT&CK coverage matrix will show what is covered, what is evaluated, and where the gaps are. The M1 starter set is 15 Linux and network playbooks, chosen for the lab data.
+
 ## Design principles
 
 These are non-negotiable. The full text is §1 of [`ENGINEERING_MASTER_PROMPT.md`](ENGINEERING_MASTER_PROMPT.md).

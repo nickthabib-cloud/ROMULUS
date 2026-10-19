@@ -17,6 +17,11 @@ _Last updated: 2026-10-19 by Claude (lead), M1 accepted._
   - Model quality (M2 bakeoff): ~33% invalid model outputs; agent has contributed no new findings on the lab yet.
 - **Process notes:** Claude does not edit the shell parser or the investigator (an assistant-side safety check stopped that work); those go to Codex via `Claude-Codex.md` (replace Claude's last message; date+time headers; execute-only rounds).
 
+- **Owner direction, 2026-10-19: detection breadth is a primary goal.** The tool must find any malicious activity, anywhere. The catalog comes from systematic research: a full ATT&CK Enterprise + ICS technique walk, the public detection corpora, and every telemetry family. The spec's example event IDs, protocols and playbook classes are samples, not limits. Recorded in:
+  - spec intro and §7 *Detection breadth*;
+  - §15 breadth datasets and metrics;
+  - §17 milestones: research starts by M3 and may begin during M2; M4 is the bulk; standing work continues after M6;
+  - MILESTONES.md, CLAUDE.md, and the `detection-engineer` brief.
 - **Current milestone:** M2 (evaluation harness and model bakeoff), **not started**. M1 is accepted and merged into `main` (2026-10-19). Start M2 in a fresh session: branch from `main` (e.g. `m2/evaluation`), begin with the `eval-custodian` gold opportunity inventory for SL700 e_a (ground truth on the VM at `/home/user/romulus-eval/sl700_e_a/`), then the scoring scripts, the simple-baseline runner and the model bakeoff (spec §12, §15; `docs/project/MILESTONES.md` → M2). Include the M1 carry-overs listed above.
 - **State:**
   - Sweep → decisions → coverage ledger → report manifest (immutable revisions, citation integrity) → technical Markdown/JSON → web UI (login, live stream, finding detail with highlighted raw evidence, triage, reports).

@@ -18,6 +18,12 @@ Defensive, AI-assisted threat-hunting tool for USAF CPT analysts. A deterministi
 - The model proposes typed actions only. It never writes DSL, Arkime expressions, TShark filters, shell commands, or paths. All model output is validated, and telemetry is untrusted data.
 - Read-only toward telemetry. No external transmission. Secrets never appear in the repo, logs, prompts, reports, or memory.
 
+## Detection scope (owner direction)
+
+- Detection breadth is a primary goal. ROMULUS should find any malicious activity the telemetry can show, on any mission network.
+- The catalog comes from systematic research: all of MITRE ATT&CK (Enterprise and ICS), the public detection corpora, and every telemetry family a CPT may meet. See spec §7 *Detection breadth*.
+- Event IDs, protocols and playbook classes named in the spec are examples, never limits. Don't scope detection work down to them.
+
 ## Environment
 
 - Develop on Windows (this folder). Deploy and run on the Ubuntu VM: SSH alias `romulus-vm` (`192.168.36.128`). Ollama is at `http://192.168.36.1:11434`.

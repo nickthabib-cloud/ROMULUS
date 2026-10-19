@@ -14,6 +14,13 @@ The operator's question for every hunt: **What suspicious indicators and behavio
 
 The north star is an analyst who can trust an urgent finding within minutes, see exactly which source fields support it, watch the agent's reasoning and pivots as they happen, and know where the hunt did and did not look.
 
+**Detection breadth is a primary product goal** (owner direction, 2026-10-19). A CPT must be able to take ROMULUS to any mission network and find any malicious activity that the available telemetry can show. Build the detection catalog from systematic research:
+- the whole of MITRE ATT&CK, Enterprise and ICS;
+- the public detection corpora;
+- every platform and telemetry family a CPT may meet.
+
+The catalog keeps growing for the life of the product. The playbook classes, event IDs and protocols named anywhere in this document are **examples of the kind of content wanted, never the limit of it** (§7, *Detection breadth*). Breadth never relaxes the §1 invariants: every rule still proves exactly what it claims.
+
 ---
 
 ## 0. How to run this assignment
@@ -241,7 +248,11 @@ This is the "run a bunch of searches to narrow the field" step, done the way an 
 
 ### Hunt playbooks
 
-A **playbook** is a versioned, reviewed unit of analyst tradecraft. It holds a typed `SearchIntent` (aggregation or raw), the typed evaluator, what a hit means, known benign causes, and the suggested next pivots. Build a **small, validated starter set** chosen for the telemetry actually present (use the source profiles to choose). Example classes (adapt to what exists; mark the rest `not-applicable`):
+A **playbook** is a versioned, reviewed unit of analyst tradecraft. It holds a typed `SearchIntent` (aggregation or raw), the typed evaluator, what a hit means, known benign causes, and the suggested next pivots. M1 shipped a small starter set to prove the pipeline end to end. The product target is the broad, research-driven catalog described under *Detection breadth* below.
+
+At hunt time, the source profiles decide which playbooks apply. The rest are `not-applicable` for that hunt; they are never removed from the catalog.
+
+The classes below are **illustrative only**. Each is a sample of what its area should cover, not a scope boundary:
 
 **Host (Linux, given the lab data: auditd, journal, auth, web server logs)**
 - Execution from world-writable/temporary paths; interpreters spawned by web server or service accounts (web shell); reverse-shell argument patterns (token-aware, e.g., `nc -e`/`-c`, `bash -i >& /dev/tcp`, `socat exec`).
@@ -270,6 +281,68 @@ A **playbook** is a versioned, reviewed unit of analyst tradecraft. It holds a t
 - **Reconnaissance**: scans of ICS ports (502 Modbus, 20000 DNP3, 102 S7, 44818/2222 EtherNet/IP, 47808 BACnet, 2404 IEC-104, 4840 OPC UA, 34962–34964 PROFINET), device identification sweeps (Modbus FC 43/14 Read Device ID, CIP List Identity, BACnet Who-Is), and broadcast discovery from new sources.
 - **Protocol abuse and failure**: malformed or exception-heavy traffic (Modbus exception responses, DNP3 IIN error bits), unusual polling-rate changes, and protocol on a nonstandard port.
 - Map ICS findings to **MITRE ATT&CK for ICS** (vendored STIX), not the Enterprise matrix. Wording matters even more here: "a Modbus Write Multiple Registers request from X to PLC Y was observed" is not "the setpoint was changed" unless a response or follow-up read shows the change took effect. ICS recommendations must avoid suggesting any active probing of OT devices. ROMULUS is passive only.
+
+### Detection breadth: a research-driven, ATT&CK-wide catalog
+
+**Goal.** Every ATT&CK technique or sub-technique that is observable in a telemetry family ROMULUS supports should end up in one of two states:
+- at least one active, fixture-tested rule or playbook detects it; or
+- it has a documented reason why not.
+
+ROMULUS is meant to find malicious activity anywhere. A short list of favorite detections is not the product.
+
+**Research method.** This is standing work for the `detection-engineer`.
+
+1. **ATT&CK technique walk.** Walk every technique and sub-technique in the vendored ATT&CK Enterprise and ATT&CK for ICS STIX data:
+   - every tactic, from reconnaissance through impact;
+   - every platform: Windows, Linux, macOS, network devices, identity and cloud.
+
+   For each one, record in the **research register** (structured YAML in the repo):
+   - the data sources and data components that ATT&CK lists;
+   - which telemetry families and typed fields would show the technique;
+   - the procedure examples ATT&CK cites for groups and software;
+   - a disposition: `rule active`, `covered by <rule>`, `planned`, `deferred (why)`, or `not observable in supported telemetry (why)`.
+
+   No technique is silently skipped.
+
+2. **Corpus harvest.** Mine the public detection and threat-intelligence corpora for behaviors, thresholds, benign lookalikes and test cases:
+   - SigmaHQ, MITRE CAR, Elastic detection-rules, Splunk Security Content;
+   - Atomic Red Team: its procedures become fixture ideas and emulation plans;
+   - LOLBAS, GTFOBins, LOLDrivers;
+   - Suricata ET Open signature metadata, Zeek packages;
+   - CISA advisories and their TTP tables, public DFIR case reports;
+   - the Microsoft audit-policy and Sysmon event references.
+
+   Record each source's license. Content under an incompatible license is research reference only: reimplement it, never copy it.
+
+3. **Telemetry-family coverage.** Plan and build for every family a CPT may meet:
+   - **Windows:** Security, System, Sysmon, PowerShell (4103/4104), Defender, AppLocker/WDAC, Task Scheduler, WMI-Activity, TerminalServices, BITS, DNS client.
+   - **Active Directory and Kerberos.**
+   - **Linux:** auditd, journal, auth, sudo, cron, package managers, web servers.
+   - **macOS:** unified log, plus ESF events where they are shipped.
+   - **Identity and cloud audit logs**, when they are shipped into Elasticsearch/OpenSearch: Entra ID, M365, AWS CloudTrail, Okta.
+   - **Network security devices:** firewall, proxy, VPN, DNS server, DHCP, email gateway.
+   - **Zeek, Suricata, Arkime and PCAP.**
+   - **ICS protocols.**
+
+   When a family is targeted, it gets a normalizer and a field contract derived from live or standard-shipper profiles (Winlogbeat, Elastic Agent, Malcolm, and so on).
+
+4. **Indicator sets.** Besides behaviors, support offline indicator sets supplied by the mission or the partner. These can be hashes, IPs, domains, URLs, JA3/JA4 fingerprints and certificate fingerprints, in STIX 2.1, MISP export or CSV files.
+   - The runtime never fetches them; nothing is transmitted externally.
+   - Matches are typed, and they cite the indicator's provenance and age.
+
+5. **Every detection approach the data supports.** That means single-event indicators, sequences, aggregates and stack counts, peer and historical baselines, rarity with denominators, and the discovery lane. A technique that no signature can catch is still in scope through baselines and discovery.
+
+**Rules of the breadth effort.**
+- **Breadth never relaxes §1.** Every rule is typed, fixture-tested (§9) and worded to claim no more than it proves. Rules that interpret text are positive-only (ADR-004).
+- **Noise is handled by lanes, grouping and evaluation, not by leaving behavior out.** A broad but noisy rule ships to `lead` or `context` until evaluation supports more. Measure every rule's precision (§15).
+- **The coverage matrix.** `docs/detection/ATTACK_COVERAGE.md` is generated from the research register plus rule metadata, and CI checks it, like the module map. Per technique and telemetry family, it shows:
+  - researched;
+  - rules active with fixtures;
+  - lab-evaluated;
+  - gaps.
+
+  It is a research and planning view. Never present it as proof of detection (§1, *Truthful coverage*).
+- **The catalog is standing work.** Every milestone from M3 onward adds content. New datasets, advisories and ATT&CK releases trigger a register update.
 
 ### Open-ended discovery lane
 
@@ -449,6 +522,12 @@ Unit tests show the code works as written; they do not show that ROMULUS finds a
   - The **evaluation folder is never readable by the hunt runtime** (separate path, not in any allowlist). The gold inventory is built from attackmate.json plus raw telemetry before tuning. v1 tuned against `e_a` (and `a_b`), so earlier v1 results are not independent evidence.
 - **Holdout**: the other SL700 runs are `a_a`, `a_b`, `a_c`, `b_a`, `f_a`. **`a_b` is contaminated**: v1 loaded it (`ainception-*-a-b` indices) and its extracted files are in `~/ainception-agent/data/staging/run_a_b`. Use **`f_a`** (privesc through a found SSH key, the variant least like `e_a`'s cron path), downloaded from the official Zenodo record with checksums verified, loaded into separate indices and a separate Arkime node, and **not inspected** until rules, prompts, and model are frozen. Loading it is an owner-approved step. **Caveat**: every SL700 run follows the same storyline and attacker scripts, so an SL700 holdout tests robustness to variant changes, not generalization. Before claiming general effectiveness, evaluate on at least one dataset with a different storyline (e.g., an AIT Log Data Set v2 scenario, OTRF Security-Datasets for Windows, or an owner-run emulation). If a holdout is contaminated, say so and get a new one.
 - **ICS test data**: the SL700 PCAPs contain **no industrial protocols** (TShark protocol hierarchy, 2026-10-18: Ethernet/IP/TCP/UDP with HTTP, TLS, SSH, DNS, Kafka, mDNS, NTP, and **RTSP/RTP CCTV video streams**). SL700's "OT" element is the CCTV system, which is still useful: playbooks for camera-stream disruption (RTSP session loss, firewall rule changes affecting camera viewers) map to ATT&CK for ICS *Loss/Denial of View*. ICS protocol playbooks need public ICS PCAPs with known activity (candidates to vet: Netresec's 4SICS ICS captures, the community `ICS-pcap` collection, Malcolm's own test captures). Record each capture's source, license, and checksum, and adjudicate their "known activity" independently.
+- **Breadth datasets.** SL700 is Linux-only and follows one storyline, so it cannot exercise a broad catalog. Vet and load datasets with known activity for the other families, for example:
+  - Windows and AD event datasets: OTRF Security-Datasets, Splunk attack_data, EVTX-ATTACK-SAMPLES;
+  - owner-run Atomic Red Team or adversary emulation in a lab;
+  - public Zeek, Suricata and PCAP collections with documented activity.
+
+  Record each dataset's source, license and checksum. Treat malware captures as hostile input, read only through the adapters.
 - Include benign administrative lookalikes and attack activity in early, middle, and late window positions.
 
 ### Metrics (with denominators)
@@ -460,6 +539,10 @@ Unit tests show the code works as written; they do not show that ROMULUS finds a
 - Time to first actionable finding, and total hunt time.
 - Query and model cost.
 - Coverage-claim accuracy (no false complete negatives).
+- Detection breadth:
+  - ATT&CK techniques by disposition and telemetry family, from the coverage matrix;
+  - per-rule hit counts and precision on every evaluated dataset;
+  - techniques with active rules that have never fired on any dataset with known activity, listed as unproven.
 - **Ablations**: model-off vs. model-on, and ROMULUS vs. a simple "run the standard searches and review" baseline under the same budget. The agent must demonstrate that it finds additional true indicators or reaches them faster, or that is a result to fix.
 
 Starting targets to test, set with the owner before running the holdout: ≥90% recall of observable critical/high opportunities, ≥80% of all eligible opportunities, P@10 ≥ 0.8, and an agreed false-lead-per-hour ceiling. If the telemetry cannot support a target, say so; do not shrink the denominator after a miss.
@@ -509,13 +592,32 @@ Starting targets to test, set with the owner before running the holdout: ≥90% 
 
 **M2, evaluation harness and model bakeoff.** Gold opportunity inventory for the lab dataset, metric scripts, simple-baseline comparison, model bakeoff, and the selected model ADR. Demo: measured recall/precision/time on the lab set, with the miss funnel.
 
-**M3, full sources and coverage truth.** Arkime and TShark adapters with field contracts from the live deployment, exhaustive pagination, per-rule coverage ledger, fault-injection suite, entity profiles, and the full pivot catalog. Demo: coverage view; injected faults never produce complete negatives.
+**M3, full sources and coverage truth.** Includes:
+- Arkime and TShark adapters with field contracts from the live deployment;
+- exhaustive pagination;
+- the per-rule coverage ledger and the fault-injection suite;
+- entity profiles and the full pivot catalog;
+- kernel-record Linux host rules (ADR-004);
+- **the start of the detection-breadth research** (§7): vendored ATT&CK STIX, the research register with the full technique walk, and the generated coverage matrix.
 
-**M4, detection depth.** Expanded validated playbooks, Sigma import, Zeek normalizers and playbooks, OpenSearch/Malcolm source contract, ICS playbooks with baselines (fixture- and public-PCAP-tested; live Malcolm integration pending), sequences/aggregates where the data justifies them, discovery lane, triage workflow, and suppressions. Demo: improved metrics on the lab set; discovery's incremental value measured; ICS playbooks firing on ICS PCAP fixtures.
+The research may begin during M2, run by the `detection-engineer` alongside evaluation work. Demo: coverage view; injected faults never produce complete negatives; the first coverage matrix.
+
+**M4, detection breadth and depth.** This is the bulk of the research-driven catalog (§7, *Detection breadth*). It is the largest content milestone, but not the last: catalog growth continues through M5, M6 and after release. Includes:
+- playbooks and rules across every ATT&CK tactic for the families ROMULUS supports;
+- Windows/AD normalizers and playbooks;
+- Sigma import;
+- offline indicator sets;
+- the breadth datasets loaded and evaluated (§15);
+- Zeek normalizers and playbooks, OpenSearch/Malcolm source contract, ICS playbooks with baselines (fixture- and public-PCAP-tested; live Malcolm integration pending), sequences/aggregates where the data justifies them, discovery lane, triage workflow, and suppressions. Demo: improved metrics on the lab set; per-family results on the breadth datasets; the coverage matrix with its gaps; discovery's incremental value measured; ICS playbooks firing on ICS PCAP fixtures.
 
 **M5, synthesis and reports.** Attack-path assembly, narrative with citation checking, recommendations, polished executive DOCX, full technical Markdown, IOC export, and report revisions. Demo: both reports from a real hunt, reviewed by the owner for readability.
 
 **M6, hardening and holdout.** Web authentication/TLS/CSP, security review against §14, crash/resume tests, backup/restore drill, air-gap install from wheelhouse, frozen holdout evaluation, and release gate review. Demo: holdout results and gate status.
+
+**After M6: standing detection work.** Catalog growth never ends at a milestone:
+- the research register is kept current with each ATT&CK release and new advisories;
+- new telemetry families and datasets are added as missions meet them;
+- every coverage-matrix gap stays visible until a rule closes it or a documented reason retires it.
 
 ## 18. Deliverables and definition of done
 
