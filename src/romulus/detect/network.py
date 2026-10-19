@@ -112,7 +112,12 @@ class WebScanBurst(_Grouped):
         for e in self.applicable(events):
             key = (e.host, e.get("source.ip"))
             self.keep(key, e)
-            st = int(e.get("http.response.status_code"))
+            try:
+                st = int(e.get("http.response.status_code"))
+            except (TypeError, ValueError):
+                self.evaluated -= 1
+                self.missing_required += 1
+                continue
             ex = self.extra[key]
             if st >= 400:
                 ex["errors"].add(e.id)
@@ -156,6 +161,14 @@ class DnsSubdomainEnumeration(_Grouped):
     def consume(self, events):
         for e in self.applicable(events):
             if e.get("dns.type") not in (None, "query"):
+                # answers/other record types are not evaluated by this rule: they must not count toward a
+                # complete negative (an answer-only capture still carries the enumeration)
+                self.evaluated -= 1
+                self.missing_required += 1
+                continue
+            if not isinstance(e.get("dns.question.name"), str):
+                self.evaluated -= 1
+                self.missing_required += 1
                 continue
             key = (e.get("source.ip"), _registered(e.get("dns.question.name")))
             self.keep(key, e)
@@ -181,8 +194,12 @@ class DnsSubdomainEnumeration(_Grouped):
 
 
 class ToolUserAgentHttp(_Grouped):
+    """Positive-only (ADR-004): the user agent is self-reported, attacker-controlled text, so its absence
+    proves nothing; the prefix list also cannot see tools whose agent string does not start with the name."""
     id = "net.tool_user_agent_http"
-    title = "HTTP requests with a command-line tool user agent"
+    version = "2"
+    assures_negative = False
+    title = "HTTP requests whose user agent begins with a known command-line tool name"
     families = ("http_tx",)
     required_fields = ("source.ip", "destination.ip", "user_agent.original")
     severity, lane = "low", "lead"
@@ -192,7 +209,12 @@ class ToolUserAgentHttp(_Grouped):
 
     def consume(self, events):
         for e in self.applicable(events):
-            ua = e.get("user_agent.original").lower()
+            ua = e.get("user_agent.original")
+            if not isinstance(ua, str):
+                self.evaluated -= 1
+                self.missing_required += 1
+                continue
+            ua = ua.lower()
             if not ua.startswith(TOOL_UA_PREFIXES):
                 continue
             key = (e.get("source.ip"), e.get("destination.ip"), e.get("http.hostname"), ua.split(" ")[0])
@@ -233,7 +255,10 @@ class PortScan(_Grouped):
             self.keep(key, e)
             ports = self.extra[key]["ports"]
             if len(ports) < 70000:
-                ports.add(int(e.get("destination.port")))
+                try:
+                    ports.add(int(e.get("destination.port")))
+                except (TypeError, ValueError):
+                    self.missing_required += 1
         return []
 
     def finalize(self):

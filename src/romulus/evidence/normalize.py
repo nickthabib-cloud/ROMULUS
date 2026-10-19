@@ -324,7 +324,7 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
                 skips[f"dataset:{ds} not normalized in M1"] += 1
         except Skip as s:
             skips[s.reason] += 1
-        except (ValueError, KeyError, TypeError) as e:
+        except (ValueError, KeyError, TypeError, AttributeError) as e:   # malformed telemetry: an error, never a crash
             errors.append((h["_id"], f"{ds}: {e}"))
     groups, audit_errors = group_audit(audit_hits)
     errors.extend(audit_errors)

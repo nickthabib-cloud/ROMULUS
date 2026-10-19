@@ -388,11 +388,16 @@ def test_every_host_rule_is_positive_only_and_every_negative_assuring_rule_is_ty
     from romulus.detect.host import HOST_PLAYBOOKS
     from romulus.detect.network import NETWORK_PLAYBOOKS
     assert all(not cls.assures_negative for cls in HOST_PLAYBOOKS)
-    assert all(cls.assures_negative for cls in NETWORK_PLAYBOOKS)
+    # network rules keep typed-field negatives, except the self-reported user agent (ADR-004)
+    assert {cls.id for cls in NETWORK_PLAYBOOKS if not cls.assures_negative} == {"net.tool_user_agent_http"}
+    from romulus.detect.registry import ALL_PLAYBOOKS
     from romulus.report.manifest import POSITIVE_ONLY_CLAIMS
-    assert {cls.id for cls in HOST_PLAYBOOKS} <= set(POSITIVE_ONLY_CLAIMS)
-    for claim in POSITIVE_ONLY_CLAIMS.values():
-        assert "assurance is provided by" not in claim       # no rule may point to another positive-only rule
+    positive_only = {cls.id for cls in ALL_PLAYBOOKS if not cls.assures_negative}
+    assert positive_only <= set(POSITIVE_ONLY_CLAIMS)
+    all_ids = {cls.id for cls in ALL_PLAYBOOKS}
+    for rid, claim in POSITIVE_ONLY_CLAIMS.items():
+        # a positive-only claim may not name any rule as its assurance
+        assert not [other for other in all_ids if other in claim], (rid, claim)
 
 
 def test_positive_only_aggregate_with_a_match_reports_matched(monkeypatch):
@@ -410,3 +415,35 @@ def test_positive_only_aggregate_with_a_match_reports_matched(monkeypatch):
     s.finalize()
     window = {c["rule_id"]: c["state"] for c in repo.rule_cells("h1") if c["target"] == "*"}
     assert window["host.web_service_spawns_interpreter"] == "matched"
+
+
+
+# ---------------------------------------------------------------- scoped final check regressions (B1, B2, I1)
+def test_cells_stored_before_a_rule_became_positive_only_never_render_complete():
+    from romulus.report.manifest import _coverage
+    cells = [{"rule_id": "host.credential_store_read", "target": "idx", "partition": "p",
+              "state": "no_match_complete", "evaluated": 5}]          # stored under pack m1-pack@1
+    claim = _coverage(cells, targets=["idx"])["rules"][0]["negative_claim"]
+    assert claim.startswith("not assessable by design"), claim
+
+
+def test_dns_answer_only_partition_is_not_a_complete_negative():
+    from romulus.detect.network import DnsSubdomainEnumeration
+    from romulus.evidence.typed import RawRef, TypedEvent, fv
+    evs = [TypedEvent(id=f"a{i}", family="dns_query", ts=START, host="sensor",
+                      fields={"source.ip": fv("10.1.1.2", "o"), "destination.ip": fv("10.1.1.50", "o"),
+                              "dns.type": fv("answer", "o"), "dns.question.name": fv(f"h{i}.target.example", "o")},
+                      raw=[RawRef(target="n", native_id=f"r{i}")], normalizer="t") for i in range(150)]
+    pb = DnsSubdomainEnumeration()
+    pb.consume(evs)
+    assert pb.evaluated == 0 and pb.missing_required == 150    # unevaluated -> partial cell, never complete
+
+
+def test_malformed_suricata_records_are_errors_not_crashes():
+    from romulus.evidence.normalize import normalize_hits
+    bad = ['[1, 2]', 'null', '{"event_type": "alert", "alert": "x"}', '{"event_type": "dns", "dns": "x"}']
+    hits = [{"_id": f"m{i}", "_index": "net", "_source": {"@timestamp": "2024-11-18T14:00:00Z",
+             "event": {"dataset": "suricata.eve.alert", "original": raw}, "host": {"name": "sensor"}}}
+            for i, raw in enumerate(bad)]
+    events, skips, errors = normalize_hits(hits)
+    assert events == [] and len(errors) == len(bad)

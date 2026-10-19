@@ -21,4 +21,4 @@ def fresh_direct_pack():
 def pack_manifest() -> list[dict]:
     return [{"id": c.id, "version": c.version, "title": c.title, "kind": c.kind, "families": list(c.families),
              "required_fields": list(c.required_fields), "severity": c.severity, "lane": c.lane,
-             "attack": list(c.attack)} for c in ALL_PLAYBOOKS]
+             "attack": list(c.attack), "assures_negative": c.assures_negative} for c in ALL_PLAYBOOKS]

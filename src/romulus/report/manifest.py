@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from sqlalchemy import func, select
 
 from romulus.decide.policy import LANE_ORDER
+from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
 from romulus.store.repo import Repo, raw_id
@@ -68,9 +69,17 @@ POSITIVE_ONLY_CLAIMS = {
     "host.firewall_rule_change_command": _po("the firewall tool and change flags are identified from argv"),
     "host.credential_store_read": _po("the reader and the file are identified from argv, not from a file-access "
                                       "record"),
+    "net.tool_user_agent_http": (
+        "not assessable by design: positive-only rule (the user agent is self-reported, attacker-controlled text, "
+        "and only agents beginning with a listed tool name are matched; its absence proves nothing)"
+    ),
     "host.ssh_login_external_source": _po("logins are identified by parsing sshd log message text; unrecognized "
                                           "formats are not seen"),
 }
+
+
+POSITIVE_ONLY_RULE_IDS = frozenset({cls.id for cls in ALL_PLAYBOOKS if not cls.assures_negative}
+                                   | set(POSITIVE_ONLY_CLAIMS))
 
 
 def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None,
@@ -106,7 +115,9 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         matched = any(s.startswith("match") for s in states)
         if matched:
             claim = "none (rule matched)" + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
-        elif states.get("positive_only") or states.get("positive_only_partial"):
+        elif states.get("positive_only") or states.get("positive_only_partial") or rule in POSITIVE_ONLY_RULE_IDS:
+            # decided by what the rule can prove *now*, not by cells stored under an older pack: a hunt swept
+            # before a rule became positive-only must not render its old no_match_complete as "complete"
             claim = POSITIVE_ONLY_CLAIMS.get(
                 rule,
                 _po("the rule identifies programs or actions from argv or text"),
