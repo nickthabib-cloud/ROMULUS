@@ -442,10 +442,10 @@ class ProcessNetworkLink(Playbook):
             ("succeeded", outcomes.get(Outcome.success, 0)), ("failed", outcomes.get(Outcome.failure, 0)),
             ("with unknown or in-progress outcome", outcomes.get(Outcome.unknown, 0))) if n)
         parts = [
-            f"Observed on {s0.host} (auditd): {_process_words(first)} made {len(socks)} connect() call(s) to "
+            (f"Observed on {s0.host} (auditd): {_process_words(first)} made {len(socks)} connect() call(s) to "
             f"{s0.ip} port {s0.port} that join network records "
             f"({datetime.fromtimestamp(socks[0].ts, UTC).isoformat()} – "
-            f"{datetime.fromtimestamp(socks[-1].ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}.",
+            f"{datetime.fromtimestamp(socks[-1].ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."),
             f"Observed by network sensor(s) {', '.join(observers)}: {len(flows)} flow or session record(s) across "
             f"{len(connections)} connection(s) to {s0.ip} port {s0.port} starting within seconds of those calls"
             + (f", with local address(es) {', '.join(locals_)}" if locals_ else "")

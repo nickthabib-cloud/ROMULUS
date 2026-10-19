@@ -310,9 +310,9 @@ def test_record_from_another_hosts_established_address_is_never_linked():
 
 def test_unfamiliar_local_address_is_linked_but_stated_and_capped():
     hs, hn = history(local="198.51.100.10")
-    m = [m for m in link(hs + [_sock(**SSHD)] + hn + _network(flow(src="198.51.100.99"),
+    m = next(m for m in link(hs + [_sock(**SSHD)] + hn + _network(flow(src="198.51.100.99"),
                                                                  alert(src="198.51.100.99")))
-         if "port 4444" in m.claim][0]
+         if "port 4444" in m.claim)
     assert m.proposed_lane == "lead"
     assert "198.51.100.99 differ from the address usually seen for videoserver" in m.claim
 
@@ -357,6 +357,7 @@ def test_a_cited_event_missing_from_the_stage_fails_loudly():
 
 def test_stage_is_removed_on_failure_and_stale_stages_are_cleared(tmp_path):
     import os
+
     from romulus.hunt.stage import PREFIX, EventStage, clear_stale_stages
     stage = EventStage(tmp_path)
     stage.put([_sock()], {"romulus-host-logs/s500videoserver": {"x": 1}})

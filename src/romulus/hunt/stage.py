@@ -11,6 +11,7 @@ every exit path the process controls, and stages left by a killed process are cl
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import sqlite3
@@ -90,7 +91,5 @@ class EventStage:
         shutil.rmtree(self._dir, ignore_errors=True)
 
     def __del__(self):
-        try:
+        with contextlib.suppress(Exception):    # interpreter shutdown: nothing useful to report
             self.close()
-        except Exception:  # noqa: BLE001 - interpreter shutdown; nothing useful to report
-            pass
