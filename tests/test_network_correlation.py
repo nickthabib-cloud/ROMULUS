@@ -18,19 +18,20 @@ T0 = 1731940000.100                                   # 2024-11-18T14:26:40.100Z
 TS = "2024-11-18T14:26:40.100Z"
 ATTACKER, C2_PORT = "192.0.2.174", 4444               # documentation range stands in for an external peer
 SADDR_C2 = "0200115CC00002AE0000000000000000"          # AF_INET, port 4444, 192.0.2.174
+SSHD = {"exe": "/usr/sbin/sshd", "comm": "sshd", "uid": "0", "user": "root"}
 
 
 def syscall(serial=500, *, nr=42, arch="c000003e", success="yes", exit_code="0", exe="/usr/bin/perl",
-            comm="perl", uid="33", user="www-data"):
-    return (f"type=SYSCALL msg=audit({T0}:{serial}): arch={arch} syscall={nr} success={success} exit={exit_code} "
-            f"a0=3 a1=7ffc a2=10 a3=0 items=0 ppid=100 pid=200 auid=4294967295 uid={uid} gid={uid} euid={uid} "
-            f"tty=(none) ses=4294967295 comm=\"{comm}\" exe=\"{exe}\" subj==unconfined "
+            comm="perl", uid="33", user="www-data", t0=T0, pid=200):
+    return (f"type=SYSCALL msg=audit({t0:.3f}:{serial}): arch={arch} syscall={nr} success={success} "
+            f"exit={exit_code} a0=3 a1=7ffc a2=10 a3=0 items=0 ppid=100 pid={pid} auid=4294967295 uid={uid} "
+            f"gid={uid} euid={uid} tty=(none) ses=4294967295 comm=\"{comm}\" exe=\"{exe}\" subj==unconfined "
             f"key=\"T1043_Commonly_Used_Port\"\x1dARCH=x86_64 SYSCALL=connect AUID=\"unset\" UID=\"{user}\" "
             f"EUID=\"{user}\"")
 
 
-def sockaddr(serial=500, saddr=SADDR_C2):
-    return f"type=SOCKADDR msg=audit({T0}:{serial}): saddr={saddr}"
+def sockaddr(serial=500, saddr=SADDR_C2, t0=T0):
+    return f"type=SOCKADDR msg=audit({t0:.3f}:{serial}): saddr={saddr}"
 
 
 def audit_hit(_id, raw, host="videoserver", ts=TS):
@@ -47,19 +48,21 @@ def eve_hit(_id, eve, ts=TS):
 
 
 def flow(_id="f1", *, src="198.51.100.10", start="2024-11-18T14:26:40.050000+0000", cid="1:abc=",
-         end="2024-11-18T14:59:00.000000+0000"):
-    return eve_hit(_id, {"timestamp": end, "event_type": "flow", "src_ip": src, "src_port": 51000,
-                         "dest_ip": ATTACKER, "dest_port": C2_PORT, "proto": "TCP", "community_id": cid,
-                         "flow": {"start": start, "end": end, "bytes_toserver": 9000, "bytes_toclient": 120000}},
+         end="2024-11-18T14:59:00.000000+0000", dst=ATTACKER, dport=C2_PORT, sport=51000, event_type="flow"):
+    key = "netflow" if event_type == "netflow" else "flow"
+    return eve_hit(_id, {"timestamp": end, "event_type": event_type, "src_ip": src, "src_port": sport,
+                         "dest_ip": dst, "dest_port": dport, "proto": "TCP", "community_id": cid,
+                         key: {"start": start, "end": end, "bytes": 9000, "pkts": 30}},
                    ts="2024-11-18T14:59:00Z")
 
 
-def alert(_id="a1", *, severity=1, cid="1:abc=", ts="2024-11-18T14:31:00.000000+0000"):
-    return eve_hit(_id, {"timestamp": ts, "event_type": "alert", "src_ip": "198.51.100.10", "src_port": 51000,
+def alert(_id="a1", *, severity=1, cid="1:abc=", ts="2024-11-18T14:31:00.000000+0000", category="Trojan",
+          src="198.51.100.10"):
+    return eve_hit(_id, {"timestamp": ts, "event_type": "alert", "src_ip": src, "src_port": 51000,
                          "dest_ip": ATTACKER, "dest_port": C2_PORT, "proto": "TCP", "community_id": cid,
                          "alert": {"signature": "ET POLICY Meterpreter-like reverse shell", "signature_id": 1,
-                                   "category": "Trojan", "severity": severity}},
-                   ts="2024-11-18T14:31:00Z")
+                                   "category": category, "severity": severity}},
+                   ts=ts[:19] + "Z")
 
 
 # ---- sockaddr --------------------------------------------------------------------------------
@@ -97,6 +100,11 @@ def test_connect_group_becomes_a_typed_net_socket_event():
     assert ("ip", ATTACKER, "dst") in e.entities() and ("host", "videoserver", "host") in e.entities()
 
 
+def test_socket_time_is_the_audit_header_epoch():
+    e = normalize_hits([audit_hit("s1", syscall(), ts="2024-11-18T15:00:00Z"), audit_hit("k1", sockaddr())])[0][0]
+    assert e.ts == datetime.fromtimestamp(T0, UTC)
+
+
 def test_einprogress_connect_is_unknown_not_failed_and_other_failures_fail():
     started, _, _ = normalize_hits([audit_hit("s1", syscall(success="no", exit_code="-115")),
                                     audit_hit("k1", sockaddr())])
@@ -114,6 +122,7 @@ def test_non_ip_sockets_and_non_socket_syscalls_are_counted_skips():
     ])
     assert events == [] and errors == []
     assert sum(skips.values()) == 3 and any("non-IP socket family (local)" in k for k in skips)
+    assert skips["audit syscall on an arch whose socket calls are not decoded (40000003)"] == 1
 
 
 def test_connect_without_sockaddr_keeps_an_explicit_unknown_destination():
@@ -130,10 +139,17 @@ def test_duplicate_sockaddr_in_one_group_is_ambiguous_error():
     assert errors and "ambiguous" in errors[0][1]
 
 
+def test_socket_parse_errors_are_tagged_for_socket_rules_only():
+    _, _, errors = normalize_hits([audit_hit("s1", syscall()), audit_hit("k1", sockaddr(saddr="0200"))])
+    assert errors and errors[0][1].startswith("linux.audit.socket:")
+
+
 # ---- host rule -------------------------------------------------------------------------------
 
-def _socket_to(saddr, **kw):
-    events, _, _ = normalize_hits([audit_hit("s1", syscall(**kw)), audit_hit("k1", sockaddr(saddr=saddr))])
+def _sock(serial=500, saddr=SADDR_C2, host="videoserver", t0=T0, **kw):
+    events, _, errors = normalize_hits([audit_hit(f"s{serial}{host}", syscall(serial, t0=t0, **kw), host=host),
+                                        audit_hit(f"k{serial}{host}", sockaddr(serial, saddr, t0=t0), host=host)])
+    assert errors == []
     return events[0]
 
 
@@ -144,26 +160,41 @@ def _socket_to(saddr, **kw):
     ({"exe": "/usr/bin/python3.12", "comm": "python3", "uid": "1000", "user": "alice"}, "lead"),
 ])
 def test_notable_process_external_connect_matches_with_kernel_identity(kw, lane):
-    e = _socket_to(SADDR_C2, **kw)
-    matches = InterpreterExternalConnection().consume([e])
+    matches = InterpreterExternalConnection().consume([_sock(**kw)])
     assert len(matches) == 1 and matches[0].proposed_lane == lane
-    assert "connect()" in matches[0].claim and "the call succeeded" in matches[0].claim
+    assert "the call succeeded" in matches[0].claim
+
+
+def test_claim_says_connect_call_and_states_the_socket_type_caveat():
+    m = InterpreterExternalConnection().consume([_sock()])[0]
+    assert "calling connect() to non-private address" in m.claim and "UDP socket sends no packets" in m.claim
+    assert "connected" not in InterpreterExternalConnection.title
 
 
 @pytest.mark.parametrize("saddr, kw", [
     ("0200115C0A000005" + "0" * 16, {}),                                        # internal destination
-    (SADDR_C2, {"exe": "/usr/sbin/sshd", "comm": "sshd", "uid": "0", "user": "root"}),   # ordinary daemon
+    (SADDR_C2, SSHD),                                                           # ordinary daemon
     ("0200115C7F000001" + "0" * 16, {"exe": "/usr/bin/bash", "comm": "bash"}),  # loopback
+    ("020000005DB8D822" + "0" * 16, {}),                                        # port 0 route probe
+    ("0200115CFFFFFFFF" + "0" * 16, {}),                                        # broadcast
+    ("0200115CF0000001" + "0" * 16, {}),                                        # reserved 240/4
 ])
-def test_internal_or_ordinary_connections_do_not_match(saddr, kw):
-    assert InterpreterExternalConnection().consume([_socket_to(saddr, **kw)]) == []
+def test_internal_ordinary_and_non_connection_calls_do_not_match(saddr, kw):
+    assert InterpreterExternalConnection().consume([_sock(saddr=saddr, **kw)]) == []
 
 
 def test_failed_connect_is_worded_as_failed_and_lowered_by_policy():
-    e = _socket_to(SADDR_C2, success="no", exit_code="-111")
-    m = InterpreterExternalConnection().consume([e])[0]
+    m = InterpreterExternalConnection().consume([_sock(success="no", exit_code="-111")])[0]
     assert "the call failed" in m.claim
     assert decide(m, "h1").lane == "lead"
+
+
+def test_success_after_failure_keeps_both_candidates():
+    rule = InterpreterExternalConnection()
+    failed = rule.consume([_sock(1, success="no", exit_code="-111")])
+    ok = rule.consume([_sock(2, t0=T0 + 300)])
+    assert decide(failed[0], "h1").candidate_id != decide(ok[0], "h1").candidate_id
+    assert decide(ok[0], "h1").lane == "high"
 
 
 # ---- correlation -----------------------------------------------------------------------------
@@ -174,58 +205,109 @@ def _network(*hits):
     return events
 
 
+def link(*batches):
+    """Drive the staged join the way the sweep does: consume, stage, then finalize with a loader."""
+    rule, stage = ProcessNetworkLink(), {}
+    for batch in batches:
+        rule.consume(batch)
+        stage.update({e.id: e for e in rule.drain_staged()})
+    assert rule.retained_events() == []                    # nothing is held in memory for citation
+    rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    return rule.finalize()
+
+
 @pytest.mark.parametrize("network_first", [False, True])
 def test_alert_on_joined_flow_is_attributed_to_the_process_in_either_order(network_first):
-    host = [_socket_to(SADDR_C2, exe="/usr/sbin/sshd", comm="sshd", uid="0", user="root")]
-    net = _network(flow(), alert())
-    rule = ProcessNetworkLink()
-    for batch in ([net, host] if network_first else [host, net]):
-        rule.consume(batch)
-    retained = {e.id for e in rule.retained_events()}
-    matches = rule.finalize()
+    host, net = [_sock(**SSHD)], _network(flow(), alert())
+    matches = link(*([net, host] if network_first else [host, net]))
     assert len(matches) == 1
     m = matches[0]
-    assert m.claim_type == "correlated_observation" and m.proposed_lane == "high"
-    assert "inferred" in m.claim and "not itself observed" in m.claim
-    assert "Meterpreter-like" in m.claim and "198.51.100.10" in m.claim
+    assert m.claim_type == "correlated_observation" and m.proposed_lane == "high" and m.severity == "high"
+    assert "inferred from address, port and time; it is not itself observed" in m.claim
+    assert "1 IDS alert(s) on those connections: ET POLICY Meterpreter-like" in m.claim
+    assert "with local address(es) 198.51.100.10," in m.claim and "ambiguous" not in m.claim
     assert {e.family for e in m.events} == {"net_socket", "net_flow", "net_alert"}
-    assert all(e.id in retained for e in m.events)                 # every citation has a retained raw copy
-    assert any("inferred, not an asset record" in n for n in m.notes)
 
 
 def test_notable_process_gets_its_network_evidence_without_an_alert():
-    rule = ProcessNetworkLink()
-    rule.consume([_socket_to(SADDR_C2)] + _network(flow()))
-    matches = rule.finalize()
-    assert len(matches) == 1 and matches[0].proposed_lane == "high"
-    assert "web-service account" in matches[0].claim
+    m = link([_sock()] + _network(flow()))
+    assert len(m) == 1 and m[0].proposed_lane == "high"
+    assert "notable as an interpreter 'perl' running as web-service account 'www-data'" in m[0].claim
 
 
 def test_ordinary_process_without_alert_is_not_published():
-    rule = ProcessNetworkLink()
-    rule.consume([_socket_to(SADDR_C2, exe="/usr/sbin/sshd", comm="sshd", uid="0", user="root")]
-                 + _network(flow()))
-    assert rule.finalize() == []
+    assert link([_sock(**SSHD)] + _network(flow())) == []
 
 
 def test_flow_outside_the_join_window_is_not_linked():
-    rule = ProcessNetworkLink()
-    rule.consume([_socket_to(SADDR_C2)] + _network(flow(start="2024-11-18T14:27:10.000000+0000")))
-    assert rule.finalize() == []
+    assert link([_sock()] + _network(flow(start="2024-11-18T14:27:10.000000+0000"))) == []
 
 
-def test_two_matching_source_addresses_are_called_ambiguous():
-    rule = ProcessNetworkLink()
-    rule.consume([_socket_to(SADDR_C2)] + _network(flow("f1"), flow("f2", src="198.51.100.11", cid="1:def=")))
-    m = rule.finalize()[0]
-    assert "ambiguous" in m.claim and "198.51.100.10, 198.51.100.11" in m.claim
+def test_two_local_addresses_are_called_ambiguous():
+    m = link([_sock()] + _network(flow("f1"), flow("f2", src="198.51.100.11", cid="1:def=", sport=51001)))[0]
+    assert "It is ambiguous: more than one local address matched" in m.claim
+    assert "local address(es) 198.51.100.10, 198.51.100.11" in m.claim
 
 
 def test_low_severity_alert_with_ordinary_process_is_a_lead():
-    rule = ProcessNetworkLink()
-    rule.consume([_socket_to(SADDR_C2, exe="/usr/sbin/sshd", comm="sshd", uid="0", user="root")]
-                 + _network(flow(), alert(severity=2)))
-    assert rule.finalize()[0].proposed_lane == "lead"
+    assert link([_sock(**SSHD)] + _network(flow(), alert(severity=2)))[0].proposed_lane == "lead"
+
+
+def test_reverse_netflow_is_the_same_connection_not_another_source():
+    fwd = flow("n1", event_type="netflow")
+    rev = flow("n2", event_type="netflow", src=ATTACKER, sport=C2_PORT, dst="198.51.100.10", dport=51000)
+    m = link([_sock()] + _network(fwd, rev))[0]
+    assert "2 flow record(s) across 1 connection(s)" in m.claim
+    assert "with local address(es) 198.51.100.10." in m.claim and "ambiguous" not in m.claim
+
+
+def test_reused_community_id_hours_later_is_not_pulled_in():
+    near = flow(end="2024-11-18T14:27:00.000000+0000")
+    later_flow = flow("f9", start="2024-11-18T18:00:00.000000+0000", end="2024-11-18T18:05:00.000000+0000")
+    later_alert = alert("a9", ts="2024-11-18T18:01:00.000000+0000")
+    assert link([_sock(**SSHD)] + _network(near, later_flow, later_alert)) == []
+
+
+def test_alert_joined_by_two_hosts_is_shared_and_capped_at_lead():
+    a = _sock(host="hostA", exe="/usr/bin/python3", comm="python3", uid="1000", user="alice")
+    b = _sock(host="hostB", t0=T0 + 2, **SSHD)
+    matches = link([a, b] + _network(flow(), alert()))
+    assert len(matches) == 2 and all(m.proposed_lane == "lead" for m in matches)
+    assert all("the attribution is shared, so the lane is capped at lead" in m.claim for m in matches)
+
+
+def test_known_host_address_excludes_records_from_other_local_addresses():
+    https = "020001BBC00002AE" + "0" * 16                  # 192.0.2.174:443
+    earlier, prior = [], []
+    for i in range(1, 5):                                  # four unique joins agree on 198.51.100.10
+        t0 = T0 - 300 * i
+        start = datetime.fromtimestamp(t0, UTC).isoformat()
+        end = datetime.fromtimestamp(t0 + 10, UTC).isoformat()
+        earlier.append(_sock(i, saddr=https, t0=t0, **SSHD))
+        prior += _network(flow(f"p{i}", dport=443, cid=f"1:p{i}=", sport=52000 + i, start=start, end=end))
+    elsewhere = _network(flow(src="198.51.100.99"), alert(src="198.51.100.99"))
+    matches = link(earlier + [_sock(**SSHD)] + prior + elsewhere)
+    assert [m for m in matches if "port 4444" in m.claim] == []      # another machine's alert is not pinned here
+
+
+def test_web_account_to_internal_destination_has_no_process_component():
+    assert link([_sock(saddr="0200115C0A000005" + "0" * 16)] + _network(flow(dst="10.0.0.5"))) == []
+
+
+def test_context_level_alert_stays_context():
+    m = link([_sock(**SSHD)] + _network(flow(), alert(severity=3, category="Not Suspicious Traffic")))[0]
+    assert m.proposed_lane == "context" and m.severity == "low"
+
+
+def test_failed_notable_connect_is_a_lead():
+    m = link([_sock(success="no", exit_code="-111")] + _network(flow()))[0]
+    assert m.proposed_lane == "lead" and "1 failed" in m.claim
+
+
+def test_expanded_ipv6_in_sensor_records_joins_compressed_socket_address():
+    saddr = "0A00115C" + "00000000" + "20010DB8000000000000000000000005" + "00000000"
+    ev = flow(dst="2001:0db8:0000:0000:0000:0000:0000:0005", src="2001:0db8::10", cid="1:v6=")
+    assert len(link([_sock(saddr=saddr)] + _network(ev))) == 1
 
 
 # ---- end to end through the sweep: citations resolve whichever target is swept first -----------
@@ -261,6 +343,7 @@ def test_correlated_candidate_citations_are_all_retained(monkeypatch, order):
     for target in order:
         s.run_partition(target, None, [], w, est=2)
     s.finalize()
+    assert getattr(s, "_stage", None) is None                       # the disk stage is removed after finalize
     linked = [c for c in repo.candidates("h1") if c["rule_id"] == "corr.process_network_link"]
     direct = [c for c in repo.candidates("h1") if c["rule_id"] == "host.interpreter_external_connection"]
     assert len(linked) == 1 and len(direct) == 1

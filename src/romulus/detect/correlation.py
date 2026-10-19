@@ -1,15 +1,17 @@
 """Host↔network playbooks: process sockets from auditd, and their joins to network-sensor records.
 
 A join is a correlation, never an observation (spec section 1). Each side is an observed fact cited to
-its own record; the link between them is inferred from typed address, port and time (and, inside the
-network side, from the sensor's own flow identity) and is worded as inferred. A correlated item's lane
-is never higher than its strongest observed component.
+its own record; the link between them is inferred from typed address, port and time (and, on the network
+side, from the sensor's own flow identity bounded by the flow's lifetime) and is worded as inferred.
+A correlated item's lane never exceeds its strongest observed component, and drops to lead whenever the
+same network records also match another host's or process's connect() call.
 """
 from __future__ import annotations
 
 import ipaddress
-from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS, interpreter_name, is_internal
@@ -17,21 +19,34 @@ from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome, TypedEvent
 
 RELAYS = {"nc", "ncat", "netcat", "socat"}
-JOIN_BEFORE = timedelta(seconds=3)      # sensor flow start may precede the audit record slightly
-JOIN_AFTER = timedelta(seconds=5)
+JOIN_BEFORE = 3.0        # seconds a sensor's flow start may precede the audit record
+JOIN_AFTER = 5.0
+FLOW_SLACK = 1.0         # seconds around a flow's lifetime within which same-flow records are pulled in
 NETWORK_JOIN_FAMILIES = ("net_flow", "net_alert", "http_tx", "tls_session", "ssh_session", "file_transfer")
 EXAMPLE_LIMIT = 20
+ADDRESS_MIN_JOINS, ADDRESS_MIN_SHARE = 2, 0.8
+LANE_RANK = {"high": 0, "lead": 1, "context": 2}
+LANE_SEVERITY = {"high": "high", "lead": "medium", "context": "low"}
+SOCKET_TYPE_CAVEAT = "auditd does not record the socket type; a connect() on a UDP socket sends no packets"
 
 
-def _ip(value) -> ipaddress._BaseAddress | None:
+def canon_ip(value) -> str | None:
     try:
-        return ipaddress.ip_address(str(value))
+        return str(ipaddress.ip_address(str(value)))
     except ValueError:
         return None
 
 
-def _routable_remote(ip: ipaddress._BaseAddress | None) -> bool:
-    return ip is not None and not (ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local)
+def routable_remote(ip: str | None) -> bool:
+    if ip is None:
+        return False
+    a = ipaddress.ip_address(ip)
+    return not (a.is_loopback or a.is_unspecified or a.is_multicast or a.is_link_local or a.is_reserved
+                or (a.version == 4 and a == ipaddress.IPv4Address("255.255.255.255")))
+
+
+def external(ip: str | None) -> bool:
+    return routable_remote(ip) and not is_internal(ipaddress.ip_address(ip))
 
 
 def connect_phrase(e: TypedEvent) -> str:
@@ -40,26 +55,28 @@ def connect_phrase(e: TypedEvent) -> str:
     if e.outcome == Outcome.failure:
         return "the call failed"
     if e.get("socket.exit") == "-115":
-        return "the connection was started (non-blocking; completion is not recorded)"
+        return "the call started a non-blocking connection whose completion is not recorded"
     return "the call's outcome is unknown"
 
 
 def process_interest(e: TypedEvent) -> tuple[str | None, str]:
-    """Why a connecting process is notable, and the lane that reason supports (None: not notable).
-    Identity comes from kernel-recorded fields only (SYSCALL exe and uid), never from argv text."""
+    """Why a connecting process is notable (a noun phrase with its article), and the lane that reason
+    supports. Identity comes from kernel-recorded SYSCALL fields only (exe, uid), never argv text."""
     exe = e.get("process.executable") or ""
     name = interpreter_name(basename(exe))
     user = e.get("process.user") or ""
     euser = e.get("process.effective_user") or ""
-    web = user in WEB_SERVICE_USERS or euser in WEB_SERVICE_USERS
-    if web and name in INTERPRETERS:
-        return f"interpreter '{name}' running as web-service account '{user or euser}'", "high"
-    if web:
-        return f"process running as web-service account '{user or euser}'", "high"
-    if name in SHELLS or name in RELAYS:
-        return f"{'shell' if name in SHELLS else 'network relay tool'} '{name}'", "high"
+    account = user if user in WEB_SERVICE_USERS else euser
+    if account in WEB_SERVICE_USERS and name in INTERPRETERS:
+        return f"an interpreter '{name}' running as web-service account '{account}'", "high"
+    if account in WEB_SERVICE_USERS:
+        return f"a process running as web-service account '{account}'", "high"
+    if name in SHELLS:
+        return f"a shell '{name}'", "high"
+    if name in RELAYS:
+        return f"a network relay tool '{name}'", "high"
     if name in INTERPRETERS:
-        return f"interpreter '{name}'", "lead"
+        return f"an interpreter '{name}'", "lead"
     return None, "lead"
 
 
@@ -74,45 +91,120 @@ class InterpreterExternalConnection(Playbook):
     """Positive-only: the audit rule set's scope (syscalls, families, ports) is not visible in telemetry,
     so a missing connect record never proves a connection did not happen."""
     id = "host.interpreter_external_connection"
-    title = "Shell, interpreter, relay tool or web-service process connected to a non-private address"
+    version = "2"
+    title = "Shell, interpreter, relay tool or web-service process made a connect() call to a non-private address"
     families = ("net_socket",)
     required_fields = ("socket.syscall", "process.executable", "destination.ip")
     assures_negative = False
     severity, lane = "high", "lead"
     attack = ("T1059", "T1071", "T1095")
     benign = ("package managers and update checks run from scripts", "monitoring or backup scripts calling out",
-              "web applications making approved outbound API calls")
+              "web applications making approved outbound API calls",
+              "name resolution: resolvers and address sorting call connect() on UDP sockets")
     next_checks = ("process_tree for the connecting process", "network records for the same destination and time",
                    "entity_timeline of the host around the connection")
 
     def match(self, e: TypedEvent) -> list[Match]:
         if e.get("socket.syscall") != "connect":
             return []
-        ip = _ip(e.get("destination.ip"))
-        if not _routable_remote(ip) or is_internal(ip):
+        ip, port = canon_ip(e.get("destination.ip")), e.get("destination.port")
+        if not external(ip) or not port:          # port 0: a route probe, never a connection
             return []
         reason, lane = process_interest(e)
         if reason is None:
             return []
-        port = e.get("destination.port")
-        claim = (f"An auditd connect() record on {e.host} shows {_process_words(e)}, a {reason}, connecting to "
-                 f"non-private address {ip} port {port} at {e.ts.isoformat()}; {connect_phrase(e)}.")
+        claim = (f"An auditd connect() record on {e.host} shows {_process_words(e)}, {reason}, calling connect() "
+                 f"to non-private address {ip} port {port} at {e.ts.isoformat()}; {connect_phrase(e)}. "
+                 f"{SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
         preds = [pf(e, "socket.syscall"), pf(e, "process.executable"), pf(e, "destination.ip")]
         if e.has("process.user"):
             preds.append(pf(e, "process.user"))
-        key = f"{e.host}|{e.get('process.executable')}|{e.get('process.user')}|{ip}|{port}"
+        # the outcome is part of the identity: a refused call must never hide a later successful one
+        key = f"{e.host}|{e.get('process.executable')}|{e.get('process.user')}|{ip}|{port}|{e.outcome}"
         return [Match(self.id, claim, self.claim_type, [e], preds, e.ts, self.severity, lane, "high",
                       e.entities(), group_key=key)]
 
 
+# ---------------------------------------------------------------------------------------------
+# correlation
+# ---------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Sock:
+    id: str
+    host: str
+    ts: float
+    ip: str
+    port: int
+    exe: str
+    user: str
+    pid: int | None
+    outcome: str
+    reason: str | None
+    process_lane: str
+
+    @property
+    def group(self) -> str:
+        return f"{self.host}|{self.exe}|{self.user}|{self.ip}|{self.port}"
+
+    @property
+    def claimant(self) -> tuple[str, str, int | None]:
+        return self.host, self.exe, self.pid
+
+
+@dataclass(frozen=True)
+class Net:
+    id: str
+    family: str
+    observer: str
+    start: float
+    end: float | None
+    src: str
+    sport: int
+    dst: str
+    dport: int
+    cid: str | None
+    alert_sev: int | None
+    alert_cat: str | None
+    alert_sig: str | None
+
+    def local_side(self, ip: str, port: int) -> str | None:
+        """The non-remote endpoint, if this record is one direction of a connection to ip:port."""
+        if (self.dst, self.dport) == (ip, port):
+            return self.src
+        if (self.src, self.sport) == (ip, port):
+            return self.dst
+        return None
+
+
+def _epoch(value) -> float | None:
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp()
+    return None
+
+
+def alert_lane(n: Net) -> str:
+    """Exactly the lane SuricataAlertStack gives the same alert on its own."""
+    if n.alert_cat == "Not Suspicious Traffic" or n.alert_sev == 3:
+        return "context"
+    return "high" if n.alert_sev == 1 else "lead"
+
+
 class ProcessNetworkLink(Playbook):
-    """Join each IP connect() to network-sensor records for the same remote address and port that start
-    within the join window, then pull in every sensor record sharing those flows' community IDs. Publishes
-    when the network side carries an IDS alert (the alert gets a process) or the process is notable (the
-    process gets its network evidence)."""
+    """Join each IP connect() to network-sensor records of the same connection: records for the same
+    remote endpoint (either direction) that start within the join window, plus records sharing their
+    community ID inside the flow's own lifetime. Publishes when the joined records carry an IDS alert
+    (the alert gets a process) or when the process meets the external-connection criteria (the process
+    gets its network evidence). Memory holds compact keys only; full events are staged on disk."""
     id = "corr.process_network_link"
-    title = "Host process connection linked to network-sensor records for the same flow (inferred link)"
+    version = "2"
+    title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
+    staged = True
     claim_type = "correlated_observation"
     families = ("net_socket",) + NETWORK_JOIN_FAMILIES
     required_fields = ()
@@ -120,144 +212,213 @@ class ProcessNetworkLink(Playbook):
     assures_negative = False
     severity, lane = "high", "lead"
     attack = ("T1071", "T1095", "T1571")
-    benign = ("the same destination contacted by another host at the same second (shared NAT, proxies)",
+    benign = ("another host or process reaching the same endpoint at the same second (stated when seen)",
               "benign IDS signatures on routine traffic")
     next_checks = ("flow detail for the linked community IDs", "process_tree for the connecting process",
                    "peer activity for the remote address across hosts and sessions")
 
     def __init__(self):
         super().__init__()
-        self.sockets: list[TypedEvent] = []
-        self.by_endpoint: dict[tuple[str, int], list[TypedEvent]] = defaultdict(list)
-        self.by_community: dict[str, list[TypedEvent]] = defaultdict(list)
+        self.sockets: list[Sock] = []
+        self.by_endpoint: dict[tuple[str, int], list[Net]] = defaultdict(list)
+        self.by_community: dict[str, list[Net]] = defaultdict(list)
+        self._pending: list[TypedEvent] = []
+        self.load = lambda ids: []
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        return out
+
+    def _sock(self, e: TypedEvent) -> None:
+        if e.get("socket.syscall") != "connect":
+            return
+        ip, port = canon_ip(e.get("destination.ip")), e.get("destination.port")
+        if ip is None or port is None:
+            self.missing_required += 1
+            return
+        if not routable_remote(ip) or not port:
+            return
+        reason, lane = process_interest(e) if external(ip) else (None, "lead")
+        self.evaluated += 1
+        self.sockets.append(Sock(e.id, e.host or "", e.ts.timestamp(), ip, int(port),
+                                 str(e.get("process.executable")), str(e.get("process.user")),
+                                 e.get("process.pid"), str(e.outcome), reason, lane))
+        self._pending.append(e)
+
+    def _net(self, e: TypedEvent) -> None:
+        src, dst = canon_ip(e.get("source.ip")), canon_ip(e.get("destination.ip"))
+        try:
+            sport, dport = int(e.get("source.port")), int(e.get("destination.port"))
+        except (TypeError, ValueError):
+            self.missing_required += 1
+            return
+        if src is None or dst is None:
+            self.missing_required += 1
+            return
+        self.evaluated += 1
+        start = _epoch(e.get("flow.start")) or e.ts.timestamp()
+        end = _epoch(e.get("flow.end"))
+        sev = e.get("alert.severity")
+        n = Net(e.id, e.family, e.host or "", start, end, src, sport, dst, dport, e.get("network.community_id"),
+                sev if isinstance(sev, int) else None, e.get("alert.category"), e.get("alert.signature"))
+        self.by_endpoint[(dst, dport)].append(n)
+        self.by_endpoint[(src, sport)].append(n)
+        if n.cid:
+            self.by_community[n.cid].append(n)
+        self._pending.append(e)
 
     def consume(self, events):
         for e in events:
-            if e.family not in self.families:
-                continue
             if e.family == "net_socket":
-                if e.get("socket.syscall") != "connect":
-                    continue
-                if not e.has("destination.ip") or e.get("destination.port") is None:
-                    self.missing_required += 1
-                    continue
-                if not _routable_remote(_ip(e.get("destination.ip"))):
-                    continue
-                self.evaluated += 1
-                self.sockets.append(e)
-                continue
-            dst, port = e.get("destination.ip"), e.get("destination.port")
-            if dst is None or port is None:
-                continue
-            self.evaluated += 1
-            try:
-                self.by_endpoint[(str(dst), int(port))].append(e)
-            except (TypeError, ValueError):
-                self.missing_required += 1
-                continue
-            cid = e.get("network.community_id")
-            if cid:
-                self.by_community[cid].append(e)
+                self._sock(e)
+            elif e.family in NETWORK_JOIN_FAMILIES:
+                self._net(e)
         return []
 
     def retained_events(self) -> list[TypedEvent]:
-        # Any of these may be cited at finalize, whatever order the targets are swept in.
-        return self.sockets + [e for evs in self.by_endpoint.values() for e in evs]
+        return []           # staged on disk instead
 
-    @staticmethod
-    def _start(e: TypedEvent) -> datetime:
-        start = e.get("flow.start")
-        if isinstance(start, str):
-            try:
-                parsed = datetime.fromisoformat(start)
-            except ValueError:
-                return e.ts
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-        return e.ts
-
-    def _join(self, s: TypedEvent) -> list[TypedEvent]:
-        key = (str(s.get("destination.ip")), int(s.get("destination.port")))
-        lo, hi = s.ts - JOIN_BEFORE, s.ts + JOIN_AFTER
-        direct = [n for n in self.by_endpoint.get(key, []) if lo <= self._start(n) <= hi]
-        linked: dict[str, TypedEvent] = {n.id: n for n in direct}
-        for n in direct:
-            cid = n.get("network.community_id")
-            for m in self.by_community.get(cid, []) if cid else []:
-                linked.setdefault(m.id, m)
-        return sorted(linked.values(), key=lambda n: (n.ts, n.id))
+    # ---- join ------------------------------------------------------------------------------
+    def _join(self, s: Sock) -> list[Net]:
+        direct = [n for n in self.by_endpoint.get((s.ip, s.port), [])
+                  if s.ts - JOIN_BEFORE <= n.start <= s.ts + JOIN_AFTER and n.local_side(s.ip, s.port)]
+        linked = {n.id: n for n in direct}
+        for d in direct:
+            if not d.cid:
+                continue
+            lo = d.start - FLOW_SLACK
+            hi = (d.end if d.end is not None else d.start + JOIN_AFTER) + FLOW_SLACK
+            pair = {(d.src, d.sport), (d.dst, d.dport)}
+            for m in self.by_community[d.cid]:
+                if lo <= m.start <= hi and {(m.src, m.sport), (m.dst, m.dport)} == pair:
+                    linked.setdefault(m.id, m)
+        return sorted(linked.values(), key=lambda n: (n.start, n.id))
 
     def finalize(self):
-        joins: dict[str, list[TypedEvent]] = {}
-        addresses: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        raw = {s.id: self._join(s) for s in self.sockets}
+        # pass 1: who else claims each network record, and each host's address as each sensor sees it
+        claimants: dict[str, set] = defaultdict(set)
         for s in self.sockets:
-            partners = self._join(s)
-            if not partners:
+            for n in raw[s.id]:
+                claimants[n.id].add(s.claimant)
+        seen: dict[tuple[str, str], Counter] = defaultdict(Counter)
+        for s in self.sockets:
+            partners = raw[s.id]
+            if not partners or any(len(claimants[n.id]) > 1 for n in partners):
                 continue
-            joins[s.id] = partners
-            sources = {str(n.get("source.ip")) for n in partners if n.family == "net_flow" and n.get("source.ip")}
-            if len(sources) == 1:
-                addresses[s.host or ""][sources.pop()] += 1
-        groups: dict[str, list[TypedEvent]] = defaultdict(list)
+            by_observer: dict[str, set] = defaultdict(set)
+            for n in partners:
+                by_observer[n.observer].add(n.local_side(s.ip, s.port))
+            for observer, locals_ in by_observer.items():
+                if len(locals_) == 1:
+                    seen[(s.host, observer)][locals_.pop()] += 1
+        address: dict[tuple[str, str], tuple[str, int, int]] = {}
+        for key, counts in seen.items():
+            best, n = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
+            total = sum(counts.values())
+            if n >= ADDRESS_MIN_JOINS and n / total >= ADDRESS_MIN_SHARE:
+                address[key] = (best, n, total)
+        # pass 2: when a host's address is known for a sensor, its records must carry it
+        joins: dict[str, list[Net]] = {}
+        for s in self.sockets:
+            kept = [n for n in raw[s.id]
+                    if (s.host, n.observer) not in address
+                    or n.local_side(s.ip, s.port) == address[(s.host, n.observer)][0]]
+            if kept:
+                joins[s.id] = kept
+        groups: dict[str, list[Sock]] = defaultdict(list)
         for s in self.sockets:
             if s.id in joins:
-                key = f"{s.host}|{s.get('process.executable')}|{s.get('process.user')}|" \
-                      f"{s.get('destination.ip')}|{s.get('destination.port')}"
-                groups[key].append(s)
+                groups[s.group].append(s)
         out = []
-        for key, socks in groups.items():
-            socks.sort(key=lambda x: (x.ts, x.id))
-            partners: dict[str, TypedEvent] = {}
-            for s in socks:
-                for n in joins[s.id]:
-                    partners.setdefault(n.id, n)
-            alerts = [n for n in partners.values() if n.family == "net_alert"]
-            reason, process_lane = process_interest(socks[0])
-            if not alerts and reason is None:
-                continue
-            out.append(self._match(key, socks, list(partners.values()), alerts, reason, process_lane, addresses))
+        for key in sorted(groups):
+            m = self._group_match(key, sorted(groups[key], key=lambda x: (x.ts, x.id)), joins, claimants, address)
+            if m is not None:
+                out.append(m)
         return out
 
-    def _match(self, key, socks, partners, alerts, reason, process_lane, addresses) -> Match:
+    def _group_match(self, key, socks, joins, claimants, address) -> Match | None:
+        partners: dict[str, Net] = {}
+        for s in socks:
+            for n in joins[s.id]:
+                partners.setdefault(n.id, n)
+        alerts = [n for n in partners.values() if n.family == "net_alert"]
+        notable = [s for s in socks if s.reason is not None]
+        if not alerts and not notable:
+            return None
+        components = []
+        if notable:
+            lane = notable[0].process_lane
+            if all(s.outcome == Outcome.failure for s in notable):
+                lane = "lead"                       # every notable call failed: an attempt, not a connection
+            components.append(lane)
+        if alerts:
+            components.append(min((alert_lane(a) for a in alerts), key=LANE_RANK.__getitem__))
+        lane = min(components, key=LANE_RANK.__getitem__)
+        others = sorted({c for n in partners.values() for c in claimants[n.id]} - {s.claimant for s in socks},
+                        key=str)
+        if others and lane == "high":
+            lane = "lead"
         s0 = socks[0]
-        dst, port = s0.get("destination.ip"), s0.get("destination.port")
-        lanes = []
-        if alerts:
-            lanes.append("high" if any(a.get("alert.severity") == 1 for a in alerts) else "lead")
-        if reason is not None:
-            lanes.append(process_lane)
-        lane = "high" if "high" in lanes else "lead"
-        flows = [n for n in partners if n.family == "net_flow"]
-        sources = sorted({str(n.get("source.ip")) for n in flows if n.get("source.ip")})
-        sigs = sorted({str(a.get("alert.signature")) for a in alerts})
-        parts = [(f"Observed on {s0.host} (auditd): {_process_words(s0)} called connect() to {dst} port {port} "
-                 f"{len(socks)} time(s) ({socks[0].ts.isoformat()} – {socks[-1].ts.isoformat()}); first call: "
-                 f"{connect_phrase(s0)}.")]
-        parts.append(f"Observed by network sensors: {len(flows)} flow record(s) to {dst} port {port} starting within "
-                     f"seconds of those calls" + (f", from source address(es) {', '.join(sources)}" if sources else "")
-                     + (f", and {len(alerts)} IDS alert(s) on the same flows: {'; '.join(sigs[:3])}"
-                        + (f" and {len(sigs) - 3} more" if len(sigs) > 3 else "") if alerts else "") + ".")
-        parts.append("The link between the host process and these network records is inferred from destination "
-                     "address, port and time" + (" and is ambiguous: more than one source address matched"
-                                                  if len(sources) > 1 else "") + "; it is not itself observed.")
-        if reason is not None:
-            parts.append(f"The process is notable as a {reason}.")
-        cited = socks[:EXAMPLE_LIMIT] + sorted(partners, key=lambda n: (n.family != "net_alert", n.ts))[:EXAMPLE_LIMIT]
-        preds = [pf(s0, "process.executable"), pf(s0, "destination.ip"), pf(s0, "destination.port")]
-        if alerts:
-            preds.append(pf(alerts[0], "alert.signature"))
-        elif flows and flows[0].has("network.community_id"):
-            preds.append(pf(flows[0], "network.community_id"))
-        m = Match(self.id, " ".join(parts), self.claim_type, cited, preds, s0.ts, self.severity, lane, "medium",
-                  s0.entities(), group_key=key)
-        seen = addresses.get(s0.host or "", {})
-        if seen:
-            total = sum(seen.values())
-            best, n = max(seen.items(), key=lambda kv: (kv[1], kv[0]))
-            m.notes.append(f"inferred, not an asset record: network sensors saw {s0.host}'s joined connections from "
-                           f"{best} in {n} of {total} uniquely joined connect() calls")
+        flows = [n for n in partners.values() if n.family == "net_flow"]
+        connections = {n.cid or f"{n.src}:{n.sport}-{n.dst}:{n.dport}" for n in partners.values()}
+        locals_ = sorted({n.local_side(s0.ip, s0.port) for n in partners.values()} - {None})
+        observers = sorted({n.observer for n in partners.values()})
+        sigs = sorted({str(a.alert_sig) for a in alerts})
+        outcomes = Counter(s.outcome for s in socks)
+
+        ids = [s.id for s in socks[:EXAMPLE_LIMIT]] + [
+            n.id for n in sorted(partners.values(), key=lambda n: (n.family != "net_alert", n.start, n.id))
+        ][:EXAMPLE_LIMIT]
+        loaded = {e.id: e for e in self.load(ids)}
+        cited = [loaded[i] for i in ids if i in loaded]
+        first = loaded.get(s0.id)
+        if first is None:
+            return None
+        outcome_words = ", ".join(f"{n} {w}" for w, n in (
+            ("succeeded", outcomes.get(Outcome.success, 0)), ("failed", outcomes.get(Outcome.failure, 0)),
+            ("with unknown or in-progress outcome", outcomes.get(Outcome.unknown, 0))) if n)
+        parts = [
+            (f"Observed on {s0.host} (auditd): {_process_words(first)} made {len(socks)} connect() call(s) to "
+            f"{s0.ip} port {s0.port} that join network records "
+            f"({datetime.fromtimestamp(socks[0].ts, UTC).isoformat()} – "
+            f"{datetime.fromtimestamp(socks[-1].ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."),
+            f"Observed by network sensor(s) {', '.join(observers)}: {len(flows)} flow record(s) across "
+            f"{len(connections)} connection(s) to {s0.ip} port {s0.port} starting within seconds of those calls"
+            + (f", with local address(es) {', '.join(locals_)}" if locals_ else "")
+            + (f", and {len(alerts)} IDS alert(s) on those connections: {'; '.join(sigs[:3])}"
+               + (f" and {len(sigs) - 3} more" if len(sigs) > 3 else "") if alerts else "") + ".",
+            "The link between the host process and these network records is inferred from address, port and "
+            "time; it is not itself observed"
+            + (". It is ambiguous: more than one local address matched" if len(locals_) > 1 else "") + ".",
+        ]
+        if others:
+            names = "; ".join(f"{h} '{exe}' (pid {pid})" for h, exe, pid in others[:5])
+            parts.append(f"The same network records also join connect() calls by {len(others)} other "
+                         f"process(es): {names}" + (" and more" if len(others) > 5 else "")
+                         + "; the attribution is shared, so the lane is capped at lead.")
+        if notable:
+            parts.append(f"The process is notable as {notable[0].reason} calling connect() to a non-private "
+                         f"address.")
+        alert_event = next((loaded[n.id] for n in alerts if n.id in loaded), None)
+        flow_event = next((loaded[n.id] for n in flows if n.id in loaded), None)
+        preds = [pf(first, "process.executable"), pf(first, "destination.ip"), pf(first, "destination.port")]
+        if alert_event is not None and alert_event.has("alert.signature"):
+            preds.append(pf(alert_event, "alert.signature"))
+        elif flow_event is not None and flow_event.has("network.community_id"):
+            preds.append(pf(flow_event, "network.community_id"))
+        m = Match(self.id, " ".join(parts), self.claim_type, cited, preds, first.ts, LANE_SEVERITY[lane], lane,
+                  "medium", first.entities(), group_key=key)
+        for observer in observers:
+            known = address.get((s0.host, observer))
+            if known:
+                best, n, total = known
+                m.notes.append(f"inferred, not an asset record: sensor {observer} saw {s0.host}'s uniquely joined "
+                               f"connections from {best} in {n} of {total} joins; records from other local "
+                               f"addresses were not linked")
         if len(socks) > EXAMPLE_LIMIT or len(partners) > EXAMPLE_LIMIT:
-            m.notes.append(f"{len(socks)} connect record(s) and {len(partners)} network record(s) joined; "
-                           f"up to {EXAMPLE_LIMIT} of each are cited")
+            m.notes.append(f"{len(socks)} connect() record(s) and {len(partners)} network record(s) joined; up to "
+                           f"{EXAMPLE_LIMIT} of each are cited")
         return m
 
 

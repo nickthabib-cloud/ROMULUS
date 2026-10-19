@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 from romulus.evidence.auditd import (
+    SOCKET_SYSCALLS,
     AuditParseError,
     AuditRecord,
     execve_argv,
@@ -167,7 +168,8 @@ def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], s
         outcome = Outcome.unknown
     if exit_code:
         f["socket.exit"] = fv(exit_code, f"{sid}:event.original#auditd:SYSCALL.exit")
-    return TypedEvent(id=event_id("net_socket", refs), family="net_socket", ts=_ts(hs["_source"]["@timestamp"]),
+    # the audit header's own epoch, not the shipper's @timestamp: joins with sensor clocks need the kernel time
+    return TypedEvent(id=event_id("net_socket", refs), family="net_socket", ts=datetime.fromtimestamp(rs.ts, UTC),
                       host=host or None, outcome=outcome, fields=f, raw=refs, normalizer=NORMALIZER_VERSION,
                       caveats=caveats)
 
@@ -398,16 +400,20 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
             errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
             continue
         if "EXECVE" not in types:
-            syscall = next((socket_syscall(r) for _, r in members if r.type == "SYSCALL"), None)
+            sys_rec = next((r for _, r in members if r.type == "SYSCALL"), None)
+            syscall = socket_syscall(sys_rec) if sys_rec is not None else None
             if syscall is None:
-                skips["audit group without EXECVE or socket syscall"] += 1
+                arch = sys_rec.fields.get("arch", "") if sys_rec is not None else ""
+                skips["audit group without EXECVE or socket syscall" if not arch or arch in SOCKET_SYSCALLS
+                      else f"audit syscall on an arch whose socket calls are not decoded ({arch})"] += 1
                 continue
             try:
                 events.append(normalize_socket_group(host, members, syscall))
             except Skip as s:
                 skips[s.reason] += 1
             except (AuditParseError, ValueError, KeyError) as e:
-                errors.append((members[0][0]["_id"], f"linux.audit: {e}"))
+                # tagged by family so the sweep marks only socket rules partial
+                errors.append((members[0][0]["_id"], f"linux.audit.socket: {e}"))
             continue
         try:
             events.append(normalize_exec_group(host, members))

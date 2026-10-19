@@ -86,6 +86,18 @@ class Playbook:
     def finalize(self) -> list[Match]:
         return []
 
+    # Joining aggregates keep compact keys in memory and hand full events to the sweep's disk stage
+    # (romulus.hunt.stage); at finalize they load back only what they cite.
+    staged: ClassVar[bool] = False
+
+    def drain_staged(self) -> list[TypedEvent]:
+        """Events consumed since the last call that this playbook may cite later (staged playbooks)."""
+        return []
+
+    def bind_loader(self, load) -> None:
+        """Give a staged playbook the function that loads staged events back by id."""
+        self.load = load
+
     def retained_events(self) -> list[TypedEvent]:
         """Every event an aggregate playbook may still cite at finalize. The sweep keeps raw copies of
         exactly these, so no published citation can point at a raw record that was never retained."""
