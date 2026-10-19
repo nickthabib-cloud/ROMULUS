@@ -391,10 +391,10 @@ class ExecFromTempDir(Playbook):
         a0 = argv[0] if argv else ""
         cwd = e.get("process.cwd") or ""
 
-        def resolve(p: str) -> str:
+        def resolve(p: str, *, allow_bare_relative: bool = False) -> str:
             if p.startswith("/"):
                 return posixpath.normpath(p)
-            if p and cwd.startswith("/"):
+            if p and cwd.startswith("/") and (allow_bare_relative or "/" in p):
                 return posixpath.normpath(posixpath.join(cwd, p))
             return ""
 
@@ -432,7 +432,7 @@ class ExecFromTempDir(Playbook):
             else:
                 script = ""
             if script:
-                script_path = resolve(script)
+                script_path = resolve(script, allow_bare_relative=True)
                 if not script_path:
                     self.missing_required += 1
                     return []

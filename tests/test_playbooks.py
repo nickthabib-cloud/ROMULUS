@@ -348,11 +348,11 @@ def test_exec_from_tmp_via_cwd():
 
 
 @pytest.mark.parametrize("event_fields", [
-    {"argv": ["linpeas.sh"], "process__cwd": "/tmp/tools/.."},
-    {"argv": ["linpeas.sh"], "process__cwd": "/tmp", "process__executable": "linpeas.sh"},
+    {"argv": ["./linpeas.sh"], "process__cwd": "/tmp/tools/.."},
+    {"argv": ["linpeas.sh"], "process__cwd": "/tmp", "process__executable": "./linpeas.sh"},
     {"argv": ["bash", "x.sh"], "process__cwd": "/tmp", "process__executable": "/usr/bin/bash"},
 ])
-def test_exec_from_tmp_resolves_any_relative_path_with_posix_normpath(event_fields):
+def test_exec_from_tmp_resolves_explicit_relative_paths_and_script_operands(event_fields):
     argv = event_fields["argv"]
     extra = {key: value for key, value in event_fields.items() if key != "argv"}
 
@@ -365,6 +365,11 @@ def test_exec_from_tmp_resolves_any_relative_path_with_posix_normpath(event_fiel
 @pytest.mark.parametrize("argv,extra", [
     (["./x"], {}),
     (["x"], {}),
+    (["linpeas.sh"], {"process__cwd": "/tmp"}),
+    (["linpeas.sh"], {"process__cwd": "/tmp", "process__executable": "linpeas.sh"}),
+    (["ls", "-la"], {"process__cwd": "/tmp"}),
+    (["-bash"], {"process__cwd": "/tmp"}),
+    (["x"], {"process__cwd": "/root"}),
     (["bash", "x.sh"], {"process__executable": "/usr/bin/bash"}),
 ])
 def test_exec_from_tmp_missing_path_context_is_unevaluable(argv, extra):
