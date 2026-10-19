@@ -17,19 +17,20 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 from romulus.agent.brief import BuiltBrief, _render
-from romulus.agent.controller import Investigator
-from romulus.agent.models import EntityRef
+from romulus.agent.models import AgentDecision, EntityRef
 from romulus.agent.ollama import ModelUnavailable, OllamaClient
 from romulus.agent.options import Menu
 from romulus.agent.resolver import resolve_output
+from romulus.agent.tools import parse_tool_request
 from romulus.bakeoff.export import MAX_OUT
 from romulus.config import Settings
 
@@ -99,10 +100,28 @@ def _window(task: dict) -> SimpleNamespace:
 
 
 def _duplicate(task: dict, request: Any) -> dict | None:
-    """The controller's own duplicate-pivot check, over the task's frozen prior steps."""
-    steps = task.get("prior_steps") or []
-    shim = SimpleNamespace(repo=SimpleNamespace(case_steps=lambda _case_id: steps))
-    return Investigator._executed_duplicate(shim, task["origin"]["case_id"], request)
+    """Apply the controller's semantic duplicate rule to frozen partition history."""
+    def semantic_key(item: Any) -> tuple:
+        args = item.arguments
+        window = (args.start.astimezone(UTC), args.end.astimezone(UTC))
+        entity = getattr(args, "entity", None)
+        if entity is not None:
+            return item.tool, window, entity.kind, entity.value
+        return item.tool, window, args.host, args.process_id
+
+    requested_key = semantic_key(request)
+    for step in task.get("prior_steps") or []:
+        decision_data = step.get("decision") or {}
+        if (not step.get("accepted") or step.get("result_digest") is None
+                or decision_data.get("action") != "pivot"):
+            continue
+        try:
+            prior_request = parse_tool_request(AgentDecision.model_validate(decision_data))
+        except (ValidationError, ValueError):
+            continue
+        if semantic_key(prior_request) == requested_key:
+            return step
+    return None
 
 
 def _matches_schema(value: Any, schema: dict) -> bool:

@@ -25,6 +25,26 @@ def seed_candidate_ids(steps: list[dict]) -> list[str]:
     return []
 
 
+def seed_partition_families(
+    case_id: str, steps: list[dict], candidates: list[dict],
+) -> tuple[str, ...]:
+    """Identify the original time/entity clusters containing a case's active seeds."""
+    active = set(seed_candidate_ids(steps))
+    if not active:
+        return (case_id,)
+    base_candidates = [
+        candidate for candidate in candidates
+        if candidate.get("source_case_id") is None and candidate.get("lane") != "context"
+    ]
+    clusters = cluster_seed_candidates(
+        base_candidates, max_seeds=max(1, len(base_candidates)),
+    )
+    families = sorted(
+        cluster.id for cluster in clusters if active.intersection(cluster.seed_candidate_ids)
+    )
+    return tuple(families) or (case_id,)
+
+
 def _ts(value) -> datetime:
     return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
 

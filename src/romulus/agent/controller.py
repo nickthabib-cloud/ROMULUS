@@ -10,7 +10,12 @@ from typing import Any
 from pydantic import ValidationError
 
 from romulus.agent.brief import build_brief
-from romulus.agent.cases import MAX_SEEDS_PER_CASE, cluster_seed_candidates, seed_candidate_ids
+from romulus.agent.cases import (
+    MAX_SEEDS_PER_CASE,
+    cluster_seed_candidates,
+    seed_candidate_ids,
+    seed_partition_families,
+)
 from romulus.agent.constraints import SCHEMA_FORM, eligible_evidence_aliases
 from romulus.agent.models import AgentDecision, EntityRef, PivotResult
 from romulus.agent.ollama import ModelResult, ModelUnavailable, OllamaClient
@@ -169,8 +174,15 @@ class Investigator:
             return item.tool, window, args.host, args.process_id
 
         requested_key = semantic_key(request)
+        candidates = self.repo.candidates(self.hunt_id)
+        current_family = seed_partition_families(
+            case_id, self.repo.case_steps(case_id), candidates,
+        )
         for case in self.repo.cases(self.hunt_id):
-            for step in self.repo.case_steps(case["id"]):
+            case_steps = self.repo.case_steps(case["id"])
+            if seed_partition_families(case["id"], case_steps, candidates) != current_family:
+                continue
+            for step in case_steps:
                 decision_data = step.get("decision") or {}
                 if (not step.get("accepted") or step.get("result_digest") is None
                         or decision_data.get("action") != "pivot"):

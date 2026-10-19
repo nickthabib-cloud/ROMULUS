@@ -9,7 +9,7 @@ from romulus.agent.controller import Investigator
 from romulus.agent.models import EntityRef, PivotResult
 from romulus.agent.ollama import ModelResult
 from romulus.bakeoff.export import export_tasks, read_jsonl, readonly_repo, write_jsonl
-from romulus.bakeoff.runner import run_bakeoff, summarize
+from romulus.bakeoff.runner import brief_from_task, judge, run_bakeoff, summarize
 from romulus.config import Settings
 from romulus.evidence.typed import TypedEvent
 from romulus.sources.models import Window
@@ -141,7 +141,7 @@ def test_export_bounds_legacy_oversized_calls_without_claiming_a_digest_match():
         })
     repo.create_case({
         "id": "legacy-case", "hunt_id": "h1", "seed_candidate_id": "c1",
-        "title": "legacy", "priority": 50,
+        "title": "legacy", "priority": 999,
         "entities": [
             {"kind": "host", "value": "video", "role": "host"},
             {"kind": "ip", "value": "203.0.113.99", "role": "src"},
@@ -178,6 +178,10 @@ def test_export_bounds_legacy_oversized_calls_without_claiming_a_digest_match():
         {"kind": "host", "value": "video", "role": "host"},
         {"kind": "ip", "value": "10.0.0.5", "role": "src"},
     ]
+    telemetry = json.loads(brief["user"].split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split(
+        "\n</UNTRUSTED_TELEMETRY>", 1,
+    )[0])
+    assert telemetry["case"]["priority"] == 50.0
 
 
 def test_variant_mutation_changes_only_the_brief_it_targets():
@@ -277,6 +281,24 @@ def test_runner_judges_through_the_production_path_and_resumes(tmp_path):
         "valid_with_retry": 0, "truncated": 0, "output_limit": 0, "errors": 0,
         "median_latency_ms": summary[0]["median_latency_ms"], "median_decode_tokens_per_s": 40.0,
     }]
+
+
+def test_runner_judges_a_valid_pivot_without_a_live_investigator_repo():
+    repo = _memory_repo()
+    _run_investigation(repo)
+    tasks, _ = export_tasks(repo, "h1", [CTX])
+    task = tasks[0]
+    brief = task["briefs"][str(CTX)]
+    pivot = next(option for option in brief["menu"]["options"]
+                 if option["decision"]["action"] == "pivot")
+
+    result = judge(
+        task,
+        brief_from_task(brief),
+        _selection(pivot["id"]),
+    )
+
+    assert result["validation_ok"] is True
 
 
 def test_runner_accepts_a_valid_close_and_rejects_hostile_citations(tmp_path):

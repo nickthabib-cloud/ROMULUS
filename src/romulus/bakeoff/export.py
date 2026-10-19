@@ -20,7 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from romulus.agent.brief import BuiltBrief, build_brief
-from romulus.agent.cases import MAX_SEEDS_PER_CASE, cluster_seed_candidates, seed_candidate_ids
+from romulus.agent.cases import (
+    MAX_SEEDS_PER_CASE,
+    cluster_seed_candidates,
+    seed_candidate_ids,
+    seed_partition_families,
+)
 from romulus.agent.models import EntityRef
 from romulus.agent.tools import tool_catalog
 from romulus.store.db import digest, make_engine
@@ -82,7 +87,23 @@ def _initial_entities(repo: Repo, hunt_id: str, case: dict, steps: list[dict]) -
     return [EntityRef.model_validate(raw) for raw in case.get("entities") or [] if isinstance(raw, dict)]
 
 
-def _case_before(case: dict, prior_steps: list[dict], initial: list[EntityRef]) -> dict:
+def _effective_priority(repo: Repo, hunt_id: str, case: dict, steps: list[dict]) -> float:
+    first = (steps[0].get("decision") or {}) if steps and steps[0]["n"] == 0 else {}
+    if first.get("action") == "seed":
+        active_seed_ids = set(seed_candidate_ids(steps))
+        priorities = [
+            float(candidate["priority"])
+            for candidate in repo.candidates(hunt_id)
+            if candidate["id"] in active_seed_ids
+        ]
+        if priorities:
+            return max(priorities)
+    return float(case["priority"])
+
+
+def _case_before(
+    case: dict, prior_steps: list[dict], initial: list[EntityRef], priority: float,
+) -> dict:
     """The case row as the controller held it before the next call: open, with pivots merged in order."""
     entities = {_entity_key(entity): entity for entity in initial}
     hypotheses: list[str] = []
@@ -100,6 +121,7 @@ def _case_before(case: dict, prior_steps: list[dict], initial: list[EntityRef]) 
     state = dict(case)
     state.update(
         status="open",
+        priority=priority,
         steps_used=sum(1 for step in prior_steps if step["n"] >= 1),
         hypotheses=hypotheses,
         entities=[entity.model_dump(mode="json") for entity in entities.values()],
@@ -203,6 +225,18 @@ def _prior_for_duplicates(prior_steps: list[dict]) -> list[dict]:
     } for step in prior_steps]
 
 
+def _family_prior_steps(view: _StepView, case: dict) -> list[dict]:
+    candidates = view.candidates(case["hunt_id"])
+    current_steps = view.case_steps(case["id"])
+    current_family = seed_partition_families(case["id"], current_steps, candidates)
+    prior: list[dict] = []
+    for item in view.cases(case["hunt_id"]):
+        item_steps = view.case_steps(item["id"])
+        if seed_partition_families(item["id"], item_steps, candidates) == current_family:
+            prior.extend(item_steps)
+    return prior
+
+
 def _effective_prior_steps(prior_steps: list[dict]) -> list[dict]:
     """Bound pre-migration seed groups for replay without rewriting or claiming an exact digest."""
     active_seed_ids = seed_candidate_ids(prior_steps)
@@ -244,7 +278,8 @@ def export_tasks(repo: Repo, hunt_id: str, num_ctx_values: list[int],
             prior = [s for s in steps if s["n"] < step["n"]]
             effective_prior = _effective_prior_steps(prior)
             initial = _initial_entities(repo, hunt_id, case, effective_prior)
-            state = _case_before(case, effective_prior, initial)
+            priority = _effective_priority(repo, hunt_id, case, effective_prior)
+            state = _case_before(case, effective_prior, initial, priority)
             view = _StepView(repo, state, effective_prior, call["at"])
             options = call.get("options") or {}
             production_ctx = int(options.get("num_ctx") or num_ctx_values[0])
@@ -284,7 +319,7 @@ def export_tasks(repo: Repo, hunt_id: str, num_ctx_values: list[int],
                 "attempt": 2 if chosen else 1,
                 "retry_errors": list(chosen),
                 "window": {"start": window["start"], "end": window["end"]},
-                "prior_steps": _prior_for_duplicates(prior),
+                "prior_steps": _prior_for_duplicates(_family_prior_steps(view, state)),
             }
             specs = [(None, [], view)] + [
                 (variant["variant"], variant["mutations"],

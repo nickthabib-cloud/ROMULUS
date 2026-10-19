@@ -31,14 +31,15 @@ def _repo(*, total=6, per_case=4, max_cases=4, wall_minutes=120) -> Repo:
     return repo
 
 
-def _candidate(repo: Repo, cid: str, host: str, priority: float, *, ip: str | None = None):
+def _candidate(repo: Repo, cid: str, host: str, priority: float, *, ip: str | None = None,
+               ts: datetime = START):
     entities = [["host", host, "host"]]
     if ip:
         entities.append(["ip", ip, "src"])
     repo.save_candidate({
         "id": cid, "hunt_id": "h1", "rule_id": "test.rule", "rule_version": "1",
         "claim": f"Suspicious action on {host}.", "claim_type": "observed_action",
-        "event_ids": [f"event-{cid}"], "predicate_fields": [], "entities": entities, "ts": START,
+        "event_ids": [f"event-{cid}"], "predicate_fields": [], "entities": entities, "ts": ts,
         "severity": "medium", "confidence": "high", "lane": "lead", "priority": priority,
         "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
         "source_case_id": None,
@@ -446,6 +447,37 @@ def test_residual_seed_partition_excludes_pivots_executed_by_its_legacy_sibling(
         and option.entity_kind == "host"
         and option.entity_value == "video"
         and option.window_label == "anchor ±5 min"
+        for option in brief.menu.options
+    )
+
+
+def test_unrelated_same_host_case_keeps_pivot_executed_by_another_partition():
+    repo = _repo(total=2, per_case=2, max_cases=4)
+    _candidate(repo, "c1", "video", 100, ts=START)
+    _candidate(repo, "c2", "video", 90, ts=START + timedelta(minutes=20))
+    _evidence(repo, "event-c1", START)
+    _evidence(repo, "event-c2", START + timedelta(minutes=20))
+    investigator = _investigator(
+        repo, QueueModel([]), RecordingExecutor(), agent_mode="deterministic",
+    )
+    investigator._seed_cases()
+    first, second = sorted(repo.cases("h1"), key=lambda case: case["priority"], reverse=True)
+    executed = _host_pivot("video", "event-c1")
+    executed["arguments"].update(
+        start=WINDOW.start.isoformat(), end=WINDOW.end.isoformat(),
+    )
+    repo.append_case_step(
+        first["id"], 1, executed, True, result_digest={"status": "complete", "entities": []},
+    )
+
+    brief = build_brief(repo, second["id"], tool_catalog(), num_ctx=4096)
+
+    assert any(
+        option.decision.action == "pivot"
+        and option.decision.tool == executed["tool"]
+        and option.entity_kind == "host"
+        and option.entity_value == "video"
+        and option.window_label == "anchor ±2 h"
         for option in brief.menu.options
     )
 

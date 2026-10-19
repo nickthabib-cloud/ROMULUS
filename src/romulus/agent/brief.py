@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from romulus.agent.cases import seed_candidate_ids
+from romulus.agent.cases import seed_candidate_ids, seed_partition_families
 from romulus.agent.constraints import build_output_schema
 from romulus.agent.models import EntityRef
 from romulus.agent.ollama import estimate_tokens
@@ -262,8 +262,9 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         raise KeyError(case_id)
     steps = repo.case_steps(case_id)
     seeds = set(seed_candidate_ids(steps))
+    hunt_candidates = repo.candidates(case["hunt_id"])
     candidates = [
-        candidate for candidate in repo.candidates(case["hunt_id"])
+        candidate for candidate in hunt_candidates
         if candidate["id"] in seeds or candidate.get("source_case_id") == case_id
     ]
     candidates.sort(key=lambda item: (-float(item.get("priority", 0)), item["id"]))
@@ -328,9 +329,12 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         (entity.kind, entity.value)
         for item in all_cases for entity in _entity_refs(item.get("entities") or [])
     }
-    executed_steps = [
-        step for item in all_cases for step in repo.case_steps(item["id"])
-    ]
+    current_family = seed_partition_families(case_id, steps, hunt_candidates)
+    executed_steps = []
+    for item in all_cases:
+        item_steps = repo.case_steps(item["id"])
+        if seed_partition_families(item["id"], item_steps, hunt_candidates) == current_family:
+            executed_steps.extend(item_steps)
     menu = generate_options(
         case=case, evidence=evidence_views, candidates=candidates, steps=steps,
         hunt_window=hunt_window, existing_case_entities=existing_case_entities,
