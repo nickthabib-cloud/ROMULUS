@@ -257,7 +257,7 @@ def test_reverse_netflow_is_the_same_connection_not_another_source():
     fwd = flow("n1", event_type="netflow")
     rev = flow("n2", event_type="netflow", src=ATTACKER, sport=C2_PORT, dst="198.51.100.10", dport=51000)
     m = link([_sock()] + _network(fwd, rev))[0]
-    assert "2 flow record(s) across 1 connection(s)" in m.claim
+    assert "2 flow or session record(s) across 1 connection(s)" in m.claim
     assert "with local address(es) 198.51.100.10." in m.claim and "ambiguous" not in m.claim
 
 

@@ -22,7 +22,8 @@ RELAYS = {"nc", "ncat", "netcat", "socat"}
 JOIN_BEFORE = 3.0        # seconds a sensor's flow start may precede the audit record
 JOIN_AFTER = 5.0
 FLOW_SLACK = 1.0         # seconds around a flow's lifetime within which same-flow records are pulled in
-NETWORK_JOIN_FAMILIES = ("net_flow", "net_alert", "http_tx", "tls_session", "ssh_session", "file_transfer")
+NETWORK_JOIN_FAMILIES = ("net_flow", "net_session", "net_alert", "http_tx", "tls_session", "ssh_session",
+                         "file_transfer")
 EXAMPLE_LIMIT = 20
 ADDRESS_MIN_JOINS, ADDRESS_MIN_SHARE = 2, 0.8
 LANE_RANK = {"high": 0, "lead": 1, "context": 2}
@@ -360,7 +361,7 @@ class ProcessNetworkLink(Playbook):
         if others and lane == "high":
             lane = "lead"
         s0 = socks[0]
-        flows = [n for n in partners.values() if n.family == "net_flow"]
+        flows = [n for n in partners.values() if n.family in ("net_flow", "net_session")]
         connections = {n.cid or f"{n.src}:{n.sport}-{n.dst}:{n.dport}" for n in partners.values()}
         locals_ = sorted({n.local_side(s0.ip, s0.port) for n in partners.values()} - {None})
         observers = sorted({n.observer for n in partners.values()})
@@ -383,7 +384,7 @@ class ProcessNetworkLink(Playbook):
             f"{s0.ip} port {s0.port} that join network records "
             f"({datetime.fromtimestamp(socks[0].ts, UTC).isoformat()} – "
             f"{datetime.fromtimestamp(socks[-1].ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."),
-            f"Observed by network sensor(s) {', '.join(observers)}: {len(flows)} flow record(s) across "
+            f"Observed by network sensor(s) {', '.join(observers)}: {len(flows)} flow or session record(s) across "
             f"{len(connections)} connection(s) to {s0.ip} port {s0.port} starting within seconds of those calls"
             + (f", with local address(es) {', '.join(locals_)}" if locals_ else "")
             + (f", and {len(alerts)} IDS alert(s) on those connections: {'; '.join(sigs[:3])}"

@@ -83,6 +83,16 @@ def flatten_mapping(mapping: dict) -> dict[str, str]:
     return out
 
 
+ARKIME_SESSION_MARKERS = ("firstPacket", "lastPacket", "network.community_id")
+
+
+def schema_of(field_types: dict[str, str]) -> str:
+    """Which normalizer family a target's mapping belongs to, from its fields (never its name)."""
+    if all(f in field_types for f in ARKIME_SESSION_MARKERS):
+        return "arkime_sessions"
+    return "lab_ecs"
+
+
 def contract_from_types(target: str, field_types: dict[str, str]) -> FieldContract:
     """Lab indices already use ECS-like names, so typed name == native name. Non-ECS schemas
     get an explicit alias table here when they are added (Zeek, Malcolm, Winlogbeat)."""
@@ -90,18 +100,24 @@ def contract_from_types(target: str, field_types: dict[str, str]) -> FieldContra
         name: FieldSpec(native=name, type=t, ops=sorted(OPS_BY_TYPE.get(t, set())), aggregatable=t in AGGREGATABLE)
         for name, t in field_types.items()
     }
-    return FieldContract(target=target, fields=fields)
+    time_field = "firstPacket" if schema_of(field_types) == "arkime_sessions" else "@timestamp"
+    return FieldContract(target=target, fields=fields, time_field=time_field)
 
 
 def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
     """Read-only preflight of one concrete index."""
     field_types = flatten_mapping(client.mapping(target))
+    schema = schema_of(field_types)
+    # Arkime sessions: time is the first packet; the "dataset" is the session protocol and the
+    # reporting host is the capture node
+    tf, ds_field, host_field = (("firstPacket", "protocol", "node") if schema == "arkime_sessions"
+                                else ("@timestamp", "event.dataset", "host.name"))
     body = {
         "size": 0, "track_total_hits": True,
         "aggs": {
-            "tmin": {"min": {"field": "@timestamp"}}, "tmax": {"max": {"field": "@timestamp"}},
-            "ds": {"terms": {"field": "event.dataset", "size": 200}},
-            "hosts": {"terms": {"field": "host.name", "size": 500}},
+            "tmin": {"min": {"field": tf}}, "tmax": {"max": {"field": tf}},
+            "ds": {"terms": {"field": ds_field, "size": 200}},
+            "hosts": {"terms": {"field": host_field, "size": 500}},
         },
     }
     d = client.request("POST", f"/{target}/_search", body)
@@ -111,7 +127,7 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
         if aggs.get(k, {}).get("sum_other_doc_count"):
             notes.append(f"{k} inventory truncated (sum_other_doc_count>0)")
     prof = dict(
-        target=target, kind="es_index", backend=client.settings.es_flavor, backend_version=client.version,
+        target=target, kind="es_index" if schema == "lab_ecs" else schema, backend=client.settings.es_flavor, backend_version=client.version,
         captured_at=datetime.now(UTC), field_types=field_types,
         datasets={b["key"]: b["doc_count"] for b in aggs.get("ds", {}).get("buckets", [])},
         hosts={b["key"]: b["doc_count"] for b in aggs.get("hosts", {}).get("buckets", [])},
