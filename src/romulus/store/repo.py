@@ -430,6 +430,21 @@ class Repo:
             self._fence_lease(c, hunt_id, owner_token)
             c.execute(t.case.update().where(t.case.c.id == case_id).values(**values, updated_at=utcnow()))
 
+    def repartition_case(self, case_id: str, step_n: int, decision: dict, *, priority: float,
+                         entities: list[dict], owner_token: str | None = None) -> None:
+        """Atomically update bounded seed metadata and append its durable partition marker."""
+        now = utcnow()
+        with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.case.c.hunt_id).where(t.case.c.id == case_id)).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
+            c.execute(t.case.update().where(t.case.c.id == case_id).values(
+                priority=priority, entities=entities, updated_at=now,
+            ))
+            c.execute(t.case_step.insert().values(
+                case_id=case_id, n=step_n, decision=decision, accepted=1,
+                rejection=None, model_call_id=None, task_id=None, result_digest=None, at=now,
+            ))
+
     def append_case_step(self, case_id: str, n: int, decision: dict, accepted: bool,
                          rejection: str | None = None, model_call_id: str | None = None,
                          task_id: str | None = None, result_digest: dict | None = None,

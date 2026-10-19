@@ -110,19 +110,15 @@ class Investigator:
             unique_entities = {
                 (entity.kind, entity.value, entity.role): entity for entity in retained_entities
             }
-            self.repo.update_case(
-                case["id"], owner_token=self.owner_token,
-                priority=retained_priority,
-                entities=[entity.model_dump(mode="json") for entity in unique_entities.values()],
-            )
-            self.repo.append_case_step(
+            self.repo.repartition_case(
                 case["id"], max(step["n"] for step in steps) + 1,
                 {
                     "action": "seed_partition",
                     "seed_candidate_ids": retained_ids,
                     "previous_seed_count": len(seed_ids),
                 },
-                True,
+                priority=retained_priority,
+                entities=[entity.model_dump(mode="json") for entity in unique_entities.values()],
                 owner_token=self.owner_token,
             )
 
@@ -173,17 +169,18 @@ class Investigator:
             return item.tool, window, args.host, args.process_id
 
         requested_key = semantic_key(request)
-        for step in self.repo.case_steps(case_id):
-            decision_data = step.get("decision") or {}
-            if (not step.get("accepted") or step.get("result_digest") is None
-                    or decision_data.get("action") != "pivot"):
-                continue
-            try:
-                prior_request = parse_tool_request(AgentDecision.model_validate(decision_data))
-            except (ValidationError, ValueError):
-                continue
-            if semantic_key(prior_request) == requested_key:
-                return step
+        for case in self.repo.cases(self.hunt_id):
+            for step in self.repo.case_steps(case["id"]):
+                decision_data = step.get("decision") or {}
+                if (not step.get("accepted") or step.get("result_digest") is None
+                        or decision_data.get("action") != "pivot"):
+                    continue
+                try:
+                    prior_request = parse_tool_request(AgentDecision.model_validate(decision_data))
+                except (ValidationError, ValueError):
+                    continue
+                if semantic_key(prior_request) == requested_key:
+                    return step
         return None
 
     def _record_call(self, case: dict, step_n: int, brief, result: ModelResult,

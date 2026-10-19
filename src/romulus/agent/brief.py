@@ -328,11 +328,14 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         (entity.kind, entity.value)
         for item in all_cases for entity in _entity_refs(item.get("entities") or [])
     }
+    executed_steps = [
+        step for item in all_cases for step in repo.case_steps(item["id"])
+    ]
     menu = generate_options(
         case=case, evidence=evidence_views, candidates=candidates, steps=steps,
         hunt_window=hunt_window, existing_case_entities=existing_case_entities,
         max_cases=int((manifest.get("budgets") or {}).get("max_cases", 12)),
-        case_count=len(all_cases),
+        case_count=len(all_cases), executed_steps=executed_steps,
     )
     schema = build_output_schema(menu, aliases, candidate_map, injection_evidence)
     system = (

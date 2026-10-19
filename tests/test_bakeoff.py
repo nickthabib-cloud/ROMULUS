@@ -131,14 +131,22 @@ def test_export_bounds_legacy_oversized_calls_without_claiming_a_digest_match():
             "id": candidate_id, "hunt_id": "h1", "rule_id": "test.rule", "rule_version": "1",
             "claim": f"Suspicious action {index} on video.", "claim_type": "observed_action",
             "event_ids": [f"event-{candidate_id}"], "predicate_fields": [],
-            "entities": [["host", "video", "host"]], "ts": START,
+            "entities": [
+                ["host", "video", "host"],
+                *([["ip", "203.0.113.99", "src"]] if index == 10 else []),
+            ], "ts": START,
             "severity": "medium", "confidence": "high", "lane": "lead", "priority": 50 - index,
             "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
             "source_case_id": None,
         })
     repo.create_case({
         "id": "legacy-case", "hunt_id": "h1", "seed_candidate_id": "c1",
-        "title": "legacy", "priority": 50, "entities": [["host", "video", "host"]],
+        "title": "legacy", "priority": 50,
+        "entities": [
+            {"kind": "host", "value": "video", "role": "host"},
+            {"kind": "ip", "value": "203.0.113.99", "role": "src"},
+            {"kind": "domain", "value": "future.test", "role": "destination"},
+        ],
         "hypotheses": [], "step_budget": 4,
     })
     repo.append_case_step(
@@ -166,6 +174,10 @@ def test_export_bounds_legacy_oversized_calls_without_claiming_a_digest_match():
         option["decision"]["action"] == "escalate"
         for option in brief["menu"]["options"]
     ) == 9
+    assert brief["known_entities"] == [
+        {"kind": "host", "value": "video", "role": "host"},
+        {"kind": "ip", "value": "10.0.0.5", "role": "src"},
+    ]
 
 
 def test_variant_mutation_changes_only_the_brief_it_targets():

@@ -2,9 +2,11 @@
 import json
 from datetime import UTC, datetime, timedelta
 
+from romulus.agent.brief import build_brief
 from romulus.agent.controller import Investigator
 from romulus.agent.models import PivotResult
 from romulus.agent.ollama import ModelResult, ModelUnavailable
+from romulus.agent.tools import tool_catalog
 from romulus.config import Settings
 from romulus.evidence.typed import TypedEvent
 from romulus.sources.models import Window
@@ -406,6 +408,46 @@ def test_resume_repartitions_a_legacy_oversized_open_seed_case():
     ]
     assert sorted(len(group) for group in groups) == [1, 9]
     assert sorted(candidate_id for group in groups for candidate_id in group) == seed_ids
+
+
+def test_residual_seed_partition_excludes_pivots_executed_by_its_legacy_sibling():
+    repo = _repo(total=2, per_case=2, max_cases=4)
+    for index in range(10):
+        _candidate(repo, f"c{index:02}", "video", 100 - index)
+    _evidence(repo, "event-c09", START)
+    seed_ids = [f"c{index:02}" for index in range(10)]
+    repo.create_case({
+        "id": "legacy-case", "hunt_id": "h1", "seed_candidate_id": seed_ids[0],
+        "title": "legacy", "priority": 100, "entities": [["host", "video", "host"]],
+        "hypotheses": [], "step_budget": 2,
+    })
+    repo.append_case_step(
+        "legacy-case", 0, {"action": "seed", "seed_candidate_ids": seed_ids}, True,
+    )
+    executed = _host_pivot("video", "event-c09")
+    executed["arguments"]["end"] = (START + timedelta(minutes=5)).isoformat()
+    repo.append_case_step(
+        "legacy-case", 1, executed, True, result_digest={"status": "complete", "entities": []},
+    )
+    investigator = _investigator(
+        repo, QueueModel([]), RecordingExecutor(), agent_mode="deterministic",
+    )
+    investigator._seed_cases()
+    residual = next(
+        case for case in repo.cases("h1")
+        if investigator._seed_ids(repo.case_steps(case["id"])) == ["c09"]
+    )
+
+    brief = build_brief(repo, residual["id"], tool_catalog(), num_ctx=4096)
+
+    assert not any(
+        option.decision.action == "pivot"
+        and option.decision.tool == executed["tool"]
+        and option.entity_kind == "host"
+        and option.entity_value == "video"
+        and option.window_label == "anchor ±5 min"
+        for option in brief.menu.options
+    )
 
 
 def test_resume_replays_persisted_v2_pivot_without_a_result_before_new_model_calls():

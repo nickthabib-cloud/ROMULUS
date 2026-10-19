@@ -58,13 +58,17 @@ def _initial_entities(repo: Repo, hunt_id: str, case: dict, steps: list[dict]) -
     """Entities the case was created with, recomputed the way the controller created it."""
     first = (steps[0].get("decision") or {}) if steps and steps[0]["n"] == 0 else {}
     if first.get("action") == "seed":
+        active_seed_ids = set(seed_candidate_ids(steps))
         seeds = [
             candidate for candidate in repo.candidates(hunt_id)
-            if candidate["lane"] != "context" and candidate.get("source_case_id") is None
+            if candidate["id"] in active_seed_ids
         ]
+        entities: dict[tuple[str, str, str], EntityRef] = {}
         for cluster in cluster_seed_candidates(seeds):
-            if cluster.id == case["id"]:
-                return list(cluster.entities)
+            for entity in cluster.entities:
+                entities[_entity_key(entity)] = entity
+        if entities:
+            return list(entities.values())
     if first.get("action") == "spawn_seed":
         for step in repo.case_steps(first.get("parent_case_id") or ""):
             decision = step.get("decision") or {}
@@ -128,7 +132,9 @@ class _StepView:
         return self._case if case_id == self._case["id"] else None
 
     def case_steps(self, case_id: str) -> list[dict]:
-        return self._steps if case_id == self._case["id"] else []
+        if case_id == self._case["id"]:
+            return self._steps
+        return [step for step in self._repo.case_steps(case_id) if step["at"] < self._before]
 
     def get_hunt(self, hunt_id: str) -> dict | None:
         return self._repo.get_hunt(hunt_id)
@@ -229,7 +235,6 @@ def export_tasks(repo: Repo, hunt_id: str, num_ctx_values: list[int],
     for case in repo.cases(hunt_id):
         steps = repo.case_steps(case["id"])
         calls = {call["id"]: call for call in repo.model_calls(hunt_id=hunt_id, case_id=case["id"])}
-        initial = _initial_entities(repo, hunt_id, case, steps)
         by_n = {step["n"]: step for step in steps}
         for step in steps:
             call = calls.get(step.get("model_call_id") or "")
@@ -237,8 +242,9 @@ def export_tasks(repo: Repo, hunt_id: str, num_ctx_values: list[int],
                 continue
             stats["model_calls"] += 1
             prior = [s for s in steps if s["n"] < step["n"]]
-            state = _case_before(case, prior, initial)
             effective_prior = _effective_prior_steps(prior)
+            initial = _initial_entities(repo, hunt_id, case, effective_prior)
+            state = _case_before(case, effective_prior, initial)
             view = _StepView(repo, state, effective_prior, call["at"])
             options = call.get("options") or {}
             production_ctx = int(options.get("num_ctx") or num_ctx_values[0])

@@ -2,6 +2,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -124,6 +125,24 @@ def test_model_calls_are_ordered_and_elapsed_time_includes_pivots():
 
     assert [c["id"] for c in repo.model_calls(case_id="case-1")] == ["call-1", "call-2"]
     assert repo.agent_elapsed_ms("h1") == 40
+
+
+def test_seed_repartition_rolls_back_metadata_when_the_marker_cannot_be_written():
+    repo = _repo()
+    repo.create_case(_case_row())
+    repo.append_case_step(
+        "case-1", 0, {"action": "seed", "seed_candidate_ids": ["cand-1"]}, True,
+    )
+
+    with pytest.raises(IntegrityError):
+        repo.repartition_case(
+            "case-1", None,
+            {"action": "seed_partition", "seed_candidate_ids": ["cand-1"]},
+            priority=10.0, entities=[],
+        )
+
+    assert repo.case("case-1")["priority"] == 50.0
+    assert len(repo.case_steps("case-1")) == 1
 
 
 def test_terminal_state_clears_the_worker_lease():

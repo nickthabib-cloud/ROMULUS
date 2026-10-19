@@ -178,6 +178,7 @@ def generate_options(
     existing_case_entities: set[tuple[str, str]],
     max_cases: int,
     case_count: int,
+    executed_steps: list[dict] | None = None,
     cap: int = DEFAULT_MENU_CAP,
 ) -> Menu:
     """Return the legal next moves derivable from durable case state."""
@@ -202,7 +203,7 @@ def generate_options(
         if tool in str(check)
     }
     windows = _named_windows(evidence, seed_candidates, hunt_start, hunt_end)
-    executed = _executed_keys(steps)
+    executed = _executed_keys(executed_steps if executed_steps is not None else steps)
     investigations: list[MenuOption] = []
 
     for tool, kinds in _TOOL_ENTITY_KINDS.items():
