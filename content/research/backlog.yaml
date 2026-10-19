@@ -1,0 +1,441 @@
+# ROMULUS research: prioritized detection backlog, round 1 (2026-10-19).
+# The 25 highest-value new detections for telemetry the lab has today (raw records present; some need a
+# normalizer extension, listed under prerequisites). Ranked by expected detection value and generality across
+# mission networks, not by what the SL700 dataset contains. Each card is a DRAFT selection card (spec §9 card
+# fields: claim, telemetry, fidelity, benign causes, next pivot); a rule built from it still needs the full card,
+# typed predicate, retrieval superset, fixtures and review before it can be active.
+#
+# assurance: "negative-capable" means the predicate can rest on kernel-recorded or typed network fields (ADR-004)
+# once coverage is profiled; "positive-only" means it interprets text (argv, messages) and never writes a complete
+# negative. lane/severity are proposals: severity is impact if adverse, never evidence strength.
+schema_version: 1
+ranking_basis: >-
+  Value = how much malicious activity the detection can surface that current rules miss, weighted by how often the
+  behaviour appears across intrusions on Linux servers and mixed networks (CISA advisories, public DFIR reports,
+  ATT&CK procedure frequency) and by how well it survives renaming and tool changes. Generality = whether it works
+  on any mission network that has the same telemetry family, without lab-specific tuning. Class-level M2 misses
+  (c2_channel x2, discovery x4, privesc x1, recon/remote_login only as leads) informed which gaps exist, not the
+  order within them.
+backlog:
+  - id: BL-01
+    rank: 1
+    title: Interpreter, shell or service account initiates an external connection (auditd connect + SOCKADDR)
+    rule_type: direct
+    assurance: negative-capable
+    lane: high
+    severity: high
+    techniques: [T1059.004, T1059.006, T1505.003, T1190, T1071, T1095]
+    prerequisites: ["auditd_net normalizer (connect/bind/accept + SOCKADDR)"]
+    card: >-
+      Claim: process P (kernel-recorded exe, uid/auid) on host H issued connect() to an external address D:P;
+      outcome is "attempted" because non-blocking connect returns EINPROGRESS, and "established" only when a network
+      record confirms it (COR-02). Telemetry: auditd SYSCALL(connect)+SOCKADDR (present in the lab, ~16k records,
+      not normalized) with typed fields process.executable, process.user, destination.ip, destination.port,
+      socket.family, event.outcome. Fidelity: direct action from kernel records; the exe path is authoritative, so
+      renamed tools are still caught when the exe is an interpreter path or the account is a web/service account;
+      negatives are legal once connect auditing is profiled per host. Benign causes: package managers, update
+      agents and monitoring scripts run by interpreters; web apps calling external APIs (both baseline-able per
+      host and exe); false-lead cost moderate, controlled by per-(host, exe, destination) stacking. Next pivot: the
+      process's parent chain and children, then the network session's bytes and duration and the destination's
+      other clients.
+  - id: BL-02
+    rank: 2
+    title: Shell started by a process that holds an external connection (reverse shell by lineage)
+    rule_type: sequence
+    assurance: negative-capable
+    lane: urgent
+    severity: critical
+    techniques: [T1059.004, T1059.006, T1095, T1071]
+    prerequisites: ["BL-01", "per-host pid table from exec events"]
+    card: >-
+      Claim: within W seconds after process P on H connected to external D:P (or accepted from it), P or its child
+      executed a shell or interpreter (kernel exe path). Telemetry: auditd_net connect/accept plus auditd_exec
+      (ppid, exe), joined by pid lineage (K8). Fidelity: direct observation of both stages; it survives renaming
+      because it keys on the socket owner's lineage, not on nc/socat/bash argv text, and it covers bash /dev/tcp,
+      python pty, socat exec, perl/php one-liners and compiled implants alike. Benign causes: ssh clients spawning
+      local shells (ProxyCommand), deployment agents running scripts after contacting a controller, IDE remote
+      helpers; exclude by exe allow-list per host only with evidence. Next pivot: the shell's children
+      (commands run), the session's PCAP for cleartext commands (COR-23), and how P was started.
+  - id: BL-03
+    rank: 3
+    title: Host-to-network flow attribution playbook (join engine for COR-01/02/03/04)
+    rule_type: sequence (correlation)
+    assurance: n/a (links only)
+    lane: context
+    severity: n/a
+    techniques: [T1071, T1105, T1041]
+    prerequisites: ["BL-01", "host alias table (correlation.yaml P1)", "clock-skew estimate (P2)", "sensor visibility map (P3)"]
+    card: >-
+      Claim: a network session flagged by any network rule or IDS alert is linked, as a graded hypothesis, to the
+      host process that most likely owns it. Telemetry: auditd_net on the host side; EVE flow/alert and Arkime SPI
+      on the network side; join keys K2/K3/K4 with candidate counts. Fidelity: it adds no new facts; it raises
+      priority and gives the investigator the process pivot, which is the step analysts do by hand today. Benign
+      causes: ambiguous joins when a host has many flows to the same destination; recorded as multi-candidate,
+      never collapsed. Next pivot: the attributed process's lineage and the same process's other destinations.
+  - id: BL-04
+    rank: 4
+    title: Beaconing (interval regularity per source, destination and port)
+    rule_type: aggregate
+    assurance: negative-capable
+    lane: lead
+    severity: high
+    techniques: [T1071, T1573, T1102, T1029, T1020]
+    prerequisites: []
+    card: >-
+      Claim: connections from S to D:P recur with a dominant interval T and low dispersion (jitter-tolerant,
+      e.g. median absolute deviation of inter-arrival over T below a threshold, minimum N connections) and similar
+      sizes. Telemetry: EVE flow/netflow (flow.start, bytes, 5-tuple; present and normalized), Arkime sessions as a
+      second source. Fidelity: a statistical deviation, worded as such; it does not prove C2, but it is the most
+      general C2 shape across frameworks and does not depend on payload or names. Benign causes: NTP, update
+      checks, monitoring agents, telemetry, cron-driven API calls; handled by per-destination prevalence (how many
+      internal hosts share it) and baseline lists, not by dropping the rule. Next pivot: host process attribution
+      (COR-03), TLS/SNI and certificate of the destination, first-seen date of the destination.
+  - id: BL-05
+    rank: 5
+    title: Discovery burst within one login session
+    rule_type: aggregate
+    assurance: positive-only (argv-identified members) / negative-capable (exe-path members)
+    lane: high
+    severity: medium
+    techniques: [T1033, T1082, T1016, T1049, T1057, T1083, T1087.001, T1069.001, T1518.001, T1007, T1201]
+    prerequisites: ["process.session_id normalization (ppid tree as fallback)"]
+    card: >-
+      Claim: one audit session (auid+ses) or one process tree executed K distinct discovery commands from different
+      categories (identity, system, network, process, privilege, security software) within W minutes. Telemetry:
+      auditd_exec (present, normalized): process.executable (kernel path) classifies most members, argv only refines
+      (e.g. find -perm -4000); category membership comes from a reviewed list. Fidelity: direct execution records;
+      the burst shape, not any single command, is the signal; linpeas-style enumeration and hands-on-keyboard
+      recon both fit. Benign causes: admins troubleshooting, configuration-management facts gathering, login
+      scripts (motd); weighted by account role and by the session's origin (web-service parent = high). Next
+      pivot: how the session started (login source, parent), and what the session did right after (privilege
+      change, downloads, persistence).
+  - id: BL-06
+    rank: 6
+    title: Privilege transition without a sanctioned broker
+    rule_type: direct
+    assurance: negative-capable
+    lane: urgent
+    severity: critical
+    techniques: [T1068, T1548.001, T1548.003, T1611]
+    prerequisites: ["per-host pid table", "reviewed list of sanctioned brokers"]
+    card: >-
+      Claim: a process ran with euid 0 (or uid 0) while its auid is a non-root login and no ancestor in the observed
+      chain is a sanctioned broker (sudo, su, pkexec, sshd, login, cron, systemd, polkit agents) — or the euid-0
+      exe is a setuid file outside the host's setuid baseline. Telemetry: auditd_exec uid/euid/auid/ppid/exe (present,
+      normalized). Fidelity: kernel-recorded credentials; this is the generic result of kernel or setuid exploits
+      (pwnkit, dirty pipe) and GTFOBins escapes, independent of the exploit used. Benign causes: setuid helpers
+      (ping, passwd, mount) invoked normally (allow-listed by exe path with evidence), container runtimes, missing
+      parent records (yields unresolved, not a finding). Next pivot: the exploit binary's origin (download,
+      compile) and the root process's children.
+  - id: BL-07
+    rank: 7
+    title: SSH brute force, password spray and success after failures
+    rule_type: aggregate + sequence
+    assurance: negative-capable
+    lane: high (success after failures) / lead (failures only)
+    severity: high
+    techniques: [T1110.001, T1110.003, T1110.004, T1078, T1133]
+    prerequisites: []
+    card: >-
+      Claim: source S produced F failed sshd authentications for one account (guessing) or for K distinct accounts
+      (spray) within W, optionally followed by a success for one of them. Telemetry: journal_sshd auth events
+      (present, normalized: user.name, source.ip, source.port, event.outcome). Fidelity: typed auth outcomes from a
+      fixed sshd grammar; success-after-failures is a direct sequence. Benign causes: misconfigured automation
+      retrying, users mistyping, internet background noise on exposed SSH (high volume, low value unless success
+      follows); lane separates them. Next pivot: the successful session's commands (COR-10) and the source's other
+      targets.
+  - id: BL-08
+    rank: 8
+    title: First-seen SSH source, destination and account combinations; interactive root and service-account logins
+    rule_type: aggregate (baseline)
+    assurance: negative-capable
+    lane: lead
+    severity: high
+    techniques: [T1078, T1021.004, T1133]
+    prerequisites: ["frozen baseline window outside the hunt"]
+    card: >-
+      Claim: account A logged in to H from source S where (S, H, A) never occurred in the baseline window, or A is
+      root or a service/web account logging in interactively. Telemetry: journal_sshd (normalized), EVE ssh for
+      client software once normalized (COR-05). Fidelity: typed auth events; a deviation from baseline, worded as
+      such. Benign causes: new staff, new admin workstations, DHCP churn of admin hosts; false-lead cost moderate,
+      reduced by grouping per account and by requiring a second signal for high lane. Next pivot: the session's
+      commands (COR-10) and the chain onward (COR-14).
+  - id: BL-09
+    rank: 9
+    title: Horizontal sweep and connection-failure fan-out from one source
+    rule_type: aggregate
+    assurance: negative-capable
+    lane: lead
+    severity: medium
+    techniques: [T1046, T1018, T1595.001, T1135]
+    prerequisites: []
+    card: >-
+      Claim: one source contacted N distinct destination addresses on the same port (or ICMP echo) within W, with
+      a failure ratio R from flow state. Telemetry: EVE flow (present, normalized: 5-tuple, flow.state, packets),
+      Arkime as a second source. Fidelity: typed network fields; complements net.port_scan (vertical). Benign
+      causes: vulnerability scanners and monitoring (known sources, allow-listed with mission evidence), service
+      discovery protocols. Next pivot: which destinations answered and what the source did with them next; host
+      attribution if the source is internal (COR-13).
+  - id: BL-10
+    rank: 10
+    title: DNS tunnelling and DNS exfiltration shape per registered domain
+    rule_type: aggregate
+    assurance: negative-capable
+    lane: lead
+    severity: high
+    techniques: [T1071.004, T1572, T1048.003, T1132.001]
+    prerequisites: ["public-suffix list vendored offline"]
+    card: >-
+      Claim: under one registered domain, client C issued Q queries with D distinct subdomain labels whose mean length
+      and character entropy exceed thresholds, or an unusual share of TXT/NULL/CNAME types. Telemetry: EVE dns
+      (present, normalized: dns.question.name/type, source.ip). Fidelity: a deviation computed from typed qnames;
+      not proof of a tunnel. Benign causes: CDN and anti-virus lookups, DNSBL queries, telemetry with hashed
+      labels; handled by domain prevalence across clients and a reviewed allow-list. Next pivot: the issuing host
+      process (COR-16), timing regularity (BL-04), and any answers carrying data.
+  - id: BL-11
+    rank: 11
+    title: DNS reconnaissance (PTR sweeps, zone-transfer requests) and NXDOMAIN bursts
+    rule_type: aggregate
+    assurance: negative-capable
+    lane: lead
+    severity: medium
+    techniques: [T1590.002, T1018, T1568.002]
+    prerequisites: []
+    card: >-
+      Claim: source S requested PTR records for N addresses in one block, or AXFR/IXFR for a zone, or produced N
+      NXDOMAIN responses across many algorithmic-looking names within W. Telemetry: EVE dns (present, normalized:
+      qtype, qname, rcode). Fidelity: typed query fields; request observed, not data obtained (a transfer's success
+      needs the response). Benign causes: secondary name servers (allow-listed), reverse-lookup in log tooling,
+      browsers prefetching. Next pivot: the resolving name in a DGA burst and the connection that followed (COR-09).
+  - id: BL-12
+    rank: 12
+    title: Application protocol on a non-standard port, and long sessions with unknown protocol
+    rule_type: aggregate
+    assurance: negative-capable
+    lane: lead
+    severity: medium
+    techniques: [T1571, T1095, T1573.001, T1572]
+    prerequisites: []
+    card: >-
+      Claim: a session's detected application protocol (network.app_proto: http, tls, ssh, dns) is outside its
+      standard port set for that site's baseline, or a long, data-carrying session has no identified protocol, or ICMP
+      carries payload volumes atypical for echo. Telemetry: EVE flow (present, normalized app_proto, port, bytes,
+      transport), Arkime protocols. Fidelity: protocol identification is Suricata's dissector result (typed);
+      deviation wording. Benign causes: internal services on custom ports (baseline pairs), proxies on 8080, VPNs.
+      Next pivot: host process (BL-03), PCAP of the first packets.
+  - id: BL-13
+    rank: 13
+    title: TLS normalization; self-signed, short-lived or rare certificates and client fingerprints on outbound sessions
+    rule_type: aggregate
+    assurance: negative-capable
+    lane: lead
+    severity: medium
+    techniques: [T1573.002, T1071.001, T1036.012, T1090.003]
+    prerequisites: ["normalize eve_tls fields: sni, ja3/ja4, ja3s, subject, issuer, validity", "Arkime adapter as a second source"]
+    card: >-
+      Claim: an outbound TLS session from H presented a certificate that is self-signed (issuer equals subject),
+      short-lived, or matches a C2 framework default subject, or used a client fingerprint (JA3/JA4) rare across the
+      hunt's hosts. Telemetry: EVE tls (present, fields not normalized), Arkime cert/JA3 fields. Fidelity: typed
+      handshake fields; rarity is a deviation. Benign causes: internal PKI and appliances, IoT devices, developer
+      tools. Next pivot: host process (COR-17), destination prevalence, beaconing.
+  - id: BL-14
+    rank: 14
+    title: SSH normalization; rare client software or HASSH, outbound SSH from servers, SSH to unusual peers
+    rule_type: aggregate
+    assurance: negative-capable
+    lane: lead
+    severity: medium
+    techniques: [T1021.004, T1572, T1048.001]
+    prerequisites: ["normalize eve_ssh fields: client/server software, hassh"]
+    card: >-
+      Claim: an SSH session used a client software string or HASSH never seen for that destination or account
+      (scripted clients such as paramiko, libssh, Go), or a server-role host initiated SSH to an external address.
+      Telemetry: EVE ssh (present, fields not normalized), Arkime HASSH, journal_sshd via K4 for the account.
+      Fidelity: typed handshake fields; the client string is self-reported, so it is positive-only (ADR-004) while
+      HASSH is derived from the key-exchange offer (still forgeable, positive-only). Benign causes: automation
+      (Ansible uses paramiko or OpenSSH), backup jobs. Next pivot: the authenticated session (COR-05) and its
+      commands.
+  - id: BL-15
+    rank: 15
+    title: Outbound volume asymmetry with denominators (possible exfiltration)
+    rule_type: aggregate
+    assurance: negative-capable
+    lane: lead
+    severity: high
+    techniques: [T1041, T1048, T1567, T1030, T1020]
+    prerequisites: []
+    card: >-
+      Claim: host H sent B bytes to destination D (or to D's /24 or ASN) over W, with toserver/toclient ratio R,
+      exceeding H's own baseline and the site's peer distribution. Telemetry: EVE flow bytes (present, normalized),
+      Arkime bytes. Fidelity: typed counters; volume alone is a deviation. Benign causes: backups, log shipping,
+      software distribution, video uploads (the lab has CCTV traffic); handled by destination prevalence and
+      per-host baselines. Next pivot: staging on the host (COR-12) and the uploading process.
+  - id: BL-16
+    rank: 16
+    title: Web-shell chain (upload, new server-side script requested, web-service execution)
+    rule_type: sequence
+    assurance: negative-capable once PATH is normalized (positive-only for URI-to-path mapping)
+    lane: urgent
+    severity: critical
+    techniques: [T1505.003, T1190, T1105]
+    prerequisites: ["auditd_path normalizer", "document-root mapping per web server"]
+    card: >-
+      Claim: on web host H, the web-service account created file F under the document root; a request for the URI
+      that maps to F returned 2xx; the web-service account then executed a shell or interpreter. Telemetry:
+      auditd PATH CREATE + exec (present; PATH not normalized), Apache access log (normalized). Fidelity: each
+      stage is a direct event; the link between stages is temporal (COR-20). Benign causes: CMS plugin or theme
+      installs and cache file generation (no exec stage), upload directories serving media; the exec stage is what
+      makes it high. Next pivot: every request to F, its sources, and the commands spawned per request.
+  - id: BL-17
+    rank: 17
+    title: Persistence-path writes from kernel PATH records
+    rule_type: direct
+    assurance: negative-capable where watch coverage is profiled
+    lane: high
+    severity: high
+    techniques: [T1053.003, T1543.002, T1037.004, T1546.004, T1098.004, T1556.003, T1548.003, T1574.006]
+    prerequisites: ["auditd_path normalizer", "per-host watch inventory from audit rules"]
+    card: >-
+      Claim: a process other than the package manager or the path's sanctioned editor created or wrote a file under
+      a persistence location: cron spools and /etc/cron*, systemd unit directories, rc scripts, shell init files,
+      authorized_keys, /etc/pam.d, /etc/sudoers*, /etc/ld.so.preload, udev rules, modules-load.d. Telemetry: auditd
+      PATH nametype CREATE/NORMAL with syscall and exe (present in raw, not normalized). Fidelity: kernel records of
+      the file operation (a write is proved; content is not); this is the negative-assuring successor to the
+      positive-only argv rules (ADR-004 M3 plan). Benign causes: configuration management, admins with editors,
+      package post-install scripts (identified by ancestor). Next pivot: what executes from the written path
+      (COR-15) and who wrote it (audit session).
+  - id: BL-18
+    rank: 18
+    title: Account and group creation or modification
+    rule_type: direct
+    assurance: negative-capable via auditd_acct/PATH, positive-only via argv
+    lane: high
+    severity: high
+    techniques: [T1136.001, T1098.007, T1531, T1036.010, T1564.002]
+    prerequisites: ["auditd_acct normalizer for ADD_USER/ADD_GROUP/USER_MGMT/USER_CHAUTHTOK, or PATH watches on /etc/passwd, /etc/shadow and /etc/group"]
+    card: >-
+      Claim: account A was created, given UID 0, added to a privileged group (sudo, wheel, adm, docker, lxd, disk), or
+      had its password/expiry changed by a session other than the identity-management baseline. Telemetry: auditd
+      user-management records (presence in the lab unverified), useradd/usermod execs (normalized, positive-only),
+      PATH writes to account files. Fidelity: ADD_USER/USER_MGMT carry res=success (authoritative outcome).
+      Benign causes: provisioning tools, package-created system users (dpkg ancestor). Next pivot: the account's
+      first authentication (COR-26).
+  - id: BL-19
+    rank: 19
+    title: Audit and log tampering, security-service stops, and per-host telemetry silence
+    rule_type: direct + aggregate
+    assurance: negative-capable for typed records; silence is a coverage fact, not a detection negative
+    lane: high
+    severity: high
+    techniques: [T1685, T1685.004, T1685.006, T1070.003, T1690, T1564.012, T1686]
+    prerequisites: ["journal_other normalizer for unit lifecycle", "auditd CONFIG_CHANGE parsing"]
+    card: >-
+      Claim: on H, auditd/rsyslog/journald/EDR was stopped, disabled or reconfigured (CONFIG_CHANGE, systemctl stop,
+      auditctl -D/-e 0), log files under /var/log were truncated or deleted, or H's host telemetry stopped while
+      its network traffic continued. Telemetry: auditd_acct/auditd_exec/PATH, journal unit lifecycle, per-host event
+      rate (date_histogram) plus EVE flow for the same host. Fidelity: direct records for the tampering actions;
+      silence is reported as a deviation and also marks the hunt's coverage for H as unresolved for that interval.
+      Benign causes: maintenance restarts, logrotate (exe allow-list), host shutdowns (network also stops). Next
+      pivot: what H did on the network during the gap.
+  - id: BL-20
+    rank: 20
+    title: Execution from memory-backed, deleted or shared-memory executables
+    rule_type: direct
+    assurance: negative-capable
+    lane: high
+    severity: high
+    techniques: [T1027.011, T1620, T1564.001, T1036.005]
+    prerequisites: []
+    card: >-
+      Claim: a process's kernel-recorded executable is a memfd (/memfd:...), a deleted file ("... (deleted)"), or a
+      file under /dev/shm or /run/user. Telemetry: auditd_exec process.executable (present, normalized; SYSCALL.exe).
+      Fidelity: kernel-recorded image path; fileless Linux implants and in-memory loaders (memfd_create + fexecve)
+      show here regardless of name. Benign causes: some JIT/sandboxed runtimes and browser helpers use memfd (rare on
+      servers; baseline by host), self-updating agents that replace their binary. Next pivot: the creating parent,
+      its download, and the process's sockets (COR-02).
+  - id: BL-21
+    rank: 21
+    title: Kernel module loads and dynamic-linker preload staging
+    rule_type: direct
+    assurance: negative-capable where init_module/finit_module and the preload path are audited
+    lane: urgent
+    severity: critical
+    techniques: [T1547.006, T1014, T1574.006]
+    prerequisites: ["auditd_sys normalizer for init_module/finit_module", "PATH watch on /etc/ld.so.preload"]
+    card: >-
+      Claim: after boot, a kernel module was loaded (finit_module/init_module, or insmod/modprobe exec) from a
+      session or path outside the package baseline, or /etc/ld.so.preload was written. Telemetry: auditd syscall
+      records (coverage unverified), exec records (normalized), journal kernel taint messages. Fidelity: syscall
+      records prove the load attempt and its result; preload writes are proved by PATH. Benign causes: DKMS builds
+      after kernel updates, hardware drivers, security agents. Next pivot: the module/library file origin and
+      network behaviour of the host afterwards (rootkits hide host artefacts, not packets).
+  - id: BL-22
+    rank: 22
+    title: Downloaded executable content followed by execution of a same-named file
+    rule_type: sequence
+    assurance: positive-only (file-name link)
+    lane: high
+    severity: high
+    techniques: [T1105, T1204.002, T1570, T1036.008]
+    prerequisites: ["auditd_path normalizer", "check whether lab fileinfo records carry magic"]
+    card: >-
+      Claim: client H received a transfer whose content is executable (EVE fileinfo magic ELF/script, or HTTP
+      content-type for executables) named N, and within W a file with basename N was created and then executed on H.
+      Telemetry: EVE fileinfo/http (present; magic unverified), auditd PATH/exec. Fidelity: each side is a direct
+      observation; the name link is temporal (COR-06) and attacker-controlled, so the joined claim is positive-only
+      and worded as a hypothesis. Benign causes: software installs and updates over HTTP, admin tool downloads.
+      Next pivot: the download server's other clients and the executed file's behaviour.
+  - id: BL-23
+    rank: 23
+    title: IDS alert to host activity corroboration
+    rule_type: sequence (correlation)
+    assurance: n/a (priority adjustment)
+    lane: context
+    severity: n/a
+    techniques: [T1190, T1210, T1071]
+    prerequisites: ["host alias table", "BL-03 for outbound alerts"]
+    card: >-
+      Claim: an IDS alert involving host H (inbound exploit category, or outbound C2/trojan category) was followed
+      within W by service-account execution on H (COR-08) or originated from a process on H (COR-01). Telemetry:
+      EVE alert (present, normalized) and auditd exec/net. Fidelity: priority adjustment only; it never upgrades an
+      alert to proof. Benign causes: scanner noise against servers that are not vulnerable (no host follow-on, so
+      no upgrade). Next pivot: the host process tree in the window.
+  - id: BL-24
+    rank: 24
+    title: Rare executable per host and per account (stack count over kernel exe path)
+    rule_type: aggregate (discovery lane)
+    assurance: negative-capable
+    lane: lead
+    severity: medium
+    techniques: [T1059, T1036.005, T1564.006, T1219.002, T1105]
+    prerequisites: ["frozen baseline window", "peer-group definition"]
+    card: >-
+      Claim: executable path X ran on H (or under account A) with count c in the hunt window and zero or near-zero
+      prevalence in the baseline and among peer hosts. Telemetry: auditd_exec process.executable (present,
+      normalized) with composite aggregation for exhaustive buckets. Fidelity: kernel exe path; rarity with
+      denominators, worded as a deviation. Benign causes: patches and new deployments (many hosts at once, so peer
+      prevalence rises), admin one-offs. Next pivot: the first execution's parent and session, and any sockets.
+  - id: BL-25
+    rank: 25
+    title: First-seen or rare external destination per internal host (server-role egress)
+    rule_type: aggregate (baseline)
+    assurance: negative-capable
+    lane: lead
+    severity: medium
+    techniques: [T1071, T1105, T1102, T1567, T1195.002]
+    prerequisites: ["frozen baseline window", "host role tags from the asset list"]
+    card: >-
+      Claim: internal host H contacted external destination D (address, /24, or DNS name) that H, and almost all of
+      H's peers, never contacted in the baseline window. Telemetry: EVE flow/dns/tls (present), Arkime. Fidelity:
+      typed network fields; first-seen is a deviation, strongest for server-role hosts with stable egress. Benign
+      causes: CDN rotation (aggregate by /24 or ASN and by DNS name), new SaaS. Next pivot: the host process
+      (COR-01/COR-09) and what the session carried.
+next_candidates:
+  - "Cryptomining protocol (Stratum) and pool connections (T1496.001)"
+  - "Raw packet sockets outside the capture baseline (T1205.002, T1040)"
+  - "Database dump tools run by web-service or non-DBA accounts (T1213.006)"
+  - "Archive of sensitive paths followed by outbound transfer (T1560.001, COR-12)"
+  - "Masquerading: system binary name in the wrong path, kernel-thread argv[0] for userland exe (T1036.005, T1036.011)"
+  - "Remote-access/RMM agent first seen on a server (T1219.002)"
+  - "ptrace attach to sshd/sudo/login processes (T1055.008)"
+  - "Setuid bit added outside package paths (T1548.001, T1222.002)"

@@ -1,0 +1,273 @@
+# ROMULUS research vocabulary: telemetry families.
+# Register entries, the correlation catalog, the tool and LOTL catalogs and the backlog name families by `id`.
+# Typed field names are ROMULUS typed fields (spec §6 FieldContract). Field status:
+#   normalized - emitted by the current normalizer (src/romulus/evidence/normalize.py, lab-ecs@1)
+#   proposed   - the raw lab records carry it (or the standard shipper does) but no normalizer emits it yet
+# Family `lab` values: present (records exist in the lab indices/Arkime today), absent, unverified (may exist;
+# confirm with the hunt-time SourceProfile before planning work on it). Facts dated 2026-10-19; lab facts from
+# docs/project/ENVIRONMENT.md and the round-1 brief. Nothing here is a detection claim.
+schema_version: 1
+families:
+  # ---------------------------------------------------------------------------------- lab: host (Linux)
+  - id: auditd_exec
+    title: auditd EXECVE + SYSCALL(execve) + CWD (+PROCTITLE) grouped by serial
+    typed_family: process_exec
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [process.argv, process.args_count, process.executable, process.comm, process.pid, process.ppid,
+                   process.uid, process.euid, process.auid, process.user, process.effective_user, process.login_user,
+                   process.tty, process.cwd, event.outcome, audit.serial]
+      proposed: [process.session_id, process.gid, process.egid, process.suid, process.fsuid, audit.key,
+                 process.parent.executable]
+    notes: >-
+      process.executable is SYSCALL.exe (kernel-recorded path of the image that ran); argv is caller-chosen text
+      (ADR-004: argv-identified programs are positive-only). process.parent.executable needs a per-host pid table
+      built from exec events (pid reuse and missing parents are unknowns, never defaults). auditd does not record
+      the environment, so LD_PRELOAD/HISTFILE set in the environment are invisible here.
+  - id: auditd_path
+    title: auditd PATH records attached to any audited syscall (execve item 0, creat/open/rename/unlink...)
+    typed_family: file_event (proposed)
+    lab: present
+    normalizer: proposed
+    fields:
+      proposed: [file.path, file.item, file.nametype, file.inode, file.device, file.mode, file.owner_uid,
+                 file.owner_gid, syscall.name, process.executable, process.pid, process.auid, audit.key,
+                 event.outcome]
+    notes: >-
+      PATH item 0 of an execve is the file actually executed, including #! scripts (ADR-004 negative-assurance
+      basis). nametype=CREATE/DELETE prove a directory-entry change. Writes to existing files appear only when
+      the audit rules watch that path or syscall (open with write flags); which watches the lab has is
+      unverified, so per-path coverage must be read from the SourceProfile, never assumed.
+  - id: auditd_net
+    title: auditd SYSCALL(connect|bind|listen|accept|accept4|sendto) + SOCKADDR
+    typed_family: net_socket (proposed)
+    lab: present
+    normalizer: proposed
+    fields:
+      proposed: [syscall.name, socket.family, destination.ip, destination.port, source.ip, source.port,
+                 socket.local_port, process.executable, process.comm, process.pid, process.ppid, process.uid,
+                 process.user, process.auid, process.session_id, event.outcome, syscall.exit]
+    notes: >-
+      The brief reports ~16k connect syscalls in the lab. connect SOCKADDR carries the remote address only; the
+      local source port is kernel-assigned and absent, so outbound host-to-flow joins are hypotheses (see
+      correlation.yaml). A non-blocking connect returns EINPROGRESS (success=no, exit=-115) even when the
+      connection later succeeds: outcome is "attempted", never "failed". accept/accept4 SOCKADDR carries the
+      peer address and port. AF_UNIX and AF_NETLINK sockaddrs are not network events.
+  - id: auditd_sys
+    title: auditd other syscalls and keyed rules (ptrace, init_module/finit_module, mount, memfd_create, setuid, kill, chmod, setxattr...)
+    typed_family: syscall_event (proposed)
+    lab: unverified
+    normalizer: proposed
+    fields:
+      proposed: [syscall.name, syscall.args, syscall.exit, audit.key, process.executable, process.pid,
+                 process.ppid, process.uid, process.euid, process.auid, target.pid, module.name, event.outcome]
+    notes: Which syscalls are audited depends on the host's audit.rules; confirm per host from the profile.
+  - id: auditd_acct
+    title: auditd user-space records (USER_AUTH, USER_LOGIN, USER_START, ADD_USER, ADD_GROUP, USER_MGMT, USER_CHAUTHTOK, CRED_ACQ, SERVICE_START/STOP, CONFIG_CHANGE, DAEMON_*, ANOM_*)
+    typed_family: auth / account_change / service_change / audit_config (proposed)
+    lab: unverified
+    normalizer: proposed
+    fields:
+      proposed: [audit.record_type, user.name, user.id, auth.target_user, group.name, source.ip, process.executable,
+                 process.pid, process.auid, process.session_id, service.name, audit.config_op, event.outcome]
+    notes: res=success|failed is an authoritative outcome field; acct= and exe= are typed key=value fields.
+  - id: journal_sshd
+    title: systemd journal, SYSLOG_IDENTIFIER=sshd
+    typed_family: auth
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [auth.service, auth.method, user.name, source.ip, source.port, event.outcome, journal.identifier,
+                   journal.unit]
+      proposed: [ssh.key_fingerprint, process.pid, ssh.session_close]
+    notes: >-
+      Typed from a fixed sshd message grammar (anchored regex over MESSAGE). The client source port is logged,
+      which allows a full 5-tuple join to network SSH sessions (correlation.yaml COR-05, COR-24).
+  - id: journal_sudo
+    title: systemd journal, SYSLOG_IDENTIFIER=sudo
+    typed_family: privilege_use
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [user.name, auth.target_user, sudo.command, process.cwd, event.outcome]
+      proposed: [process.tty]
+    notes: sudo.command is text written by sudo (argv rendering); rules over it are positive-only (ADR-004).
+  - id: journal_other
+    title: systemd journal, other identifiers (systemd unit lifecycle, CRON, useradd/usermod/groupadd/passwd, su, systemd-logind, kernel, polkit, audit daemon, rsyslog)
+    typed_family: various (proposed)
+    lab: present
+    normalizer: proposed
+    fields:
+      proposed: [journal.identifier, journal.unit, journal.message, process.pid, process.executable,
+                 systemd.unit_event, user.name, cron.command, kernel.message]
+    notes: >-
+      Present in the lab index (918k journal docs) but only sshd/sudo are normalized; the rest are skipped and
+      counted. Message-grammar parsers are positive-only unless the field is structured journal metadata
+      (_SYSTEMD_UNIT, _PID, _EXE, _COMM are structured).
+  - id: apache_access
+    title: Apache access log
+    typed_family: http_access
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [source.ip, http.request.method, http.response.status_code, url.original, user_agent.original]
+      proposed: [url.path, url.query, http.response.bytes, http.referrer]
+    notes: Server-side view; status code is the server's outcome for the request, not proof of exploitation.
+  - id: apache_error
+    title: Apache error log
+    typed_family: web_error
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [web.error_message, source.ip]
+    notes: Free text; any rule over it is positive-only. Importer assumed UTC for some timestamps (caveat kept).
+  - id: zoneminder
+    title: ZoneMinder application logs
+    typed_family: app_log (proposed)
+    lab: present
+    normalizer: proposed
+    fields:
+      proposed: [app.component, app.message, user.name, source.ip, event.outcome]
+    notes: Application-specific; useful for application auth and API-abuse context. Not normalized in M1.
+  # ---------------------------------------------------------------------------------- lab: network
+  - id: eve_alert
+    title: Suricata EVE alert
+    typed_family: net_alert
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [alert.signature, alert.signature_id, alert.category, alert.severity, alert.action,
+                   alert.mitre_technique_id, alert.signature_severity, source.ip, source.port, destination.ip,
+                   destination.port, network.transport, network.app_proto, network.community_id, suricata.flow_id]
+    notes: "An alert is a prior detection with its own false-positive rate: a lead with metadata, never proof."
+  - id: eve_flow
+    title: Suricata EVE flow and netflow
+    typed_family: net_flow
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [source.ip, source.port, destination.ip, destination.port, network.transport, network.app_proto,
+                   network.community_id, suricata.flow_id, flow.bytes_toserver, flow.bytes_toclient,
+                   flow.pkts_toserver, flow.pkts_toclient, flow.bytes, flow.pkts, flow.start, flow.end, flow.state]
+      proposed: [flow.age, flow.reason, flow.alerted, tcp.flags]
+    notes: >-
+      Sensors in the lab: inetfw and corpdns. A host pair the sensors cannot see yields "not observed by
+      sensor", never a negative. netflow records are unidirectional (bytes/pkts, no toserver/toclient split).
+  - id: eve_dns
+    title: Suricata EVE dns
+    typed_family: dns_query
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [dns.type, dns.question.name, dns.question.type, dns.response_code, source.ip, destination.ip,
+                   network.community_id]
+      proposed: [dns.answers.data, dns.answers.type, dns.answers.ttl, dns.id, dns.flags]
+    notes: >-
+      dns.answers are not normalized, so name-to-address joins (COR-09) need normalizer work. When the sensor
+      sits at the resolver, the querying client is the resolver's client; when it sits upstream, the client is
+      the resolver itself and host attribution needs resolver logs.
+  - id: eve_http
+    title: Suricata EVE http
+    typed_family: http_tx
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [http.hostname, url.original, user_agent.original, http.request.method, http.response.status_code,
+                   http.response.length, http.content_type, source.ip, source.port, destination.ip,
+                   destination.port, network.community_id]
+      proposed: [http.referrer, http.protocol, http.xff, http.request.headers, http.response.headers]
+  - id: eve_fileinfo
+    title: Suricata EVE fileinfo
+    typed_family: file_transfer
+    lab: present
+    normalizer: normalized
+    fields:
+      normalized: [file.name, file.size, source.ip, destination.ip, network.app_proto, network.community_id]
+      proposed: [file.magic, file.mime_type, file.sha256, file.md5, file.state, file.stored, file.gaps,
+                 file.tx_id]
+    notes: Whether the lab's fileinfo records carry magic or hashes is unverified (depends on Suricata config).
+  - id: eve_tls
+    title: Suricata EVE tls
+    typed_family: tls_session
+    lab: present
+    normalizer: partial
+    fields:
+      normalized: [source.ip, source.port, destination.ip, destination.port, network.community_id]
+      proposed: [tls.sni, tls.version, tls.ja3, tls.ja3s, tls.ja4, tls.subject, tls.issuer, tls.serial,
+                 tls.not_before, tls.not_after, tls.fingerprint]
+    notes: Only 137 tls records in the lab index; JA3/JA4 presence depends on Suricata version and config.
+  - id: eve_ssh
+    title: Suricata EVE ssh
+    typed_family: ssh_session
+    lab: present
+    normalizer: partial
+    fields:
+      normalized: [source.ip, source.port, destination.ip, destination.port, network.community_id]
+      proposed: [ssh.client.software, ssh.client.proto, ssh.server.software, ssh.server.proto, ssh.client.hassh,
+                 ssh.server.hassh]
+    notes: 69 ssh records in the lab index. HASSH needs Suricata 6+ with hassh enabled; verify in the profile.
+  - id: arkime_spi
+    title: Arkime session SPI (read through the Arkime API)
+    typed_family: net_session (proposed)
+    lab: present
+    normalizer: proposed
+    fields:
+      proposed: [arkime.session_id, arkime.node, network.community_id, source.ip, source.port, destination.ip,
+                 destination.port, network.transport, network.protocols, network.bytes_src, network.bytes_dst,
+                 network.packets_src, network.packets_dst, session.first_packet, session.last_packet,
+                 session.duration, tls.ja3, tls.ja3s, tls.ja4, tls.sni, tls.cert.issuer, tls.cert.subject,
+                 tls.cert.not_before, tls.cert.not_after, tls.cert.hash, tls.cert.alt_names, ssh.hassh,
+                 ssh.hassh_server, ssh.version, http.host, http.uri, http.user_agent, http.method,
+                 http.status_code, http.body_md5, dns.query, dns.query_type, dns.answer_ip, arkime.tags]
+    notes: >-
+      Arkime 6.3.1, 24,630 sessions, 688 fields (brief). Not read by ROMULUS in M1. Field availability per
+      deployment comes from /api/fields; ja4 depends on plugins. Arkime is network evidence only; it never
+      proves host execution.
+  - id: pcap
+    title: Packets for one Arkime session (or an allowed PCAP set) analysed with TShark
+    typed_family: packet_detail (proposed)
+    lab: present
+    normalizer: proposed
+    fields:
+      proposed: [tcp.stream, frame.time, payload.bytes, payload.printable_ratio, icmp.data_len, dns.qry.name,
+                 http.request.uri, tls.handshake.extensions_server_name, ssh.protocol, smb2.filename]
+    notes: Deep inspection for a specific session only; TShark filters come from a validated AST (spec §6).
+  # ---------------------------------------------------------------------------------- mission families (absent in lab)
+  - {id: win_security, title: "Windows Security log (4624/4625/4648/4672/4688/4697/4698/4720/4728/4732/4768/4769/4776/5140/5145/1102...)", typed_family: "auth / process_exec / account_change", lab: absent, normalizer: proposed}
+  - {id: win_sysmon, title: "Sysmon (1,3,6,7,8,10,11,12-14,15,17/18,22,23,25,26)", typed_family: "process_exec / net_socket / file_event / registry / dns_query", lab: absent, normalizer: proposed}
+  - {id: win_powershell, title: "PowerShell 4103/4104/400/800", typed_family: script_block, lab: absent, normalizer: proposed}
+  - {id: win_system, title: "Windows System log (7045, 7036, 104...)", typed_family: service_change, lab: absent, normalizer: proposed}
+  - {id: win_other, title: "Windows Defender, AppLocker/WDAC, TaskScheduler, WMI-Activity, TerminalServices, BITS, DNS client", typed_family: various, lab: absent, normalizer: proposed}
+  - {id: edr, title: "EDR / Elastic Defend export (process with entity_id lineage, network-by-process, file, registry, DNS-by-process, module load)", typed_family: various, lab: absent, normalizer: proposed}
+  - {id: osquery, title: "osquery scheduled-query results (process_open_sockets, listening_ports, crontab, authorized_keys, kernel_modules, suid_bin)", typed_family: state_snapshot, lab: absent, normalizer: proposed}
+  - {id: linux_syslog, title: "Linux syslog files shipped as files (auth.log/secure, cron, kern.log, messages)", typed_family: various, lab: absent, normalizer: proposed}
+  - {id: pkg_log, title: "Package manager logs (dpkg.log, apt history, yum/dnf, pip/npm audit where shipped)", typed_family: package_change, lab: absent, normalizer: proposed}
+  - {id: container_rt, title: "Container runtime and orchestrator audit (docker/containerd events, Kubernetes audit)", typed_family: container_event, lab: absent, normalizer: proposed}
+  - {id: macos_unified, title: "macOS unified log and ESF events", typed_family: various, lab: absent, normalizer: proposed}
+  - {id: zeek_conn, title: "Zeek conn.log (history, conn_state, orig/resp bytes, duration, community_id)", typed_family: net_flow, lab: absent, normalizer: proposed}
+  - {id: zeek_dns, title: "Zeek dns.log (query, qtype, rcode, answers, TTLs)", typed_family: dns_query, lab: absent, normalizer: proposed}
+  - {id: zeek_http, title: "Zeek http.log", typed_family: http_tx, lab: absent, normalizer: proposed}
+  - {id: zeek_ssl, title: "Zeek ssl.log and x509.log (SNI, JA3/JA4 packages, validation status, cert chain)", typed_family: tls_session, lab: absent, normalizer: proposed}
+  - {id: zeek_files, title: "Zeek files.log (mime, hashes, extracted) ", typed_family: file_transfer, lab: absent, normalizer: proposed}
+  - {id: zeek_smb, title: "Zeek smb_files/smb_mapping", typed_family: smb_event, lab: absent, normalizer: proposed}
+  - {id: zeek_dce_rpc, title: "Zeek dce_rpc.log (endpoint/operation: svcctl, atsvc, drsuapi...)", typed_family: rpc_event, lab: absent, normalizer: proposed}
+  - {id: zeek_kerberos, title: "Zeek kerberos.log", typed_family: auth, lab: absent, normalizer: proposed}
+  - {id: zeek_ntlm, title: "Zeek ntlm.log", typed_family: auth, lab: absent, normalizer: proposed}
+  - {id: zeek_rdp, title: "Zeek rdp.log", typed_family: remote_session, lab: absent, normalizer: proposed}
+  - {id: zeek_ssh, title: "Zeek ssh.log (auth_success heuristic, client/server, HASSH package, host key)", typed_family: ssh_session, lab: absent, normalizer: proposed}
+  - {id: zeek_notice, title: "Zeek notice.log and weird.log", typed_family: net_alert, lab: absent, normalizer: proposed}
+  - {id: zeek_software, title: "Zeek software.log / known_* logs", typed_family: inventory, lab: absent, normalizer: proposed}
+  - {id: zeek_ics, title: "Zeek ICSNPP protocol logs (Modbus, DNP3, S7, ENIP/CIP, BACnet, OPC UA...)", typed_family: ics_command, lab: absent, normalizer: proposed}
+  - {id: dns_server, title: "Resolver query logs (BIND/Unbound/Windows DNS debug/Infoblox) with client IP", typed_family: dns_query, lab: absent, normalizer: proposed}
+  - {id: proxy, title: "Web proxy logs (user, URL, category, bytes, action)", typed_family: http_tx, lab: absent, normalizer: proposed}
+  - {id: firewall, title: "Firewall and NAT logs (allow/deny, NAT translations)", typed_family: net_flow, lab: absent, normalizer: proposed}
+  - {id: vpn, title: "VPN / remote-access gateway logs", typed_family: auth, lab: absent, normalizer: proposed}
+  - {id: dhcp, title: "DHCP lease logs (IP-to-MAC-to-hostname over time)", typed_family: asset_binding, lab: absent, normalizer: proposed}
+  - {id: email_gw, title: "Email gateway logs (sender, recipient, attachment hashes, URLs, verdicts, SPF/DKIM/DMARC)", typed_family: email_event, lab: absent, normalizer: proposed}
+  - {id: netdev, title: "Network-device syslog and AAA (logins, privilege, config change/archive, TACACS+/RADIUS accounting, image/boot events)", typed_family: various, lab: absent, normalizer: proposed}
+  - {id: netflow, title: "NetFlow/IPFIX/sFlow from routers and switches", typed_family: net_flow, lab: absent, normalizer: proposed}
+  - {id: cloud_audit, title: "Cloud control-plane audit (AWS CloudTrail, Azure Activity, GCP Audit)", typed_family: cloud_api, lab: absent, normalizer: proposed}
+  - {id: idp_signin, title: "Identity provider sign-in and audit (Entra ID, Okta, ADFS, M365 UAL)", typed_family: auth, lab: absent, normalizer: proposed}
+  - {id: db_audit, title: "Database audit logs (PostgreSQL/MySQL/MSSQL audit)", typed_family: db_event, lab: absent, normalizer: proposed}
+  - {id: devops_audit, title: "Source control and CI/CD audit logs (GitLab/GitHub/Jenkins)", typed_family: devops_event, lab: absent, normalizer: proposed}

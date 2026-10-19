@@ -1,0 +1,958 @@
+# ROMULUS research register: ATT&CK Enterprise v20.0, entries whose first tactic is command-and-control.
+# Schema and workflow: docs/research/README.md. 41 entries (41 assessed, 0 stubs).
+# An entry with only id/name/tactics is a stub: walked and listed, not yet assessed.
+attack_version: enterprise-attack 20.0
+primary_tactic: command-and-control
+entries:
+- id: T1001
+  name: Data Obfuscation
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_http
+    fields: [http.content_type, http.response.length]
+  - family: pcap
+    fields: [payload.bytes]
+  - family: arkime_spi
+    fields: [network.bytes_src, network.bytes_dst]
+  lab_observable:
+    status: partial
+    reason: metadata visible; obfuscated content needs PCAP
+  rules: []
+  disposition:
+    status: deferred
+    reason: content-level evasion; detected through channel behaviour (beaconing BL-04, protocol mismatch BL-12)
+  priority: P4
+  detection_ideas: [See BL-04 and BL-12.]
+  correlation: []
+  pivots: [PCAP of a representative session]
+- id: T1001.001
+  name: Junk Data
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: pcap
+    fields: [payload.bytes]
+  lab_observable:
+    status: partial
+    reason: PCAP available per session
+  rules: []
+  disposition:
+    status: not_observable_by_design
+    reason: junk data defeats content signatures; behaviour layers apply
+  priority: P4
+  detection_ideas: []
+  correlation: []
+  pivots: [Channel timing]
+- id: T1001.002
+  name: Steganography
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_http
+    fields: [http.content_type, url.original]
+  - family: eve_fileinfo
+    fields: [file.name, file.magic]
+  lab_observable:
+    status: partial
+    reason: repeated image fetches visible
+  rules: []
+  disposition:
+    status: planned
+    reason: periodic fetch of image content from the same rare host by a non-browser client (BL-04 with content_type image/*)
+  priority: P4
+  detection_ideas:
+  - BL-04 restricted to HTTP image responses to a non-browser user agent/host process.
+  correlation: [COR-03]
+  pivots: [The host process making the requests]
+- id: T1001.003
+  name: Protocol or Service Impersonation
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_http
+    fields: [http.hostname, user_agent.original, url.original]
+  - family: eve_tls
+    fields: [tls.sni, tls.ja3, tls.issuer]
+  - family: arkime_spi
+    fields: [tls.ja3, http.host]
+  lab_observable:
+    status: partial
+    reason: TLS/HTTP metadata visible once normalized
+  rules: []
+  disposition:
+    status: planned
+    reason: traffic claiming a well-known service (SNI/Host) that does not resolve to or present that service's certificate
+  priority: P3
+  detection_ideas:
+  - SNI/Host of a well-known domain with a certificate issuer/subject that does not match it (needs eve_tls).
+  - HTTP Host of a well-known domain sent to an IP that the domain did not resolve to in the window (needs dns.answers).
+  correlation: [COR-09]
+  pivots: [The client process]
+- id: T1008
+  name: Fallback Channels
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.state]
+  - family: auditd_net
+    fields: [process.executable, destination.ip, destination.port, event.outcome]
+  lab_observable:
+    status: 'yes'
+    reason: failed then alternate-destination connections are visible on both host and network
+  rules: []
+  disposition:
+    status: planned
+    reason: same process (host) or source (network) switching destination/protocol after repeated failures
+  priority: P3
+  detection_ideas:
+  - 'One process: repeated connect attempts to D1 with no established flow, then success to D2 on a different port/protocol
+    (BL-01 data).'
+  correlation: [COR-01]
+  pivots: [Both destinations' other clients]
+- id: T1071
+  name: Application Layer Protocol
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.bytes_toserver, flow.bytes_toclient, flow.start, flow.end]
+  - family: eve_http
+    fields: [http.hostname, url.original, user_agent.original]
+  - family: eve_dns
+    fields: [dns.question.name, dns.question.type]
+  - family: eve_tls
+    fields: [tls.sni, tls.ja3]
+  - family: arkime_spi
+    fields: [session.duration, network.bytes_src, network.bytes_dst]
+  - family: auditd_net
+    fields: [process.executable, destination.ip, destination.port]
+  lab_observable:
+    status: 'yes'
+    reason: flows, HTTP, DNS and (some) TLS metadata exist; host connect syscalls exist but are not normalized
+  rules: [net.suricata_alert_stack]
+  disposition:
+    status: planned
+    reason: alert stacking is the only current coverage; beaconing (BL-04), process attribution (BL-01/BL-03), rare destinations
+      (BL-25) are the planned core
+  priority: P1
+  detection_ideas:
+  - 'BL-04: per (src, dst, port) interval regularity with jitter tolerance and small consistent sizes.'
+  - 'BL-01: interpreter/shell/service-account external connect.'
+  - 'BL-25: first-seen external destination per internal host.'
+  correlation: ['COR-01, COR-02, COR-03.']
+  pivots:
+  - Host process behind the channel and its parent chain
+- id: T1071.001
+  name: Web Protocols
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_http
+    fields: [http.hostname, url.original, user_agent.original, http.request.method, http.response.status_code, http.response.length]
+  - family: eve_tls
+    fields: [tls.sni, tls.ja3, tls.ja4, tls.issuer]
+  - family: arkime_spi
+    fields: [http.host, http.uri, http.user_agent, tls.ja3]
+  - family: auditd_net
+    fields: [process.executable, destination.ip, destination.port]
+  lab_observable:
+    status: 'yes'
+    reason: EVE http is the largest network family in the lab
+  rules: [net.tool_user_agent_http]
+  disposition:
+    status: planned
+    reason: tool user agents are a positive-only lead; HTTP beaconing, direct-to-IP requests, rare UA per host and UA-vs-process
+      mismatch are planned
+  priority: P1
+  detection_ideas:
+  - 'BL-04 on HTTP: same URI path pattern polled at regular intervals by one client.'
+  - Direct-to-IP HTTP (Host header is an IP literal) from servers to external addresses.
+  - 'COR-17: user agent claims a browser but the host process is curl/python/unknown.'
+  correlation: ['COR-03, COR-17.']
+  pivots:
+  - URIs and response sizes over time for the channel
+- id: T1071.002
+  name: File Transfer Protocols
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [destination.port, network.app_proto, flow.bytes_toserver]
+  - family: auditd_exec
+    fields: [process.executable, process.argv]
+  lab_observable:
+    status: partial
+    reason: FTP/SFTP/TFTP flows visible if present
+  rules: []
+  disposition:
+    status: planned
+    reason: FTP/TFTP sessions from servers to external hosts, or ftp/tftp clients run by service accounts
+  priority: P3
+  detection_ideas:
+  - app_proto ftp/tftp to external destinations from a host with no FTP baseline.
+  correlation: [COR-01]
+  pivots: [Files transferred (EVE fileinfo)]
+- id: T1071.003
+  name: Mail Protocols
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [destination.port, network.app_proto]
+  - family: auditd_net
+    fields: [process.executable, destination.port]
+  lab_observable:
+    status: partial
+    reason: SMTP/IMAP flows visible if present
+  rules: []
+  disposition:
+    status: planned
+    reason: mail protocols from hosts that are not mail servers or MUAs (process attribution via BL-01)
+  priority: P3
+  detection_ideas:
+  - Outbound 25/465/587/993 from a server host whose process is not the MTA.
+  correlation: [COR-01]
+  pivots: [Mail volume and recipients]
+- id: T1071.004
+  name: DNS
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_dns
+    fields: [source.ip, dns.question.name, dns.question.type, dns.response_code]
+  - family: dns_server
+    fields: [client.ip, dns.question.name]
+  - family: auditd_net
+    fields: [process.executable, destination.ip, destination.port]
+  lab_observable:
+    status: 'yes'
+    reason: EVE dns at the lab resolver
+  rules: [net.dns_subdomain_enumeration]
+  disposition:
+    status: planned
+    reason: the subdomain-enumeration rule also surfaces tunnel-shaped query volume as a lead; the dedicated DNS tunnel
+      shape (BL-10) is planned
+  priority: P1
+  detection_ideas:
+  - 'BL-10: per registered domain: unique subdomain count, mean label length, entropy, TXT/NULL/CNAME ratio, query rate
+    per client.'
+  - DNS queries sent directly to external resolvers by processes other than the local resolver (BL-01 on port 53).
+  correlation:
+  - 'COR-16: tunnel-shaped queries joined to the host process issuing them.'
+  pivots: [The client host's process issuing queries]
+- id: T1071.005
+  name: Publish/Subscribe Protocols
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [destination.port, network.app_proto]
+  - family: arkime_spi
+    fields: [network.protocols]
+  lab_observable:
+    status: partial
+    reason: the lab has Kafka traffic (protocol hierarchy); MQTT/AMQP would be visible as flows
+  rules: []
+  disposition:
+    status: planned
+    reason: pub/sub protocol sessions to external brokers or from hosts outside the messaging baseline
+  priority: P3
+  detection_ideas:
+  - MQTT (1883/8883), AMQP (5672), Kafka (9092) sessions to external addresses.
+  correlation: [COR-01]
+  pivots: [The client process]
+- id: T1090
+  name: Proxy
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.bytes_toserver, flow.bytes_toclient]
+  - family: auditd_net
+    fields: [syscall.name, process.executable, socket.local_port, destination.ip]
+  - family: auditd_exec
+    fields: [process.executable, process.argv]
+  - family: netdev
+    fields: [config.change]
+  lab_observable:
+    status: 'yes'
+    reason: proxy tools and relays show as listeners and paired in/out flows
+  rules: []
+  disposition:
+    status: planned
+    reason: see sub-techniques
+  priority: P2
+  detection_ideas: [See sub-techniques.]
+  correlation: [COR-18]
+  pivots:
+  - Paired inbound and outbound sessions on the relay
+- id: T1090.001
+  name: Internal Proxy
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: auditd_net
+    fields: [syscall.name, process.executable, socket.local_port, destination.ip, destination.port]
+  - family: auditd_exec
+    fields: [process.executable, process.argv]
+  - family: eve_flow
+    fields: [source.ip, destination.ip, flow.bytes_toserver, flow.bytes_toclient]
+  lab_observable:
+    status: 'yes'
+    reason: new listeners (bind/accept) and relayed flows are observable (auditd_net not normalized yet)
+  rules: []
+  disposition:
+    status: planned
+    reason: 'internal relay: a process accepting inbound sessions and opening outbound sessions with matched byte volumes
+      (socat/ssh -L/chisel)'
+  priority: P2
+  detection_ideas:
+  - Process that both accepts on a new port and connects to internal peers within seconds of each accept (COR-18 + BL-01).
+  - socat TCP-LISTEN + TCP:, ssh -L/-R/-D, chisel/ligolo execs (positive-only argv; behaviour via sockets).
+  correlation: [COR-18]
+  pivots: [Who connects to the relay and where it forwards]
+- id: T1090.002
+  name: External Proxy
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [destination.ip, destination.port]
+  - family: eve_tls
+    fields: [tls.sni]
+  lab_observable:
+    status: 'yes'
+    reason: outbound sessions to external proxies visible
+  rules: []
+  disposition:
+    status: planned
+    reason: sessions to public proxy/VPS ranges with CONNECT semantics or SOCKS on non-standard ports (BL-12, BL-25)
+  priority: P3
+  detection_ideas:
+  - HTTP CONNECT requests (EVE http method CONNECT) from servers to external hosts.
+  - SOCKS handshakes on non-standard ports (BL-12, PCAP to confirm).
+  correlation: [COR-01]
+  pivots: [The host process]
+- id: T1090.003
+  name: Multi-hop Proxy
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.ja3, tls.sni]
+  - family: eve_flow
+    fields: [destination.ip, destination.port]
+  - family: arkime_spi
+    fields: [tls.ja3, destination.port]
+  lab_observable:
+    status: partial
+    reason: Tor-like TLS (random SNI, 9001/443) is visible at sensors once tls is normalized
+  rules: []
+  disposition:
+    status: planned
+    reason: Tor relay indicator lists (mission-supplied, offline) and Tor-shaped TLS (random-looking SNI, self-signed certs)
+      from servers
+  priority: P3
+  detection_ideas:
+  - Destination in a mission-supplied Tor relay list (typed IP indicator, positive-only).
+  - TLS with random-label .com SNI and self-signed short-lived certificate (BL-13 feature).
+  correlation: []
+  pivots: [The host process and volume]
+- id: T1090.004
+  name: Domain Fronting
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: eve_http
+    fields: [http.hostname]
+  - family: proxy
+    fields: [url.original, tls.sni]
+  lab_observable:
+    status: partial
+    reason: SNI vs HTTP Host mismatch needs TLS interception; SNI to CDN fronts visible
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: domain fronting is only provable with decrypted HTTP Host (TLS-inspecting proxy logs)
+  priority: P4
+  detection_ideas:
+  - TLS-inspecting proxy logs with SNI != Host header for CDN-hosted domains.
+  correlation: []
+  pivots: [Client process and true Host]
+- id: T1092
+  name: Communication Through Removable Media
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: journal_other
+    fields: [kernel.message]
+  - family: auditd_exec
+    fields: [process.argv]
+  lab_observable:
+    status: 'no'
+    reason: no removable media
+  rules: []
+  disposition:
+    status: not_observable_by_design
+    reason: air-gap bridging via media leaves no network trace; host media events need device telemetry
+  priority: P4
+  detection_ideas:
+  - Repeated mounts of the same removable volume across segregated hosts (device telemetry).
+  correlation: []
+  pivots: [Files read and written on the media]
+- id: T1095
+  name: Non-Application Layer Protocol
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [network.transport, source.ip, destination.ip, flow.bytes, flow.pkts]
+  - family: auditd_net
+    fields: [socket.family, process.executable]
+  - family: pcap
+    fields: [icmp.data_len, payload.bytes]
+  lab_observable:
+    status: 'yes'
+    reason: ICMP and other non-TCP/UDP flows are recorded by EVE flow
+  rules: []
+  disposition:
+    status: planned
+    reason: ICMP/raw-IP sessions with payload volume or regularity atypical for ping (BL-12 family)
+  priority: P2
+  detection_ideas:
+  - ICMP flows with large or variable payload sizes, long duration, or bidirectional byte volume above ping norms.
+  - Raw socket (SOCK_RAW) creation by non-ping processes (COR-22).
+  correlation: [COR-22]
+  pivots: [PCAP of the ICMP session for payload content]
+- id: T1102
+  name: Web Service
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: eve_dns
+    fields: [dns.question.name]
+  - family: eve_http
+    fields: [http.hostname, url.original]
+  - family: auditd_net
+    fields: [process.executable, destination.ip]
+  lab_observable:
+    status: partial
+    reason: domains of web services visible via DNS/SNI; content is encrypted
+  rules: []
+  disposition:
+    status: planned
+    reason: non-browser processes on servers contacting paste/social/cloud-storage/messaging API domains (category list)
+      with regular timing
+  priority: P2
+  detection_ideas:
+  - Server-class host querying paste/file-share/chat-API domains (mission category list) from a process that is not a browser
+    (COR-21).
+  - BL-04 restricted to those domains.
+  correlation: [COR-21]
+  pivots: [Process and timing of the requests]
+- id: T1102.001
+  name: Dead Drop Resolver
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_dns
+    fields: [dns.question.name]
+  - family: eve_http
+    fields: [url.original]
+  lab_observable:
+    status: partial
+    reason: as T1102
+  rules: []
+  disposition:
+    status: planned
+    reason: web-service fetch followed by a connection to a new destination (dead drop then real C2)
+  priority: P3
+  detection_ideas:
+  - Request to a paste/social domain followed within seconds by the same process connecting to a first-seen IP.
+  correlation: [COR-21]
+  pivots: [The resolved second-stage destination]
+- id: T1102.002
+  name: Bidirectional Communication
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: eve_flow
+    fields: [flow.bytes_toserver, flow.bytes_toclient]
+  lab_observable:
+    status: partial
+    reason: as T1102
+  rules: []
+  disposition:
+    status: planned
+    reason: BL-04 and COR-21 on web-service domains
+  priority: P3
+  detection_ideas:
+  - Regular bidirectional sessions to chat/storage APIs from a non-browser process.
+  correlation: [COR-21]
+  pivots: [Process lineage]
+- id: T1102.003
+  name: One-Way Communication
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: eve_dns
+    fields: [dns.question.name]
+  lab_observable:
+    status: partial
+    reason: as T1102
+  rules: []
+  disposition:
+    status: planned
+    reason: periodic fetches from web services by a non-browser process
+  priority: P3
+  detection_ideas:
+  - BL-04 on web-service domains with small download-only sessions.
+  correlation: [COR-21]
+  pivots: [Process lineage]
+- id: T1104
+  name: Multi-Stage Channels
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, flow.start]
+  - family: auditd_net
+    fields: [process.executable, destination.ip]
+  lab_observable:
+    status: 'yes'
+    reason: sequences of distinct destinations per process are reconstructible
+  rules: []
+  disposition:
+    status: planned
+    reason: a process that contacted D1, then spawned/loaded something that contacts first-seen D2 (stage change)
+  priority: P3
+  detection_ideas:
+  - Process or its child contacting two different first-seen external destinations in sequence with a download between them
+    (BL-22 + BL-25).
+  correlation: [COR-06]
+  pivots: [Both stages' destinations]
+- id: T1105
+  name: Ingress Tool Transfer
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: auditd_exec
+    fields: [process.executable, process.argv, process.ppid, process.user]
+  - family: auditd_path
+    fields: [file.path, file.nametype]
+  - family: eve_http
+    fields: [http.hostname, url.original, user_agent.original, http.content_type, http.response.length]
+  - family: eve_fileinfo
+    fields: [file.name, file.size, file.magic]
+  - family: arkime_spi
+    fields: [http.uri, http.body_md5]
+  lab_observable:
+    status: 'yes'
+    reason: downloaders in auditd and HTTP/fileinfo transfers in EVE; the lab storyline includes download-to-shell
+  rules: [host.downloader_feeds_interpreter, host.download_piped_to_shell, net.tool_user_agent_http]
+  disposition:
+    status: covered
+    reason: downloader->interpreter (urgent), download piped to shell, and tool user-agent rules (positive-only); download-then-execute
+      (BL-22) planned
+  priority: P1
+  detection_ideas:
+  - 'BL-22: executable content (fileinfo magic ELF/script or content-type) transferred to a host, then a same-named file
+    executed.'
+  - Downloader exec (curl/wget -o/-O) writing into temp/web dirs by service accounts (positive-only).
+  correlation:
+  - 'COR-06: download flow -> execution of downloaded path.'
+  pivots:
+  - The download server's other clients and served files
+- id: T1132
+  name: Data Encoding
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_http
+    fields: [url.original]
+  - family: eve_dns
+    fields: [dns.question.name]
+  - family: pcap
+    fields: [payload.bytes]
+  lab_observable:
+    status: partial
+    reason: encoded URIs/qnames visible
+  rules: []
+  disposition:
+    status: planned
+    reason: encoding shows in URI/qname character statistics (BL-10 entropy features; base64-like URI parameters)
+  priority: P3
+  detection_ideas:
+  - URI path or query segments that are long base64/hex strings to rare hosts, repeated per request.
+  correlation: []
+  pivots: [The client process]
+- id: T1132.001
+  name: Standard Encoding
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_http
+    fields: [url.original]
+  - family: eve_dns
+    fields: [dns.question.name]
+  lab_observable:
+    status: partial
+    reason: as T1132
+  rules: []
+  disposition:
+    status: planned
+    reason: as T1132
+  priority: P3
+  detection_ideas:
+  - Base32/base64/hex label shape in DNS qnames (BL-10).
+  correlation: []
+  pivots: [The client process]
+- id: T1132.002
+  name: Non-Standard Encoding
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: pcap
+    fields: [payload.bytes]
+  lab_observable:
+    status: partial
+    reason: needs PCAP
+  rules: []
+  disposition:
+    status: deferred
+    reason: custom encodings need content analysis
+  priority: P4
+  detection_ideas:
+  - High-entropy payload in protocols that are normally plaintext (PCAP sampling).
+  correlation: []
+  pivots: [The session's host process]
+- id: T1219
+  name: Remote Access Tools
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: eve_dns
+    fields: [dns.question.name]
+  - family: eve_flow
+    fields: [destination.port]
+  - family: auditd_exec
+    fields: [process.executable]
+  lab_observable:
+    status: partial
+    reason: remote-access tool domains and ports visible at sensors; tools on lab hosts visible in auditd
+  rules: []
+  disposition:
+    status: planned
+    reason: see sub-techniques
+  priority: P2
+  detection_ideas: [See sub-techniques.]
+  correlation: []
+  pivots: [Sessions of the tool]
+- id: T1219.001
+  name: IDE Tunneling
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: eve_dns
+    fields: [dns.question.name]
+  - family: auditd_exec
+    fields: [process.executable, process.argv]
+  lab_observable:
+    status: partial
+    reason: IDE tunnel relay domains visible via DNS/SNI
+  rules: []
+  disposition:
+    status: planned
+    reason: code tunnel / dev tunnel binaries executed on servers, and DNS/SNI to tunnel relay domains (mission category
+      list)
+  priority: P3
+  detection_ideas:
+  - code tunnel / devtunnel executions or long sessions to tunnel relay domains from servers.
+  correlation: [COR-01]
+  pivots: [The account that started the tunnel]
+- id: T1219.002
+  name: Remote Desktop Software
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: eve_dns
+    fields: [dns.question.name]
+  - family: auditd_exec
+    fields: [process.executable]
+  - family: auditd_net
+    fields: [process.executable, destination.ip]
+  lab_observable:
+    status: partial
+    reason: RMM/remote desktop domains visible; agents on Linux hosts visible in auditd
+  rules: []
+  disposition:
+    status: planned
+    reason: first-seen remote-desktop/RMM agent execution or vendor-domain traffic from hosts outside the approved RMM list
+      (tools.yaml remote-access entries)
+  priority: P2
+  detection_ideas:
+  - DNS/SNI to RMM vendor domains (AnyDesk, TeamViewer, RustDesk, ScreenConnect, MeshCentral...) from hosts not in the mission's
+    approved list.
+  correlation: [COR-01]
+  pivots: [Install time and who installed it]
+- id: T1219.003
+  name: Remote Access Hardware
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: dhcp
+    fields: [client.mac, vendor]
+  - family: eve_flow
+    fields: [source.ip]
+  lab_observable:
+    status: 'no'
+    reason: hardware remote-access devices (IP-KVM) need asset/DHCP telemetry
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: DHCP/asset telemetry to identify IP-KVM devices
+  priority: P4
+  detection_ideas:
+  - New DHCP client with an IP-KVM vendor OUI followed by outbound sessions.
+  correlation: []
+  pivots: [Device's external sessions]
+- id: T1568
+  name: Dynamic Resolution
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_dns
+    fields: [dns.question.name, dns.response_code, dns.answers.data, dns.answers.ttl]
+  - family: dns_server
+    fields: [client.ip, dns.question.name]
+  lab_observable:
+    status: 'yes'
+    reason: DNS queries and response codes visible; answers not normalized
+  rules: []
+  disposition:
+    status: planned
+    reason: see sub-techniques
+  priority: P2
+  detection_ideas: [See sub-techniques.]
+  correlation: []
+  pivots:
+  - Successful resolutions and the connections that follow
+- id: T1568.001
+  name: Fast Flux DNS
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_dns
+    fields: [dns.question.name, dns.answers.data, dns.answers.ttl]
+  lab_observable:
+    status: partial
+    reason: needs dns.answers normalization
+  rules: []
+  disposition:
+    status: planned
+    reason: domains with many distinct A records across many ASNs and very low TTLs (needs answers)
+  priority: P3
+  detection_ideas:
+  - 'Per domain: distinct answer IPs, TTL < 300, rotation rate across the window.'
+  correlation: []
+  pivots: [Hosts that connected to those IPs]
+- id: T1568.002
+  name: Domain Generation Algorithms
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_dns
+    fields: [source.ip, dns.question.name, dns.response_code]
+  - family: dns_server
+    fields: [client.ip, dns.question.name, dns.response_code]
+  lab_observable:
+    status: 'yes'
+    reason: NXDOMAIN volume per client is computable from EVE dns
+  rules: []
+  disposition:
+    status: planned
+    reason: BL-11 NXDOMAIN bursts with algorithmic-looking names from one client
+  priority: P2
+  detection_ideas:
+  - 'BL-11: per client, NXDOMAIN count and distinct second-level domains with high entropy in a short window; the one that
+    resolves is the lead.'
+  correlation: [COR-09]
+  pivots: [The resolving domain and connections to it]
+- id: T1568.003
+  name: DNS Calculation
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_dns
+    fields: [dns.question.name, dns.answers.data]
+  lab_observable:
+    status: partial
+    reason: needs answers
+  rules: []
+  disposition:
+    status: deferred
+    reason: the computed port/IP comes from answers; observable as connections to ports derived from resolved IPs (rare)
+  priority: P4
+  detection_ideas:
+  - Connection to an unusual port right after resolving a domain whose answer octets encode it.
+  correlation: []
+  pivots: [The process]
+- id: T1571
+  name: Non-Standard Port
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [destination.port, network.app_proto, network.transport]
+  - family: arkime_spi
+    fields: [network.protocols, destination.port]
+  - family: auditd_net
+    fields: [process.executable, destination.port]
+  lab_observable:
+    status: 'yes'
+    reason: app_proto and destination port are normalized on EVE flow
+  rules: []
+  disposition:
+    status: planned
+    reason: BL-12 application protocol on a non-standard port and unknown app_proto on long sessions
+  priority: P1
+  detection_ideas:
+  - 'BL-12: app_proto http/tls/ssh on a port outside its standard set (and outside the site''s baseline of such pairs).'
+  - Long-lived sessions with app_proto failed/unknown to external addresses.
+  correlation: [COR-01]
+  pivots: [The host process and PCAP of the first packets]
+- id: T1572
+  name: Protocol Tunneling
+  tactics: [command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.bytes_toserver, flow.bytes_toclient, flow.start, flow.end]
+  - family: eve_ssh
+    fields: [ssh.client.software]
+  - family: eve_dns
+    fields: [dns.question.name, dns.question.type]
+  - family: auditd_exec
+    fields: [process.executable, process.argv]
+  - family: arkime_spi
+    fields: [session.duration]
+  lab_observable:
+    status: 'yes'
+    reason: long SSH sessions, DNS volume and tunnel tool execs are visible
+  rules: []
+  disposition:
+    status: planned
+    reason: SSH tunnels (ssh -R/-L/-D/-w), DNS tunnels (BL-10), HTTP/WebSocket tunnels (chisel) and ICMP tunnels
+  priority: P1
+  detection_ideas:
+  - ssh client with -R/-L/-D/-w (token-aware grouped flags, e.g. -fNR) by service accounts or to external hosts (positive-only
+    argv), joined to a long-lived SSH flow (COR-11).
+  - BL-10 DNS tunnel shape.
+  - Long-lived HTTP(S) session with sustained bidirectional bytes to a rare host (WebSocket/chisel shape).
+  correlation:
+  - 'COR-11: ssh client with forwarding joined to a long-lived SSH session.'
+  - COR-16
+  pivots:
+  - What traffic appears inside the tunnel's far end (other sensors)
+- id: T1573
+  name: Encrypted Channel
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.sni, tls.ja3, tls.issuer, tls.not_before, tls.not_after]
+  - family: arkime_spi
+    fields: [tls.ja3, tls.cert.issuer]
+  - family: eve_flow
+    fields: [network.app_proto]
+  lab_observable:
+    status: partial
+    reason: 137 TLS records; most metadata not normalized
+  rules: []
+  disposition:
+    status: planned
+    reason: BL-13 certificate and fingerprint rarity
+  priority: P2
+  detection_ideas: [See sub-techniques.]
+  correlation: [COR-17]
+  pivots: [Host process behind rare TLS]
+- id: T1573.001
+  name: Symmetric Cryptography
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [network.app_proto, flow.bytes]
+  - family: pcap
+    fields: [payload.bytes]
+  lab_observable:
+    status: partial
+    reason: custom symmetric crypto appears as unknown app_proto
+  rules: []
+  disposition:
+    status: planned
+    reason: unknown app_proto with high-entropy payload on long sessions (BL-12 feature; PCAP confirmation)
+  priority: P3
+  detection_ideas:
+  - 'BL-12: app_proto unknown/failed sessions with sustained bytes to rare external hosts.'
+  correlation: []
+  pivots: [PCAP sample]
+- id: T1573.002
+  name: Asymmetric Cryptography
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.issuer, tls.subject, tls.not_before, tls.not_after, tls.ja3, tls.ja3s]
+  - family: arkime_spi
+    fields: [tls.cert.issuer, tls.cert.not_before, tls.cert.not_after, tls.ja3]
+  lab_observable:
+    status: partial
+    reason: needs eve_tls normalization or Arkime
+  rules: []
+  disposition:
+    status: planned
+    reason: BL-13 self-signed/short-lived certs and rare JA3/JA4/JA3S on outbound sessions
+  priority: P2
+  detection_ideas:
+  - 'BL-13: issuer == subject, validity < 30 days or default framework subjects, on external sessions from servers.'
+  correlation: [COR-17]
+  pivots:
+  - Other clients presenting the same JA3 to the same server
+- id: T1665
+  name: Hide Infrastructure
+  tactics: [command-and-control]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: eve_dns
+    fields: [dns.question.name]
+  lab_observable:
+    status: partial
+    reason: infrastructure hiding (CDNs, compromised hosts) is designed to look normal
+  rules: []
+  disposition:
+    status: deferred
+    reason: adversary-side; ROMULUS detects the channel's behaviour, not the hiding
+  priority: P4
+  detection_ideas:
+  - Behavioural channel detections (BL-04, BL-25) regardless of infrastructure.
+  correlation: []
+  pivots: [Channel behaviour]
