@@ -287,6 +287,15 @@ Run 2026-10-19 by the custodian; rerun before every holdout run.
 | 2026-10-19 | **Known limitation.** For `inferable_only` opportunities, the indirect evidence can lie outside the action window (later use of a transferred file). A citation of it then fails the time check and is logged as an anomaly, not a hit. Kept as pre-registered; revisit with the lead before any holdout. | Found in the first scored run (1 anomaly, reviewed) |
 | 2026-10-19 | **Gold amendment v1.1 pending.** Adjudication found attacker-caused executions outside the v1 evidence sets of two observable opportunities: the exploit's vulnerability-check and payload-stage executions, and enumeration-script descendants reached through forked subshells that leave no exec record. The amendment will add them as evidence. No opportunity is added or removed, denominators are unchanged, and it applies from the next scored run. Run 1–2 precision counts them as `true_unlisted`. | §6 amendment rule |
 | 2026-10-19 | The agent-on hunt `h20261018-224406-923663` (pre option B) was deleted from the store on 2026-10-19 01:14 UTC (`hunt.delete` audit event). No agent-on hunt exists, so model-on vs model-off is pending a new agent-on run. | Scoring round 1 |
+| 2026-10-19 | **Agent effectiveness and ablation definitions** (§8 item 10), fixed before scoring the first agent-on hunt: | New agent-on hunt `h20261019-192853-9da2b5` |
+| | • *Agent-produced item* = a candidate with `source_case_id`. It is scored by §6 like any other item. | |
+| | • *Pivot reach (locator)* = an executed pivot retrieved a gold `action`/`outcome` record of an observable opportunity. Retrieval is taken from the step's result-digest event IDs plus raw records whose first retrieving task is the pivot's task, so it is a lower bound. | |
+| | • *Pivot reach (entity + window)* = the pivot entity intersects the opportunity's entities, and the pivot window overlaps its window ±10 min. | |
+| | • Reach is reported, never counted as recall. | |
+| | • Rejection reasons are reported as classes, with IDs and values stripped. | |
+| | • "Hit only with model on/off" = the set difference of per-opportunity Tier A hits (reported and surfaced separately), reported as counts by behavior class. | |
+| | • `eval.ablation` refuses to compare runs scored against different gold file digests. | |
+| 2026-10-19 | Gold v1.1 is not built yet. Its only effect on runs 1–3 would be to turn 19 `true_unlisted` items (already true positives) into Tier A hits. Recall, P@k and the denominators would not change. | Scoping |
 
 ## 14. Pre-registration block (holdout)
 

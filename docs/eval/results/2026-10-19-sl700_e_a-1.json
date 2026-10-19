@@ -1,4 +1,57 @@
 {
+ "agent": {
+  "agent_items": {
+   "by_lane": {},
+   "tier_a_opps": 0,
+   "tier_b_opps": 0,
+   "total": 0
+  },
+  "analyst_flags": 0,
+  "cases": 0,
+  "cases_by_status": {},
+  "conclusions": {},
+  "decisions": {},
+  "escalations_accepted": 0,
+  "fallback_parked": 0,
+  "model_calls": {
+   "by_status": {},
+   "completion_tokens": 0,
+   "model_ms": 0,
+   "prompt_tokens": 0,
+   "total": 0
+  },
+  "pivot_reach": {
+   "entity_window_by_class": {},
+   "entity_window_opps": 0,
+   "locator_level_by_class": {},
+   "locator_level_not_otherwise_surfaced": {},
+   "locator_level_opps": 0,
+   "note": "a pivot retrieving a gold record is reach, not a finding; only an admitted item counts toward recall"
+  },
+  "pivots": {
+   "complete": 0,
+   "duplicates_blocked": null,
+   "executed": 0,
+   "failed": 0,
+   "partial": 0,
+   "proposed": 0,
+   "rejected": 0,
+   "tools_executed": {}
+  },
+  "present": false,
+  "rejection_reasons": {},
+  "seeds": {
+   "assigned_unfinished": null,
+   "concluded": null,
+   "total": null,
+   "unassigned": null,
+   "unworked": 97
+  },
+  "status": "disabled",
+  "step_budget": 0,
+  "steps_used": 0,
+  "stop_reason": "model investigator disabled (model-off run)"
+ },
  "citations": {
   "citations": 117,
   "items_all_checks_pass": {
@@ -43,7 +96,7 @@
  },
  "comparisons": {
   "AMiner alerts (\u00a78.2)": "pending",
-  "Model-on vs model-off": "pending",
+  "Model-on vs model-off": "see the ablation file when both runs exist",
   "Simple baseline (\u00a78.1)": "pending",
   "Telosian alerts (\u00a78.2)": "pending"
  },
@@ -166,11 +219,11 @@
  "mode": "dev",
  "notes": [
   "Dev set with known exposure (PROTOCOL \u00a712, C-001 to C-004): tuning on it is allowed and it can never support a release claim.",
-  "Model-off hunt. The agent-on hunt named for this round (h20261018-224406-923663, pre option B) was deleted on 2026-10-19 01:14 UTC (audit event hunt.delete); no agent-on hunt exists in the store, so model-on vs model-off is pending a new agent-on run.",
+  "Model-off hunt. Its model-on counterpart is run 2026-10-19-sl700_e_a-3 (h20261019-192853-9da2b5); see the ablation file.",
   "Non-hit surfaced items were adjudicated by the custodian against raw telemetry: 41 benign, 19 true_unlisted (attacker-caused activity outside the gold v1 evidence sets: exploit check and payload-stage executions, enumeration-script descendants reached via forked subshells). Gold evidence amendment v1.1 is pending and applies from the next run; denominators are unchanged.",
   "Review time is modeled at the pre-registered 5 min per surfaced item (owner has not yet set a measured value or a false-lead ceiling).",
   "The single locator-match anomaly was reviewed: an item citing the later use of a transferred tool, outside the inferable-only transfer window; it is a correct non-hit under the pre-registered rule (PROTOCOL \u00a713, known limitation). That item is a Tier A hit on another opportunity.",
-  "Owner-demo hunt (rule pack m1-pack@2, after option B)."
+  "Owner-demo hunt (rule pack m1-pack@2, after option B). Rescored 2026-10-19 with the scorer build that adds the agent section; every earlier metric is unchanged."
  ],
  "precision": {
   "order_basis": "report manifest order (latest revision)",
@@ -597,9 +650,9 @@
  },
  "run_id": "2026-10-19-sl700_e_a-1",
  "schema": "eval-result/1",
- "scored_utc": "2026-10-19T19:19:47Z",
+ "scored_utc": "2026-10-19T19:42:49Z",
  "scorer": {
-  "commit": "3d75cad+dirty",
+  "commit": "e07143f+dirty",
   "matching_rule": "PROTOCOL \u00a76 (2026-10-19)"
  },
  "timing": {

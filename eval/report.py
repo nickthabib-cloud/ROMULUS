@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 
 from eval.funnel import STAGES
 
@@ -126,6 +127,7 @@ def render(r: dict) -> str:
           f"no_match_complete cells: {r['coverage_claims']['complete_negative_cells']}; candidate false complete "
           f"negatives (gold action records of a claimed technique inside the cell): "
           f"{r['coverage_claims']['candidate_false_complete_negatives']} ({r['coverage_claims']['adjudication']})."), "",
+          ] + agent_section(r.get("agent")) + [
           "## Comparisons", "", "| Comparison | Status |", "|---|---|"]
     for k, v in r["comparisons"].items():
         L.append(f"| {k} | {v} |")
@@ -135,26 +137,103 @@ def render(r: dict) -> str:
     return "\n".join(L)
 
 
+def agent_section(a: dict | None) -> list[str]:
+    if not a or not a.get("present"):
+        return ["## Agent", "", "No agent activity in this hunt (model-off or disabled).", ""]
+    p, s, mc, ai, pr = a["pivots"], a["seeds"], a["model_calls"], a["agent_items"], a["pivot_reach"]
+    return [
+        "## Agent effectiveness", "",
+        f"- Status: {a['status']} ({a['stop_reason']}).",
+        f"- Cases: {a['cases']} {a['cases_by_status']}; steps used {a['steps_used']} of {a['step_budget']} budgeted.",
+        f"- Decisions (excluding seeds): {a['decisions']}.",
+        f"- Rejection reasons: {a['rejection_reasons']}.",
+        (f"- Pivots: {p['proposed']} proposed, {p['executed']} executed ({p['complete']} complete, {p['partial']} "
+        f"partial, {p['failed']} failed), {p['rejected']} rejected, duplicates blocked {p['duplicates_blocked']}; "
+        f"tools executed {p['tools_executed']}."),
+        (f"- Fallback-parked cases: {a['fallback_parked']}; analyst flags: {a['analyst_flags']}; conclusions: "
+        f"{a['conclusions']}; accepted escalations: {a['escalations_accepted']}."),
+        (f"- Seeds: {s['total']} total; concluded {s['concluded']}; assigned but unfinished {s['assigned_unfinished']}; "
+        f"unassigned {s['unassigned']}; unworked {s['unworked']}."),
+        (f"- Model calls: {mc['total']} {mc['by_status']}; prompt/completion tokens {mc['prompt_tokens']}/"
+        f"{mc['completion_tokens']}; model time {mc['model_ms']} ms."),
+        (f"- Agent-produced items: {ai['total']} {ai['by_lane']}; Tier A opportunities {ai['tier_a_opps']}; "
+        f"Tier B opportunities {ai['tier_b_opps']}."),
+        (f"- Pivot reach (retrieved a gold action/outcome record): {pr['locator_level_opps']} observable "
+        f"opportunities {pr['locator_level_by_class']}; of these not otherwise surfaced: "
+        f"{pr['locator_level_not_otherwise_surfaced']}."),
+        f"- Pivot reach at entity + window level: {pr['entity_window_opps']} {pr['entity_window_by_class']}.",
+        f"- Note: {pr['note']}.", ""]
+
+
+def ablation(off: dict, on: dict, off_priv: dict, on_priv: dict, classes: dict[str, str]) -> str:
+    """Model-on vs model-off (§8 item 10). classes: opp id -> behavior class (used for counts only)."""
+    def only(a, b, key):
+        sa = {o for o, v in a["per_opportunity"].items() if v[key]}
+        sb = {o for o, v in b["per_opportunity"].items() if v[key]}
+        d = sa - sb
+        return len(d), dict(sorted(Counter(classes[o] for o in d).items()))
+    L = [compare(off, on, "model-off", "model-on"), "",
+         "| Delta (on minus off) | Value |", "|---|---|"]
+    for name, path in (("Time to first actionable (s)", ("timing", "time_to_first_actionable_s")),
+                       ("Time to first reported (s)", ("timing", "time_to_first_reported_s")),
+                       ("Total hunt (s)", ("timing", "total_hunt_s")), ("Model calls", ("cost", "model_calls")),
+                       ("Prompt tokens", ("cost", "prompt_tokens")), ("Completion tokens", ("cost", "completion_tokens")),
+                       ("Model time (ms)", ("cost", "model_ms")), ("Tasks", ("cost", "tasks")),
+                       ("Records returned", ("cost", "records_returned"))):
+        va, vb = off[path[0]][path[1]], on[path[0]][path[1]]
+        try:
+            L.append(f"| {name} | {round(vb - va, 1)} ({va} → {vb}) |")
+        except TypeError:
+            L.append(f"| {name} | n/a ({va} → {vb}) |")
+    L += ["", "| Opportunities hit only in one run | Count | By class |", "|---|---|---|"]
+    for lane in ("reported", "surfaced"):
+        n, c = only(on_priv, off_priv, lane)
+        L.append(f"| {lane}, model-on only | {n} | {c} |")
+        n, c = only(off_priv, on_priv, lane)
+        L.append(f"| {lane}, model-off only | {n} | {c} |")
+    return "\n".join(L)
+
+
 def compare(a: dict, b: dict, la: str, lb: str) -> str:
     def g(r, path):
         x = r
         for p in path:
-            x = x[p]
+            x = x.get(p) if isinstance(x, dict) else None
+            if x is None:
+                return None
         return x
     rows = [("Recall reported, all observable", ("recall", "reported", "all_observable")),
             ("Recall reported, critical+high", ("recall", "reported", "critical_high")),
             ("Recall surfaced, all observable", ("recall", "surfaced", "all_observable")),
-            ("P@10", ("precision", "p10")), ("P@20", ("precision", "p20"))]
+            ("Recall surfaced, critical+high", ("recall", "surfaced", "critical_high"))]
+    for src in ("host_index", "network_index", "arkime", "pcap"):
+        rows.append((f"Recall reported, source {src}", ("recall", "reported", "by_source", src)))
+    for pos in ("middle", "late"):
+        rows.append((f"Recall reported, position {pos}", ("recall", "reported", "by_time_position", pos)))
+    rows += [("P@10", ("precision", "p10")), ("P@20", ("precision", "p20")),
+             ("Citation items passing all automated checks", ("citations", "items_all_checks_pass"))]
     L = [f"| Metric | {la} | {lb} |", "|---|---|---|"]
     for name, path in rows:
         va, vb = g(a, path), g(b, path)
-        fmt = _p if "k" in va and "n_reviewed" in va else _w
-        L.append(f"| {name} | {fmt(va)} | {fmt(vb)} |")
-    L.append(f"| Surfaced items | {a['precision']['surfaced_total']} | {b['precision']['surfaced_total']} |")
-    L.append(f"| Time to first actionable (s) | {a['timing']['time_to_first_actionable_s']} | "
-             f"{b['timing']['time_to_first_actionable_s']} |")
-    L.append(f"| Total hunt (s) | {a['timing']['total_hunt_s']} | {b['timing']['total_hunt_s']} |")
-    L.append(f"| Model calls | {a['cost']['model_calls']} | {b['cost']['model_calls']} |")
+        fmt = _p if isinstance(va, dict) and "n_reviewed" in va else _w
+        L.append(f"| {name} | {fmt(va) if va is not None else 'n/a'} | {fmt(vb) if vb is not None else 'n/a'} |")
+    scal = [("Surfaced items", ("precision", "surfaced_total")), ("False leads", ("false_leads", "false")),
+            ("False leads per hour (modeled)", ("false_leads", "per_hour")),
+            ("Unadjudicated surfaced items", ("false_leads", "unadjudicated")),
+            ("Funnel misses", ("funnel", "misses")),
+            ("Candidate false complete negatives", ("coverage_claims", "candidate_false_complete_negatives")),
+            ("Time to first actionable (s)", ("timing", "time_to_first_actionable_s")),
+            ("Time to first reported (s)", ("timing", "time_to_first_reported_s")),
+            ("Total hunt (s)", ("timing", "total_hunt_s")), ("Tasks", ("cost", "tasks")),
+            ("Records returned", ("cost", "records_returned")), ("Model calls", ("cost", "model_calls")),
+            ("Prompt / completion tokens", None), ("Model time (ms)", ("cost", "model_ms")),
+            ("Review order basis", ("precision", "order_basis"))]
+    for name, path in scal:
+        if path is None:
+            L.append(f"| {name} | {a['cost']['prompt_tokens']} / {a['cost']['completion_tokens']} | "
+                     f"{b['cost']['prompt_tokens']} / {b['cost']['completion_tokens']} |")
+        else:
+            L.append(f"| {name} | {g(a, path)} | {g(b, path)} |")
     return "\n".join(L)
 
 

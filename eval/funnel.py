@@ -13,7 +13,7 @@ from collections import Counter
 from collections.abc import Callable
 
 from eval.gold import Gold, locator_key, parse_ts
-from eval.hunt import Hunt
+from eval.hunt import Hunt, case_entity_values
 from eval.match import ItemMatch, ok_roles
 
 STAGES = ("source", "queried", "retrieved", "normalized", "evaluated", "candidate", "surfaced_only", "reported")
@@ -123,8 +123,7 @@ def compute(gold: Gold, hunt: Hunt, matches: list[ItemMatch], hits: dict,
             best = max(best, "candidate", key=STAGES.index)
         if oid in hits["surfaced"]:
             best = "surfaced_only"
-        agent = any(set(map(str.lower, map(str, (c.get("entities") or [])))) & gold.expand(opp.entities)
-                    for c in hunt.cases) if hunt.cases else False
+        agent = any(case_entity_values(c.get("entities")) & gold.expand(opp.entities) for c in hunt.cases)
         per_opp[oid] = {"stage": best, "per_source": per_src, "agent_touched": agent,
                         "mentioned": oid in hits["mentioned"]}
     by_stage_class = Counter()

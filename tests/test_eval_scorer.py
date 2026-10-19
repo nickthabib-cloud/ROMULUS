@@ -291,3 +291,76 @@ def test_locator_key_forms():
     assert locator_key("es", "i", "x") == ("es", "i", "x")
     assert locator_key("pcap", "f", "7") == ("pcap", "f", 7)
     assert funnel_mod.STAGES[0] == "source" and funnel_mod.STAGES[-1] == "reported"
+
+
+@pytest.fixture()
+def agent_db(hunt_db):
+    """Adds model-on hunt H2: one sweep item, one case with an executed pivot that retrieves a gold record."""
+    eng = create_engine(f"sqlite:///{hunt_db}")
+    now = datetime(2040, 1, 1, 9, 0, tzinfo=UTC)
+    with eng.begin() as c:
+        man = dict(c.execute(t.hunt.select().where(t.hunt.c.id == "H1")).mappings().one()["manifest"])
+        c.execute(t.hunt.insert().values(id="H2", created_at=now, created_by="x", manifest=man, manifest_digest="m",
+                                         execution_state="completed_within_scope", detection_result="reportable_findings",
+                                         started_at=now, ended_at=datetime(2040, 1, 1, 9, 5, tzinfo=UTC)))
+        cand = _cand("k1", "urgent", 90, ["e1"], [["host", "web1", "host"]], "12:00:02", created="09:00:20")
+        cand["hunt_id"] = "H2"
+        c.execute(t.candidate.insert(), [cand])
+        c.execute(t.task.insert().values(
+            id="tp1", hunt_id="H2", kind="pivot", owner="case-1", fingerprint="tp1", state="evaluated", priority=0.0,
+            attempts=1, created_at=now, updated_at=now, outcome={"completeness": "complete", "returned": 1, "total": 1},
+            intent={"kind": "raw", "target": HIDX, "window": {"start": iso("13:00:00"), "end": iso("13:30:00")}}))
+        c.execute(t.raw_record.insert().values(id=raw_id(HIDX, "docF0001"), target=HIDX, native_id="docF0001",
+                                               digest="d-docF0001", source={}, first_task_id="tp1", retrieved_at=now))
+        c.execute(t.case.insert().values(id="case-1", hunt_id="H2", title="x", status="fallback_parked", priority=1.0,
+                                         entities=[{"kind": "host", "value": "web1", "role": "host"}], hypotheses=[],
+                                         steps_used=3, step_budget=8, created_at=now, updated_at=now,
+                                         summary=json.dumps({"model_conclusion": "deterministic_fallback_park",
+                                                             "analyst_flag": {"reason": "validation_fallback"}})))
+        steps = [(0, {"action": "seed", "seed_candidate_ids": ["k1"]}, 1, None, None),
+                 (1, {"action": "pivot", "tool": "entity_timeline",
+                      "arguments": {"entity": {"kind": "host", "value": "web1"}}}, 1, None,
+                  {"status": "complete", "task_ids": ["tp1"], "event_ids": []}),
+                 (2, {"action": "pivot", "tool": "entity_timeline", "arguments": {}}, 0,
+                  "duplicate pivot: normalized request already executed at step 1", None),
+                 (3, {"action": "close"}, 0, "unknown evidence IDs: ['zzz']", None)]
+        for n, dec, acc, rej, res in steps:
+            c.execute(t.case_step.insert().values(case_id="case-1", n=n, decision=dec, accepted=acc, rejection=rej,
+                                                  result_digest=res, at=now))
+        c.execute(t.model_call.insert(), [
+            {"id": f"mc{i}", "hunt_id": "H2", "case_id": "case-1", "purpose": "triage", "model": "m", "options": {},
+             "prompt_digest": "p", "prompt_eval_count": 100, "eval_count": 10, "duration_ms": 1000,
+             "status": st, "at": now} for i, st in enumerate(("ok", "invalid", "ok"))])
+        c.execute(t.audit_event.insert().values(at=now, actor="x", action="hunt.agent_summary", hunt_id="H2",
+                                                detail={"status": "budget_exhausted", "seed_count": 1,
+                                                        "concluded_seed_ids": [], "assigned_unfinished_seed_ids": ["k1"],
+                                                        "unassigned_seed_ids": [], "unworked_count": 1}))
+    eng.dispose()
+    return hunt_db
+
+
+def test_agent_effectiveness(gold_dir, agent_db):
+    r, priv, _ = score(gold_dir, agent_db, "H2", "syn-on")
+    a = r["agent"]
+    assert a["present"] and a["cases"] == 1 and a["fallback_parked"] == 1 and a["analyst_flags"] == 1
+    assert a["pivots"]["executed"] == 1 and a["pivots"]["complete"] == 1 and a["pivots"]["rejected"] == 1
+    assert a["model_calls"]["total"] == 3 and a["model_calls"]["prompt_tokens"] == 300
+    assert a["seeds"]["unworked"] == 1 and a["seeds"]["assigned_unfinished"] == 1
+    assert a["pivot_reach"]["locator_level_opps"] == 1                    # the pivot retrieved a gold action record
+    assert a["pivot_reach"]["locator_level_not_otherwise_surfaced"] == {"discovery": 1}
+    assert all("zzz" not in k for k in a["rejection_reasons"])               # ids stripped from reason classes
+    assert not r["hunt"]["model_off"]
+    assert "Agent effectiveness" in render(r)
+    assert priv["agent"]["pivot_reach_locator"] == ["OPP06"]
+
+
+def test_ablation_counts_by_class(gold_dir, agent_db):
+    from eval.report import ablation
+    g = load(gold_dir)
+    off, offp, _ = score(gold_dir, agent_db, "H1", "syn-off")
+    on, onp, _ = score(gold_dir, agent_db, "H2", "syn-on")
+    md = ablation(off, on, offp, onp, {o.opp_id: o.behavior_class for o in g.opportunities.values()})
+    assert "| surfaced, model-off only | 1 | {'c2_channel': 1} |" in md
+    assert "| reported, model-on only | 0 | {} |" in md
+    for f in g.forbidden_strings():
+        assert f not in md

@@ -14,6 +14,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from eval import agent as agent_mod
 from eval import funnel as funnel_mod
 from eval import gold as gold_mod
 from eval import metrics as M
@@ -72,6 +73,7 @@ def score(gold_dir, db_path, hunt_id, run_id, mode="dev", adjudications=None, fe
                 found[("es", hit["_index"], hit["_id"])] = raw_digest(hit["_source"])
         source_check = {k: found.get(k) == d for k, d in rep_keys.items()}
     fun = funnel_mod.compute(g, h, matches, hits, fetcher=fetcher, normalize=normalize)
+    agent_eff, agent_private = agent_mod.effectiveness(h, g, matches, hits)
     agent = next((a["detail"] for a in reversed(h.audit) if a["action"] == "hunt.agent_summary"), None) or {}
     model_off = not h.model_calls and agent.get("status") in ("disabled", None, "unknown")
     hm = h.manifest
@@ -118,7 +120,8 @@ def score(gold_dir, db_path, hunt_id, run_id, mode="dev", adjudications=None, fe
         "timing": M.timing(h, g, matches), "cost": M.cost(h),
         "coverage_claims": M.coverage_claims(h, g),
         "funnel": {k: v for k, v in fun.items() if not k.startswith("_")},
-        "comparisons": {"Model-on vs model-off": "pending", "Simple baseline (§8.1)": "pending",
+        "agent": agent_eff,
+        "comparisons": {"Model-on vs model-off": "see the ablation file when both runs exist", "Simple baseline (§8.1)": "pending",
                         "AMiner alerts (§8.2)": "pending", "Telosian alerts (§8.2)": "pending"},
         "data_gaps": gaps, "notes": list(notes or []) + ([ver_note] if ver_note else []),
     }
@@ -133,6 +136,7 @@ def score(gold_dir, db_path, hunt_id, run_id, mode="dev", adjudications=None, fe
                                          "funnel": fun["_per_opp"].get(oid)} for oid in g.opportunities},
                "anomalies": [{"item_id": m.item.id, "rule_id": m.item.rule_id, "lane": m.item.lane, "opp": o, "why": w}
                              for m in matches for o, w in m.anomalies],
+               "agent": agent_private,
                "review": rows,
                "unadjudicated": [{"signature": r["signature"], "item_id": r["item_id"], "rule_id": r["rule_id"],
                                   "lane": r["lane"]} for r in rows if r["tp"] is None]}

@@ -93,6 +93,8 @@ class Hunt:
     cases: list[dict]
     report_order: list[str] | None
     report_coverage: list[dict] | None = None
+    case_steps: list[dict] = field(default_factory=list)
+    pivots: list[dict] = field(default_factory=list)   # executed or proposed pivot steps with retrieval keys
     gaps: list[str] = field(default_factory=list)  # product data the scorer needed but did not find
 
 
@@ -110,6 +112,59 @@ def target_to_key(target: str, native_id: str) -> tuple | None:
         except ValueError:
             return None
     return locator_key("es", target, native_id)
+
+
+def case_entity_values(entities) -> set[str]:
+    """Case entities are stored as [{kind, value, role}] (or [kind, value, role] lists)."""
+    out = set()
+    for e in entities or []:
+        if isinstance(e, dict) and e.get("value") is not None:
+            out.add(norm_entity(e["value"]))
+        elif isinstance(e, list) and len(e) >= 2:
+            out.add(norm_entity(e[1]))
+    return out
+
+
+def _pivots(conn: sqlite3.Connection, steps: list[dict], tasks: list[dict]) -> list[dict]:
+    """Pivot steps with the raw locators each executed pivot retrieved.
+
+    Retrieval keys come from (a) the typed events listed in the step's result digest and (b) raw records whose
+    first retrieving task is one of the step's tasks. Records first retained by an earlier hunt are not
+    attributable through (b), because raw_record is not hunt-scoped.
+    """
+    task_by_id = {t["id"]: t for t in tasks}
+    out = []
+    for s in steps:
+        d = s["decision"] or {}
+        if d.get("action") != "pivot":
+            continue
+        res = s["result_digest"] or {}
+        tids = list(res.get("task_ids") or ([s["task_id"]] if s.get("task_id") else []))
+        keys: set[tuple] = set()
+        eids = list(res.get("event_ids") or []) + list(res.get("anchor_event_ids") or [])
+        for i in range(0, len(eids), 500):
+            chunk = eids[i:i + 500]
+            for (ev,) in conn.execute(f"SELECT event FROM typed_event WHERE id IN ({','.join('?' * len(chunk))})", chunk):
+                for ref in (_j(ev) or {}).get("raw") or []:
+                    keys.add(target_to_key(ref["target"], ref["native_id"]))
+        for tid in tids:
+            for r in conn.execute("SELECT target, native_id FROM raw_record WHERE first_task_id = ?", (tid,)):
+                keys.add(target_to_key(r["target"], r["native_id"]))
+        args = d.get("arguments") or {}
+        ent = args.get("entity") if isinstance(args.get("entity"), dict) else None
+        ents = {norm_entity(ent["value"])} if ent and ent.get("value") is not None else set()
+        for k in ("host", "account", "ip", "domain"):
+            if isinstance(args.get(k), str):
+                ents.add(norm_entity(args[k]))
+        windows = [(task_by_id[t]["intent"] or {}).get("window") or {} for t in tids if t in task_by_id]
+        starts = [parse_ts(w.get("start")) for w in windows if w.get("start")] or [parse_ts(args.get("start"))]
+        ends = [parse_ts(w.get("end")) for w in windows if w.get("end")] or [parse_ts(args.get("end"))]
+        out.append({"case_id": s["case_id"], "n": s["n"], "tool": d.get("tool"), "accepted": bool(s["accepted"]),
+                    "rejection": s.get("rejection"), "status": res.get("status") if res else None,
+                    "executed": bool(s["accepted"] and res), "entities": ents,
+                    "start": min((x for x in starts if x), default=None), "end": max((x for x in ends if x), default=None),
+                    "keys": {k for k in keys if k}})
+    return out
 
 
 def _interval_values(fields: dict) -> list[datetime]:
@@ -195,6 +250,13 @@ def load_hunt(conn: sqlite3.Connection, hunt_id: str) -> Hunt:
         d = dict(r)
         d["entities"] = _j(d["entities"])
         cases.append(d)
+    steps = []
+    for cs in cases:
+        for r in conn.execute("SELECT * FROM case_step WHERE case_id = ? ORDER BY n", (cs["id"],)):
+            d = dict(r)
+            d["decision"], d["result_digest"], d["at"] = _j(d["decision"]), _j(d["result_digest"]), _dt(d["at"])
+            steps.append(d)
+    pivots = _pivots(conn, steps, tasks)
     order = coverage = None
     rm = conn.execute("SELECT manifest FROM report_manifest WHERE hunt_id = ? ORDER BY revision DESC LIMIT 1",
                       (hunt_id,)).fetchone()
@@ -205,4 +267,5 @@ def load_hunt(conn: sqlite3.Connection, hunt_id: str) -> Hunt:
     return Hunt(id=hunt_id, manifest=_j(h["manifest"]) or {}, started_at=_dt(h["started_at"]),
                 ended_at=_dt(h["ended_at"]), execution_state=h["execution_state"],
                 detection_result=h["detection_result"], items=items, tasks=tasks, rule_cells=cells, audit=audit,
-                model_calls=calls, cases=cases, report_order=order, report_coverage=coverage, gaps=gaps)
+                model_calls=calls, cases=cases, report_order=order, report_coverage=coverage,
+                case_steps=steps, pivots=pivots, gaps=gaps)
