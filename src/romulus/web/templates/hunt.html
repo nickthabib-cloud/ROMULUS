@@ -13,14 +13,26 @@
 {% if agent %}
 <section id="agent-summary">
   <h2>Model investigator</h2>
-  <p><b>{{ agent.status }}</b> · {{ agent.unworked_count or 0 }} unworked seed(s)
+  <p><b>{{ agent.status }}</b> · Mode {{ investigations.summary.mode }} · {{ agent.unworked_count or 0 }} unworked seed(s)
     · {{ agent.model_calls or 0 }} model call(s) · {{ agent.pivots or 0 }} pivot(s)
-    · {{ agent.partial_pivots or 0 }} partial pivot(s)</p>
+    · {{ agent.partial_pivots or 0 }} partial pivot(s)
+    · {{ investigations.summary.deterministic_fallbacks or 0 }} deterministic fallback(s)
+    · {{ investigations.summary.menu_hidden_options or 0 }} hidden option(s)</p>
   {% if agent.stop_reason %}<p class="help">{{ agent.stop_reason }}</p>{% endif %}
   {% if agent.analyst_flags %}
   <h3>Analyst review required</h3>
   <ul>{% for flag in agent.analyst_flags %}<li><b>{{ flag.case_id }}</b>: {{ flag.message or flag.reason }}</li>{% endfor %}</ul>
   {% endif %}
+  {% for case in investigations.cases %}
+  <h3>{{ case.id }} choices</h3>
+  <p class="help">{{ case.menu_cap.hidden_options }} hidden option(s) across {{ case.menu_cap.steps_capped }} capped step(s)</p>
+  <ul>
+    {% for choice in case.chosen_options %}
+    <li><b>{{ choice.id }}</b>: {{ choice.description }}{% if choice.deterministic_fallback %} (deterministic fallback){% endif %}
+      {% if choice.fallback_note %}<br><span class="help">{{ choice.fallback_note }}</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endfor %}
 </section>
 {% endif %}
 

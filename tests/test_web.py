@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from romulus.config import Settings
 from romulus.web.app import create_app
 from romulus.web.auth import create_user
-from tests.test_report import _repo_with_finding
+from tests.test_report import _add_investigation, _repo_with_finding
 
 
 @pytest.fixture()
@@ -21,18 +21,21 @@ def client(tmp_path, monkeypatch):
     pw = secrets.token_urlsafe(18)
     create_user(repo.engine, "analyst1", pw, "analyst")
     src_repo, cid = _repo_with_finding(claim_suffix=' <script>alert(1)</script><img src=x onerror=alert(2)>')
+    _add_investigation(src_repo, cid)
     src_repo.set_hunt_state("h1", "running")
     src_repo.set_hunt_state("h1", "completed_within_scope", detection_result="reportable_findings")
     # copy the seeded hunt into the app DB
     from romulus.store import schema as t
     with src_repo.engine.connect() as a, repo.engine.begin() as b:
-        for table in (t.hunt, t.raw_record, t.typed_event, t.candidate, t.disposition_event):
+        for table in (t.hunt, t.raw_record, t.typed_event, t.candidate, t.disposition_event,
+                      t.case, t.case_step, t.model_call):
             rows = [dict(r) for r in a.execute(table.select()).mappings()]
             if rows:
                 b.execute(table.insert(), rows)
     repo.audit("system", "hunt.agent_summary", "h1", {
-        "status": "budget_exhausted", "partial": True, "partial_pivots": 1,
+        "status": "budget_exhausted", "mode": "model", "partial": True, "partial_pivots": 1,
         "unworked_count": 3, "model_calls": 4, "pivots": 2,
+        "deterministic_fallbacks": 1,
         "analyst_flags": [{"case_id": "case-1", "reason": "Analyst review required"}],
     })
     return TestClient(app), pw, cid
@@ -102,4 +105,8 @@ def test_hunt_page_shows_latest_agent_status_and_unworked_count(client):
     assert "budget_exhausted" in page.text
     assert "3 unworked" in page.text
     assert "1 partial pivot" in page.text
+    assert "Mode model" in page.text
+    assert "process_tree for host web01 pid 10" in page.text
+    assert "model output failed twice; selected top-ranked pivot" in page.text
+    assert "5 hidden option" in page.text
     assert "Analyst review required" in page.text

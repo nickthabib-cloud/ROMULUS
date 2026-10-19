@@ -156,6 +156,9 @@ def _case_conclusion(summary: str | None) -> dict | None:
 
 
 def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dict) -> dict:
+    hunt = repo.get_hunt(hunt_id) or {}
+    hunt_manifest = hunt.get("manifest") or {}
+    agent_mode = hunt_manifest.get("agent_mode") or agent.get("mode") or "model"
     cases = repo.cases(hunt_id)
     seed_candidates = {
         candidate["id"]: candidate
@@ -175,8 +178,33 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
     executed_pivots = 0
     pivot_gaps = []
     analyst_flags = []
+    deterministic_fallbacks = 0
+    constraint_defects = 0
+    menu_hidden_total = 0
     for case in cases:
         steps = repo.case_steps(case["id"])
+        chosen_options = []
+        capped_steps = 0
+        case_hidden_options = 0
+        for step in steps:
+            decision = step.get("decision") or {}
+            hidden = int(decision.get("menu_hidden_count") or 0)
+            if hidden:
+                capped_steps += 1
+                case_hidden_options += hidden
+            if decision.get("action") == "constraint_defect":
+                constraint_defects += 1
+            description = decision.get("option_description")
+            if decision.get("chosen_option") and description:
+                fallback = bool(decision.get("deterministic_fallback"))
+                deterministic_fallbacks += int(fallback)
+                chosen_options.append({
+                    "n": step["n"], "id": decision["chosen_option"],
+                    "description": description, "agent_mode": decision.get("agent_mode") or agent_mode,
+                    "deterministic_fallback": fallback,
+                    "fallback_note": decision.get("fallback_note") or "",
+                })
+        menu_hidden_total += case_hidden_options
         seed_ids: list[str] = []
         for step in steps:
             decision = step.get("decision") or {}
@@ -228,6 +256,8 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
             "entities": case["entities"], "hypotheses": case["hypotheses"],
             "steps_used": case["steps_used"], "step_budget": case["step_budget"],
             "pivot_steps": pivot_steps,
+            "chosen_options": chosen_options,
+            "menu_cap": {"steps_capped": capped_steps, "hidden_options": case_hidden_options},
             "conclusion": conclusion,
             "analyst_flags": case_flags,
             "contributed_candidate_ids": sorted(contributed.get(case["id"], [])),
@@ -247,11 +277,15 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
     return {
         "summary": {
             "status": agent.get("status", "unknown"),
+            "mode": agent_mode,
             "cases": len(case_rows), "model_calls": total_calls, "pivots": executed_pivots,
             "pivot_proposals": pivot_proposals,
             "partial_pivots": len(pivot_gaps),
             "contributed_candidates": len(discovered_ids), "unworked_count": len(unworked),
             "analyst_flags": len(analyst_flags),
+            "deterministic_fallbacks": agent.get("deterministic_fallbacks", deterministic_fallbacks),
+            "constraint_defects": agent.get("constraint_defects", constraint_defects),
+            "menu_hidden_options": menu_hidden_total,
         },
         "model_contribution": {
             "model_calls": total_calls, "pivot_steps": executed_pivots,
@@ -271,6 +305,13 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
         "pivot_gaps": pivot_gaps,
         "cases": case_rows,
     }
+
+
+def investigations_for_hunt(repo: Repo, hunt_id: str) -> dict:
+    """Shared live/report projection for every investigator summary renderer."""
+    agent_audit = repo.latest_audit(hunt_id, "hunt.agent_summary")
+    agent = agent_audit["detail"] if agent_audit else {"status": "unknown"}
+    return _investigations(repo, hunt_id, repo.candidates(hunt_id), agent)
 
 
 def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:

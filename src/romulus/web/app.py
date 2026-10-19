@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from romulus.config import Settings
 from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.run import open_repo
-from romulus.report.manifest import publish_revision
+from romulus.report.manifest import investigations_for_hunt, publish_revision
 from romulus.report.markdown import render as render_md
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 
@@ -149,8 +149,10 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                                 .order_by(t.report_manifest.c.revision.desc())).mappings().all()
         agent_audit = repo.latest_audit(hunt_id, "hunt.agent_summary")
         agent_summary = agent_audit["detail"] if agent_audit else None
+        investigations = investigations_for_hunt(repo, hunt_id)
         return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
-                    coverage=cov["rules"], tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary)
+                    coverage=cov["rules"], tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
+                    investigations=investigations)
 
     @app.get("/hunts/{hunt_id}/stream")
     async def stream(request: Request, hunt_id: str):
@@ -209,6 +211,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         must lose delete rights immediately, not when its 8-hour session expires."""
         u = need(request)
         from sqlalchemy import select as _select
+
         from romulus.store import schema as _t
         with repo.engine.connect() as c:
             row = c.execute(_select(_t.user.c.role, _t.user.c.disabled)
@@ -252,7 +255,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             try:
                 with repo.engine.connect() as c:
                     c.exec_driver_sql("VACUUM")
-            except Exception:  # noqa: BLE001 - best-effort; the deletion already committed
+            except Exception:  # noqa: BLE001, S110 - best-effort; the deletion already committed
                 pass
         return RedirectResponse(f"/?deleted={hunt_id}&removed={counts.get('candidates', 0)}", status_code=303)
 

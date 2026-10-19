@@ -18,7 +18,8 @@ def _repo_with_finding(claim_suffix=""):
     e = make_engine(":memory:")
     migrate(e)
     repo = Repo(e)
-    manifest = {"style": "broad", "window": {"start": "2024-11-18T10:00:00+00:00", "end": "2024-11-18T17:30:00+00:00"},
+    manifest = {"style": "broad", "agent_mode": "model",
+                "window": {"start": "2024-11-18T10:00:00+00:00", "end": "2024-11-18T17:30:00+00:00"},
                 "original_input": {}, "targets": ["idx"], "pack": {"version": "p"}, "normalizer": "n",
                 "policy": "d", "model": {}, "romulus_version": "0"}
     repo.create_hunt("h1", manifest, "dig", "test")
@@ -135,6 +136,9 @@ def _add_investigation(repo, seed_id, *, hostile=""):
     repo.append_case_step(case_id, 1, {
         "action": "pivot", "tool": "process_tree", "evidence_ids": ["ev1"],
         "arguments": {"host": "web01", "process_id": 10},
+        "chosen_option": "O1", "option_description": "process_tree for host web01 pid 10, anchor ±5 min",
+        "menu_hidden_count": 3, "agent_mode": "model", "deterministic_fallback": True,
+        "fallback_note": "model output failed twice; selected top-ranked pivot",
     }, True, task_id="pivot-task", result_digest={
         "status": "partial", "event_ids": ["ev1"], "candidate_ids": ["pivot-candidate"],
         "reasons": ["cap:10<total:20"], "coverage": [{
@@ -160,6 +164,8 @@ def _add_investigation(repo, seed_id, *, hostile=""):
         "action": "escalate", "candidate_id": "pivot-candidate", "claim": "Machine claim for pivot-candidate.",
         "proposed_lane": "high", "reasoning": f"Separate model reasoning. {hostile}",
         "evidence_ids": ["ev1"],
+        "chosen_option": "O9", "option_description": "escalate pivot-candidate: Machine claim",
+        "menu_hidden_count": 2, "agent_mode": "model", "deterministic_fallback": False,
     }, True, model_call_id="call-1")
     repo.save_model_call({
         "id": "call-1", "hunt_id": "h1", "case_id": case_id, "purpose": "triage", "model": "test",
@@ -168,8 +174,9 @@ def _add_investigation(repo, seed_id, *, hostile=""):
     })
     _copy_candidate(repo, seed_id, "pivot-candidate", source_case_id=case_id)
     repo.audit("system", "hunt.agent_summary", "h1", {
-        "status": "completed", "partial": True, "partial_pivots": 1,
+        "status": "completed", "mode": "model", "partial": True, "partial_pivots": 1,
         "unworked_count": 0, "model_calls": 1, "pivots": 1,
+        "deterministic_fallbacks": 1, "constraint_defects": 2,
     })
     return case_id
 
@@ -218,6 +225,29 @@ def test_model_conclusion_is_separate_from_machine_claim_and_markdown_shows_chai
     assert "<script>" not in markdown
     assert "&lt;script&gt;" not in markdown  # renderer uses Markdown escaping, not raw HTML entities
     assert "\\<script\\>" in markdown
+
+
+def test_investigation_renderers_use_manifest_mode_options_fallbacks_and_menu_caps():
+    repo, seed_id = _repo_with_finding()
+    _add_investigation(repo, seed_id)
+
+    manifest = publish_revision(repo, "h1", "test")
+    investigations = manifest["investigations"]
+    case = investigations["cases"][0]
+    markdown = render(manifest)
+
+    assert investigations["summary"]["mode"] == "model"
+    assert investigations["summary"]["deterministic_fallbacks"] == 1
+    assert case["menu_cap"] == {"steps_capped": 2, "hidden_options": 5}
+    assert [choice["description"] for choice in case["chosen_options"]] == [
+        "process_tree for host web01 pid 10, anchor ±5 min",
+        "escalate pivot-candidate: Machine claim",
+    ]
+    assert case["chosen_options"][0]["fallback_note"].startswith("model output failed twice")
+    assert "| Agent mode | model |" in markdown
+    assert r"process\_tree for host web01 pid 10" in markdown
+    assert "model output failed twice; selected top-ranked pivot" in markdown
+    assert "Menu cap: 5 hidden option(s) across 2 capped step(s)" in markdown
 
 
 def test_completed_hunt_report_keeps_partial_pivot_gaps_in_investigations():

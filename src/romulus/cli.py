@@ -85,17 +85,30 @@ def cmd_hunt(args) -> int:
                   f"analyst_flags={len(agent.get('analyst_flags') or [])}")
         return EXIT_OK
     if args.action == "status":
+        from romulus.report.manifest import investigations_for_hunt
         repo = open_repo(s)
         hunts = [repo.get_hunt(args.hunt_id)] if args.hunt_id else repo.list_hunts()
         for h in hunts:
             if h:
                 agent_audit = repo.latest_audit(h["id"], "hunt.agent_summary")
                 agent = agent_audit["detail"] if agent_audit else {}
+                investigations = investigations_for_hunt(repo, h["id"])
+                inv_summary = investigations["summary"]
                 print(f"{h['id']}  {h['execution_state']:24} {h['detection_result'] or '-':40} "
                       f"lanes={repo.lane_counts(h['id'])} agent={agent.get('status', '-')} "
+                      f"mode={inv_summary.get('mode', 'model')} "
                       f"unworked={agent.get('unworked_count', '-')} "
                       f"partial_pivots={agent.get('partial_pivots', 0)} "
+                      f"fallbacks={inv_summary.get('deterministic_fallbacks', 0)} "
+                      f"menu_hidden={inv_summary.get('menu_hidden_options', 0)} "
                       f"analyst_flags={len(agent.get('analyst_flags') or [])}")
+                for case in investigations["cases"]:
+                    descriptions = [choice["description"] for choice in case["chosen_options"]]
+                    if descriptions:
+                        print(f"  {case['id']} options: " + " -> ".join(descriptions))
+                    for choice in case["chosen_options"]:
+                        if choice["fallback_note"]:
+                            print(f"    fallback: {choice['fallback_note']}")
         return EXIT_OK
     return EXIT_USAGE
 

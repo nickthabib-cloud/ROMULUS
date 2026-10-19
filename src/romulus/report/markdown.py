@@ -112,6 +112,7 @@ def render(m: dict, banner: str = BANNER) -> str:
          "machine claims, lanes, and coverage results."), "",
         "| Item | Value |", "|---|---|",
         f"| Status | {esc(inv_summary.get('status', 'unknown'))} |",
+        f"| Agent mode | {esc(inv_summary.get('mode', 'model'))} |",
         f"| Cases | {inv_summary.get('cases', 0)} |",
         f"| Model calls | {contributions.get('model_calls', 0)} |",
         f"| Pivot steps | {contributions.get('pivot_steps', 0)} |",
@@ -119,7 +120,10 @@ def render(m: dict, banner: str = BANNER) -> str:
         f"| Rejected pivot proposals | {max(0, contributions.get('pivot_proposals', 0) - contributions.get('pivot_steps', 0))} |",
         f"| Pivot-discovered candidates | {contributions.get('contributed_candidates', inv_summary.get('contributed_candidates', 0))} |",
         f"| Unworked seeds | {inv_summary.get('unworked_count', 0)} |",
-        f"| Analyst flags | {inv_summary.get('analyst_flags', 0)} |", "",
+        f"| Analyst flags | {inv_summary.get('analyst_flags', 0)} |",
+        f"| Deterministic fallbacks | {inv_summary.get('deterministic_fallbacks', 0)} |",
+        f"| Constraint defects | {inv_summary.get('constraint_defects', 0)} |",
+        f"| Menu options hidden by cap | {inv_summary.get('menu_hidden_options', 0)} |", "",
         "**Seed accounting**", "",
         f"- Concluded: {esc(', '.join(partitions.get('concluded', [])) or 'none')}",
         f"- Assigned but unfinished: {esc(', '.join(partitions.get('assigned_unfinished', [])) or 'none')}",
@@ -141,7 +145,19 @@ def render(m: dict, banner: str = BANNER) -> str:
             f"- Seeds: {esc(', '.join(case['seed_candidate_ids']) or 'none (spawned case)')}",
             f"- Entities: {esc(json.dumps(case['entities'], ensure_ascii=False, sort_keys=True))}",
             f"- Hypotheses: {esc('; '.join(case['hypotheses']) or 'none')}",
+            (f"- Menu cap: {case.get('menu_cap', {}).get('hidden_options', 0)} hidden option(s) across "
+             f"{case.get('menu_cap', {}).get('steps_capped', 0)} capped step(s)"),
         ]
+        chosen_options = case.get("chosen_options") or []
+        if chosen_options:
+            out += ["", "**Chosen option chain**", ""]
+            for choice in chosen_options:
+                suffix = " · deterministic fallback" if choice.get("deterministic_fallback") else ""
+                out.append(
+                    f"- Step {choice['n']}: `{esc(choice['id'])}` — {esc(choice['description'])}{suffix}"
+                )
+                if choice.get("fallback_note"):
+                    out.append(f"  - Fallback note: {esc(choice['fallback_note'])}")
         contributed = case.get("contributed_candidate_ids") or []
         if contributed:
             links = ", ".join(f"[{esc(candidate)}](#f-{candidate})" for candidate in contributed)
