@@ -50,6 +50,11 @@ The scope is the whole research-driven catalog (spec §7 *Detection breadth*), n
   - Kerberos and AD;
   - field contracts from Winlogbeat and Elastic Agent profiles.
 - [ ] Corpus harvest recorded in the register, with licenses: SigmaHQ, CAR, Elastic and Splunk rules, Atomic Red Team, LOLBAS/GTFOBins/LOLDrivers, ET Open, CISA advisories.
+- [ ] Offensive and dual-use tool catalog in the register (spec §7 item 6):
+  - ATT&CK Software, C2 and post-exploitation frameworks, credential and AD tooling, enumeration scripts, tunnels, remote-access and admin tools;
+  - behavioral detections first, with name, hash and command-line leads layered under them.
+- [ ] Living-off-the-land coverage (spec §7 item 7): every LOLBAS/GTFOBins binary and abuse pattern has a register entry, and its detection rests on context (parent, account, arguments, effect, rarity against baseline).
+- [ ] Cross-cutting themes (spec §7 item 8): process lineage, unusual execution paths, masquerading, persistence, privilege escalation, credential access, lateral movement, defense evasion, discovery bursts, C2/exfiltration, first-seen activity.
 - [ ] Sigma import (with upstream commit provenance)
 - [ ] Offline indicator sets (STIX 2.1 / MISP / CSV), typed matching, provenance and age cited
 - [ ] Breadth datasets vetted and loaded (Windows/AD, network, ICS), with per-family evaluation results and per-rule precision

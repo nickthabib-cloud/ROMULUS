@@ -309,7 +309,7 @@ ROMULUS is meant to find malicious activity anywhere. A short list of favorite d
    - Atomic Red Team: its procedures become fixture ideas and emulation plans;
    - LOLBAS, GTFOBins, LOLDrivers;
    - Suricata ET Open signature metadata, Zeek packages;
-   - CISA advisories and their TTP tables, public DFIR case reports;
+   - CISA advisories and their TTP tables, including the joint guidance on identifying living-off-the-land techniques; public DFIR case reports;
    - the Microsoft audit-policy and Sysmon event references.
 
    Record each source's license. Content under an incompatible license is research reference only: reimplement it, never copy it.
@@ -331,6 +331,54 @@ ROMULUS is meant to find malicious activity anywhere. A short list of favorite d
    - Matches are typed, and they cite the indicator's provenance and age.
 
 5. **Every detection approach the data supports.** That means single-event indicators, sequences, aggregates and stack counts, peer and historical baselines, rarity with denominators, and the discovery lane. A technique that no signature can catch is still in scope through baselines and discovery.
+
+6. **Offensive and dual-use tool catalog.** Tools are a second axis of the register, alongside techniques. Every tool gets a register entry. That covers:
+   - every tool in the ATT&CK Software catalog;
+   - common red-team, post-exploitation and C2 frameworks;
+   - credential and AD tooling;
+   - enumeration scripts;
+   - tunneling and proxy tools;
+   - remote-access software;
+   - dual-use admin tools.
+
+   Examples include Metasploit/Meterpreter, Cobalt Strike, Sliver, mimikatz, Impacket, BloodHound/SharpHound, Rubeus, PsExec, linpeas/winpeas, chisel, ligolo and ngrok. They are samples, not the list. Each entry records the tool's techniques, behaviors and artifacts, and the disposition of each.
+
+   Build detections in two layers:
+   - **Behavior that survives renaming** (the primary layer):
+     - mimikatz: access to LSASS memory;
+     - enumeration scripts such as linpeas: a burst of discovery commands from one shell;
+     - C2 frameworks: named pipes, injection, staging patterns and beaconing;
+     - PsExec-style execution: a remote service install plus an admin-share write.
+   - **Names, hashes, PE metadata (`OriginalFileName`), command-line tokens and signatures** (the cheap layer). These are positive-only leads (ADR-004). A tool name in text proves a mention, not an execution (§1).
+
+7. **Living off the land (LOTL).** A major focus, not an edge case. Many intrusions use only what is already on the system:
+   - Windows: PowerShell, WMI/`wmic`, `certutil`, `bitsadmin`, `rundll32`, `regsvr32`, `mshta`, `schtasks`, `sc`, `netsh`, `vssadmin`, `ntdsutil`, `reg`, `net`, `nltest`, `dsquery`;
+   - Linux: `curl`/`wget`, `bash` `/dev/tcp`, interpreters, `find -exec`, `crontab`, `ssh` tunnels, `systemctl`;
+   - native admin protocols: RDP, WinRM, SMB, SSH;
+   - cloud and identity admin APIs.
+
+   Use LOLBAS, GTFOBins and the CISA LOTL guidance as the corpus, and give each binary and abuse pattern a register entry. The binary itself is legitimate, so a LOTL detection rests on **context**, not on the binary's presence:
+   - the parent and the account that ran it;
+   - the arguments (token-aware);
+   - the network or file effect that followed;
+   - how rare that binary-and-argument pattern is on this host, compared with peers and the hunt's own baseline;
+   - time of day;
+   - the chain it sits in.
+
+   Baselines, stack counts, sequences and the discovery lane are first-class tools here. Wording follows §1: "`certutil` was run with `-urlcache` against an external URL" is not "`certutil` downloaded a payload" unless a file or network event shows it.
+
+8. **Cross-cutting detection themes.** Use these alongside the technique and tool walks, because a single technique entry often misses them:
+   - process lineage anomalies: Office, browser, web server or service spawning a shell or interpreter;
+   - execution from temporary, user-writable, hidden or unusual paths;
+   - masquerading: renamed system binaries, a system binary name in the wrong path, mismatched `OriginalFileName`;
+   - unsigned or rare binaries in system locations;
+   - persistence in all its forms;
+   - privilege-escalation and credential-access signals;
+   - lateral movement between hosts that do not normally talk;
+   - defense evasion: log clearing, security tooling tampered with or stopped, timestomping;
+   - discovery bursts;
+   - C2 and exfiltration patterns;
+   - first-seen and rare activity per host and per account.
 
 **Rules of the breadth effort.**
 - **Breadth never relaxes §1.** Every rule is typed, fixture-tested (§9) and worded to claim no more than it proves. Rules that interpret text are positive-only (ADR-004).

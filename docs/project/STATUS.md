@@ -17,7 +17,13 @@ _Last updated: 2026-10-19 by Claude (lead), M1 accepted._
   - Model quality (M2 bakeoff): ~33% invalid model outputs; agent has contributed no new findings on the lab yet.
 - **Process notes:** Claude does not edit the shell parser or the investigator (an assistant-side safety check stopped that work); those go to Codex via `Claude-Codex.md` (replace Claude's last message; date+time headers; execute-only rounds).
 
-- **Owner direction, 2026-10-19: detection breadth is a primary goal.** The tool must find any malicious activity, anywhere. The catalog comes from systematic research: a full ATT&CK Enterprise + ICS technique walk, the public detection corpora, and every telemetry family. The spec's example event IDs, protocols and playbook classes are samples, not limits. Recorded in:
+- **Owner direction, 2026-10-19: detection breadth is a primary goal.** The tool must find any malicious activity, anywhere. The catalog comes from systematic research:
+  - a full ATT&CK Enterprise + ICS technique walk;
+  - an offensive and dual-use tool catalog (behavior first, names as leads);
+  - living-off-the-land coverage based on context and rarity;
+  - cross-cutting themes;
+  - the public detection corpora;
+  - every telemetry family. The spec's example event IDs, protocols and playbook classes are samples, not limits. Recorded in:
   - spec intro and §7 *Detection breadth*;
   - §15 breadth datasets and metrics;
   - §17 milestones: research starts by M3 and may begin during M2; M4 is the bulk; standing work continues after M6;

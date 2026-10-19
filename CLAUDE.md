@@ -21,7 +21,15 @@ Defensive, AI-assisted threat-hunting tool for USAF CPT analysts. A deterministi
 ## Detection scope (owner direction)
 
 - Detection breadth is a primary goal. ROMULUS should find any malicious activity the telemetry can show, on any mission network.
-- The catalog comes from systematic research: all of MITRE ATT&CK (Enterprise and ICS), the public detection corpora, and every telemetry family a CPT may meet. See spec §7 *Detection breadth*.
+- The catalog comes from systematic research, covering:
+  - all of MITRE ATT&CK (Enterprise and ICS);
+  - an offensive and dual-use tool catalog;
+  - living-off-the-land techniques;
+  - cross-cutting themes such as process lineage and masquerading;
+  - the public detection corpora;
+  - every telemetry family a CPT may meet.
+
+  See spec §7 *Detection breadth*.
 - Event IDs, protocols and playbook classes named in the spec are examples, never limits. Don't scope detection work down to them.
 
 ## Environment

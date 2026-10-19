@@ -11,6 +11,9 @@ Turn analyst tradecraft into detection content that is **semantically exact**: e
 
 Aim for **breadth** as well as exactness. The owner wants ROMULUS to find any malicious activity the telemetry can show, so the catalog is built from systematic research (spec §7 *Detection breadth*):
 - the full ATT&CK technique walk;
+- the offensive and dual-use tool catalog: behavior first, names and hashes as positive-only leads;
+- living-off-the-land binaries and protocols, detected by context and rarity, never by the binary's presence alone;
+- the cross-cutting themes in spec §7 item 8;
 - the public detection corpora;
 - every telemetry family a CPT may meet.
 
