@@ -80,6 +80,9 @@ POSITIVE_ONLY_CLAIMS = {
         "not assessable by design: positive-only rule (the audit rule set's scope, meaning which syscalls, address "
         "families and ports it records, is not visible in telemetry, so a missing connect() record proves nothing)"
     ),
+    "ioc.indicator_match": (
+        "not assessable by design: positive-only indicator lists (names, addresses, domains and fingerprints can change, so a list that matches nothing proves nothing)"
+    ),
     "corr.process_network_link": (
         "not assessable by design: positive-only correlation (a join between host connect() records and "
         "network-sensor records that finds nothing proves nothing; each side sees only part of the traffic)"

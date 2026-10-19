@@ -1,0 +1,27 @@
+# ROMULUS indicator list: offensive and dual-use program names (seed, 2026-10-19).
+# Source: content/research/tools.yaml leads (exe_basename / script basenames), made machine-readable.
+#
+# Every match is POSITIVE-ONLY (ADR-004): a name can be changed in seconds, so a match is evidence and a miss
+# proves nothing. Values are matched EXACTLY (case-insensitive) against typed fields, never as substrings:
+#   - executed program   : basename of the kernel-recorded process.executable  -> "program named X ran"
+#   - interpreter script : the script operand an interpreter was started with   -> "interpreter started with script X"
+#   - argument           : any other argv token whose basename equals X         -> "a command's argument names X" (context)
+# `lane` applies to the executed-program and interpreter-script roles; the argument role is always context.
+# Analysts add lists by dropping more YAML files with the same schema into content/indicators/.
+schema_version: 1
+indicators:
+  - {id: ind.tool.linpeas, kind: program_name, values: [linpeas.sh, linpeas], label: "LinPEAS privilege-escalation enumeration", severity: high, lane: high, attack: [T1082, T1083, T1548]}
+  - {id: ind.tool.linenum, kind: program_name, values: [LinEnum.sh], label: "LinEnum privilege-escalation enumeration", severity: high, lane: high, attack: [T1082, T1083]}
+  - {id: ind.tool.les, kind: program_name, values: [linux-exploit-suggester.sh, les.sh], label: "Linux Exploit Suggester", severity: high, lane: lead, attack: [T1068, T1082]}
+  - {id: ind.tool.lse, kind: program_name, values: [lse.sh], label: "linux-smart-enumeration", severity: high, lane: lead, attack: [T1082, T1083]}
+  - {id: ind.tool.pspy, kind: program_name, values: [pspy, pspy32, pspy64, pspy32s, pspy64s], label: "pspy process snooping", severity: medium, lane: high, attack: [T1057]}
+  - {id: ind.tool.mimipenguin, kind: program_name, values: [mimipenguin.sh, mimipenguin.py, mimipenguin], label: "MimiPenguin credential dumper", severity: critical, lane: high, attack: [T1003.007]}
+  - {id: ind.tool.lazagne, kind: program_name, values: [laZagne.py, lazagne], label: "LaZagne credential recovery", severity: critical, lane: high, attack: [T1555, T1552.001]}
+  - {id: ind.tool.3snake, kind: program_name, values: [3snake], label: "3snake credential sniffer", severity: critical, lane: high, attack: [T1056]}
+  - {id: ind.tool.hydra, kind: program_name, values: [hydra, medusa, ncrack, patator], label: "online password guessing tools", severity: high, lane: lead, attack: [T1110]}
+  - {id: ind.tool.crackers, kind: program_name, values: [john, unshadow, hashcat], label: "offline password crackers", severity: medium, lane: lead, attack: [T1110.002]}
+  - {id: ind.tool.ad_enum, kind: program_name, values: [enum4linux, enum4linux.pl, enum4linux-ng, smbmap, kerbrute, nxc, netexec, crackmapexec, cme], label: "Windows/AD enumeration and spraying tools", severity: high, lane: lead, attack: [T1087.002, T1135, T1110.003]}
+  - {id: ind.tool.impacket, kind: program_name, values: [secretsdump.py, psexec.py, wmiexec.py, smbexec.py, atexec.py, dcomexec.py, ntlmrelayx.py, GetUserSPNs.py, GetNPUsers.py, impacket-secretsdump, impacket-psexec, impacket-wmiexec, impacket-ntlmrelayx], label: "Impacket attack scripts", severity: critical, lane: high, attack: [T1003, T1021.002, T1557.001, T1558.003]}
+  - {id: ind.tool.mitm, kind: program_name, values: [Responder.py, responder, mitm6, bettercap, ettercap, arpspoof], label: "name-poisoning and man-in-the-middle tools", severity: high, lane: high, attack: [T1557.001, T1557.002]}
+  - {id: ind.tool.tunnels, kind: program_name, values: [chisel, frpc, frps, gost, ligolo-ng, ngrok], label: "tunnelling and reverse-proxy tools", severity: high, lane: lead, attack: [T1572, T1090]}
+  - {id: ind.tool.scanners, kind: program_name, values: [nmap, masscan, zmap, rustscan, nikto, gobuster, ffuf, dirb, feroxbuster, wfuzz, sqlmap], label: "network and web scanners (dual-use)", severity: medium, lane: lead, attack: [T1046, T1595]}

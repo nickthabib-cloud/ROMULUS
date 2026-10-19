@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from romulus.detect.correlation import CORRELATION_PLAYBOOKS
 from romulus.detect.host import HOST_PLAYBOOKS
+from romulus.detect.indicators import INDICATOR_PLAYBOOKS
 from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
 
 PACK_VERSION = "m2-pack@1"
-ALL_PLAYBOOKS = HOST_PLAYBOOKS + NETWORK_PLAYBOOKS + SESSION_PLAYBOOKS + CORRELATION_PLAYBOOKS
+ALL_PLAYBOOKS = HOST_PLAYBOOKS + NETWORK_PLAYBOOKS + SESSION_PLAYBOOKS + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS
 
 
 def fresh_pack():
