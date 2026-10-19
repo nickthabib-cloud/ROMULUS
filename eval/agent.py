@@ -12,6 +12,7 @@ from datetime import timedelta
 from eval.gold import DIRECT_ROLES, Gold
 from eval.hunt import Hunt
 from eval.match import ItemMatch
+from eval.metrics import item_signature
 
 TIER_B_SLACK = timedelta(minutes=10)
 
@@ -41,7 +42,8 @@ def _summary(case: dict) -> dict:
         return {"model_conclusion": "legacy_summary"}
 
 
-def effectiveness(hunt: Hunt, gold: Gold, matches: list[ItemMatch], hits: dict) -> tuple[dict, dict]:
+def effectiveness(hunt: Hunt, gold: Gold, matches: list[ItemMatch], hits: dict,
+                  adjudications: dict | None = None) -> tuple[dict, dict]:
     agent = next((a["detail"] for a in reversed(hunt.audit) if a["action"] == "hunt.agent_summary"), None) or {}
     steps = hunt.case_steps
     decisions = Counter()
@@ -112,8 +114,99 @@ def effectiveness(hunt: Hunt, gold: Gold, matches: list[ItemMatch], hits: dict) 
                         "note": "a pivot retrieving a gold record is reach, not a finding; only an admitted item counts "
                                 "toward recall"},
     }
+    out["pivot_reach"]["executed_pivots_retrieving_gold"] = sum(
+        1 for p in executed if any(role in DIRECT_ROLES for k in p["keys"] for _o, role, _s in gold.evidence.get(k, ())))
+    v2, v2_private = _menu_and_conclusions(hunt, gold, matches, hits, agent, adjudications or {})
+    out.update(v2)
     private = {"pivot_reach_locator": sorted(reach_a), "pivot_reach_entity_window": sorted(reach_b),
-               "agent_item_hits": sorted({o for m in agent_items for o in m.tier_a})}
+               "agent_item_hits": sorted({o for m in agent_items for o in m.tier_a}), **v2_private}
+    return out, private
+
+
+def _option_kind(decision: dict) -> str:
+    act = decision.get("action", "unknown")
+    return f"pivot:{decision.get('tool')}" if act == "pivot" else act
+
+
+def _menu_and_conclusions(hunt: Hunt, gold: Gold, matches: list[ItemMatch], hits: dict, agent: dict,
+                          adjudications: dict):
+    """Investigator v2 (menu-driven) fields, and the gold quality of case conclusions and concluded seeds."""
+    by_item = {m.item.id: m for m in matches}
+    menu_steps = [s for s in hunt.case_steps if "chosen_option" in (s["decision"] or {})]
+    chosen = Counter()
+    sizes, hidden, truncated, fallbacks, attempts = [], 0, 0, 0, Counter()
+    for s in menu_steps:
+        d = s["decision"]
+        menu = {o.get("id"): o for o in d.get("menu") or []}
+        opt = menu.get(d.get("chosen_option"))
+        chosen[_option_kind((opt or {}).get("decision") or d)] += 1
+        sizes.append(len(menu))
+        hidden += int(d.get("menu_hidden_count") or 0)
+        truncated += bool(d.get("text_truncated"))
+        fallbacks += bool(d.get("deterministic_fallback"))
+        attempts[str(d.get("model_attempt"))] += 1
+    defects = sum(1 for s in hunt.case_steps if (s["decision"] or {}).get("action") == "constraint_defect")
+    model_errors = sum(1 for s in hunt.case_steps if (s["decision"] or {}).get("action") == "model_error")
+
+    def gold_opps(cids):
+        return {o for c in cids if c in by_item for o in by_item[c].tier_a}
+
+    def cls(ids):
+        return dict(sorted(Counter(gold.opportunities[i].behavior_class for i in ids).items()))
+    # case conclusions vs gold
+    concl = Counter()
+    verdicts = Counter()
+
+    def verdict(cid):
+        m = by_item.get(cid)
+        if m is None:
+            return "missing"
+        if m.tier_a:
+            return "tier_a_hit"
+        return (adjudications.get(item_signature(m.item)) or {}).get("verdict") or f"unadjudicated_{m.item.lane}"
+    esc_gold, esc_only_lead = set(), set()
+    concluded_benign_on_gold = set()
+    for case in hunt.cases:
+        st = case["status"]
+        if st not in ("escalated", "parked", "closed"):
+            continue
+        steps = [s for s in hunt.case_steps if s["case_id"] == case["id"]]
+        seeds = next(((s["decision"] or {}).get("seed_candidate_ids") or [] for s in steps
+                      if (s["decision"] or {}).get("action") == "seed"), [])
+        escalated = [(s["decision"] or {}).get("candidate_id") for s in steps
+                     if (s["decision"] or {}).get("action") == "escalate" and s["accepted"]]
+        opps = gold_opps(seeds + [c for c in escalated if c])
+        for c in escalated:
+            verdicts[f"escalated:{verdict(c)}"] += 1
+        if st in ("parked", "closed"):
+            for c in seeds:
+                verdicts[f"{st}_seed:{verdict(c)}"] += 1
+        concl[f"{st}:{'gold' if opps else 'no_gold'}"] += 1
+        if st == "escalated":
+            eo = gold_opps([c for c in escalated if c])
+            esc_gold |= eo
+            esc_only_lead |= {o for o in eo if o not in hits["reported"]}
+        if st == "closed" and opps:
+            concluded_benign_on_gold |= opps
+    seeds_concluded = [c for c in (agent.get("concluded_seed_ids") or []) if isinstance(c, str)]
+    seeds_unworked = [c for c in (agent.get("unworked_seed_ids") or []) if isinstance(c, str)]
+    out = {"menu": {"menus": len(menu_steps), "options_chosen_by_kind": dict(chosen.most_common()),
+                    "menu_size_median": sorted(sizes)[len(sizes) // 2] if sizes else None,
+                    "hidden_options_total": hidden, "text_truncated": truncated,
+                    "deterministic_fallbacks": fallbacks, "model_attempts": dict(attempts),
+                    "constraint_defects": defects, "model_errors": model_errors} if menu_steps else None,
+           "conclusions_vs_gold": {
+               "cases_by_status_and_gold": dict(sorted(concl.items())),
+               "concluded_candidates_by_verdict": dict(sorted(verdicts.items())),
+               "escalations_on_gold_opps": len(esc_gold), "escalations_on_gold_by_class": cls(esc_gold),
+               "escalated_gold_opps_not_reported_by_sweep": cls(esc_only_lead),
+               "closed_cases_holding_gold": cls(concluded_benign_on_gold),
+               "seeds_concluded_with_gold": len(gold_opps(seeds_concluded)),
+               "seeds_concluded_with_gold_by_class": cls(gold_opps(seeds_concluded)),
+               "seeds_unworked_with_gold_by_class": cls(gold_opps(seeds_unworked)),
+               "note": "escalation cannot change a candidate's lane; it marks the case escalated. Gold is judged on "
+                       "the seed and escalated candidates' Tier A hits"}}
+    private = {"escalated_gold_opps": sorted(esc_gold), "seed_concluded_gold_opps": sorted(gold_opps(seeds_concluded))}
     return out, private
 
 

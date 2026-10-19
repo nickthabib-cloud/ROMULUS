@@ -364,3 +364,35 @@ def test_ablation_counts_by_class(gold_dir, agent_db):
     assert "| reported, model-on only | 0 | {} |" in md
     for f in g.forbidden_strings():
         assert f not in md
+
+
+def test_v2_menu_conclusions_and_nway_ablation(gold_dir, agent_db):
+    from eval.report import ablation_n, render
+    eng = create_engine(f"sqlite:///{agent_db}")
+    now = datetime(2040, 1, 1, 9, 1, tzinfo=UTC)
+    with eng.begin() as c:
+        c.execute(t.case.insert().values(id="case-2", hunt_id="H2", title="x", status="escalated", priority=1.0,
+                                         entities=[{"kind": "host", "value": "web1", "role": "host"}], hypotheses=[],
+                                         steps_used=1, step_budget=8, created_at=now, updated_at=now,
+                                         summary=json.dumps({"model_conclusion": "escalate"})))
+        esc = {"action": "escalate", "candidate_id": "k1", "chosen_option": "O2", "deterministic_fallback": False,
+               "model_attempt": 1, "menu_hidden_count": 1, "text_truncated": False,
+               "menu": [{"id": "O1", "decision": {"action": "pivot", "tool": "entity_timeline"}},
+                        {"id": "O2", "decision": {"action": "escalate", "candidate_id": "k1"}}]}
+        c.execute(t.case_step.insert(), [
+            {"case_id": "case-2", "n": 0, "decision": {"action": "seed", "seed_candidate_ids": ["k1"]}, "accepted": 1,
+             "at": now},
+            {"case_id": "case-2", "n": 1, "decision": esc, "accepted": 1, "at": now},
+            {"case_id": "case-2", "n": 2, "decision": {"action": "constraint_defect"}, "accepted": 0, "at": now}])
+    eng.dispose()
+    g = load(gold_dir)
+    off, offp, _ = score(gold_dir, agent_db, "H1", "syn-off")
+    on, onp, _ = score(gold_dir, agent_db, "H2", "syn-on")
+    a = on["agent"]
+    assert a["menu"]["options_chosen_by_kind"] == {"escalate": 1} and a["menu"]["constraint_defects"] == 1
+    assert a["conclusions_vs_gold"]["cases_by_status_and_gold"] == {"escalated:gold": 1}
+    assert a["conclusions_vs_gold"]["escalations_on_gold_by_class"] == {"exploit_public_app": 1}
+    assert "Menu decisions" in render(on)
+    md = ablation_n(("off", off, offp), [("det", on, onp), ("model", on, onp)],
+                    {o.opp_id: o.behavior_class for o in g.opportunities.values()})
+    assert "| Metric | off | det | model |" in md and "| surfaced, off only (not det) | 1 | {'c2_channel': 1} |" in md

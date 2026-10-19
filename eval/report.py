@@ -162,7 +162,34 @@ def agent_section(a: dict | None) -> list[str]:
         f"opportunities {pr['locator_level_by_class']}; of these not otherwise surfaced: "
         f"{pr['locator_level_not_otherwise_surfaced']}."),
         f"- Pivot reach at entity + window level: {pr['entity_window_opps']} {pr['entity_window_by_class']}.",
-        f"- Note: {pr['note']}.", ""]
+        (f"- Executed pivots that retrieved at least one gold action/outcome record: "
+         f"{pr.get('executed_pivots_retrieving_gold', 'n/a')} of {p['executed']}."),
+        f"- Note: {pr['note']}.", ""] + _v2_lines(a)
+
+
+def _v2_lines(a: dict) -> list[str]:
+    out = []
+    m = a.get("menu")
+    if m:
+        out += [(f"- Menu decisions: {m['menus']}; options chosen by kind {m['options_chosen_by_kind']}; median menu "
+                 f"size {m['menu_size_median']}; hidden options {m['hidden_options_total']}; text truncated "
+                 f"{m['text_truncated']}."),
+                (f"- Constraint defects: {m['constraint_defects']}; model errors: {m['model_errors']}; deterministic "
+                 f"fallbacks: {m['deterministic_fallbacks']}; model attempts {m['model_attempts']}.")]
+    cg = a.get("conclusions_vs_gold")
+    if cg:
+        out += [f"- Concluded cases by status and gold: {cg['cases_by_status_and_gold']}.",
+                (f"- Escalated and parked/closed-seed candidates by verdict (Tier A hit, or the custodian adjudication): "
+                 f"{cg.get('concluded_candidates_by_verdict')}."),
+                (f"- Escalations landing on gold: {cg['escalations_on_gold_opps']} opportunities "
+                 f"{cg['escalations_on_gold_by_class']}; of these, not reported by the sweep (lead lane only): "
+                 f"{cg['escalated_gold_opps_not_reported_by_sweep']}."),
+                f"- Closed cases holding gold: {cg['closed_cases_holding_gold'] or 'none'}.",
+                (f"- Concluded seeds hitting gold: {cg['seeds_concluded_with_gold']} opportunities "
+                 f"{cg['seeds_concluded_with_gold_by_class']}; unworked seeds hitting gold: "
+                 f"{cg['seeds_unworked_with_gold_by_class']}."),
+                f"- Note: {cg['note']}.", ""]
+    return out
 
 
 def ablation(off: dict, on: dict, off_priv: dict, on_priv: dict, classes: dict[str, str]) -> str:
@@ -194,7 +221,46 @@ def ablation(off: dict, on: dict, off_priv: dict, on_priv: dict, classes: dict[s
     return "\n".join(L)
 
 
+def ablation_n(base: tuple, others: list[tuple], classes: dict[str, str]) -> str:
+    """N-way ablation: base = (label, result, private); others likewise. Deltas and only-in sets vs the base."""
+    bl, b, bp = base
+    L = [compare_n([(bl, b)] + [(lab, r) for lab, r, _ in others]), "",
+         "| Delta vs " + bl + " | " + " | ".join(lab for lab, _, _ in others) + " |",
+         "|---|" + "---|" * len(others)]
+    for name, path in (("Time to first actionable (s)", ("timing", "time_to_first_actionable_s")),
+                       ("Total hunt (s)", ("timing", "total_hunt_s")), ("Model calls", ("cost", "model_calls")),
+                       ("Prompt tokens", ("cost", "prompt_tokens")), ("Completion tokens", ("cost", "completion_tokens")),
+                       ("Model time (ms)", ("cost", "model_ms")), ("Tasks", ("cost", "tasks")),
+                       ("Records returned", ("cost", "records_returned"))):
+        cells = []
+        for _lab, r, _ in others:
+            va, vb = b[path[0]][path[1]], r[path[0]][path[1]]
+            try:
+                cells.append(f"{round(vb - va, 1)} ({va} → {vb})")
+            except TypeError:
+                cells.append(f"n/a ({va} → {vb})")
+        L.append(f"| {name} | " + " | ".join(cells) + " |")
+
+    def only(a, c, key):
+        sa = {o for o, v in a["per_opportunity"].items() if v[key]}
+        sc = {o for o, v in c["per_opportunity"].items() if v[key]}
+        d = sa - sc
+        return len(d), dict(sorted(Counter(classes[o] for o in d).items()))
+    L += ["", "| Opportunities hit only in one run | Count | By class |", "|---|---|---|"]
+    for lab, _r, p in others:
+        for lane in ("reported", "surfaced"):
+            n, c = only(p, bp, lane)
+            L.append(f"| {lane}, {lab} only (not {bl}) | {n} | {c} |")
+            n, c = only(bp, p, lane)
+            L.append(f"| {lane}, {bl} only (not {lab}) | {n} | {c} |")
+    return chr(10).join(L)
+
+
 def compare(a: dict, b: dict, la: str, lb: str) -> str:
+    return compare_n([(la, a), (lb, b)])
+
+
+def compare_n(runs: list[tuple]) -> str:
     def g(r, path):
         x = r
         for p in path:
@@ -212,11 +278,11 @@ def compare(a: dict, b: dict, la: str, lb: str) -> str:
         rows.append((f"Recall reported, position {pos}", ("recall", "reported", "by_time_position", pos)))
     rows += [("P@10", ("precision", "p10")), ("P@20", ("precision", "p20")),
              ("Citation items passing all automated checks", ("citations", "items_all_checks_pass"))]
-    L = [f"| Metric | {la} | {lb} |", "|---|---|---|"]
+    L = ["| Metric | " + " | ".join(lab for lab, _ in runs) + " |", "|---|" + "---|" * len(runs)]
     for name, path in rows:
-        va, vb = g(a, path), g(b, path)
-        fmt = _p if isinstance(va, dict) and "n_reviewed" in va else _w
-        L.append(f"| {name} | {fmt(va) if va is not None else 'n/a'} | {fmt(vb) if vb is not None else 'n/a'} |")
+        vals = [g(r, path) for _, r in runs]
+        fmt = _p if isinstance(vals[0], dict) and "n_reviewed" in vals[0] else _w
+        L.append(f"| {name} | " + " | ".join(fmt(v) if v is not None else "n/a" for v in vals) + " |")
     scal = [("Surfaced items", ("precision", "surfaced_total")), ("False leads", ("false_leads", "false")),
             ("False leads per hour (modeled)", ("false_leads", "per_hour")),
             ("Unadjudicated surfaced items", ("false_leads", "unadjudicated")),
@@ -230,11 +296,11 @@ def compare(a: dict, b: dict, la: str, lb: str) -> str:
             ("Review order basis", ("precision", "order_basis"))]
     for name, path in scal:
         if path is None:
-            L.append(f"| {name} | {a['cost']['prompt_tokens']} / {a['cost']['completion_tokens']} | "
-                     f"{b['cost']['prompt_tokens']} / {b['cost']['completion_tokens']} |")
+            L.append(f"| {name} | " + " | ".join(f"{r['cost']['prompt_tokens']} / {r['cost']['completion_tokens']}"
+                                                 for _, r in runs) + " |")
         else:
-            L.append(f"| {name} | {g(a, path)} | {g(b, path)} |")
-    return "\n".join(L)
+            L.append(f"| {name} | " + " | ".join(str(g(r, path)) for _, r in runs) + " |")
+    return chr(10).join(L)
 
 
 def dumps(r: dict) -> str:

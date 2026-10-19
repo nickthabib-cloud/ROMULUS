@@ -73,7 +73,7 @@ def score(gold_dir, db_path, hunt_id, run_id, mode="dev", adjudications=None, fe
                 found[("es", hit["_index"], hit["_id"])] = raw_digest(hit["_source"])
         source_check = {k: found.get(k) == d for k, d in rep_keys.items()}
     fun = funnel_mod.compute(g, h, matches, hits, fetcher=fetcher, normalize=normalize)
-    agent_eff, agent_private = agent_mod.effectiveness(h, g, matches, hits)
+    agent_eff, agent_private = agent_mod.effectiveness(h, g, matches, hits, adj)
     agent = next((a["detail"] for a in reversed(h.audit) if a["action"] == "hunt.agent_summary"), None) or {}
     model_off = not h.model_calls and agent.get("status") in ("disabled", None, "unknown")
     hm = h.manifest

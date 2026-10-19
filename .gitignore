@@ -40,3 +40,6 @@ DEPLOYED_COMMIT
 
 # local Claude/Codex collaboration channel, never committed
 Claude-Codex.md
+
+# agent worktrees (Claude Code)
+.claude/worktrees/
