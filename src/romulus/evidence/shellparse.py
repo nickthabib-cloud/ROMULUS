@@ -334,20 +334,71 @@ class UnknownShellScript:
     reason: str
 
 
-def _has_c_option(args: list[str]) -> bool:
-    option_takes_value = False
-    for arg in args:
-        if option_takes_value:
-            option_takes_value = False
-            continue
-        if arg == "--" or not arg.startswith(("-", "+")):
-            return False
-        if arg in {"-o", "+o", "-O", "+O", "--init-file", "--rcfile"}:
-            option_takes_value = True
+@dataclass(frozen=True)
+class _ShellArgLayout:
+    script_file: str | None = None
+    has_command_option: bool = False
+    error: str = ""
+
+
+_SHELL_OPTIONS_WITH_VALUES = {"-o", "+o", "-O", "+O", "--init-file", "--rcfile"}
+
+
+def _scan_shell_args(args: list[str]) -> _ShellArgLayout:
+    """Locate a shell script file while respecting the option values we model."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            return _ShellArgLayout(script_file=args[index + 1] if index + 1 < len(args) else None)
+        if arg in _SHELL_OPTIONS_WITH_VALUES:
+            if index + 1 >= len(args):
+                return _ShellArgLayout(error=f"shell option {arg!r} is missing its value")
+            index += 2
             continue
         if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
-            return True
-    return False
+            return _ShellArgLayout(has_command_option=True)
+        if arg.startswith(("-", "+")):
+            index += 1
+            continue
+        return _ShellArgLayout(script_file=arg)
+    return _ShellArgLayout()
+
+
+def _shell_argv(argv: list[str], shell_name: str | None = None) -> tuple[str, list[str]] | None:
+    if not argv:
+        return None
+    name = shell_name or argv[0].rsplit("/", 1)[-1]
+    if name.startswith("-"):
+        name = name[1:]
+    if name not in SHELLS:
+        return None
+    args = argv[1:]
+    if name == "busybox":
+        if not args or args[0] not in SHELLS:
+            return None
+        name, args = args[0], args[1:]
+    return name, args
+
+
+def _has_c_option(args: list[str]) -> bool:
+    return _scan_shell_args(args).has_command_option
+
+
+def shell_script_file_of(argv: list[str], *, shell_name: str | None = None) -> str | UnknownShellScript | None:
+    """Return the shell script-file operand, an explicit unknown, or no script file."""
+    shell_argv = _shell_argv(argv, shell_name)
+    if shell_argv is None:
+        return None
+    name, args = shell_argv
+    layout = _scan_shell_args(args)
+    if layout.error:
+        return UnknownShellScript(layout.error)
+    if name in NON_POSIX_SHELLS and any(arg.startswith(("-", "+")) for arg in args):
+        return UnknownShellScript(f"the {name} shell option grammar is not modelled")
+    if layout.has_command_option:
+        return None
+    return layout.script_file
 
 
 def shell_script_of(argv: list[str]) -> str | UnknownShellScript | None:
@@ -357,27 +408,27 @@ def shell_script_of(argv: list[str]) -> str | UnknownShellScript | None:
     option parsing is otherwise deliberately not emulated: if a command still appears to request
     ``-c``, callers receive an explicit unknown and must not publish a complete negative claim.
     """
-    if not argv:
+    shell_argv = _shell_argv(argv)
+    if shell_argv is None:
         return None
-    name = argv[0].rsplit("/", 1)[-1]
-    if name.startswith("-"):
-        name = name[1:]
-    if name not in SHELLS:
-        return None
-
-    args = argv[1:]
+    name, args = shell_argv
+    direct_name = argv[0].rsplit("/", 1)[-1]
+    if direct_name.startswith("-"):
+        direct_name = direct_name[1:]
     if name in NON_POSIX_SHELLS:
         if _has_c_option(args):
             return UnknownShellScript(f"the {name} shell grammar is not modelled")
         return None
 
-    if name != "busybox" and len(args) >= 2 and args[0] in {"-c", "-lc"}:
+    if direct_name != "busybox" and len(args) >= 2 and args[0] in {"-c", "-lc"}:
         script = args[1]
         if script and not script.startswith(("-", "+")):
             return script
         return UnknownShellScript("the shell -c script position is missing or option-like")
 
-    scan_args = args[1:] if name == "busybox" and args and args[0] in SHELLS else args
-    if _has_c_option(scan_args):
+    layout = _scan_shell_args(args)
+    if layout.error:
+        return UnknownShellScript(layout.error)
+    if layout.has_command_option:
         return UnknownShellScript("the shell -c option layout is not modelled")
     return None

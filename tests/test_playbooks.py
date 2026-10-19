@@ -497,6 +497,31 @@ def test_exec_from_tmp_stops_shell_option_scan_at_script_file(argv):
     assert "'/tmp/x.sh' via interpreter 'bash'" in matches[0].claim
 
 
+@pytest.mark.parametrize("argv", [
+    ["bash", "-o", "pipefail", "/tmp/x.sh"],
+    ["bash", "+x", "/tmp/x.sh"],
+    ["bash", "-O", "extglob", "/tmp/x.sh"],
+    ["bash", "--init-file", "/etc/bashrc", "/tmp/x.sh"],
+    ["busybox", "sh", "/tmp/x.sh"],
+])
+def test_exec_from_tmp_consumes_shell_options_and_busybox_applet(argv):
+    matches = run(host.ExecFromTempDir, [exec_ev(argv)])
+
+    assert len(matches) == 1
+    assert "'/tmp/x.sh'" in matches[0].claim
+
+
+@pytest.mark.parametrize("argv", [
+    ["python3", "-W", "ignore", "/tmp/x.py"],
+    ["python3", "+X", "/tmp/x.py"],
+])
+def test_exec_from_tmp_non_shell_option_layout_is_unevaluable(argv):
+    playbook = host.ExecFromTempDir()
+
+    assert playbook.consume([exec_ev(argv, process__executable="/usr/bin/python3")]) == []
+    assert playbook.missing_required == 1
+
+
 # ---------------------------------------------------------------- tool user agent
 def test_tool_ua():
     m = run(network.ToolUserAgentHttp, [ev(family="http_tx", source__ip="192.0.2.10", destination__ip="192.0.2.99",

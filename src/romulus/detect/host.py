@@ -7,7 +7,13 @@ import re
 from collections import defaultdict
 
 from romulus.detect.base import Match, Playbook, basename, outcome_phrase, pf
-from romulus.evidence.shellparse import SHELLS, UnknownShellScript, parse_script, shell_script_of
+from romulus.evidence.shellparse import (
+    SHELLS,
+    UnknownShellScript,
+    parse_script,
+    shell_script_file_of,
+    shell_script_of,
+)
 from romulus.evidence.typed import Outcome, TypedEvent
 
 WEB_SERVICE_USERS = {"www-data", "apache", "nginx", "httpd", "_www", "wwwrun"}
@@ -392,15 +398,23 @@ class ExecFromTempDir(Playbook):
         if not path.startswith(TEMP_DIRS):
             path = resolve(a0)
         via = ""
-        if not path.startswith(TEMP_DIRS) and interpreter_name(a0) in INTERPRETERS and len(argv) > 1:
-            # interpreter running a script file: first non-option argument is the program
-            script = next((a for a in argv[1:] if not a.startswith("-")), "")
-            layout = shell_script_of(argv)
-            if isinstance(layout, UnknownShellScript):
-                self.missing_required += 1      # cannot tell a script-file run from -c: unevaluable, not absent
-                return []
-            if script and layout is None:
-                path, via = resolve(script), interpreter_name(a0)
+        name = interpreter_name(a0)
+        if not path.startswith(TEMP_DIRS) and name in INTERPRETERS and len(argv) > 1:
+            if name in SHELLS:
+                script = shell_script_file_of(argv, shell_name=name)
+                if isinstance(script, UnknownShellScript):
+                    self.missing_required += 1
+                    return []
+            else:
+                script = ""
+                for arg in argv[1:]:
+                    if arg.startswith(("-", "+")):
+                        self.missing_required += 1
+                        return []
+                    script = arg
+                    break
+            if script:
+                path, via = resolve(script), name
         if not path.startswith(TEMP_DIRS):
             return []
         fields = [pf(e, "process.argv")] + ([pf(e, "process.executable")] if exe else []) + \

@@ -5,7 +5,7 @@ import pytest
 
 from romulus.evidence.auditd import execve_argv, parse_record
 from romulus.evidence.normalize import normalize_hits
-from romulus.evidence.shellparse import UnknownShellScript, parse_script, shell_script_of
+from romulus.evidence.shellparse import UnknownShellScript, parse_script, shell_script_file_of, shell_script_of
 from romulus.evidence.typed import Outcome
 
 # shapes copied from the lab index (benign motd job)
@@ -306,6 +306,19 @@ def test_login_shell_name_is_recognized_for_script_extraction(login_shell):
 ])
 def test_shell_option_scan_stops_at_script_file(argv):
     assert shell_script_of(argv) is None
+
+
+@pytest.mark.parametrize("argv,expected", [
+    (["bash", "-o", "pipefail", "/tmp/x.sh"], "/tmp/x.sh"),
+    (["bash", "+x", "/tmp/x.sh"], "/tmp/x.sh"),
+    (["bash", "-O", "extglob", "/tmp/x.sh"], "/tmp/x.sh"),
+    (["bash", "--rcfile", "/tmp/bashrc", "/tmp/x.sh"], "/tmp/x.sh"),
+    (["busybox", "sh", "/tmp/x.sh"], "/tmp/x.sh"),
+    (["bash", "/tmp/x.sh", "-c"], "/tmp/x.sh"),
+    (["bash", "-c", "/tmp/x.sh"], None),
+])
+def test_shell_script_file_uses_shell_option_scanner(argv, expected):
+    assert shell_script_file_of(argv) == expected
 
 
 @pytest.mark.parametrize("argv", [
