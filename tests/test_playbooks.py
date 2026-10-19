@@ -307,6 +307,40 @@ def test_exec_from_tmp_via_cwd():
     assert len(m) == 1 and "/tmp/linpeas.sh" in m[0].claim
 
 
+@pytest.mark.parametrize("event_fields", [
+    {"argv": ["linpeas.sh"], "process__cwd": "/tmp/tools/.."},
+    {"argv": ["linpeas.sh"], "process__cwd": "/tmp", "process__executable": "linpeas.sh"},
+    {"argv": ["bash", "x.sh"], "process__cwd": "/tmp", "process__executable": "/usr/bin/bash"},
+])
+def test_exec_from_tmp_resolves_any_relative_path_with_posix_normpath(event_fields):
+    argv = event_fields["argv"]
+    extra = {key: value for key, value in event_fields.items() if key != "argv"}
+
+    matches = run(host.ExecFromTempDir, [exec_ev(argv, **extra)])
+
+    assert len(matches) == 1
+    assert "'/tmp/linpeas.sh'" in matches[0].claim or "'/tmp/x.sh'" in matches[0].claim
+
+
+@pytest.mark.parametrize("argv,extra", [
+    (["./x"], {}),
+    (["x"], {}),
+    (["bash", "x.sh"], {"process__executable": "/usr/bin/bash"}),
+])
+def test_exec_from_tmp_missing_path_context_is_unevaluable(argv, extra):
+    playbook = host.ExecFromTempDir()
+
+    assert playbook.consume([exec_ev(argv, **extra)]) == []
+    assert playbook.missing_required == 1
+
+
+def test_exec_from_tmp_absolute_non_temp_path_needs_no_cwd():
+    playbook = host.ExecFromTempDir()
+
+    assert playbook.consume([exec_ev(["/usr/bin/id"])]) == []
+    assert playbook.missing_required == 0
+
+
 @pytest.mark.parametrize("argv,cwd", [
     (["cat", "/tmp/report.txt"], "/home/user"),        # temp path as argument only
     (["./build.sh"], "/home/user/src"),                # relative exec outside temp

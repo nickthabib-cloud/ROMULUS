@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import ipaddress
+import posixpath
 import re
 from collections import defaultdict
 
@@ -387,16 +388,23 @@ class ExecFromTempDir(Playbook):
         exe = e.get("process.executable") or ""
         a0 = argv[0] if argv else ""
         cwd = e.get("process.cwd") or ""
+
         def resolve(p: str) -> str:
             if p.startswith("/"):
-                return p
-            if p.startswith("./") and cwd.startswith("/"):
-                return cwd.rstrip("/") + "/" + p[2:]
+                return posixpath.normpath(p)
+            if p and cwd.startswith("/"):
+                return posixpath.normpath(posixpath.join(cwd, p))
             return ""
 
-        path = exe if exe.startswith("/") else ""
-        if not path.startswith(TEMP_DIRS):
-            path = resolve(a0)
+        path = ""
+        unresolved_path = False
+        for candidate in ([exe] if exe else []) + [a0]:
+            resolved = resolve(candidate)
+            if resolved:
+                path = resolved
+                break
+            if candidate:
+                unresolved_path = True
         via = ""
         name = interpreter_name(a0)
         if not path.startswith(TEMP_DIRS) and name in INTERPRETERS and len(argv) > 1:
@@ -414,8 +422,14 @@ class ExecFromTempDir(Playbook):
                     script = arg
                     break
             if script:
-                path, via = resolve(script), name
+                script_path = resolve(script)
+                if not script_path:
+                    self.missing_required += 1
+                    return []
+                path, via = script_path, name
         if not path.startswith(TEMP_DIRS):
+            if not path and unresolved_path:
+                self.missing_required += 1
             return []
         fields = [pf(e, "process.argv")] + ([pf(e, "process.executable")] if exe else []) + \
                  ([pf(e, "process.cwd")] if cwd else [])
