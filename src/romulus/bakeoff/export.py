@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from romulus.agent.brief import BuiltBrief, build_brief
-from romulus.agent.cases import cluster_seed_candidates
+from romulus.agent.cases import MAX_SEEDS_PER_CASE, cluster_seed_candidates, seed_candidate_ids
 from romulus.agent.models import EntityRef
 from romulus.agent.tools import tool_catalog
 from romulus.store.db import digest, make_engine
@@ -197,6 +197,20 @@ def _prior_for_duplicates(prior_steps: list[dict]) -> list[dict]:
     } for step in prior_steps]
 
 
+def _effective_prior_steps(prior_steps: list[dict]) -> list[dict]:
+    """Bound pre-migration seed groups for replay without rewriting or claiming an exact digest."""
+    active_seed_ids = seed_candidate_ids(prior_steps)
+    if len(active_seed_ids) <= MAX_SEEDS_PER_CASE:
+        return prior_steps
+    effective = copy.deepcopy(prior_steps)
+    for step in effective:
+        decision = step.get("decision") or {}
+        if step.get("n") == 0 and decision.get("action") == "seed":
+            decision["effective_seed_candidate_ids"] = active_seed_ids[:MAX_SEEDS_PER_CASE]
+            break
+    return effective
+
+
 def export_tasks(repo: Repo, hunt_id: str, num_ctx_values: list[int],
                  variants: list[dict] | None = None) -> tuple[list[dict], dict]:
     """Return (tasks, stats). ``variants`` are {variant, task_id, mutations[]} applied to a base step."""
@@ -224,7 +238,8 @@ def export_tasks(repo: Repo, hunt_id: str, num_ctx_values: list[int],
             stats["model_calls"] += 1
             prior = [s for s in steps if s["n"] < step["n"]]
             state = _case_before(case, prior, initial)
-            view = _StepView(repo, state, prior, call["at"])
+            effective_prior = _effective_prior_steps(prior)
+            view = _StepView(repo, state, effective_prior, call["at"])
             options = call.get("options") or {}
             production_ctx = int(options.get("num_ctx") or num_ctx_values[0])
 
@@ -267,7 +282,7 @@ def export_tasks(repo: Repo, hunt_id: str, num_ctx_values: list[int],
             }
             specs = [(None, [], view)] + [
                 (variant["variant"], variant["mutations"],
-                 _StepView(repo, state, prior, call["at"], variant["mutations"]))
+                 _StepView(repo, state, effective_prior, call["at"], variant["mutations"]))
                 for variant in by_base.get(task_id, [])
             ]
             for name, mutations, step_view in specs:

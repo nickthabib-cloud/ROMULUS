@@ -71,26 +71,61 @@ class Investigator:
         return seed_candidate_ids(steps)
 
     def _seed_cases(self) -> list[str]:
+        candidates = [
+            candidate for candidate in self.repo.candidates(self.hunt_id)
+            if candidate["lane"] != "context" and candidate.get("source_case_id") is None
+        ]
+        candidates_by_id = {candidate["id"]: candidate for candidate in candidates}
         for case in self.repo.cases(self.hunt_id, statuses=["open"]):
             steps = self.repo.case_steps(case["id"])
             seed_ids = self._seed_ids(steps)
             if len(seed_ids) <= MAX_SEEDS_PER_CASE:
                 continue
+            retained_ids = seed_ids[:MAX_SEEDS_PER_CASE]
+            retained_candidates = [
+                candidates_by_id[seed_id] for seed_id in retained_ids if seed_id in candidates_by_id
+            ]
+            retained_entities: list[EntityRef] = []
+            retained_priority = float(case["priority"])
+            if retained_candidates:
+                retained_priority = max(float(candidate["priority"]) for candidate in retained_candidates)
+                retained_entities.extend(
+                    entity
+                    for cluster in cluster_seed_candidates(retained_candidates)
+                    for entity in cluster.entities
+                )
+            else:
+                for raw in case.get("entities") or []:
+                    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+                        retained_entities.append(EntityRef(kind=raw[0], value=str(raw[1]), role=str(raw[2])))
+                    else:
+                        retained_entities.append(EntityRef.model_validate(raw))
+            for step in steps:
+                decision = step.get("decision") or {}
+                result = step.get("result_digest") or {}
+                if not step.get("accepted") or decision.get("action") != "pivot":
+                    continue
+                for raw in result.get("entities") or []:
+                    retained_entities.append(EntityRef.model_validate(raw))
+            unique_entities = {
+                (entity.kind, entity.value, entity.role): entity for entity in retained_entities
+            }
+            self.repo.update_case(
+                case["id"], owner_token=self.owner_token,
+                priority=retained_priority,
+                entities=[entity.model_dump(mode="json") for entity in unique_entities.values()],
+            )
             self.repo.append_case_step(
                 case["id"], max(step["n"] for step in steps) + 1,
                 {
                     "action": "seed_partition",
-                    "seed_candidate_ids": seed_ids[:MAX_SEEDS_PER_CASE],
+                    "seed_candidate_ids": retained_ids,
                     "previous_seed_count": len(seed_ids),
                 },
                 True,
                 owner_token=self.owner_token,
             )
 
-        candidates = [
-            candidate for candidate in self.repo.candidates(self.hunt_id)
-            if candidate["lane"] != "context" and candidate.get("source_case_id") is None
-        ]
         all_seed_ids = [candidate["id"] for candidate in candidates]
         assigned = {
             seed_id

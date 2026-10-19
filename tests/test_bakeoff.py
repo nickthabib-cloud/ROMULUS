@@ -121,6 +121,53 @@ def test_export_reproduces_every_production_brief_exactly():
     )
 
 
+def test_export_bounds_legacy_oversized_calls_without_claiming_a_digest_match():
+    repo = _memory_repo()
+    seed_ids = ["c1"]
+    for index in range(2, 11):
+        candidate_id = f"c{index}"
+        seed_ids.append(candidate_id)
+        repo.save_candidate({
+            "id": candidate_id, "hunt_id": "h1", "rule_id": "test.rule", "rule_version": "1",
+            "claim": f"Suspicious action {index} on video.", "claim_type": "observed_action",
+            "event_ids": [f"event-{candidate_id}"], "predicate_fields": [],
+            "entities": [["host", "video", "host"]], "ts": START,
+            "severity": "medium", "confidence": "high", "lane": "lead", "priority": 50 - index,
+            "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+            "source_case_id": None,
+        })
+    repo.create_case({
+        "id": "legacy-case", "hunt_id": "h1", "seed_candidate_id": "c1",
+        "title": "legacy", "priority": 50, "entities": [["host", "video", "host"]],
+        "hypotheses": [], "step_budget": 4,
+    })
+    repo.append_case_step(
+        "legacy-case", 0, {"action": "seed", "seed_candidate_ids": seed_ids}, True,
+    )
+    call_at = datetime.now(UTC) + timedelta(minutes=1)
+    repo.save_model_call({
+        "id": "legacy-call", "hunt_id": "h1", "case_id": "legacy-case", "purpose": "triage",
+        "model": "test", "options": {"num_ctx": CTX}, "prompt_digest": "legacy-digest",
+        "status": "ok", "duration_ms": 1, "at": call_at,
+    })
+    repo.append_case_step(
+        "legacy-case", 1, {"action": "model_error"}, False, model_call_id="legacy-call",
+    )
+
+    tasks, stats = export_tasks(repo, "h1", [CTX])
+
+    assert stats["tasks"] == 1
+    assert stats["digest_mismatch"] == 1 and stats["digest_match"] == 0
+    assert stats["unfit_briefs"] == 0
+    brief = tasks[0]["briefs"][str(CTX)]
+    assert "error" not in brief
+    assert len(brief["menu"]["options"]) <= 12
+    assert sum(
+        option["decision"]["action"] == "escalate"
+        for option in brief["menu"]["options"]
+    ) == 9
+
+
 def test_variant_mutation_changes_only_the_brief_it_targets():
     repo = _memory_repo()
     _run_investigation(repo)

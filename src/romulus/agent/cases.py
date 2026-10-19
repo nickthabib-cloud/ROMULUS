@@ -20,7 +20,8 @@ def seed_candidate_ids(steps: list[dict]) -> list[str]:
     for step in steps:
         decision = step.get("decision") or {}
         if step.get("n") == 0 and decision.get("action") == "seed":
-            return [str(item) for item in decision.get("seed_candidate_ids") or []]
+            active = decision.get("effective_seed_candidate_ids")
+            return [str(item) for item in active or decision.get("seed_candidate_ids") or []]
     return []
 
 

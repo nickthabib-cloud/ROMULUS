@@ -363,15 +363,26 @@ def test_model_outage_leaves_case_open_for_resume():
 def test_resume_repartitions_a_legacy_oversized_open_seed_case():
     repo = _repo(total=1, per_case=1, max_cases=4)
     for index in range(10):
-        _candidate(repo, f"c{index:02}", "video", 100 - index)
+        _candidate(
+            repo, f"c{index:02}", "video", 100 - index,
+            ip="203.0.113.99" if index == 9 else None,
+        )
     seed_ids = [f"c{index:02}" for index in range(10)]
     repo.create_case({
         "id": "legacy-case", "hunt_id": "h1", "seed_candidate_id": seed_ids[0],
-        "title": "legacy oversized case", "priority": 100,
-        "entities": [["host", "video", "host"]], "hypotheses": [], "step_budget": 1,
+        "title": "legacy oversized case", "priority": 999,
+        "entities": [["host", "video", "host"], ["ip", "203.0.113.99", "src"]],
+        "hypotheses": [], "step_budget": 1,
     })
     repo.append_case_step(
         "legacy-case", 0, {"action": "seed", "seed_candidate_ids": seed_ids}, True,
+    )
+    repo.append_case_step(
+        "legacy-case", 1, {"action": "pivot"}, True,
+        result_digest={
+            "status": "complete",
+            "entities": [{"kind": "domain", "value": "pivot.test", "role": "destination"}],
+        },
     )
 
     investigator = _investigator(
@@ -387,6 +398,12 @@ def test_resume_repartitions_a_legacy_oversized_open_seed_case():
         "seed_candidate_ids": seed_ids[:9],
         "previous_seed_count": 10,
     }
+    legacy_case = repo.case("legacy-case")
+    assert legacy_case["priority"] == 100
+    assert legacy_case["entities"] == [
+        {"kind": "host", "value": "video", "role": "host"},
+        {"kind": "domain", "value": "pivot.test", "role": "destination"},
+    ]
     assert sorted(len(group) for group in groups) == [1, 9]
     assert sorted(candidate_id for group in groups for candidate_id in group) == seed_ids
 
