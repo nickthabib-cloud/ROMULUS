@@ -1,0 +1,612 @@
+# ROMULUS research register: ATT&CK Enterprise v20.0, entries whose first tactic is initial-access.
+# Schema and workflow: docs/research/README.md. 22 entries (22 assessed, 0 stubs).
+# An entry with only id/name/tactics is a stub: walked and listed, not yet assessed.
+attack_version: enterprise-attack 20.0
+primary_tactic: initial-access
+entries:
+- id: T1078
+  name: Valid Accounts
+  tactics: [initial-access, persistence, privilege-escalation, stealth]
+  platforms: [Linux, Network Devices, Windows, macOS, Containers, IaaS, SaaS, Office Suite, Identity Provider]
+  telemetry:
+  - family: journal_sshd
+    fields: [user.name, source.ip, auth.method, event.outcome]
+  - family: journal_sudo
+    fields: [user.name, auth.target_user, event.outcome]
+  - family: auditd_acct
+    fields: [user.name, source.ip, audit.record_type, event.outcome]
+  - family: win_security
+    fields: [event.code, user.name, logon.type, source.ip]
+  - family: idp_signin
+    fields: [user.name, source.ip, event.outcome]
+  lab_observable:
+    status: 'yes'
+    reason: sshd and sudo journal records are normalized
+  rules: [host.ssh_login_external_source]
+  disposition:
+    status: covered
+    reason: host.ssh_login_external_source flags successful SSH from external sources (lead); behavioural misuse of valid
+      accounts needs baselines (BL-08)
+  priority: P1
+  detection_ideas:
+  - 'BL-08: first-seen source per account; login at hours outside the account''s baseline; interactive login by a service
+    account.'
+  - 'BL-07: success after failures (credential guessing that worked).'
+  - Same account authenticated from two sources too far apart in network terms within minutes (only with mission site context).
+  correlation:
+  - 'COR-10: login session -> commands -> network effects.'
+  - 'COR-26: account created then first used from a network source.'
+  pivots:
+  - All sessions of the account in the window and the commands run under each audit session
+  - Other accounts that authenticated from the same source
+- id: T1078.001
+  name: Default Accounts
+  tactics: [initial-access, persistence, privilege-escalation, stealth]
+  platforms: [Linux, Network Devices, Windows, macOS, Containers, IaaS, SaaS, Office Suite, Identity Provider]
+  telemetry:
+  - family: journal_sshd
+    fields: [user.name, source.ip, event.outcome]
+  - family: apache_access
+    fields: [url.original, source.ip, http.response.status_code]
+  - family: zoneminder
+    fields: [user.name, source.ip, event.outcome]
+  - family: netdev
+    fields: [user.name, source.ip, event.outcome]
+  lab_observable:
+    status: partial
+    reason: default-credential logins to SSH are visible; application logins (e.g. ZoneMinder admin) need the app log normalized
+  rules: []
+  disposition:
+    status: planned
+    reason: mission-supplied list of default and vendor account names, matched as typed user.name on successful auth
+  priority: P2
+  detection_ideas:
+  - Successful authentication with a vendor-default account name (root, admin, pi, ubnt, cisco...) from a non-management
+    source.
+  - Application default admin login success from a source that never used it before (app logs).
+  correlation: []
+  pivots: [Commands run after the default-account login]
+- id: T1078.002
+  name: Domain Accounts
+  tactics: [initial-access, persistence, privilege-escalation, stealth]
+  platforms: [Linux, Windows, macOS, Identity Provider]
+  telemetry:
+  - family: win_security
+    fields: [event.code, user.domain, logon.type, source.ip]
+  - family: zeek_kerberos
+    fields: [client, service, success]
+  - family: journal_sshd
+    fields: [user.name, source.ip]
+  lab_observable:
+    status: 'no'
+    reason: no Active Directory or domain-joined hosts in the lab
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: domain account misuse needs DC Security logs or Zeek Kerberos/NTLM
+  priority: P2
+  detection_ideas:
+  - Domain account authenticating to a host class it never touched in the baseline (peer-group rarity).
+  correlation: []
+  pivots:
+  - The account's Kerberos service tickets and logon hosts
+- id: T1078.003
+  name: Local Accounts
+  tactics: [initial-access, persistence, privilege-escalation, stealth]
+  platforms: [Linux, Network Devices, Windows, macOS, Containers, ESXi]
+  telemetry:
+  - family: journal_sshd
+    fields: [user.name, source.ip, auth.method, event.outcome]
+  - family: journal_sudo
+    fields: [user.name, auth.target_user]
+  - family: auditd_acct
+    fields: [user.name, audit.record_type, event.outcome]
+  lab_observable:
+    status: 'yes'
+    reason: local account logins via sshd and sudo are normalized
+  rules: [host.ssh_login_external_source]
+  disposition:
+    status: covered
+    reason: external-source SSH logins are covered as leads; local-account baselines are planned (BL-08)
+  priority: P1
+  detection_ideas:
+  - 'BL-08: direct root SSH login, or login by an account whose shell was recently changed or which was recently created.'
+  correlation: ['COR-26: account created/modified then used.']
+  pivots: [The account's session commands and sudo use]
+- id: T1078.004
+  name: Cloud Accounts
+  tactics: [initial-access, persistence, privilege-escalation, stealth]
+  platforms: [IaaS, SaaS, Office Suite, Identity Provider]
+  telemetry:
+  - family: idp_signin
+    fields: [user.name, source.ip, app, mfa.result, event.outcome]
+  - family: cloud_audit
+    fields: [user.identity, source.ip, event.action]
+  lab_observable:
+    status: 'no'
+    reason: no cloud or identity-provider logs in the lab
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: requires cloud control-plane and identity-provider sign-in logs
+  priority: P2
+  detection_ideas:
+  - Sign-in from a first-seen ASN/country for the account followed by privileged API calls.
+  correlation: []
+  pivots:
+  - The identity's API calls and token issuance after the sign-in
+- id: T1091
+  name: Replication Through Removable Media
+  tactics: [initial-access, lateral-movement]
+  platforms: [Windows]
+  telemetry:
+  - family: win_sysmon
+    fields: [event.code, file.path, process.executable]
+  - family: edr
+    fields: [device.type, file.path]
+  - family: journal_other
+    fields: [kernel.message]
+  lab_observable:
+    status: 'no'
+    reason: no removable-media telemetry and the technique targets Windows autorun behaviour
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: requires Windows device and file telemetry (Sysmon/EDR)
+  priority: P4
+  detection_ideas:
+  - Process launched from a removable-volume path (drive letter mapped to a removable device).
+  correlation: []
+  pivots:
+  - Other hosts where the same volume serial or file hash appeared
+- id: T1133
+  name: External Remote Services
+  tactics: [initial-access, persistence]
+  platforms: [Linux, Windows, macOS, Containers]
+  telemetry:
+  - family: journal_sshd
+    fields: [user.name, source.ip, auth.method, event.outcome]
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.bytes_toserver, flow.bytes_toclient]
+  - family: eve_ssh
+    fields: [ssh.client.software, ssh.client.hassh]
+  - family: vpn
+    fields: [user.name, source.ip, event.outcome]
+  - family: win_security
+    fields: [event.code, logon.type, source.ip]
+  lab_observable:
+    status: 'yes'
+    reason: sshd logins from external addresses (journal) and EVE flow/ssh at inetfw
+  rules: [host.ssh_login_external_source]
+  disposition:
+    status: covered
+    reason: host.ssh_login_external_source flags successful SSH from non-private addresses (lead); VPN/RDP/Citrix gateways
+      need their logs
+  priority: P1
+  detection_ideas:
+  - 'BL-08: first-seen external source per account, and first external login for an account that only ever logged in internally.'
+  - 'BL-07: success after a burst of failures from the same source or account.'
+  correlation:
+  - 'COR-05: auth success joined to the SSH session''s client software/HASSH.'
+  - 'COR-10: login session -> commands run under that audit session.'
+  pivots:
+  - Commands run in the session (auid/ses) after the login
+  - Other accounts that logged in from the same source
+- id: T1189
+  name: Drive-by Compromise
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS, Identity Provider]
+  telemetry:
+  - family: eve_http
+    fields: [http.hostname, url.original, http.content_type, user_agent.original]
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: eve_dns
+    fields: [dns.question.name]
+  - family: proxy
+    fields: [url.original, user.name, category]
+  - family: auditd_exec
+    fields: [process.executable, process.ppid, process.parent.executable]
+  - family: edr
+    fields: [process.parent.name, process.name]
+  lab_observable:
+    status: partial
+    reason: lab hosts are servers with little browsing; DNS/HTTP to exploit kits would be visible on the sensors, but browser-spawned
+      children need host telemetry from workstations
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: the decisive signal is a browser spawning a shell or writing an executable, which needs workstation process
+      telemetry (Sysmon/EDR or auditd on desktops)
+  priority: P3
+  detection_ideas:
+  - Browser process (kernel exe path) with a shell, interpreter or downloader child (cross-cutting process-lineage theme).
+  - First-seen domain visited, followed within seconds by an executable or script transfer (fileinfo magic) to the same
+    client.
+  correlation:
+  - 'COR-06: download flow followed by execution of the downloaded path.'
+  pivots:
+  - Referrer chain and domains contacted by the client in the minute before the download
+  - Child processes of the browser on the client
+- id: T1190
+  name: Exploit Public-Facing Application
+  tactics: [initial-access]
+  platforms: [Linux, Network Devices, Windows, macOS, Containers, IaaS]
+  telemetry:
+  - family: apache_access
+    fields: [source.ip, http.request.method, url.original, http.response.status_code, user_agent.original]
+  - family: apache_error
+    fields: [web.error_message]
+  - family: eve_alert
+    fields: [alert.signature, alert.category, source.ip, destination.ip]
+  - family: eve_http
+    fields: [url.original, http.request.method, http.response.status_code]
+  - family: auditd_exec
+    fields: [process.executable, process.user, process.ppid, process.argv]
+  - family: auditd_net
+    fields: [process.executable, process.user, destination.ip, destination.port]
+  - family: zoneminder
+    fields: [app.message, source.ip]
+  lab_observable:
+    status: 'yes'
+    reason: web server access/error logs, Suricata alerts on inbound exploits, and auditd process records on the web host
+      are all present
+  rules: [host.web_service_spawns_interpreter]
+  disposition:
+    status: covered
+    reason: host.web_service_spawns_interpreter detects the post-exploitation effect (web service account runs a shell/interpreter);
+      exploit requests themselves are leads via web.scan_burst and net.suricata_alert_stack; outbound callback from the
+      service account is planned (BL-01)
+  priority: P1
+  detection_ideas:
+  - 'BL-01: web-service account process initiates a connection to an external address.'
+  - 'BL-16: upload, then request to a new script, then web-service exec.'
+  - Inbound exploit-category alert to a server followed by any new child of the server process (COR-08).
+  correlation:
+  - 'COR-07: inbound request -> web-service child process.'
+  - 'COR-08: exploit alert -> service-account process on the target.'
+  - 'COR-02: service account with an external socket.'
+  pivots:
+  - All requests from the exploiting source, especially POSTs and 2xx responses
+  - Process tree under the web server for the window, and any outbound sockets from it
+  - Files created under the web root (auditd PATH CREATE)
+- id: T1195
+  name: Supply Chain Compromise
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: pkg_log
+    fields: [package.name, package.version, action]
+  - family: auditd_exec
+    fields: [process.executable, process.parent.executable, process.argv]
+  - family: auditd_net
+    fields: [process.executable, destination.ip, destination.port]
+  - family: eve_tls
+    fields: [tls.sni]
+  lab_observable:
+    status: partial
+    reason: package installs and their child processes appear in auditd; provenance of the software does not
+  rules: []
+  disposition:
+    status: planned
+    reason: 'compromised software is detectable only by its behaviour after install: package-manager scripts spawning network
+      tools or shells, new outbound destinations from long-standing services'
+  priority: P3
+  detection_ideas:
+  - Package manager (dpkg/apt/rpm/pip/npm) maintainer script spawning a downloader or opening an external socket (BL-01
+    lineage).
+  - 'BL-25: a long-standing service binary contacting a first-seen external destination after an update.'
+  correlation: ['COR-01: process connect joined to flagged flows.']
+  pivots:
+  - Package install events on the host and the processes they spawned
+  - Other hosts that installed the same package version
+- id: T1195.001
+  name: Compromise Software Dependencies and Development Tools
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: auditd_exec
+    fields: [process.executable, process.parent.executable, process.argv, process.cwd]
+  - family: auditd_net
+    fields: [process.executable, destination.ip]
+  - family: eve_dns
+    fields: [dns.question.name]
+  lab_observable:
+    status: partial
+    reason: build/install tools (pip, npm, cargo) and their children are visible in auditd on hosts that build software
+  rules: []
+  disposition:
+    status: planned
+    reason: detect dependency install hooks that spawn shells/downloaders or contact non-registry destinations
+  priority: P3
+  detection_ideas:
+  - pip/npm/gem install whose child is a shell running a downloader, or that connects to an address that is not the package
+    registry.
+  correlation: []
+  pivots:
+  - The project directory (process.cwd) and the dependency being installed
+- id: T1195.002
+  name: Compromise Software Supply Chain
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: auditd_exec
+    fields: [process.executable, process.parent.executable]
+  - family: auditd_net
+    fields: [process.executable, destination.ip, destination.port]
+  - family: eve_tls
+    fields: [tls.sni, tls.ja3]
+  lab_observable:
+    status: partial
+    reason: behaviour of updated software is visible; trust of the update is not
+  rules: []
+  disposition:
+    status: planned
+    reason: rely on behaviour change of trusted software (new children, new destinations) against a per-binary baseline
+  priority: P3
+  detection_ideas:
+  - Trusted service binary spawning a child it never spawned in the baseline.
+  - 'BL-25 per executable: first-seen external destination for an established binary.'
+  correlation: ['COR-01: process connect joined to flagged flows.']
+  pivots:
+  - Version/install time of the binary and all hosts running it
+- id: T1195.003
+  name: Compromise Hardware Supply Chain
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: netdev
+    fields: [device.firmware_version, boot events]
+  - family: journal_other
+    fields: [kernel.message]
+  lab_observable:
+    status: 'no'
+    reason: hardware/firmware provenance is not observable in log telemetry
+  rules: []
+  disposition:
+    status: not_observable_by_design
+    reason: tampered hardware below the OS does not produce distinguishable log records; only anomalous network behaviour
+      of the device can be observed (T1071, T1571)
+  priority: P4
+  detection_ideas:
+  - Network devices or appliances contacting external destinations outside their management baseline.
+  correlation: []
+  pivots: [The device's full external conversation history]
+- id: T1199
+  name: Trusted Relationship
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS, IaaS, SaaS, Office Suite, Identity Provider]
+  telemetry:
+  - family: journal_sshd
+    fields: [user.name, source.ip, event.outcome]
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port]
+  - family: vpn
+    fields: [user.name, source.ip]
+  - family: idp_signin
+    fields: [user.name, source.ip, app]
+  lab_observable:
+    status: partial
+    reason: logins and sessions from partner address ranges are visible if the ranges are known; the trust relationship
+      itself is mission context
+  rules: []
+  disposition:
+    status: planned
+    reason: needs a mission-supplied list of partner ranges/accounts; then detect partner sources reaching assets outside
+      their agreed scope
+  priority: P3
+  detection_ideas:
+  - Partner-range source authenticating to a host or service outside its agreed asset list (mission indicator set).
+  - Partner account used from a source outside the partner's ranges.
+  correlation: ['COR-10: session commands after a partner login.']
+  pivots:
+  - All hosts the partner source or account touched in the window
+- id: T1200
+  name: Hardware Additions
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: dhcp
+    fields: [client.mac, client.ip, hostname]
+  - family: eve_flow
+    fields: [source.ip]
+  - family: eve_dns
+    fields: [source.ip, dns.question.name]
+  - family: journal_other
+    fields: [kernel.message, journal.identifier]
+  - family: netdev
+    fields: [port security / 802.1X events]
+  lab_observable:
+    status: partial
+    reason: a never-before-seen internal source address is visible to the sensors; device attachment itself needs DHCP/NAC/kernel
+      logs that are not normalized
+  rules: []
+  disposition:
+    status: planned
+    reason: first-seen internal source detection is lab-feasible (BL-25 family); device-level proof needs DHCP or NAC telemetry
+  priority: P3
+  detection_ideas:
+  - Internal source address with no prior activity in the baseline window that starts scanning or authenticating.
+  - Kernel USB device-attach messages for HID or network-class devices on servers (journal kernel identifier, positive-only).
+  correlation: []
+  pivots:
+  - Everything the new address talked to, and its DHCP hostname/MAC if available
+- id: T1566
+  name: Phishing
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS, SaaS, Office Suite]
+  telemetry:
+  - family: email_gw
+    fields: [sender, recipient, attachment.sha256, url, verdict, spf, dkim, dmarc]
+  - family: eve_http
+    fields: [url.original, http.hostname]
+  - family: eve_fileinfo
+    fields: [file.name, file.magic]
+  - family: edr
+    fields: [process.parent.name, process.name]
+  lab_observable:
+    status: 'no'
+    reason: no mail infrastructure or email gateway logs in the lab
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: requires email gateway logs or mailbox audit; follow-on execution is covered under T1204
+  priority: P3
+  detection_ideas:
+  - Mail client or office process spawning a shell/interpreter (process lineage).
+  - 'Recipient clicks: proxy/HTTP request to a URL that appeared in a recently delivered message (email_gw join).'
+  correlation: []
+  pivots:
+  - Other recipients of the same sender/attachment hash and whether they clicked
+- id: T1566.001
+  name: Spearphishing Attachment
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: email_gw
+    fields: [attachment.sha256, attachment.name, sender, recipient]
+  - family: edr
+    fields: [process.parent.name, process.name, file.path]
+  - family: auditd_exec
+    fields: [process.parent.executable, process.executable]
+  lab_observable:
+    status: 'no'
+    reason: no mail telemetry
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: email gateway or mailbox telemetry required
+  priority: P3
+  detection_ideas:
+  - Attachment written to disk then executed by the same user within minutes (file create + exec join).
+  correlation: []
+  pivots: [Recipients of the same attachment hash]
+- id: T1566.002
+  name: Spearphishing Link
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS, SaaS, Office Suite, Identity Provider]
+  telemetry:
+  - family: email_gw
+    fields: [url, recipient]
+  - family: proxy
+    fields: [url.original, user.name]
+  - family: eve_http
+    fields: [url.original, http.hostname]
+  - family: eve_dns
+    fields: [dns.question.name]
+  lab_observable:
+    status: partial
+    reason: link clicks over HTTP/DNS are visible to the sensors, but the mail that carried them is not
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: the phishing link is only attributable with mail telemetry; the click alone is an ordinary web request
+  priority: P3
+  detection_ideas:
+  - Newly registered or first-seen domain requested by several internal clients within a short window (campaign shape).
+  correlation: []
+  pivots:
+  - Clients that resolved the same domain and what they downloaded
+- id: T1566.003
+  name: Spearphishing via Service
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: proxy
+    fields: [url.original, category]
+  - family: eve_tls
+    fields: [tls.sni]
+  - family: edr
+    fields: [process.name, file.path]
+  lab_observable:
+    status: 'no'
+    reason: messaging-service content is not visible
+  rules: []
+  disposition:
+    status: not_observable_by_design
+    reason: delivery happens inside third-party services; only the follow-on download/execution is observable (T1105, T1204)
+  priority: P4
+  detection_ideas:
+  - Executable downloaded from a messaging or social service domain followed by execution (COR-06).
+  correlation: ['COR-06: download flow followed by execution.']
+  pivots: [The downloading client's subsequent processes]
+- id: T1566.004
+  name: Spearphishing Voice
+  tactics: [initial-access]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: vpn
+    fields: [user.name, source.ip]
+  - family: idp_signin
+    fields: [user.name, mfa.result]
+  lab_observable:
+    status: 'no'
+    reason: voice channel is out of scope of all supported telemetry
+  rules: []
+  disposition:
+    status: not_observable_by_design
+    reason: the call itself is never in telemetry; consequences (remote-access tool installs, new sign-ins) are covered
+      under T1219 and T1078
+  priority: P4
+  detection_ideas:
+  - Remote-desktop tool first seen on a host shortly after a help-desk style password reset (identity logs plus T1219.002).
+  correlation: []
+  pivots:
+  - Remote-access tool sessions and new sign-ins for the affected user
+- id: T1659
+  name: Content Injection
+  tactics: [initial-access, command-and-control]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_http
+    fields: [source.ip, destination.ip, http.hostname, url.original, http.content_type, http.response.length]
+  - family: eve_tls
+    fields: [tls.sni, tls.issuer, tls.subject]
+  - family: arkime_spi
+    fields: [http.host, http.uri, http.body_md5, tls.cert.issuer]
+  - family: pcap
+    fields: [payload.bytes, http.request.uri]
+  - family: auditd_exec
+    fields: [process.executable, process.ppid, process.argv]
+  lab_observable:
+    status: partial
+    reason: cleartext HTTP responses are visible to EVE/Arkime; injected content inside TLS is not; host follow-on execution
+      is visible in auditd
+  rules: []
+  disposition:
+    status: deferred
+    reason: injection happens on an upstream path ROMULUS does not observe; the observable consequence is a download or
+      execution handled by T1105/T1204 rules
+  priority: P4
+  detection_ideas:
+  - Same URL returning different content hashes (Arkime http.body_md5) to different clients in the window, where the publisher
+    is expected to be static.
+  - Plain-HTTP software update or script fetch followed by execution of the fetched content (COR-06).
+  correlation:
+  - 'COR-06: download flow followed by execution of the downloaded path.'
+  pivots:
+  - Other clients that fetched the same URL and the body hashes they received
+- id: T1669
+  name: Wi-Fi Networks
+  tactics: [initial-access]
+  platforms: [Linux, Network Devices, Windows, macOS]
+  telemetry:
+  - family: netdev
+    fields: [wireless controller association/auth events]
+  - family: dhcp
+    fields: [client.mac, client.ip]
+  - family: eve_flow
+    fields: [source.ip, flow.start]
+  lab_observable:
+    status: 'no'
+    reason: no wireless infrastructure telemetry
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: requires wireless controller/WIDS logs; downstream activity of a new wireless client is generic first-seen-source
+      detection
+  priority: P4
+  detection_ideas:
+  - Wireless client association on an SSID from a MAC never seen before followed by internal scanning.
+  correlation: []
+  pivots: [The new client's DHCP binding and conversations]

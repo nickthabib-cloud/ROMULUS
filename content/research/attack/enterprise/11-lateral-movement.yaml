@@ -1,0 +1,496 @@
+# ROMULUS research register: ATT&CK Enterprise v20.0, entries whose first tactic is lateral-movement.
+# Schema and workflow: docs/research/README.md. 21 entries (21 assessed, 0 stubs).
+# An entry with only id/name/tactics is a stub: walked and listed, not yet assessed.
+attack_version: enterprise-attack 20.0
+primary_tactic: lateral-movement
+entries:
+- id: T1021
+  name: Remote Services
+  tactics: [lateral-movement]
+  platforms: [Linux, Windows, macOS, IaaS, SaaS, Identity Provider]
+  telemetry:
+  - family: journal_sshd
+    fields: [user.name, source.ip, source.port, event.outcome]
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.bytes_toserver, flow.bytes_toclient]
+  - family: eve_ssh
+    fields: [ssh.client.software, ssh.client.hassh]
+  - family: auditd_exec
+    fields: [process.executable, process.argv, process.user]
+  - family: zeek_conn
+    fields: [id.orig_h, id.resp_h, id.resp_p]
+  lab_observable:
+    status: 'yes'
+    reason: SSH logins (journal), SSH sessions (EVE flow/ssh) and ssh client execs (auditd) are present
+  rules: [host.ssh_login_external_source]
+  disposition:
+    status: covered
+    reason: external-source SSH logins are covered (lead); internal peer-to-peer remote services between hosts that do not
+      normally talk are planned (network allowed-pairs baseline)
+  priority: P1
+  detection_ideas:
+  - Internal remote-service sessions (22, 3389, 5900, 5985/5986, 445) between host pairs with no conversation in the baseline
+    window.
+  - One internal source authenticating to many internal hosts in a short window (fan-out).
+  correlation:
+  - 'COR-14: A ssh exec -> flow A->B:22 -> B sshd accepted from A.'
+  pivots:
+  - What the source did on each destination after login
+- id: T1021.001
+  name: Remote Desktop Protocol
+  tactics: [lateral-movement]
+  platforms: [Windows]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port]
+  - family: zeek_rdp
+    fields: [cookie, security_protocol, result]
+  - family: win_security
+    fields: [event.code, logon.type, source.ip]
+  lab_observable:
+    status: partial
+    reason: RDP flows (3389) would be visible at the sensors; no Windows hosts in the lab
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: Windows logon events (4624 type 10) or Zeek rdp.log for attribution; flow-level peer baseline is lab-feasible
+  priority: P2
+  detection_ideas:
+  - RDP between internal peers that do not normally talk; RDP from a server-class host.
+  correlation: []
+  pivots: [Logon sessions on the destination]
+- id: T1021.002
+  name: SMB/Windows Admin Shares
+  tactics: [lateral-movement]
+  platforms: [Windows]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port]
+  - family: zeek_smb
+    fields: [path, action]
+  - family: zeek_dce_rpc
+    fields: [endpoint, operation]
+  - family: win_security
+    fields: [event.code, share.name]
+  lab_observable:
+    status: partial
+    reason: SMB flows visible at sensors if crossing them; no Windows hosts
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: Zeek SMB/DCE-RPC or Windows 5140/5145 for admin-share writes and svcctl service creation
+  priority: P2
+  detection_ideas:
+  - ADMIN$/C$ write followed by svcctl CreateService from the same source (PsExec behaviour).
+  correlation: []
+  pivots: [Files written to the share and services created]
+- id: T1021.003
+  name: Distributed Component Object Model
+  tactics: [lateral-movement]
+  platforms: [Windows]
+  telemetry:
+  - family: zeek_dce_rpc
+    fields: [endpoint, operation]
+  - family: win_sysmon
+    fields: [process.parent.executable]
+  lab_observable:
+    status: 'no'
+    reason: no Windows/DCOM
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: Windows process or Zeek DCE-RPC telemetry
+  priority: P3
+  detection_ideas:
+  - Remote DCOM activation followed by mmc/explorer/excel spawning a shell on the destination.
+  correlation: []
+  pivots: [Process tree on the destination]
+- id: T1021.004
+  name: SSH
+  tactics: [lateral-movement]
+  platforms: [Linux, macOS, ESXi]
+  telemetry:
+  - family: journal_sshd
+    fields: [user.name, source.ip, source.port, auth.method, event.outcome]
+  - family: auditd_exec
+    fields: [process.executable, process.argv, process.user, process.auid]
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.bytes_toserver, flow.bytes_toclient, flow.start, flow.end]
+  - family: eve_ssh
+    fields: [ssh.client.software, ssh.client.hassh, ssh.server.hassh]
+  - family: arkime_spi
+    fields: [ssh.hassh, ssh.hassh_server, session.duration]
+  lab_observable:
+    status: 'yes'
+    reason: all three views of SSH exist in the lab
+  rules: [host.ssh_login_external_source]
+  disposition:
+    status: covered
+    reason: external-source SSH logins covered (lead); internal lateral SSH chains, first-seen pairs and key-based hops
+      are planned (BL-08, COR-14)
+  priority: P1
+  detection_ideas:
+  - 'BL-08: first-seen (source host, destination host, account) SSH triple.'
+  - 'COR-14: chain A->B->C within a window by the same operator account.'
+  - SSH login by a service or web account; SSH from a host that only ever received SSH.
+  correlation:
+  - 'COR-14: lateral SSH chain.'
+  - 'COR-05: auth success joined to network SSH metadata.'
+  - 'COR-10: login -> session commands.'
+  pivots:
+  - Commands run under the destination login's audit session
+  - Other destinations reached from the same source
+- id: T1021.005
+  name: VNC
+  tactics: [lateral-movement]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, network.app_proto]
+  - family: auditd_exec
+    fields: [process.executable, process.argv]
+  - family: auditd_net
+    fields: [process.executable, socket.local_port]
+  lab_observable:
+    status: partial
+    reason: VNC flows (590x) visible at sensors; VNC servers on lab hosts would appear in auditd
+  rules: []
+  disposition:
+    status: planned
+    reason: VNC sessions between unusual peers and VNC servers started outside the baseline (x11vnc/vncserver execs, listeners
+      on 590x)
+  priority: P3
+  detection_ideas:
+  - New listener on 5900-5910 (auditd bind) or x11vnc/Xvnc exec on a server.
+  - app_proto vnc (or RFB banner) on a non-standard port (BL-12).
+  correlation: ['COR-18: new listener joined to inbound flows.']
+  pivots: [Who connected to the VNC listener]
+- id: T1021.006
+  name: Windows Remote Management
+  tactics: [lateral-movement]
+  platforms: [Windows]
+  telemetry:
+  - family: eve_flow
+    fields: [destination.port]
+  - family: zeek_http
+    fields: [uri, user_agent]
+  - family: win_security
+    fields: [event.code]
+  lab_observable:
+    status: partial
+    reason: WinRM flows (5985/5986) visible if present; no Windows hosts
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: Windows/WinRM logs; evil-winrm from Linux hosts is a positive-only tool lead
+  priority: P3
+  detection_ideas:
+  - WinRM sessions from a Linux host (exe evil-winrm or ruby) to Windows peers.
+  correlation: []
+  pivots:
+  - Processes spawned by wsmprovhost on the destination
+- id: T1021.007
+  name: Cloud Services
+  tactics: [lateral-movement]
+  platforms: [IaaS, SaaS, Office Suite, Identity Provider]
+  telemetry:
+  - family: idp_signin
+    fields: [user.name, app, source.ip]
+  - family: cloud_audit
+    fields: [event.action]
+  lab_observable:
+    status: 'no'
+    reason: no cloud
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: cloud and identity logs
+  priority: P3
+  detection_ideas:
+  - Federated/SSO sign-in to cloud services from an on-prem host not used for administration.
+  correlation: []
+  pivots: [Cloud API calls after the sign-in]
+- id: T1021.008
+  name: Direct Cloud VM Connections
+  tactics: [lateral-movement]
+  platforms: [IaaS]
+  telemetry:
+  - family: cloud_audit
+    fields: [event.action, user.identity]
+  lab_observable:
+    status: 'no'
+    reason: no cloud
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: cloud audit logs (serial console, SSM, Instance Connect)
+  priority: P3
+  detection_ideas:
+  - Serial console or SSM session start by an identity that does not normally administer the VM.
+  correlation: []
+  pivots: [Commands in the session]
+- id: T1080
+  name: Taint Shared Content
+  tactics: [lateral-movement]
+  platforms: [Linux, Windows, macOS, SaaS, Office Suite]
+  telemetry:
+  - family: auditd_path
+    fields: [file.path, file.nametype, process.executable]
+  - family: zeek_smb
+    fields: [path, action]
+  lab_observable:
+    status: partial
+    reason: writes to shared directories (NFS exports, web roots served to others) are visible via PATH where watched
+  rules: []
+  disposition:
+    status: planned
+    reason: executable or script written into a shared/exported path by an account that does not normally publish there
+  priority: P3
+  detection_ideas:
+  - CREATE of executables/scripts in NFS-exported directories or shared web download paths by non-deployment processes.
+  correlation: []
+  pivots: [Other hosts that executed files from the share]
+- id: T1210
+  name: Exploitation of Remote Services
+  tactics: [lateral-movement]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: eve_alert
+    fields: [alert.signature, alert.category, source.ip, destination.ip]
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port]
+  - family: auditd_exec
+    fields: [process.executable, process.user, process.parent.executable]
+  lab_observable:
+    status: 'yes'
+    reason: IDS exploit alerts between internal hosts and service-account children on the target are visible
+  rules: [net.suricata_alert_stack]
+  disposition:
+    status: planned
+    reason: alerts stack as leads; COR-08 joins an internal exploit alert to a new child of the targeted service
+  priority: P1
+  detection_ideas:
+  - 'COR-08: internal-source exploit alert followed by a shell/interpreter child of the service listening on the destination
+    port.'
+  - 'BL-02: service process that accepted a connection then spawned a shell.'
+  correlation: [COR-08]
+  pivots:
+  - The source host's own process activity (was it compromised first?)
+- id: T1534
+  name: Internal Spearphishing
+  tactics: [lateral-movement]
+  platforms: [Linux, Windows, macOS, SaaS, Office Suite]
+  telemetry:
+  - family: email_gw
+    fields: [sender, recipient, attachment.sha256, url]
+  lab_observable:
+    status: 'no'
+    reason: no mail
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: internal mail logs
+  priority: P4
+  detection_ideas:
+  - Internal sender sending links/attachments to many internal recipients for the first time.
+  correlation: []
+  pivots: [Recipients who opened them]
+- id: T1550
+  name: Use Alternate Authentication Material
+  tactics: [lateral-movement]
+  platforms: [Linux, Windows, IaaS, SaaS, Office Suite, Identity Provider]
+  telemetry:
+  - family: win_security
+    fields: [event.code, logon.type]
+  - family: idp_signin
+    fields: [token.type]
+  - family: journal_sshd
+    fields: [auth.method]
+  lab_observable:
+    status: partial
+    reason: Linux analogues (forwarded agents, reused keys) are in T1563.001 and T1552.004
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: Windows and identity telemetry for the main sub-techniques
+  priority: P3
+  detection_ideas: [See sub-techniques.]
+  correlation: []
+  pivots: [Sessions created with the alternate material]
+- id: T1550.001
+  name: Application Access Token
+  tactics: [lateral-movement]
+  platforms: [IaaS, SaaS, Office Suite, Identity Provider]
+  telemetry:
+  - family: idp_signin
+    fields: [token.type, app, source.ip]
+  - family: cloud_audit
+    fields: [user.identity, source.ip]
+  lab_observable:
+    status: 'no'
+    reason: no cloud
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: identity and cloud logs
+  priority: P3
+  detection_ideas:
+  - Application token used from a source never seen for that app.
+  correlation: []
+  pivots: [API calls made with the token]
+- id: T1550.002
+  name: Pass the Hash
+  tactics: [lateral-movement]
+  platforms: [Windows]
+  telemetry:
+  - family: win_security
+    fields: [event.code, logon.type, auth.package]
+  - family: zeek_ntlm
+    fields: [username, hostname, success]
+  lab_observable:
+    status: 'no'
+    reason: no Windows
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: Windows 4624/4776 or Zeek NTLM
+  priority: P2
+  detection_ideas:
+  - NTLM network logons from a workstation to many hosts with the same account (Zeek ntlm fan-out).
+  correlation: []
+  pivots: [Hosts reached and processes started]
+- id: T1550.003
+  name: Pass the Ticket
+  tactics: [lateral-movement]
+  platforms: [Windows]
+  telemetry:
+  - family: zeek_kerberos
+    fields: [client, service, cipher]
+  - family: win_security
+    fields: [event.code]
+  lab_observable:
+    status: 'no'
+    reason: no Kerberos
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: DC logs or Zeek Kerberos
+  priority: P2
+  detection_ideas:
+  - TGS requests without a preceding AS request from the same host for that principal.
+  correlation: []
+  pivots: [Services accessed]
+- id: T1550.004
+  name: Web Session Cookie
+  tactics: [lateral-movement]
+  platforms: [IaaS, SaaS, Office Suite, Identity Provider]
+  telemetry:
+  - family: idp_signin
+    fields: [session.id, source.ip, user_agent]
+  lab_observable:
+    status: 'no'
+    reason: no app session logs
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: application/identity session logs
+  priority: P3
+  detection_ideas:
+  - Session cookie reused from a new ASN/user-agent pair without re-authentication.
+  correlation: []
+  pivots: [Actions under the session]
+- id: T1563
+  name: Remote Service Session Hijacking
+  tactics: [lateral-movement]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: auditd_exec
+    fields: [process.executable, process.argv, process.auid]
+  - family: auditd_path
+    fields: [file.path]
+  lab_observable:
+    status: partial
+    reason: see T1563.001
+  rules: []
+  disposition:
+    status: planned
+    reason: see T1563.001
+  priority: P3
+  detection_ideas: [See T1563.001.]
+  correlation: []
+  pivots: [Sessions created via the hijack]
+- id: T1563.001
+  name: SSH Hijacking
+  tactics: [lateral-movement]
+  platforms: [Linux, macOS]
+  telemetry:
+  - family: auditd_exec
+    fields: [process.executable, process.argv, process.auid, process.uid]
+  - family: auditd_path
+    fields: [file.path, process.executable]
+  - family: journal_sshd
+    fields: [user.name, source.ip, auth.method]
+  lab_observable:
+    status: partial
+    reason: SSH_AUTH_SOCK is an environment variable (invisible); access to /tmp/ssh-*/agent.* sockets is visible only with
+      PATH/connect(AF_UNIX) audit
+  rules: []
+  disposition:
+    status: planned
+    reason: root or another uid connecting to a user's ssh-agent socket, then outbound ssh using that identity
+  priority: P3
+  detection_ideas:
+  - connect(AF_UNIX) to /tmp/ssh-*/agent.* by a uid different from the socket owner, followed by an ssh client exec (needs
+    syscall audit).
+  - 'ControlMaster socket reuse: ssh -S <socket> by a different uid (positive-only argv).'
+  correlation: [COR-14]
+  pivots: [Destinations reached with the hijacked agent]
+- id: T1563.002
+  name: RDP Hijacking
+  tactics: [lateral-movement]
+  platforms: [Windows]
+  telemetry:
+  - family: win_security
+    fields: [event.code]
+  - family: win_other
+    fields: [terminalservices.event]
+  lab_observable:
+    status: 'no'
+    reason: no Windows
+  rules: []
+  disposition:
+    status: needs_telemetry
+    reason: TerminalServices logs (tscon from SYSTEM)
+  priority: P3
+  detection_ideas:
+  - tscon.exe executed as SYSTEM to attach another user's session.
+  correlation: []
+  pivots: [Actions in the hijacked session]
+- id: T1570
+  name: Lateral Tool Transfer
+  tactics: [lateral-movement]
+  platforms: [Linux, Windows, macOS]
+  telemetry:
+  - family: auditd_exec
+    fields: [process.executable, process.argv, process.user]
+  - family: auditd_path
+    fields: [file.path, file.nametype, process.executable]
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.bytes_toserver]
+  - family: eve_fileinfo
+    fields: [file.name, file.size, file.magic]
+  - family: zeek_files
+    fields: [mime_type, filename]
+  lab_observable:
+    status: 'yes'
+    reason: scp/rsync/curl between internal hosts visible in auditd and EVE (when crossing sensors)
+  rules: []
+  disposition:
+    status: planned
+    reason: file received over SSH/HTTP/SMB from an internal peer then executed on the destination (BL-22 internal variant)
+  priority: P2
+  detection_ideas:
+  - scp/sftp server (sshd child) creating an executable file (PATH CREATE) that is executed within minutes on the destination.
+  - Internal HTTP transfer of an ELF/script (fileinfo magic) between peers that do not normally exchange files.
+  correlation: [COR-06 (internal source variant)., COR-14]
+  pivots: [The source host's process that sent the file]

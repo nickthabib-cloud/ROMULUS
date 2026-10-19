@@ -1,0 +1,286 @@
+# ROMULUS research register: ATT&CK Enterprise v20.0, entries whose first tactic is reconnaissance.
+# Schema and workflow: docs/research/README.md. 46 entries (6 assessed, 40 stubs).
+# An entry with only id/name/tactics is a stub: walked and listed, not yet assessed.
+attack_version: enterprise-attack 20.0
+primary_tactic: reconnaissance
+entries:
+- id: T1589
+  name: Gather Victim Identity Information
+  tactics: [reconnaissance]
+- id: T1589.001
+  name: Credentials
+  tactics: [reconnaissance]
+- id: T1589.002
+  name: Email Addresses
+  tactics: [reconnaissance]
+- id: T1589.003
+  name: Employee Names
+  tactics: [reconnaissance]
+- id: T1590
+  name: Gather Victim Network Information
+  tactics: [reconnaissance]
+  platforms: [PRE]
+  telemetry:
+  - family: eve_dns
+    fields: [source.ip, dns.question.name, dns.question.type, dns.response_code]
+  - family: dns_server
+    fields: [client.ip, dns.question.name, dns.question.type]
+  lab_observable:
+    status: partial
+    reason: only the DNS sub-technique leaves traces on the defended network (queries to its resolvers)
+  rules: []
+  disposition:
+    status: planned
+    reason: 'parent: only .002 is observable; other sub-techniques are passive collection off-network (stubs)'
+  priority: P4
+  detection_ideas: [See T1590.002.]
+  correlation: []
+  pivots:
+  - Queries from the same source against the organisation's zones
+- id: T1590.001
+  name: Domain Properties
+  tactics: [reconnaissance]
+- id: T1590.002
+  name: DNS
+  tactics: [reconnaissance]
+  platforms: [PRE]
+  telemetry:
+  - family: eve_dns
+    fields: [source.ip, dns.question.name, dns.question.type, dns.response_code]
+  - family: dns_server
+    fields: [client.ip, dns.question.name, dns.question.type, dns.response_code]
+  - family: zeek_dns
+    fields: [query, qtype_name, rcode_name]
+  lab_observable:
+    status: 'yes'
+    reason: corpdns sensor sees queries to the lab resolver
+  rules: [net.dns_subdomain_enumeration]
+  disposition:
+    status: covered
+    reason: net.dns_subdomain_enumeration finds many distinct subdomains of one domain from one source; zone-transfer requests
+      and PTR sweeps are not covered (BL-11)
+  priority: P2
+  detection_ideas:
+  - 'BL-11: AXFR/IXFR requests from sources that are not configured secondaries.'
+  - 'BL-11: PTR sweep: one source requesting reverse names across a contiguous address block.'
+  correlation: []
+  pivots:
+  - Whether the enumerating source later connected to any resolved internal name
+- id: T1590.003
+  name: Network Trust Dependencies
+  tactics: [reconnaissance]
+- id: T1590.004
+  name: Network Topology
+  tactics: [reconnaissance]
+- id: T1590.005
+  name: IP Addresses
+  tactics: [reconnaissance]
+- id: T1590.006
+  name: Network Security Appliances
+  tactics: [reconnaissance]
+- id: T1591
+  name: Gather Victim Org Information
+  tactics: [reconnaissance]
+- id: T1591.001
+  name: Determine Physical Locations
+  tactics: [reconnaissance]
+- id: T1591.002
+  name: Business Relationships
+  tactics: [reconnaissance]
+- id: T1591.003
+  name: Identify Business Tempo
+  tactics: [reconnaissance]
+- id: T1591.004
+  name: Identify Roles
+  tactics: [reconnaissance]
+- id: T1592
+  name: Gather Victim Host Information
+  tactics: [reconnaissance]
+- id: T1592.001
+  name: Hardware
+  tactics: [reconnaissance]
+- id: T1592.002
+  name: Software
+  tactics: [reconnaissance]
+- id: T1592.003
+  name: Firmware
+  tactics: [reconnaissance]
+- id: T1592.004
+  name: Client Configurations
+  tactics: [reconnaissance]
+- id: T1593
+  name: Search Open Websites/Domains
+  tactics: [reconnaissance]
+- id: T1593.001
+  name: Social Media
+  tactics: [reconnaissance]
+- id: T1593.002
+  name: Search Engines
+  tactics: [reconnaissance]
+- id: T1593.003
+  name: Code Repositories
+  tactics: [reconnaissance]
+- id: T1594
+  name: Search Victim-Owned Websites
+  tactics: [reconnaissance]
+- id: T1595
+  name: Active Scanning
+  tactics: [reconnaissance]
+  platforms: [PRE]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.state, flow.pkts_toserver, flow.pkts_toclient]
+  - family: apache_access
+    fields: [source.ip, url.original, http.response.status_code, user_agent.original]
+  - family: arkime_spi
+    fields: [source.ip, destination.ip, destination.port, network.packets_src, network.packets_dst]
+  - family: zeek_conn
+    fields: [conn_state, history, id.orig_h, id.resp_h, id.resp_p]
+  lab_observable:
+    status: 'yes'
+    reason: inetfw EVE flow sees inbound connection attempts from the internet; apache access logs see web probing
+  rules: [net.port_scan, web.scan_burst]
+  disposition:
+    status: covered
+    reason: parent covered through its sub-techniques; see .001-.003 for the gaps
+  priority: P2
+  detection_ideas:
+  - 'Group inbound attempts by external source across the hunt window: distinct destination hosts and ports, failure ratio
+    from flow.state, with the source''s later successful sessions as the escalation hook.'
+  correlation:
+  - 'COR-08: an external scanner that later appears as the source of an exploit alert or an accepted login is a stage link
+    (hypothesis).'
+  pivots:
+  - All later successful sessions and logins from the scanning source
+  - Whether any scanned service later spawned unusual children (host)
+- id: T1595.001
+  name: Scanning IP Blocks
+  tactics: [reconnaissance]
+  platforms: [PRE]
+  telemetry:
+  - family: eve_flow
+    fields: [source.ip, destination.ip, destination.port, flow.state, flow.pkts_toserver]
+  - family: arkime_spi
+    fields: [source.ip, destination.ip, destination.port, network.packets_src]
+  - family: zeek_conn
+    fields: [conn_state, history, id.resp_p]
+  - family: firewall
+    fields: [action, source.ip, destination.ip, destination.port]
+  lab_observable:
+    status: 'yes'
+    reason: EVE flow carries 5-tuple and state for traffic crossing inetfw
+  rules: [net.port_scan]
+  disposition:
+    status: covered
+    reason: net.port_scan finds one source contacting many ports on one destination (vertical); horizontal sweeps across
+      many hosts are not covered (BL-09)
+  priority: P2
+  detection_ideas:
+  - 'BL-09: horizontal sweep: one source, one port, many destination addresses in a short window, with denominators and
+    failure ratio.'
+  - 'Scan-to-success transition: the first completed handshake with payload after a sweep from the same source.'
+  correlation:
+  - COR-13 when the scanning source is an internal host with host telemetry.
+  pivots:
+  - Sessions from the source that completed with application payload
+  - Other sources sharing the same port set and timing (distributed scan)
+- id: T1595.002
+  name: Vulnerability Scanning
+  tactics: [reconnaissance]
+  platforms: [PRE]
+  telemetry:
+  - family: apache_access
+    fields: [source.ip, url.original, http.response.status_code, user_agent.original, http.request.method]
+  - family: eve_http
+    fields: [source.ip, http.hostname, url.original, user_agent.original, http.response.status_code]
+  - family: eve_alert
+    fields: [alert.signature, alert.category, source.ip]
+  lab_observable:
+    status: 'yes'
+    reason: apache access logs and EVE http in the lab; Suricata scanner signatures fire on EVE alert
+  rules: [web.scan_burst]
+  disposition:
+    status: covered
+    reason: web.scan_burst finds high-volume error-heavy request bursts per source; low-and-slow scanning stays a gap
+  priority: P2
+  detection_ideas:
+  - Request burst followed by a 2xx on a URI never requested by other sources (scanner hit, then targeted request).
+  - Rare URI paths per web server stacked against the server's own baseline (known-vulnerable paths as positive-only leads).
+  correlation:
+  - 'COR-07: a scanning source whose later request precedes a web-service child process on the target host.'
+  pivots:
+  - 2xx responses to the scanning source and the URIs involved
+  - Web-service child processes on the target within minutes of those requests
+- id: T1595.003
+  name: Wordlist Scanning
+  tactics: [reconnaissance]
+  platforms: [PRE]
+  telemetry:
+  - family: apache_access
+    fields: [source.ip, url.original, http.response.status_code]
+  - family: eve_http
+    fields: [source.ip, url.original, http.response.status_code]
+  - family: eve_dns
+    fields: [source.ip, dns.question.name, dns.response_code]
+  lab_observable:
+    status: 'yes'
+    reason: apache access and EVE http/dns in the lab
+  rules: [web.scan_burst]
+  disposition:
+    status: covered
+    reason: web.scan_burst covers content-discovery bursts (many distinct paths, mostly 404); DNS wordlist brute force is
+      covered by net.dns_subdomain_enumeration under T1590.002
+  priority: P3
+  detection_ideas:
+  - Distinct-path count per source with 404 ratio, separated from crawler user agents only as context (UA is self-reported).
+  correlation: []
+  pivots:
+  - Paths that returned 200/301/401 to the source during the burst
+- id: T1596
+  name: Search Open Technical Databases
+  tactics: [reconnaissance]
+- id: T1596.001
+  name: DNS/Passive DNS
+  tactics: [reconnaissance]
+- id: T1596.002
+  name: WHOIS
+  tactics: [reconnaissance]
+- id: T1596.003
+  name: Digital Certificates
+  tactics: [reconnaissance]
+- id: T1596.004
+  name: CDNs
+  tactics: [reconnaissance]
+- id: T1596.005
+  name: Scan Databases
+  tactics: [reconnaissance]
+- id: T1597
+  name: Search Closed Sources
+  tactics: [reconnaissance]
+- id: T1597.001
+  name: Threat Intel Vendors
+  tactics: [reconnaissance]
+- id: T1597.002
+  name: Purchase Technical Data
+  tactics: [reconnaissance]
+- id: T1598
+  name: Phishing for Information
+  tactics: [reconnaissance]
+- id: T1598.001
+  name: Spearphishing Service
+  tactics: [reconnaissance]
+- id: T1598.002
+  name: Spearphishing Attachment
+  tactics: [reconnaissance]
+- id: T1598.003
+  name: Spearphishing Link
+  tactics: [reconnaissance]
+- id: T1598.004
+  name: Spearphishing Voice
+  tactics: [reconnaissance]
+- id: T1681
+  name: Search Threat Vendor Data
+  tactics: [reconnaissance]
+- id: T1682
+  name: Query Public AI Services
+  tactics: [reconnaissance]
