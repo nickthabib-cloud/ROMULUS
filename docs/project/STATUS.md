@@ -2,79 +2,55 @@
 
 ## Resume here
 
-_Last updated: 2026-10-19 by Claude (lead), M2 started: protocol and e_a gold v1 done._
+_Last updated: 2026-10-19 23:10 EDT by Claude (lead)._
 
-- **M1 gate: concluded with owner decision "option B" (2026-10-19).** Seven gate rounds on the shell/argv path showed one structural cause: every host rule assured its *negative* by interpreting text (argv[0], argv operands, script parses), and an adversarial reviewer can always find another form. Option B makes negatives honest by construction:
-  - All 10 host rules and `net.tool_user_agent_http` are positive-only (`assures_negative = False`): their findings, lanes and lab results are unchanged; coverage reads "not assessable by design" with a per-rule reason, never "complete". Network rules (typed fields) keep real negatives.
-  - Negative assurance for host behaviour moves to M3: kernel-recorded auditd PATH (item 0 = the file actually executed, incl. `#!` scripts), `nametype=CREATE` writes, CWD, and watch keys. `EXEC_COMPANIONS` currently omits PATH.
-  - Option 2 before it (2026-10-18) made script-text rules positive-only; option B extends the same principle to argv.
-  - **Merged 2026-10-19:** `m1/thin-slice` fast-forwarded to `codex/model-investigator` at `a76f155` after the final scoped check ("can any rule claim a negative it cannot prove?"). Its three Blocking findings (legacy stored cells rendering complete, DNS answer records counted as evaluated, self-reported user agent assuring a negative) and the malformed-EVE crash were fixed in `a76f155` and verified with the reviewer's own reproduction probes; no Blocking item is open. **M1 accepted 2026-10-19** after the owner demo (report walkthrough of `h20261019-093029-32dfef`, owner explored the web UI). Carried into M2: uv lockfile (generate on the VM); cadence check should tolerate missed runs (the 8 TODO.md cron runs skip two 15-minute slots, so no 'regular cadence' note); lead volume (80 leads incl. benign boot-time activity) to be measured by M2 evaluation; the investigator has not yet added findings on the lab (M2 model bakeoff).
-- **Lab baseline (model-off, SL700 e_a 10:00–17:30 UTC):** `completed_within_scope`, 1,791,438 records, 296,500 events, 0 normalization errors, 0 broken citations, 7 urgent / 10 high / 80 lead / 504 context. The ZoneMinder exploit payload is a lead because its injected commands share a shell line with unmodelled `$(...)`; its spawned children are urgent.
-- **Follow-ups (not blocking M1):**
-  - M3 kernel-record rules: exec-from-temp via PATH item 0; authorized_keys writes and /etc/shadow reads via PATH/watch records; restore the exploit payload to high via process-tree evidence (its shell has child execs, proving the line ran).
-  - Gate leftovers: interpreter location via PATH when no exe (I1); `ncat --lua-exec`; `busybox awk -f`; exec_from_temp_dir wording for failed execs (SYSCALL.exe is the caller); `script_from_temp_dir` should cite `process.executable` over argv[0] (I1 of last check); non-absolute/`(null)` exe values should be unevaluable (I2 of last check).
-  - Earlier gate Important items still open: per-target source failure retries (I5), typed events/raw copies shared across hunts (I7), Markdown newlines and CLI ANSI escapes (I8/I9), context items absent from the manifest (I10), index-name substring scoping (I12), naive timestamps (I13), ingestion watermark (I14), `ignore_above` (I15), sshd-session journal identifier (gate N4), investigator I1–I7.
-  - Model quality (M2 bakeoff): ~33% invalid model outputs; agent has contributed no new findings on the lab yet.
-- **Process notes:** Claude does not edit the shell parser or the investigator (an assistant-side safety check stopped that work); those go to Codex via `Claude-Codex.md` (replace Claude's last message; date+time headers; execute-only rounds).
-
-- **Owner direction, 2026-10-19: detection breadth is a primary goal.** The tool must find any malicious activity, anywhere. The catalog comes from systematic research:
-  - a full ATT&CK Enterprise + ICS technique walk;
-  - an offensive and dual-use tool catalog (behavior first, names as leads);
-  - living-off-the-land coverage based on context and rarity;
-  - cross-cutting themes;
-  - the public detection corpora;
-  - every telemetry family. The spec's example event IDs, protocols and playbook classes are samples, not limits. Recorded in:
-  - spec intro and §7 *Detection breadth*;
-  - §15 breadth datasets and metrics;
-  - §17 milestones: research starts by M3 and may begin during M2; M4 is the bulk; standing work continues after M6;
-  - MILESTONES.md, CLAUDE.md, and the `detection-engineer` brief.
-- **Owner request, 2026-10-19: a detection catalog page in the web UI.** It shows everything being searched (ATT&CK, tools, LOTL, themes, telemetry), applicability to the current sources, per-rule performance and gaps. Analysts add to the catalog in three tiers:
-  - indicator lists;
-  - detection requests with "flag more like this";
-  - a structured local-rule builder (never DSL), promoted by a `lead`.
-
-  The design is in spec §7 *Detection catalog page*. The page and tiers 1–2 are in M4; tier 3 is in M6.
-- **Current milestone:** M2 (evaluation harness and model bakeoff), **in progress** on branch `m2/evaluation` (from `main` at `8296a27`, 2026-10-19). M1 is accepted and merged into `main` (2026-10-19). Order of work: the `eval-custodian` gold opportunity inventory for SL700 e_a (ground truth on the VM at `/home/user/romulus-eval/sl700_e_a/`), then the scoring scripts, the simple-baseline runner and the model bakeoff (spec §12, §15; `docs/project/MILESTONES.md` → M2). Include the M1 carry-overs listed above.
-- **State:**
-  - Sweep → decisions → coverage ledger → report manifest (immutable revisions, citation integrity) → technical Markdown/JSON → web UI (login, live stream, finding detail with highlighted raw evidence, triage, reports).
-  - The 455-test local suite includes acceptance scenarios 13–17, hostile input, positive-only shell coverage, argv-layout and line-safe partial-prefix regressions, budget/fairness, owner-fenced lease/resume and pivot persistence, crash replay, direct-only pivots, and investigation reporting.
-  - Lab hunt `h20261018-181953-decca8` (SL700 e_a, 10:00–17:30 UTC): `completed_within_scope`, 1,791,438 records evaluated, 0 parse errors, 7 urgent / 11 high / 79 leads / 504 context, 0 broken citations.
-  - Fix-round lab hunt `h20261018-211924-b1edf9`: `completed_within_scope` / `reportable_findings`; the complete sweep evaluated 1,791,438 records and 296,500 typed events with 0 errors. The model made 52 calls, executed 2 complete pivots, and had 4 duplicate pivot proposals blocked before source execution. The attacker-IP `ids_alerts` pivot returned 969/969 alert records with complete coverage and no cap. All 97 seeds were accounted for; 43 remained unworked. Report revision 1 contained 97 findings/leads and 0 broken citations.
-  - Gate-fix model-off hunt `h20261018-224208-b2cc27`: `completed_within_scope` / `reportable_findings`; 7 urgent, 11 high, 79 leads, 504 context; 0 errors; agent disabled with all 97 seeds unworked; report r1 had 0 broken citations.
-  - Gate-fix agent hunt `h20261018-224406-923663`: `completed_within_scope` / `reportable_findings`; the investigator ended `budget_exhausted` after 54 model calls, 3 pivots (1 partial), and 9 rejected pivot proposals. Eight cases became `fallback_parked` with analyst flags, four cases exhausted budgets, no seed concluded, 88 seeds were assigned-but-unfinished, 9 were unassigned, and all 97 remained explicitly unworked. Report r1 had 0 broken citations.
-  - Gate re-run model-off hunt `h20261018-232714-ad664a`: `completed_within_scope` / `reportable_findings`; 7 urgent, 11 high, 79 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations.
-  - Shell allow-list model-off hunt `h20261019-001401-d6328f`: `completed_within_scope` / `reportable_findings`; 7 urgent, 10 high, 80 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 normalization errors; report r1 had 97 findings/leads and 0 broken citations. Both shell-script negative claims are unresolved with 17 `evaluated_partial` partitions; the TODO.md and README.txt.1 downloader→stdin-shell urgent findings remain.
-  - Final parser model-off hunt `h20261019-005148-03348c`: `completed_within_scope` / `reportable_findings`; 7 urgent, 11 high, 79 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations. Both shell-script rules show `positive_only=17` and “not assessable by design.” The recovered ZoneMinder high finding cites three retained raw records and states that its indicators use the clean modelled prefix only.
-  - Final gate model-off hunt `h20261019-012238-c13596`: `completed_within_scope` / `reportable_findings`; 7 urgent, 10 high, 80 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations. Both script-text rules show `positive_only_partial=17` with explicit per-rule assurance wording. The one-line ZoneMinder payload is now a rarity lead because no indicator precedes the parser cut on a fully terminated earlier line.
-  - Temp-dir operand gate model-off hunt `h20261019-014722-06695c`: `completed_within_scope` / `reportable_findings`; 7 urgent, 10 high, 80 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations.
-  - Executable/operand split model-off hunt `h20261019-020720-4448fd`: `completed_within_scope` / `reportable_findings`; 7 urgent, 10 high, 80 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations. Eighteen interpreter-operand findings moved to the positive-only script rule; one kernel-recorded temp executable stayed under the negative-assuring executable rule.
-  - Web UI: `http://192.168.36.128:8443` (plain HTTP lab exception); restart with `scripts/web-restart.sh`.
-- **Model investigator:**
-  - **Implemented, locally tested, and integration tested.** The explicit controller uses SQLite state, clustered cases, breadth-first scheduling, typed tools, strict validation, one retry plus deterministic fallback, cumulative budgets, Ollama truncation checks, and durable model/case/pivot records.
-  - `romulus hunt resume <hunt-id>` performs agent-only recovery under an active/stale lease policy and never reruns the sweep. New hunts retain a structured sweep summary.
-  - Pivot subsets run direct playbooks only through the hunt-layer executor. Aggregate playbooks remain full-window only. Pivot publications use the sweep's shared deterministic policy and set `source_case_id` for genuinely new candidates.
-  - Reports contain an Investigations section with seed accounting, case status, pivot chain/results, cited model conclusions separate from machine decisions, contributions, and incomplete work.
-  - Source-family constraints, whole-window/anchor sampling, exact covered and unresolved ranges, and normalized duplicate-pivot rejection are implemented. Pivot gaps remain visible in Investigations but no longer make a complete-sweep hunt partial.
-  - Live model quality remains a measured risk: on `h20261018-211924-b1edf9`, 4 of 12 cases exhausted their step budgets, 43 seeds remained unworked, and no pivot contributed a new candidate. Case `case-fddc19830be15d0c` was seeded with the 15:16 UTC root SSH login and later `videoserver` activity, but the model used all 8 calls without a pivot or conclusion; no accepted pivot independently reached that later host activity. This is an effectiveness gap, not hidden as an execution or coverage failure.
-  - The newer `h20261018-224406-923663` run makes the risk more visible rather than hiding it: 8 validation fallbacks are now analyst-flagged and unfinished, all 97 seeds remain in the unworked partition, and no pivot contributed a candidate. One pivot was partial. This is an investigator-effectiveness issue for the reviewer/model bakeoff, not a sweep completeness or citation-integrity failure.
-- **M2 progress (2026-10-19):** `docs/eval/PROTOCOL.md` written by the `eval-custodian`, with the matching rule (§6), lanes (§7), metrics (§8) and miss funnel (§10) pre-registered before any scoring. AttackMate times are naive UTC (offset 0 h, 7 anchors). Gold `sl700_e_a` v1 is on the VM: 27 opportunities, **22 observable** (13 critical+high), 1 inferable-only, 4 not observable; 0 in the early third of the hunt window, so e_a cannot test early-window detection. Contamination log C-001…C-004: e_a can never support a release claim.
-- **First scored run (dev, model-off, 2026-10-19):** `docs/eval/results/2026-10-19-sl700_e_a-1.md` = owner-demo hunt `h20261019-093029-32dfef`. Tier A recall: reported 11/22 (0.50, Wilson 0.31–0.69), surfaced 15/22; critical+high reported 9/13 (0.69), surfaced 10/13. By source: host 10/22, network 1/10 (7/10 surfaced), Arkime 0/12 and PCAP 0/12 (no adapters). P@10 1.00, P@20 0.85; 97 surfaced = 37 hits + 19 true-unlisted + 41 benign → 5.07 false leads/modelled hour. Citations 117/117 resolve with matching digests. 0 false complete negatives (no rule claims one). First actionable finding 52.5 s; hunt 99 s. Run 2 (`h20261019-091850-00987d`, same pack) scored identically: model-off determinism holds. Well short of the spec targets (≥0.90 crit+high, ≥0.80 all).
-  - **Miss funnel (11 misses, class level):** 2 c2_channel stop at *retrieved* (connect/SOCKADDR audit groups without EXECVE are never normalized; no Suricata flow; Arkime/PCAP not queried); 5 stop at *evaluated* with no rule matching (4 discovery, 1 privesc); 4 surfaced only as leads (recon_dns, 2 recon_scan, a critical remote_login).
-  - **Model-on vs. model-off (2026-10-19, `docs/eval/results/2026-10-19-sl700_e_a-ablation-1v3.md`):** agent-on hunt `h20261019-192853-9da2b5` (same window, pack `m1-pack@2`, config digest; qwen3:8b, num_ctx 8192, think off) scores **identically** to model-off on every finding metric: the agent produced 0 candidates, 0 conclusions, 0 escalations, and 0 opportunities hit only with the model on. Cost: +508.6 s wall (99 → 608 s), 44 model calls, ~182k prompt / 12k completion tokens, 419.5 s model time. 21/44 model outputs invalid (48%); 12 cases (10 fallback-parked, 2 budget-exhausted); 14 pivots proposed, 5 executed (3 complete, 2 partial); all 97 seeds unworked. Its pivots retrieved gold records for 4 opportunities, all already surfaced by the sweep. One sample per arm: no variance estimate. **The agent currently adds cost and no detection value; this is the main M2 finding to fix.**
-  - **Agent data gaps the ablation found:** model-on hunt had no report revision; pivot retrieval is only recoverable as a lower bound (result digests cap at ~50 event IDs; `raw_record.first_task_id` records first retrieval only); no case lineage (spawn → case); no agent-phase start/end timestamps; per-case step budgets (sum 96) do not reconcile with the hunt budget (60).
-  - **Product gaps the scorer found:** `typed_event`/`raw_record` are not hunt-scoped and only candidate-supporting raw records are kept (the funnel has to infer retrieval and replay the normalizer); no ES request/byte cost accounting or per-task durations; candidates carry a single `ts`; context items absent from the manifest (I10); `evaluated_complete` is easy to misread as a complete negative. Hunt deletion should warn or export first, since eval runs depend on retained hunts.
-- **Next three actions:**
-  1. **Owner decision 2026-10-19: no model bakeoff; stay on qwen3:8b and redesign the investigator so a small model succeeds by construction** (ADR-005, accepted; `docs/design/investigator-v2.md`, approved 2026-10-19 with the deterministic fallback mode and the acceptance targets). **Codex brief written** in `Claude-Codex.md` (2026-10-19 16:15 EDT): option generator, aliased brief, per-call constrained schema and resolver, agent modes `model`/`deterministic`/`off`, reporting, replay-harness compatibility, then three live e_a hunts. Codex branches `codex/investigator-v2` from `m2/evaluation`; `reviewer` reviews; the custodian scores replay and the ablation. The runner (`romulus model bakeoff*`, uncommitted; to be renamed `replay`) reproduced all 44 real briefs of `h20261019-192853-9da2b5` exactly (44/44 digest matches); 39/44 briefs at num_ctx 8192 were shrunk. The custodian is building the replay task set, intent-level expected decisions and scorer, and the qwen3:8b baseline at 8192 and 16384.
-  2. `eval-custodian`: simple standard-searches baseline runner (PROTOCOL §8.1) and the AMiner/Telosian comparison (§8.2). Gold v1.1 is deferred: it would change no recall, P@k or denominator.
-  3. Product follow-ups from scoring (not M2 blockers): hunt-scoped retrieval records, cost accounting, case lineage, agent-phase timestamps, a report revision for every completed hunt, and a warning or export before hunt deletion.
-- **Blockers:** none.
-- **Owner decisions pending:**
-  - Load SL700 `f_a` as the holdout (download ≈3.7 GB from Zenodo).
-  - Isolate ground truth from the runtime (needs sudo): move `/home/user/romulus-eval` to a dedicated account, or run ROMULUS as its own service user (PROTOCOL §11).
-  - Set the false-leads-per-hour ceiling, confirm the spec targets, and confirm the modelled review time of 5 min per surfaced item (PROTOCOL §14).
-  - Choose a different-storyline dataset with early-window activity (AIT-LDS v2, OTRF, or an owner-run emulation).
-  - Separate Malcolm VM (≈16 GiB) for M4.
-  - Resize the VM to 12 GiB / 8 vCPU before M3.
+- **Direction (owner, 2026-10-19):**
+  - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5: deterministic expansion finds, and an optional model only explains leads and drafts the narrative.
+  - The New hunt page has an "Agentic hunt" checkbox, unchecked by default. `AGENT_MODE` defaults to `off`.
+  - The spec (`ENGINEERING_MASTER_PROMPT.md`) is a set of suggestions, not requirements. Propose better routes when they exist. The goal is to find indicators of compromise wherever ROMULUS is sent, correlating host logs with network telemetry.
+- **Branch:** `m2/evaluation` at `b8be0dc`, deployed to the VM, not pushed. It merges:
+  - investigator v2 (`codex/investigator-v2`, `0bfd0d2`);
+  - host↔network correlation and Arkime (`m2/network-correlation`);
+  - the research register (round 1).
+- **What's in it now:**
+  - `net_socket` events from auditd connect/SOCKADDR.
+  - `host.interpreter_external_connection`.
+  - `corr.process_network_link`: a host connect() joined to Suricata or Arkime records, disk-staged, with the link worded as inferred.
+  - Arkime session indices as a target (`net_session`), with `net.long_external_connection`, `net.beaconing` and `net.rare_client_fingerprint`.
+  - Investigator modes model / deterministic / off.
+  - The replay harness (`romulus model bakeoff*`), to be renamed.
+  - Tests: 590 pass; `archmap --check` is clean.
+- **Latest lab hunt** `h20261019-225437-045bc8` (model-off, e_a 10:00–17:30 UTC):
+  - `completed_within_scope`; 1,791,438 records; 301,582 events; 0 errors.
+  - Lanes: 7 urgent / 15 high / 107 lead / 505 context.
+  - **New:** the www-data `python3.9` C2 connect to `192.42.1.174:4444` is high and joined to its Suricata flows; the root handler (81 connects) and the cron `curl` to `:80` are leads.
+  - **Noise:** about 20 leads from root `python3.10` calling Ubuntu update servers (one candidate per destination; tuning item), plus 2 ZoneMinder Perl highs at boot.
+  - The eval-custodian is scoring it as run 7.
+- **Evaluation so far (dev set e_a, gold v1: 22 observable):**
+  - Model-off before the network work: recall 11/22 reported, 15/22 surfaced; P@10 1.00; 5.07 false leads per modelled hour.
+  - Off, deterministic and model hunts are identical on every finding metric (`docs/eval/results/2026-10-19-sl700_e_a-ablation-456.md`).
+  - Replay: v1 free-JSON 0.22 → v2 menu 0.53 with retry. The remaining error is escalating benign seeds.
+- **Owner actions pending:**
+  1. Run the two Elasticsearch commands that grant `romulus_agent` read on `arkime_sessions3-*` (role `romulus_arkime_reader`). Then the lead adds `arkime_sessions3-*` to `ES_INDEX_PATTERNS` in the VM `.env` (approved). Until then Arkime is unreadable.
+  2. ATT&CK STIX bundle download (`enterprise-attack.json`, about 40–50 MB, MITRE cti on GitHub): asked, not yet answered.
+- **Owner decisions recorded (2026-10-19):**
+  - f_a holdout on hold.
+  - A different-storyline dataset later.
+  - Malcolm after deterministic search is built out.
+  - Ground-truth account isolation: explained as defence in depth, not required now; revisit before any holdout.
+- **Next:**
+  1. Custodian scores run 7.
+  2. v1 search-code review (detection engineer auditing the v1 catalogs; lead's code verdict in the session log).
+  3. Network slice 3: per-session packets through Arkime plus bounded TShark.
+  4. ADR-006 expansion engine and context rules (Codex).
+  5. Tune the external-connection rule's grouping.
+- **Merge gates and known issues:**
+  - Investigator v2 re-review findings on `0abb1fc` (spawned-case stall, stale schema after shrink, seed cards dropped, `valid_first` metric, deterministic errors treated as outages). Several may be fixed in Codex's later commits but are not re-verified. They only matter for agent mode, which is off by default.
+  - IP `entity_timeline` on host targets searches only `systemd.journal` yet reports complete coverage (`hunt/pivot.py`). Must be fixed before any agent or expansion result counts.
+- **Process notes:**
+  - Investigator and shell-parser code goes to Codex via `Claude-Codex.md`. The file is gitignored; replace Claude's last message; old text may be cleared at a new conversation.
+  - The eval-custodian never deploys without asking.
+  - Owner direction: detection breadth is a primary goal (spec §7), plus a detection catalog page (spec §7; M4/M6).
 
 ## Milestone summary
 
@@ -82,7 +58,7 @@ _Last updated: 2026-10-19 by Claude (lead), M2 started: protocol and e_a gold v1
 |---|---|---|
 | Pre-M1 setup | done | this file, TEAM.md, `.claude/agents/`, ENVIRONMENT.md |
 | M1 thin end-to-end slice | accepted 2026-10-19 | 455-test suite; reviewer gate (option B, ADR-004); owner demo on `h20261019-093029-32dfef`; merged to `main` |
-| M2 evaluation and model bakeoff | in progress | branch `m2/evaluation`; protocol, gold v1, scorer; model-off recall 11/22; model-on identical (agent adds no value yet) |
+| M2 evaluation (bakeoff dropped, ADR-005/006) | in progress | protocol, gold v1, scorer, replay harness; v2 investigator, network correlation and Arkime merged; deterministic default |
 | M3 full sources and coverage truth | not started | |
 | M4 detection depth (incl. Zeek, ICS, Malcolm) | not started | |
 | M5 synthesis and reports | not started | |
@@ -102,6 +78,12 @@ _Last updated: 2026-10-19 by Claude (lead), M2 started: protocol and e_a gold v1
 ## Session log
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
+
+- **2026-10-19 (evening: direction change, network correlation, merges)**:
+  - Owner dropped the model bakeoff (ADR-005), then set deterministic search first with the model optional (ADR-006, from a parallel design thread). Codex built investigator v2. The custodian showed off, deterministic and model hunts identical on findings; replay 0.22 → 0.53.
+  - Lead built host↔network correlation and Arkime-as-ES-target on `m2/network-correlation`. The reviewer failed then passed slice 1 after fixes (B1/B2/I1–I4, N1/N2, M1–M7). 541 tests at merge.
+  - Merged v2, network and research into `m2/evaluation`; added the agentic-hunt checkbox (default off). 590 tests; deployed `b8be0dc`. Lab hunt `h20261019-225437-045bc8` finds the C2 connect at high.
+  - v1 search code reviewed by the lead. Discard the query construction: model-written DSL, `*term*` substring search over `message`/`event.original` and `json.dumps(raw)`, silent selector truncation, lab-tuned indicator terms. Keep for slice 3: Arkime per-session PCAP fetch (explicit IDs, byte cap, streamed); the TShark wrapper's argv-only exec, allowlist via `resolve()`, timeout kill, and its lesson that `-c` caps packets before the display filter (false negatives). Ideas worth porting: protocol-on-any-port via Arkime `protocols`, and edit-distance-one process-name masquerade. The detection engineer is auditing the v1 rule catalogs and packs.
 
 - **2026-10-19 (M2 start)**:
   - Branched `m2/evaluation` from `main` (`8296a27`); refreshed stale M1 lines in this file.
