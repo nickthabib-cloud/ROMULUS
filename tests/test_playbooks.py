@@ -474,6 +474,19 @@ def test_script_from_tmp_awk_uses_only_dash_f_script_operand(name):
     assert "script operand '/tmp/tool.awk'" in matches[0].claim
 
 
+@pytest.mark.parametrize("argv", [
+    ["awk", "{print}", "-f", "/tmp/data"],
+    ["awk", "--", "{print}", "-f", "/tmp/data"],
+])
+def test_script_from_tmp_awk_stops_option_scan_before_late_dash_f(argv):
+    playbook = host.ScriptFromTempDir()
+
+    assert playbook.consume([
+        exec_ev(argv, process__executable="/usr/bin/awk", process__cwd="/"),
+    ]) == []
+    assert playbook.missing_required == 0
+
+
 @pytest.mark.parametrize("argv,cwd", [
     (["cat", "/tmp/report.txt"], "/home/user"),        # temp path as argument only
     (["./build.sh"], "/home/user/src"),                # relative exec outside temp
