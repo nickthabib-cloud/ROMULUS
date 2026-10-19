@@ -357,3 +357,17 @@ def test_script_text_rules_never_claim_a_complete_negative(monkeypatch):
     assert "host.downloader_feeds_interpreter" in rows["host.download_piped_to_shell"]["negative_claim"]
     assert "no process-level assurance exists" in rows["host.ssh_authorized_keys_write"]["negative_claim"]
     assert rows["host.credential_store_read"]["negative_claim"] == "complete"     # process-level rule still assures
+
+
+def test_temp_script_operand_rule_is_positive_only_for_unmodelled_interpreter_options(monkeypatch):
+    repo = _run_shell_partition(monkeypatch, argv=["python3", "-W", "ignore", "/tmp/x.py"])
+
+    from romulus.report.manifest import _coverage
+    row = next(
+        item for item in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]
+        if item["rule_id"] == "host.script_from_temp_dir"
+    )
+
+    assert row["states"] == {"positive_only": 1}
+    assert row["negative_claim"].startswith("not assessable by design")
+    assert "interpreter argv" in row["negative_claim"]

@@ -38,6 +38,36 @@ INTERNAL_NETS = [ipaddress.ip_network(n) for n in (
     "::1/128", "fc00::/7", "fe80::/10")]
 
 
+def _normalize_posix_path(path: str) -> str:
+    normalized = posixpath.normpath(path)
+    return "/" + normalized.lstrip("/") if normalized.startswith("//") else normalized
+
+
+def _resolve_script_path(path: str, cwd: str) -> str:
+    if path.startswith("/"):
+        return _normalize_posix_path(path)
+    if path and cwd.startswith("/"):
+        return _normalize_posix_path(posixpath.join(_normalize_posix_path(cwd), path))
+    return ""
+
+
+def _awk_script_file_of(argv: list[str]) -> str:
+    index = 1
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--" or not arg.startswith("-"):
+            return ""
+        if arg in {"-v", "-F"}:
+            if index + 1 >= len(argv):
+                return ""
+            index += 2
+            continue
+        if arg == "-f":
+            return argv[index + 1] if index + 1 < len(argv) else ""
+        return ""
+    return ""
+
+
 def interpreter_name(argv0: str) -> str:
     """Normalize an argv[0] for membership checks without expanding the allow-list."""
     name = basename(argv0)
@@ -379,81 +409,69 @@ class ExecFromTempDir(Playbook):
     id = "host.exec_from_temp_dir"
     title = "Program executed from a world-writable temporary directory"
     families = ("process_exec",)
-    required_fields = ("process.argv",)
+    required_fields = ("process.executable",)
     severity, lane = "medium", "lead"
     attack = ("T1059", "T1036.005")
     benign = ("installers and build tools unpacking into /tmp", "package manager hooks")
     next_checks = ("file_activity for how the file arrived", "process_tree", "http_requests that delivered it")
 
     def match(self, e):
-        argv = e.get("process.argv")
         exe = e.get("process.executable") or ""
-        a0 = argv[0] if argv else ""
-        cwd = e.get("process.cwd") or ""
-
-        def normalize(p: str) -> str:
-            normalized = posixpath.normpath(p)
-            return "/" + normalized.lstrip("/") if normalized.startswith("//") else normalized
-
-        resolved_cwd = normalize(cwd) if cwd.startswith("/") else ""
-
-        def resolve(p: str, *, allow_bare_relative: bool = False) -> str:
-            if p.startswith("/"):
-                return normalize(p)
-            if p and resolved_cwd and (allow_bare_relative or "/" in p):
-                return normalize(posixpath.join(resolved_cwd, p))
-            return ""
-
-        path = ""
-        unresolved_path = False
-        for candidate in ([exe] if exe else []) + [a0]:
-            resolved = resolve(candidate)
-            if resolved:
-                path = resolved
-                break
-            if candidate:
-                unresolved_path = True
-        via = ""
-        name = interpreter_name(a0)
-        if not path.startswith(TEMP_DIRS) and name in INTERPRETERS and len(argv) > 1:
-            if name in SHELLS:
-                script = shell_script_file_of(argv, shell_name=name)
-                if isinstance(script, UnknownShellScript):
-                    self.missing_required += 1
-                    return []
-            elif name in AWK_INTERPRETERS:
-                script = ""
-                for i, arg in enumerate(argv[1:-1], start=1):
-                    if arg == "-f":
-                        script = argv[i + 1]
-                        break
-            elif name in SCRIPT_FILE_INTERPRETERS:
-                script = ""
-                for arg in argv[1:]:
-                    if arg.startswith(("-", "+")):
-                        self.missing_required += 1
-                        return []
-                    script = arg
-                    break
-            else:
-                script = ""
-            if script:
-                script_path = resolve(script, allow_bare_relative=True)
-                if not script_path:
-                    self.missing_required += 1
-                    return []
-                path, via = script_path, name
-        if not path.startswith(TEMP_DIRS):
-            if not path and unresolved_path:
-                self.missing_required += 1
+        if not exe:
+            self.missing_required += 1
             return []
-        fields = [pf(e, "process.argv")] + ([pf(e, "process.executable")] if exe else []) + \
-                 ([pf(e, "process.cwd")] if cwd else [])
-        how = f" via interpreter '{via}'" if via else ""
-        claim = (f"A process execution event on {e.host} records execution of '{path}'{how} from a temporary "
-                 f"directory (argv: {_argv_summary(argv)}); {outcome_phrase(e)}.")
-        return [Match(self.id, claim, self.claim_type, [e], fields, e.ts, self.severity, self.lane,
-                      "high" if exe else "medium", _exec_entities(e))]
+        path = _normalize_posix_path(exe) if exe.startswith("/") else exe
+        if not path.startswith(TEMP_DIRS):
+            return []
+        claim = (f"A process execution event on {e.host} records process.executable '{path}' in a temporary "
+                 f"directory; {outcome_phrase(e)}.")
+        return [Match(self.id, claim, self.claim_type, [e], [pf(e, "process.executable")], e.ts, self.severity,
+                      self.lane, "high", _exec_entities(e))]
+
+
+class ScriptFromTempDir(Playbook):
+    """Positive-only argv indicator: an interpreter was given a temp-directory script operand."""
+    id = "host.script_from_temp_dir"
+    title = "Interpreter started with a script operand in a temporary directory"
+    claim_type = "script_content"
+    assures_negative = False
+    families = ("process_exec",)
+    required_fields = ("process.argv",)
+    severity, lane = "medium", "lead"
+    attack = ("T1059", "T1036.005")
+    benign = ("installers and build tools unpacking into /tmp", "package manager hooks")
+    next_checks = ("file_activity for how the script arrived", "process_tree", "http_requests that delivered it")
+
+    def match(self, e):
+        argv = e.get("process.argv")
+        name = interpreter_name(argv[0])
+        if name in SHELLS:
+            script = shell_script_file_of(argv, shell_name=name)
+            if isinstance(script, UnknownShellScript):
+                self.missing_required += 1
+                return []
+        elif name in SCRIPT_FILE_INTERPRETERS:
+            script = argv[1] if len(argv) > 1 and not argv[1].startswith(("-", "+")) else ""
+        elif name in AWK_INTERPRETERS:
+            script = _awk_script_file_of(argv)
+        else:
+            script = ""
+        if not script:
+            return []
+        path = _resolve_script_path(script, e.get("process.cwd") or "")
+        if not path:
+            self.missing_required += 1
+            return []
+        if not path.startswith(TEMP_DIRS):
+            return []
+        fields = [pf(e, "process.argv")]
+        if e.get("process.cwd"):
+            fields.append(pf(e, "process.cwd"))
+        claim = (f"A process execution event on {e.host} records that interpreter '{name}' was started with "
+                 f"temp-directory script operand '{path}' (argv: {_argv_summary(argv)}); {outcome_phrase(e)}. "
+                 f"The argv identifies a script operand; whether that script ran is not established by this event.")
+        return [Match(self.id, claim, self.claim_type, [e], fields, e.ts, self.severity, self.lane, "medium",
+                      _exec_entities(e))]
 
 
 BUILTIN_CHAINS = {"INPUT", "OUTPUT", "FORWARD", "PREROUTING", "POSTROUTING"}
@@ -656,4 +674,5 @@ class SshLoginFromExternal(Playbook):
 
 
 HOST_PLAYBOOKS = [WebServiceSpawnsInterpreter, DownloadPipedToShell, DownloaderFeedsInterpreter, PtyUpgrade,
-                  ExecFromTempDir, FirewallRuleChange, CredentialStoreRead, AuthorizedKeysWrite, SshLoginFromExternal]
+                  ExecFromTempDir, ScriptFromTempDir, FirewallRuleChange, CredentialStoreRead, AuthorizedKeysWrite,
+                  SshLoginFromExternal]

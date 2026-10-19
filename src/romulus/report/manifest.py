@@ -53,6 +53,10 @@ POSITIVE_ONLY_CLAIMS = {
         "not assessable by design: positive-only rule (script text can show authorized_keys write intent but "
         "cannot prove that it ran; no process-level assurance exists for authorized_keys writes)"
     ),
+    "host.script_from_temp_dir": (
+        "not assessable by design: positive-only rule (interpreter argv can show a temp-directory script operand "
+        "but cannot prove that the script ran)"
+    ),
 }
 
 

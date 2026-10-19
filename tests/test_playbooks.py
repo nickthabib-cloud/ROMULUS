@@ -342,38 +342,75 @@ def test_pty_negatives(argv):
 
 
 # ---------------------------------------------------------------- exec from temp
-def test_exec_from_tmp_via_cwd():
-    m = run(host.ExecFromTempDir, [exec_ev(["./linpeas.sh", "-s"], process__cwd="/tmp")])
-    assert len(m) == 1 and "/tmp/linpeas.sh" in m[0].claim
+def test_exec_from_tmp_requires_process_executable_instead_of_inferring_argv0():
+    playbook = host.ExecFromTempDir()
+
+    assert playbook.consume([
+        exec_ev(["/tmp/linpeas.sh"], process__cwd="/tmp"),
+    ]) == []
+    assert playbook.missing_required == 1
 
 
-@pytest.mark.parametrize("event_fields", [
-    {"argv": ["./linpeas.sh"], "process__cwd": "/tmp/tools/.."},
-    {"argv": ["linpeas.sh"], "process__cwd": "/tmp", "process__executable": "./linpeas.sh"},
-    {"argv": ["bash", "x.sh"], "process__cwd": "/tmp", "process__executable": "/usr/bin/bash"},
+def test_exec_from_tmp_direct_match_marks_missing_executable_unevaluable():
+    playbook = host.ExecFromTempDir()
+
+    assert playbook.match(exec_ev(["/tmp/linpeas.sh"])) == []
+    assert playbook.missing_required == 1
+
+
+def test_exec_from_tmp_ignores_script_operands_when_executable_is_not_temp():
+    playbook = host.ExecFromTempDir()
+
+    assert playbook.consume([
+        exec_ev(["bash", "/tmp/x.sh"], process__executable="/usr/bin/bash", process__cwd="/tmp"),
+    ]) == []
+    assert playbook.missing_required == 0
+
+
+@pytest.mark.parametrize("argv,cwd,expected", [
+    (["/bin/sh", "./linpeas.sh"], "/tmp", "/tmp/linpeas.sh"),
+    (["python3", "x.py"], "/tmp", "/tmp/x.py"),
+    (["perl", "/tmp/x.pl"], "/", "/tmp/x.pl"),
+    (["awk", "-v", "x=1", "-F", ":", "-f", "/tmp/x.awk"], "/", "/tmp/x.awk"),
 ])
-def test_exec_from_tmp_resolves_explicit_relative_paths_and_script_operands(event_fields):
-    argv = event_fields["argv"]
-    extra = {key: value for key, value in event_fields.items() if key != "argv"}
-
-    matches = run(host.ExecFromTempDir, [exec_ev(argv, **extra)])
+def test_script_from_tmp_flags_only_a_modelled_interpreter_operand(argv, cwd, expected):
+    matches = run(host.ScriptFromTempDir, [
+        exec_ev(argv, process__executable=f"/usr/bin/{host.interpreter_name(argv[0])}", process__cwd=cwd),
+    ])
 
     assert len(matches) == 1
-    assert "'/tmp/linpeas.sh'" in matches[0].claim or "'/tmp/x.sh'" in matches[0].claim
+    assert matches[0].claim_type == "script_content"
+    assert f"temp-directory script operand '{expected}'" in matches[0].claim
+    assert "whether that script ran is not established" in matches[0].claim
 
 
-@pytest.mark.parametrize("argv,extra", [
-    (["./x"], {}),
-    (["x"], {}),
-    (["linpeas.sh"], {"process__cwd": "/tmp"}),
-    (["linpeas.sh"], {"process__cwd": "/tmp", "process__executable": "linpeas.sh"}),
-    (["ls", "-la"], {"process__cwd": "/tmp"}),
-    (["-bash"], {"process__cwd": "/tmp"}),
-    (["x"], {"process__cwd": "/root"}),
-    (["bash", "x.sh"], {"process__executable": "/usr/bin/bash"}),
+def test_script_from_tmp_keeps_lab_relative_shell_operand_lead():
+    m = run(host.ScriptFromTempDir, [exec_ev(["/bin/sh", "./linpeas.sh"], process__cwd="/tmp")])
+    assert len(m) == 1 and "temp-directory script operand '/tmp/linpeas.sh'" in m[0].claim
+
+
+@pytest.mark.parametrize("executable,expected", [
+    ("/tmp/tools/../linpeas.sh", "/tmp/linpeas.sh"),
+    ("/etc/../tmp/x", "/tmp/x"),
 ])
-def test_exec_from_tmp_missing_path_context_is_unevaluable(argv, extra):
+def test_exec_from_tmp_normalizes_kernel_executable_path(executable, expected):
+    matches = run(host.ExecFromTempDir, [exec_ev(["ignored"], process__executable=executable)])
+
+    assert len(matches) == 1
+    assert f"process.executable '{expected}'" in matches[0].claim
+
+
+@pytest.mark.parametrize("argv,cwd", [
+    (["./x"], None),
+    (["x"], None),
+    (["linpeas.sh"], "/tmp"),
+    (["ls", "-la"], "/tmp"),
+    (["-bash"], "/tmp"),
+    (["x"], "/root"),
+])
+def test_exec_from_tmp_missing_executable_is_unevaluable(argv, cwd):
     playbook = host.ExecFromTempDir()
+    extra = {"process__cwd": cwd} if cwd else {}
 
     assert playbook.consume([exec_ev(argv, **extra)]) == []
     assert playbook.missing_required == 1
@@ -382,20 +419,26 @@ def test_exec_from_tmp_missing_path_context_is_unevaluable(argv, extra):
 def test_exec_from_tmp_absolute_non_temp_path_needs_no_cwd():
     playbook = host.ExecFromTempDir()
 
-    assert playbook.consume([exec_ev(["/usr/bin/id"])]) == []
+    assert playbook.consume([exec_ev(["id"], process__executable="/usr/bin/id")]) == []
     assert playbook.missing_required == 0
 
 
-@pytest.mark.parametrize("argv,extra,expected", [
-    (["bash", "//tmp/x.sh"], {"process__executable": "/usr/bin/bash"}, "/tmp/x.sh"),
-    (["x"], {"process__executable": "//tmp/x"}, "/tmp/x"),
-    (["bash", "x.sh"], {"process__executable": "/usr/bin/bash", "process__cwd": "//tmp"}, "/tmp/x.sh"),
-])
-def test_exec_from_tmp_collapses_double_leading_slash(argv, extra, expected):
-    matches = run(host.ExecFromTempDir, [exec_ev(argv, **extra)])
+def test_exec_from_tmp_collapses_double_leading_slash():
+    matches = run(host.ExecFromTempDir, [exec_ev(["x"], process__executable="//tmp/x")])
 
     assert len(matches) == 1
-    assert f"'{expected}'" in matches[0].claim
+    assert "process.executable '/tmp/x'" in matches[0].claim
+
+
+@pytest.mark.parametrize("argv,cwd,expected", [
+    (["bash", "//tmp/x.sh"], "/root", "/tmp/x.sh"),
+    (["bash", "x.sh"], "//tmp", "/tmp/x.sh"),
+])
+def test_script_from_tmp_collapses_double_leading_slash(argv, cwd, expected):
+    matches = run(host.ScriptFromTempDir, [exec_ev(argv, process__cwd=cwd)])
+
+    assert len(matches) == 1
+    assert f"script operand '{expected}'" in matches[0].claim
 
 
 @pytest.mark.parametrize("argv,executable", [
@@ -407,8 +450,8 @@ def test_exec_from_tmp_collapses_double_leading_slash(argv, extra, expected):
     (["awk", "/tmp/ {print}", "input"], "/usr/bin/awk"),
     (["gawk", "/tmp/ {print}", "input"], "/usr/bin/gawk"),
 ])
-def test_exec_from_tmp_does_not_treat_data_operands_as_executed_programs(argv, executable):
-    playbook = host.ExecFromTempDir()
+def test_script_from_tmp_does_not_treat_data_operands_as_scripts(argv, executable):
+    playbook = host.ScriptFromTempDir()
 
     assert playbook.consume([
         exec_ev(argv, process__executable=executable, process__cwd="/tmp"),
@@ -417,21 +460,21 @@ def test_exec_from_tmp_does_not_treat_data_operands_as_executed_programs(argv, e
 
 
 @pytest.mark.parametrize("name", ["awk", "gawk"])
-def test_exec_from_tmp_awk_uses_only_dash_f_script_operand(name):
-    matches = run(host.ExecFromTempDir, [
+def test_script_from_tmp_awk_uses_only_dash_f_script_operand(name):
+    matches = run(host.ScriptFromTempDir, [
         exec_ev([name, "-f", "/tmp/tool.awk"], process__executable=f"/usr/bin/{name}", process__cwd="/"),
     ])
 
     assert len(matches) == 1
-    assert "'/tmp/tool.awk'" in matches[0].claim
+    assert "script operand '/tmp/tool.awk'" in matches[0].claim
 
 
 @pytest.mark.parametrize("argv,cwd", [
     (["cat", "/tmp/report.txt"], "/home/user"),        # temp path as argument only
     (["./build.sh"], "/home/user/src"),                # relative exec outside temp
 ])
-def test_exec_from_tmp_negatives(argv, cwd):
-    assert run(host.ExecFromTempDir, [exec_ev(argv, process__cwd=cwd)]) == []
+def test_script_from_tmp_negatives(argv, cwd):
+    assert run(host.ScriptFromTempDir, [exec_ev(argv, process__cwd=cwd)]) == []
 
 
 # ---------------------------------------------------------------- firewall change
@@ -591,29 +634,30 @@ def test_many_flows_to_few_ports_is_not_scan():
     assert run(network.PortScan, evs) == []
 
 
-def test_exec_from_tmp_via_interpreter_script():
-    m = run(host.ExecFromTempDir, [exec_ev(["/bin/sh", "./linpeas.sh", "-s"], process__cwd="/tmp")])
-    assert len(m) == 1 and "via interpreter 'sh'" in m[0].claim
+def test_script_from_tmp_via_interpreter_script():
+    m = run(host.ScriptFromTempDir, [exec_ev(["/bin/sh", "./linpeas.sh", "-s"], process__cwd="/tmp")])
+    assert len(m) == 1 and "interpreter 'sh'" in m[0].claim
     # sh -c with a script string is not a script file
-    assert run(host.ExecFromTempDir, [exec_ev(["/bin/sh", "-c", "./x"], process__cwd="/tmp")]) == []
+    assert run(host.ScriptFromTempDir, [exec_ev(["/bin/sh", "-c", "./x"], process__cwd="/tmp")]) == []
 
 
-def test_exec_from_tmp_normalizes_login_shell_name():
-    matches = run(host.ExecFromTempDir, [exec_ev(["-bash", "/tmp/x.sh"])])
+def test_script_from_tmp_normalizes_login_shell_name():
+    matches = run(host.ScriptFromTempDir, [exec_ev(["-bash", "/tmp/x.sh"])])
 
     assert len(matches) == 1
-    assert "via interpreter 'bash'" in matches[0].claim
+    assert "interpreter 'bash'" in matches[0].claim
 
 
 @pytest.mark.parametrize("argv", [
     ["bash", "/tmp/x.sh", "-c"],
     ["bash", "/tmp/x.sh", "-recursive"],
 ])
-def test_exec_from_tmp_stops_shell_option_scan_at_script_file(argv):
-    matches = run(host.ExecFromTempDir, [exec_ev(argv)])
+def test_script_from_tmp_stops_shell_option_scan_at_script_file(argv):
+    matches = run(host.ScriptFromTempDir, [exec_ev(argv)])
 
     assert len(matches) == 1
-    assert "'/tmp/x.sh' via interpreter 'bash'" in matches[0].claim
+    assert "interpreter 'bash'" in matches[0].claim
+    assert "script operand '/tmp/x.sh'" in matches[0].claim
 
 
 @pytest.mark.parametrize("argv", [
@@ -623,8 +667,8 @@ def test_exec_from_tmp_stops_shell_option_scan_at_script_file(argv):
     ["bash", "--init-file", "/etc/bashrc", "/tmp/x.sh"],
     ["busybox", "sh", "/tmp/x.sh"],
 ])
-def test_exec_from_tmp_consumes_shell_options_and_busybox_applet(argv):
-    matches = run(host.ExecFromTempDir, [exec_ev(argv)])
+def test_script_from_tmp_consumes_shell_options_and_busybox_applet(argv):
+    matches = run(host.ScriptFromTempDir, [exec_ev(argv)])
 
     assert len(matches) == 1
     assert "'/tmp/x.sh'" in matches[0].claim
@@ -636,8 +680,8 @@ def test_exec_from_tmp_consumes_shell_options_and_busybox_applet(argv):
     ["bash", "-se", "/tmp/x.sh"],
     ["busybox", "sh", "-s", "/tmp/x.sh"],
 ])
-def test_exec_from_tmp_ignores_arguments_after_shell_stdin_option(argv):
-    playbook = host.ExecFromTempDir()
+def test_script_from_tmp_ignores_arguments_after_shell_stdin_option(argv):
+    playbook = host.ScriptFromTempDir()
 
     assert playbook.consume([
         exec_ev(argv, process__executable=f"/bin/{argv[0]}", process__cwd="/"),
@@ -649,11 +693,11 @@ def test_exec_from_tmp_ignores_arguments_after_shell_stdin_option(argv):
     ["python3", "-W", "ignore", "/tmp/x.py"],
     ["python3", "+X", "/tmp/x.py"],
 ])
-def test_exec_from_tmp_non_shell_option_layout_is_unevaluable(argv):
-    playbook = host.ExecFromTempDir()
+def test_script_from_tmp_non_shell_option_layout_produces_no_positive(argv):
+    playbook = host.ScriptFromTempDir()
 
     assert playbook.consume([exec_ev(argv, process__executable="/usr/bin/python3")]) == []
-    assert playbook.missing_required == 1
+    assert playbook.missing_required == 0
 
 
 # ---------------------------------------------------------------- tool user agent
