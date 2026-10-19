@@ -44,6 +44,16 @@ def _citations(repo: Repo, cand: dict) -> list[dict]:
 UNRESOLVED_STATES = (
     "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
 )
+POSITIVE_ONLY_CLAIMS = {
+    "host.download_piped_to_shell": (
+        "not assessable by design: positive-only rule (script text can show download-to-interpreter intent but "
+        "cannot prove that it ran; process-level assurance is provided by host.downloader_feeds_interpreter)"
+    ),
+    "host.ssh_authorized_keys_write": (
+        "not assessable by design: positive-only rule (script text can show authorized_keys write intent but "
+        "cannot prove that it ran; no process-level assurance exists for authorized_keys writes)"
+    ),
+}
 
 
 def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None,
@@ -80,9 +90,11 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         if matched:
             claim = "none (rule matched)" + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
         elif states.get("positive_only") or states.get("positive_only_partial"):
-            claim = ("not assessable by design: positive-only rule (script text can show intent but cannot prove "
-                     "that something did not run; see the process-level rules)" +
-                     ("; coverage incomplete: " + "; ".join(reasons) if reasons else ""))
+            claim = POSITIVE_ONLY_CLAIMS.get(
+                rule,
+                "not assessable by design: positive-only rule (script text can show intent but cannot prove "
+                "that something did not run)",
+            ) + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
         elif reasons:
             claim = "unresolved: " + "; ".join(reasons)
         elif states.get("no_match_complete") and not (states.get("not_applicable_no_events") and

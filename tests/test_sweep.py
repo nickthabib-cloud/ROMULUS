@@ -354,4 +354,6 @@ def test_script_text_rules_never_claim_a_complete_negative(monkeypatch):
     rows = {r["rule_id"]: r for r in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]}
     for rid in ("host.download_piped_to_shell", "host.ssh_authorized_keys_write"):
         assert rows[rid]["negative_claim"].startswith("not assessable by design"), rows[rid]
+    assert "host.downloader_feeds_interpreter" in rows["host.download_piped_to_shell"]["negative_claim"]
+    assert "no process-level assurance exists" in rows["host.ssh_authorized_keys_write"]["negative_claim"]
     assert rows["host.credential_store_read"]["negative_claim"] == "complete"     # process-level rule still assures
