@@ -8,7 +8,8 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from romulus.agent.models import EntityRef, decision_schema
+from romulus.agent.constraints import build_output_schema
+from romulus.agent.models import EntityRef
 from romulus.agent.ollama import estimate_tokens
 from romulus.agent.options import Menu, generate_options
 from romulus.store.repo import Repo
@@ -279,7 +280,7 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         max_cases=int((manifest.get("budgets") or {}).get("max_cases", 12)),
         case_count=len(all_cases),
     )
-    schema = decision_schema()
+    schema = build_output_schema(menu, aliases, candidate_map, injection_evidence)
     system = (
         "You are the ROMULUS investigator. Choose exactly one offered option and cite 1–4 evidence cards. "
         "The controller supplies every typed action value; never invent identifiers, tools, time windows, claims, "

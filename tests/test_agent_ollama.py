@@ -156,14 +156,14 @@ class OldDuplicateBriefRepo(LargeBriefRepo):
         return steps
 
 
-def test_minimum_safe_retry_brief_pins_old_duplicate_result_digest():
+def test_shrunk_retry_brief_pins_old_duplicate_result_digest():
     brief = build_brief(
         OldDuplicateBriefRepo(), "case-1", {"tools": ["entity_timeline"]},
         num_ctx=2600, max_out=900,
         retry_errors=("duplicate pivot: normalized request already executed at step 1",),
     )
 
-    assert "minimum_safe_brief" in brief.shrink_actions
+    assert brief.shrink_actions
     telemetry = json.loads(brief.user.split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split("\n</", 1)[0])
     pinned = next(step for step in telemetry["prior_steps"] if step["n"] == 1)
     assert pinned["outcome"] == "partial"

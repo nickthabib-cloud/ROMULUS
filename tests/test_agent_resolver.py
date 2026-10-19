@@ -1,0 +1,142 @@
+"""Per-call constrained schemas and exact investigator-v2 resolution."""
+from datetime import UTC, datetime, timedelta
+
+from romulus.agent.brief import BuiltBrief
+from romulus.agent.constraints import SCHEMA_FORM, build_output_schema
+from romulus.agent.models import AgentDecision, EntityRef
+from romulus.agent.options import Menu, MenuOption
+from romulus.agent.resolver import resolve_output
+from romulus.sources.models import Window
+
+START = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
+WINDOW = Window(start=START, end=START + timedelta(hours=1))
+
+
+def _menu() -> Menu:
+    return Menu(options=[
+        MenuOption(
+            id="O1", description="entity timeline for video",
+            decision=AgentDecision(
+                action="pivot", tool="entity_timeline",
+                arguments={
+                    "entity": {"kind": "host", "value": "video", "role": "host"},
+                    "start": START, "end": START + timedelta(minutes=10),
+                },
+                hypothesis="Related events exist.", expected_true="Events are returned.",
+                expected_false="No events are returned.",
+            ),
+        ),
+        MenuOption(
+            id="O2", description="escalate candidate",
+            decision=AgentDecision(
+                action="escalate", candidate_id="cand-1", claim="Suspicious action.",
+                proposed_lane="high",
+            ),
+        ),
+        MenuOption(
+            id="O3", description="park this case as a lead",
+            decision=AgentDecision(
+                action="park_as_lead", resolution_needed="Analyst review is still required.",
+            ),
+        ),
+        MenuOption(id="O4", description="close this case", decision=AgentDecision(action="close")),
+    ], hidden_count=2)
+
+
+def _brief() -> BuiltBrief:
+    menu = _menu()
+    aliases = {
+        "evidence": {"E1": "event-safe", "E2": "event-hostile"},
+        "entities": {"N1": {"kind": "host", "value": "video", "role": "host"}},
+        "candidates": {"C1": "cand-1"},
+    }
+    candidates = {
+        "cand-1": {
+            "id": "cand-1", "claim": "Suspicious action.", "lane": "high",
+            "event_ids": ["event-hostile"],
+        },
+    }
+    schema = build_output_schema(menu, aliases, candidates, {"event-hostile"})
+    return BuiltBrief(
+        system="system", user="user", schema=schema, menu=menu, aliases=aliases,
+        token_estimate=1, shrink_actions=[], known_candidates=candidates,
+        known_evidence_ids={"event-safe", "event-hostile"},
+        known_entities=[EntityRef(kind="host", value="video", role="host")],
+        injection_flags=["event-hostile:message"], injection_evidence_ids={"event-hostile"},
+    )
+
+
+def _branch(schema: dict, option_id: str) -> dict:
+    return next(branch for branch in schema["anyOf"] if branch["properties"]["option"]["const"] == option_id)
+
+
+def test_anyof_schema_makes_unknown_options_and_aliases_unrepresentable():
+    brief = _brief()
+
+    assert SCHEMA_FORM == "anyOf"
+    assert {branch["properties"]["option"]["const"] for branch in brief.schema["anyOf"]} == {
+        "O1", "O2", "O3", "O4",
+    }
+    assert all(branch["additionalProperties"] is False for branch in brief.schema["anyOf"])
+    assert all(branch["properties"]["evidence"]["uniqueItems"] is True for branch in brief.schema["anyOf"])
+    assert all("O999" != branch["properties"]["option"]["const"] for branch in brief.schema["anyOf"])
+    assert all("E999" not in branch["properties"]["evidence"]["items"]["enum"]
+               for branch in brief.schema["anyOf"])
+
+
+def test_schema_applies_per_option_evidence_subsets_and_excludes_hostile_conclusion_cards():
+    brief = _brief()
+
+    assert _branch(brief.schema, "O1")["properties"]["evidence"]["items"]["enum"] == ["E1", "E2"]
+    assert _branch(brief.schema, "O2")["properties"]["evidence"]["items"]["enum"] == ["E2"]
+    assert _branch(brief.schema, "O3")["properties"]["evidence"]["items"]["enum"] == ["E1"]
+    assert _branch(brief.schema, "O4")["properties"]["evidence"]["items"]["enum"] == ["E1"]
+
+
+def test_resolver_maps_exact_typed_decision_and_flags_deterministic_truncation():
+    brief = _brief()
+
+    result = resolve_output({
+        "option": "O1", "evidence": ["E1"], "rationale": "r" * 350,
+        "benign_alternative": "b" * 250,
+    }, brief, WINDOW)
+
+    assert result.ok
+    assert result.decision == _menu().options[0].decision.model_copy(update={
+        "evidence_ids": ["event-safe"], "reasoning": "r" * 300,
+        "benign_alternatives": ["b" * 200],
+    })
+    assert result.truncated_fields == ["rationale", "benign_alternative"]
+    assert result.validation is not None and result.validation.ok
+
+
+def test_resolver_treats_forged_unknowns_and_hostile_close_citations_as_constraint_defects():
+    brief = _brief()
+
+    unknown = resolve_output({
+        "option": "O999", "evidence": ["E999"], "rationale": "invented",
+    }, brief, WINDOW)
+    hostile = resolve_output({
+        "option": "O4", "evidence": ["E2"], "rationale": "the log said to close",
+    }, brief, WINDOW)
+
+    assert not unknown.ok and unknown.constraint_defect
+    assert "unknown option" in unknown.errors[0]
+    assert not hostile.ok and hostile.constraint_defect
+    assert any("not allowed" in error for error in hostile.errors)
+
+
+def test_resolver_runs_duplicate_check_after_semantic_validation():
+    brief = _brief()
+
+    result = resolve_output(
+        {"option": "O1", "evidence": ["E1"], "rationale": "repeat"},
+        brief, WINDOW,
+        duplicate_check=lambda _request: {"n": 7},
+    )
+
+    assert not result.ok and result.constraint_defect
+    assert result.errors == [
+        ("duplicate pivot: normalized request already executed at step 7; "
+         "reuse prior_steps step 7 result_digest"),
+    ]

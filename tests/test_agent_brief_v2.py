@@ -117,3 +117,4 @@ def test_v2_brief_is_byte_stable_and_keeps_injection_flags_on_cards():
     assert first.injection_flags == ["candidate:candidate-real.claim"]
     assert first.injection_evidence_ids == {"event-real"}
     assert first.aliases["evidence"] == {"E1": "event-real"}
+    assert "anyOf" in first.schema
