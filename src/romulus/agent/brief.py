@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+from romulus.agent.cases import seed_candidate_ids
 from romulus.agent.constraints import build_output_schema
 from romulus.agent.models import EntityRef
 from romulus.agent.ollama import estimate_tokens
@@ -38,14 +39,6 @@ class BuiltBrief:
     schema: dict = field(default_factory=dict)
     menu: Menu = field(default_factory=lambda: Menu(options=[], hidden_count=0))
     aliases: dict[str, dict] = field(default_factory=dict)
-
-
-def _seed_ids(steps: list[dict]) -> list[str]:
-    for step in steps:
-        decision = step.get("decision") or {}
-        if step.get("n") == 0 and decision.get("action") == "seed":
-            return list(decision.get("seed_candidate_ids") or [])
-    return []
 
 
 def _entity_refs(raw_entities: list) -> list[EntityRef]:
@@ -268,7 +261,7 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
     if case is None:
         raise KeyError(case_id)
     steps = repo.case_steps(case_id)
-    seeds = set(_seed_ids(steps))
+    seeds = set(seed_candidate_ids(steps))
     candidates = [
         candidate for candidate in repo.candidates(case["hunt_id"])
         if candidate["id"] in seeds or candidate.get("source_case_id") == case_id

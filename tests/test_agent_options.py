@@ -252,3 +252,17 @@ def test_process_tree_requires_the_evidence_host_to_be_a_known_case_entity():
 
     assert not any(option.decision.tool == "process_tree" and option.entity_value == "unrepresented"
                    for option in menu.options)
+
+
+def test_process_tree_allows_a_known_host_that_also_has_an_observer_role():
+    case, evidence, candidates, steps = _state()
+    case["entities"].append(["host", "video", "observer"])
+
+    menu = generate_options(
+        case=case, evidence=evidence, candidates=candidates, steps=steps,
+        hunt_window=WINDOW, existing_case_entities={("host", "video")},
+        max_cases=4, case_count=2, cap=100,
+    )
+
+    assert any(option.decision.tool == "process_tree" and option.entity_value == "video"
+               for option in menu.options)

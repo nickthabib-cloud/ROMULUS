@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from romulus.agent.cases import seed_candidate_ids
 from romulus.agent.models import AgentDecision, EntityRef
 
 _TOOL_ENTITY_KINDS = {
@@ -66,14 +67,6 @@ def _field_value(fields: dict, name: str):
     if isinstance(value, dict) and "value" in value:
         return value["value"]
     return value
-
-
-def _seed_ids(steps: list[dict]) -> list[str]:
-    for step in steps:
-        decision = step.get("decision") or {}
-        if step.get("n") == 0 and decision.get("action") == "seed":
-            return [str(item) for item in decision.get("seed_candidate_ids") or []]
-    return []
 
 
 def _named_windows(
@@ -189,7 +182,7 @@ def generate_options(
 ) -> Menu:
     """Return the legal next moves derivable from durable case state."""
     hunt_start, hunt_end = _utc(hunt_window.start), _utc(hunt_window.end)
-    seed_ids = set(_seed_ids(steps))
+    seed_ids = set(seed_candidate_ids(steps))
     seed_candidates = sorted(
         (candidate for candidate in candidates if candidate.get("id") in seed_ids),
         key=lambda item: (-float(item.get("priority", 0)), str(item.get("id"))),
@@ -201,10 +194,6 @@ def generate_options(
     entities = _entity_refs(raw_entities)
     entities = [entity for entity in entities if not (entity.kind == "host" and entity.role == "observer")]
     known_hosts = {entity.value for entity in entities if entity.kind == "host"}
-    observer_hosts = {
-        entity.value for entity in _entity_refs(raw_entities)
-        if entity.kind == "host" and entity.role == "observer"
-    }
     template_tools = {
         tool
         for candidate in seed_candidates
@@ -232,7 +221,7 @@ def generate_options(
     process_pairs: set[tuple[str, int]] = set()
     for item in evidence:
         host = item.get("host")
-        if not host or str(host) not in known_hosts or str(host) in observer_hosts:
+        if not host or str(host) not in known_hosts:
             continue
         fields = item.get("fields") or {}
         for name in ("process.pid", "process.ppid"):

@@ -360,6 +360,37 @@ def test_model_outage_leaves_case_open_for_resume():
     assert repo.cases("h1")[0]["status"] == "open"
 
 
+def test_resume_repartitions_a_legacy_oversized_open_seed_case():
+    repo = _repo(total=1, per_case=1, max_cases=4)
+    for index in range(10):
+        _candidate(repo, f"c{index:02}", "video", 100 - index)
+    seed_ids = [f"c{index:02}" for index in range(10)]
+    repo.create_case({
+        "id": "legacy-case", "hunt_id": "h1", "seed_candidate_id": seed_ids[0],
+        "title": "legacy oversized case", "priority": 100,
+        "entities": [["host", "video", "host"]], "hypotheses": [], "step_budget": 1,
+    })
+    repo.append_case_step(
+        "legacy-case", 0, {"action": "seed", "seed_candidate_ids": seed_ids}, True,
+    )
+
+    investigator = _investigator(
+        repo, QueueModel([]), RecordingExecutor(), agent_mode="deterministic",
+    )
+    investigator._seed_cases()
+
+    groups = [investigator._seed_ids(repo.case_steps(case["id"])) for case in repo.cases("h1")]
+    legacy_steps = repo.case_steps("legacy-case")
+    assert legacy_steps[0]["decision"]["seed_candidate_ids"] == seed_ids
+    assert legacy_steps[-1]["decision"] == {
+        "action": "seed_partition",
+        "seed_candidate_ids": seed_ids[:9],
+        "previous_seed_count": 10,
+    }
+    assert sorted(len(group) for group in groups) == [1, 9]
+    assert sorted(candidate_id for group in groups for candidate_id in group) == seed_ids
+
+
 def test_resume_replays_persisted_v2_pivot_without_a_result_before_new_model_calls():
     repo = _repo(total=1)
     _candidate(repo, "c1", "video", 50)

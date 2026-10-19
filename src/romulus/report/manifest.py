@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 
 from sqlalchemy import func, select
 
+from romulus.agent.cases import seed_candidate_ids
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.store import schema as t
@@ -205,13 +206,7 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
                     "fallback_note": decision.get("fallback_note") or "",
                 })
         menu_hidden_total += case_hidden_options
-        seed_ids: list[str] = []
-        for step in steps:
-            decision = step.get("decision") or {}
-            if step["n"] == 0 and decision.get("action") == "seed":
-                seed_ids = [seed_id for seed_id in decision.get("seed_candidate_ids") or []
-                            if seed_id in seed_candidates]
-                break
+        seed_ids = [seed_id for seed_id in seed_candidate_ids(steps) if seed_id in seed_candidates]
         unique_seed_ids = [seed_id for seed_id in seed_ids if seed_id not in categorized]
         categorized.update(unique_seed_ids)
         if case["status"] in CONCLUDED_CASE_STATUSES:

@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from romulus.agent.brief import build_brief
-from romulus.agent.cases import cluster_seed_candidates
+from romulus.agent.cases import MAX_SEEDS_PER_CASE, cluster_seed_candidates, seed_candidate_ids
 from romulus.agent.constraints import SCHEMA_FORM, eligible_evidence_aliases
 from romulus.agent.models import AgentDecision, EntityRef, PivotResult
 from romulus.agent.ollama import ModelResult, ModelUnavailable, OllamaClient
@@ -68,13 +68,25 @@ class Investigator:
 
     @staticmethod
     def _seed_ids(steps: list[dict]) -> list[str]:
-        for step in steps:
-            decision = step.get("decision") or {}
-            if step["n"] == 0 and decision.get("action") == "seed":
-                return list(decision.get("seed_candidate_ids") or [])
-        return []
+        return seed_candidate_ids(steps)
 
     def _seed_cases(self) -> list[str]:
+        for case in self.repo.cases(self.hunt_id, statuses=["open"]):
+            steps = self.repo.case_steps(case["id"])
+            seed_ids = self._seed_ids(steps)
+            if len(seed_ids) <= MAX_SEEDS_PER_CASE:
+                continue
+            self.repo.append_case_step(
+                case["id"], max(step["n"] for step in steps) + 1,
+                {
+                    "action": "seed_partition",
+                    "seed_candidate_ids": seed_ids[:MAX_SEEDS_PER_CASE],
+                    "previous_seed_count": len(seed_ids),
+                },
+                True,
+                owner_token=self.owner_token,
+            )
+
         candidates = [
             candidate for candidate in self.repo.candidates(self.hunt_id)
             if candidate["lane"] != "context" and candidate.get("source_case_id") is None

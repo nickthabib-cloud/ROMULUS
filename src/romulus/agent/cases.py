@@ -11,6 +11,19 @@ _LANE_ORDER = {"urgent": 0, "high": 1, "lead": 2, "context": 3}
 MAX_SEEDS_PER_CASE = 9
 
 
+def seed_candidate_ids(steps: list[dict]) -> list[str]:
+    """Return the active seed partition without rewriting the original seed event."""
+    for step in reversed(steps):
+        decision = step.get("decision") or {}
+        if decision.get("action") == "seed_partition":
+            return [str(item) for item in decision.get("seed_candidate_ids") or []]
+    for step in steps:
+        decision = step.get("decision") or {}
+        if step.get("n") == 0 and decision.get("action") == "seed":
+            return [str(item) for item in decision.get("seed_candidate_ids") or []]
+    return []
+
+
 def _ts(value) -> datetime:
     return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
 
