@@ -75,6 +75,11 @@ POSITIVE_ONLY_CLAIMS = {
     ),
     "host.ssh_login_external_source": _po("logins are identified by parsing sshd log message text; unrecognized "
                                           "formats are not seen"),
+    "host.interpreter_external_connection": _po("the audit rule set's scope (which syscalls, address families and "
+                                                "ports it records) is not visible in telemetry, so a missing "
+                                                "connect record proves nothing"),
+    "corr.process_network_link": _po("a join between host connect records and network-sensor records that finds "
+                                     "nothing proves nothing: each side sees only part of the traffic"),
 }
 
 

@@ -10,7 +10,7 @@ from romulus.evidence.typed import Outcome, TypedEvent
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 LANES = ("urgent", "high", "lead", "context")
 CLAIM_TYPES = ("observed_action", "script_content", "network_observation", "aggregate_observation", "anomaly",
-               "mention")
+               "correlated_observation", "mention")
 
 
 @dataclass

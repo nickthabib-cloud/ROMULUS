@@ -7,7 +7,14 @@ import re
 from collections import defaultdict
 from datetime import UTC, datetime
 
-from romulus.evidence.auditd import AuditParseError, AuditRecord, execve_argv, parse_record
+from romulus.evidence.auditd import (
+    AuditParseError,
+    AuditRecord,
+    execve_argv,
+    parse_record,
+    parse_sockaddr,
+    socket_syscall,
+)
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, event_id, fv
 
 NORMALIZER_VERSION = "lab-ecs@1"
@@ -95,6 +102,76 @@ def merge_execve(execs: list[tuple[dict, AuditRecord]]) -> tuple[dict, AuditReco
     return h_head, merged
 
 
+def _syscall_process_fields(sid: str, rs: AuditRecord) -> dict:
+    """Process identity from a SYSCALL record, with field lineage. Absent fields stay absent."""
+    f = {}
+    for name, key in (("process.pid", "pid"), ("process.ppid", "ppid")):
+        if rs.fields.get(key, "").isdigit():
+            f[name] = fv(int(rs.fields[key]), f"{sid}:event.original#auditd:SYSCALL.{key}")
+    if rs.fields.get("exe"):
+        f["process.executable"] = fv(rs.fields["exe"], f"{sid}:event.original#auditd:SYSCALL.exe")
+    if rs.fields.get("comm"):
+        f["process.comm"] = fv(rs.fields["comm"], f"{sid}:event.original#auditd:SYSCALL.comm")
+    for name, key in (("process.uid", "uid"), ("process.euid", "euid"), ("process.auid", "auid")):
+        if key in rs.fields:
+            f[name] = fv(rs.fields[key], f"{sid}:event.original#auditd:SYSCALL.{key}")
+    for name, key in (("process.user", "UID"), ("process.effective_user", "EUID"),
+                      ("process.login_user", "AUID")):
+        if key in rs.enriched:
+            f[name] = fv(rs.enriched[key], f"{sid}:event.original#auditd:enriched.{key}")
+    if rs.fields.get("tty"):
+        f["process.tty"] = fv(rs.fields["tty"], f"{sid}:event.original#auditd:SYSCALL.tty")
+    return f
+
+
+SOCKET_COMPANIONS = {"SYSCALL", "SOCKADDR", "PROCTITLE"}
+EINPROGRESS = "-115"
+
+
+def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], syscall: str) -> TypedEvent:
+    """One net_socket event from a socket SYSCALL plus its SOCKADDR. connect() records the remote
+    endpoint, accept() the peer, bind() the local address. A non-blocking connect that returns
+    EINPROGRESS was started, not refused, so its outcome is unknown rather than failed."""
+    by_type = {r.type: (h, r) for h, r in members if r.type in SOCKET_COMPANIONS}
+    hs, rs = by_type["SYSCALL"]
+    sid = hs["_id"]
+    refs = [_ref(h) for h, r in members if r.type in SOCKET_COMPANIONS]
+    f = {"socket.syscall": fv(syscall, f"{sid}:event.original#auditd:SYSCALL.arch+syscall"),
+         "audit.serial": fv(rs.serial, f"{sid}:event.original#auditd:msg.serial"),
+         **_syscall_process_fields(sid, rs)}
+    if rs.fields.get("key") not in (None, "(null)"):
+        f["audit.key"] = fv(rs.fields["key"], f"{sid}:event.original#auditd:SYSCALL.key")
+    caveats = []
+    if "SOCKADDR" in by_type:
+        ha, ra = by_type["SOCKADDR"]
+        addr = parse_sockaddr(ra.fields.get("saddr", ""))
+        origin = f"{ha['_id']}:event.original#auditd:SOCKADDR.saddr"
+        if addr.ip is None:
+            raise Skip(f"audit {syscall} on a non-IP socket family ({addr.family})")
+        f["socket.family"] = fv(addr.family, origin)
+        side = {"connect": "destination", "accept": "source", "accept4": "source", "bind": "socket.local"}[syscall]
+        f[f"{side}.ip"] = fv(addr.ip, origin)
+        f[f"{side}.port"] = fv(addr.port, origin)
+    else:
+        caveats.append("SOCKADDR companion not retrieved: socket address unknown")
+    succ, exit_code = rs.fields.get("success"), rs.fields.get("exit")
+    if succ == "yes":
+        outcome = Outcome.success
+    elif succ == "no" and exit_code == EINPROGRESS and syscall == "connect":
+        outcome = Outcome.unknown
+        caveats.append("non-blocking connect returned EINPROGRESS: the connection was started; completion is "
+                       "not recorded")
+    elif succ == "no":
+        outcome = Outcome.failure
+    else:
+        outcome = Outcome.unknown
+    if exit_code:
+        f["socket.exit"] = fv(exit_code, f"{sid}:event.original#auditd:SYSCALL.exit")
+    return TypedEvent(id=event_id("net_socket", refs), family="net_socket", ts=_ts(hs["_source"]["@timestamp"]),
+                      host=host or None, outcome=outcome, fields=f, raw=refs, normalizer=NORMALIZER_VERSION,
+                      caveats=caveats)
+
+
 def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent:
     """Build one process_exec event from the EXECVE record plus whatever companions are present.
     Missing SYSCALL means uid/ppid/success are unknown (caveat), not defaulted."""
@@ -116,23 +193,7 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
     outcome = Outcome.unknown
     if "SYSCALL" in by_type:
         hs, rs = by_type["SYSCALL"]
-        sid = hs["_id"]
-        for name, key in (("process.pid", "pid"), ("process.ppid", "ppid")):
-            if rs.fields.get(key, "").isdigit():
-                f[name] = fv(int(rs.fields[key]), f"{sid}:event.original#auditd:SYSCALL.{key}")
-        if rs.fields.get("exe"):
-            f["process.executable"] = fv(rs.fields["exe"], f"{sid}:event.original#auditd:SYSCALL.exe")
-        if rs.fields.get("comm"):
-            f["process.comm"] = fv(rs.fields["comm"], f"{sid}:event.original#auditd:SYSCALL.comm")
-        for name, key in (("process.uid", "uid"), ("process.euid", "euid"), ("process.auid", "auid")):
-            if key in rs.fields:
-                f[name] = fv(rs.fields[key], f"{sid}:event.original#auditd:SYSCALL.{key}")
-        for name, key in (("process.user", "UID"), ("process.effective_user", "EUID"),
-                          ("process.login_user", "AUID")):
-            if key in rs.enriched:
-                f[name] = fv(rs.enriched[key], f"{sid}:event.original#auditd:enriched.{key}")
-        if rs.fields.get("tty"):
-            f["process.tty"] = fv(rs.fields["tty"], f"{sid}:event.original#auditd:SYSCALL.tty")
+        f.update(_syscall_process_fields(hs["_id"], rs))
         succ = rs.fields.get("success")
         outcome = Outcome.success if succ == "yes" else Outcome.failure if succ == "no" else Outcome.unknown
     else:
@@ -332,12 +393,21 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
         types = {r.type for _, r in members}
         # EXECVE may legitimately repeat (long-argv continuation records; merged in normalize_exec_group)
         dup = sorted(t for t in types if sum(1 for _, r in members if r.type == t) > 1
-                     and t in EXEC_COMPANIONS and t != "EXECVE")
+                     and t in EXEC_COMPANIONS | SOCKET_COMPANIONS and t != "EXECVE")
         if dup:
             errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
             continue
         if "EXECVE" not in types:
-            skips["audit group without EXECVE (not an exec event)"] += 1
+            syscall = next((socket_syscall(r) for _, r in members if r.type == "SYSCALL"), None)
+            if syscall is None:
+                skips["audit group without EXECVE or socket syscall"] += 1
+                continue
+            try:
+                events.append(normalize_socket_group(host, members, syscall))
+            except Skip as s:
+                skips[s.reason] += 1
+            except (AuditParseError, ValueError, KeyError) as e:
+                errors.append((members[0][0]["_id"], f"linux.audit: {e}"))
             continue
         try:
             events.append(normalize_exec_group(host, members))
