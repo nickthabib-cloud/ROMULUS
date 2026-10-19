@@ -1,6 +1,6 @@
 # ROMULUS v2
 
-A defensive, AI-assisted threat-hunting tool for Cyber Protection Team (CPT) analysts.
+A defensive, AI-assisted threat-hunting tool.
 
 ROMULUS first runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. A local Ollama model then works the leads. It pivots on entities, follows hypotheses, and escalates findings with citations to the raw evidence. Outputs:
 
