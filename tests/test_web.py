@@ -110,3 +110,33 @@ def test_hunt_page_shows_latest_agent_status_and_unworked_count(client):
     assert "model output failed twice; selected top-ranked pivot" in page.text
     assert "5 hidden option" in page.text
     assert "Analyst review required" in page.text
+
+
+@pytest.mark.parametrize("form, mode", [({}, "off"), ({"agent": "model"}, "model")])
+def test_new_hunt_is_deterministic_unless_the_agentic_box_is_checked(client, monkeypatch, form, mode):
+    from romulus.web import app as web
+    launched = []
+
+    class FakePopen:
+        def __init__(self, cmd, **_kw):
+            launched.append(cmd)
+
+    monkeypatch.setattr(web.subprocess, "Popen", FakePopen)
+    c, pw, _ = client
+    _login(c, pw)
+    page = c.get("/hunts/new").text
+    assert 'name="agent" value="model"' in page and "checked" not in page.split('name="agent"')[1][:40]
+    r = c.post("/hunts", data={"start": "2024-11-18T10:00:00Z", "end": "2024-11-18T17:30:00Z",
+                               "csrf": _csrf(page), **form}, follow_redirects=False)
+    assert r.status_code == 303
+    cmd = launched[0]
+    assert cmd[cmd.index("--agent-mode") + 1] == mode
+
+
+def test_unknown_agent_option_is_refused(client):
+    c, pw, _ = client
+    _login(c, pw)
+    page = c.get("/hunts/new").text
+    r = c.post("/hunts", data={"start": "2024-11-18T10:00:00Z", "end": "2024-11-18T17:30:00Z",
+                               "csrf": _csrf(page), "agent": "deterministic; rm -rf /"})
+    assert r.status_code == 400

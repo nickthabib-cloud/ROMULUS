@@ -102,11 +102,12 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     @app.get("/hunts/new", response_class=HTMLResponse)
     def new_hunt_form(request: Request):
         u = need(request)
-        return page(request, "new_hunt.html", u, tz=s.mission_timezone, sources=s.es_index_patterns)
+        return page(request, "new_hunt.html", u, tz=s.mission_timezone, sources=s.es_index_patterns,
+                    model=s.ollama_model_triage)
 
     @app.post("/hunts")
     def start_hunt(request: Request, start: str = Form(...), end: str = Form(...), style: str = Form("broad"),
-                   hypothesis: str = Form(""), csrf: str = Form("")):
+                   hypothesis: str = Form(""), agent: str = Form(""), csrf: str = Form("")):
         u = need(request)
         if not csrf_ok(u, csrf):
             raise HTTPException(403, "bad CSRF token")
@@ -117,15 +118,19 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             raise HTTPException(400, "start/end must be ISO 8601 times") from None
         if style not in ("broad", "directed"):
             raise HTTPException(400, "bad style")
+        if agent not in ("", "model"):
+            raise HTTPException(400, "bad agent option")
+        mode = "model" if agent == "model" else "off"     # unchecked: deterministic search only
         cmd = [sys.executable, "-m", "romulus.cli"] + (["--env-file", str(env_file)] if env_file else []) + \
-              ["hunt", "start", "--start", start, "--end", end, "--style", style]
+              ["hunt", "start", "--start", start, "--end", end, "--style", style, "--agent-mode", mode]
         if hypothesis.strip():
             cmd += ["--hypothesis", hypothesis.strip()[:500]]
         s.logs_dir.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "USER": f"web:{u['u']}"}
         with open(s.logs_dir / f"hunt-{datetime.now():%Y%m%d-%H%M%S}.log", "ab") as log:
             subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
-        repo.audit(f"web:{u['u']}", "web.hunt_start", detail={"start": start, "end": end, "style": style})
+        repo.audit(f"web:{u['u']}", "web.hunt_start", detail={"start": start, "end": end, "style": style,
+                                                                "agent_mode": mode})
         return RedirectResponse("/?started=1", status_code=303)
 
     @app.get("/hunts/{hunt_id}", response_class=HTMLResponse)

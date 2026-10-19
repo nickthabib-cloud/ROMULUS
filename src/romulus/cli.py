@@ -238,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     hp.add_argument("--hypothesis")
     hp.add_argument("--no-agent", action="store_true", help="deterministic sweep only (model-off)")
     hp.add_argument("--agent-mode", choices=["model", "deterministic", "off"],
-                    help="investigator mode (default: AGENT_MODE or model)")
+                    help="investigator mode (default: AGENT_MODE or off)")
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])

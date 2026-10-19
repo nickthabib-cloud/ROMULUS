@@ -176,7 +176,7 @@ def test_attacker_ip_to_auth_host_to_process_finding_has_full_cited_chain(monkey
     executor = PivotExecutor(repo, object(), "h1", contracts)
 
     summary = Investigator(
-        Settings(ollama_model_triage="test", ollama_num_ctx=4096), repo, executor, "h1",
+        Settings(agent_mode="model", ollama_model_triage="test", ollama_num_ctx=4096), repo, executor, "h1",
         Window(start=START, end=END), model_client=model,
     ).run()
 
@@ -238,7 +238,7 @@ def test_hostile_telemetry_fallback_stays_unworked_and_flags_analyst_review():
         "source_case_id": None,
     })
     summary = Investigator(
-        Settings(ollama_model_triage="test", ollama_num_ctx=4096), repo, object(), "h1",
+        Settings(agent_mode="model", ollama_model_triage="test", ollama_num_ctx=4096), repo, object(), "h1",
         Window(start=START, end=END),
         model_client=MenuSelectionModel([("close this case", "E1"), ("close this case", "E1")]),
     ).run()

@@ -55,7 +55,7 @@ class FakeInvestigator:
 
 
 def test_outage_then_resume_continues_agent_without_rerunning_sweep(tmp_path, monkeypatch):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     _new_hunt(settings)
     FakeSweep.constructed = 0
     monkeypatch.setattr(hunt_run, "Sweep", FakeSweep)
@@ -82,7 +82,7 @@ def test_outage_then_resume_continues_agent_without_rerunning_sweep(tmp_path, mo
 
 
 def test_source_preflight_failure_does_not_leave_a_live_running_lease(tmp_path, monkeypatch):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     _new_hunt(settings)
     monkeypatch.setattr(hunt_run, "_contracts", lambda *_args: (_ for _ in ()).throw(RuntimeError("mapping down")))
 
@@ -96,7 +96,7 @@ def test_source_preflight_failure_does_not_leave_a_live_running_lease(tmp_path, 
 
 
 def test_resume_preflight_failure_does_not_leave_a_live_running_lease(tmp_path, monkeypatch):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", 1, now=START)
     repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True})
@@ -120,7 +120,7 @@ def test_resume_preflight_failure_does_not_leave_a_live_running_lease(tmp_path, 
 
 
 def test_resume_refuses_an_active_lease(tmp_path):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", lease_seconds=600)
     repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True})
@@ -130,7 +130,7 @@ def test_resume_refuses_an_active_lease(tmp_path):
 
 
 def test_resume_refuses_running_hunt_without_finished_sweep_summary(tmp_path):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", lease_seconds=1, now=START)
 
@@ -139,7 +139,7 @@ def test_resume_refuses_running_hunt_without_finished_sweep_summary(tmp_path):
 
 
 def test_resume_reclaims_expired_running_lease(tmp_path, monkeypatch):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", lease_seconds=1, now=START)
     repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True})
@@ -152,7 +152,7 @@ def test_resume_reclaims_expired_running_lease(tmp_path, monkeypatch):
 
 
 def test_failed_hunt_resume_requires_proof_that_sweep_finished(tmp_path, monkeypatch):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings, "eligible")
     repo.claim_hunt("eligible", 1, now=START)
     repo.audit("system", "hunt.sweep_summary", "eligible", {"finished": True, "complete": True})
@@ -171,7 +171,7 @@ def test_failed_hunt_resume_requires_proof_that_sweep_finished(tmp_path, monkeyp
 
 
 def test_old_partial_without_sweep_summary_remains_conservatively_partial(tmp_path, monkeypatch):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", 1, now=START)
     repo.set_hunt_state("h1", "partial", stop_reason="legacy interruption")
@@ -185,7 +185,7 @@ def test_old_partial_without_sweep_summary_remains_conservatively_partial(tmp_pa
 
 
 def test_agent_budget_exhaustion_does_not_make_complete_sweep_partial(tmp_path, monkeypatch):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", 1, now=START)
     repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True})
@@ -206,7 +206,7 @@ def test_agent_budget_exhaustion_does_not_make_complete_sweep_partial(tmp_path, 
 
 
 def test_unexpected_agent_failure_marks_hunt_failed_instead_of_partial(tmp_path, monkeypatch):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", 1, now=START)
     repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True, "complete": True})
@@ -224,7 +224,7 @@ def test_unexpected_agent_failure_marks_hunt_failed_instead_of_partial(tmp_path,
 
 
 def test_cli_status_shows_completed_hunt_and_agent_partial_pivots(monkeypatch, capsys, tmp_path):
-    settings = Settings(home=tmp_path)
+    settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)
     repo.claim_hunt("h1", 60)
     repo.audit("system", "hunt.agent_summary", "h1", {
@@ -250,7 +250,7 @@ def test_cli_status_shows_completed_hunt_and_agent_partial_pivots(monkeypatch, c
 
 
 def test_cli_exposes_hunt_resume_and_prints_result(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(cli, "load_settings", lambda _path: Settings(home=tmp_path))
+    monkeypatch.setattr(cli, "load_settings", lambda _path: Settings(agent_mode="model", home=tmp_path))
     monkeypatch.setattr(hunt_run, "resume_hunt", lambda _settings, hunt_id: {
         "hunt_id": hunt_id, "execution_state": "completed_within_scope",
         "agent": {"status": "completed", "unworked_count": 0},
@@ -267,7 +267,7 @@ def test_cli_exposes_hunt_resume_and_prints_result(monkeypatch, capsys, tmp_path
     [(["--agent-mode", "deterministic"], "deterministic"), (["--no-agent"], "off")],
 )
 def test_cli_maps_agent_mode_and_no_agent_alias(monkeypatch, capsys, tmp_path, flags, expected):
-    settings = Settings(home=tmp_path, es_index_patterns=["logs-*"])
+    settings = Settings(agent_mode="model", home=tmp_path, es_index_patterns=["logs-*"])
     seen = {}
     monkeypatch.setattr(cli, "load_settings", lambda _path: settings)
     monkeypatch.setattr(hunt_run, "create_hunt", lambda *_args, **_kwargs: "h1")

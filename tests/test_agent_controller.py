@@ -130,7 +130,7 @@ class RecordingExecutor:
 
 def _investigator(repo, model, executor, **kwargs):
     return Investigator(
-        Settings(ollama_num_ctx=4096), repo, executor, "h1", WINDOW,
+        Settings(agent_mode="model", ollama_num_ctx=4096), repo, executor, "h1", WINDOW,
         model_client=model, **kwargs,
     )
 

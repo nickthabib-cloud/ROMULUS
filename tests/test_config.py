@@ -28,8 +28,8 @@ def test_strong_secret_accepted():
     Sessions("K" * 43)
 
 
-def test_agent_mode_defaults_to_model_and_loads_valid_env_value():
-    assert Settings().agent_mode == "model"
+def test_agent_mode_defaults_to_off_and_loads_valid_env_value():
+    assert Settings().agent_mode == "off"
     assert load_settings(environ={"AGENT_MODE": "deterministic"}).agent_mode == "deterministic"
 
 

@@ -92,7 +92,7 @@ class EntityExecutor:
 
 def _run_investigation(repo: Repo) -> RecordingModel:
     model = RecordingModel(SCRIPT)
-    Investigator(Settings(ollama_num_ctx=CTX), repo, EntityExecutor(), "h1", WINDOW, model_client=model).run()
+    Investigator(Settings(agent_mode="model", ollama_num_ctx=CTX), repo, EntityExecutor(), "h1", WINDOW, model_client=model).run()
     assert not model.replies, "the scripted investigation should use every reply"
     return model
 
@@ -255,7 +255,7 @@ def test_runner_judges_through_the_production_path_and_resumes(tmp_path):
     fake = FakeOllama(lambda _body: _selection("O999"))
     out = tmp_path / "results.jsonl"
 
-    counts = run_bakeoff(Settings(ollama_num_ctx=CTX), read_jsonl(tasks_path), ["m:1"], [CTX], [False], [7, 8],
+    counts = run_bakeoff(Settings(agent_mode="model", ollama_num_ctx=CTX), read_jsonl(tasks_path), ["m:1"], [CTX], [False], [7, 8],
                          out, "t1", inner_transport=httpx.MockTransport(fake))
 
     rows = [row for row in read_jsonl(out) if row["kind"] == "result"]
@@ -271,7 +271,7 @@ def test_runner_judges_through_the_production_path_and_resumes(tmp_path):
     info = [row for row in read_jsonl(out) if row["kind"] == "model_info"]
     assert info and info[0]["quantization"] == "Q4_K_M" and info[0]["loaded_vram_bytes"] == 6
 
-    again = run_bakeoff(Settings(ollama_num_ctx=CTX), read_jsonl(tasks_path), ["m:1"], [CTX], [False], [7, 8],
+    again = run_bakeoff(Settings(agent_mode="model", ollama_num_ctx=CTX), read_jsonl(tasks_path), ["m:1"], [CTX], [False], [7, 8],
                         out, "t1", inner_transport=httpx.MockTransport(fake))
     assert again["calls"] == 0 and again["skipped_done"] == 2
 
@@ -317,7 +317,7 @@ def test_runner_accepts_a_valid_close_and_rejects_hostile_citations(tmp_path):
         return _choose_description(user, "close this case")
     out = tmp_path / "results.jsonl"
 
-    run_bakeoff(Settings(ollama_num_ctx=CTX), chosen, ["m:1"], [CTX], [False], [7], out, "t2",
+    run_bakeoff(Settings(agent_mode="model", ollama_num_ctx=CTX), chosen, ["m:1"], [CTX], [False], [7], out, "t2",
                 retry=False, inner_transport=httpx.MockTransport(FakeOllama(close)))
 
     by_task = {row["task_id"]: row for row in read_jsonl(out) if row["kind"] == "result"}

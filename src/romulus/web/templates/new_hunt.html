@@ -12,6 +12,9 @@
       <select name="style"><option value="broad">Broad (sweep everything in scope)</option>
       <option value="directed">Directed (hypothesis plus a reduced broad sweep)</option></select></label>
     <label>Hypothesis (optional) <textarea name="hypothesis" rows="3" maxlength="500" placeholder="e.g. videoserver may have been compromised via its web application"></textarea></label>
+    <label class="check"><input type="checkbox" name="agent" value="model"> Agentic hunt: after the deterministic
+      search, let the language model ({{ model }}) work the leads. Experimental; it never changes findings or lanes.
+      Leave unchecked for a deterministic hunt.</label>
     <button type="submit">Start hunt</button>
   </form>
 </section>

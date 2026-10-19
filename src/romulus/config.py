@@ -68,7 +68,8 @@ class Settings(BaseModel):
     tshark_bin: str = "tshark"
     mission_timezone: str = "UTC"
     allow_privileged_source_account: bool = False
-    agent_mode: Literal["model", "deterministic", "off"] = "model"
+    # deterministic search is the default (owner direction 2026-10-19, ADR-006); the model is opt-in per hunt
+    agent_mode: Literal["model", "deterministic", "off"] = "off"
 
     @field_validator("es_index_patterns", "pcap_allowed_dirs", mode="before")
     @classmethod
