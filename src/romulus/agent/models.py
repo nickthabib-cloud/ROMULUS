@@ -141,6 +141,7 @@ class PivotCoverage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target: str
+    dataset: str | None = None
     start: datetime
     end: datetime
     status: Literal["complete", "partial", "failed"]

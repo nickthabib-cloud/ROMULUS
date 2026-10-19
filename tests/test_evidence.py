@@ -56,10 +56,21 @@ def test_exec_group_joins_syscall_and_keeps_unknowns_explicit():
     assert ev.family == "process_exec" and ev.outcome == Outcome.success
     assert ev.get("process.user") == "root" and ev.get("process.ppid") == 80935
     assert ev.get("process.executable") == "/usr/bin/dash"
+    assert ev.get("process.session_id") == 128
+    assert ev.fields["process.session_id"].origin.endswith("auditd:SYSCALL.ses")
     assert {r.native_id for r in ev.raw} == {"e1", "s1"}
     # without the SYSCALL companion: outcome/uid unknown, with a caveat (never defaulted)
     events, _, _ = normalize_hits([hit("e1", "linux.audit", EXECVE_HEX)])
     assert events[0].outcome == Outcome.unknown and not events[0].has("process.user") and events[0].caveats
+
+
+def test_unset_audit_session_id_stays_absent():
+    unset = SYSCALL.replace("ses=128", "ses=4294967295")
+    events, _, errors = normalize_hits([hit("e1", "linux.audit", EXECVE_HEX),
+                                        hit("s1", "linux.audit", unset)])
+
+    assert errors == []
+    assert not events[0].has("process.session_id")
 
 
 def test_non_exec_audit_groups_are_counted_not_dropped_silently():

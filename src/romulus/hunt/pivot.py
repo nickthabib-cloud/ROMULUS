@@ -43,8 +43,8 @@ _ISO_NANOS = re.compile(
 )
 
 
-def _is_network(target: str) -> bool:
-    return "network" in target.lower()
+def _is_network(target: str, contract: FieldContract | None = None) -> bool:
+    return "network" in target.lower() or bool(contract and contract.time_field == "firstPacket")
 
 
 def _supports(contract: FieldContract, field: str, op: str = "eq") -> bool:
@@ -226,8 +226,9 @@ def _safe_sample_interval(outcome: SearchOutcome, intent: SearchIntent,
 
 def _coalesce_coverage(segments: list[PivotCoverage]) -> list[PivotCoverage]:
     merged: list[PivotCoverage] = []
-    for segment in sorted(segments, key=lambda item: (item.target, item.start, item.end)):
+    for segment in sorted(segments, key=lambda item: (item.target, item.dataset or "", item.start, item.end)):
         if (merged and merged[-1].target == segment.target and merged[-1].end == segment.start
+                and merged[-1].dataset == segment.dataset
                 and merged[-1].status == segment.status and merged[-1].reasons == segment.reasons):
             previous = merged[-1]
             total = previous.total + segment.total if previous.total is not None and segment.total is not None else None
@@ -267,7 +268,7 @@ class PivotExecutor:
         window = Window(start=args.start, end=args.end)
         intents: list[SearchIntent] = []
         for target, contract in self.contracts.items():
-            network = _is_network(target)
+            network = _is_network(target, contract)
             filters: list[Predicate] = []
             any_of: list[list[Predicate]] = []
 
@@ -285,7 +286,22 @@ class PivotExecutor:
                 elif entity.kind == "ip" and not network:
                     if not _supports(contract, "event.dataset"):
                         continue
-                    filters = [Predicate(field="event.dataset", op="eq", value="systemd.journal")]
+                    for dataset in HOST_TIMELINE_DATASETS:
+                        dataset_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
+                        dataset_any_of: list[list[Predicate]] = []
+                        if dataset.startswith("apache."):
+                            for field in ("source.ip", "destination.ip"):
+                                if _supports(contract, field):
+                                    dataset_any_of.append([
+                                        Predicate(field=field, op="eq", value=entity.value),
+                                    ])
+                        intents.append(SearchIntent(
+                            kind="raw", target=target, window=window,
+                            filters=dataset_filters, any_of=dataset_any_of,
+                            max_records=MAX_PIVOT_RECORDS,
+                            purpose=f"agent:{request.tool}:{dataset}",
+                        ))
+                    continue
                 elif (entity.kind == "host" and not network
                       and _supports(contract, "event.dataset", "in") and _supports(contract, "host.name")):
                     filters = [
@@ -327,6 +343,32 @@ class PivotExecutor:
                 max_records=MAX_PIVOT_RECORDS, purpose=f"agent:{request.tool}",
             ))
         return intents
+
+    @staticmethod
+    def _intent_dataset(intent: SearchIntent) -> str | None:
+        for predicate in intent.filters:
+            if predicate.field == "event.dataset" and predicate.op == "eq" and isinstance(predicate.value, str):
+                return predicate.value
+        return None
+
+    def _unsearchable_ip_coverage(self, request: ToolRequest) -> list[PivotCoverage]:
+        if not isinstance(request, EntityTimelineRequest) or request.arguments.entity.kind != "ip":
+            return []
+        args = request.arguments
+        unresolved: list[PivotCoverage] = []
+        for target, contract in self.contracts.items():
+            if _is_network(target, contract):
+                continue
+            if _supports(contract, "event.dataset"):
+                continue
+            for dataset in HOST_TIMELINE_DATASETS:
+                reason = f"dataset_unsearchable:{dataset}:event.dataset predicate unavailable"
+                unresolved.append(PivotCoverage(
+                    target=target, dataset=dataset, start=args.start, end=args.end,
+                    status="partial", reasons=[reason], returned=0, total=None,
+                    unresolved_ranges=[_range(args.start, args.end, reason)],
+                ))
+        return unresolved
 
     def _execute_partitions(self, intent: SearchIntent, contract: FieldContract,
                             anchor_ts: datetime | None = None):
@@ -556,22 +598,28 @@ class PivotExecutor:
                 "ids_alerts requires an IP entity; network host.name identifies the observer sensor",
             ])
         intents = self._intents(request)
+        planning_coverage = self._unsearchable_ip_coverage(request)
         if not intents:
+            if planning_coverage:
+                return PivotResult(
+                    status="partial", coverage=planning_coverage,
+                    reasons=sorted({reason for cell in planning_coverage for reason in cell.reasons}),
+                )
             return PivotResult(status="unsupported", reasons=["no compatible source contract"])
 
         task_ids: list[str] = []
         retained: list[TypedEvent] = []
         raw_sources: dict[str, dict] = {}
-        reasons: list[str] = []
-        coverage: list[PivotCoverage] = []
+        reasons: list[str] = [reason for cell in planning_coverage for reason in cell.reasons]
+        coverage: list[PivotCoverage] = list(planning_coverage)
         successful_outcomes = 0
-        incomplete = False
+        incomplete = bool(planning_coverage)
 
         for intent in intents:
             fingerprint = digest({
                 "case_id": case_id,
                 "tool": request.model_dump(mode="json"),
-                "target": intent.target,
+                "intent": intent.model_dump(mode="json"),
                 "anchor_ts": anchor_ts.isoformat() if anchor_ts is not None else None,
             })
             task_id = "t-" + fingerprint[:20]
@@ -633,6 +681,7 @@ class PivotExecutor:
                     target_total += outcome.total
                 target_coverage.append(PivotCoverage(
                     target=intent.target,
+                    dataset=self._intent_dataset(intent),
                     start=leaf_intent.window.start.astimezone(UTC),
                     end=leaf_intent.window.end.astimezone(UTC),
                     status=status, reasons=sorted(set(leaf_reasons)), returned=outcome.returned,

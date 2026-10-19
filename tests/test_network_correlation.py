@@ -21,10 +21,10 @@ SSHD = {"exe": "/usr/sbin/sshd", "comm": "sshd", "uid": "0", "user": "root"}
 
 
 def syscall(serial=500, *, nr=42, arch="c000003e", success="yes", exit_code="0", exe="/usr/bin/perl",
-            comm="perl", uid="33", user="www-data", t0=T0, pid=200):
+            comm="perl", uid="33", user="www-data", t0=T0, pid=200, session_id="4294967295"):
     return (f"type=SYSCALL msg=audit({t0:.3f}:{serial}): arch={arch} syscall={nr} success={success} "
             f"exit={exit_code} a0=3 a1=7ffc a2=10 a3=0 items=0 ppid=100 pid={pid} auid=4294967295 uid={uid} "
-            f"gid={uid} euid={uid} tty=(none) ses=4294967295 comm=\"{comm}\" exe=\"{exe}\" subj==unconfined "
+            f"gid={uid} euid={uid} tty=(none) ses={session_id} comm=\"{comm}\" exe=\"{exe}\" subj==unconfined "
             f"key=\"T1043_Commonly_Used_Port\"\x1dARCH=x86_64 SYSCALL=connect AUID=\"unset\" UID=\"{user}\" "
             f"EUID=\"{user}\"")
 
@@ -97,6 +97,16 @@ def test_connect_group_becomes_a_typed_net_socket_event():
     assert e.fields["destination.ip"].origin.startswith("k1:")
     assert {r.native_id for r in e.raw} == {"s1", "k1"}
     assert ("ip", ATTACKER, "dst") in e.entities() and ("host", "videoserver", "host") in e.entities()
+    assert not e.has("process.session_id")
+
+
+def test_connect_group_keeps_set_audit_session_id():
+    events, _, errors = normalize_hits([
+        audit_hit("s1", syscall(session_id="42")), audit_hit("k1", sockaddr()),
+    ])
+
+    assert errors == []
+    assert events[0].get("process.session_id") == 42
 
 
 def test_socket_time_is_the_audit_header_epoch():

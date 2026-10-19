@@ -116,6 +116,11 @@ def _syscall_process_fields(sid: str, rs: AuditRecord) -> dict:
     for name, key in (("process.uid", "uid"), ("process.euid", "euid"), ("process.auid", "auid")):
         if key in rs.fields:
             f[name] = fv(rs.fields[key], f"{sid}:event.original#auditd:SYSCALL.{key}")
+    session_id = rs.fields.get("ses")
+    if session_id and session_id.isdigit() and session_id != "4294967295":
+        f["process.session_id"] = fv(
+            int(session_id), f"{sid}:event.original#auditd:SYSCALL.ses",
+        )
     for name, key in (("process.user", "UID"), ("process.effective_user", "EUID"),
                       ("process.login_user", "AUID")):
         if key in rs.enriched:
