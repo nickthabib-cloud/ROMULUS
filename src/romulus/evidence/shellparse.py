@@ -339,6 +339,8 @@ def shell_script_of(argv: list[str]) -> str | UnknownShellScript | None:
     if not argv:
         return None
     name = argv[0].rsplit("/", 1)[-1]
+    if name.startswith("-"):
+        name = name[1:]
     if name not in SHELLS:
         return None
 

