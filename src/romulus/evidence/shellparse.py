@@ -336,6 +336,7 @@ class UnknownShellScript:
 class _ShellArgLayout:
     script_file: str | None = None
     has_command_option: bool = False
+    reads_stdin: bool = False
     error: str = ""
 
 
@@ -356,6 +357,8 @@ def _scan_shell_args(args: list[str]) -> _ShellArgLayout:
             continue
         if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
             return _ShellArgLayout(has_command_option=True)
+        if arg == "-s" or (arg.startswith("-") and not arg.startswith("--") and "s" in arg[1:]):
+            return _ShellArgLayout(reads_stdin=True)
         if arg.startswith(("-", "+")):
             index += 1
             continue
@@ -394,7 +397,7 @@ def shell_script_file_of(argv: list[str], *, shell_name: str | None = None) -> s
         return UnknownShellScript(layout.error)
     if name in NON_POSIX_SHELLS and any(arg.startswith(("-", "+")) for arg in args):
         return UnknownShellScript(f"the {name} shell option grammar is not modelled")
-    if layout.has_command_option:
+    if layout.has_command_option or layout.reads_stdin:
         return None
     return layout.script_file
 

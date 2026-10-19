@@ -347,6 +347,17 @@ def test_shell_script_file_uses_shell_option_scanner(argv, expected):
 
 
 @pytest.mark.parametrize("argv", [
+    ["bash", "-s", "/tmp/x.sh"],
+    ["bash", "-es", "/tmp/x.sh"],
+    ["bash", "-se", "/tmp/x.sh"],
+    ["bash", "-s", "--", "/tmp/x.sh"],
+    ["busybox", "sh", "-s", "/tmp/x.sh"],
+])
+def test_shell_stdin_option_has_no_script_file_operand(argv):
+    assert shell_script_file_of(argv) is None
+
+
+@pytest.mark.parametrize("argv", [
     ["bash", "-c", "--", "id"],
     ["bash", "-c", "-x", "id"],
     ["bash", "-o", "pipefail", "-c", "id"],

@@ -631,6 +631,21 @@ def test_exec_from_tmp_consumes_shell_options_and_busybox_applet(argv):
 
 
 @pytest.mark.parametrize("argv", [
+    ["bash", "-s", "/tmp/x.sh"],
+    ["bash", "-es", "/tmp/x.sh"],
+    ["bash", "-se", "/tmp/x.sh"],
+    ["busybox", "sh", "-s", "/tmp/x.sh"],
+])
+def test_exec_from_tmp_ignores_arguments_after_shell_stdin_option(argv):
+    playbook = host.ExecFromTempDir()
+
+    assert playbook.consume([
+        exec_ev(argv, process__executable=f"/bin/{argv[0]}", process__cwd="/"),
+    ]) == []
+    assert playbook.missing_required == 0
+
+
+@pytest.mark.parametrize("argv", [
     ["python3", "-W", "ignore", "/tmp/x.py"],
     ["python3", "+X", "/tmp/x.py"],
 ])
