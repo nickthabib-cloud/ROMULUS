@@ -272,6 +272,21 @@ Run 2026-10-19 by the custodian; rerun before every holdout run.
 | Date | Change | Reason |
 |---|---|---|
 | 2026-10-19 | Protocol created. Matching rule (§6), lanes (§7), metrics (§8), funnel (§10) pre-registered before any scoring. Gold `sl700_e_a` v1 built. | M2 start |
+| 2026-10-19 | The lead accepted §6 and §7 as written. | Review |
+| 2026-10-19 | **Scoring source: the hunt DB**, opened read-only (`mode=ro` URI plus `query_only`). The latest report-manifest revision is used only for the review order and its rule-level coverage claims. | The manifest omits context-lane items (open item I10), and the funnel needs `task`, `rule_run` and `candidate` rows. Items are rebuilt from `candidate` → cited `typed_event` → raw refs (`target` = index, `native_id` = `_id`), the same native locators the retained raw copies carry. |
+| 2026-10-19 | Interpretations of §6, fixed before the first scored run: | Typed events log Suricata flows at log time, which can be minutes after the activity. |
+| | • **Item time range** = the union of the cited typed events' `ts` and, where present, EVE `flow.start`/`flow.end`. | |
+| | • **Item entities** = candidate entity values plus the cited events' hosts, lower-cased, with any `host\` prefix removed from accounts. | |
+| | • Host↔IP aliases come from a new gold file, `aliases.v1.json`, listing DNAT and dual-homed addresses. This is not an opportunity or evidence change. | |
+| 2026-10-19 | **Adjudications** are keyed by an item signature = SHA-256 of (rule ID, sorted cited locators). Candidate IDs differ between hunts, so this signature is what lets a verdict carry over to the same evidence in a later hunt. Stored on the VM only (`romulus-eval/sl700_e_a/adjudications.v1.jsonl`). | Run-to-run reuse |
+| 2026-10-19 | **Funnel determination** (§10), made concrete because the store retains only candidate-supporting records and `typed_event`/`raw_record` are not hunt-scoped: | Store limitation, reported to the lead as a product issue |
+| | • *retrieved* = a covering task (target, window, dataset filter) finished `complete`; | |
+| | • *normalized* and *evaluated* = replay of the product normalizer over the gold action/outcome records, fetched read-only from ES (cap 3,000 per opportunity and source), then a rule of the hunt's pack consuming that family with an evaluated cell covering the event time; | |
+| | • Arkime/PCAP stop at *source* until adapters exist. | |
+| 2026-10-19 | **Coverage-claim accuracy** (§8.8) uses only `no_match_complete` cells plus the report's rule-level `complete` claims. | `evaluated_complete` means "fully evaluated", not "no match"; cells in that state contain matched partitions. |
+| 2026-10-19 | **Known limitation.** For `inferable_only` opportunities, the indirect evidence can lie outside the action window (later use of a transferred file). A citation of it then fails the time check and is logged as an anomaly, not a hit. Kept as pre-registered; revisit with the lead before any holdout. | Found in the first scored run (1 anomaly, reviewed) |
+| 2026-10-19 | **Gold amendment v1.1 pending.** Adjudication found attacker-caused executions outside the v1 evidence sets of two observable opportunities: the exploit's vulnerability-check and payload-stage executions, and enumeration-script descendants reached through forked subshells that leave no exec record. The amendment will add them as evidence. No opportunity is added or removed, denominators are unchanged, and it applies from the next scored run. Run 1–2 precision counts them as `true_unlisted`. | §6 amendment rule |
+| 2026-10-19 | The agent-on hunt `h20261018-224406-923663` (pre option B) was deleted from the store on 2026-10-19 01:14 UTC (`hunt.delete` audit event). No agent-on hunt exists, so model-on vs model-off is pending a new agent-on run. | Scoring round 1 |
 
 ## 14. Pre-registration block (holdout)
 
