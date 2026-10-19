@@ -8,7 +8,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-_RESERVED = {"if", "then", "fi", "for", "while", "case", "do", "done", "!", "function"}
+_RESERVED = {"if", "then", "elif", "else", "fi", "for", "while", "case", "esac", "do", "done", "!",
+             "function"}
 _DYNAMIC_COMMANDS = {"eval", "exec", "command", "env", "builtin"}
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _ASCII_BLANK = {" ", "\t"}
@@ -49,7 +50,11 @@ def _lex(script: str) -> list[_Token]:
         tokens.append(_Token(kind, value))
 
     def fail(message: str) -> None:
-        raise _Unmodelled(message, tokens)
+        last_complete_line = max(
+            (i for i, token in enumerate(tokens) if token.kind == "operator" and token.value == "\n"),
+            default=-1,
+        )
+        raise _Unmodelled(message, tokens[:last_complete_line + 1])
 
     while index < len(script):
         char = script[index]
@@ -255,15 +260,6 @@ def parse_script(script: str) -> ParsedScript:
             pipelines.append(current)
         current = Pipeline(commands=[])
 
-    def clean_prefix() -> list[Pipeline]:
-        prefix = list(pipelines)
-        commands = list(current.commands)
-        if cmd.argv or cmd.redirects:
-            commands.append(cmd)
-        if commands:
-            prefix.append(Pipeline(commands=commands))
-        return prefix
-
     try:
         index = 0
         while index < len(tokens):
@@ -304,6 +300,8 @@ def parse_script(script: str) -> ParsedScript:
                 close_pipeline()
                 requires_command = True
             elif token.value == "\n":
+                if requires_command:
+                    raise _Unmodelled("line continuation after an operator is not modelled")
                 close_pipeline()
             else:  # ; or &
                 if not (cmd.argv or cmd.redirects or current.commands):
@@ -315,10 +313,10 @@ def parse_script(script: str) -> ParsedScript:
             raise _Unmodelled("trailing operator is missing a command")
         close_pipeline()
     except _Unmodelled as e:
-        return ParsedScript(pipelines=clean_prefix(), ok=False, error=str(e), partial=True)
+        return ParsedScript(pipelines=[], ok=False, error=str(e), partial=False)
 
     if lex_error:
-        return ParsedScript(pipelines=pipelines, ok=False, error=lex_error, partial=True)
+        return ParsedScript(pipelines=pipelines, ok=False, error=lex_error, partial=bool(pipelines))
     return ParsedScript(pipelines=pipelines)
 
 

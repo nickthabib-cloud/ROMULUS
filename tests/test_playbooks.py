@@ -126,8 +126,8 @@ def test_web_user_partial_script_prefix_can_supply_positive_chaining_indicator()
     pb = host.WebServiceSpawnsInterpreter()
     argv = [
         "sh", "-c",
-        r"/usr/bin/zmu -A -a -m ;echo exec\(__import__\(\'zlib\'\).decompress\(payload\)\) "
-        r"| exec $(which python || which python3) -",
+        r"/usr/bin/zmu -A -a -m ;echo exec\(__import__\(\'zlib\'\).decompress\(payload\)\)"
+        "\n" r"exec $(which python || which python3) -",
     ]
 
     immediate = pb.consume([exec_ev(argv, user="www-data")])
@@ -136,6 +136,46 @@ def test_web_user_partial_script_prefix_can_supply_positive_chaining_indicator()
     assert pb.missing_required == 1
     assert "indicator: additional commands chained after application helper 'zmu'" in immediate[0].notes
     assert any("clean prefix only" in note for note in immediate[0].notes)
+
+
+@pytest.mark.parametrize("script", [
+    '/usr/bin/zmu -m 0; echo b64decode; echo "unterminated',
+    "/usr/bin/zmu -m 0; echo b64decode '",
+    "/usr/bin/zmu -m 0; echo b64decode; x=$(id",
+    "/usr/bin/zmu a; echo b64decode )",
+    "/usr/bin/zmu a; echo b64decode; }",
+    "/usr/bin/zmu a; echo b64decode |",
+    "/usr/bin/zmu a && echo b64decode &&",
+    "/usr/bin/zmu a; echo b64decode; esac",
+    "/usr/bin/zmu a; echo b64decode; then",
+    "/usr/bin/zmu a; echo b64decode; echo $'x",
+    "/usr/bin/zmu a; python3 -c 'exec(base64.b64decode(\"aWQ=\"))' ${",
+    "/usr/bin/zmu a; echo b64decode `id",
+    "/usr/bin/zmu a; echo b64decode; case x in",
+    "/usr/bin/zmu a; echo b64decode <(id",
+    "/usr/bin/zmu a;echo b64decode;function",
+    "/usr/bin/zmu a; echo b64decode; if true; then id",
+    "/usr/bin/zmu a; echo b64decode; (id",
+    "/usr/bin/zmu a; echo b64decode;; id",
+    "/usr/bin/zmu a |\necho b64decode",
+])
+def test_rejected_shell_line_never_supplies_interpreter_indicators(script):
+    indicators, unevaluable, prefix_only = host._interpreter_indicators(["bash", "-c", script])
+
+    assert indicators == []
+    assert unevaluable is True
+    assert prefix_only is False
+
+
+def test_lexical_cut_on_later_line_can_use_the_completed_prior_line():
+    indicators, unevaluable, prefix_only = host._interpreter_indicators([
+        "bash", "-c", "/usr/bin/zmu a; echo b64decode\necho $HOME",
+    ])
+
+    assert "additional commands chained after application helper 'zmu'" in indicators
+    assert "encoded payload text piped/echoed into another command" in indicators
+    assert unevaluable is True
+    assert prefix_only is True
 
 
 def test_web_user_partial_prefix_does_not_read_chaining_text_after_unclosed_construct():

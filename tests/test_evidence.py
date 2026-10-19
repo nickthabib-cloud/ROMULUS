@@ -178,12 +178,37 @@ def test_command_substitution_is_explicitly_unevaluable(script):
 
 
 def test_unmodelled_script_retains_only_cleanly_parsed_prefix():
-    parsed = parse_script("/usr/bin/zmu -A -a -m ; echo payload | exec $(which python) -")
+    parsed = parse_script("/usr/bin/zmu -A -a -m ; echo payload\nexec $(which python) -")
 
     assert parsed.ok is False
     assert parsed.partial is True
     assert [command.name for command in parsed.commands()] == ["zmu", "echo"]
     assert all("which" not in argument for command in parsed.commands() for argument in command.argv)
+
+
+def test_unmodelled_construct_discards_commands_on_its_own_line():
+    parsed = parse_script("/usr/bin/zmu -A -a -m ; echo payload | exec $(which python) -")
+
+    assert parsed.ok is False
+    assert parsed.partial is False
+    assert parsed.commands() == []
+
+
+@pytest.mark.parametrize("script", [
+    "/usr/bin/zmu a; echo b64decode |",
+    "/usr/bin/zmu a && echo b64decode &&",
+    "/usr/bin/zmu a; echo b64decode;; id",
+    "/usr/bin/zmu a; echo b64decode; then",
+    "/usr/bin/zmu a; echo b64decode; esac",
+    "/usr/bin/zmu a; echo b64decode\nelse",
+    "/usr/bin/zmu a |\necho b64decode",
+])
+def test_shell_parser_errors_never_retain_a_prefix(script):
+    parsed = parse_script(script)
+
+    assert parsed.ok is False
+    assert parsed.partial is False
+    assert parsed.commands() == []
 
 
 def test_shell_allowlist_tracks_comments_quotes_and_escapes_in_one_grammar():
@@ -258,7 +283,7 @@ def test_shell_allowlist_rejects_unmodelled_constructs(script, reason):
 
 
 @pytest.mark.parametrize("word", [
-    "if", "then", "fi", "for", "while", "case", "do", "done", "!", "function",
+    "if", "then", "elif", "else", "fi", "for", "while", "case", "esac", "do", "done", "!", "function",
 ])
 def test_shell_allowlist_rejects_reserved_words_in_command_position(word):
     parsed = parse_script(word)
