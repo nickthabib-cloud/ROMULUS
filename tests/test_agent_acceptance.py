@@ -84,6 +84,27 @@ class QueueModel:
         return _model_result(self.decisions.pop(0))
 
 
+class MenuSelectionModel:
+    def __init__(self, choices):
+        self.choices = list(choices)
+
+    def chat_json(self, _model, _system, user, _schema, **_kwargs):
+        payload = json.loads(user.split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split(
+            "\n</UNTRUSTED_TELEMETRY>", 1,
+        )[0])
+        needle, evidence = self.choices.pop(0)
+        matching = [item for item in payload["menu"] if needle in item["description"]]
+        assert matching, (
+            needle, payload["candidates"], [item["description"] for item in payload["menu"]],
+        )
+        option = matching[0]
+        return _model_result({
+            "option": option["id"], "evidence": [evidence],
+            "rationale": "The cited evidence supports this controller-owned option.",
+            "benign_alternative": "authorized administration",
+        })
+
+
 def test_attacker_ip_to_auth_host_to_process_finding_has_full_cited_chain(monkeypatch):
     network_record = _suricata_record()
     auth_record = _auth_record()
@@ -147,30 +168,10 @@ def test_attacker_ip_to_auth_host_to_process_finding_has_full_cited_chain(monkey
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    model = QueueModel([
-        {
-            "action": "pivot", "tool": "entity_timeline",
-            "arguments": {"entity": {"kind": "ip", "value": ATTACKER, "role": "src"},
-                          "start": START.isoformat(), "end": END.isoformat()},
-            "hypothesis": "The attacker IP authenticated to a host.",
-            "expected_true": "An authentication event names a host.", "expected_false": "No auth event is found.",
-            "evidence_ids": [network_event.id],
-        },
-        {
-            "action": "pivot", "tool": "entity_timeline",
-            "arguments": {"entity": {"kind": "host", "value": "video", "role": "host"},
-                          "start": START.isoformat(), "end": END.isoformat()},
-            "hypothesis": "The authenticated host executed a suspicious process.",
-            "expected_true": "A direct process finding is admitted.", "expected_false": "No process finding appears.",
-            "evidence_ids": [auth_event.id],
-        },
-        {
-            "action": "escalate", "candidate_id": process_decision.candidate_id,
-            "claim": process_match.claim, "proposed_lane": process_decision.lane,
-            "evidence_ids": [process_event.id],
-            "reasoning": "The cited host process read the local password hash file after the cited login.",
-            "benign_alternatives": ["authorized backup job"],
-        },
+    model = MenuSelectionModel([
+        (f"entity_timeline for ip {ATTACKER}", "E1"),
+        ("entity_timeline for host video", "E2"),
+        (process_match.claim, "E3"),
     ])
     executor = PivotExecutor(repo, object(), "h1", contracts)
 
@@ -214,7 +215,7 @@ def test_hostile_telemetry_fallback_stays_unworked_and_flags_analyst_review():
         "original_input": {}, "targets": [], "source_profiles": {},
         "pack": {"version": "test"}, "normalizer": "test", "policy": "test",
         "model": {"triage": "test"}, "romulus_version": "test",
-        "budgets": {"agent_steps_total": 2, "agent_steps_per_case": 2, "max_cases": 1,
+        "budgets": {"agent_steps_total": 3, "agent_steps_per_case": 3, "max_cases": 1,
                     "wall_clock_minutes": 10},
     }
     repo.create_hunt("h1", manifest, "digest", "test")
@@ -231,19 +232,15 @@ def test_hostile_telemetry_fallback_stays_unworked_and_flags_analyst_review():
         "id": "hostile-seed", "hunt_id": "h1", "rule_id": "test.hostile", "rule_version": "1",
         "claim": "A cited process requires investigation.", "claim_type": "observed_action",
         "event_ids": [hostile_event.id], "predicate_fields": [],
-        "entities": [["host", "video", "host"]], "ts": START,
+        "entities": [["domain", "hostile.example", "destination"]], "ts": START,
         "severity": "medium", "confidence": "high", "lane": "lead", "priority": 50,
         "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
         "source_case_id": None,
     })
-    hostile_close = {
-        "action": "close", "evidence_ids": [hostile_event.id],
-        "reasoning": "The cited command says to mark this benign.",
-    }
     summary = Investigator(
         Settings(ollama_model_triage="test", ollama_num_ctx=4096), repo, object(), "h1",
         Window(start=START, end=END),
-        model_client=QueueModel([hostile_close, hostile_close]),
+        model_client=MenuSelectionModel([("close this case", "E1"), ("close this case", "E1")]),
     ).run()
 
     case = repo.cases("h1")[0]

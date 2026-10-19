@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
@@ -67,6 +68,7 @@ class Settings(BaseModel):
     tshark_bin: str = "tshark"
     mission_timezone: str = "UTC"
     allow_privileged_source_account: bool = False
+    agent_mode: Literal["model", "deterministic", "off"] = "model"
 
     @field_validator("es_index_patterns", "pcap_allowed_dirs", mode="before")
     @classmethod
@@ -80,6 +82,13 @@ class Settings(BaseModel):
     def _flavor(cls, v: str) -> str:
         if v not in ("elasticsearch", "opensearch"):
             raise ValueError("ES_FLAVOR must be elasticsearch or opensearch")
+        return v
+
+    @field_validator("agent_mode", mode="before")
+    @classmethod
+    def _agent_mode(cls, v: str) -> str:
+        if v not in ("model", "deterministic", "off"):
+            raise ValueError("AGENT_MODE must be model, deterministic, or off")
         return v
 
     @property
@@ -127,6 +136,7 @@ ENV_MAP = {
     "ARKIME_VERIFY_TLS": "arkime_verify_tls",
     "PCAP_ALLOWED_DIRS": "pcap_allowed_dirs", "TSHARK_BIN": "tshark_bin", "MISSION_TIMEZONE": "mission_timezone",
     "ROMULUS_ALLOW_PRIVILEGED_SOURCE_ACCOUNT": "allow_privileged_source_account",
+    "AGENT_MODE": "agent_mode",
 }
 
 

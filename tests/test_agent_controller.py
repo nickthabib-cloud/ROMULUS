@@ -57,6 +57,10 @@ def _result(parsed: dict, *, duration=5) -> ModelResult:
     )
 
 
+def _selection(option="O1", evidence="E1", rationale="Cited evidence supports this option.") -> dict:
+    return {"option": option, "evidence": [evidence], "rationale": rationale}
+
+
 def _host_pivot(host: str, evidence: str) -> dict:
     return {
         "action": "pivot", "tool": "entity_timeline",
@@ -83,7 +87,19 @@ class QueueModel:
         item = self.results.pop(0)
         if isinstance(item, Exception):
             raise item
+        if callable(item):
+            item = item(_args[2])
         return item
+
+
+def _choose_description(needle: str, evidence: str = "E1"):
+    def choose(user: str) -> ModelResult:
+        payload = json.loads(user.split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split(
+            "\n</UNTRUSTED_TELEMETRY>", 1,
+        )[0])
+        option = next(item for item in payload["menu"] if needle in item["description"])
+        return _result(_selection(option["id"], evidence))
+    return choose
 
 
 def test_prompt_digest_covers_system_user_and_schema():
@@ -116,13 +132,107 @@ def _investigator(repo, model, executor, **kwargs):
     )
 
 
+def test_deterministic_mode_uses_top_pivots_without_model_calls_and_is_reproducible():
+    decisions = []
+    for _index in range(2):
+        repo = _repo(total=1, per_case=4)
+        _candidate(repo, "c1", "video", 50)
+        _evidence(repo, "event-c1", START)
+        model = QueueModel([])
+        executor = RecordingExecutor()
+
+        summary = _investigator(repo, model, executor, agent_mode="deterministic").run()
+
+        case = repo.cases("h1")[0]
+        step = repo.case_steps(case["id"])[1]
+        assert summary["mode"] == "deterministic"
+        assert model.calls == 0
+        assert len(executor.calls) == 1
+        assert step["decision"]["agent_mode"] == "deterministic"
+        assert step["decision"]["chosen_option"] == "O1"
+        assert step["decision"]["menu"] and step["decision"]["aliases"]["evidence"] == {"E1": "event-c1"}
+        decisions.append(step["decision"])
+    assert decisions[0] == decisions[1]
+
+
+def test_deterministic_mode_parks_with_completion_reason_when_no_pivot_remains():
+    repo = _repo(total=1, per_case=1)
+    repo.save_candidate({
+        "id": "c1", "hunt_id": "h1", "rule_id": "test.rule", "rule_version": "1",
+        "claim": "Suspicious domain.", "claim_type": "observed_action",
+        "event_ids": ["event-c1"], "predicate_fields": [],
+        "entities": [["domain", "example.test", "destination"]], "ts": START,
+        "severity": "medium", "confidence": "high", "lane": "lead", "priority": 50,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "source_case_id": None,
+    })
+    _evidence(repo, "event-c1", START)
+    model = QueueModel([])
+
+    summary = _investigator(
+        repo, model, RecordingExecutor(), agent_mode="deterministic",
+    ).run()
+
+    case = repo.cases("h1")[0]
+    decision = repo.case_steps(case["id"])[1]["decision"]
+    assert summary["status"] == "completed" and case["status"] == "parked"
+    assert decision["action"] == "park_as_lead"
+    assert decision["reasoning"] == "deterministic investigation complete"
+    assert model.calls == 0
+
+
+def test_model_mode_falls_back_to_top_pivot_after_two_constraint_defects():
+    repo = _repo(total=3, per_case=3)
+    _candidate(repo, "c1", "video", 50)
+    _evidence(repo, "event-c1", START)
+    model = QueueModel([_result(_selection("O999")), _result(_selection("O999"))])
+    executor = RecordingExecutor()
+
+    summary = _investigator(repo, model, executor, agent_mode="model").run()
+
+    case = repo.cases("h1")[0]
+    steps = repo.case_steps(case["id"])[1:]
+    assert model.calls == 2 and len(executor.calls) == 1
+    assert [step["accepted"] for step in steps] == [0, 0, 1]
+    assert all(step["rejection"].startswith("unknown option") for step in steps[:2])
+    assert steps[2]["decision"]["deterministic_fallback"] is True
+    assert "failed twice" in steps[2]["decision"]["fallback_note"]
+    assert summary["deterministic_fallbacks"] == 1
+    assert summary["constraint_defects"] == 2
+
+
+def test_model_mode_fallback_parks_only_when_no_pivot_option_remains():
+    repo = _repo(total=3, per_case=3)
+    repo.save_candidate({
+        "id": "c1", "hunt_id": "h1", "rule_id": "test.rule", "rule_version": "1",
+        "claim": "Suspicious domain.", "claim_type": "observed_action",
+        "event_ids": ["event-c1"], "predicate_fields": [],
+        "entities": [["domain", "example.test", "destination"]], "ts": START,
+        "severity": "medium", "confidence": "high", "lane": "lead", "priority": 50,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "source_case_id": None,
+    })
+    _evidence(repo, "event-c1", START)
+    model = QueueModel([_result(_selection("O999")), _result(_selection("O999"))])
+
+    summary = _investigator(repo, model, RecordingExecutor(), agent_mode="model").run()
+
+    case = repo.cases("h1")[0]
+    final = repo.case_steps(case["id"])[-1]["decision"]
+    assert case["status"] == "fallback_parked"
+    assert final["action"] == "park_as_lead" and final["deterministic_fallback"] is True
+    assert summary["fallback_parked_count"] == 1
+
+
 def test_scheduler_gives_each_case_one_call_before_depth():
     repo = _repo(total=2, per_case=4)
     _candidate(repo, "c-high", "video", 80)
     _candidate(repo, "c-low", "control", 20)
+    _evidence(repo, "event-c-high", START)
+    _evidence(repo, "event-c-low", START)
     model = QueueModel([
-        _result(_host_pivot("video", "event-c-high")),
-        _result(_host_pivot("control", "event-c-low")),
+        _result(_selection()),
+        _result(_selection()),
     ])
     executor = RecordingExecutor()
 
@@ -138,7 +248,7 @@ def test_accepted_pivot_receives_anchor_from_cited_persisted_evidence():
     _candidate(repo, "c1", "video", 50)
     anchor = START + timedelta(minutes=2)
     _evidence(repo, "event-c1", anchor)
-    model = QueueModel([_result(_host_pivot("video", "event-c1"))])
+    model = QueueModel([_result(_selection())])
     executor = RecordingExecutor()
 
     _investigator(repo, model, executor).run()
@@ -146,35 +256,48 @@ def test_accepted_pivot_receives_anchor_from_cited_persisted_evidence():
     assert executor.anchors == [anchor]
 
 
-def test_two_rejections_count_against_budget_then_park_deterministically():
+def test_two_rejections_count_against_budget_without_unsafe_parking():
     repo = _repo(total=4, per_case=2)
     _candidate(repo, "c1", "video", 50)
-    invalid = _host_pivot("video", "event-c1")
-    invalid["arguments"]["query"] = {"match_all": {}}
-    model = QueueModel([_result(invalid), _result(invalid)])
+    model = QueueModel([_result(_selection("O999")), _result(_selection("O999"))])
 
     summary = _investigator(repo, model, RecordingExecutor()).run()
 
     case = repo.cases("h1")[0]
-    assert summary["status"] == "completed"
-    assert case["status"] == "fallback_parked"
+    assert summary["status"] == "budget_exhausted"
+    assert case["status"] == "budget_exhausted"
     assert case["steps_used"] == 2
     assert [step["accepted"] for step in repo.case_steps(case["id"])[1:]] == [0, 0]
-    assert "validation failed twice" in case["summary"]
     assert summary["unworked_seed_ids"] == ["c1"]
     assert summary["unworked_count"] == 1
-    assert summary["analyst_flags"][0]["case_id"] == case["id"]
+    assert summary["fallback_parked_count"] == 0
 
 
 def test_spawn_is_bounded_by_max_cases():
-    repo = _repo(total=1, max_cases=2)
-    _candidate(repo, "c1", "video", 50, ip="203.0.113.8")
-    model = QueueModel([_result({
-        "action": "spawn", "entity": {"kind": "ip", "value": "203.0.113.8", "role": "src"},
-        "evidence_ids": ["event-c1"], "reasoning": "Separate the network thread.",
-    })])
+    repo = _repo(total=2, max_cases=2)
+    repo.save_candidate({
+        "id": "c1", "hunt_id": "h1", "rule_id": "test.rule", "rule_version": "1",
+        "claim": "Suspicious domain.", "claim_type": "observed_action",
+        "event_ids": ["event-c1"], "predicate_fields": [],
+        "entities": [["domain", "example.test", "destination"]], "ts": START,
+        "severity": "medium", "confidence": "high", "lane": "lead", "priority": 50,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "source_case_id": None,
+    })
+    _evidence(repo, "event-c1", START)
+    model = QueueModel([_choose_description("spawn a case for ip 203.0.113.8")])
+    investigator = _investigator(repo, model, RecordingExecutor())
+    investigator._seed_cases()
+    case = repo.cases("h1")[0]
+    repo.append_case_step(
+        case["id"], 1, {"action": "pivot"}, True,
+        result_digest={
+            "status": "complete", "entities": [{"kind": "ip", "value": "203.0.113.8", "role": "dst"}],
+        },
+    )
+    repo.update_case(case["id"], steps_used=1)
 
-    _investigator(repo, model, RecordingExecutor()).run()
+    investigator.run()
 
     cases = repo.cases("h1")
     assert len(cases) == 2
@@ -248,46 +371,44 @@ def test_resume_replays_accepted_pivot_without_a_result_before_new_model_calls()
     assert summary["status"] == "budget_exhausted"
 
 
-def test_duplicate_normalized_pivot_is_not_executed_and_falls_back_after_two_rejections():
+def test_executed_pivot_is_removed_from_the_next_generated_menu():
     repo = _repo(total=3, per_case=3)
     _candidate(repo, "c1", "video", 50)
-    original = _host_pivot("video", "event-c1")
-    duplicate = _host_pivot("video", "event-c1")
-    duplicate["arguments"] = {
-        "end": "2024-11-18T14:10:00Z",
-        "entity": {"role": "host", "value": "video", "kind": "host"},
-        "start": "2024-11-18T14:00:00Z",
-    }
-    model = QueueModel([_result(original), _result(duplicate), _result(duplicate)])
+    _evidence(repo, "event-c1", START)
+    model = QueueModel([
+        _result(_selection()), _result(_selection("O999")), _result(_selection("O999")),
+    ])
     executor = RecordingExecutor()
 
     summary = _investigator(repo, model, executor).run()
 
     case = repo.cases("h1")[0]
     proposal_steps = repo.case_steps(case["id"])[1:]
-    assert executor.calls == [(case["id"], "entity_timeline")]
+    assert len(executor.calls) == 1
     assert case["steps_used"] == 3
-    assert case["status"] == "fallback_parked"
+    assert case["status"] == "budget_exhausted"
     assert [step["accepted"] for step in proposal_steps] == [1, 0, 0]
-    assert all("duplicate pivot" in step["rejection"] for step in proposal_steps[1:])
-    assert summary["duplicate_pivots_blocked"] == 2
-    assert "deterministic_fallback_park" in case["summary"]
-    assert "already executed at step 1" in model.users[2]
-    assert '"option":"pivot"' in model.users[2]
+    executed = proposal_steps[0]["decision"]
+    for rejected in proposal_steps[1:]:
+        assert not any(
+            option["decision"].get("tool") == executed["tool"]
+            and option["decision"].get("arguments") == executed["arguments"]
+            for option in rejected["decision"]["menu"]
+        )
+    assert summary["duplicate_pivots_blocked"] == 0
 
 
-def test_duplicate_pivot_ignores_non_query_entity_role():
-    repo = _repo(total=3, per_case=3)
+def test_model_cannot_mutate_the_controller_owned_option_payload():
+    repo = _repo(total=2, per_case=2)
     _candidate(repo, "c1", "video", 50)
-    original = _host_pivot("video", "event-c1")
-    duplicate = _host_pivot("video", "event-c1")
-    duplicate["arguments"]["entity"]["role"] = "attacker-controlled"
-    model = QueueModel([_result(original), _result(duplicate), _result(duplicate)])
+    _evidence(repo, "event-c1", START)
+    mutated = {**_selection(), "arguments": {"query": {"match_all": {}}}}
+    model = QueueModel([_result(mutated), _result(mutated)])
     executor = RecordingExecutor()
 
     summary = _investigator(repo, model, executor).run()
 
     case = repo.cases("h1")[0]
-    assert executor.calls == [(case["id"], "entity_timeline")]
-    assert summary["duplicate_pivots_blocked"] == 2
-    assert case["status"] == "fallback_parked"
+    assert executor.calls == []
+    assert summary["constraint_defects"] == 2
+    assert case["status"] == "budget_exhausted"

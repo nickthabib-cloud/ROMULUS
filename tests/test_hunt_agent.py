@@ -257,3 +257,30 @@ def test_cli_exposes_hunt_resume_and_prints_result(monkeypatch, capsys, tmp_path
 
     assert code == 0
     assert '"hunt_id": "h1"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [(["--agent-mode", "deterministic"], "deterministic"), (["--no-agent"], "off")],
+)
+def test_cli_maps_agent_mode_and_no_agent_alias(monkeypatch, capsys, tmp_path, flags, expected):
+    settings = Settings(home=tmp_path, es_index_patterns=["logs-*"])
+    seen = {}
+    monkeypatch.setattr(cli, "load_settings", lambda _path: settings)
+    monkeypatch.setattr(hunt_run, "create_hunt", lambda *_args, **_kwargs: "h1")
+
+    def fake_run(_settings, _hunt_id, **kwargs):
+        seen.update(kwargs)
+        return {
+            "execution_state": "completed_within_scope", "detection_result": "leads_only",
+            "lanes": {}, "stats": {}, "agent": {"status": "completed"},
+        }
+
+    monkeypatch.setattr(hunt_run, "run_hunt", fake_run)
+
+    code = cli.main(["hunt", "start", "--start", START.isoformat(), "--end",
+                     (START + timedelta(hours=1)).isoformat(), *flags])
+
+    assert code == 0
+    assert seen["agent_mode"] == expected
+    capsys.readouterr()

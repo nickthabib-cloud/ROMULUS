@@ -11,10 +11,12 @@ from pydantic import ValidationError
 
 from romulus.agent.brief import build_brief
 from romulus.agent.cases import cluster_seed_candidates
-from romulus.agent.models import AgentDecision, EntityRef, PivotResult, parse_decision_output
+from romulus.agent.constraints import eligible_evidence_aliases
+from romulus.agent.models import AgentDecision, EntityRef, PivotResult
 from romulus.agent.ollama import ModelResult, ModelUnavailable, OllamaClient
+from romulus.agent.resolver import Resolution, resolve_output
 from romulus.agent.tools import parse_tool_request, tool_catalog
-from romulus.agent.validate import ValidationResult, validate_decision
+from romulus.agent.validate import ValidationResult
 from romulus.config import Settings
 from romulus.store.db import digest, utcnow
 from romulus.store.repo import Repo
@@ -28,7 +30,8 @@ class Investigator:
                  window: Any, model_client: Any | None = None,
                  heartbeat: Callable[[], None] | None = None,
                  owner_token: str | None = None,
-                 clock: Callable[[], float] | None = None):
+                 clock: Callable[[], float] | None = None,
+                 agent_mode: str | None = None):
         self.settings = settings
         self.repo = repo
         self.pivot_executor = pivot_executor
@@ -38,6 +41,9 @@ class Investigator:
         self.heartbeat = heartbeat or (lambda: None)
         self.owner_token = owner_token
         self.clock = clock or monotonic
+        self.mode = agent_mode or settings.agent_mode
+        if self.mode not in {"model", "deterministic", "off"}:
+            raise ValueError(f"invalid agent mode: {self.mode}")
         hunt = repo.get_hunt(hunt_id)
         if hunt is None:
             raise KeyError(hunt_id)
@@ -148,6 +154,7 @@ class Investigator:
             "options": {
                 "num_ctx": self.settings.ollama_num_ctx, "max_out": 900,
                 "think": self.settings.ollama_think, "shrink_actions": brief.shrink_actions,
+                "schema_form": "anyOf",
             },
             "prompt_digest": digest({"system": brief.system, "user": brief.user, "schema": brief.schema}),
             "prompt_tokens_est": result.prompt_tokens_est,
@@ -178,7 +185,73 @@ class Investigator:
             steps_used=int(case["steps_used"]) + 1,
         )
 
-    def _call_once(self, case: dict, retry_errors: tuple[str, ...]) -> tuple[str, Any]:
+    @staticmethod
+    def _menu_snapshot(brief) -> list[dict]:
+        return [option.model_dump(mode="json") for option in brief.menu.options]
+
+    def _annotate_decision(
+        self,
+        decision: AgentDecision,
+        brief,
+        option_id: str,
+        *,
+        deterministic_fallback: bool = False,
+        fallback_note: str = "",
+        truncated_fields: list[str] | None = None,
+        model_attempt: int | None = None,
+    ) -> AgentDecision:
+        option = next(item for item in brief.menu.options if item.id == option_id)
+        return decision.model_copy(update={
+            "chosen_option": option_id,
+            "option_description": option.description,
+            "menu": self._menu_snapshot(brief),
+            "menu_hidden_count": brief.menu.hidden_count,
+            "aliases": brief.aliases,
+            "agent_mode": "deterministic" if self.mode == "deterministic" else "model",
+            "deterministic_fallback": deterministic_fallback,
+            "fallback_note": fallback_note,
+            "text_truncated": list(truncated_fields or []),
+            "model_attempt": model_attempt,
+        })
+
+    def _constraint_defect_decision(self, brief, result: ModelResult, attempt: int) -> dict:
+        parsed = result.parsed if isinstance(result.parsed, dict) else {}
+        return {
+            "action": "constraint_defect",
+            "model_output": result.parsed,
+            "chosen_option": parsed.get("option"),
+            "menu": self._menu_snapshot(brief),
+            "menu_hidden_count": brief.menu.hidden_count,
+            "aliases": brief.aliases,
+            "agent_mode": "model",
+            "deterministic_fallback": False,
+            "fallback_note": "",
+            "text_truncated": [],
+            "model_attempt": attempt,
+        }
+
+    def _append_accepted(
+        self,
+        case: dict,
+        decision: AgentDecision,
+        step_n: int,
+    ) -> None:
+        stored = decision.model_dump(mode="json")
+        pending_id = None
+        if decision.action == "pivot":
+            pending_id = "pending-" + digest({
+                "case": case["id"], "step": step_n, "decision": stored,
+            })[:20]
+        self.repo.append_case_step(
+            case["id"], step_n, stored, True, task_id=pending_id,
+            owner_token=self.owner_token,
+        )
+        self.repo.update_case(
+            case["id"], owner_token=self.owner_token,
+            steps_used=int(case["steps_used"]) + 1,
+        )
+
+    def _call_once(self, case: dict, retry_errors: tuple[str, ...], attempt: int) -> tuple[str, Any]:
         step_n = self._next_step_number(case["id"])
         brief = build_brief(
             self.repo, case["id"], tool_catalog(), self.settings.ollama_num_ctx,
@@ -209,35 +282,32 @@ class Investigator:
             )
             return "unavailable", result.error or result.status
 
-        decision = None
-        validation = None
-        parse_errors: list[str] = []
-        try:
-            decision = parse_decision_output(result.parsed)
-        except ValidationError as exc:
-            parse_errors = [f"invalid decision schema: {exc}"]
-        if decision is not None:
-            validation = validate_decision(decision, brief, self.window)
-            parse_errors = validation.errors
-            if validation.ok and decision.action == "pivot":
-                duplicate = self._executed_duplicate(case["id"], validation.request)
-                if duplicate is not None:
-                    error = (
-                        f"duplicate pivot: normalized request already executed at step {duplicate['n']}; "
-                        f"reuse prior_steps step {duplicate['n']} result_digest"
-                    )
-                    validation = ValidationResult(ok=False, errors=[error], request=validation.request)
-                    parse_errors = validation.errors
-        accepted = bool(validation and validation.ok)
-        result_status = result.status if accepted else "invalid"
+        resolution = resolve_output(
+            result.parsed, brief, self.window,
+            duplicate_check=lambda request: self._executed_duplicate(case["id"], request),
+        )
+        accepted = resolution.ok
+        validation = resolution.validation or ValidationResult(False, list(resolution.errors))
+        result_status = result.status if accepted else "constraint_defect"
         call_id = self._record_call(case, step_n, brief, result, validation, status=result_status)
-        stored_decision = decision.model_dump(mode="json") if decision else (result.parsed or {"action": "invalid"})
+        decision = None
+        if accepted and resolution.decision is not None:
+            option_id = str(result.parsed["option"])
+            decision = self._annotate_decision(
+                resolution.decision, brief, option_id,
+                truncated_fields=resolution.truncated_fields, model_attempt=attempt,
+            )
+            stored_decision = decision.model_dump(mode="json")
+        else:
+            stored_decision = self._constraint_defect_decision(brief, result, attempt)
         pending_id = None
-        if accepted and decision.action == "pivot":
-            pending_id = "pending-" + digest({"case": case["id"], "step": step_n, "decision": stored_decision})[:20]
+        if accepted and decision is not None and decision.action == "pivot":
+            pending_id = "pending-" + digest({
+                "case": case["id"], "step": step_n, "decision": stored_decision,
+            })[:20]
         self.repo.append_case_step(
             case["id"], step_n, stored_decision, accepted,
-            rejection="; ".join(parse_errors) if parse_errors else None,
+            rejection="; ".join(resolution.errors) if resolution.errors else None,
             model_call_id=call_id, task_id=pending_id, owner_token=self.owner_token,
         )
         self.repo.update_case(
@@ -246,8 +316,77 @@ class Investigator:
         )
         self.heartbeat()
         if not accepted:
-            return "rejected", parse_errors
+            return "rejected", resolution.errors
         return "accepted", (decision, validation, step_n)
+
+    def _deterministic_resolution(self, case: dict, brief, option) -> Resolution:
+        aliases = eligible_evidence_aliases(
+            option, brief.aliases, brief.known_candidates, brief.injection_evidence_ids,
+        )
+        if not aliases:
+            return Resolution(
+                errors=[f"no eligible evidence card for deterministic option {option.id}"],
+                constraint_defect=True,
+            )
+        return resolve_output({
+            "option": option.id,
+            "evidence": [aliases[0]],
+            "rationale": f"Deterministically selected the highest-ranked legal option {option.id}.",
+        }, brief, self.window,
+            duplicate_check=lambda request: self._executed_duplicate(case["id"], request))
+
+    def _take_deterministic_action(
+        self,
+        case: dict,
+        *,
+        fallback: bool = False,
+        retry_errors: tuple[str, ...] = (),
+    ) -> bool:
+        brief = build_brief(
+            self.repo, case["id"], tool_catalog(), self.settings.ollama_num_ctx,
+            retry_errors=retry_errors,
+        )
+        option = brief.menu.pivot_options[0] if brief.menu.pivot_options else next(
+            (item for item in brief.menu.options if item.decision.action == "park_as_lead"),
+            None,
+        )
+        if option is None:
+            return False
+        resolution = self._deterministic_resolution(case, brief, option)
+        if not resolution.ok or resolution.decision is None or resolution.validation is None:
+            return False
+        note = "model output failed twice; selected top-ranked pivot"
+        if option.decision.action == "park_as_lead":
+            note = "model output failed twice; no pivot option remained, so the case was parked"
+        resolved_decision = resolution.decision
+        if not fallback and resolved_decision.action == "park_as_lead":
+            resolved_decision = resolved_decision.model_copy(update={
+                "reasoning": "deterministic investigation complete",
+                "resolution_needed": "deterministic investigation complete",
+            })
+        decision = self._annotate_decision(
+            resolved_decision, brief, option.id,
+            deterministic_fallback=fallback, fallback_note=note if fallback else "",
+            truncated_fields=resolution.truncated_fields,
+        )
+        step_n = self._next_step_number(case["id"])
+        self._append_accepted(case, decision, step_n)
+        if fallback and decision.action == "park_as_lead":
+            self.repo.update_case(
+                case["id"], owner_token=self.owner_token, status="fallback_parked",
+                summary=json.dumps({
+                    "model_conclusion": "deterministic_fallback_park",
+                    "reasoning": note,
+                    "validation_errors": list(retry_errors),
+                    "analyst_flag": {
+                        "reason": "validation_fallback",
+                        "message": "Model output failed validation twice and no pivot remained; analyst review is required.",
+                    },
+                }, sort_keys=True),
+            )
+        else:
+            self._execute_action(case, decision, resolution.validation, step_n)
+        return True
 
     def _merge_entities(self, case: dict, discovered: list[EntityRef]) -> list[dict]:
         current = []
@@ -422,8 +561,13 @@ class Investigator:
             if (step.get("decision") or {}).get("action") == "pivot" and not step.get("accepted")
             and "duplicate pivot:" in (step.get("rejection") or "")
         ]
+        decisions = [
+            step.get("decision") or {}
+            for case in cases for step in self.repo.case_steps(case["id"])
+        ]
         return {
             "status": status,
+            "mode": self.mode,
             "partial": partial or self.partial_pivot,
             "stop_reason": reason,
             "cases_total": len(cases),
@@ -436,6 +580,15 @@ class Investigator:
             "fallback_parked_count": len(analyst_flags),
             "analyst_flags": analyst_flags,
             "model_calls": len(calls),
+            "constraint_defects": sum(call.get("status") == "constraint_defect" for call in calls),
+            "valid_first_attempt": sum(
+                decision.get("model_attempt") == 1
+                for decision in decisions
+            ),
+            "deterministic_fallbacks": sum(
+                bool(decision.get("deterministic_fallback"))
+                for decision in decisions
+            ),
             "pivots": len(pivot_steps),
             "partial_pivots": len(partial_pivot_steps),
             "duplicate_pivots_blocked": len(duplicate_pivots),
@@ -451,6 +604,19 @@ class Investigator:
         return self._summary("completed", "all selected cases concluded", all_seed_ids)
 
     def run(self) -> dict:
+        if self.mode == "off":
+            seed_ids = [
+                candidate["id"] for candidate in self.repo.candidates(self.hunt_id)
+                if candidate["lane"] != "context" and candidate.get("source_case_id") is None
+            ]
+            return {
+                "status": "disabled", "mode": "off", "partial": False,
+                "stop_reason": "investigator disabled (agent mode off)",
+                "seed_count": len(seed_ids), "unworked_seed_ids": sorted(seed_ids),
+                "unworked_count": len(seed_ids), "model_calls": 0,
+                "constraint_defects": 0, "valid_first_attempt": 0,
+                "deterministic_fallbacks": 0,
+            }
         all_seed_ids = self._seed_cases()
         self._replay_pending()
         if not self.repo.cases(self.hunt_id, statuses=["open"]):
@@ -477,6 +643,24 @@ class Investigator:
                 return self._summary("budget_exhausted", "all open cases exhausted their step budgets", all_seed_ids)
 
             case = min(open_cases, key=lambda item: (int(item["steps_used"]), -float(item["priority"]), item["id"]))
+            if self.mode == "deterministic":
+                if not self._take_deterministic_action(case):
+                    remaining = build_brief(
+                        self.repo, case["id"], tool_catalog(), self.settings.ollama_num_ctx,
+                    )
+                    status = "budget_exhausted" if remaining.menu.pivot_options else "fallback_parked"
+                    self.repo.update_case(
+                        case["id"], owner_token=self.owner_token, status=status,
+                        summary=json.dumps({
+                            "model_conclusion": "deterministic_fallback_park",
+                            "reasoning": "no legal deterministic option could be resolved",
+                            "analyst_flag": {
+                                "reason": "no_legal_deterministic_option",
+                                "message": "No legal deterministic option remained; analyst review is required.",
+                            },
+                        }, sort_keys=True),
+                    )
+                continue
             retry_errors: tuple[str, ...] = ()
             rejected = 0
             while True:
@@ -485,7 +669,7 @@ class Investigator:
                     break
                 if self._wall_exhausted() or self._total_steps() >= self.total_budget:
                     break
-                outcome, value = self._call_once(case, retry_errors)
+                outcome, value = self._call_once(case, retry_errors, rejected + 1)
                 if outcome == "unavailable":
                     return self._summary(
                         "unavailable", f"model unavailable: {value}", all_seed_ids, partial=True,
@@ -497,6 +681,32 @@ class Investigator:
                 rejected += 1
                 retry_errors = tuple(value)
                 if rejected >= 2:
+                    case = self.repo.case(case["id"])
+                    if case is not None:
+                        per_case_limit = min(int(case["step_budget"]), self.per_case_budget)
+                        budget_available = (
+                            int(case["steps_used"]) < per_case_limit
+                            and self._total_steps() < self.total_budget
+                            and not self._wall_exhausted()
+                        )
+                        if not budget_available:
+                            break
+                        if self._take_deterministic_action(
+                                case, fallback=True, retry_errors=retry_errors):
+                            break
+                        remaining = build_brief(
+                            self.repo, case["id"], tool_catalog(), self.settings.ollama_num_ctx,
+                            retry_errors=retry_errors,
+                        )
+                        if remaining.menu.pivot_options:
+                            self.repo.update_case(
+                                case["id"], owner_token=self.owner_token, status="budget_exhausted",
+                                summary=json.dumps({
+                                    "reasoning": "a pivot remained but no legal deterministic citation was available",
+                                    "validation_errors": list(retry_errors),
+                                }, sort_keys=True),
+                            )
+                            break
                     injection_related = any(
                         "untrusted instruction-like telemetry" in error
                         for error in retry_errors
@@ -517,7 +727,9 @@ class Investigator:
                         case["id"], owner_token=self.owner_token, status="fallback_parked",
                         summary=json.dumps({
                             "model_conclusion": "deterministic_fallback_park",
-                            "reasoning": "validation failed twice",
+                            "reasoning": (
+                                "validation failed twice; no budget or legal deterministic option remained"
+                            ),
                             "validation_errors": list(retry_errors),
                             "analyst_flag": analyst_flag,
                         }, sort_keys=True),

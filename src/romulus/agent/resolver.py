@@ -62,7 +62,11 @@ def resolve_output(
         if alias not in known_aliases:
             errors.append(f"unknown evidence alias: {alias}")
         elif alias not in allowed:
-            errors.append(f"evidence alias {alias} is not allowed for option {option.id}")
+            if (option.decision.action in {"close", "park_as_lead"}
+                    and known_aliases[alias] in brief.injection_evidence_ids):
+                errors.append("untrusted instruction-like telemetry cannot authorize close or park")
+            else:
+                errors.append(f"evidence alias {alias} is not allowed for option {option.id}")
     if errors:
         return Resolution(errors=errors, constraint_defect=True)
 

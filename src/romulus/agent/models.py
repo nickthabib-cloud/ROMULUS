@@ -51,6 +51,16 @@ class AgentDecision(BaseModel):
     benign_alternatives: list[str] = Field(default_factory=list)
     resolution_needed: str = ""
     entity: EntityRef | None = None
+    chosen_option: str | None = None
+    option_description: str = ""
+    menu: list[dict[str, Any]] = Field(default_factory=list)
+    menu_hidden_count: int = 0
+    aliases: dict[str, dict] = Field(default_factory=dict)
+    agent_mode: Literal["model", "deterministic"] | None = None
+    deterministic_fallback: bool = False
+    fallback_note: str = ""
+    text_truncated: list[str] = Field(default_factory=list)
+    model_attempt: int | None = None
 
 
 class _DecisionOutput(BaseModel):

@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from romulus.agent.models import AgentDecision, EntityRef
 
-
 _TOOL_ENTITY_KINDS = {
     "entity_timeline": {"host", "ip"},
     "auth_activity": {"host", "account"},
@@ -263,7 +262,7 @@ def generate_options(
 
     investigations.sort(key=_investigation_rank)
     conclusions: list[MenuOption] = []
-    for candidate in seed_candidates:
+    for candidate in sorted(candidates, key=lambda item: str(item.get("id"))):
         conclusions.append(MenuOption(
             id="", description=f"escalate {candidate['id']}: {candidate['claim']}",
             decision=AgentDecision(

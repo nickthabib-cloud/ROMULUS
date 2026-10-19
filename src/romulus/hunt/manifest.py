@@ -35,6 +35,7 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         "policy": POLICY_VERSION,
         "model": {"triage": s.ollama_model_triage, "synthesis": s.synthesis_model, "num_ctx": s.ollama_num_ctx,
                   "think": s.ollama_think},
+        "agent_mode": s.agent_mode,
         "budgets": budgets or {"agent_steps_total": 60, "agent_steps_per_case": 8, "max_cases": 12,
                                "wall_clock_minutes": 120},
         "config_digest": digest(safe_cfg),

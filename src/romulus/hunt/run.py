@@ -118,7 +118,8 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
 
 
 def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str,
-                      contracts: dict, window: Window, owner_token: str) -> dict:
+                      contracts: dict, window: Window, owner_token: str,
+                      agent_mode: str) -> dict:
     def heartbeat():
         repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
 
@@ -128,10 +129,12 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
 
     return Investigator(
         s, repo, executor, hunt_id, window, heartbeat=heartbeat, owner_token=owner_token,
+        agent_mode=agent_mode,
     ).run()
 
 
-def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -> dict:
+def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=None,
+             agent_mode: str | None = None) -> dict:
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -140,6 +143,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
     owner_token = claimed["lease_owner"]
     h = repo.get_hunt(hunt_id)
     m = h["manifest"]
+    mode = "off" if agent is False else (agent_mode or m.get("agent_mode") or s.agent_mode)
     window = Window(start=datetime.fromisoformat(m["window"]["start"]), end=datetime.fromisoformat(m["window"]["end"]))
     client = ElasticClient(s)
     try:
@@ -183,19 +187,20 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
         "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,
     )
     agent_summary = {
-        "status": "disabled", "partial": False,
-        "stop_reason": "model investigator disabled (model-off run)",
+        "status": "disabled", "mode": "off", "partial": False,
+        "stop_reason": "investigator disabled (agent mode off)",
         "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
     }
-    if agent:
+    if mode != "off":
         try:
             agent_summary = _run_investigator(
-                s, repo, client, hunt_id, contracts, window, owner_token,
+                s, repo, client, hunt_id, contracts, window, owner_token, mode,
             )
         except Exception as exc:
             log.exception("investigator failed")
             agent_summary = {
-                "status": "failed", "partial": True, "stop_reason": f"investigator error: {exc}",
+                "status": "failed", "mode": mode, "partial": True,
+                "stop_reason": f"investigator error: {exc}",
                 "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
             }
     return _finish(
@@ -204,7 +209,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool = True, on_candidate=None) -
     )
 
 
-def resume_hunt(s: Settings, hunt_id: str) -> dict:
+def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dict:
     """Resume only persisted investigator work; the deterministic sweep is never re-run."""
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
@@ -222,6 +227,7 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
     owner_token = claimed["lease_owner"]
     hunt = repo.get_hunt(hunt_id)
     manifest = hunt["manifest"]
+    mode = agent_mode or manifest.get("agent_mode") or s.agent_mode
     window = Window(
         start=datetime.fromisoformat(manifest["window"]["start"]),
         end=datetime.fromisoformat(manifest["window"]["end"]),
@@ -239,16 +245,23 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
             hunt_id, "failed", owner_token=owner_token, stop_reason=stop_reason,
         )
         raise
-    try:
-        agent_summary = _run_investigator(
-            s, repo, client, hunt_id, contracts, window, owner_token,
-        )
-    except Exception as exc:
-        log.exception("resumed investigator failed")
-        agent_summary = {
-            "status": "failed", "partial": True, "stop_reason": f"investigator error: {exc}",
-            "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
-        }
+    agent_summary = {
+        "status": "disabled", "mode": "off", "partial": False,
+        "stop_reason": "investigator disabled (agent mode off)",
+        "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
+    }
+    if mode != "off":
+        try:
+            agent_summary = _run_investigator(
+                s, repo, client, hunt_id, contracts, window, owner_token, mode,
+            )
+        except Exception as exc:
+            log.exception("resumed investigator failed")
+            agent_summary = {
+                "status": "failed", "mode": mode, "partial": True,
+                "stop_reason": f"investigator error: {exc}",
+                "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
+            }
     return _finish(
         repo, hunt_id, agent_summary, sweep_summary, owner_token=owner_token,
     )

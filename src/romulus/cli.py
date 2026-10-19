@@ -35,12 +35,12 @@ def cmd_doctor(args) -> int:
 
 
 def _parse_time(value: str, tz: str):
-    from datetime import datetime
+    from datetime import UTC, datetime
     from zoneinfo import ZoneInfo
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo(tz))
-    return dt.astimezone(ZoneInfo("UTC"))
+        dt = dt.replace(tzinfo=UTC if tz == "UTC" else ZoneInfo(tz))
+    return dt.astimezone(UTC)
 
 
 def cmd_hunt(args) -> int:
@@ -52,6 +52,8 @@ def cmd_hunt(args) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     s = load_settings(_env_file(args))
     if args.action == "start":
+        agent_mode = "off" if args.no_agent else (args.agent_mode or s.agent_mode)
+        s = s.model_copy(update={"agent_mode": agent_mode})
         start, end = _parse_time(args.start, s.mission_timezone), _parse_time(args.end, s.mission_timezone)
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
         try:
@@ -66,13 +68,14 @@ def cmd_hunt(args) -> int:
         def show(c):
             if c["lane"] in ("urgent", "high"):
                 print(f"  [{c['lane'].upper():6}] {c['rule_id']}: {c['claim'][:180]}", flush=True)
-        res = run_hunt(s, hid, agent=not args.no_agent, on_candidate=show)
+        res = run_hunt(s, hid, agent_mode=agent_mode, on_candidate=show)
         print(json.dumps(res, indent=2, default=str) if args.json else
               f"done: {res['execution_state']} {res['detection_result']} lanes={res['lanes']} "
               f"stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }")
         return EXIT_OK
     if args.action == "resume":
-        result = resume_hunt(s, args.hunt_id)
+        agent_mode = "off" if args.no_agent else args.agent_mode
+        result = resume_hunt(s, args.hunt_id, agent_mode=agent_mode) if agent_mode else resume_hunt(s, args.hunt_id)
         if args.json:
             print(json.dumps(result, indent=2, default=str))
         else:
@@ -221,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
     hp.add_argument("--style", default="broad", choices=["broad", "directed"])
     hp.add_argument("--hypothesis")
     hp.add_argument("--no-agent", action="store_true", help="deterministic sweep only (model-off)")
+    hp.add_argument("--agent-mode", choices=["model", "deterministic", "off"],
+                    help="investigator mode (default: AGENT_MODE or model)")
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])

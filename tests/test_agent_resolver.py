@@ -123,7 +123,7 @@ def test_resolver_treats_forged_unknowns_and_hostile_close_citations_as_constrai
     assert not unknown.ok and unknown.constraint_defect
     assert "unknown option" in unknown.errors[0]
     assert not hostile.ok and hostile.constraint_defect
-    assert any("not allowed" in error for error in hostile.errors)
+    assert any("untrusted instruction-like telemetry" in error for error in hostile.errors)
 
 
 def test_resolver_runs_duplicate_check_after_semantic_validation():

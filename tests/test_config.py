@@ -1,7 +1,7 @@
 """Config parsing: inline comments never become values; weak web secrets are refused."""
 import pytest
 
-from romulus.config import parse_env_file
+from romulus.config import Settings, load_settings, parse_env_file
 from romulus.web.auth import Sessions
 
 
@@ -26,3 +26,13 @@ def test_weak_or_comment_secrets_refused(secret):
 
 def test_strong_secret_accepted():
     Sessions("K" * 43)
+
+
+def test_agent_mode_defaults_to_model_and_loads_valid_env_value():
+    assert Settings().agent_mode == "model"
+    assert load_settings(environ={"AGENT_MODE": "deterministic"}).agent_mode == "deterministic"
+
+
+def test_invalid_agent_mode_is_rejected():
+    with pytest.raises(ValueError, match="AGENT_MODE"):
+        Settings(agent_mode="invented")
