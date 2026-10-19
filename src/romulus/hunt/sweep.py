@@ -203,6 +203,9 @@ class Sweep:
             missing = pb.missing_required - before_missing
             if not (set(pb.families) & families) and evaluated == 0:
                 state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
+            elif pb.kind == "aggregate" and matches:
+                # aggregate rules may publish indicator events during consume(); those are matches
+                state = "match_on_partial" if (rule_partial or missing) else "matched"
             elif pb.kind == "aggregate":
                 state = "evaluated_partial" if (rule_partial or missing) else "evaluated_complete"
             elif matches:
@@ -237,13 +240,16 @@ class Sweep:
             any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")
                               for c in cells)
             evaluated = sum(c["evaluated"] or 0 for c in cells)
+            consumed_matches = sum(c["matched"] or 0 for c in cells)
+            matched_any = bool(ms) or consumed_matches > 0
             if any_partial or not cells:
-                state = "match_on_partial" if ms else "evaluated_partial"
-            elif ms:
+                state = "match_on_partial" if matched_any else "evaluated_partial"
+            elif matched_any:
                 state = "matched"
             elif evaluated == 0:
                 # nothing of this rule's families was in scope: that is not a negative
                 state = "not_applicable_no_events"
             else:
                 state = "no_match_complete"
-            self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state, len(ms), evaluated)
+            self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
+                                    len(ms) + consumed_matches, evaluated)

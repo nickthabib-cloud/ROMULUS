@@ -288,3 +288,27 @@ def test_sequence_pair_split_across_partitions_keeps_all_raw_copies(monkeypatch)
     assert len(seq) == 1
     cites = rm._citations(repo, seq[0])
     assert len(cites) == 4 and all(c["status"] == "retained" for c in cites), cites
+
+
+def test_aggregate_consume_time_match_is_never_a_complete_negative(monkeypatch):
+    # F8 (gate): host.web_service_spawns_interpreter publishes indicator events during consume()
+    raw = 'type=EXECVE msg=audit(1731938400.000:8101): argc=3 a0="bash" a1="-c" a2="/usr/bin/zmpkg.pl start; id"'
+    sc = ('type=SYSCALL msg=audit(1731938400.000:8101): syscall=59 success=yes ppid=1 pid=2 uid=33 comm="bash" '
+          'exe="/usr/bin/bash"\x1dUID="www-data" EUID="www-data"')
+    recs = [{"_id": f"w{i}", "_index": "romulus-host-x", "_source": {
+        "@timestamp": "2024-11-18T14:00:00Z", "message": r, "host": {"name": "video"},
+        "event": {"dataset": "linux.audit", "original": r}}} for i, r in enumerate((raw, sc))]
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, recs))
+    repo = _repo()
+    repo.set_hunt_state("h1", "running")
+    w = Window(start=START, end=START + timedelta(minutes=5))
+    s = sw.Sweep(repo, FakeClient(), "h1", w, {"romulus-host-x": None})
+    s.run_partition("romulus-host-x", None, [], w, est=2)
+    s.finalize()
+    pub = [c for c in repo.candidates("h1") if c["rule_id"] == "host.web_service_spawns_interpreter"
+           and c["lane"] != "context"]
+    assert pub, "fixture should publish an indicator match"
+    from romulus.report.manifest import _coverage
+    row = next(r for r in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]
+               if r["rule_id"] == "host.web_service_spawns_interpreter")
+    assert row["negative_claim"].startswith("none (rule matched)"), row
