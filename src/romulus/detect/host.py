@@ -7,7 +7,7 @@ import re
 from collections import defaultdict
 
 from romulus.detect.base import Match, Playbook, basename, outcome_phrase, pf
-from romulus.evidence.shellparse import SHELLS, parse_script, shell_script_of
+from romulus.evidence.shellparse import SHELLS, UnknownShellScript, parse_script, shell_script_of
 from romulus.evidence.typed import Outcome, TypedEvent
 
 WEB_SERVICE_USERS = {"www-data", "apache", "nginx", "httpd", "_www", "wwwrun"}
@@ -79,15 +79,18 @@ def _python_exec_of_decoded(code: str) -> bool:
     return False
 
 
-def interpreter_indicators(argv: list[str]) -> list[str]:
-    """Typed-argv indicators that an interpreter run is attacker-shaped rather than routine."""
+def _interpreter_indicators(argv: list[str]) -> tuple[list[str], bool]:
+    """Return typed indicators and whether shell-script inspection was unevaluable."""
     out = []
+    unevaluable = False
     name = basename(argv[0]) if argv else ""
     rest = argv[1:]
     if name in INTERPRETERS and (not rest or rest in (["-"], ["-i"], ["-p"])):
         out.append("interpreter reading commands from stdin (no script argument)")
     script = shell_script_of(argv)
-    if script:
+    if isinstance(script, UnknownShellScript):
+        unevaluable = True
+    elif script:
         parsed = parse_script(script)
         if parsed.ok:
             cmds = parsed.commands()
@@ -102,12 +105,17 @@ def interpreter_indicators(argv: list[str]) -> list[str]:
                 if c.name == "echo" and any("b64decode" in a or "decompress" in a for a in c.argv[1:]):
                     out.append("encoded payload text piped/echoed into another command")
         else:
-            out.append(f"shell script could not be parsed ({parsed.error})")
+            unevaluable = True
     if name.startswith("python"):
         for i, a in enumerate(rest[:-1]):
             if a == "-c" and _python_exec_of_decoded(rest[i + 1]):
                 out.append("python code executes decoded data")
-    return sorted(set(out))
+    return sorted(set(out)), unevaluable
+
+
+def interpreter_indicators(argv: list[str]) -> list[str]:
+    """Typed-argv indicators that an interpreter run is attacker-shaped rather than routine."""
+    return _interpreter_indicators(argv)[0]
 
 
 class WebServiceSpawnsInterpreter(Playbook):
@@ -138,7 +146,9 @@ class WebServiceSpawnsInterpreter(Playbook):
             user, argv = e.get("process.user"), e.get("process.argv")
             if user not in WEB_SERVICE_USERS or not argv or basename(argv[0]) not in INTERPRETERS:
                 continue
-            indicators = interpreter_indicators(argv)
+            indicators, unevaluable = _interpreter_indicators(argv)
+            if unevaluable:
+                self.missing_required += 1
             if indicators:
                 matches.append(self._event_match(e, user, argv, indicators))
                 continue
@@ -284,6 +294,9 @@ class DownloadPipedToShell(Playbook):
 
     def match(self, e):
         script = shell_script_of(e.get("process.argv"))
+        if isinstance(script, UnknownShellScript):
+            self.missing_required += 1
+            return []
         if not script:
             return []
         parsed = parse_script(script)
@@ -489,7 +502,9 @@ class AuthorizedKeysWrite(Playbook):
         argv = e.get("process.argv")
         targets = []
         script = shell_script_of(argv)
-        if script:
+        if isinstance(script, UnknownShellScript):
+            self.missing_required += 1
+        elif script:
             parsed = parse_script(script)
             if parsed.ok:
                 for c in parsed.commands():

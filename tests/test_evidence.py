@@ -5,7 +5,7 @@ import pytest
 
 from romulus.evidence.auditd import execve_argv, parse_record
 from romulus.evidence.normalize import normalize_hits
-from romulus.evidence.shellparse import parse_script, shell_script_of
+from romulus.evidence.shellparse import UnknownShellScript, parse_script, shell_script_of
 from romulus.evidence.typed import Outcome
 
 # shapes copied from the lab index (benign motd job)
@@ -284,6 +284,20 @@ def test_shell_script_extraction():
     assert shell_script_of(["bash", "-lc", "id"]) == "id"
     assert shell_script_of(["bash", "script.sh"]) is None
     assert shell_script_of(["python3", "-c", "print(1)"]) is None
+
+
+@pytest.mark.parametrize("argv", [
+    ["bash", "-c", "--", "id"],
+    ["bash", "-c", "-x", "id"],
+    ["bash", "-o", "pipefail", "-c", "id"],
+    ["busybox", "sh", "-c", "id"],
+    ["bash", "-c"],
+])
+def test_ambiguous_shell_command_returns_explicit_unknown(argv):
+    result = shell_script_of(argv)
+
+    assert isinstance(result, UnknownShellScript)
+    assert result.reason
 
 
 # ---------------------------------------------------------------- M1 gate regressions (B1, I4)

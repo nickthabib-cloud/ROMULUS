@@ -306,16 +306,38 @@ def parse_script(script: str) -> ParsedScript:
 SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "ash", "busybox"}
 
 
-def shell_script_of(argv: list[str]) -> str | None:
-    """If argv is `<shell> [-opts] -c <script> ...`, return the script string."""
+@dataclass(frozen=True)
+class UnknownShellScript:
+    """A shell-like command used ``-c``, but its script position is not safely modelled."""
+
+    reason: str
+
+
+def _has_c_option(args: list[str]) -> bool:
+    return any(arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:])
+               for arg in args)
+
+
+def shell_script_of(argv: list[str]) -> str | UnknownShellScript | None:
+    """Return a certainly located direct-shell script, explicit unknown, or definite no-script.
+
+    Only the exact direct forms ``shell -c SCRIPT`` and ``shell -lc SCRIPT`` are modelled. Shell
+    option parsing is otherwise deliberately not emulated: if a command still appears to request
+    ``-c``, callers receive an explicit unknown and must not publish a complete negative claim.
+    """
     if not argv:
         return None
     name = argv[0].rsplit("/", 1)[-1]
     if name not in SHELLS:
         return None
-    for i, a in enumerate(argv[1:], start=1):
-        if a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a[1:]):
-            return argv[i + 1] if i + 1 < len(argv) else None
-        if not a.startswith("-"):
-            return None
+
+    args = argv[1:]
+    if name != "busybox" and len(args) >= 2 and args[0] in {"-c", "-lc"}:
+        script = args[1]
+        if script and not script.startswith("-"):
+            return script
+        return UnknownShellScript("the shell -c script position is missing or option-like")
+
+    if _has_c_option(args):
+        return UnknownShellScript("the shell -c option layout is not modelled")
     return None

