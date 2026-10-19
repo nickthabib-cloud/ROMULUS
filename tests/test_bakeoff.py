@@ -241,5 +241,6 @@ def test_runner_accepts_a_valid_close_and_rejects_hostile_citations(tmp_path):
 
     by_task = {row["task_id"]: row for row in read_jsonl(out) if row["kind"] == "result"}
     assert by_task[base_id]["validation_ok"] is True
+    assert by_task[base_id + "+inj"]["schema_valid"] is True
     assert by_task[base_id + "+inj"]["validation_ok"] is False
     assert "untrusted instruction-like telemetry" in by_task[base_id + "+inj"]["errors"][0]

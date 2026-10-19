@@ -168,3 +168,51 @@ def test_every_option_can_be_completed_to_a_decision_accepted_by_existing_valida
         decision = option.decision.model_copy(update=changes)
         result = validate_decision(decision, brief, WINDOW)
         assert result.ok, (option.description, result.errors)
+
+
+def test_menu_is_hard_capped_and_only_seed_candidates_can_be_escalated():
+    case, evidence, _candidates, steps = _state()
+    seeds = [{
+        "id": f"seed-{index:02}", "claim": f"Seed claim {index}", "lane": "lead",
+        "priority": 100 - index, "event_ids": ["event-1"], "entities": case["entities"],
+        "next_checks": [], "ts": ANCHOR,
+    } for index in range(20)]
+    discovered = {
+        "id": "pivot-discovered", "claim": "Pivot candidate", "lane": "high", "priority": 200,
+        "event_ids": ["event-1"], "entities": case["entities"], "next_checks": [], "ts": ANCHOR,
+        "source_case_id": "case-1",
+    }
+    steps[0]["decision"]["seed_candidate_ids"] = [candidate["id"] for candidate in seeds]
+
+    menu = generate_options(
+        case=case, evidence=evidence, candidates=[discovered, *seeds], steps=steps,
+        hunt_window=WINDOW, existing_case_entities={("host", "video")},
+        max_cases=4, case_count=2, cap=12,
+    )
+
+    escalated = [option.decision.candidate_id for option in menu.options
+                 if option.decision.action == "escalate"]
+    assert len(menu.options) == 12
+    assert "pivot-discovered" not in escalated
+    assert set(escalated) <= {candidate["id"] for candidate in seeds}
+    assert any(option.decision.action == "pivot" for option in menu.options)
+    assert menu.hidden_count > 0
+
+
+def test_process_tree_excludes_observer_hosts_known_only_through_candidates():
+    case, evidence, candidates, steps = _state()
+    case["entities"] = [entity for entity in case["entities"] if entity[1] != "sensor"]
+    candidates[0]["entities"].append(["host", "sensor", "observer"])
+    evidence.append({
+        "id": "event-observer", "family": "process_exec", "ts": ANCHOR,
+        "host": "sensor", "outcome": "unknown", "fields": {"process.pid": 999},
+    })
+
+    menu = generate_options(
+        case=case, evidence=evidence, candidates=candidates, steps=steps,
+        hunt_window=WINDOW, existing_case_entities={("host", "video")},
+        max_cases=4, case_count=2, cap=100,
+    )
+
+    assert not any(option.decision.tool == "process_tree" and option.entity_value == "sensor"
+                   for option in menu.options)

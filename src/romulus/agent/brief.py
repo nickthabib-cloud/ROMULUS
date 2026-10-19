@@ -8,10 +8,10 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from romulus.agent.constraints import build_output_schema
+from romulus.agent.constraints import build_output_schema, eligible_evidence_aliases
 from romulus.agent.models import EntityRef
 from romulus.agent.ollama import estimate_tokens
-from romulus.agent.options import Menu, generate_options
+from romulus.agent.options import DEFAULT_MENU_CAP, Menu, generate_options
 from romulus.store.repo import Repo
 
 _INSTRUCTION = re.compile(
@@ -147,6 +147,69 @@ def _utc(value: datetime | str) -> datetime:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
+def _select_evidence_views(
+    evidence_views: list[dict], seed_candidates: list[dict], limit: int = 16,
+) -> list[dict]:
+    """Keep the latest anchor and a citation for every escalation that can fit in the menu."""
+    if len(evidence_views) <= limit:
+        return evidence_views
+    by_id = {str(view["id"]): view for view in evidence_views}
+    selected: dict[str, dict] = {}
+
+    newest = max(
+        evidence_views,
+        key=lambda item: (_utc(item["ts"]) if item.get("ts") is not None
+                          else datetime.min.replace(tzinfo=UTC), str(item.get("id"))),
+    )
+    selected[str(newest["id"])] = newest
+    for candidate in seed_candidates[:DEFAULT_MENU_CAP - 2]:
+        cited = [by_id[str(event_id)] for event_id in candidate.get("event_ids") or []
+                 if str(event_id) in by_id]
+        if not cited:
+            continue
+        view = max(
+            cited,
+            key=lambda item: (_utc(item["ts"]) if item.get("ts") is not None
+                              else datetime.min.replace(tzinfo=UTC), str(item.get("id"))),
+        )
+        selected[str(view["id"])] = view
+
+    newest_first = sorted(
+        evidence_views,
+        key=lambda item: (_utc(item["ts"]) if item.get("ts") is not None
+                          else datetime.min.replace(tzinfo=UTC), str(item.get("id"))),
+        reverse=True,
+    )
+    for view in newest_first:
+        if len(selected) >= limit:
+            break
+        selected.setdefault(str(view["id"]), view)
+    return sorted(
+        selected.values(),
+        key=lambda item: (_utc(item["ts"]) if item.get("ts") is not None
+                          else datetime.min.replace(tzinfo=UTC), str(item.get("id"))),
+    )
+
+
+def _limit_evidence_cards(data: dict, limit: int) -> list[dict]:
+    """Prefer the newest anchor and one recent cited card per highest-ranked candidate."""
+    cards = data["evidence_cards"]
+    if len(cards) <= limit:
+        return cards
+    selected: set[str] = {cards[-1]["id"]}
+    for candidate in data["candidates"]:
+        cited = candidate.get("cited_cards") or []
+        if cited:
+            selected.add(cited[-1])
+        if len(selected) >= limit:
+            break
+    for card in reversed(cards):
+        if len(selected) >= limit:
+            break
+        selected.add(card["id"])
+    return [card for card in cards if card["id"] in selected]
+
+
 def _case_window(repo: Repo, case: dict, candidates: list[dict], evidence: list[dict]):
     hunt = repo.get_hunt(case["hunt_id"]) if hasattr(repo, "get_hunt") else None
     manifest = (hunt or {}).get("manifest") or {}
@@ -217,9 +280,12 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
     ]
     candidates.sort(key=lambda item: (-float(item.get("priority", 0)), item["id"]))
     candidate_map = {candidate["id"]: candidate for candidate in candidates}
+    seed_candidates = [candidate for candidate in candidates if candidate["id"] in seeds]
 
     evidence_ids = {str(event_id) for candidate in candidates for event_id in candidate.get("event_ids") or []}
     for step in steps:
+        decision = step.get("decision") or {}
+        evidence_ids.update(str(event_id) for event_id in decision.get("evidence_ids") or [])
         result = step.get("result_digest") or {}
         evidence_ids.update(str(event_id) for event_id in result.get("event_ids") or [])
         evidence_ids.update(str(summary["id"]) for summary in result.get("event_summaries") or [] if summary.get("id"))
@@ -239,7 +305,7 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
                 seen_evidence.add(summary["id"])
     evidence_views.sort(key=lambda item: (_utc(item["ts"]) if item.get("ts") is not None
                                           else datetime.min.replace(tzinfo=UTC), str(item.get("id"))))
-    evidence_views = evidence_views[:16]
+    evidence_views = _select_evidence_views(evidence_views, seed_candidates)
 
     all_raw_entities = list(case.get("entities") or [])
     all_raw_entities.extend(entity for candidate in candidates for entity in candidate.get("entities") or [])
@@ -332,7 +398,7 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         shrink_actions.append("limit_prior_steps")
         user, token_estimate = _render(system, data, schema)
     if token_estimate + max_out > num_ctx:
-        data["evidence_cards"] = data["evidence_cards"][:6]
+        data["evidence_cards"] = _limit_evidence_cards(data, 6)
         shrink_actions.append("limit_evidence_cards")
         user, token_estimate = _render(system, data, schema)
     if token_estimate + max_out > num_ctx:
@@ -367,6 +433,29 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
     }
     for candidate in data["candidates"]:
         candidate["cited_cards"] = [alias for alias in candidate["cited_cards"] if alias in visible_cards]
+    legal_options = [
+        option for option in menu.options
+        if option.decision.action != "escalate"
+        or eligible_evidence_aliases(option, aliases, candidate_map, injection_evidence)
+    ]
+    removed_options = len(menu.options) - len(legal_options)
+    rendered_descriptions = {item["id"]: item["description"] for item in data["menu"]}
+    menu_rows = []
+    numbered_options = []
+    for index, option in enumerate(legal_options, 1):
+        option_id = f"O{index}"
+        numbered_options.append(option.model_copy(update={"id": option_id}))
+        menu_rows.append({
+            "id": option_id,
+            "description": rendered_descriptions.get(option.id, option.description),
+        })
+    menu = Menu(
+        options=numbered_options,
+        hidden_count=menu.hidden_count + removed_options,
+    )
+    data["menu"] = menu_rows
+    data["menu_hidden_count"] = menu.hidden_count
+    schema = build_output_schema(menu, aliases, candidate_map, injection_evidence)
     user, token_estimate = _render(system, data, schema)
 
     return BuiltBrief(

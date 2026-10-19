@@ -250,6 +250,17 @@ def test_investigation_renderers_use_manifest_mode_options_fallbacks_and_menu_ca
     assert "Menu cap: 5 hidden option(s) across 2 capped step(s)" in markdown
 
 
+def test_investigation_mode_prefers_the_actual_agent_audit_over_manifest_default():
+    repo, _seed_id = _repo_with_finding()
+    repo.audit("system", "hunt.agent_summary", "h1", {
+        "status": "disabled", "mode": "off", "unworked_count": 1,
+    })
+
+    manifest = publish_revision(repo, "h1", "test")
+
+    assert manifest["investigations"]["summary"]["mode"] == "off"
+
+
 def test_completed_hunt_report_keeps_partial_pivot_gaps_in_investigations():
     repo, seed_id = _repo_with_finding()
     repo.set_hunt_state("h1", "running")

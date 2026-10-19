@@ -105,13 +105,48 @@ def _duplicate(task: dict, request: Any) -> dict | None:
     return Investigator._executed_duplicate(shim, task["origin"]["case_id"], request)
 
 
+def _matches_schema(value: Any, schema: dict) -> bool:
+    """Validate the constrained-output subset of JSON Schema used by frozen investigator tasks."""
+    if "anyOf" in schema:
+        return any(_matches_schema(value, branch) for branch in schema["anyOf"])
+    expected = schema.get("type")
+    if expected == "object":
+        if not isinstance(value, dict):
+            return False
+        properties = schema.get("properties") or {}
+        if any(name not in value for name in schema.get("required") or []):
+            return False
+        if schema.get("additionalProperties") is False and any(name not in properties for name in value):
+            return False
+        return all(name not in value or _matches_schema(value[name], spec)
+                   for name, spec in properties.items())
+    if expected == "array":
+        if not isinstance(value, list):
+            return False
+        if len(value) < int(schema.get("minItems", 0)):
+            return False
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            return False
+        if schema.get("uniqueItems") and len({json.dumps(item, sort_keys=True) for item in value}) != len(value):
+            return False
+        return all(_matches_schema(item, schema.get("items") or {}) for item in value)
+    if expected == "string":
+        if not isinstance(value, str):
+            return False
+        if "maxLength" in schema and len(value) > int(schema["maxLength"]):
+            return False
+    if "const" in schema and value != schema["const"]:
+        return False
+    return not ("enum" in schema and value not in schema["enum"])
+
+
 def judge(task: dict, brief: BuiltBrief, parsed: dict | None) -> dict:
     """Resolve and validate exactly as the v2 controller applies constrained output."""
     resolution = resolve_output(
         parsed, brief, _window(task), duplicate_check=lambda request: _duplicate(task, request),
     )
     return {
-        "schema_valid": resolution.decision is not None,
+        "schema_valid": _matches_schema(parsed, brief.schema),
         "validation_ok": resolution.ok,
         "errors": list(resolution.errors),
         "decision": (

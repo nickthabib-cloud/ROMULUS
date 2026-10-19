@@ -14,6 +14,7 @@ _TOOL_ENTITY_KINDS = {
     "ids_alerts": {"ip"},
 }
 _ENTITY_RANK = {"host": 0, "account": 1, "ip": 2, "domain": 3}
+DEFAULT_MENU_CAP = 12
 
 
 class MenuOption(BaseModel):
@@ -184,20 +185,25 @@ def generate_options(
     existing_case_entities: set[tuple[str, str]],
     max_cases: int,
     case_count: int,
-    cap: int = 12,
+    cap: int = DEFAULT_MENU_CAP,
 ) -> Menu:
     """Return the legal next moves derivable from durable case state."""
     hunt_start, hunt_end = _utc(hunt_window.start), _utc(hunt_window.end)
     seed_ids = set(_seed_ids(steps))
     seed_candidates = sorted(
         (candidate for candidate in candidates if candidate.get("id") in seed_ids),
-        key=lambda item: str(item.get("id")),
+        key=lambda item: (-float(item.get("priority", 0)), str(item.get("id"))),
     )
-    entities = _entity_refs(
+    raw_entities = (
         list(case.get("entities") or [])
         + [entity for candidate in candidates for entity in candidate.get("entities") or []]
     )
+    entities = _entity_refs(raw_entities)
     entities = [entity for entity in entities if not (entity.kind == "host" and entity.role == "observer")]
+    observer_hosts = {
+        entity.value for entity in _entity_refs(raw_entities)
+        if entity.kind == "host" and entity.role == "observer"
+    }
     template_tools = {
         tool
         for candidate in seed_candidates
@@ -225,8 +231,7 @@ def generate_options(
     process_pairs: set[tuple[str, int]] = set()
     for item in evidence:
         host = item.get("host")
-        if not host or any(entity.kind == "host" and entity.value == host and entity.role == "observer"
-                           for entity in _entity_refs(case.get("entities") or [])):
+        if not host or str(host) in observer_hosts:
             continue
         fields = item.get("fields") or {}
         for name in ("process.pid", "process.ppid"):
@@ -261,25 +266,34 @@ def generate_options(
             ))
 
     investigations.sort(key=_investigation_rank)
-    conclusions: list[MenuOption] = []
-    for candidate in sorted(candidates, key=lambda item: str(item.get("id"))):
-        conclusions.append(MenuOption(
+    escalations: list[MenuOption] = []
+    for candidate in seed_candidates:
+        escalations.append(MenuOption(
             id="", description=f"escalate {candidate['id']}: {candidate['claim']}",
             decision=AgentDecision(
                 action="escalate", candidate_id=str(candidate["id"]),
                 claim=str(candidate["claim"]), proposed_lane=candidate["lane"],
             ),
         ))
-    conclusions.extend([
+    terminal_options = [
         MenuOption(
             id="", description="park this case as a lead",
             decision=AgentDecision(action="park_as_lead", resolution_needed="Analyst review is still required."),
         ),
         MenuOption(id="", description="close this case", decision=AgentDecision(action="close")),
-    ])
+    ]
 
+    visible_terminal = terminal_options[-min(cap, len(terminal_options)):] if cap else []
+    reserved_investigation = int(bool(investigations) and cap > len(visible_terminal))
+    visible_escalations = escalations[:max(0, cap - len(visible_terminal) - reserved_investigation)]
+    conclusions = visible_escalations + visible_terminal
     available_slots = max(0, cap - len(conclusions))
-    visible = investigations[:available_slots] + conclusions
-    hidden_count = max(0, len(investigations) - available_slots)
+    visible_investigations = investigations[:available_slots]
+    visible = visible_investigations + conclusions
+    hidden_count = (
+        len(investigations) - len(visible_investigations)
+        + len(escalations) - len(visible_escalations)
+        + len(terminal_options) - len(visible_terminal)
+    )
     numbered = [option.model_copy(update={"id": f"O{index}"}) for index, option in enumerate(visible, 1)]
     return Menu(options=numbered, hidden_count=hidden_count)

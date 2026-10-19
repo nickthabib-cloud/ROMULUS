@@ -158,7 +158,7 @@ def _case_conclusion(summary: str | None) -> dict | None:
 def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dict) -> dict:
     hunt = repo.get_hunt(hunt_id) or {}
     hunt_manifest = hunt.get("manifest") or {}
-    agent_mode = hunt_manifest.get("agent_mode") or agent.get("mode") or "model"
+    agent_mode = agent.get("mode") or hunt_manifest.get("agent_mode") or "model"
     cases = repo.cases(hunt_id)
     seed_candidates = {
         candidate["id"]: candidate

@@ -63,6 +63,50 @@ class BriefRepo:
         }]
 
 
+class SpawnBriefRepo(BriefRepo):
+    def case_steps(self, _case_id):
+        return [{
+            "n": 0, "accepted": 1, "rejection": None, "result_digest": None,
+            "decision": {
+                "action": "spawn_seed", "parent_case_id": "case-parent",
+                "evidence_ids": ["event-real"],
+            },
+        }]
+
+    def candidates(self, _hunt_id):
+        return []
+
+    def events_by_ids(self, ids):
+        return super().events_by_ids(ids) if "event-real" in ids else []
+
+
+class ManyEvidenceRepo(BriefRepo):
+    def __init__(self):
+        super().__init__()
+        self._case["entities"] = [["host", "video", "host"]]
+
+    def candidates(self, _hunt_id):
+        candidate = super().candidates(_hunt_id)[0]
+        return [{
+            **candidate,
+            "event_ids": [f"event-{index:02}" for index in range(1, 18)],
+            "entities": [["host", "video", "host"]],
+            "claim": "Suspicious host activity. " + "x" * 3_000,
+        }]
+
+    def events_by_ids(self, _ids):
+        return [{
+            "id": f"event-{index:02}", "family": "process_exec",
+            "ts": START + timedelta(minutes=index), "host": "video",
+            "event": {
+                "outcome": "success",
+                "fields": {
+                    "process.command_line": {"value": "x" * 600, "origin": "process.command_line"},
+                },
+            },
+        } for index in range(1, 18)]
+
+
 def _telemetry(brief):
     return json.loads(brief.user.split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split("\n</", 1)[0])
 
@@ -120,3 +164,21 @@ def test_v2_brief_is_byte_stable_and_keeps_injection_flags_on_cards():
     assert first.schema["properties"]["option"]["enum"] == [
         option.id for option in first.menu.options
     ]
+
+
+def test_spawned_case_inherits_the_parent_decisions_cited_evidence():
+    brief = build_brief(SpawnBriefRepo(), "case-real", {}, num_ctx=8192)
+
+    assert brief.aliases["evidence"] == {"E1": "event-real"}
+    assert brief.schema["properties"]["evidence"]["items"]["enum"] == ["E1"]
+
+
+def test_latest_citation_is_preserved_and_shrunk_schema_matches_visible_aliases():
+    brief = build_brief(ManyEvidenceRepo(), "case-real", {}, num_ctx=2048, max_out=300)
+    telemetry = _telemetry(brief)
+    visible = [card["id"] for card in telemetry["evidence_cards"]]
+
+    assert "event-17" in brief.aliases["evidence"].values()
+    assert brief.shrink_actions
+    assert brief.schema["properties"]["evidence"]["items"]["enum"] == visible
+    assert set(brief.aliases["evidence"]) == set(visible)

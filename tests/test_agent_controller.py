@@ -273,6 +273,21 @@ def test_two_rejections_count_against_budget_without_unsafe_parking():
     assert summary["fallback_parked_count"] == 0
 
 
+def test_retry_never_exceeds_the_per_case_step_budget():
+    repo = _repo(total=4, per_case=1)
+    _candidate(repo, "c1", "video", 50)
+    _evidence(repo, "event-c1", START)
+    model = QueueModel([_result(_selection("O999")), _result(_selection("O999"))])
+
+    summary = _investigator(repo, model, RecordingExecutor()).run()
+
+    case = repo.cases("h1")[0]
+    assert summary["status"] == "budget_exhausted"
+    assert model.calls == 1
+    assert case["steps_used"] == 1
+    assert len(repo.case_steps(case["id"])[1:]) == 1
+
+
 def test_spawn_is_bounded_by_max_cases():
     repo = _repo(total=2, max_cases=2)
     repo.save_candidate({

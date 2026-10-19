@@ -171,7 +171,7 @@ def test_attacker_ip_to_auth_host_to_process_finding_has_full_cited_chain(monkey
     model = MenuSelectionModel([
         (f"entity_timeline for ip {ATTACKER}", "E1"),
         ("entity_timeline for host video", "E2"),
-        (process_match.claim, "E3"),
+        ("park this case as a lead", "E3"),
     ])
     executor = PivotExecutor(repo, object(), "h1", contracts)
 
@@ -184,7 +184,7 @@ def test_attacker_ip_to_auth_host_to_process_finding_has_full_cited_chain(monkey
     case = repo.cases("h1")[0]
     steps = repo.case_steps(case["id"])
     assert summary["status"] == "completed"
-    assert case["status"] == "escalated"
+    assert case["status"] == "parked"
     assert discovered["source_case_id"] == case["id"]
     assert discovered["lane"] == process_decision.lane and discovered["claim"] == process_match.claim
     assert auth_event.id in steps[1]["result_digest"]["event_ids"]

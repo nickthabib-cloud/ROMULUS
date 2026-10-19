@@ -625,6 +625,10 @@ class Investigator:
         while True:
             open_cases = self.repo.cases(self.hunt_id, statuses=["open"])
             if not open_cases:
+                if self.repo.cases(self.hunt_id, statuses=["budget_exhausted"]):
+                    return self._summary(
+                        "budget_exhausted", "all open cases exhausted their step budgets", all_seed_ids,
+                    )
                 return self._completed_summary(all_seed_ids)
             if self._wall_exhausted():
                 self._mark_budget_exhausted()
@@ -668,6 +672,12 @@ class Investigator:
                 if case is None:
                     break
                 if self._wall_exhausted() or self._total_steps() >= self.total_budget:
+                    break
+                per_case_limit = min(int(case["step_budget"]), self.per_case_budget)
+                if int(case["steps_used"]) >= per_case_limit:
+                    self.repo.update_case(
+                        case["id"], owner_token=self.owner_token, status="budget_exhausted",
+                    )
                     break
                 outcome, value = self._call_once(case, retry_errors, rejected + 1)
                 if outcome == "unavailable":
