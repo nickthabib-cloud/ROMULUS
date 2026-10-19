@@ -386,6 +386,18 @@ def test_exec_from_tmp_absolute_non_temp_path_needs_no_cwd():
     assert playbook.missing_required == 0
 
 
+@pytest.mark.parametrize("argv,extra,expected", [
+    (["bash", "//tmp/x.sh"], {"process__executable": "/usr/bin/bash"}, "/tmp/x.sh"),
+    (["x"], {"process__executable": "//tmp/x"}, "/tmp/x"),
+    (["bash", "x.sh"], {"process__executable": "/usr/bin/bash", "process__cwd": "//tmp"}, "/tmp/x.sh"),
+])
+def test_exec_from_tmp_collapses_double_leading_slash(argv, extra, expected):
+    matches = run(host.ExecFromTempDir, [exec_ev(argv, **extra)])
+
+    assert len(matches) == 1
+    assert f"'{expected}'" in matches[0].claim
+
+
 @pytest.mark.parametrize("argv,executable", [
     (["nc", "10.0.0.5", "4444"], "/usr/bin/nc"),
     (["ncat", "evil.example", "443"], "/usr/bin/ncat"),

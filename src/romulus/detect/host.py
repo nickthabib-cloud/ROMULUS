@@ -391,11 +391,17 @@ class ExecFromTempDir(Playbook):
         a0 = argv[0] if argv else ""
         cwd = e.get("process.cwd") or ""
 
+        def normalize(p: str) -> str:
+            normalized = posixpath.normpath(p)
+            return "/" + normalized.lstrip("/") if normalized.startswith("//") else normalized
+
+        resolved_cwd = normalize(cwd) if cwd.startswith("/") else ""
+
         def resolve(p: str, *, allow_bare_relative: bool = False) -> str:
             if p.startswith("/"):
-                return posixpath.normpath(p)
-            if p and cwd.startswith("/") and (allow_bare_relative or "/" in p):
-                return posixpath.normpath(posixpath.join(cwd, p))
+                return normalize(p)
+            if p and resolved_cwd and (allow_bare_relative or "/" in p):
+                return normalize(posixpath.join(resolved_cwd, p))
             return ""
 
         path = ""
