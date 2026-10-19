@@ -9,7 +9,8 @@ from romulus.evidence.typed import Outcome, TypedEvent
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 LANES = ("urgent", "high", "lead", "context")
-CLAIM_TYPES = ("observed_action", "network_observation", "aggregate_observation", "anomaly", "mention")
+CLAIM_TYPES = ("observed_action", "script_content", "network_observation", "aggregate_observation", "anomaly",
+               "mention")
 
 
 @dataclass
@@ -53,6 +54,9 @@ class Playbook:
     benign: ClassVar[tuple[str, ...]] = ()
     next_checks: ClassVar[tuple[str, ...]] = ()
     kind: ClassVar[str] = "direct"            # direct | aggregate
+    # False for rules that read script *text*: text can show intent but can never prove that something
+    # did not run, so such rules publish positives only and never write a complete negative.
+    assures_negative: ClassVar[bool] = True
 
     def __init__(self) -> None:
         self.evaluated = 0

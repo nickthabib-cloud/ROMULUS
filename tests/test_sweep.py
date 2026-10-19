@@ -222,8 +222,10 @@ def test_unevaluable_shell_script_makes_rule_cells_partial(monkeypatch, script):
     repo = _run_shell_partition(monkeypatch, script=script)
 
     cells = {cell["rule_id"]: cell for cell in repo.rule_cells("h1")}
-    assert cells["host.download_piped_to_shell"]["state"] == "evaluated_partial"
-    assert cells["host.ssh_authorized_keys_write"]["state"] == "evaluated_partial"
+    # script-text rules are positive-only: an unevaluable script is never a complete negative and the
+    # unevaluable count is still recorded
+    assert cells["host.download_piped_to_shell"]["state"] == "positive_only"
+    assert cells["host.ssh_authorized_keys_write"]["state"] == "positive_only"
     assert cells["host.download_piped_to_shell"]["detail"]["missing_required"] == 1
     assert cells["host.ssh_authorized_keys_write"]["detail"]["missing_required"] == 1
     assert not [candidate for candidate in repo.candidates("h1") if candidate["rule_id"] in {
@@ -312,3 +314,14 @@ def test_aggregate_consume_time_match_is_never_a_complete_negative(monkeypatch):
     row = next(r for r in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]
                if r["rule_id"] == "host.web_service_spawns_interpreter")
     assert row["negative_claim"].startswith("none (rule matched)"), row
+
+
+
+def test_script_text_rules_never_claim_a_complete_negative(monkeypatch):
+    # option 2 (owner decision 2026-10-18): even a fully parsed, clean script cannot prove absence
+    repo = _run_shell_partition(monkeypatch, script="echo hello; ls /tmp")
+    from romulus.report.manifest import _coverage
+    rows = {r["rule_id"]: r for r in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]}
+    for rid in ("host.download_piped_to_shell", "host.ssh_authorized_keys_write"):
+        assert rows[rid]["negative_claim"].startswith("not assessable by design"), rows[rid]
+    assert rows["host.credential_store_read"]["negative_claim"] == "complete"     # process-level rule still assures

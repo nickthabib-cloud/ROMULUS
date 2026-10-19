@@ -282,8 +282,14 @@ class DownloaderFeedsInterpreter(Playbook):
 
 
 class DownloadPipedToShell(Playbook):
+    """Script-text indicator: a shell was started with a script containing downloader | interpreter.
+    Positive-only: whether the pipeline ran is shown by process-level evidence
+    (host.downloader_feeds_interpreter), never inferred from text."""
     id = "host.download_piped_to_shell"
-    title = "Downloaded content piped directly into an interpreter"
+    version = "3"
+    title = "Shell started with a script that pipes a download into an interpreter"
+    claim_type = "script_content"
+    assures_negative = False
     families = ("process_exec",)
     required_fields = ("process.argv",)
     severity, lane = "high", "urgent"
@@ -308,9 +314,10 @@ class DownloadPipedToShell(Playbook):
             for i, c in enumerate(p.commands[:-1]):
                 if c.name in DOWNLOADERS and names[i + 1] in INTERPRETERS:
                     urls = [a for a in c.argv[1:] if "://" in a or a.count(".") >= 1 and not a.startswith("-")]
-                    claim = (f"A process execution event on {e.host} records a shell running the pipeline "
-                             f"'{c.name} … | {names[i + 1]}' (script: {_argv_summary([script])}); "
-                             f"{outcome_phrase(e)}. Whether the download succeeded is not established by this event.")
+                    claim = (f"A process execution event on {e.host} records a shell started with a script that "
+                             f"contains the pipeline '{c.name} … | {names[i + 1]}' (script: {_argv_summary([script])}); "
+                             f"{outcome_phrase(e)}. The script text shows intent; whether that pipeline ran, and "
+                             f"whether the download succeeded, are not established by this event.")
                     m = Match(self.id, claim, self.claim_type, [e], [pf(e, "process.argv")], e.ts, self.severity,
                               self.lane, "high", _exec_entities(e))
                     m.notes.append(f"download target(s): {urls[:3]}")
@@ -370,7 +377,11 @@ class ExecFromTempDir(Playbook):
         if not path.startswith(TEMP_DIRS) and basename(a0) in INTERPRETERS and len(argv) > 1:
             # interpreter running a script file: first non-option argument is the program
             script = next((a for a in argv[1:] if not a.startswith("-")), "")
-            if script and shell_script_of(argv) is None:
+            layout = shell_script_of(argv)
+            if isinstance(layout, UnknownShellScript):
+                self.missing_required += 1      # cannot tell a script-file run from -c: unevaluable, not absent
+                return []
+            if script and layout is None:
                 path, via = resolve(script), basename(a0)
         if not path.startswith(TEMP_DIRS):
             return []
@@ -489,8 +500,13 @@ class CredentialStoreRead(Playbook):
 
 
 class AuthorizedKeysWrite(Playbook):
+    """Indicator of an authorized_keys write: a tee/cp/mv/install exec naming the file (observed action),
+    or a shell script containing a redirect into it (script content). Positive-only: shell-builtin
+    redirects create no process, so absence can only be assured by file-access telemetry."""
     id = "host.ssh_authorized_keys_write"
-    title = "Shell command writes to an SSH authorized_keys file"
+    version = "3"
+    title = "Command or script writing to an SSH authorized_keys file"
+    assures_negative = False
     families = ("process_exec",)
     required_fields = ("process.argv",)
     severity, lane = "high", "high"
@@ -501,6 +517,7 @@ class AuthorizedKeysWrite(Playbook):
     def match(self, e):
         argv = e.get("process.argv")
         targets = []
+        from_script = False
         script = shell_script_of(argv)
         if isinstance(script, UnknownShellScript):
             self.missing_required += 1
@@ -508,6 +525,7 @@ class AuthorizedKeysWrite(Playbook):
             parsed = parse_script(script)
             if parsed.ok:
                 for c in parsed.commands():
+                    from_script = True
                     targets += [t for op, t in c.redirects if op in (">", ">>", ">|", "1>", "1>>")
                                 and t.endswith("authorized_keys")]
                     if c.name in ("tee", "cp", "mv", "install") and c.argv and c.argv[-1].endswith("authorized_keys"):
@@ -518,9 +536,16 @@ class AuthorizedKeysWrite(Playbook):
             targets.append(argv[-1])
         if not targets:
             return []
-        claim = (f"A process execution event on {e.host} records a command that writes to {targets[0]}; "
-                 f"{outcome_phrase(e)}. The file content written is not shown by this event.")
-        return [Match(self.id, claim, self.claim_type, [e], [pf(e, "process.argv")], e.ts, self.severity, self.lane,
+        if from_script:
+            claim = (f"A process execution event on {e.host} records a shell started with a script that contains a "
+                     f"write to {targets[0]}; {outcome_phrase(e)}. The script text shows intent; whether the write "
+                     f"happened is not established by this event.")
+            ctype = "script_content"
+        else:
+            claim = (f"A process execution event on {e.host} records a command that writes to {targets[0]}; "
+                     f"{outcome_phrase(e)}. The file content written is not shown by this event.")
+            ctype = "observed_action"
+        return [Match(self.id, claim, ctype, [e], [pf(e, "process.argv")], e.ts, self.severity, self.lane,
                       "high", _exec_entities(e))]
 
 

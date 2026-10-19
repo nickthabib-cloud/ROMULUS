@@ -77,6 +77,9 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         matched = any(s.startswith("match") for s in states)
         if matched:
             claim = "none (rule matched)" + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
+        elif states.get("positive_only"):
+            claim = ("not assessable by design: positive-only rule (script text can show intent but cannot prove "
+                     "that something did not run; see the process-level rules)")
         elif reasons:
             claim = "unresolved: " + "; ".join(reasons)
         elif states.get("no_match_complete") and not (states.get("not_applicable_no_events") and
