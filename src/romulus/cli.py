@@ -183,6 +183,31 @@ def cmd_web(args) -> int:
     return EXIT_OK
 
 
+def cmd_db(args) -> int:
+    from datetime import UTC, datetime
+
+    from romulus.hunt.run import open_repo
+    from romulus.store.db import compact
+    s = load_settings(_env_file(args))
+    repo = open_repo(s)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    active = [h["id"] for h in repo.list_hunts()
+              if h.get("execution_state") == "running" and h.get("lease_until")
+              and h["lease_until"].replace(tzinfo=None) > now]
+    if active:
+        print(f"refusing to compact while hunts hold an active lease: {', '.join(active)}", file=sys.stderr)
+        return EXIT_FAIL
+    res = compact(repo.engine)
+    b, a = res["before"], res["after"]
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        print(f"database {b['file_bytes'] / 1e6:.0f} MB + log {b['wal_bytes'] / 1e6:.0f} MB -> "
+              f"{a['file_bytes'] / 1e6:.0f} MB + log {a['wal_bytes'] / 1e6:.0f} MB")
+    repo.audit(f"cli:{os.environ.get('USER', '?')}", "db.compact", detail={"before": b, "after": a})
+    return EXIT_OK
+
+
 def cmd_model(args) -> int:
     from romulus.bakeoff.export import export_tasks, read_jsonl, readonly_repo, write_jsonl
     from romulus.bakeoff.runner import run_bakeoff, summarize
@@ -249,6 +274,8 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("username")
     up.add_argument("--role", choices=["lead", "analyst"], default="analyst")
     sub.add_parser("web", help="serve the browser UI on ROMULUS_WEB_BIND")
+    dp = sub.add_parser("db", help="database maintenance")
+    dp.add_argument("action", choices=["compact"], help="compact: return space freed by deleted hunts to the disk")
     mp = sub.add_parser("model", help="model bakeoff: export frozen investigator briefs, run candidates, summarize")
     mp.add_argument("action", choices=["bakeoff-export", "bakeoff", "bakeoff-summary"])
     mp.add_argument("--hunt", help="bakeoff-export: hunt whose investigator calls become tasks")
@@ -276,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "hunt" and args.action == "resume" and not args.hunt_id:
         p.error("hunt resume needs a hunt id")
     handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report,
-                "user": cmd_user, "web": cmd_web, "model": cmd_model}
+                "user": cmd_user, "web": cmd_web, "model": cmd_model, "db": cmd_db}
     return handlers[args.cmd](args)
 
 

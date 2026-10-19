@@ -37,9 +37,43 @@ def make_engine(db_path: Path | str) -> Engine:
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA foreign_keys=ON")
         cur.execute("PRAGMA busy_timeout=30000")
+        # after a checkpoint, shrink the write-ahead log back to this size: one large transaction
+        # (deleting a big hunt) must not leave a gigabyte-sized log file behind
+        cur.execute(f"PRAGMA journal_size_limit={WAL_SIZE_LIMIT}")
         cur.close()
 
     return engine
+
+
+WAL_SIZE_LIMIT = 64 * 1024 * 1024
+
+
+def space_report(engine: Engine) -> dict:
+    """Database file sizes and how much of the main file is free pages (reclaimable by compaction)."""
+    path = Path(engine.url.database or "")
+    with engine.connect() as c:
+        page = c.exec_driver_sql("PRAGMA page_size").scalar()
+        free = c.exec_driver_sql("PRAGMA freelist_count").scalar()
+    wal = path.with_name(path.name + "-wal")
+    return {"file_bytes": path.stat().st_size if path.exists() else 0,
+            "wal_bytes": wal.stat().st_size if wal.exists() else 0,
+            "free_bytes": int(page) * int(free)}
+
+
+def compact(engine: Engine) -> dict:
+    """Checkpoint and truncate the write-ahead log, then VACUUM to return free pages to the disk.
+    VACUUM rewrites the file and blocks writers while it runs, so callers make sure no hunt is active."""
+    before = space_report(engine)
+    raw = engine.raw_connection()
+    try:
+        dbapi = raw.driver_connection
+        dbapi.isolation_level = None
+        dbapi.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        dbapi.execute("VACUUM")
+        dbapi.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        raw.close()
+    return {"before": before, "after": space_report(engine)}
 
 
 def migrate(engine: Engine) -> None:
