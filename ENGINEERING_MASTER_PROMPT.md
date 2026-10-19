@@ -77,6 +77,10 @@ v1 is a **read-only source of lessons and working service configuration**. Do no
 | 8 | Report generation could place hypotheses ahead of findings, and multiple reports could disagree. | One manifest; fixed ordering: urgent → high → leads → context → attack path → coverage. |
 | 9 | Process overhead (multi-role agent packets, tabletop reviews) displaced product work. | §0.3. |
 | 10 | Entity-following was ad hoc. | First-class **entity profiles** and pivot tools (§8, §11). |
+| 11 | (Verified 2026-10-19 by a read-only audit of the v1 catalogs and packs.) Role aliases treated `message` and `event.original` as command lines and conflated Subject/Target and Source/Target fields; 142 corpus rules encoded intended conjunctions as an OR of substrings ("Enable RDP in registry" fired on any command line containing `0`); all 73 active direct rules were free-text substrings, 68 of them tool-name mentions; a failed `curl \| sh` fired 11 rules. | Typed fields and token-aware argv only; conjunctions are explicit; every rule has benign-lookalike and failed-outcome fixtures. |
+| 12 | Compiled queries were not supersets of the local evaluator (`fields[:4]`, `values[:12]`, wildcard needles under 3 characters silently dropped), and v1 selectors were silently truncated (two IPs for Arkime, one hostname for TShark). | Retrieval intent is a provable superset of the evaluator; any cap makes coverage partial and is recorded. |
+| 13 | Aggregates and baselines returned only their first match per hunt and ran on capped, sampled evidence; one "failure rate" computed failures per minute. | Exact counts over every partition; every group that meets the threshold is published. |
+| 14 | Event-ID rules had unverified selectors (1102 with the wrong provider) and IOC matching ran over the flattened raw record with no subdomain semantics. | Selectors and indicator semantics are fixture-tested per source profile; indicators match typed fields. |
 
 If you find a v1 lesson is wrong or incomplete, correct this table and say why.
 
