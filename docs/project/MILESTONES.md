@@ -23,8 +23,8 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 
 ## M2: evaluation harness and model bakeoff
 
-- [ ] Gold opportunity inventory for e_a (eval-custodian; on the VM, not the repo)
-- [ ] Scoring scripts plus `docs/eval/PROTOCOL.md`
+- [x] Gold opportunity inventory for e_a (eval-custodian; on the VM, not the repo) — v1, 2026-10-19: 27 opportunities, 22 observable
+- [ ] Scoring scripts plus `docs/eval/PROTOCOL.md` (protocol written and matching rule pre-registered 2026-10-19; scorer pending)
 - [ ] Simple "standard searches" baseline runner
 - [ ] Model bakeoff task set, runner, and results; ADR selecting triage/synthesis models and `num_ctx`
 - [ ] First lab evaluation results file with miss funnel

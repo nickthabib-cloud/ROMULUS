@@ -2,7 +2,7 @@
 
 ## Resume here
 
-_Last updated: 2026-10-19 by Claude (lead), M1 accepted._
+_Last updated: 2026-10-19 by Claude (lead), M2 started: protocol and e_a gold v1 done._
 
 - **M1 gate: concluded with owner decision "option B" (2026-10-19).** Seven gate rounds on the shell/argv path showed one structural cause: every host rule assured its *negative* by interpreting text (argv[0], argv operands, script parses), and an adversarial reviewer can always find another form. Option B makes negatives honest by construction:
   - All 10 host rules and `net.tool_user_agent_http` are positive-only (`assures_negative = False`): their findings, lanes and lab results are unchanged; coverage reads "not assessable by design" with a per-rule reason, never "complete". Network rules (typed fields) keep real negatives.
@@ -34,7 +34,7 @@ _Last updated: 2026-10-19 by Claude (lead), M1 accepted._
   - a structured local-rule builder (never DSL), promoted by a `lead`.
 
   The design is in spec §7 *Detection catalog page*. The page and tiers 1–2 are in M4; tier 3 is in M6.
-- **Current milestone:** M2 (evaluation harness and model bakeoff), **not started**. M1 is accepted and merged into `main` (2026-10-19). Start M2 in a fresh session: branch from `main` (e.g. `m2/evaluation`), begin with the `eval-custodian` gold opportunity inventory for SL700 e_a (ground truth on the VM at `/home/user/romulus-eval/sl700_e_a/`), then the scoring scripts, the simple-baseline runner and the model bakeoff (spec §12, §15; `docs/project/MILESTONES.md` → M2). Include the M1 carry-overs listed above.
+- **Current milestone:** M2 (evaluation harness and model bakeoff), **in progress** on branch `m2/evaluation` (from `main` at `8296a27`, 2026-10-19). M1 is accepted and merged into `main` (2026-10-19). Order of work: the `eval-custodian` gold opportunity inventory for SL700 e_a (ground truth on the VM at `/home/user/romulus-eval/sl700_e_a/`), then the scoring scripts, the simple-baseline runner and the model bakeoff (spec §12, §15; `docs/project/MILESTONES.md` → M2). Include the M1 carry-overs listed above.
 - **State:**
   - Sweep → decisions → coverage ledger → report manifest (immutable revisions, citation integrity) → technical Markdown/JSON → web UI (login, live stream, finding detail with highlighted raw evidence, triage, reports).
   - The 455-test local suite includes acceptance scenarios 13–17, hostile input, positive-only shell coverage, argv-layout and line-safe partial-prefix regressions, budget/fairness, owner-fenced lease/resume and pivot persistence, crash replay, direct-only pivots, and investigation reporting.
@@ -57,13 +57,17 @@ _Last updated: 2026-10-19 by Claude (lead), M1 accepted._
   - Source-family constraints, whole-window/anchor sampling, exact covered and unresolved ranges, and normalized duplicate-pivot rejection are implemented. Pivot gaps remain visible in Investigations but no longer make a complete-sweep hunt partial.
   - Live model quality remains a measured risk: on `h20261018-211924-b1edf9`, 4 of 12 cases exhausted their step budgets, 43 seeds remained unworked, and no pivot contributed a new candidate. Case `case-fddc19830be15d0c` was seeded with the 15:16 UTC root SSH login and later `videoserver` activity, but the model used all 8 calls without a pivot or conclusion; no accepted pivot independently reached that later host activity. This is an effectiveness gap, not hidden as an execution or coverage failure.
   - The newer `h20261018-224406-923663` run makes the risk more visible rather than hiding it: 8 validation fallbacks are now analyst-flagged and unfinished, all 97 seeds remain in the unworked partition, and no pivot contributed a candidate. One pivot was partial. This is an investigator-effectiveness issue for the reviewer/model bakeoff, not a sweep completeness or citation-integrity failure.
+- **M2 progress (2026-10-19):** `docs/eval/PROTOCOL.md` written by the `eval-custodian`, with the matching rule (§6), lanes (§7), metrics (§8) and miss funnel (§10) pre-registered before any scoring. AttackMate times are naive UTC (offset 0 h, 7 anchors). Gold `sl700_e_a` v1 is on the VM: 27 opportunities, **22 observable** (13 critical+high), 1 inferable-only, 4 not observable; 0 in the early third of the hunt window, so e_a cannot test early-window detection. Contamination log C-001…C-004: e_a can never support a release claim. Nothing scored yet.
 - **Next three actions:**
-  1. Run the `reviewer` M1 gate, with special attention to model proposal quality, lease behavior, exact pivot coverage, and report semantics.
-  2. Owner reviews the web UI and fresh live report, including the explicit 43-seed unworked list and the model's failure to act on seeded post-login `videoserver` activity.
-  3. Begin M2 model bakeoff and evaluation; tune the compact prompt/tool choice against fixed tasks before changing the default model or budgets.
-- **Blockers:** no implementation blocker. M1 sign-off still requires reviewer and owner-demo gates.
+  1. `eval-custodian`: scorer and metric scripts in `eval/` (consume the hunt DB/manifest, apply PROTOCOL §6–§10), then score the latest model-off and agent hunts.
+  2. `eval-custodian`: simple standard-searches baseline runner (PROTOCOL §8.1) and the AMiner/Telosian comparison (§8.2).
+  3. Model bakeoff: custodian owns the task set and expected decisions; lead builds the runner (`romulus model bakeoff`); then the ADR selecting triage/synthesis models and `num_ctx`.
+- **Blockers:** none.
 - **Owner decisions pending:**
   - Load SL700 `f_a` as the holdout (download ≈3.7 GB from Zenodo).
+  - Isolate ground truth from the runtime (needs sudo): move `/home/user/romulus-eval` to a dedicated account, or run ROMULUS as its own service user (PROTOCOL §11).
+  - Set the false-leads-per-hour ceiling, confirm the spec targets, and confirm the modelled review time of 5 min per surfaced item (PROTOCOL §14).
+  - Choose a different-storyline dataset with early-window activity (AIT-LDS v2, OTRF, or an owner-run emulation).
   - Separate Malcolm VM (≈16 GiB) for M4.
   - Resize the VM to 12 GiB / 8 vCPU before M3.
 
@@ -72,8 +76,8 @@ _Last updated: 2026-10-19 by Claude (lead), M1 accepted._
 | Milestone | State | Evidence |
 |---|---|---|
 | Pre-M1 setup | done | this file, TEAM.md, `.claude/agents/`, ENVIRONMENT.md |
-| M1 thin end-to-end slice | integration tested | 455-test suite; latest model-off lab hunt `h20261019-020720-4448fd`; final reviewer gate and owner demo remain |
-| M2 evaluation and model bakeoff | not started | |
+| M1 thin end-to-end slice | accepted 2026-10-19 | 455-test suite; reviewer gate (option B, ADR-004); owner demo on `h20261019-093029-32dfef`; merged to `main` |
+| M2 evaluation and model bakeoff | in progress | branch `m2/evaluation` |
 | M3 full sources and coverage truth | not started | |
 | M4 detection depth (incl. Zeek, ICS, Malcolm) | not started | |
 | M5 synthesis and reports | not started | |
@@ -93,6 +97,11 @@ _Last updated: 2026-10-19 by Claude (lead), M1 accepted._
 ## Session log
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
+
+- **2026-10-19 (M2 start)**:
+  - Branched `m2/evaluation` from `main` (`8296a27`); refreshed stale M1 lines in this file.
+  - `eval-custodian` wrote `docs/eval/PROTOCOL.md`, resolved the AttackMate timezone (UTC), built gold `sl700_e_a` v1 on the VM (27 opportunities, 22 observable), extracted the AMiner/Telosian alerts into the eval folder, tightened eval-folder modes to 700/600, and verified no runtime config path reaches it. It read no ROMULUS output.
+  - Lead reviewed PROTOCOL.md (aggregate only, no per-opportunity answers) and accepted the matching rule and lane split. Dataset quirks added to ENVIRONMENT.md.
 
 - **2026-10-18 22:10 EDT (executable-versus-operand split round)**:
   - Split temp execution into a negative-assuring executable-path rule and a positive-only interpreter-operand rule; fixed shell `-s`/`-c` ordering and rejected late awk `-f` operands. Each of the three requested items was developed red-first and committed separately (`a7220c3`, `e59732f`, `ea2c410`).
