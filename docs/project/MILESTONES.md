@@ -56,6 +56,14 @@ The scope is the whole research-driven catalog (spec §7 *Detection breadth*), n
 - [ ] Living-off-the-land coverage (spec §7 item 7): every LOLBAS/GTFOBins binary and abuse pattern has a register entry, and its detection rests on context (parent, account, arguments, effect, rarity against baseline).
 - [ ] Cross-cutting themes (spec §7 item 8): process lineage, unusual execution paths, masquerading, persistence, privilege escalation, credential access, lateral movement, defense evasion, discovery bursts, C2/exfiltration, first-seen activity.
 - [ ] Sigma import (with upstream commit provenance)
+- [ ] Detection catalog page in the web UI (spec §7 *Detection catalog page*):
+  - browse views: ATT&CK matrix, tools, LOTL, themes, telemetry, rule list;
+  - rule detail;
+  - applicability to the current sources;
+  - per-rule hunt performance;
+  - gaps;
+  - export.
+- [ ] Catalog additions, tiers 1–2: analyst indicator lists (typed, attributed, with expiry), and detection requests with "flag more like this" on finding detail, feeding the research register
 - [ ] Offline indicator sets (STIX 2.1 / MISP / CSV), typed matching, provenance and age cited
 - [ ] Breadth datasets vetted and loaded (Windows/AD, network, ICS), with per-family evaluation results and per-rule precision
 - [ ] Zeek normalizers plus playbooks
@@ -79,6 +87,12 @@ The scope is the whole research-driven catalog (spec §7 *Detection breadth*), n
 - [ ] Security review (`/security-review` plus reviewer security brief)
 - [ ] Backup/restore drill; offline wheelhouse install
 - [ ] Holdout pre-registered and run once; results published
+- [ ] Catalog additions, tier 3 (spec §7 *Detection catalog page*):
+  - a structured local-rule builder (typed fields and fixed operators only, never DSL);
+  - required fixtures, and a dry run against a past hunt;
+  - `lead` promotion;
+  - export and import as rule-pack YAML;
+  - covered by the security review.
 - [ ] Release gate review (§15 gates 1–9)
 
 ## After M6: standing detection work

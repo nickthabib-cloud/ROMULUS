@@ -187,6 +187,7 @@ Execution states: `planned`, `running`, `paused`, `completed_within_scope`, `par
 - **Entity profile**: host, account, IP, or domain, with a timeline of everything ROMULUS saw for it across sources, related findings, and peers.
 - **Attack path**: graph and timeline with observed edges solid and inferred edges dashed and labeled with their hypothesis.
 - **Coverage**: per rule, source, and partition, plus gaps and how to fix them.
+- **Detection catalog**: everything ROMULUS searches for, and how analysts add to it (§7, *Detection catalog page*).
 - **Reports**: generate, preview, download, revision history.
 - **Settings / doctor**: source health, model health, version info.
 
@@ -391,6 +392,65 @@ ROMULUS is meant to find malicious activity anywhere. A short list of favorite d
 
   It is a research and planning view. Never present it as proof of detection (§1, *Truthful coverage*).
 - **The catalog is standing work.** Every milestone from M3 onward adds content. New datasets, advisories and ATT&CK releases trigger a register update.
+
+### Detection catalog page (web UI)
+
+Owner request, 2026-10-19. Analysts must be able to see everything ROMULUS searches for, so they know what is covered and can add more things to flag.
+
+**Browse (all users, read-only).**
+- **Views:**
+  - an ATT&CK matrix, colored by disposition from the coverage matrix;
+  - the tool catalog;
+  - the LOTL catalog;
+  - the cross-cutting themes;
+  - telemetry families;
+  - a flat, searchable, filterable rule list.
+
+  Every view links to rule detail and lists gaps alongside covered items.
+- **Rule detail:**
+  - title, behavior claim, and what a hit does and does not prove;
+  - required telemetry and typed fields;
+  - the predicate, rendered as readable typed conditions from the rule AST (not code);
+  - thresholds, lane and severity;
+  - whether the rule assures negatives or is positive-only, with the reason;
+  - benign causes and next pivots;
+  - ATT&CK techniques, tools and LOTL entries covered;
+  - research basis and license;
+  - fixture names and version history.
+- **Applicability to this environment.** Computed from the latest source profiles and field contracts. Each rule shows "runs on source X", or "not applicable: field Y missing in source Z". This answers "what is actually being searched on our data", not just "what is loaded" (§1 *Truthful coverage*).
+- **Performance from past hunts:**
+  - hit counts and last fired;
+  - triage outcomes per rule (confirmed, benign, expected);
+  - rules that have never fired on data with known activity.
+- **Active suppressions** that affect each rule.
+- **Export** as CSV or Markdown for briefings.
+
+**Add (three tiers, ordered by risk).** All additions are attributed, versioned, audit-logged, and pinned in the hunt manifest of every hunt that uses them, so old hunts stay reproducible.
+
+1. **Indicator lists.** Analysts enter or upload hashes, IPs and CIDRs, domains, URLs, and JA3/JA4 and certificate fingerprints (STIX 2.1, MISP export or CSV).
+   - Every value is type-validated.
+   - Each list carries its source, author and expiry.
+   - Lists are matched by typed fields in the next hunts (item 4 above).
+   - Low risk, so this tier can take effect immediately.
+2. **Detection requests.** A form asks for the behavior to flag, an example record, the telemetry, and the ATT&CK technique if known. A **"flag more like this"** action on finding detail pre-fills the form from a cited record.
+   - Requests enter the research register as `requested`.
+   - The `detection-engineer` builds them with fixtures.
+   - The requester sees the status until the rule is active, or the request is declined with a reason.
+3. **Local rules through a structured builder.** Building a rule follows a fixed sequence:
+   1. Pick an event family.
+   2. Pick fields from the field contract.
+   3. Pick operators from a fixed set: equals, in list, argv token match, path prefix, CIDR, parent/child relation, count over a window.
+   4. Set lane and severity, and write benign notes.
+
+   Typing query DSL, regular expressions over raw records, or free-form expressions is never possible; this keeps §1 and the §11 typed-action rule. The new rule is saved as `draft`. Promotion to `active` follows this order:
+   1. The author attaches at least one positive and one benign fixture (real records can be used).
+   2. The builder runs the fixtures.
+   3. The builder dry-runs the rule against a past hunt and shows its hit count.
+   4. A `lead` promotes the rule.
+
+   Conditions that interpret text are positive-only automatically (ADR-004).
+
+**Storage.** The shipped catalog is the repo's versioned rule pack plus the research register; the UI shows it read-only. Local additions live in the database as an overlay: indicator sets, detection requests and local rules. A deployed, air-gapped kit cannot edit the repo, so local content is exportable as rule-pack YAML. That export can be imported into another kit or upstreamed into the repo after review.
 
 ### Open-ended discovery lane
 
@@ -656,11 +716,12 @@ The research may begin during M2, run by the `detection-engineer` alongside eval
 - Sigma import;
 - offline indicator sets;
 - the breadth datasets loaded and evaluated (§15);
+- the detection catalog page, plus analyst indicator lists and detection requests (§7, tiers 1–2);
 - Zeek normalizers and playbooks, OpenSearch/Malcolm source contract, ICS playbooks with baselines (fixture- and public-PCAP-tested; live Malcolm integration pending), sequences/aggregates where the data justifies them, discovery lane, triage workflow, and suppressions. Demo: improved metrics on the lab set; per-family results on the breadth datasets; the coverage matrix with its gaps; discovery's incremental value measured; ICS playbooks firing on ICS PCAP fixtures.
 
 **M5, synthesis and reports.** Attack-path assembly, narrative with citation checking, recommendations, polished executive DOCX, full technical Markdown, IOC export, and report revisions. Demo: both reports from a real hunt, reviewed by the owner for readability.
 
-**M6, hardening and holdout.** Web authentication/TLS/CSP, security review against §14, crash/resume tests, backup/restore drill, air-gap install from wheelhouse, frozen holdout evaluation, and release gate review. Demo: holdout results and gate status.
+**M6, hardening and holdout.** Web authentication/TLS/CSP, security review against §14, crash/resume tests, backup/restore drill, air-gap install from wheelhouse, frozen holdout evaluation, the structured local-rule builder (§7, *Detection catalog page*, tier 3, under the security review), and release gate review. Demo: holdout results and gate status.
 
 **After M6: standing detection work.** Catalog growth never ends at a milestone:
 - the research register is kept current with each ATT&CK release and new advisories;
