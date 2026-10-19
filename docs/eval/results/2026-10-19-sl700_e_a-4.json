@@ -166,16 +166,16 @@
   "by_stage": {
    "candidate": 0,
    "evaluated": 5,
-   "normalized": 0,
+   "normalized": 2,
    "queried": 0,
-   "retrieved": 2,
+   "retrieved": 0,
    "source": 0,
    "surfaced_only": 4
   },
   "by_stage_class": {
    "evaluated|discovery": 4,
    "evaluated|privesc": 1,
-   "retrieved|c2_channel": 2,
+   "normalized|c2_channel": 2,
    "surfaced_only|recon_dns": 1,
    "surfaced_only|recon_scan": 2,
    "surfaced_only|remote_login": 1
@@ -233,12 +233,86 @@
  "mode": "dev",
  "notes": [
   "Dev set with known exposure (PROTOCOL \u00a712): tuning on it is allowed and it can never support a release claim.",
-  "Investigator v2 (deployed commit 0abb1fc), same window, targets and pack m1-pack@2 as runs 1-3; scored with the harness copy in the eval folder (app not redeployed).",
-  "Agent mode off.",
-  "Non-hit surfaced items were adjudicated by the custodian against raw telemetry (41 benign, 19 true_unlisted; gold v1.1 amendment pending, denominators unchanged). Escalated and concluded candidates are judged by Tier A hit or that adjudication.",
+  "Investigator v2, agent mode off, pack m1-pack@2 (deployed 0abb1fc). Rescored 2026-10-19 with the scorer build that adds the per-rule precision table; every earlier metric is unchanged.",
+  "Non-hit surfaced items adjudicated by the custodian against raw telemetry: 67 benign, 19 true_unlisted in total across runs (the 26 new items in run 7, from host.interpreter_external_connection and corr.process_network_link, are benign: ZoneMinder perl at boot contacting external HTTPS; root python3.10 on the firewall and DNS hosts contacting Ubuntu/Canonical archive and public DNS). Gold v1.1 amendment pending; denominators unchanged.",
   "Review time is modeled at the pre-registered 5 min per surfaced item."
  ],
  "precision": {
+  "by_rule": {
+   "host.credential_store_read": {
+    "lane:high": 2,
+    "n": 2,
+    "tier_a_hit": 2
+   },
+   "host.downloader_feeds_interpreter": {
+    "lane:urgent": 2,
+    "n": 2,
+    "tier_a_hit": 2
+   },
+   "host.exec_from_temp_dir": {
+    "benign": 1,
+    "lane:lead": 1,
+    "n": 1
+   },
+   "host.firewall_rule_change_command": {
+    "lane:high": 2,
+    "n": 2,
+    "tier_a_hit": 2
+   },
+   "host.python_pty_spawn": {
+    "lane:high": 2,
+    "n": 2,
+    "tier_a_hit": 2
+   },
+   "host.script_from_temp_dir": {
+    "benign": 18,
+    "lane:lead": 18,
+    "n": 18
+   },
+   "host.ssh_login_external_source": {
+    "benign": 1,
+    "lane:lead": 2,
+    "n": 2,
+    "tier_a_hit": 1
+   },
+   "host.web_service_spawns_interpreter": {
+    "benign": 8,
+    "lane:high": 2,
+    "lane:lead": 32,
+    "lane:urgent": 5,
+    "n": 39,
+    "tier_a_hit": 12,
+    "true_unlisted": 19
+   },
+   "net.dns_subdomain_enumeration": {
+    "lane:lead": 2,
+    "n": 2,
+    "tier_a_hit": 2
+   },
+   "net.port_scan": {
+    "benign": 9,
+    "lane:lead": 11,
+    "n": 11,
+    "tier_a_hit": 2
+   },
+   "net.suricata_alert_stack": {
+    "benign": 4,
+    "lane:high": 2,
+    "lane:lead": 11,
+    "n": 13,
+    "tier_a_hit": 9
+   },
+   "net.tool_user_agent_http": {
+    "lane:lead": 2,
+    "n": 2,
+    "tier_a_hit": 2
+   },
+   "web.scan_burst": {
+    "lane:lead": 1,
+    "n": 1,
+    "tier_a_hit": 1
+   }
+  },
   "order_basis": "report manifest order (latest revision)",
   "p10": {
    "duplicates_in_top": 3,
@@ -663,9 +737,9 @@
  },
  "run_id": "2026-10-19-sl700_e_a-4",
  "schema": "eval-result/1",
- "scored_utc": "2026-10-19T21:30:59Z",
+ "scored_utc": "2026-10-19T22:58:59Z",
  "scorer": {
-  "commit": "harness: local eval/ working tree on 0abb1fc (app not redeployed)",
+  "commit": "harness: local eval/ working tree (app at b8be0dc, not redeployed)",
   "matching_rule": "PROTOCOL \u00a76 (2026-10-19)"
  },
  "timing": {

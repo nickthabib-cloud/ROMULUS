@@ -97,6 +97,7 @@ def render(r: dict) -> str:
           f"- P@10: {_p(p['p10'])}; duplicates in top 10: {p['p10']['duplicates_in_top']}.",
           f"- P@20: {_p(p['p20'])}; duplicates in top 20: {p['p20']['duplicates_in_top']}.",
           f"- Surfaced items: {p['surfaced_total']}. Verdicts: {fl['verdicts']}.", "",
+          ] + _by_rule_lines(p.get("by_rule")) + [
           "## False leads per review hour", "",
           (f"Review time {fl['basis']}: {fl['minutes_per_item']} min per surfaced item, "
           f"{fl['review_hours_modeled']} h for {fl['surfaced']} items."), "",
@@ -135,6 +136,17 @@ def render(r: dict) -> str:
         L += ["", "## Product data the scorer needed but the store lacks", ""] + [f"- {g}" for g in r["data_gaps"]]
     L.append("")
     return "\n".join(L)
+
+
+def _by_rule_lines(br: dict | None) -> list[str]:
+    if not br:
+        return []
+    L = ["", "| Rule (surfaced items) | n | Tier A hit | true_unlisted | benign | unsupported | unadjudicated |",
+         "|---|---|---|---|---|---|---|"]
+    for rule, v in br.items():
+        L.append(f"| {rule} | {v.get('n', 0)} | {v.get('tier_a_hit', 0)} | {v.get('true_unlisted', 0)} | "
+                 f"{v.get('benign', 0)} | {v.get('unsupported', 0)} | {v.get('unadjudicated', 0)} |")
+    return L + [""]
 
 
 def agent_section(a: dict | None) -> list[str]:

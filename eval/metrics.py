@@ -127,6 +127,16 @@ def classify(ordered: list[ItemMatch], adj: dict[str, dict]) -> list[dict]:
     return out
 
 
+def by_rule(rows: list[dict]) -> dict:
+    """Surfaced items per rule by verdict: the precision cost (or yield) of each rule."""
+    out: dict[str, Counter] = defaultdict(Counter)
+    for r in rows:
+        out[r["rule_id"]][r["verdict"]] += 1
+        out[r["rule_id"]]["n"] += 1
+        out[r["rule_id"]][f"lane:{r['lane']}"] += 1
+    return {k: dict(v) for k, v in sorted(out.items())}
+
+
 def precision_at(rows: list[dict], k: int) -> dict:
     top = rows[:k]
     n = len(top)

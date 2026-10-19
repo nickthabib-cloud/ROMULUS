@@ -224,6 +224,9 @@ def test_precision_bounds_and_adjudication(gold_dir, hunt_db, tmp_path):
     assert r2["precision"]["p10"]["p"] == 0.4
     fl = r2["false_leads"]
     assert fl["false"] == 3 and fl["per_hour"] == round(3 / (5 * 5 / 60), 2)
+    br = r2["precision"]["by_rule"]
+    assert br["rule.exec"]["n"] == 4 and br["rule.exec"]["benign"] == 3 and br["rule.exec"]["tier_a_hit"] == 1
+    assert br["rule.flow"] == {"n": 1, "tier_a_hit": 1, "lane:lead": 1}
 
 
 def test_funnel_without_and_with_replay(gold_dir, hunt_db):

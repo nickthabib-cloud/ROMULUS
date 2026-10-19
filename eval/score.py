@@ -114,7 +114,7 @@ def score(gold_dir, db_path, hunt_id, run_id, mode="dev", adjudications=None, fe
                                              and any(oid in m.tier_b for m in matches if m.item.lane in SURFACED_LANES)),
                      "anomalies": sum(len(m.anomalies) for m in matches)},
         "precision": {"order_basis": basis, "surfaced_total": len(rows), "p10": M.precision_at(rows, 10),
-                      "p20": M.precision_at(rows, 20)},
+                      "p20": M.precision_at(rows, 20), "by_rule": M.by_rule(rows)},
         "false_leads": M.false_leads(rows),
         "citations": M.citation_validity(matches, source_check),
         "timing": M.timing(h, g, matches), "cost": M.cost(h),
