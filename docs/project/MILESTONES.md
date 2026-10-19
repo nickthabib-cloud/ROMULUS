@@ -18,8 +18,8 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 - [x] Web UI: login (argon2, rate limit), CSRF, CSP; hunt list; live SSE view; finding detail with highlighted predicate fields and retained raw records; triage; reports (`tests/test_web.py`).
 - [x] Report manifest (immutable revisions, citation resolution, degraded mode, investigator chains/conclusions/contributions/unworked seeds) plus JSON plus technical Markdown (`tests/test_report.py`).
 - [x] Deployed and **integration tested** on the VM. Executable/operand split deploy `ea2c410`; model-off hunt `h20261019-020720-4448fd` completed within scope with 7 urgent / 10 high / 80 lead / 504 context, 0 errors, and 0 broken citations. The 455-test suite covers the negative-assuring kernel executable rule, the positive-only interpreter operand rule, shell `-s` followed by `-c`, and awk option-section boundaries. Eighteen package-maintenance findings moved to restrained script-operand claims and the single real temp executable retained its prior rule. The live linpeas event has no cwd/CWD telemetry, so it soundly remains a web-service interpreter lead rather than a temp-path finding. Earlier agent hunt `h20261018-224406-923663` exhaustively lists all 97 unworked seeds and 8 fallback analyst flags; live model effectiveness remains open.
-- [ ] `reviewer` milestone review: no Blocking findings open
-- [ ] Owner demo recorded in STATUS.md
+- [x] `reviewer` milestone review: no Blocking findings open. Concluded 2026-10-19 after the final scoped check; fixes in `a76f155`, verified with the reviewer's own probes; merged to `m1/thin-slice` (ADR-004 option B).
+- [x] Owner demo recorded in STATUS.md (2026-10-19: technical report walkthrough of `h20261019-093029-32dfef` and owner exploration of the web UI).
 
 ## M2: evaluation harness and model bakeoff
 
