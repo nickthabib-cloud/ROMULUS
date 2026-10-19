@@ -4,7 +4,7 @@ from __future__ import annotations
 from romulus.detect.host import HOST_PLAYBOOKS
 from romulus.detect.network import NETWORK_PLAYBOOKS
 
-PACK_VERSION = "m1-pack@1"
+PACK_VERSION = "m1-pack@2"
 ALL_PLAYBOOKS = HOST_PLAYBOOKS + NETWORK_PLAYBOOKS
 
 

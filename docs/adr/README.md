@@ -7,3 +7,4 @@ Write one only for decisions that are hard to reverse. Keep each to a page: **Co
 | [001](ADR-001-no-langgraph.md) | Explicit controller and single SQLite authority; no LangGraph | Accepted 2026-10-18 |
 | [002](ADR-002-runtime-and-stack.md) | Modular monolith on the VM; FastAPI/HTMX; SQLite; Ollama on Windows host | Accepted 2026-10-18 |
 | [003](ADR-003-agent-pivot-executor-boundary.md) | Execute agent pivots in the hunt layer | Accepted 2026-10-18 |
+| [004](ADR-004-negatives-only-from-kernel-records.md) | Negatives only from evidence that can prove them; argv/text rules positive-only | Accepted 2026-10-19 |

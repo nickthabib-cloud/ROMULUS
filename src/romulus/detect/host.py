@@ -177,7 +177,10 @@ class WebServiceSpawnsInterpreter(Playbook):
     """Stack-counted: routine shapes collapse into one context item; rare shapes become leads and
     are escalated only when typed argv indicators are present (rarity alone is not suspicion)."""
     id = "host.web_service_spawns_interpreter"
-    version = "3"
+    # argv/text-identified programs and actions: findings only, never a complete negative
+    # (owner decision 2026-10-19; kernel-record negatives are M3)
+    assures_negative = False
+    version = "4"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -255,6 +258,10 @@ class DownloaderFeedsInterpreter(Playbook):
     """Sequence: a downloader exec and a stdin-reading interpreter exec with the same parent on the
     same host within MAX_GAP seconds (the shape of `curl URL | sh` typed into a shell or a script)."""
     id = "host.downloader_feeds_interpreter"
+    # argv/text-identified programs and actions: findings only, never a complete negative
+    # (owner decision 2026-10-19; kernel-record negatives are M3)
+    assures_negative = False
+    version = "2"
     title = "Downloader and stdin interpreter launched together by the same parent"
     kind = "aggregate"
     families = ("process_exec",)
@@ -384,6 +391,10 @@ class DownloadPipedToShell(Playbook):
 
 class PtyUpgrade(Playbook):
     id = "host.python_pty_spawn"
+    # argv/text-identified programs and actions: findings only, never a complete negative
+    # (owner decision 2026-10-19; kernel-record negatives are M3)
+    assures_negative = False
+    version = "2"
     title = "Python executed code that spawns a pseudo-terminal"
     families = ("process_exec",)
     required_fields = ("process.argv",)
@@ -407,6 +418,10 @@ class PtyUpgrade(Playbook):
 
 class ExecFromTempDir(Playbook):
     id = "host.exec_from_temp_dir"
+    # argv/text-identified programs and actions: findings only, never a complete negative
+    # (owner decision 2026-10-19; kernel-record negatives are M3)
+    assures_negative = False
+    version = "2"
     title = "Program executed from a world-writable temporary directory"
     families = ("process_exec",)
     required_fields = ("process.executable",)
@@ -489,7 +504,10 @@ class FirewallRuleChange(Playbook):
     """Direct finding for commands that block/unblock a specific address on a built-in chain;
     other rule-change commands are grouped per host as routine context."""
     id = "host.firewall_rule_change_command"
-    version = "2"
+    # argv/text-identified programs and actions: findings only, never a complete negative
+    # (owner decision 2026-10-19; kernel-record negatives are M3)
+    assures_negative = False
+    version = "3"
     title = "Firewall command blocking or unblocking a specific address"
     kind = "aggregate"
     families = ("process_exec",)
@@ -554,6 +572,10 @@ class FirewallRuleChange(Playbook):
 
 class CredentialStoreRead(Playbook):
     id = "host.credential_store_read"
+    # argv/text-identified programs and actions: findings only, never a complete negative
+    # (owner decision 2026-10-19; kernel-record negatives are M3)
+    assures_negative = False
+    version = "2"
     title = "Local password hash file read by a file-reading tool"
     families = ("process_exec",)
     required_fields = ("process.argv",)
@@ -631,6 +653,10 @@ class AuthorizedKeysWrite(Playbook):
 
 class SshLoginFromExternal(Playbook):
     id = "host.ssh_login_external_source"
+    # argv/text-identified programs and actions: findings only, never a complete negative
+    # (owner decision 2026-10-19; kernel-record negatives are M3)
+    assures_negative = False
+    version = "2"
     title = "Successful SSH login from a non-private source address"
     kind = "aggregate"
     families = ("auth",)

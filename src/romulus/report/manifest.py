@@ -44,19 +44,32 @@ def _citations(repo: Repo, cand: dict) -> list[dict]:
 UNRESOLVED_STATES = (
     "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
 )
+_NO_ASSURANCE = ("no rule in this pack can prove absence for this behavior yet; negatives from kernel file and "
+                 "path records are planned (M3)")
+
+
+def _po(what: str) -> str:
+    return f"not assessable by design: positive-only rule ({what}; {_NO_ASSURANCE})"
+
+
 POSITIVE_ONLY_CLAIMS = {
-    "host.download_piped_to_shell": (
-        "not assessable by design: positive-only rule (script text can show download-to-interpreter intent but "
-        "cannot prove that it ran; process-level assurance is provided by host.downloader_feeds_interpreter)"
-    ),
-    "host.ssh_authorized_keys_write": (
-        "not assessable by design: positive-only rule (script text can show authorized_keys write intent but "
-        "cannot prove that it ran; no process-level assurance exists for authorized_keys writes)"
-    ),
-    "host.script_from_temp_dir": (
-        "not assessable by design: positive-only rule (interpreter argv can show a temp-directory script operand "
-        "but cannot prove that the script ran)"
-    ),
+    "host.download_piped_to_shell": _po("script text can show download-to-interpreter intent but cannot prove it ran"),
+    "host.ssh_authorized_keys_write": _po("script text or command arguments can show an authorized_keys write but "
+                                          "cannot prove that none happened; shell-builtin redirects create no process"),
+    "host.script_from_temp_dir": _po("interpreter argv can show a temp-directory script operand but cannot prove "
+                                     "that no script ran from a temp directory"),
+    "host.exec_from_temp_dir": _po("the kernel-recorded executable is the interpreter for #! scripts, so it cannot "
+                                   "prove that no temp-directory program ran"),
+    "host.web_service_spawns_interpreter": _po("the interpreter is identified from argv[0], which a renamed or "
+                                               "copied interpreter or exec -a can change"),
+    "host.downloader_feeds_interpreter": _po("downloader, interpreter and stdin use are identified from argv"),
+    "host.python_pty_spawn": _po("python and its -c code are identified from argv; script files, stdin and "
+                                 "wrapped code are not seen"),
+    "host.firewall_rule_change_command": _po("the firewall tool and change flags are identified from argv"),
+    "host.credential_store_read": _po("the reader and the file are identified from argv, not from a file-access "
+                                      "record"),
+    "host.ssh_login_external_source": _po("logins are identified by parsing sshd log message text; unrecognized "
+                                          "formats are not seen"),
 }
 
 
@@ -96,8 +109,7 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         elif states.get("positive_only") or states.get("positive_only_partial"):
             claim = POSITIVE_ONLY_CLAIMS.get(
                 rule,
-                "not assessable by design: positive-only rule (script text can show intent but cannot prove "
-                "that something did not run)",
+                _po("the rule identifies programs or actions from argv or text"),
             ) + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
         elif reasons:
             claim = "unresolved: " + "; ".join(reasons)

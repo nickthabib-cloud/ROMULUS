@@ -120,7 +120,10 @@ def test_aggregate_rules_with_zero_evaluated_are_not_complete_negatives(monkeypa
     s.finalize()
     window_cells = {c["rule_id"]: c["state"] for c in repo.rule_cells("h1") if c["target"] == "*"}
     assert window_cells and "no_match_complete" not in window_cells.values()
-    assert set(window_cells.values()) == {"not_applicable_no_events"}
+    from romulus.detect.registry import ALL_PLAYBOOKS
+    positive_only = {cls.id for cls in ALL_PLAYBOOKS if not cls.assures_negative}
+    for rid, state in window_cells.items():
+        assert state == ("positive_only" if rid in positive_only else "not_applicable_no_events"), (rid, state)
 
 
 def test_report_coverage_never_complete_with_unexecuted_or_missing_work():
@@ -354,9 +357,13 @@ def test_script_text_rules_never_claim_a_complete_negative(monkeypatch):
     rows = {r["rule_id"]: r for r in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]}
     for rid in ("host.download_piped_to_shell", "host.ssh_authorized_keys_write"):
         assert rows[rid]["negative_claim"].startswith("not assessable by design"), rows[rid]
-    assert "host.downloader_feeds_interpreter" in rows["host.download_piped_to_shell"]["negative_claim"]
-    assert "no process-level assurance exists" in rows["host.ssh_authorized_keys_write"]["negative_claim"]
-    assert rows["host.credential_store_read"]["negative_claim"] == "complete"     # process-level rule still assures
+    assert "planned (M3)" in rows["host.download_piped_to_shell"]["negative_claim"]   # no false pointer to another positive-only rule
+    assert "can prove absence" in rows["host.ssh_authorized_keys_write"]["negative_claim"]
+    # option B (owner decision 2026-10-19): no argv/text-identified host rule may claim a complete negative
+    from romulus.detect.host import HOST_PLAYBOOKS
+    for cls in HOST_PLAYBOOKS:
+        assert not rows[cls.id]["negative_claim"].startswith("complete"), (cls.id, rows[cls.id])
+    assert rows["host.credential_store_read"]["negative_claim"].startswith("not assessable by design")
 
 
 def test_temp_script_operand_rule_is_positive_only_for_unmodelled_interpreter_options(monkeypatch):
@@ -371,3 +378,35 @@ def test_temp_script_operand_rule_is_positive_only_for_unmodelled_interpreter_op
     assert row["states"] == {"positive_only": 1}
     assert row["negative_claim"].startswith("not assessable by design")
     assert "interpreter argv" in row["negative_claim"]
+
+
+
+def test_every_host_rule_is_positive_only_and_every_negative_assuring_rule_is_typed():
+    """Option B invariant: a rule may assure a negative only if it is not argv/text-identified.
+    Host rules identify programs from argv/text, so all are positive-only until kernel-record
+    rules exist (M3). Network rules rest on typed fields and keep their negatives."""
+    from romulus.detect.host import HOST_PLAYBOOKS
+    from romulus.detect.network import NETWORK_PLAYBOOKS
+    assert all(not cls.assures_negative for cls in HOST_PLAYBOOKS)
+    assert all(cls.assures_negative for cls in NETWORK_PLAYBOOKS)
+    from romulus.report.manifest import POSITIVE_ONLY_CLAIMS
+    assert {cls.id for cls in HOST_PLAYBOOKS} <= set(POSITIVE_ONLY_CLAIMS)
+    for claim in POSITIVE_ONLY_CLAIMS.values():
+        assert "assurance is provided by" not in claim       # no rule may point to another positive-only rule
+
+
+def test_positive_only_aggregate_with_a_match_reports_matched(monkeypatch):
+    raw = 'type=EXECVE msg=audit(1731938400.000:8201): argc=1 a0="/bin/sh"'
+    sc = ('type=SYSCALL msg=audit(1731938400.000:8201): syscall=59 success=yes ppid=1 pid=2 uid=33 comm="sh" '
+          'exe="/usr/bin/dash"UID="www-data" EUID="www-data"')
+    recs = [{"_id": f"p{i}", "_index": "romulus-host-x", "_source": {
+        "@timestamp": "2024-11-18T14:00:00Z", "message": r, "host": {"name": "video"},
+        "event": {"dataset": "linux.audit", "original": r}}} for i, r in enumerate((raw, sc))]
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, recs))
+    repo = _repo()
+    w = Window(start=START, end=START + timedelta(minutes=5))
+    s = sw.Sweep(repo, FakeClient(), "h1", w, {"romulus-host-x": None})
+    s.run_partition("romulus-host-x", None, [], w, est=2)
+    s.finalize()
+    window = {c["rule_id"]: c["state"] for c in repo.rule_cells("h1") if c["target"] == "*"}
+    assert window["host.web_service_spawns_interpreter"] == "matched"

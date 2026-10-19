@@ -2,24 +2,25 @@
 
 ## Resume here
 
-_Last updated: 2026-10-18 20:54 EDT by Codex (final M1 parser round)._
+_Last updated: 2026-10-19 by Claude (lead)._
 
-- **M1 reviewer gate: RE-RUN FIXES COMPLETE; not merged; reviewer re-run pending (2026-10-18).** The first gate failed, and its first re-run passed the investigator with issues but still failed core.
-  - Claude fixed core B1–B5 and the `.env` inline-comment session-secret bug in `7d019b9`. `2663e1d` merges auditd split long-argv EXECVE records (32 linpeas records in the attack window had been silently mishandled), scopes partiality per event family, and fixes `deploy.ps1`, which had silently uploaded a stale archive.
-  - Model-off lab hunt `h20261018-221847-d52592`: `completed_within_scope`, 102,457 exec records evaluated, 0 normalization errors, 0 broken citations.
-  - Codex implemented and locally verified the assigned core B6/B7 and investigator B1/B2/B3 fixes in `6b4d2b1` through `5c3efc1`. The fixes preserve quoted shell punctuation, evaluate interpreter indicators before shape collapse, reject host-scoped `ids_alerts`, fence workers with lease-owner tokens, and keep validation fallbacks explicitly unworked as `fallback_parked` with analyst flags.
-  - Fresh lab verification on deployed commit `13f0a43`: model-off hunt `h20261018-224208-b2cc27` and agent hunt `h20261018-224406-923663` both completed within scope over 10:00–17:30 UTC with 1,791,438 records, 296,500 typed events, 0 normalization errors, and 0 broken citations.
-  - Claude fixed cross-partition sequence raw retention in `b332dac`. Codex then fixed the five gate re-run findings in `8b274fe` through `82c1372`: shell comments/escapes/heredocs, explicit partial coverage for unmodelled shell syntax, owner-fenced pivot data writes, resume-preflight lease cleanup, and IP-only `ids_alerts` validation/catalog entries.
-  - Gate re-run verification deployed clean commit `8a09957`. Model-off hunt `h20261018-232714-ad664a` completed within scope over 10:00–17:30 UTC with the unchanged 7 urgent / 11 high counts, 1,791,438 records, 296,500 typed events, 0 normalization errors, and report r1 with 0 broken citations.
-  - Claude fixed hunt-deletion evidence safety in `05aba63`. Codex then replaced the shell parser with a single-pass allow-list lexer in `2620d68` and propagated explicit unknown script layouts through detector coverage in `d43877f`. Clean commit `65593a9` was deployed and model-off hunt `h20261019-001401-d6328f` completed within scope with 0 normalization errors and report r1 with 0 broken citations. The expected safety change moved one unmodelled ZoneMinder-shaped web-shell item from high to a rarity lead: 7 urgent / 10 high / 80 lead / 504 context.
-  - Claude made script-text detections positive-only in `9120190` and fixed aggregate consume-time coverage in `3f18b3a`. Codex fixed final parser findings F6/F7/F12/F13 and added prefix-only positive indicators in `5bcf13c` through `0d500b6`. Clean commit `72d0da0` was deployed; model-off hunt `h20261019-005148-03348c` completed within scope with 0 errors and 0 broken citations. The ZoneMinder exploit payload returned to high on its clean pre-substitution prefix, restoring 7 urgent / 11 high / 79 lead / 504 context without changing the two script rules' `positive_only` coverage.
-  - Important findings from the gate are still open (the next round after these Blocking items): I2/I3 (sequence order, interpreter-from-stdin requirement), I5 (per-target source failure handling, retries), I7 (typed events/raw copies shared across hunts), I8/I9 (Markdown newlines, CLI ANSI escapes), I10 (context items absent from the manifest), I12/I13 (index-name substring scoping, naive timestamps), I14 (no ingestion watermark), I15 (`ignore_above`), and investigator I1–I7.
-  - Next: re-run the reviewer gate; merge `codex/model-investigator` into `m1/thin-slice` only if it passes.
+- **M1 gate: concluded with owner decision "option B" (2026-10-19).** Seven gate rounds on the shell/argv path showed one structural cause: every host rule assured its *negative* by interpreting text (argv[0], argv operands, script parses), and an adversarial reviewer can always find another form. Option B makes negatives honest by construction:
+  - All 10 host rules are positive-only (`assures_negative = False`): their findings, lanes and lab results are unchanged; coverage reads "not assessable by design" with a per-rule reason, never "complete". Network rules (typed fields) keep real negatives.
+  - Negative assurance for host behaviour moves to M3: kernel-recorded auditd PATH (item 0 = the file actually executed, incl. `#!` scripts), `nametype=CREATE` writes, CWD, and watch keys. `EXEC_COMPANIONS` currently omits PATH.
+  - Option 2 before it (2026-10-18) made script-text rules positive-only; option B extends the same principle to argv.
+  - Merge `codex/model-investigator` → `m1/thin-slice` after the final scoped check (can any rule claim a negative it cannot prove?).
+- **Lab baseline (model-off, SL700 e_a 10:00–17:30 UTC):** `completed_within_scope`, 1,791,438 records, 296,500 events, 0 normalization errors, 0 broken citations, 7 urgent / 10 high / 80 lead / 504 context. The ZoneMinder exploit payload is a lead because its injected commands share a shell line with unmodelled `$(...)`; its spawned children are urgent.
+- **Follow-ups (not blocking M1):**
+  - M3 kernel-record rules: exec-from-temp via PATH item 0; authorized_keys writes and /etc/shadow reads via PATH/watch records; restore the exploit payload to high via process-tree evidence (its shell has child execs, proving the line ran).
+  - Gate leftovers: interpreter location via PATH when no exe (I1); `ncat --lua-exec`; `busybox awk -f`; exec_from_temp_dir wording for failed execs (SYSCALL.exe is the caller); `script_from_temp_dir` should cite `process.executable` over argv[0] (I1 of last check); non-absolute/`(null)` exe values should be unevaluable (I2 of last check).
+  - Earlier gate Important items still open: per-target source failure retries (I5), typed events/raw copies shared across hunts (I7), Markdown newlines and CLI ANSI escapes (I8/I9), context items absent from the manifest (I10), index-name substring scoping (I12), naive timestamps (I13), ingestion watermark (I14), `ignore_above` (I15), sshd-session journal identifier (gate N4), investigator I1–I7.
+  - Model quality (M2 bakeoff): ~33% invalid model outputs; agent has contributed no new findings on the lab yet.
+- **Process notes:** Claude does not edit the shell parser or the investigator (an assistant-side safety check stopped that work); those go to Codex via `Claude-Codex.md` (replace Claude's last message; date+time headers; execute-only rounds).
 
 - **Current milestone:** M1, implemented and locally tested on branch `codex/model-investigator`; the investigator and its pivot fix round are integration tested on the VM. Reviewer and owner-demo gates remain open.
 - **State:**
   - Sweep → decisions → coverage ledger → report manifest (immutable revisions, citation integrity) → technical Markdown/JSON → web UI (login, live stream, finding detail with highlighted raw evidence, triage, reports).
-  - The 346-test local suite includes acceptance scenarios 13–17, hostile input, positive-only shell coverage, argv-layout and partial-prefix regressions, budget/fairness, owner-fenced lease/resume and pivot persistence, crash replay, direct-only pivots, and investigation reporting.
+  - The 455-test local suite includes acceptance scenarios 13–17, hostile input, positive-only shell coverage, argv-layout and line-safe partial-prefix regressions, budget/fairness, owner-fenced lease/resume and pivot persistence, crash replay, direct-only pivots, and investigation reporting.
   - Lab hunt `h20261018-181953-decca8` (SL700 e_a, 10:00–17:30 UTC): `completed_within_scope`, 1,791,438 records evaluated, 0 parse errors, 7 urgent / 11 high / 79 leads / 504 context, 0 broken citations.
   - Fix-round lab hunt `h20261018-211924-b1edf9`: `completed_within_scope` / `reportable_findings`; the complete sweep evaluated 1,791,438 records and 296,500 typed events with 0 errors. The model made 52 calls, executed 2 complete pivots, and had 4 duplicate pivot proposals blocked before source execution. The attacker-IP `ids_alerts` pivot returned 969/969 alert records with complete coverage and no cap. All 97 seeds were accounted for; 43 remained unworked. Report revision 1 contained 97 findings/leads and 0 broken citations.
   - Gate-fix model-off hunt `h20261018-224208-b2cc27`: `completed_within_scope` / `reportable_findings`; 7 urgent, 11 high, 79 leads, 504 context; 0 errors; agent disabled with all 97 seeds unworked; report r1 had 0 broken citations.
@@ -27,6 +28,9 @@ _Last updated: 2026-10-18 20:54 EDT by Codex (final M1 parser round)._
   - Gate re-run model-off hunt `h20261018-232714-ad664a`: `completed_within_scope` / `reportable_findings`; 7 urgent, 11 high, 79 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations.
   - Shell allow-list model-off hunt `h20261019-001401-d6328f`: `completed_within_scope` / `reportable_findings`; 7 urgent, 10 high, 80 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 normalization errors; report r1 had 97 findings/leads and 0 broken citations. Both shell-script negative claims are unresolved with 17 `evaluated_partial` partitions; the TODO.md and README.txt.1 downloader→stdin-shell urgent findings remain.
   - Final parser model-off hunt `h20261019-005148-03348c`: `completed_within_scope` / `reportable_findings`; 7 urgent, 11 high, 79 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations. Both shell-script rules show `positive_only=17` and “not assessable by design.” The recovered ZoneMinder high finding cites three retained raw records and states that its indicators use the clean modelled prefix only.
+  - Final gate model-off hunt `h20261019-012238-c13596`: `completed_within_scope` / `reportable_findings`; 7 urgent, 10 high, 80 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations. Both script-text rules show `positive_only_partial=17` with explicit per-rule assurance wording. The one-line ZoneMinder payload is now a rarity lead because no indicator precedes the parser cut on a fully terminated earlier line.
+  - Temp-dir operand gate model-off hunt `h20261019-014722-06695c`: `completed_within_scope` / `reportable_findings`; 7 urgent, 10 high, 80 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations.
+  - Executable/operand split model-off hunt `h20261019-020720-4448fd`: `completed_within_scope` / `reportable_findings`; 7 urgent, 10 high, 80 leads, 504 context; 1,791,438 records, 296,500 typed events, 0 errors; report r1 had 97 findings/leads and 0 broken citations. Eighteen interpreter-operand findings moved to the positive-only script rule; one kernel-recorded temp executable stayed under the negative-assuring executable rule.
   - Web UI: `http://192.168.36.128:8443` (plain HTTP lab exception); restart with `scripts/web-restart.sh`.
 - **Model investigator:**
   - **Implemented, locally tested, and integration tested.** The explicit controller uses SQLite state, clustered cases, breadth-first scheduling, typed tools, strict validation, one retry plus deterministic fallback, cumulative budgets, Ollama truncation checks, and durable model/case/pivot records.
@@ -51,7 +55,7 @@ _Last updated: 2026-10-18 20:54 EDT by Codex (final M1 parser round)._
 | Milestone | State | Evidence |
 |---|---|---|
 | Pre-M1 setup | done | this file, TEAM.md, `.claude/agents/`, ENVIRONMENT.md |
-| M1 thin end-to-end slice | integration tested | 346-test suite; latest model-off lab hunt `h20261019-005148-03348c`; final reviewer gate and owner demo remain |
+| M1 thin end-to-end slice | integration tested | 455-test suite; latest model-off lab hunt `h20261019-020720-4448fd`; final reviewer gate and owner demo remain |
 | M2 evaluation and model bakeoff | not started | |
 | M3 full sources and coverage truth | not started | |
 | M4 detection depth (incl. Zeek, ICS, Malcolm) | not started | |
@@ -72,6 +76,24 @@ _Last updated: 2026-10-18 20:54 EDT by Codex (final M1 parser round)._
 ## Session log
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
+
+- **2026-10-18 22:10 EDT (executable-versus-operand split round)**:
+  - Split temp execution into a negative-assuring executable-path rule and a positive-only interpreter-operand rule; fixed shell `-s`/`-c` ordering and rejected late awk `-f` operands. Each of the three requested items was developed red-first and committed separately (`a7220c3`, `e59732f`, `ea2c410`).
+  - The required 455-test suite passed; `scripts/archmap.py --check` exited 0 with no output.
+  - Deployed clean commit `ea2c410` and verified the VM stamp. Model-off hunt `h20261019-020720-4448fd` completed within scope with 1,791,438 records, 296,500 events, 0 errors, and 7 urgent / 10 high / 80 lead / 504 context; report r1 had 97 findings/leads and 0 broken citations.
+  - The requested linpeas temp-rule expectation could not be met soundly: the retained live event has no cwd/CWD telemetry, so it remains a web-service interpreter lead instead of acquiring an unsupported temp-path claim.
+
+- **2026-10-18 21:49 EDT (temp-dir operand gate round)**:
+  - Restricted temp-dir script operands to shells and actual script-taking interpreters; added exact `awk`/`gawk -f FILE` handling and prevented nc/ncat/netcat/socat data operands from becoming execution claims.
+  - Required a slash before resolving executable paths against cwd, canonicalized exactly two leading slashes, modelled shell `-s`/clusters as stdin mode, and made the Markdown coverage legend rule-specific.
+  - The required 433-test suite passed; `scripts/archmap.py --check` exited 0 with no output. Each fix was developed red-first and committed separately (`aa0d9d7` through `0b9a66a`).
+  - Deployed clean commit `0b9a66a` and verified the VM stamp. Model-off hunt `h20261019-014722-06695c` completed within scope with 1,791,438 records, 296,500 events, 0 errors, and 7 urgent / 10 high / 80 lead / 504 context; report r1 had 97 findings/leads and 0 broken citations.
+
+- **2026-10-18 21:24 EDT (final M1 gate-fix round)**:
+  - Normalized login-shell and versioned interpreter argv names everywhere the interpreter allow-list is checked. Added a shared option scanner for shell script files, made non-shell option layouts explicitly unevaluable, resolved relative paths with POSIX semantics, and made missing path context partial rather than a negative.
+  - Preserved positive-only partial coverage and every report caveat; added rule-specific assurance wording. Restricted shell-prefix indicators to fully terminated earlier lines, discarded every parser-error prefix, and added `elif`, `else`, and `esac` to the reserved set.
+  - The required 406-test suite and architecture check passed. Claude's three Python probes passed, `prefix_bash.py` reported all cases sound, and the real-shell `tmpdir.sh` cases executed their expected scripts.
+  - Deployed clean commit `bf7e5ee` and verified the VM stamp. Model-off hunt `h20261019-012238-c13596` completed within scope with 0 errors; report r1 had 97 findings/leads and 0 broken citations. Counts are 7 urgent / 10 high / 80 lead / 504 context because the one-line ZoneMinder exploit cannot soundly contribute a pre-cut prefix under the final gate rule.
 
 - **2026-10-18 20:54 EDT (final M1 parser round)**:
   - Stopped shell option scanning at the first script-file argument; recognised login-shell argv names; classified zsh, ksh, fish and csh-family `-c` input as explicit unknown; and strengthened adversarial coverage assertions per rule.

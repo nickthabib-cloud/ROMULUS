@@ -245,7 +245,10 @@ class Sweep:
             evaluated = sum(c["evaluated"] or 0 for c in cells)
             consumed_matches = sum(c["matched"] or 0 for c in cells)
             matched_any = bool(ms) or consumed_matches > 0
-            if any_partial or not cells:
+            if not pb.assures_negative and not matched_any:
+                # positive-only aggregate (argv/text-identified): never a complete negative
+                state = "positive_only_partial" if (any_partial or not cells) else "positive_only"
+            elif any_partial or not cells:
                 state = "match_on_partial" if matched_any else "evaluated_partial"
             elif matched_any:
                 state = "matched"
