@@ -420,6 +420,17 @@ def test_exec_from_tmp_via_interpreter_script():
     assert run(host.ExecFromTempDir, [exec_ev(["/bin/sh", "-c", "./x"], process__cwd="/tmp")]) == []
 
 
+@pytest.mark.parametrize("argv", [
+    ["bash", "/tmp/x.sh", "-c"],
+    ["bash", "/tmp/x.sh", "-recursive"],
+])
+def test_exec_from_tmp_stops_shell_option_scan_at_script_file(argv):
+    matches = run(host.ExecFromTempDir, [exec_ev(argv)])
+
+    assert len(matches) == 1
+    assert "'/tmp/x.sh' via interpreter 'bash'" in matches[0].claim
+
+
 # ---------------------------------------------------------------- tool user agent
 def test_tool_ua():
     m = run(network.ToolUserAgentHttp, [ev(family="http_tx", source__ip="192.0.2.10", destination__ip="192.0.2.99",

@@ -287,11 +287,22 @@ def test_shell_script_extraction():
 
 
 @pytest.mark.parametrize("argv", [
+    ["bash", "/tmp/x.sh", "-c"],
+    ["bash", "/tmp/x.sh", "-recursive"],
+])
+def test_shell_option_scan_stops_at_script_file(argv):
+    assert shell_script_of(argv) is None
+
+
+@pytest.mark.parametrize("argv", [
     ["bash", "-c", "--", "id"],
     ["bash", "-c", "-x", "id"],
     ["bash", "-o", "pipefail", "-c", "id"],
     ["busybox", "sh", "-c", "id"],
     ["bash", "-c"],
+    ["bash", "-c", "+e", "id"],
+    ["sh", "-c", "+e", "id"],
+    ["bash", "-lc", "+e", "id"],
 ])
 def test_ambiguous_shell_command_returns_explicit_unknown(argv):
     result = shell_script_of(argv)

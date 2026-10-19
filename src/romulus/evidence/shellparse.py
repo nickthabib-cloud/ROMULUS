@@ -314,8 +314,19 @@ class UnknownShellScript:
 
 
 def _has_c_option(args: list[str]) -> bool:
-    return any(arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:])
-               for arg in args)
+    option_takes_value = False
+    for arg in args:
+        if option_takes_value:
+            option_takes_value = False
+            continue
+        if arg == "--" or not arg.startswith(("-", "+")):
+            return False
+        if arg in {"-o", "+o", "-O", "+O", "--init-file", "--rcfile"}:
+            option_takes_value = True
+            continue
+        if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
+            return True
+    return False
 
 
 def shell_script_of(argv: list[str]) -> str | UnknownShellScript | None:
@@ -334,10 +345,11 @@ def shell_script_of(argv: list[str]) -> str | UnknownShellScript | None:
     args = argv[1:]
     if name != "busybox" and len(args) >= 2 and args[0] in {"-c", "-lc"}:
         script = args[1]
-        if script and not script.startswith("-"):
+        if script and not script.startswith(("-", "+")):
             return script
         return UnknownShellScript("the shell -c script position is missing or option-like")
 
-    if _has_c_option(args):
+    scan_args = args[1:] if name == "busybox" and args and args[0] in SHELLS else args
+    if _has_c_option(scan_args):
         return UnknownShellScript("the shell -c option layout is not modelled")
     return None
