@@ -258,10 +258,8 @@ def test_adversarial_shell_construct_never_persists_complete_negative_for_both_r
     repo = _run_shell_partition(monkeypatch, argv=argv)
 
     cells = {cell["rule_id"]: cell for cell in repo.rule_cells("h1")}
-    states = {cells[rule_id]["state"] for rule_id in (
-        "host.download_piped_to_shell", "host.ssh_authorized_keys_write",
-    )}
-    assert states != {"no_match_complete"}
+    assert cells["host.download_piped_to_shell"]["state"] != "no_match_complete"
+    assert cells["host.ssh_authorized_keys_write"]["state"] != "no_match_complete"
 
 
 def test_sequence_pair_split_across_partitions_keeps_all_raw_copies(monkeypatch):
