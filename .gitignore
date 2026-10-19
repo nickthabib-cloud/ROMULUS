@@ -37,3 +37,6 @@ build/
 
 # written by scripts/deploy.ps1 on the VM
 DEPLOYED_COMMIT
+
+# local Claude/Codex collaboration channel, never committed
+Claude-Codex.md
