@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from romulus.agent.brief import build_brief
 from romulus.agent.cases import cluster_seed_candidates
-from romulus.agent.models import AgentDecision, EntityRef, PivotResult, decision_schema, parse_decision_output
+from romulus.agent.models import AgentDecision, EntityRef, PivotResult, parse_decision_output
 from romulus.agent.ollama import ModelResult, ModelUnavailable, OllamaClient
 from romulus.agent.tools import parse_tool_request, tool_catalog
 from romulus.agent.validate import ValidationResult, validate_decision
@@ -149,7 +149,7 @@ class Investigator:
                 "num_ctx": self.settings.ollama_num_ctx, "max_out": 900,
                 "think": self.settings.ollama_think, "shrink_actions": brief.shrink_actions,
             },
-            "prompt_digest": digest({"system": brief.system, "user": brief.user}),
+            "prompt_digest": digest({"system": brief.system, "user": brief.user, "schema": brief.schema}),
             "prompt_tokens_est": result.prompt_tokens_est,
             "prompt_eval_count": result.prompt_eval_count,
             "eval_count": result.eval_count,
@@ -188,7 +188,7 @@ class Investigator:
         try:
             result = self.model.chat_json(
                 self.settings.ollama_model_triage, brief.system, brief.user,
-                decision_schema(), max_out=900,
+                brief.schema, max_out=900,
             )
         except ModelUnavailable as exc:
             self.heartbeat()

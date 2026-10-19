@@ -130,6 +130,13 @@ class _StepView:
     def case_steps(self, case_id: str) -> list[dict]:
         return self._steps if case_id == self._case["id"] else []
 
+    def get_hunt(self, hunt_id: str) -> dict | None:
+        return self._repo.get_hunt(hunt_id)
+
+    def cases(self, hunt_id: str) -> list[dict]:
+        rows = [row for row in self._repo.cases(hunt_id) if row["created_at"] < self._before]
+        return [self._case if row["id"] == self._case["id"] else row for row in rows]
+
     def candidates(self, hunt_id: str, lanes: list[str] | None = None) -> list[dict]:
         rows = self._repo.candidates(hunt_id, lanes)
         return [row for row in rows if row["created_at"] < self._before]
@@ -164,6 +171,9 @@ def serialize_brief(brief: BuiltBrief) -> dict:
     return {
         "system": brief.system,
         "user": brief.user,
+        "output_schema": brief.schema,
+        "menu": brief.menu.model_dump(mode="json"),
+        "aliases": brief.aliases,
         "token_estimate": brief.token_estimate,
         "shrink_actions": list(brief.shrink_actions),
         "known_candidates": {
@@ -227,7 +237,8 @@ def export_tasks(repo: Repo, hunt_id: str, num_ctx_values: list[int],
                                         retry_errors=attempt_errors)
                 except ValueError:
                     continue
-                if digest({"system": brief.system, "user": brief.user}) == call["prompt_digest"]:
+                if digest({"system": brief.system, "user": brief.user,
+                           "schema": brief.schema}) == call["prompt_digest"]:
                     chosen, matched = attempt_errors, True
                     break
             if not matched and retry:

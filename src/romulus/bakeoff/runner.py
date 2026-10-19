@@ -29,6 +29,7 @@ from romulus.agent.brief import BuiltBrief, _render
 from romulus.agent.controller import Investigator
 from romulus.agent.models import EntityRef, decision_schema, parse_decision_output
 from romulus.agent.ollama import ModelUnavailable, OllamaClient
+from romulus.agent.options import Menu
 from romulus.agent.validate import ValidationResult, validate_decision
 from romulus.bakeoff.export import MAX_OUT
 from romulus.config import Settings
@@ -79,6 +80,9 @@ def brief_from_task(serialized: dict) -> BuiltBrief:
     return BuiltBrief(
         system=serialized["system"],
         user=serialized["user"],
+        schema=dict(serialized.get("output_schema") or {}),
+        menu=Menu.model_validate(serialized.get("menu") or {"options": [], "hidden_count": 0}),
+        aliases=dict(serialized.get("aliases") or {}),
         token_estimate=serialized["token_estimate"],
         shrink_actions=list(serialized.get("shrink_actions") or []),
         known_candidates=dict(serialized.get("known_candidates") or {}),
@@ -133,7 +137,7 @@ def retry_brief(brief: BuiltBrief, errors: list[str]) -> BuiltBrief | None:
         return None
     data = json.loads(match.group(1))
     data["validation_retry_errors"] = list(errors)
-    user, estimate = _render(brief.system, data)
+    user, estimate = _render(brief.system, data, brief.schema)
     return BuiltBrief(**{**brief.__dict__, "user": user, "token_estimate": estimate})
 
 
@@ -147,7 +151,7 @@ def _call(client: OllamaClient, transport: CaptureTransport, model: str, brief: 
           max_out: int) -> tuple[dict, dict | None]:
     transport.last = None
     try:
-        result = client.chat_json(model, brief.system, brief.user, decision_schema(), max_out=max_out)
+        result = client.chat_json(model, brief.system, brief.user, brief.schema or decision_schema(), max_out=max_out)
     except ModelUnavailable as exc:
         return {"status": "unavailable", "error": str(exc), "duration_ms": None, "raw": ""}, None
     timings = transport.last or {}

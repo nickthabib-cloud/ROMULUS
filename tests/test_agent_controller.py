@@ -8,7 +8,7 @@ from romulus.agent.ollama import ModelResult, ModelUnavailable
 from romulus.config import Settings
 from romulus.evidence.typed import TypedEvent
 from romulus.sources.models import Window
-from romulus.store.db import make_engine, migrate
+from romulus.store.db import digest, make_engine, migrate
 from romulus.store.repo import Repo
 
 START = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
@@ -74,14 +74,28 @@ class QueueModel:
         self.results = list(results)
         self.calls = 0
         self.users = []
+        self.requests = []
 
     def chat_json(self, *_args, **_kwargs):
         self.calls += 1
         self.users.append(_args[2])
+        self.requests.append({"system": _args[1], "user": _args[2], "schema": _args[3]})
         item = self.results.pop(0)
         if isinstance(item, Exception):
             raise item
         return item
+
+
+def test_prompt_digest_covers_system_user_and_schema():
+    repo = _repo(total=1)
+    _candidate(repo, "c1", "video", 50)
+    model = QueueModel([_result({
+        "action": "close", "evidence_ids": ["event-c1"], "reasoning": "Routine activity.",
+    })])
+
+    _investigator(repo, model, RecordingExecutor()).run()
+
+    assert repo.model_calls(hunt_id="h1")[0]["prompt_digest"] == digest(model.requests[0])
 
 
 class RecordingExecutor:
@@ -259,7 +273,7 @@ def test_duplicate_normalized_pivot_is_not_executed_and_falls_back_after_two_rej
     assert summary["duplicate_pivots_blocked"] == 2
     assert "deterministic_fallback_park" in case["summary"]
     assert "already executed at step 1" in model.users[2]
-    assert "task-" + case["id"] in model.users[2]
+    assert '"option":"pivot"' in model.users[2]
 
 
 def test_duplicate_pivot_ignores_non_query_entity_role():

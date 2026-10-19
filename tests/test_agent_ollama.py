@@ -91,19 +91,18 @@ class LargeBriefRepo:
 def test_oversized_brief_shrinks_deterministically_and_flags_instructions():
     repo = LargeBriefRepo()
 
-    first = build_brief(repo, "case-1", {"tools": ["entity_timeline"]}, num_ctx=1400, max_out=900)
-    second = build_brief(repo, "case-1", {"tools": ["entity_timeline"]}, num_ctx=1400, max_out=900)
+    first = build_brief(repo, "case-1", {"tools": ["entity_timeline"]}, num_ctx=2550, max_out=900)
+    second = build_brief(repo, "case-1", {"tools": ["entity_timeline"]}, num_ctx=2550, max_out=900)
 
     assert first.user == second.user
     assert first.shrink_actions
-    assert first.token_estimate + 900 <= 1400
+    assert first.token_estimate + 900 <= 2550
     assert first.injection_flags
     assert "event-1" in first.injection_evidence_ids
-    assert "minimum_safe_brief" in first.shrink_actions
     telemetry = json.loads(first.user.split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split("\n</", 1)[0])
-    compact_result = telemetry["prior_steps"][0]["result_digest"]
-    assert compact_result["status"] == "partial"
-    assert compact_result["coverage"][0]["status"] == "partial"
+    compact_result = telemetry["prior_steps"][0]
+    assert compact_result["outcome"] == "partial"
+    assert compact_result["result_counts"]["matched_events"] == 20
 
 
 class AnchorBriefRepo(LargeBriefRepo):
@@ -116,17 +115,17 @@ class AnchorBriefRepo(LargeBriefRepo):
         return steps
 
 
-def test_minimum_safe_brief_preserves_anchor_neighborhood_evidence():
+def test_shrunk_brief_preserves_anchor_evidence_card():
     brief = build_brief(
         AnchorBriefRepo(), "case-1", {"tools": ["entity_timeline"]},
-        num_ctx=1450, max_out=900,
+        num_ctx=2550, max_out=900,
     )
 
-    assert "minimum_safe_brief" in brief.shrink_actions
+    assert brief.shrink_actions
     telemetry = json.loads(brief.user.split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split("\n</", 1)[0])
-    assert [event["id"] for event in telemetry["anchor_neighborhood"]] == ["event-1"]
-    assert len(telemetry["anchor_neighborhood"][0]["fields"]["process.argv"]) < 2_000
-    assert brief.token_estimate + 900 <= 1450
+    assert [event["id"] for event in telemetry["evidence_cards"]] == ["E1"]
+    assert len(telemetry["evidence_cards"][0]["fields"]["process.argv"]) < 2_000
+    assert brief.token_estimate + 900 <= 2550
 
 
 class OldDuplicateBriefRepo(LargeBriefRepo):
@@ -160,13 +159,13 @@ class OldDuplicateBriefRepo(LargeBriefRepo):
 def test_minimum_safe_retry_brief_pins_old_duplicate_result_digest():
     brief = build_brief(
         OldDuplicateBriefRepo(), "case-1", {"tools": ["entity_timeline"]},
-        num_ctx=2000, max_out=900,
+        num_ctx=2600, max_out=900,
         retry_errors=("duplicate pivot: normalized request already executed at step 1",),
     )
 
     assert "minimum_safe_brief" in brief.shrink_actions
     telemetry = json.loads(brief.user.split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split("\n</", 1)[0])
     pinned = next(step for step in telemetry["prior_steps"] if step["n"] == 1)
-    assert pinned["result_digest"]["status"] == "partial"
-    assert pinned["result_digest"]["reasons"] == ["PINNED-DIGEST"]
-    assert brief.token_estimate + 900 <= 2000
+    assert pinned["outcome"] == "partial"
+    assert pinned["result_counts"]["matched_events"] == 20
+    assert brief.token_estimate + 900 <= 2600
