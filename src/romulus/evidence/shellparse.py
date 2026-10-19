@@ -5,96 +5,196 @@ quoted argument (e.g. `grep "curl | sh" notes.txt`) is data, not a command.
 """
 from __future__ import annotations
 
-import shlex
+import re
 from dataclasses import dataclass, field
 
-_OPERATORS = {"|", "||", "&&", ";", "&", "|&"}
-_REDIRECTS = {">", ">>", "<", "2>", "2>>", "&>", ">|", "1>", "1>>"}
-_PUNCTUATION = "|&;<>"
+_RESERVED = {"if", "then", "fi", "for", "while", "case", "do", "done", "!", "function"}
+_DYNAMIC_COMMANDS = {"eval", "exec", "command", "env", "builtin"}
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_ASCII_BLANK = {" ", "\t"}
 
 
-def _contains_unquoted_heredoc(script: str) -> bool:
+@dataclass(frozen=True)
+class _Token:
+    kind: str
+    value: str
+
+
+class _Unmodelled(ValueError):
+    pass
+
+
+def _lex(script: str) -> list[_Token]:
+    """Lex the deliberately small shell subset in one quote/comment-aware pass."""
+    tokens: list[_Token] = []
+    word: list[str] = []
+    word_started = False
+    word_plain = True
     quote: str | None = None
+    comment = False
     index = 0
+
+    def flush_word() -> None:
+        nonlocal word, word_started, word_plain
+        if word_started:
+            tokens.append(_Token("word", "".join(word)))
+        word = []
+        word_started = False
+        word_plain = True
+
+    def emit(kind: str, value: str) -> None:
+        flush_word()
+        tokens.append(_Token(kind, value))
+
     while index < len(script):
         char = script[index]
-        if char == "\\" and quote != "'" and index + 1 < len(script):
-            index += 2
+
+        if comment:
+            if char == "\n":
+                comment = False
+                emit("operator", "\n")
+            index += 1
             continue
-        if char in {"'", '"'}:
-            if quote is None:
-                quote = char
-            elif quote == char:
+
+        if quote == "'":
+            if char == "'":
                 quote = None
-        elif quote is None and script.startswith("<<", index):
-            return True
-        index += 1
-    return False
-
-
-def _contains_command_substitution(script: str) -> bool:
-    quote: str | None = None
-    index = 0
-    while index < len(script):
-        char = script[index]
-        if char == "\\" and quote != "'" and index + 1 < len(script):
-            index += 2
-            continue
-        if char in {"'", '"'}:
-            if quote is None:
-                quote = char
-            elif quote == char:
-                quote = None
-        elif quote != "'" and (char == "`" or script.startswith("$(", index)):
-            return True
-        index += 1
-    return False
-
-
-def _quote_aware_input(script: str) -> tuple[str, dict[int, str]]:
-    """Protect quoted punctuation and expose unquoted newlines as command separators."""
-    protected: dict[int, str] = {}
-    used = set(script)
-    next_codepoint = 0xE000
-    for char in _PUNCTUATION:
-        while chr(next_codepoint) in used:
-            next_codepoint += 1
-        protected[next_codepoint] = char
-        next_codepoint += 1
-    sentinels = {char: chr(codepoint) for codepoint, char in protected.items()}
-
-    out: list[str] = []
-    quote: str | None = None
-    index = 0
-    while index < len(script):
-        char = script[index]
-        if char == "\\" and quote != "'" and index + 1 < len(script):
-            escaped = script[index + 1]
-            if quote is None and escaped in sentinels:
-                out.append(sentinels[escaped])
             else:
-                out.extend((char, escaped))
+                word.append(char)
+            index += 1
+            continue
+
+        if quote == '"':
+            if char == '"':
+                quote = None
+                index += 1
+                continue
+            if char == "$":
+                raise _Unmodelled("dollar expansion in double quotes is not modelled")
+            if char == "`":
+                raise _Unmodelled("backtick substitution is not modelled")
+            if char == "\\":
+                if index + 1 >= len(script):
+                    raise _Unmodelled("dangling double-quote escape")
+                escaped = script[index + 1]
+                if escaped == "\n":
+                    raise _Unmodelled("backslash-newline line continuation is not modelled")
+                if escaped not in {'"', "\\", "$"}:
+                    raise _Unmodelled("double-quote escape is not modelled")
+                word.append(escaped)
+                index += 2
+                continue
+            word.append(char)
+            index += 1
+            continue
+
+        # Unquoted state. A comment begins only when no word is in progress; this exactly captures
+        # start-of-script and positions after unescaped ASCII blanks, newlines, or operators.
+        if char == "#" and not word_started:
+            comment = True
+            index += 1
+            continue
+        if char in _ASCII_BLANK:
+            flush_word()
+            index += 1
+            continue
+        if char == "\n":
+            emit("operator", "\n")
+            index += 1
+            continue
+        if char.isspace():
+            raise _Unmodelled("non-modelled whitespace outside quotes")
+        if char in {"'", '"'}:
+            quote = char
+            word_started = True
+            word_plain = False
+            index += 1
+            continue
+        if char == "\\":
+            if index + 1 >= len(script):
+                raise _Unmodelled("dangling backslash escape")
+            escaped = script[index + 1]
+            if escaped == "\n":
+                raise _Unmodelled("backslash-newline line continuation is not modelled")
+            if escaped.isspace() and escaped not in _ASCII_BLANK:
+                raise _Unmodelled("non-modelled whitespace outside quotes")
+            word.append(escaped)
+            word_started = True
+            word_plain = False
             index += 2
             continue
-        if char in {"'", '"'}:
-            if quote is None:
-                quote = char
-            elif quote == char:
-                quote = None
-            out.append(char)
-        elif quote is None and char == "#" and (index == 0 or script[index - 1].isspace()
-                                                  or script[index - 1] in _PUNCTUATION):
-            while index < len(script) and script[index] != "\n":
+        if char == "$":
+            reason = ("ANSI-C quoting is not modelled" if script.startswith("$'", index)
+                      else "command substitution is not modelled" if script.startswith("$(", index)
+                      else "dollar expansion is not modelled")
+            raise _Unmodelled(reason)
+        if char == "`":
+            raise _Unmodelled("backtick command substitution is not modelled")
+        if char in "()":
+            raise _Unmodelled("parenthesis syntax is not modelled")
+        if char in "{}":
+            raise _Unmodelled("brace syntax is not modelled")
+        if char in "*?[":
+            raise _Unmodelled("pathname expansion is not modelled")
+
+        if char in "<>":
+            if index + 1 < len(script) and script[index + 1] == "(":
+                raise _Unmodelled("process substitution is not modelled")
+            if script.startswith("<<<", index):
+                raise _Unmodelled("here-string syntax is not modelled")
+            if script.startswith("<<", index):
+                raise _Unmodelled("heredoc syntax is not modelled")
+            if script.startswith((">&", "<&", ">|"), index):
+                raise _Unmodelled("redirect form is not modelled")
+
+            size = 2 if char == ">" and script.startswith(">>", index) else 1
+            op = script[index:index + size]
+            if char == ">" and word_started and word_plain and "".join(word).isdigit():
+                descriptor = "".join(word)
+                if descriptor != "2":
+                    raise _Unmodelled("file-descriptor redirect is not modelled")
+                word = []
+                word_started = False
+                word_plain = True
+                tokens.append(_Token("redirect", descriptor + op))
+            else:
+                emit("redirect", op)
+            index += size
+            continue
+
+        if char == "&":
+            if index + 1 < len(script) and script[index + 1] == ">":
+                raise _Unmodelled("redirect form is not modelled")
+            if script.startswith("&&", index):
+                emit("operator", "&&")
+                index += 2
+            else:
+                emit("operator", "&")
                 index += 1
             continue
-        elif quote is not None and char in sentinels:
-            out.append(sentinels[char])
-        elif quote is None and char == "\n":
-            out.append(" ; ")
-        else:
-            out.append(char)
+        if char == "|":
+            if script.startswith("|&", index):
+                raise _Unmodelled("operator form is not modelled")
+            if script.startswith("||", index):
+                emit("operator", "||")
+                index += 2
+            else:
+                emit("pipe", "|")
+                index += 1
+            continue
+        if char == ";":
+            emit("operator", ";")
+            index += 1
+            continue
+
+        word.append(char)
+        word_started = True
         index += 1
-    return "".join(out), protected
+
+    if quote is not None:
+        raise _Unmodelled("unterminated shell quote")
+    flush_word()
+    return tokens
 
 
 @dataclass
@@ -123,62 +223,83 @@ class ParsedScript:
 
 
 def parse_script(script: str) -> ParsedScript:
-    """Parse a POSIX-ish shell script. Unparseable input returns ok=False (callers must treat the
-    claim as unknown, never as a match)."""
-    if _contains_unquoted_heredoc(script):
-        return ParsedScript(pipelines=[], ok=False, error="heredoc syntax is not modelled")
-    if _contains_command_substitution(script):
-        return ParsedScript(pipelines=[], ok=False, error="command substitution is not modelled")
+    """Parse only the explicit safe shell subset; every other construct is unevaluable."""
     try:
-        prepared, protected = _quote_aware_input(script)
-        lex = shlex.shlex(prepared, posix=True, punctuation_chars=_PUNCTUATION)
-        lex.whitespace_split = True
-        lex.commenters = ""
-        tokens = list(lex)
-    except ValueError as e:
+        tokens = _lex(script)
+    except _Unmodelled as e:
         return ParsedScript(pipelines=[], ok=False, error=str(e))
 
     pipelines: list[Pipeline] = []
     current = Pipeline(commands=[])
     cmd = Command(argv=[])
-    pending_redirect: str | None = None
+    requires_command = False
 
-    def literal(token: str) -> str:
-        return token.translate(protected)
-
-    def close_cmd():
+    def close_cmd() -> None:
         nonlocal cmd
         if cmd.argv or cmd.redirects:
             current.commands.append(cmd)
         cmd = Command(argv=[])
 
-    for i, tok in enumerate(tokens):
-        if pending_redirect:
-            cmd.redirects.append((pending_redirect, literal(tok)))
-            pending_redirect = None
-            continue
-        # shlex splits "2>" into "2", ">" — rejoin fd-prefixed redirects
-        if tok in (">", ">>") and cmd.argv and cmd.argv[-1] in ("1", "2") and i > 0:
-            pending_redirect = cmd.argv.pop() + tok
-            continue
-        if tok in _REDIRECTS or tok in (">&", "<&"):
-            pending_redirect = tok
-            continue
-        if tok in ("|", "|&"):
-            close_cmd()
-            continue
-        if tok in _OPERATORS:
-            close_cmd()
-            if current.commands:
-                pipelines.append(current)
-            current = Pipeline(commands=[])
-            continue
-        cmd.argv.append(literal(tok))
-    if pending_redirect:
-        return ParsedScript(pipelines=[], ok=False, error="dangling redirect")
-    close_cmd()
-    if current.commands:
-        pipelines.append(current)
+    def close_pipeline() -> None:
+        nonlocal current
+        close_cmd()
+        if current.commands:
+            pipelines.append(current)
+        current = Pipeline(commands=[])
+
+    try:
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token.kind == "redirect":
+                if index + 1 >= len(tokens) or tokens[index + 1].kind != "word":
+                    raise _Unmodelled("redirect target is missing or unmodelled")
+                cmd.redirects.append((token.value, tokens[index + 1].value))
+                requires_command = False
+                index += 2
+                continue
+            if token.kind == "word":
+                if not cmd.argv:
+                    name = token.value.rsplit("/", 1)[-1]
+                    if token.value in _RESERVED:
+                        raise _Unmodelled(f"reserved word {token.value!r} is not modelled")
+                    if _ASSIGNMENT.match(token.value):
+                        raise _Unmodelled("assignment prefix is not modelled")
+                    if name in _DYNAMIC_COMMANDS:
+                        raise _Unmodelled(f"command is not modelled: {name}")
+                cmd.argv.append(token.value)
+                requires_command = False
+                index += 1
+                continue
+            if token.kind == "pipe":
+                if not (cmd.argv or cmd.redirects):
+                    raise _Unmodelled("pipeline command is missing")
+                close_cmd()
+                requires_command = True
+                index += 1
+                continue
+
+            # Control operators delimit pipelines. Blank/comment-only lines are harmless, while
+            # && and || require a command on both sides.
+            if token.value in {"&&", "||"}:
+                if not (cmd.argv or cmd.redirects or current.commands):
+                    raise _Unmodelled("conditional operator is missing a command")
+                close_pipeline()
+                requires_command = True
+            elif token.value == "\n":
+                close_pipeline()
+            else:  # ; or &
+                if not (cmd.argv or cmd.redirects or current.commands):
+                    raise _Unmodelled("control operator is missing a command")
+                close_pipeline()
+            index += 1
+
+        if requires_command:
+            raise _Unmodelled("trailing operator is missing a command")
+        close_pipeline()
+    except _Unmodelled as e:
+        return ParsedScript(pipelines=[], ok=False, error=str(e))
+
     return ParsedScript(pipelines=pipelines)
 
 
