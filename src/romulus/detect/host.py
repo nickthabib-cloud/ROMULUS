@@ -79,10 +79,11 @@ def _python_exec_of_decoded(code: str) -> bool:
     return False
 
 
-def _interpreter_indicators(argv: list[str]) -> tuple[list[str], bool]:
-    """Return typed indicators and whether shell-script inspection was unevaluable."""
+def _interpreter_indicators(argv: list[str]) -> tuple[list[str], bool, bool]:
+    """Return typed indicators, unevaluable state, and whether indicators used a clean prefix."""
     out = []
     unevaluable = False
+    prefix_only = False
     name = basename(argv[0]) if argv else ""
     rest = argv[1:]
     if name in INTERPRETERS and (not rest or rest in (["-"], ["-i"], ["-p"])):
@@ -92,7 +93,7 @@ def _interpreter_indicators(argv: list[str]) -> tuple[list[str], bool]:
         unevaluable = True
     elif script:
         parsed = parse_script(script)
-        if parsed.ok:
+        if parsed.ok or parsed.partial:
             cmds = parsed.commands()
             if len(cmds) > 1 and cmds[0].argv and cmds[0].argv[0].startswith("/") and \
                     cmds[0].name not in INTERPRETERS:
@@ -104,13 +105,14 @@ def _interpreter_indicators(argv: list[str]) -> tuple[list[str], bool]:
                             out.append("python code executes decoded data")
                 if c.name == "echo" and any("b64decode" in a or "decompress" in a for a in c.argv[1:]):
                     out.append("encoded payload text piped/echoed into another command")
-        else:
+        if not parsed.ok:
             unevaluable = True
+            prefix_only = parsed.partial
     if name.startswith("python"):
         for i, a in enumerate(rest[:-1]):
             if a == "-c" and _python_exec_of_decoded(rest[i + 1]):
                 out.append("python code executes decoded data")
-    return sorted(set(out)), unevaluable
+    return sorted(set(out)), unevaluable, prefix_only
 
 
 def interpreter_indicators(argv: list[str]) -> list[str]:
@@ -146,11 +148,11 @@ class WebServiceSpawnsInterpreter(Playbook):
             user, argv = e.get("process.user"), e.get("process.argv")
             if user not in WEB_SERVICE_USERS or not argv or basename(argv[0]) not in INTERPRETERS:
                 continue
-            indicators, unevaluable = _interpreter_indicators(argv)
+            indicators, unevaluable, prefix_only = _interpreter_indicators(argv)
             if unevaluable:
                 self.missing_required += 1
             if indicators:
-                matches.append(self._event_match(e, user, argv, indicators))
+                matches.append(self._event_match(e, user, argv, indicators, prefix_only=prefix_only))
                 continue
             key = (e.host, user, command_shape(argv))
             self.counts[key] += 1
@@ -162,7 +164,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     def groups(self):
         return self.shapes
 
-    def _event_match(self, e, user, argv, indicators, count=None):
+    def _event_match(self, e, user, argv, indicators, count=None, prefix_only=False):
         rce_shaped = any(("decoded data" in item) or ("stdin" in item) for item in indicators)
         lane, severity = (("urgent", "critical") if rce_shaped else
                           ("high", "high") if indicators else ("lead", "medium"))
@@ -174,6 +176,8 @@ class WebServiceSpawnsInterpreter(Playbook):
             e.ts, severity, lane, "high" if e.outcome == Outcome.success else "medium", _exec_entities(e),
         )
         match.notes += [f"indicator: {item}" for item in indicators] or ["rare shape without typed indicators"]
+        if prefix_only:
+            match.notes.append("script indicator evaluated from clean prefix only; remainder was not modelled")
         return match
 
     def finalize(self):

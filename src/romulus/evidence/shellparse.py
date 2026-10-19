@@ -21,7 +21,9 @@ class _Token:
 
 
 class _Unmodelled(ValueError):
-    pass
+    def __init__(self, message: str, tokens: list[_Token] | None = None):
+        super().__init__(message)
+        self.tokens = list(tokens or [])
 
 
 def _lex(script: str) -> list[_Token]:
@@ -45,6 +47,9 @@ def _lex(script: str) -> list[_Token]:
     def emit(kind: str, value: str) -> None:
         flush_word()
         tokens.append(_Token(kind, value))
+
+    def fail(message: str) -> None:
+        raise _Unmodelled(message, tokens)
 
     while index < len(script):
         char = script[index]
@@ -70,17 +75,17 @@ def _lex(script: str) -> list[_Token]:
                 index += 1
                 continue
             if char == "$":
-                raise _Unmodelled("dollar expansion in double quotes is not modelled")
+                fail("dollar expansion in double quotes is not modelled")
             if char == "`":
-                raise _Unmodelled("backtick substitution is not modelled")
+                fail("backtick substitution is not modelled")
             if char == "\\":
                 if index + 1 >= len(script):
-                    raise _Unmodelled("dangling double-quote escape")
+                    fail("dangling double-quote escape")
                 escaped = script[index + 1]
                 if escaped == "\n":
-                    raise _Unmodelled("backslash-newline line continuation is not modelled")
+                    fail("backslash-newline line continuation is not modelled")
                 if escaped not in {'"', "\\", "$"}:
-                    raise _Unmodelled("double-quote escape is not modelled")
+                    fail("double-quote escape is not modelled")
                 word.append(escaped)
                 index += 2
                 continue
@@ -103,7 +108,7 @@ def _lex(script: str) -> list[_Token]:
             index += 1
             continue
         if char.isspace():
-            raise _Unmodelled("non-modelled whitespace outside quotes")
+            fail("non-modelled whitespace outside quotes")
         if char in {"'", '"'}:
             quote = char
             word_started = True
@@ -112,12 +117,12 @@ def _lex(script: str) -> list[_Token]:
             continue
         if char == "\\":
             if index + 1 >= len(script):
-                raise _Unmodelled("dangling backslash escape")
+                fail("dangling backslash escape")
             escaped = script[index + 1]
             if escaped == "\n":
-                raise _Unmodelled("backslash-newline line continuation is not modelled")
+                fail("backslash-newline line continuation is not modelled")
             if escaped.isspace() and escaped not in _ASCII_BLANK:
-                raise _Unmodelled("non-modelled whitespace outside quotes")
+                fail("non-modelled whitespace outside quotes")
             word.append(escaped)
             word_started = True
             word_plain = False
@@ -127,32 +132,32 @@ def _lex(script: str) -> list[_Token]:
             reason = ("ANSI-C quoting is not modelled" if script.startswith("$'", index)
                       else "command substitution is not modelled" if script.startswith("$(", index)
                       else "dollar expansion is not modelled")
-            raise _Unmodelled(reason)
+            fail(reason)
         if char == "`":
-            raise _Unmodelled("backtick command substitution is not modelled")
+            fail("backtick command substitution is not modelled")
         if char in "()":
-            raise _Unmodelled("parenthesis syntax is not modelled")
+            fail("parenthesis syntax is not modelled")
         if char in "{}":
-            raise _Unmodelled("brace syntax is not modelled")
+            fail("brace syntax is not modelled")
         if char in "*?[":
-            raise _Unmodelled("pathname expansion is not modelled")
+            fail("pathname expansion is not modelled")
 
         if char in "<>":
             if index + 1 < len(script) and script[index + 1] == "(":
-                raise _Unmodelled("process substitution is not modelled")
+                fail("process substitution is not modelled")
             if script.startswith("<<<", index):
-                raise _Unmodelled("here-string syntax is not modelled")
+                fail("here-string syntax is not modelled")
             if script.startswith("<<", index):
-                raise _Unmodelled("heredoc syntax is not modelled")
+                fail("heredoc syntax is not modelled")
             if script.startswith((">&", "<&", ">|"), index):
-                raise _Unmodelled("redirect form is not modelled")
+                fail("redirect form is not modelled")
 
             size = 2 if char == ">" and script.startswith(">>", index) else 1
             op = script[index:index + size]
             if char == ">" and word_started and word_plain and "".join(word).isdigit():
                 descriptor = "".join(word)
                 if descriptor != "2":
-                    raise _Unmodelled("file-descriptor redirect is not modelled")
+                    fail("file-descriptor redirect is not modelled")
                 word = []
                 word_started = False
                 word_plain = True
@@ -164,7 +169,7 @@ def _lex(script: str) -> list[_Token]:
 
         if char == "&":
             if index + 1 < len(script) and script[index + 1] == ">":
-                raise _Unmodelled("redirect form is not modelled")
+                fail("redirect form is not modelled")
             if script.startswith("&&", index):
                 emit("operator", "&&")
                 index += 2
@@ -174,7 +179,7 @@ def _lex(script: str) -> list[_Token]:
             continue
         if char == "|":
             if script.startswith("|&", index):
-                raise _Unmodelled("operator form is not modelled")
+                fail("operator form is not modelled")
             if script.startswith("||", index):
                 emit("operator", "||")
                 index += 2
@@ -192,7 +197,7 @@ def _lex(script: str) -> list[_Token]:
         index += 1
 
     if quote is not None:
-        raise _Unmodelled("unterminated shell quote")
+        fail("unterminated shell quote")
     flush_word()
     return tokens
 
@@ -217,6 +222,7 @@ class ParsedScript:
     pipelines: list[Pipeline]
     ok: bool = True
     error: str = ""
+    partial: bool = False
 
     def commands(self) -> list[Command]:
         return [c for p in self.pipelines for c in p.commands]
@@ -224,10 +230,12 @@ class ParsedScript:
 
 def parse_script(script: str) -> ParsedScript:
     """Parse only the explicit safe shell subset; every other construct is unevaluable."""
+    lex_error = ""
     try:
         tokens = _lex(script)
     except _Unmodelled as e:
-        return ParsedScript(pipelines=[], ok=False, error=str(e))
+        tokens = e.tokens
+        lex_error = str(e)
 
     pipelines: list[Pipeline] = []
     current = Pipeline(commands=[])
@@ -246,6 +254,15 @@ def parse_script(script: str) -> ParsedScript:
         if current.commands:
             pipelines.append(current)
         current = Pipeline(commands=[])
+
+    def clean_prefix() -> list[Pipeline]:
+        prefix = list(pipelines)
+        commands = list(current.commands)
+        if cmd.argv or cmd.redirects:
+            commands.append(cmd)
+        if commands:
+            prefix.append(Pipeline(commands=commands))
+        return prefix
 
     try:
         index = 0
@@ -298,8 +315,10 @@ def parse_script(script: str) -> ParsedScript:
             raise _Unmodelled("trailing operator is missing a command")
         close_pipeline()
     except _Unmodelled as e:
-        return ParsedScript(pipelines=[], ok=False, error=str(e))
+        return ParsedScript(pipelines=clean_prefix(), ok=False, error=str(e), partial=True)
 
+    if lex_error:
+        return ParsedScript(pipelines=pipelines, ok=False, error=lex_error, partial=True)
     return ParsedScript(pipelines=pipelines)
 
 

@@ -177,6 +177,15 @@ def test_command_substitution_is_explicitly_unevaluable(script):
     assert "command substitution" in parsed.error
 
 
+def test_unmodelled_script_retains_only_cleanly_parsed_prefix():
+    parsed = parse_script("/usr/bin/zmu -A -a -m ; echo payload | exec $(which python) -")
+
+    assert parsed.ok is False
+    assert parsed.partial is True
+    assert [command.name for command in parsed.commands()] == ["zmu", "echo"]
+    assert all("which" not in argument for command in parsed.commands() for argument in command.argv)
+
+
 def test_shell_allowlist_tracks_comments_quotes_and_escapes_in_one_grammar():
     parsed = parse_script("echo foo#bar\ntrue;# hide ' \" <<EOF $(id)\nprintf ok")
 
