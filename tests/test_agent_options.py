@@ -7,7 +7,6 @@ from romulus.agent.options import generate_options
 from romulus.agent.validate import validate_decision
 from romulus.sources.models import Window
 
-
 ANCHOR = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 WINDOW = Window(start=ANCHOR - timedelta(hours=1), end=ANCHOR + timedelta(hours=1))
 
