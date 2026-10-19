@@ -366,6 +366,11 @@ def test_shell_stdin_option_has_no_script_file_operand(argv):
     ["bash", "-c", "+e", "id"],
     ["sh", "-c", "+e", "id"],
     ["bash", "-lc", "+e", "id"],
+    ["bash", "-s", "-c", "id"],
+    ["sh", "-es", "-c", "id"],
+    ["bash", "-s", "-x", "-c", "id"],
+    ["busybox", "sh", "-s", "-c", "id"],
+    ["zsh", "-s", "-c", "id"],
 ])
 def test_ambiguous_shell_command_returns_explicit_unknown(argv):
     result = shell_script_of(argv)

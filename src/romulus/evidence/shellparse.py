@@ -346,9 +346,12 @@ _SHELL_OPTIONS_WITH_VALUES = {"-o", "+o", "-O", "+O", "--init-file", "--rcfile"}
 def _scan_shell_args(args: list[str]) -> _ShellArgLayout:
     """Locate a shell script file while respecting the option values we model."""
     index = 0
+    reads_stdin = False
     while index < len(args):
         arg = args[index]
         if arg == "--":
+            if reads_stdin:
+                return _ShellArgLayout(reads_stdin=True)
             return _ShellArgLayout(script_file=args[index + 1] if index + 1 < len(args) else None)
         if arg in _SHELL_OPTIONS_WITH_VALUES:
             if index + 1 >= len(args):
@@ -358,12 +361,16 @@ def _scan_shell_args(args: list[str]) -> _ShellArgLayout:
         if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
             return _ShellArgLayout(has_command_option=True)
         if arg == "-s" or (arg.startswith("-") and not arg.startswith("--") and "s" in arg[1:]):
-            return _ShellArgLayout(reads_stdin=True)
+            reads_stdin = True
+            index += 1
+            continue
         if arg.startswith(("-", "+")):
             index += 1
             continue
+        if reads_stdin:
+            return _ShellArgLayout(reads_stdin=True)
         return _ShellArgLayout(script_file=arg)
-    return _ShellArgLayout()
+    return _ShellArgLayout(reads_stdin=reads_stdin)
 
 
 def _shell_argv(argv: list[str], shell_name: str | None = None) -> tuple[str, list[str]] | None:

