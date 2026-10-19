@@ -1,6 +1,8 @@
 """Deterministic investigator-v2 option generation."""
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from romulus.agent.brief import BuiltBrief
 from romulus.agent.models import EntityRef
 from romulus.agent.options import generate_options
@@ -176,7 +178,7 @@ def test_menu_is_hard_capped_and_only_seed_candidates_can_be_escalated():
         "id": f"seed-{index:02}", "claim": f"Seed claim {index}", "lane": "lead",
         "priority": 100 - index, "event_ids": ["event-1"], "entities": case["entities"],
         "next_checks": [], "ts": ANCHOR,
-    } for index in range(20)]
+    } for index in range(9)]
     discovered = {
         "id": "pivot-discovered", "claim": "Pivot candidate", "lane": "high", "priority": 200,
         "event_ids": ["event-1"], "entities": case["entities"], "next_checks": [], "ts": ANCHOR,
@@ -194,9 +196,26 @@ def test_menu_is_hard_capped_and_only_seed_candidates_can_be_escalated():
                  if option.decision.action == "escalate"]
     assert len(menu.options) == 12
     assert "pivot-discovered" not in escalated
-    assert set(escalated) <= {candidate["id"] for candidate in seeds}
+    assert set(escalated) == {candidate["id"] for candidate in seeds}
     assert any(option.decision.action == "pivot" for option in menu.options)
     assert menu.hidden_count > 0
+
+
+def test_oversized_seed_cluster_is_rejected_instead_of_hiding_conclusions():
+    case, evidence, _candidates, steps = _state()
+    seeds = [{
+        "id": f"seed-{index:02}", "claim": f"Seed claim {index}", "lane": "lead",
+        "priority": 100 - index, "event_ids": ["event-1"], "entities": case["entities"],
+        "next_checks": [], "ts": ANCHOR,
+    } for index in range(10)]
+    steps[0]["decision"]["seed_candidate_ids"] = [candidate["id"] for candidate in seeds]
+
+    with pytest.raises(ValueError, match="seed cluster has 10 conclusions"):
+        generate_options(
+            case=case, evidence=evidence, candidates=seeds, steps=steps,
+            hunt_window=WINDOW, existing_case_entities={("host", "video")},
+            max_cases=4, case_count=2, cap=12,
+        )
 
 
 def test_process_tree_excludes_observer_hosts_known_only_through_candidates():
@@ -215,4 +234,21 @@ def test_process_tree_excludes_observer_hosts_known_only_through_candidates():
     )
 
     assert not any(option.decision.tool == "process_tree" and option.entity_value == "sensor"
+                   for option in menu.options)
+
+
+def test_process_tree_requires_the_evidence_host_to_be_a_known_case_entity():
+    case, evidence, candidates, steps = _state()
+    evidence.append({
+        "id": "event-unknown-host", "family": "process_exec", "ts": ANCHOR,
+        "host": "unrepresented", "outcome": "unknown", "fields": {"process.pid": 999},
+    })
+
+    menu = generate_options(
+        case=case, evidence=evidence, candidates=candidates, steps=steps,
+        hunt_window=WINDOW, existing_case_entities={("host", "video")},
+        max_cases=4, case_count=2, cap=100,
+    )
+
+    assert not any(option.decision.tool == "process_tree" and option.entity_value == "unrepresented"
                    for option in menu.options)

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from romulus.agent.models import EntityRef, SeedCluster
 
 _LANE_ORDER = {"urgent": 0, "high": 1, "lead": 2, "context": 3}
+MAX_SEEDS_PER_CASE = 9
 
 
 def _ts(value) -> datetime:
@@ -59,7 +60,13 @@ def _make_cluster(seeds: list[dict], primary: EntityRef | None) -> SeedCluster:
     )
 
 
-def cluster_seed_candidates(candidates: list[dict], gap: timedelta = timedelta(minutes=15)) -> list[SeedCluster]:
+def cluster_seed_candidates(
+    candidates: list[dict],
+    gap: timedelta = timedelta(minutes=15),
+    max_seeds: int = MAX_SEEDS_PER_CASE,
+) -> list[SeedCluster]:
+    if max_seeds < 1:
+        raise ValueError("max_seeds must be positive")
     grouped: dict[tuple[str, str] | tuple[str, str, str], list[dict]] = defaultdict(list)
     primary_by_key: dict[tuple, EntityRef | None] = {}
     for candidate in candidates:
@@ -74,7 +81,7 @@ def cluster_seed_candidates(candidates: list[dict], gap: timedelta = timedelta(m
         latest: datetime | None = None
         for seed in sorted(seeds, key=lambda c: (_ts(c["ts"]), c["id"])):
             when = _ts(seed["ts"])
-            if current and latest is not None and when - latest > gap:
+            if current and latest is not None and (when - latest > gap or len(current) >= max_seeds):
                 clusters.append(_make_cluster(current, primary_by_key[key]))
                 current = []
             current.append(seed)

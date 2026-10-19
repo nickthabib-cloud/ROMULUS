@@ -8,10 +8,10 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from romulus.agent.constraints import build_output_schema, eligible_evidence_aliases
+from romulus.agent.constraints import build_output_schema
 from romulus.agent.models import EntityRef
 from romulus.agent.ollama import estimate_tokens
-from romulus.agent.options import DEFAULT_MENU_CAP, Menu, generate_options
+from romulus.agent.options import Menu, generate_options
 from romulus.store.repo import Repo
 
 _INSTRUCTION = re.compile(
@@ -162,7 +162,7 @@ def _select_evidence_views(
                           else datetime.min.replace(tzinfo=UTC), str(item.get("id"))),
     )
     selected[str(newest["id"])] = newest
-    for candidate in seed_candidates[:DEFAULT_MENU_CAP - 2]:
+    for candidate in seed_candidates:
         cited = [by_id[str(event_id)] for event_id in candidate.get("event_ids") or []
                  if str(event_id) in by_id]
         if not cited:
@@ -191,20 +191,15 @@ def _select_evidence_views(
     )
 
 
-def _limit_evidence_cards(data: dict, limit: int) -> list[dict]:
-    """Prefer the newest anchor and one recent cited card per highest-ranked candidate."""
+def _limit_evidence_cards(data: dict, limit: int, required_aliases: set[str]) -> list[dict]:
+    """Prefer the newest anchor without dropping evidence required by offered conclusions."""
     cards = data["evidence_cards"]
-    if len(cards) <= limit:
+    if len(cards) <= limit and required_aliases <= {card["id"] for card in cards}:
         return cards
-    selected: set[str] = {cards[-1]["id"]}
-    for candidate in data["candidates"]:
-        cited = candidate.get("cited_cards") or []
-        if cited:
-            selected.add(cited[-1])
-        if len(selected) >= limit:
-            break
+    selected: set[str] = {cards[-1]["id"], *required_aliases} if cards else set(required_aliases)
+    effective_limit = max(limit, len(selected))
     for card in reversed(cards):
-        if len(selected) >= limit:
+        if len(selected) >= effective_limit:
             break
         selected.add(card["id"])
     return [card for card in cards if card["id"] in selected]
@@ -387,6 +382,16 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         "validation_retry_errors": list(retry_errors),
         "untrusted_instruction_flags": injection_flags,
     }
+    seed_candidate_aliases = {
+        candidate_alias_by_id[candidate["id"]] for candidate in seed_candidates
+    }
+    required_evidence_aliases = {
+        cited[-1]
+        for candidate in data["candidates"]
+        if candidate["id"] in seed_candidate_aliases
+        for cited in [candidate.get("cited_cards") or []]
+        if cited
+    }
     data = _truncate(data, 4_000)
     shrink_actions: list[str] = []
     user, token_estimate = _render(system, data, schema)
@@ -398,7 +403,7 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         shrink_actions.append("limit_prior_steps")
         user, token_estimate = _render(system, data, schema)
     if token_estimate + max_out > num_ctx:
-        data["evidence_cards"] = _limit_evidence_cards(data, 6)
+        data["evidence_cards"] = _limit_evidence_cards(data, 6, required_evidence_aliases)
         shrink_actions.append("limit_evidence_cards")
         user, token_estimate = _render(system, data, schema)
     if token_estimate + max_out > num_ctx:
@@ -415,8 +420,7 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         shrink_actions.append("truncate_strings_160")
         user, token_estimate = _render(system, data, schema)
     if token_estimate + max_out > num_ctx:
-        cards = data["evidence_cards"]
-        data["evidence_cards"] = cards[-1:] if cards else []
+        data["evidence_cards"] = _limit_evidence_cards(data, 1, required_evidence_aliases)
         data["prior_steps"] = _select_steps(
             data["prior_steps"], 4, _retry_step_numbers(retry_errors),
         )
@@ -433,16 +437,10 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
     }
     for candidate in data["candidates"]:
         candidate["cited_cards"] = [alias for alias in candidate["cited_cards"] if alias in visible_cards]
-    legal_options = [
-        option for option in menu.options
-        if option.decision.action != "escalate"
-        or eligible_evidence_aliases(option, aliases, candidate_map, injection_evidence)
-    ]
-    removed_options = len(menu.options) - len(legal_options)
     rendered_descriptions = {item["id"]: item["description"] for item in data["menu"]}
     menu_rows = []
     numbered_options = []
-    for index, option in enumerate(legal_options, 1):
+    for index, option in enumerate(menu.options, 1):
         option_id = f"O{index}"
         numbered_options.append(option.model_copy(update={"id": option_id}))
         menu_rows.append({
@@ -451,7 +449,7 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         })
     menu = Menu(
         options=numbered_options,
-        hidden_count=menu.hidden_count + removed_options,
+        hidden_count=menu.hidden_count,
     )
     data["menu"] = menu_rows
     data["menu_hidden_count"] = menu.hidden_count

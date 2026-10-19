@@ -53,6 +53,23 @@ def test_same_entity_joins_by_gap_across_fixed_bucket_boundary():
     assert clusters[0].priority == 40
 
 
+def test_dense_seed_clusters_are_split_to_keep_every_conclusion_visible():
+    candidates = [
+        _candidate(
+            f"c{index:02}", T + timedelta(seconds=index),
+            [["host", "video", "host"]], priority=100 - index,
+        )
+        for index in range(20)
+    ]
+
+    clusters = cluster_seed_candidates(candidates)
+
+    assert [len(cluster.seed_candidate_ids) for cluster in clusters] == [9, 9, 2]
+    assert sorted(candidate_id for cluster in clusters for candidate_id in cluster.seed_candidate_ids) == [
+        candidate["id"] for candidate in candidates
+    ]
+
+
 def test_tool_arguments_forbid_raw_dsl_and_unknown_fields():
     decision = AgentDecision(
         action="pivot", tool="entity_timeline",

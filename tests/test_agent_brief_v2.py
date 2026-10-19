@@ -107,6 +107,45 @@ class ManyEvidenceRepo(BriefRepo):
         } for index in range(1, 18)]
 
 
+class SeedHeavyRepo(BriefRepo):
+    def case_steps(self, _case_id):
+        return [{
+            "n": 0, "accepted": 1, "rejection": None, "result_digest": None,
+            "decision": {
+                "action": "seed",
+                "seed_candidate_ids": [f"seed-{index}" for index in range(7)],
+            },
+        }]
+
+    def candidates(self, _hunt_id):
+        candidates = []
+        for index in range(7):
+            candidates.append({
+                "id": f"discovered-{index}", "claim": "Discovered " + "x" * 800,
+                "lane": "lead", "priority": 200 - index,
+                "event_ids": [f"discovered-event-{index}"],
+                "entities": [["domain", f"discovered-{index}.test", "destination"]],
+                "next_checks": [], "source_case_id": "case-real", "ts": START,
+            })
+            candidates.append({
+                "id": f"seed-{index}", "claim": "Seed " + "x" * 800,
+                "lane": "high", "priority": 100 - index,
+                "event_ids": [f"seed-event-{index}"],
+                "entities": [["domain", f"seed-{index}.test", "destination"]],
+                "next_checks": [], "source_case_id": None, "ts": START,
+            })
+        return candidates
+
+    def events_by_ids(self, ids):
+        return [{
+            "id": event_id, "family": "dns", "ts": START, "host": None,
+            "event": {
+                "outcome": "success",
+                "fields": {"dns.question.name": {"value": event_id + "x" * 400, "origin": "dns"}},
+            },
+        } for event_id in ids]
+
+
 def _telemetry(brief):
     return json.loads(brief.user.split("<UNTRUSTED_TELEMETRY>\n", 1)[1].split("\n</", 1)[0])
 
@@ -182,3 +221,18 @@ def test_latest_citation_is_preserved_and_shrunk_schema_matches_visible_aliases(
     assert brief.shrink_actions
     assert brief.schema["properties"]["evidence"]["items"]["enum"] == visible
     assert set(brief.aliases["evidence"]) == set(visible)
+
+
+def test_shrinking_preserves_every_seed_conclusion_and_its_citation():
+    brief = build_brief(SeedHeavyRepo(), "case-real", {}, num_ctx=4096, max_out=300)
+
+    escalations = [
+        option.decision.candidate_id for option in brief.menu.options
+        if option.decision.action == "escalate"
+    ]
+    visible_event_ids = set(brief.aliases["evidence"].values())
+
+    assert set(escalations) == {f"seed-{index}" for index in range(7)}
+    assert {f"seed-event-{index}" for index in range(7)} <= visible_event_ids
+    assert brief.menu.hidden_count == 0
+    assert brief.shrink_actions

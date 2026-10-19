@@ -200,6 +200,7 @@ def generate_options(
     )
     entities = _entity_refs(raw_entities)
     entities = [entity for entity in entities if not (entity.kind == "host" and entity.role == "observer")]
+    known_hosts = {entity.value for entity in entities if entity.kind == "host"}
     observer_hosts = {
         entity.value for entity in _entity_refs(raw_entities)
         if entity.kind == "host" and entity.role == "observer"
@@ -231,7 +232,7 @@ def generate_options(
     process_pairs: set[tuple[str, int]] = set()
     for item in evidence:
         host = item.get("host")
-        if not host or str(host) in observer_hosts:
+        if not host or str(host) not in known_hosts or str(host) in observer_hosts:
             continue
         fields = item.get("fields") or {}
         for name in ("process.pid", "process.ppid"):
@@ -283,17 +284,17 @@ def generate_options(
         MenuOption(id="", description="close this case", decision=AgentDecision(action="close")),
     ]
 
-    visible_terminal = terminal_options[-min(cap, len(terminal_options)):] if cap else []
-    reserved_investigation = int(bool(investigations) and cap > len(visible_terminal))
-    visible_escalations = escalations[:max(0, cap - len(visible_terminal) - reserved_investigation)]
-    conclusions = visible_escalations + visible_terminal
+    reserved_investigation = int(bool(investigations))
+    required = len(escalations) + len(terminal_options) + reserved_investigation
+    if required > cap:
+        raise ValueError(
+            f"seed cluster has {len(escalations)} conclusions; menu cap {cap} supports at most "
+            f"{max(0, cap - len(terminal_options) - reserved_investigation)}"
+        )
+    conclusions = escalations + terminal_options
     available_slots = max(0, cap - len(conclusions))
     visible_investigations = investigations[:available_slots]
     visible = visible_investigations + conclusions
-    hidden_count = (
-        len(investigations) - len(visible_investigations)
-        + len(escalations) - len(visible_escalations)
-        + len(terminal_options) - len(visible_terminal)
-    )
+    hidden_count = len(investigations) - len(visible_investigations)
     numbered = [option.model_copy(update={"id": f"O{index}"}) for index, option in enumerate(visible, 1)]
     return Menu(options=numbered, hidden_count=hidden_count)
