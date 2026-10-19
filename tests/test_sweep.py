@@ -137,6 +137,38 @@ def test_report_coverage_never_complete_with_unexecuted_or_missing_work():
     assert [r["negative_claim"] for r in never if r["rule_id"] == "other"][0].startswith("unresolved")
 
 
+def test_positive_only_and_matched_claims_retain_all_coverage_caveats():
+    from romulus.report.manifest import _coverage
+
+    partial = {
+        "rule_id": "positive", "target": "a", "partition": "p1",
+        "state": "positive_only_partial", "evaluated": 1,
+    }
+    failed = {
+        "rule_id": "positive", "target": "a", "partition": "p2",
+        "state": "executed_failed", "evaluated": 0,
+    }
+    positive = _coverage(
+        [partial, failed], targets=["a", "b"], sweep_finished=False,
+    )["rules"][0]["negative_claim"]
+
+    assert positive.startswith("not assessable by design")
+    assert "sweep did not finish" in positive
+    assert "target(s) ['b']" in positive
+    assert "positive_only_partial=1" in positive
+    assert "executed_failed=1" in positive
+
+    matched = dict(partial, state="matched")
+    matched_claim = _coverage(
+        [matched, failed], targets=["a", "b"], sweep_finished=False,
+    )["rules"][0]["negative_claim"]
+
+    assert matched_claim.startswith("none (rule matched)")
+    assert "sweep did not finish" in matched_claim
+    assert "target(s) ['b']" in matched_claim
+    assert "executed_failed=1" in matched_claim
+
+
 def test_target_planning_failure_is_recorded_and_other_targets_continue(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("histogram shard failure")
@@ -224,8 +256,8 @@ def test_unevaluable_shell_script_makes_rule_cells_partial(monkeypatch, script):
     cells = {cell["rule_id"]: cell for cell in repo.rule_cells("h1")}
     # script-text rules are positive-only: an unevaluable script is never a complete negative and the
     # unevaluable count is still recorded
-    assert cells["host.download_piped_to_shell"]["state"] == "positive_only"
-    assert cells["host.ssh_authorized_keys_write"]["state"] == "positive_only"
+    assert cells["host.download_piped_to_shell"]["state"] == "positive_only_partial"
+    assert cells["host.ssh_authorized_keys_write"]["state"] == "positive_only_partial"
     assert cells["host.download_piped_to_shell"]["detail"]["missing_required"] == 1
     assert cells["host.ssh_authorized_keys_write"]["detail"]["missing_required"] == 1
     assert not [candidate for candidate in repo.candidates("h1") if candidate["rule_id"] in {

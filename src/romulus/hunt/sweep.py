@@ -209,10 +209,10 @@ class Sweep:
             elif pb.kind == "aggregate":
                 state = "evaluated_partial" if (rule_partial or missing) else "evaluated_complete"
             elif matches:
-                state = "match_on_partial" if rule_partial else "matched"
+                state = "match_on_partial" if (rule_partial or missing) else "matched"
             elif not pb.assures_negative:
                 # script-text rules can show intent but never prove absence (spec section 1)
-                state = "positive_only"
+                state = "positive_only_partial" if (rule_partial or missing) else "positive_only"
             else:
                 state = "evaluated_partial" if (rule_partial or missing) else "no_match_complete"
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, state, len(matches), evaluated,

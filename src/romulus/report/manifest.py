@@ -41,7 +41,9 @@ def _citations(repo: Repo, cand: dict) -> list[dict]:
     return cites
 
 
-UNRESOLVED_STATES = ("planned", "executed_failed", "evaluated_partial", "match_on_partial")
+UNRESOLVED_STATES = (
+    "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
+)
 
 
 def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None,
@@ -77,9 +79,10 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         matched = any(s.startswith("match") for s in states)
         if matched:
             claim = "none (rule matched)" + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
-        elif states.get("positive_only"):
+        elif states.get("positive_only") or states.get("positive_only_partial"):
             claim = ("not assessable by design: positive-only rule (script text can show intent but cannot prove "
-                     "that something did not run; see the process-level rules)")
+                     "that something did not run; see the process-level rules)" +
+                     ("; coverage incomplete: " + "; ".join(reasons) if reasons else ""))
         elif reasons:
             claim = "unresolved: " + "; ".join(reasons)
         elif states.get("no_match_complete") and not (states.get("not_applicable_no_events") and
