@@ -167,6 +167,46 @@ def cmd_web(args) -> int:
     return EXIT_OK
 
 
+def cmd_model(args) -> int:
+    from romulus.bakeoff.export import export_tasks, read_jsonl, readonly_repo, write_jsonl
+    from romulus.bakeoff.runner import run_bakeoff, summarize
+    s = load_settings(_env_file(args))
+    if args.action == "bakeoff-export":
+        variants = read_jsonl(args.variants) if args.variants else None
+        with readonly_repo(s.db_path) as repo:
+            tasks, stats = export_tasks(repo, args.hunt, args.num_ctx or [s.ollama_num_ctx], variants)
+        write_jsonl(args.out, tasks)
+        print(json.dumps(stats, indent=2) if args.json else
+              f"{stats['tasks']} tasks from {stats['model_calls']} model calls "
+              f"(digest match {stats['digest_match']}, mismatch {stats['digest_mismatch']}, "
+              f"variants {stats['variants']}, unfit briefs {stats['unfit_briefs']}) -> {args.out}")
+        return EXIT_OK
+    if args.action == "bakeoff":
+        tasks = read_jsonl(args.tasks)
+        if args.task:
+            wanted = set(args.task)
+            tasks = [task for task in tasks if task["task_id"] in wanted]
+        if args.limit:
+            tasks = tasks[:args.limit]
+        think = {"off": [False], "on": [True], "both": [False, True]}[args.think]
+        counts = run_bakeoff(s, tasks, args.model or [s.ollama_model_triage], args.num_ctx or [s.ollama_num_ctx],
+                             think, args.seed or [7], args.out, args.run_id, max_out=args.max_out,
+                             retry=not args.no_retry, progress=None if args.json else print)
+        print(json.dumps(counts) if args.json else f"done: {counts} -> {args.out}")
+        return EXIT_OK
+    rows = summarize(read_jsonl(args.results))
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return EXIT_OK
+    print(f"{'model':28} {'ctx':>6} {'think':>5} {'n':>4} {'schema':>6} {'valid1':>6} {'valid2':>6} "
+          f"{'trunc':>5} {'limit':>5} {'err':>4} {'p50 ms':>8} {'tok/s':>6}")
+    for row in rows:
+        print(f"{row['model']:28} {row['num_ctx']:>6} {row['think']!s:>5} {row['n']:>4} {row['schema_valid']:>6} "
+              f"{row['valid_first']:>6} {row['valid_with_retry']:>6} {row['truncated']:>5} {row['output_limit']:>5} "
+              f"{row['errors']:>4} {row['median_latency_ms'] or '-':>8} {row['median_decode_tokens_per_s'] or '-':>6}")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="romulus", description="ROMULUS threat hunting")
     p.add_argument("--env-file", help="path to .env (default: $ROMULUS_HOME/.env)")
@@ -191,13 +231,34 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("username")
     up.add_argument("--role", choices=["lead", "analyst"], default="analyst")
     sub.add_parser("web", help="serve the browser UI on ROMULUS_WEB_BIND")
+    mp = sub.add_parser("model", help="model bakeoff: export frozen investigator briefs, run candidates, summarize")
+    mp.add_argument("action", choices=["bakeoff-export", "bakeoff", "bakeoff-summary"])
+    mp.add_argument("--hunt", help="bakeoff-export: hunt whose investigator calls become tasks")
+    mp.add_argument("--variants", help="bakeoff-export: JSONL of {variant, task_id, mutations[]}")
+    mp.add_argument("--tasks", help="bakeoff: task JSONL from bakeoff-export")
+    mp.add_argument("--task", action="append", help="bakeoff: run only this task id (repeatable)")
+    mp.add_argument("--limit", type=int, help="bakeoff: run only the first N tasks")
+    mp.add_argument("--model", action="append", help="bakeoff: candidate model (repeatable)")
+    mp.add_argument("--num-ctx", type=int, action="append", help="num_ctx value (repeatable)")
+    mp.add_argument("--think", choices=["off", "on", "both"], default="off")
+    mp.add_argument("--seed", type=int, action="append", help="bakeoff: seed (7 = production; repeatable)")
+    mp.add_argument("--max-out", type=int, default=900, help="bakeoff: output token budget (production 900)")
+    mp.add_argument("--no-retry", action="store_true", help="bakeoff: no second attempt after a rejection")
+    mp.add_argument("--run-id", default="bakeoff", help="bakeoff: run label recorded on every row")
+    mp.add_argument("--results", help="bakeoff-summary: result JSONL")
+    mp.add_argument("--out", help="output JSONL (bakeoff appends and resumes)")
     args = p.parse_args(argv)
+    if args.cmd == "model":
+        needed = {"bakeoff-export": ("hunt", "out"), "bakeoff": ("tasks", "out"), "bakeoff-summary": ("results",)}
+        missing = [name for name in needed[args.action] if not getattr(args, name)]
+        if missing:
+            p.error(f"model {args.action} needs " + ", ".join(f"--{name}" for name in missing))
     if args.cmd == "hunt" and args.action == "start" and not (args.start and args.end):
         p.error("hunt start needs --start and --end")
     if args.cmd == "hunt" and args.action == "resume" and not args.hunt_id:
         p.error("hunt resume needs a hunt id")
     handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report,
-                "user": cmd_user, "web": cmd_web}
+                "user": cmd_user, "web": cmd_web, "model": cmd_model}
     return handlers[args.cmd](args)
 
 

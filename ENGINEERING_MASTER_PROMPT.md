@@ -575,6 +575,8 @@ The deterministic sweep, findings, coverage, and reports must work with Ollama d
 
 ## 12. Model selection bakeoff
 
+> **Superseded 2026-10-19 by owner direction (ADR-005).** No multi-model bakeoff is run. ROMULUS stays on `qwen3:8b`, and the investigator is redesigned so a model of this size produces the required decisions by construction: menu-driven options, per-call constrained schemas and short aliases (`docs/design/investigator-v2.md`). The bakeoff tooling below survives as the *investigator replay evaluation*: frozen briefs from real hunts scored against custodian-owned expected decisions on every investigator change. The text below is kept for history.
+
 Hardware constraint: RTX 4060 Laptop, 8 GiB VRAM, plus 31.7 GiB system RAM for partial offload. Rough guide: 7–9B models at Q4–Q6 run fully on GPU; ~12–14B at Q4 fit tightly or spill slightly; ~20–30B (especially MoE) need CPU offload and run slower. Long contexts consume KV-cache VRAM, so `num_ctx` and model size trade off directly.
 
 Build `romulus model bakeoff`: a fixed set of brief → expected-decision tasks drawn from lab fixtures (pivot choice, escalation correctness, benign recognition, citation accuracy, schema validity, prompt-injection resistance). Run it against currently available candidate models that fit the hardware (e.g., the Qwen, Gemma, Llama, Mistral, and gpt-oss families at sizes that fit), at a few `num_ctx` values, with thinking on and off. Measure decision accuracy, schema-valid rate, citation validity, tokens/sec, and latency per decision. Choose `OLLAMA_MODEL_TRIAGE` (fast, accurate structured decisions) and `OLLAMA_MODEL_SYNTHESIS` (quality prose, can be slower) from the results and record them in an ADR. Rerun the bakeoff when models change.
@@ -698,7 +700,7 @@ Starting targets to test, set with the owner before running the holdout: ≥90% 
 
 **M1, thin end-to-end slice.** Package, config, `doctor`, DB plus migrations, hunt manifest, ES adapter with source profile and field contract, about 5 host playbooks plus about 3 network playbooks (Suricata alert stacking, beaconing, rare DNS), typed normalization for the lab's main event families, finding admission, the agent loop with 3–4 pivot tools on the default model, a minimal web UI (hunt list, live hunt view, finding detail), and a JSON plus Markdown technical report. Deployed to the VM over SSH. Demo: a real hunt on the SL700 `e_a` lab data producing cited findings and at least one agent pivot chain.
 
-**M2, evaluation harness and model bakeoff.** Gold opportunity inventory for the lab dataset, metric scripts, simple-baseline comparison, model bakeoff, and the selected model ADR. Demo: measured recall/precision/time on the lab set, with the miss funnel.
+**M2, evaluation harness and model bakeoff.** Gold opportunity inventory for the lab dataset, metric scripts, simple-baseline comparison, model bakeoff, and the selected model ADR. *(2026-10-19: the bakeoff is replaced by the investigator replay evaluation and ADR-005; see §12.)* Demo: measured recall/precision/time on the lab set, with the miss funnel.
 
 **M3, full sources and coverage truth.** Includes:
 - Arkime and TShark adapters with field contracts from the live deployment;

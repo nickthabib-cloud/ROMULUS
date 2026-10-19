@@ -26,7 +26,8 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 - [x] Gold opportunity inventory for e_a (eval-custodian; on the VM, not the repo) — v1, 2026-10-19: 27 opportunities, 22 observable
 - [x] Scoring scripts plus `docs/eval/PROTOCOL.md` — protocol 2026-10-19; scorer in `eval/` (12 tests), scores from the hunt DB read-only
 - [ ] Simple "standard searches" baseline runner
-- [ ] Model bakeoff task set, runner, and results; ADR selecting triage/synthesis models and `num_ctx`
+- [ ] ~~Model bakeoff~~ Investigator replay evaluation (task set, expected decisions, runner, qwen3:8b baseline) and ADR-005 — owner dropped the multi-model bakeoff 2026-10-19; stay on qwen3:8b
+- [ ] Investigator v2 design approved (`docs/design/investigator-v2.md`); implementation via Codex, then replay + e_a ablation
 - [ ] First lab evaluation results file with miss funnel — model-off done (`docs/eval/results/2026-10-19-sl700_e_a-1.md`); model-on, baseline and AMiner/Telosian columns pending
 
 ## M3: full sources and coverage truth
