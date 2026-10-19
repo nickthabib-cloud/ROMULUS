@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from romulus.agent.options import Menu, MenuOption
 
-SCHEMA_FORM = "anyOf"
+SCHEMA_FORM = "flat"
 
 
 def eligible_evidence_aliases(
@@ -28,26 +28,22 @@ def build_output_schema(
     candidates: dict[str, dict],
     injection_evidence_ids: set[str],
 ) -> dict:
-    """Constrain every selectable option to its legal evidence-card subset."""
-    branches = []
-    for option in menu.options:
-        branches.append({
-            "type": "object",
-            "properties": {
-                "option": {"const": option.id},
-                "evidence": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": eligible_evidence_aliases(
-                        option, aliases, candidates, injection_evidence_ids,
-                    )},
-                    "minItems": 1,
-                    "maxItems": 4,
-                    "uniqueItems": True,
-                },
-                "rationale": {"type": "string", "maxLength": 300},
-                "benign_alternative": {"type": "string", "maxLength": 200},
+    """Build Ollama's flat constrained schema; the resolver enforces option-specific subsets."""
+    del candidates, injection_evidence_ids
+    return {
+        "type": "object",
+        "properties": {
+            "option": {"type": "string", "enum": [option.id for option in menu.options]},
+            "evidence": {
+                "type": "array",
+                "items": {"type": "string", "enum": list((aliases.get("evidence") or {}).keys())},
+                "minItems": 1,
+                "maxItems": 4,
+                "uniqueItems": True,
             },
-            "required": ["option", "evidence", "rationale"],
-            "additionalProperties": False,
-        })
-    return {"anyOf": branches}
+            "rationale": {"type": "string", "maxLength": 300},
+            "benign_alternative": {"type": "string", "maxLength": 200},
+        },
+        "required": ["option", "evidence", "rationale"],
+        "additionalProperties": False,
+    }

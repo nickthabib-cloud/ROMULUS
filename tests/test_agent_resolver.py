@@ -2,7 +2,7 @@
 from datetime import UTC, datetime, timedelta
 
 from romulus.agent.brief import BuiltBrief
-from romulus.agent.constraints import SCHEMA_FORM, build_output_schema
+from romulus.agent.constraints import SCHEMA_FORM, build_output_schema, eligible_evidence_aliases
 from romulus.agent.models import AgentDecision, EntityRef
 from romulus.agent.options import Menu, MenuOption
 from romulus.agent.resolver import resolve_output
@@ -66,31 +66,29 @@ def _brief() -> BuiltBrief:
     )
 
 
-def _branch(schema: dict, option_id: str) -> dict:
-    return next(branch for branch in schema["anyOf"] if branch["properties"]["option"]["const"] == option_id)
-
-
-def test_anyof_schema_makes_unknown_options_and_aliases_unrepresentable():
+def test_flat_schema_makes_unknown_options_and_aliases_unrepresentable():
     brief = _brief()
 
-    assert SCHEMA_FORM == "anyOf"
-    assert {branch["properties"]["option"]["const"] for branch in brief.schema["anyOf"]} == {
-        "O1", "O2", "O3", "O4",
-    }
-    assert all(branch["additionalProperties"] is False for branch in brief.schema["anyOf"])
-    assert all(branch["properties"]["evidence"]["uniqueItems"] is True for branch in brief.schema["anyOf"])
-    assert all("O999" != branch["properties"]["option"]["const"] for branch in brief.schema["anyOf"])
-    assert all("E999" not in branch["properties"]["evidence"]["items"]["enum"]
-               for branch in brief.schema["anyOf"])
+    assert SCHEMA_FORM == "flat"
+    assert brief.schema["additionalProperties"] is False
+    assert brief.schema["properties"]["option"]["enum"] == ["O1", "O2", "O3", "O4"]
+    evidence = brief.schema["properties"]["evidence"]
+    assert evidence["uniqueItems"] is True
+    assert evidence["items"]["enum"] == ["E1", "E2"]
+    assert "O999" not in brief.schema["properties"]["option"]["enum"]
+    assert "E999" not in evidence["items"]["enum"]
 
 
 def test_schema_applies_per_option_evidence_subsets_and_excludes_hostile_conclusion_cards():
     brief = _brief()
+    aliases = brief.aliases
+    candidates = brief.known_candidates
+    by_id = {option.id: option for option in brief.menu.options}
 
-    assert _branch(brief.schema, "O1")["properties"]["evidence"]["items"]["enum"] == ["E1", "E2"]
-    assert _branch(brief.schema, "O2")["properties"]["evidence"]["items"]["enum"] == ["E2"]
-    assert _branch(brief.schema, "O3")["properties"]["evidence"]["items"]["enum"] == ["E1"]
-    assert _branch(brief.schema, "O4")["properties"]["evidence"]["items"]["enum"] == ["E1"]
+    assert eligible_evidence_aliases(by_id["O1"], aliases, candidates, {"event-hostile"}) == ["E1", "E2"]
+    assert eligible_evidence_aliases(by_id["O2"], aliases, candidates, {"event-hostile"}) == ["E2"]
+    assert eligible_evidence_aliases(by_id["O3"], aliases, candidates, {"event-hostile"}) == ["E1"]
+    assert eligible_evidence_aliases(by_id["O4"], aliases, candidates, {"event-hostile"}) == ["E1"]
 
 
 def test_resolver_maps_exact_typed_decision_and_flags_deterministic_truncation():

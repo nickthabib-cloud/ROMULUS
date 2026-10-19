@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from romulus.agent.brief import build_brief
 from romulus.agent.cases import cluster_seed_candidates
-from romulus.agent.constraints import eligible_evidence_aliases
+from romulus.agent.constraints import SCHEMA_FORM, eligible_evidence_aliases
 from romulus.agent.models import AgentDecision, EntityRef, PivotResult
 from romulus.agent.ollama import ModelResult, ModelUnavailable, OllamaClient
 from romulus.agent.resolver import Resolution, resolve_output
@@ -154,7 +154,7 @@ class Investigator:
             "options": {
                 "num_ctx": self.settings.ollama_num_ctx, "max_out": 900,
                 "think": self.settings.ollama_think, "shrink_actions": brief.shrink_actions,
-                "schema_form": "anyOf",
+                "schema_form": SCHEMA_FORM,
             },
             "prompt_digest": digest({"system": brief.system, "user": brief.user, "schema": brief.schema}),
             "prompt_tokens_est": result.prompt_tokens_est,
