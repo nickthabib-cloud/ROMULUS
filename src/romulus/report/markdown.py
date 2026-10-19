@@ -206,8 +206,8 @@ def render(m: dict, banner: str = BANNER) -> str:
     out += ["## Coverage", "",
             ("A negative statement applies only where a rule's coverage is `complete`. `unresolved` means at least one "
              "partition was partial, failed, or had records missing required fields. `not assessable by design` marks "
-             "positive-only rules that read script text: they flag intent but never prove absence; assurance comes "
-             "from the process-level rules."), "",
+             "positive-only rules that read script text: they flag intent but never prove absence. Each rule row "
+             "states what, if any, complementary assurance exists."), "",
             "| Rule | Records evaluated | Negative claim | Cell states |", "|---|---|---|---|"]
     for r in m["coverage"]["rules"]:
         out.append(f"| {esc(r['rule_id'])} | {r['records_evaluated']} | {esc(r['negative_claim'])} | "

@@ -79,6 +79,26 @@ def test_broken_citation_degrades_report():
     assert "Degraded report" in render(m)
 
 
+def test_coverage_legend_defers_to_each_rules_assurance_statement():
+    repo, _ = _repo_with_finding()
+    manifest = publish_revision(repo, "h1", "test")
+    manifest["coverage"]["rules"] = [{
+        "rule_id": "host.ssh_authorized_keys_write",
+        "records_evaluated": 1,
+        "negative_claim": (
+            "not assessable by design: positive-only rule; "
+            "no process-level assurance exists for authorized_keys writes"
+        ),
+        "states": {"positive_only": 1},
+    }]
+
+    markdown = render(manifest)
+
+    assert "assurance comes from the process-level rules" not in markdown
+    assert "Each rule row states what, if any, complementary assurance exists." in markdown
+    assert "no process-level assurance exists" in markdown
+
+
 def test_telemetry_cannot_break_markdown_or_inject_html():
     repo, _ = _repo_with_finding(claim_suffix=" <script>alert(1)</script> | ``` [x](javascript:1) \x1b[31m")
     md = render(publish_revision(repo, "h1", "test"))
