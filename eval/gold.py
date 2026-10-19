@@ -61,6 +61,8 @@ class Gold:
     evidence: dict[tuple, list[tuple[str, str, str]]] = field(default_factory=dict)
     # (opp_id, source) -> list of (key, role, ts, dataset) for ES rows (funnel replay)
     es_rows: dict[tuple[str, str], list[tuple[tuple, str, datetime | None, str | None]]] = field(default_factory=dict)
+    # (opp_id, source) -> list of (key, role, first_packet) for Arkime rows (funnel)
+    arkime_rows: dict[tuple[str, str], list[tuple[tuple, str, datetime | None]]] = field(default_factory=dict)
     aliases: dict[str, set[str]] = field(default_factory=dict)
 
     def expand(self, ents: set[str]) -> set[str]:
@@ -93,7 +95,9 @@ def locator_key(kind: str, a: str, b: str | int | None = None) -> tuple:
     if kind == "es":
         return ("es", a, str(b))
     if kind == "arkime":
-        return ("arkime", str(a))
+        # Arkime API session ids carry an index-generation prefix ("3@<id>"); the sessions3 ES _id is the part
+        # after '@' (verified 2026-10-19 on Arkime 6.3.1). Both forms canonicalize to the bare _id.
+        return ("arkime", str(a).split("@", 1)[-1])
     if kind == "pcap":
         return ("pcap", str(a), int(b))
     raise ValueError(f"unknown locator kind {kind!r}")
@@ -134,7 +138,9 @@ def load(gold_dir: str | Path) -> Gold:
                 g.evidence.setdefault(key, []).append((oid, role, src))
                 g.es_rows.setdefault((oid, src), []).append((key, role, parse_ts(r.get("ts")), r.get("dataset")))
             elif r["kind"] == "arkime":
-                g.evidence.setdefault(locator_key("arkime", r["session_id"]), []).append((oid, role, src))
+                key = locator_key("arkime", r["session_id"])
+                g.evidence.setdefault(key, []).append((oid, role, src))
+                g.arkime_rows.setdefault((oid, src), []).append((key, role, parse_ts(r.get("first_packet"))))
             elif r["kind"] == "pcap":
                 ident = r.get("file_sha256") or Path(r["file"]).name
                 for fr in r["frames"]:

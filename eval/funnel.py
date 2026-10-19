@@ -84,6 +84,23 @@ def compute(gold: Gold, hunt: Hunt, matches: list[ItemMatch], hits: dict,
                 continue
             stage = "source"
             kind = SOURCE_KINDS[src]
+            if kind == "arkime" and any(t.startswith("arkime") for t in targeted):
+                rows = [r for r in gold.arkime_rows.get((oid, src), []) if r[1] in ok_roles(opp)]
+                ark_tasks = [t for t in hunt.tasks if str((t.get("intent") or {}).get("target", "")).startswith("arkime")
+                             and t.get("state") != "split"]
+
+                def covers(t, ts):
+                    w = (t.get("intent") or {}).get("window") or {}
+                    a, b = parse_ts(w.get("start")), parse_ts(w.get("end"))
+                    return bool(a and b and ts and a <= ts < b)
+                if any(covers(t, r[2]) for r in rows for t in ark_tasks):
+                    stage = "queried"
+                    if any(covers(t, r[2]) and _complete(t) for r in rows for t in ark_tasks):
+                        stage = "retrieved"
+                        notes["arkime: normalization replay not implemented; stage stops at retrieved"] += 1
+                per_src[src] = stage
+                best = max(best, stage, key=STAGES.index)
+                continue
             if kind != "es":
                 if not any(t.startswith(kind) for t in targeted):
                     notes[f"{src}: no task targets this source"] += 1

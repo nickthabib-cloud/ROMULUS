@@ -101,8 +101,9 @@ class Hunt:
 def target_to_key(target: str, native_id: str) -> tuple | None:
     """Map a stored raw reference to a gold locator key.
 
-    ES: target is the index name and native_id the document _id. Arkime and PCAP adapters do not exist
-    yet (M3); the assumed forms 'arkime[:node]' / 'pcap:<sha256-or-basename>' must be re-checked when they land.
+    ES: target is the index name and native_id the document _id. Arkime sessions are read from their ES index
+    (target 'arkime_sessions3-*', native_id = the sessions3 _id), which canonicalizes to the gold Arkime key.
+    PCAP refs are assumed to be 'pcap:<sha256-or-basename>' + frame (re-check when that adapter lands).
     """
     if target.startswith("arkime"):
         return locator_key("arkime", native_id)

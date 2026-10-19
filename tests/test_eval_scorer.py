@@ -399,3 +399,9 @@ def test_v2_menu_conclusions_and_nway_ablation(gold_dir, agent_db):
     md = ablation_n(("off", off, offp), [("det", on, onp), ("model", on, onp)],
                     {o.opp_id: o.behavior_class for o in g.opportunities.values()})
     assert "| Metric | off | det | model |" in md and "| surfaced, off only (not det) | 1 | {'c2_channel': 1} |" in md
+
+
+def test_arkime_api_id_and_es_id_canonicalize_to_same_key():
+    from eval.hunt import target_to_key
+    assert locator_key("arkime", "3@241118-abcDEF") == ("arkime", "241118-abcDEF")
+    assert target_to_key("arkime_sessions3-241118", "241118-abcDEF") == locator_key("arkime", "3@241118-abcDEF")

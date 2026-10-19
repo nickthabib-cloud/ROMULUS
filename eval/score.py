@@ -18,7 +18,7 @@ from eval import agent as agent_mod
 from eval import funnel as funnel_mod
 from eval import gold as gold_mod
 from eval import metrics as M
-from eval.hunt import SURFACED_LANES, connect_ro, load_hunt
+from eval.hunt import SURFACED_LANES, connect_ro, load_hunt, target_to_key
 from eval.match import match_all
 from eval.report import dumps, leak_check, render
 
@@ -62,15 +62,17 @@ def score(gold_dir, db_path, hunt_id, run_id, mode="dev", adjudications=None, fe
     if fetcher is not None:
         from romulus.evidence.normalize import raw_digest
         source_check = {}
-        rep_keys = {c["key"]: c["digest"] for m in matches if m.item.lane in M.REPORTED_LANES for c in m.item.locators
-                    if c["key"] and c["key"][0] == "es"}
+        # every ES-backed citation, including Arkime sessions read from their ES index (key canonicalized)
+        rep = {c["key"]: (c["target"], c["native_id"], c["digest"]) for m in matches
+               if m.item.lane in M.REPORTED_LANES for c in m.item.locators if c["key"] and c["key"][0] in ("es", "arkime")}
+        rep_keys = {k: v[2] for k, v in rep.items()}
         by_index: dict[str, list[str]] = {}
-        for k in rep_keys:
-            by_index.setdefault(k[1], []).append(k[2])
+        for target, nid, _d in rep.values():
+            by_index.setdefault(target, []).append(nid)
         found = {}
         for idx, ids in by_index.items():
             for hit in fetcher(idx, ids):
-                found[("es", hit["_index"], hit["_id"])] = raw_digest(hit["_source"])
+                found[target_to_key(hit["_index"], hit["_id"])] = raw_digest(hit["_source"])
         source_check = {k: found.get(k) == d for k, d in rep_keys.items()}
     fun = funnel_mod.compute(g, h, matches, hits, fetcher=fetcher, normalize=normalize)
     agent_eff, agent_private = agent_mod.effectiveness(h, g, matches, hits, adj)
