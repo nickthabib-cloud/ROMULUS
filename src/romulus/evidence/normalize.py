@@ -7,7 +7,15 @@ import re
 from collections import defaultdict
 from datetime import UTC, datetime
 
-from romulus.evidence.auditd import AuditParseError, AuditRecord, execve_argv, parse_record
+from romulus.evidence.auditd import (
+    SOCKET_SYSCALLS,
+    AuditParseError,
+    AuditRecord,
+    execve_argv,
+    parse_record,
+    parse_sockaddr,
+    socket_syscall,
+)
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, event_id, fv
 
 NORMALIZER_VERSION = "lab-ecs@1"
@@ -95,6 +103,77 @@ def merge_execve(execs: list[tuple[dict, AuditRecord]]) -> tuple[dict, AuditReco
     return h_head, merged
 
 
+def _syscall_process_fields(sid: str, rs: AuditRecord) -> dict:
+    """Process identity from a SYSCALL record, with field lineage. Absent fields stay absent."""
+    f = {}
+    for name, key in (("process.pid", "pid"), ("process.ppid", "ppid")):
+        if rs.fields.get(key, "").isdigit():
+            f[name] = fv(int(rs.fields[key]), f"{sid}:event.original#auditd:SYSCALL.{key}")
+    if rs.fields.get("exe"):
+        f["process.executable"] = fv(rs.fields["exe"], f"{sid}:event.original#auditd:SYSCALL.exe")
+    if rs.fields.get("comm"):
+        f["process.comm"] = fv(rs.fields["comm"], f"{sid}:event.original#auditd:SYSCALL.comm")
+    for name, key in (("process.uid", "uid"), ("process.euid", "euid"), ("process.auid", "auid")):
+        if key in rs.fields:
+            f[name] = fv(rs.fields[key], f"{sid}:event.original#auditd:SYSCALL.{key}")
+    for name, key in (("process.user", "UID"), ("process.effective_user", "EUID"),
+                      ("process.login_user", "AUID")):
+        if key in rs.enriched:
+            f[name] = fv(rs.enriched[key], f"{sid}:event.original#auditd:enriched.{key}")
+    if rs.fields.get("tty"):
+        f["process.tty"] = fv(rs.fields["tty"], f"{sid}:event.original#auditd:SYSCALL.tty")
+    return f
+
+
+SOCKET_COMPANIONS = {"SYSCALL", "SOCKADDR", "PROCTITLE"}
+EINPROGRESS = "-115"
+
+
+def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], syscall: str) -> TypedEvent:
+    """One net_socket event from a socket SYSCALL plus its SOCKADDR. connect() records the remote
+    endpoint, accept() the peer, bind() the local address. A non-blocking connect that returns
+    EINPROGRESS was started, not refused, so its outcome is unknown rather than failed."""
+    by_type = {r.type: (h, r) for h, r in members if r.type in SOCKET_COMPANIONS}
+    hs, rs = by_type["SYSCALL"]
+    sid = hs["_id"]
+    refs = [_ref(h) for h, r in members if r.type in SOCKET_COMPANIONS]
+    f = {"socket.syscall": fv(syscall, f"{sid}:event.original#auditd:SYSCALL.arch+syscall"),
+         "audit.serial": fv(rs.serial, f"{sid}:event.original#auditd:msg.serial"),
+         **_syscall_process_fields(sid, rs)}
+    if rs.fields.get("key") not in (None, "(null)"):
+        f["audit.key"] = fv(rs.fields["key"], f"{sid}:event.original#auditd:SYSCALL.key")
+    caveats = []
+    if "SOCKADDR" in by_type:
+        ha, ra = by_type["SOCKADDR"]
+        addr = parse_sockaddr(ra.fields.get("saddr", ""))
+        origin = f"{ha['_id']}:event.original#auditd:SOCKADDR.saddr"
+        if addr.ip is None:
+            raise Skip(f"audit {syscall} on a non-IP socket family ({addr.family})")
+        f["socket.family"] = fv(addr.family, origin)
+        side = {"connect": "destination", "accept": "source", "accept4": "source", "bind": "socket.local"}[syscall]
+        f[f"{side}.ip"] = fv(addr.ip, origin)
+        f[f"{side}.port"] = fv(addr.port, origin)
+    else:
+        caveats.append("SOCKADDR companion not retrieved: socket address unknown")
+    succ, exit_code = rs.fields.get("success"), rs.fields.get("exit")
+    if succ == "yes":
+        outcome = Outcome.success
+    elif succ == "no" and exit_code == EINPROGRESS and syscall == "connect":
+        outcome = Outcome.unknown
+        caveats.append("non-blocking connect returned EINPROGRESS: the connection was started; completion is "
+                       "not recorded")
+    elif succ == "no":
+        outcome = Outcome.failure
+    else:
+        outcome = Outcome.unknown
+    if exit_code:
+        f["socket.exit"] = fv(exit_code, f"{sid}:event.original#auditd:SYSCALL.exit")
+    # the audit header's own epoch, not the shipper's @timestamp: joins with sensor clocks need the kernel time
+    return TypedEvent(id=event_id("net_socket", refs), family="net_socket", ts=datetime.fromtimestamp(rs.ts, UTC),
+                      host=host or None, outcome=outcome, fields=f, raw=refs, normalizer=NORMALIZER_VERSION,
+                      caveats=caveats)
+
+
 def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent:
     """Build one process_exec event from the EXECVE record plus whatever companions are present.
     Missing SYSCALL means uid/ppid/success are unknown (caveat), not defaulted."""
@@ -116,23 +195,7 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
     outcome = Outcome.unknown
     if "SYSCALL" in by_type:
         hs, rs = by_type["SYSCALL"]
-        sid = hs["_id"]
-        for name, key in (("process.pid", "pid"), ("process.ppid", "ppid")):
-            if rs.fields.get(key, "").isdigit():
-                f[name] = fv(int(rs.fields[key]), f"{sid}:event.original#auditd:SYSCALL.{key}")
-        if rs.fields.get("exe"):
-            f["process.executable"] = fv(rs.fields["exe"], f"{sid}:event.original#auditd:SYSCALL.exe")
-        if rs.fields.get("comm"):
-            f["process.comm"] = fv(rs.fields["comm"], f"{sid}:event.original#auditd:SYSCALL.comm")
-        for name, key in (("process.uid", "uid"), ("process.euid", "euid"), ("process.auid", "auid")):
-            if key in rs.fields:
-                f[name] = fv(rs.fields[key], f"{sid}:event.original#auditd:SYSCALL.{key}")
-        for name, key in (("process.user", "UID"), ("process.effective_user", "EUID"),
-                          ("process.login_user", "AUID")):
-            if key in rs.enriched:
-                f[name] = fv(rs.enriched[key], f"{sid}:event.original#auditd:enriched.{key}")
-        if rs.fields.get("tty"):
-            f["process.tty"] = fv(rs.fields["tty"], f"{sid}:event.original#auditd:SYSCALL.tty")
+        f.update(_syscall_process_fields(hs["_id"], rs))
         succ = rs.fields.get("success")
         outcome = Outcome.success if succ == "yes" else Outcome.failure if succ == "no" else Outcome.unknown
     else:
@@ -300,6 +363,61 @@ def normalize_suricata(hit: dict) -> TypedEvent:
                       normalizer=NORMALIZER_VERSION)
 
 
+# ---------------------------------------------------------------------------------------------
+# Arkime SPI session records (read from the session indices)
+# ---------------------------------------------------------------------------------------------
+
+IP_PROTOCOLS = {1: "icmp", 6: "tcp", 17: "udp", 58: "ipv6-icmp", 132: "sctp"}
+ARKIME_FIELDS = (
+    # typed name, native path
+    ("source.ip", "source.ip"), ("source.port", "source.port"), ("destination.ip", "destination.ip"),
+    ("destination.port", "destination.port"), ("network.community_id", "network.community_id"),
+    ("source.bytes", "source.bytes"), ("source.packets", "source.packets"),
+    ("destination.bytes", "destination.bytes"), ("destination.packets", "destination.packets"),
+    ("client.bytes", "client.bytes"), ("server.bytes", "server.bytes"),
+    ("tls.ja3", "tls.ja3"), ("tls.ja3s", "tls.ja3s"), ("tls.ja4", "tls.ja4"), ("tls.version", "tls.version"),
+    ("ssh.hassh", "ssh.hassh"), ("ssh.hassh_server", "ssh.hasshServer"), ("ssh.version", "ssh.version"),
+    ("http.hostname", "http.host"), ("url.path", "http.uri"), ("user_agent.original", "http.useragent"),
+    ("http.request.method", "http.method"), ("http.response.status_code", "http.statuscode"),
+    ("dns.question.name", "dns.host"), ("tls.server.subject_cn", "cert.subjectCN"),
+    ("tls.server.issuer_cn", "cert.issuerCN"), ("tls.server.not_after", "cert.notAfter"),
+    ("network.protocols", "protocol"), ("arkime.tags", "tags"),
+)
+
+
+def is_arkime_session(src: dict) -> bool:
+    return "firstPacket" in src and "lastPacket" in src and isinstance(src.get("source"), dict)
+
+
+def _epoch_ms(value) -> datetime:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"Arkime packet time is not epoch milliseconds: {value!r}")
+    return datetime.fromtimestamp(value / 1000, UTC)
+
+
+def normalize_arkime_session(hit: dict) -> TypedEvent:
+    """One net_session per Arkime SPI record. Arkime saves long sessions in several records (one per
+    save interval) sharing the 5-tuple and community ID; each record is one event, and rules that need
+    the whole connection stitch them by community ID."""
+    src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
+    first, last = _epoch_ms(src.get("firstPacket")), _epoch_ms(src.get("lastPacket"))
+    f = {}
+    for typed, native in ARKIME_FIELDS:
+        v = _get(src, native)
+        if v not in (None, [], ""):
+            f[typed] = fv(v, f"{nid}:{native}")
+    proto = src.get("ipProtocol")
+    if proto is not None:
+        f["network.transport"] = fv(IP_PROTOCOLS.get(proto, str(proto)), f"{nid}:ipProtocol")
+    f["flow.start"] = fv(first.isoformat(), f"{nid}:firstPacket")
+    f["flow.end"] = fv(last.isoformat(), f"{nid}:lastPacket")
+    f["session.duration_s"] = fv(round((last - first).total_seconds(), 3), f"{nid}:lastPacket-firstPacket")
+    f["arkime.node"] = fv(src.get("node"), f"{nid}:node")
+    return TypedEvent(id=event_id("net_session", [ref]), family="net_session", ts=first, host=src.get("node"),
+                      fields={k: v for k, v in f.items() if v.value is not None}, raw=[ref],
+                      normalizer=NORMALIZER_VERSION)
+
+
 SINGLE = {
     "systemd.journal": normalize_journal,
     "apache.access": normalize_apache_access,
@@ -314,7 +432,10 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
     for h in hits:
         ds = _get(h["_source"], "event.dataset") or ""
         try:
-            if ds == "linux.audit":
+            if not ds and is_arkime_session(h["_source"]):
+                ds = "arkime.session"
+                events.append(normalize_arkime_session(h))
+            elif ds == "linux.audit":
                 audit_hits.append(h)
             elif ds.startswith("suricata.eve"):
                 events.append(normalize_suricata(h))
@@ -332,12 +453,25 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
         types = {r.type for _, r in members}
         # EXECVE may legitimately repeat (long-argv continuation records; merged in normalize_exec_group)
         dup = sorted(t for t in types if sum(1 for _, r in members if r.type == t) > 1
-                     and t in EXEC_COMPANIONS and t != "EXECVE")
+                     and t in EXEC_COMPANIONS | SOCKET_COMPANIONS and t != "EXECVE")
         if dup:
             errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
             continue
         if "EXECVE" not in types:
-            skips["audit group without EXECVE (not an exec event)"] += 1
+            sys_rec = next((r for _, r in members if r.type == "SYSCALL"), None)
+            syscall = socket_syscall(sys_rec) if sys_rec is not None else None
+            if syscall is None:
+                arch = sys_rec.fields.get("arch", "") if sys_rec is not None else ""
+                skips["audit group without EXECVE or socket syscall" if not arch or arch in SOCKET_SYSCALLS
+                      else f"audit syscall on an arch whose socket calls are not decoded ({arch})"] += 1
+                continue
+            try:
+                events.append(normalize_socket_group(host, members, syscall))
+            except Skip as s:
+                skips[s.reason] += 1
+            except (AuditParseError, ValueError, KeyError) as e:
+                # tagged by family so the sweep marks only socket rules partial
+                errors.append((members[0][0]["_id"], f"linux.audit.socket: {e}"))
             continue
         try:
             events.append(normalize_exec_group(host, members))

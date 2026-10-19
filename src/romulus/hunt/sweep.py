@@ -10,6 +10,7 @@ from romulus.detect.base import Match, Playbook
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import normalize_hits
 from romulus.hunt.publish import publish_match
+from romulus.hunt.stage import EventStage
 from romulus.sources.es import ElasticClient
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, Window
@@ -22,7 +23,9 @@ log = logging.getLogger("romulus.sweep")
 PARTITION_MAX_DOCS = 120_000
 HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
-DATASET_FAMILIES = {"linux.audit": {"process_exec"}, "systemd.journal": {"auth", "privilege_use"},
+DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket"}, "linux.audit.socket": {"net_socket"},
+                    "arkime.session": {"net_session"},
+                    "systemd.journal": {"auth", "privilege_use"},
                     "apache.access": {"http_access"}, "apache.error": {"web_error"},
                     **{f"suricata.eve.{t}": NET_FAMILIES for t in ("alert", "flow", "netflow", "dns", "http",
                                                                   "fileinfo", "tls", "ssh")}}
@@ -65,11 +68,12 @@ def plan_partitions(client: ElasticClient, target: str, contract: FieldContract,
 class Sweep:
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
                  contracts: dict[str, FieldContract], on_candidate: Callable[[dict], None] | None = None,
-                 heartbeat: Callable[[], None] | None = None):
+                 heartbeat: Callable[[], None] | None = None, stage_dir=None):
         self.repo, self.client, self.hunt_id, self.window = repo, client, hunt_id, window
         self.contracts = contracts
         self.on_candidate = on_candidate or (lambda c: None)
         self.heartbeat = heartbeat or (lambda: None)
+        self.stage_dir = stage_dir
         self.pack: list[Playbook] = fresh_pack()
         self.partial_reasons: list[str] = []
         self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0}
@@ -196,7 +200,10 @@ class Sweep:
             matches = pb.consume(events)
             for m in matches:
                 self._publish(m, tid, raw_sources)
-            if pb.kind == "aggregate":
+            if pb.staged:
+                # joining aggregates: full events and their raw copies go to disk, not memory
+                self._event_stage().put(pb.drain_staged(), raw_sources)
+            elif pb.kind == "aggregate":
                 # aggregates retain examples: stash raw copies of their retained events now
                 self._retain_aggregate_raw(pb, raw_sources)
             evaluated = pb.evaluated - before_eval
@@ -219,6 +226,12 @@ class Sweep:
                                     {"missing_required": missing, "reasons": out.reasons})
         self.repo.update_task(tid, "evaluated")
 
+    def _event_stage(self) -> EventStage:
+        stage = getattr(self, "_stage", None)
+        if stage is None:
+            stage = self._stage = EventStage(self.stage_dir)
+        return stage
+
     def _retain_aggregate_raw(self, pb: Playbook, raw_sources: dict[str, dict]):
         keep = getattr(self, "_agg_raw", None)
         if keep is None:
@@ -235,9 +248,17 @@ class Sweep:
             if pb.kind != "aggregate":
                 continue
             self.heartbeat()
-            ms = pb.finalize()
-            for m in ms:
-                self._publish(m, None, agg_raw)
+            if pb.staged:
+                stage = self._event_stage()
+                pb.bind_loader(stage.load)
+                pb.heartbeat = self.heartbeat
+                ms = pb.finalize()
+                for m in ms:
+                    self._publish(m, None, {**agg_raw, **stage.raw_sources(m.events)})
+            else:
+                ms = pb.finalize()
+                for m in ms:
+                    self._publish(m, None, agg_raw)
             cells = [c for c in self.repo.rule_cells(self.hunt_id)
                      if c["rule_id"] == pb.id and c["target"] != "*" and c["state"] != "split"]
             any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")
@@ -259,3 +280,11 @@ class Sweep:
                 state = "no_match_complete"
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
                                     len(ms) + consumed_matches, evaluated)
+        self.close_stage()
+
+    def close_stage(self) -> None:
+        """Remove the disk stage (raw telemetry copies). Called by finalize and on every failure path."""
+        stage = getattr(self, "_stage", None)
+        if stage is not None:
+            stage.close()
+            self._stage = None

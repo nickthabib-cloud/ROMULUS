@@ -1,11 +1,13 @@
-"""The active M1 playbook pack and per-source applicability."""
+"""The active playbook pack and per-source applicability."""
 from __future__ import annotations
 
+from romulus.detect.correlation import CORRELATION_PLAYBOOKS
 from romulus.detect.host import HOST_PLAYBOOKS
 from romulus.detect.network import NETWORK_PLAYBOOKS
+from romulus.detect.sessions import SESSION_PLAYBOOKS
 
-PACK_VERSION = "m1-pack@2"
-ALL_PLAYBOOKS = HOST_PLAYBOOKS + NETWORK_PLAYBOOKS
+PACK_VERSION = "m2-pack@1"
+ALL_PLAYBOOKS = HOST_PLAYBOOKS + NETWORK_PLAYBOOKS + SESSION_PLAYBOOKS + CORRELATION_PLAYBOOKS
 
 
 def fresh_pack():

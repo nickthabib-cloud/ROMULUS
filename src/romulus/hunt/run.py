@@ -8,6 +8,7 @@ from romulus.agent.controller import Investigator
 from romulus.config import Settings
 from romulus.hunt.manifest import build_manifest, new_hunt_id
 from romulus.hunt.pivot import PivotExecutor
+from romulus.hunt.stage import clear_stale_stages
 from romulus.hunt.sweep import Sweep
 from romulus.sources.es import ElasticClient
 from romulus.sources.models import Window
@@ -161,14 +162,17 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     def heartbeat():
         repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
 
+    stage_dir = s.home / "stage"
+    clear_stale_stages(stage_dir)
     sweep = Sweep(
-        repo, client, hunt_id, window, contracts, on_candidate, heartbeat=heartbeat,
+        repo, client, hunt_id, window, contracts, on_candidate, heartbeat=heartbeat, stage_dir=stage_dir,
     )
     try:
         for target in m["targets"]:
             sweep.run_target(target)
         sweep.finalize()
     except Exception as e:
+        sweep.close_stage()
         repo.audit("system", "hunt.sweep_summary", hunt_id, {
             "finished": False, "complete": False, "partial_reasons": sweep.partial_reasons,
             "stats": sweep.stats, "error": str(e),

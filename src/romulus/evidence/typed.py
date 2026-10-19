@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import BaseModel
 
 NETWORK_OBSERVER_FAMILIES = {
-    "net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session",
+    "net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session", "net_session",
 }
 
 

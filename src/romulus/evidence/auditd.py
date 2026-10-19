@@ -1,6 +1,7 @@
 """Parse Linux audit records (raw `type=... msg=audit(ts:serial): k=v ...` lines) exactly."""
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass, field
 
@@ -82,6 +83,50 @@ def parse_record(line: str) -> AuditRecord:
     enriched = {k: v for k, v, _ in _tokenize(enrich.strip())} if enrich else {}
     return AuditRecord(type=m.group("type"), ts=float(m.group("ts")), serial=int(m.group("serial")),
                        fields=fields, raw_fields=raw, enriched=enriched)
+
+
+AF_NAMES = {0: "unspec", 1: "local", 2: "inet", 10: "inet6", 16: "netlink", 17: "packet"}
+
+# Socket syscalls by audit arch. Other arches (e.g. i386 socketcall multiplexing) are not decoded.
+SOCKET_SYSCALLS = {
+    "c000003e": {42: "connect", 43: "accept", 288: "accept4", 49: "bind"},       # x86_64
+    "c00000b7": {203: "connect", 202: "accept", 242: "accept4", 200: "bind"},    # aarch64
+}
+
+
+@dataclass
+class SockAddr:
+    family: str
+    ip: str | None = None
+    port: int | None = None
+
+
+def socket_syscall(rec: AuditRecord) -> str | None:
+    """The socket syscall a SYSCALL record made, decoded by (arch, number); None if it is not one."""
+    table = SOCKET_SYSCALLS.get(rec.fields.get("arch", ""))
+    number = rec.fields.get("syscall", "")
+    return table.get(int(number)) if table and number.isdigit() else None
+
+
+def parse_sockaddr(saddr: str) -> SockAddr:
+    """Decode the raw sockaddr auditd logs as hex. The family is little-endian (host order on the
+    supported arches); the port and address are in network order."""
+    if not saddr or not _HEX.match(saddr) or len(saddr) % 2 or len(saddr) < 4:
+        raise AuditParseError("SOCKADDR saddr is not hex")
+    b = bytes.fromhex(saddr)
+    fam = int.from_bytes(b[0:2], "little")
+    name = AF_NAMES.get(fam, f"af_{fam}")
+    if fam == 2:
+        if len(b) < 8:
+            raise AuditParseError("short AF_INET sockaddr")
+        return SockAddr(name, str(ipaddress.IPv4Address(b[4:8])), int.from_bytes(b[2:4], "big"))
+    if fam == 10:
+        if len(b) < 24:
+            raise AuditParseError("short AF_INET6 sockaddr")
+        addr = ipaddress.IPv6Address(b[8:24])
+        ip = str(addr.ipv4_mapped) if addr.ipv4_mapped else str(addr)
+        return SockAddr(name, ip, int.from_bytes(b[2:4], "big"))
+    return SockAddr(name)
 
 
 def execve_argv(rec: AuditRecord) -> list[str]:
