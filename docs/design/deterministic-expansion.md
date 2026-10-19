@@ -1,6 +1,6 @@
 # Deterministic expansion and the optional narrative model
 
-**Status:** Direction approved by the owner 2026-10-19 (deterministic expansion, attack-path timeline as the main output, optional model for narrative and lead explanations). The open questions at the end are still open. Implements ADR-006.
+**Status:** Direction approved by the owner 2026-10-19 (deterministic expansion, attack-path timeline as the main output, optional model for narrative and lead explanations). The owner's answers to the open questions are recorded at the end. Implements ADR-006.
 
 ## Goal
 
@@ -213,9 +213,11 @@ On e_a (dev) and, before any claim, on a holdout (f_a or a different storyline):
 
 Steps 5 and 6 do not depend on 1–4 and can run in parallel. The template narrative only needs findings in time order until the incident graph lands. The §6b replay gate needs no new product code and can run now.
 
-## Open questions for the owner
+## Owner decisions (2026-10-19)
 
-1. Maximum expansion depth (proposed default 3) and whether expansion has its own wall-clock budget or shares the hunt's.
-2. Whether a context finding through an observed link may be `urgent`, or is capped at `high` until it has been lab evaluated.
-3. Whether the model option should also appear on the report page for existing hunts (proposed: yes, as "Draft narrative and explain leads").
-4. What happens to Codex's in-flight investigator v2 branch: land it as is (proposed, since its windows, executor and duplicate keys are reused), then stop model-pivot work.
+1. **Depth and budget:** maximum expansion depth 3; expansion shares the hunt's wall-clock budget.
+2. **Lanes:** a context finding reached through an observed link is capped at `high` until context rules are lab evaluated; then the cap is revisited.
+3. **Report page:** yes, a "Draft narrative and explain leads" action for existing hunts, built after the deterministic work (low priority).
+4. **Investigator v2:** landed on `m2/evaluation` (`0bfd0d2`); model-pivot work stops. Agent mode stays available behind the New hunt checkbox, off by default.
+
+Order of work agreed: noise fix and the field-role indicator matcher (lead), Arkime and TShark (lead), expansion engine and context rules (Codex, detection engineer, reviewer), then backlog detections; the eval-custodian scores after each step.
