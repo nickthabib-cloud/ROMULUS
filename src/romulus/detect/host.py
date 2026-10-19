@@ -20,6 +20,8 @@ from romulus.evidence.typed import Outcome, TypedEvent
 WEB_SERVICE_USERS = {"www-data", "apache", "nginx", "httpd", "_www", "wwwrun"}
 INTERPRETERS = SHELLS | {"python", "python2", "python3", "perl", "ruby", "php", "lua", "nc", "ncat", "netcat",
                          "socat", "awk", "gawk", "busybox"}
+SCRIPT_FILE_INTERPRETERS = {"python", "python2", "python3", "perl", "ruby", "php", "lua"}
+AWK_INTERPRETERS = {"awk", "gawk"}
 DOWNLOADERS = {"curl", "wget", "fetch", "tftp"}
 TEMP_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/")
 CRED_FILES = {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"}
@@ -413,7 +415,13 @@ class ExecFromTempDir(Playbook):
                 if isinstance(script, UnknownShellScript):
                     self.missing_required += 1
                     return []
-            else:
+            elif name in AWK_INTERPRETERS:
+                script = ""
+                for i, arg in enumerate(argv[1:-1], start=1):
+                    if arg == "-f":
+                        script = argv[i + 1]
+                        break
+            elif name in SCRIPT_FILE_INTERPRETERS:
                 script = ""
                 for arg in argv[1:]:
                     if arg.startswith(("-", "+")):
@@ -421,6 +429,8 @@ class ExecFromTempDir(Playbook):
                         return []
                     script = arg
                     break
+            else:
+                script = ""
             if script:
                 script_path = resolve(script)
                 if not script_path:
