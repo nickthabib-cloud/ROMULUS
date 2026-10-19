@@ -345,7 +345,7 @@ def test_model_outage_leaves_case_open_for_resume():
     assert repo.cases("h1")[0]["status"] == "open"
 
 
-def test_resume_replays_accepted_pivot_without_a_result_before_new_model_calls():
+def test_resume_replays_persisted_v2_pivot_without_a_result_before_new_model_calls():
     repo = _repo(total=1)
     _candidate(repo, "c1", "video", 50)
     anchor = START + timedelta(minutes=2)
@@ -358,6 +358,15 @@ def test_resume_replays_accepted_pivot_without_a_result_before_new_model_calls()
     })
     repo.append_case_step(case_id, 0, {"action": "seed", "seed_candidate_ids": ["c1"]}, True)
     decision = _host_pivot("video", "event-c1")
+    decision.update({
+        "chosen_option": "O1",
+        "option_description": "entity_timeline for host video, anchor ±5 min",
+        "menu": [{"id": "O1", "description": "entity_timeline for host video, anchor ±5 min"}],
+        "menu_hidden_count": 2,
+        "aliases": {"evidence": {"E1": "event-c1"}},
+        "agent_mode": "model",
+        "deterministic_fallback": False,
+    })
     repo.append_case_step(case_id, 1, decision, True, task_id="pending-pivot")
     executor = RecordingExecutor()
     model = QueueModel([])

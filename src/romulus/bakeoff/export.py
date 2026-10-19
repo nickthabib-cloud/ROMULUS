@@ -159,7 +159,7 @@ def _retry_errors(previous: dict | None, calls: dict[str, dict]) -> tuple[str, .
     if previous is None or previous.get("accepted") or not previous.get("model_call_id"):
         return None
     call = calls.get(previous["model_call_id"])
-    if call is None or call.get("status") != "invalid":
+    if call is None or call.get("status") not in {"invalid", "constraint_defect"}:
         return None
     validation = call.get("validation")
     if validation and validation.get("errors"):

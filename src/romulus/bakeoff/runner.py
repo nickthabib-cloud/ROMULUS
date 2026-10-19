@@ -1,8 +1,8 @@
 """Run frozen bakeoff tasks against candidate models through the production model path.
 
-Each call goes through ``OllamaClient.chat_json`` with the production decision schema and output budget,
-then ``parse_decision_output``, ``validate_decision`` and the controller's duplicate-pivot check, exactly
-as the investigator would. A capturing transport records Ollama's own timings (load, prompt eval, eval)
+Each call goes through ``OllamaClient.chat_json`` with the frozen per-call menu schema and output budget,
+then the production v2 resolver and the controller's duplicate-pivot check, exactly as the investigator
+would. A capturing transport records Ollama's own timings (load, prompt eval, eval)
 so token rates are real decode rates, not wall-clock estimates.
 
 Seed 7 is production. Other seeds are written into the request by the transport, only to measure
@@ -23,14 +23,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-from pydantic import ValidationError
 
 from romulus.agent.brief import BuiltBrief, _render
 from romulus.agent.controller import Investigator
-from romulus.agent.models import EntityRef, decision_schema, parse_decision_output
+from romulus.agent.models import EntityRef
 from romulus.agent.ollama import ModelUnavailable, OllamaClient
 from romulus.agent.options import Menu
-from romulus.agent.validate import ValidationResult, validate_decision
+from romulus.agent.resolver import resolve_output
 from romulus.bakeoff.export import MAX_OUT
 from romulus.config import Settings
 
@@ -107,27 +106,21 @@ def _duplicate(task: dict, request: Any) -> dict | None:
 
 
 def judge(task: dict, brief: BuiltBrief, parsed: dict | None) -> dict:
-    """Schema and semantic validation exactly as the controller applies it."""
-    out: dict[str, Any] = {"schema_valid": False, "validation_ok": False, "errors": [], "decision": None}
-    try:
-        decision = parse_decision_output(parsed)
-    except ValidationError as exc:
-        out["errors"] = [f"invalid decision schema: {exc}"]
-        return out
-    out["schema_valid"] = True
-    out["decision"] = decision.model_dump(mode="json")
-    validation: ValidationResult = validate_decision(decision, brief, _window(task))
-    errors = list(validation.errors)
-    if validation.ok and decision.action == "pivot":
-        duplicate = _duplicate(task, validation.request)
-        if duplicate is not None:
-            errors = [
-                (f"duplicate pivot: normalized request already executed at step {duplicate['n']}; "
-                f"reuse prior_steps step {duplicate['n']} result_digest")
-            ]
-    out["validation_ok"] = not errors
-    out["errors"] = errors
-    return out
+    """Resolve and validate exactly as the v2 controller applies constrained output."""
+    resolution = resolve_output(
+        parsed, brief, _window(task), duplicate_check=lambda request: _duplicate(task, request),
+    )
+    return {
+        "schema_valid": resolution.decision is not None,
+        "validation_ok": resolution.ok,
+        "errors": list(resolution.errors),
+        "decision": (
+            resolution.decision.model_dump(mode="json")
+            if resolution.decision is not None else None
+        ),
+        "text_truncated": list(resolution.truncated_fields),
+        "constraint_defect": resolution.constraint_defect,
+    }
 
 
 def retry_brief(brief: BuiltBrief, errors: list[str]) -> BuiltBrief | None:
@@ -151,7 +144,7 @@ def _call(client: OllamaClient, transport: CaptureTransport, model: str, brief: 
           max_out: int) -> tuple[dict, dict | None]:
     transport.last = None
     try:
-        result = client.chat_json(model, brief.system, brief.user, brief.schema or decision_schema(), max_out=max_out)
+        result = client.chat_json(model, brief.system, brief.user, brief.schema, max_out=max_out)
     except ModelUnavailable as exc:
         return {"status": "unavailable", "error": str(exc), "duration_ms": None, "raw": ""}, None
     timings = transport.last or {}
