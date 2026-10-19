@@ -4,7 +4,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.decide.policy import decide
 from romulus.detect.correlation import InterpreterExternalConnection, ProcessNetworkLink
 from romulus.evidence.auditd import AuditParseError, parse_sockaddr
 from romulus.evidence.normalize import normalize_hits
@@ -153,6 +152,22 @@ def _sock(serial=500, saddr=SADDR_C2, host="videoserver", t0=T0, **kw):
     return events[0]
 
 
+def iec(*events):
+    rule = InterpreterExternalConnection()
+    rule.consume(list(events))
+    return rule.finalize()
+
+
+def execd(pid, ppid, exe, t0=T0 - 60, host="videoserver"):
+    """A process_exec event, as the auditd exec normalizer would produce it."""
+    from romulus.evidence.typed import RawRef, TypedEvent, fv
+    return TypedEvent(id=f"x{host}{pid}", family="process_exec", ts=datetime.fromtimestamp(t0, UTC), host=host,
+                      outcome=Outcome.success,
+                      fields={"process.pid": fv(pid, "fixture"), "process.ppid": fv(ppid, "fixture"),
+                              "process.executable": fv(exe, "fixture")},
+                      raw=[RawRef(target="romulus-host-logs", native_id=f"exec-{pid}")], normalizer="fixture")
+
+
 @pytest.mark.parametrize("kw, lane", [
     ({}, "high"),                                                              # web-service interpreter
     ({"exe": "/usr/bin/bash", "comm": "bash", "uid": "0", "user": "root"}, "high"),   # shell
@@ -160,14 +175,15 @@ def _sock(serial=500, saddr=SADDR_C2, host="videoserver", t0=T0, **kw):
     ({"exe": "/usr/bin/python3.12", "comm": "python3", "uid": "1000", "user": "alice"}, "lead"),
 ])
 def test_notable_process_external_connect_matches_with_kernel_identity(kw, lane):
-    matches = InterpreterExternalConnection().consume([_sock(**kw)])
+    matches = iec(_sock(**kw))
     assert len(matches) == 1 and matches[0].proposed_lane == lane
-    assert "the call succeeded" in matches[0].claim
+    assert "1 succeeded" in matches[0].claim
 
 
 def test_claim_says_connect_call_and_states_the_socket_type_caveat():
-    m = InterpreterExternalConnection().consume([_sock()])[0]
-    assert "calling connect() to non-private address" in m.claim and "UDP socket sends no packets" in m.claim
+    m = iec(_sock())[0]
+    assert "making 1 connect() call(s) to 1 non-private address(es) on port 4444" in m.claim
+    assert "UDP socket sends no packets" in m.claim
     assert "connected" not in InterpreterExternalConnection.title
 
 
@@ -180,21 +196,51 @@ def test_claim_says_connect_call_and_states_the_socket_type_caveat():
     ("0200115CF0000001" + "0" * 16, {}),                                        # reserved 240/4
 ])
 def test_internal_ordinary_and_non_connection_calls_do_not_match(saddr, kw):
-    assert InterpreterExternalConnection().consume([_sock(saddr=saddr, **kw)]) == []
+    assert iec(_sock(saddr=saddr, **kw)) == []
 
 
-def test_failed_connect_is_worded_as_failed_and_lowered_by_policy():
-    m = InterpreterExternalConnection().consume([_sock(success="no", exit_code="-111")])[0]
-    assert "the call failed" in m.claim
-    assert decide(m, "h1").lane == "lead"
+def test_all_failed_connects_are_a_lead_and_say_so():
+    m = iec(_sock(success="no", exit_code="-111"))[0]
+    assert "1 failed" in m.claim and m.proposed_lane == "lead"
+    assert any("every connect() call failed" in n for n in m.notes)
 
 
-def test_success_after_failure_keeps_both_candidates():
-    rule = InterpreterExternalConnection()
-    failed = rule.consume([_sock(1, success="no", exit_code="-111")])
-    ok = rule.consume([_sock(2, t0=T0 + 300)])
-    assert decide(failed[0], "h1").candidate_id != decide(ok[0], "h1").candidate_id
-    assert decide(ok[0], "h1").lane == "high"
+def test_success_after_failure_keeps_the_high_lane_and_counts_both():
+    m = iec(_sock(1, success="no", exit_code="-111"), _sock(2, t0=T0 + 300))[0]
+    assert m.proposed_lane == "high" and "1 succeeded, 1 failed" in m.claim
+
+
+def test_many_destinations_on_one_port_are_one_item():
+    socks = [_sock(i, saddr=f"020001BBC00002{i:02X}" + "0" * 16, t0=T0 + i,
+                   exe="/usr/bin/python3.10", comm="python3", uid="0", user="root") for i in range(1, 6)]
+    matches = iec(*socks)
+    assert len(matches) == 1
+    assert "5 connect() call(s) to 5 non-private address(es) on port 443" in matches[0].claim
+
+
+def test_web_account_daemon_started_by_the_service_manager_is_lowered_to_lead():
+    tree = [execd(150, 1, "/usr/bin/perl"), execd(100, 150, "/usr/bin/perl", t0=T0 - 30)]
+    m = iec(*tree, _sock())[0]
+    assert m.proposed_lane == "lead" and "reaches the service manager with no web server" in m.claim
+    assert any("exec-100" in n and "exec-150" in n for n in m.notes)
+
+
+def test_web_account_child_of_the_web_server_stays_high():
+    tree = [execd(90, 1, "/usr/sbin/apache2"), execd(100, 90, "/usr/bin/dash", t0=T0 - 40)]
+    m = iec(*tree, _sock())[0]
+    assert m.proposed_lane == "high" and "ancestry includes the web server '/usr/sbin/apache2'" in m.claim
+
+
+def test_unknown_lineage_never_lowers_the_lane():
+    m = iec(execd(100, 77, "/usr/bin/perl"), _sock())[0]          # pid 77's exec is not in the window
+    assert m.proposed_lane == "high" and "not fully recorded" in m.claim
+
+
+def test_reused_pid_uses_the_exec_in_force_at_connect_time():
+    tree = [execd(100, 90, "/usr/sbin/apache2", t0=T0 - 3600),     # pid 100 was the web server an hour ago
+            execd(100, 1, "/usr/bin/perl", t0=T0 - 30)]            # now it is a daemon started by pid 1
+    m = iec(*tree, _sock())[0]
+    assert m.proposed_lane == "lead"
 
 
 # ---- correlation -----------------------------------------------------------------------------

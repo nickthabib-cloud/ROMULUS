@@ -174,3 +174,19 @@ def test_session_rule_citations_resolve_after_a_sweep(monkeypatch):
     cites = rm._citations(repo, long_conn[0])
     assert len(cites) == 4 and all(c["status"] == "retained" for c in cites), cites
     assert not s.partial_reasons
+
+
+def test_parser_verified_ntp_beacons_are_context_not_dropped():
+    ntp = [session(f"n{i}", first=T0 + timedelta(seconds=64 * i), seconds=1, sport=123, dport=123, proto=17,
+                   cid=f"1:n{i}=") for i in range(10)]
+    for hit in ntp:
+        hit["_source"]["protocol"] = ["udp", "ntp"]
+    m = run(Beaconing(), events(*ntp))
+    assert len(m) == 1 and m[0].proposed_lane == "context"
+    assert "identified every connection as ntp" in m[0].claim
+
+
+def test_port_123_without_the_ntp_parser_stays_a_lead():
+    fake = [session(f"f{i}", first=T0 + timedelta(seconds=64 * i), seconds=1, sport=40000 + i, dport=123,
+                    proto=17, cid=f"1:f{i}=") for i in range(10)]
+    assert run(Beaconing(), events(*fake))[0].proposed_lane == "lead"

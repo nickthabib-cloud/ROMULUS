@@ -89,42 +89,171 @@ def _process_words(e: TypedEvent) -> str:
             + (f", user '{user}')" if user is not None else ")"))
 
 
+WEB_SERVER_PREFIXES = ("apache2", "httpd", "nginx", "lighttpd", "php-fpm", "php-cgi", "uwsgi", "gunicorn", "caddy")
+SERVICE_MANAGERS = {"systemd", "init"}
+LINEAGE_DEPTH = 6
+
+
+class PidTable:
+    """Kernel-recorded exec history per (host, pid), for lineage questions about a socket's process. Holds
+    compact tuples only; a pid's meaning at time t is its latest exec at or before t (pids are reused)."""
+
+    def __init__(self):
+        self.execs: dict[tuple[str, int], list[tuple[float, str, int | None, str]]] = defaultdict(list)
+        self._sorted = True
+
+    def add(self, e: TypedEvent) -> None:
+        pid, exe = e.get("process.pid"), e.get("process.executable")
+        if not isinstance(pid, int) or not exe or e.host is None:
+            return
+        ppid = e.get("process.ppid")
+        self.execs[(e.host, pid)].append((e.ts.timestamp(), str(exe), ppid if isinstance(ppid, int) else None,
+                                          e.raw[0].native_id if e.raw else ""))
+        self._sorted = False
+
+    def _lookup(self, host: str, pid: int, ts: float):
+        if not self._sorted:
+            for entries in self.execs.values():
+                entries.sort(key=lambda entry: entry[0])
+            self._sorted = True
+        entries = self.execs.get((host, pid), [])
+        latest = None
+        for entry in entries:                      # one pid rarely has more than a few execs in a window
+            if entry[0] <= ts + 1.0:
+                latest = entry
+            else:
+                break
+        return latest
+
+    def ancestry(self, host: str, ppid, ts: float) -> tuple[str, list[tuple[str, str]]]:
+        """Walk up from a parent pid. Returns (verdict, [(exe, raw id)]) with verdict 'web_server' when a web
+        server is an ancestor, 'service_manager' when the chain provably reaches pid 1 or systemd/init without
+        one, and 'unknown' when an ancestor's exec is not in the window."""
+        chain: list[tuple[str, str]] = []
+        pid = ppid
+        for _ in range(LINEAGE_DEPTH):
+            if pid in (0, 1):
+                return "service_manager", chain
+            if not isinstance(pid, int):
+                return "unknown", chain
+            entry = self._lookup(host, pid, ts)
+            if entry is None:
+                return "unknown", chain
+            t, exe, parent, raw_id = entry
+            name = basename(exe)
+            chain.append((exe, raw_id))
+            if name.startswith(WEB_SERVER_PREFIXES):
+                return "web_server", chain
+            if name in SERVICE_MANAGERS:
+                return "service_manager", chain
+            pid, ts = parent, t
+        return "unknown", chain
+
+
+def lineage_lane(reason: str | None, lane: str, verdict: str, chain) -> tuple[str, list[str]]:
+    """Lineage can only lower a lane. A web-service process whose ancestry provably reaches the service
+    manager without a web server is a daemon of that account, not a request-driven child: lead. Unknown
+    lineage keeps the lane, so missing records can never hide a web shell."""
+    if reason is None or "web-service account" not in reason or verdict != "service_manager" or lane != "high":
+        return lane, []
+    names = " <- ".join(f"{exe} ({rid})" for exe, rid in chain) or "pid 1"
+    return "lead", [(f"lane lowered to lead: auditd exec records trace the process to the service manager with no "
+                    f"web server in between ({names})")]
+
+
 class InterpreterExternalConnection(Playbook):
     """Positive-only: the audit rule set's scope (syscalls, families, ports) is not visible in telemetry,
-    so a missing connect record never proves a connection did not happen."""
+    so a missing connect record never proves a connection did not happen. One item per (host, program,
+    account, port), listing every destination, so routine update traffic is one lead, not one per address."""
     id = "host.interpreter_external_connection"
-    version = "2"
-    title = "Shell, interpreter, relay tool or web-service process made a connect() call to a non-private address"
-    families = ("net_socket",)
-    required_fields = ("socket.syscall", "process.executable", "destination.ip")
+    version = "3"
+    title = "Shell, interpreter, relay tool or web-service process made connect() calls to non-private addresses"
+    kind = "aggregate"
+    families = ("net_socket", "process_exec")
+    required_fields = ()
     assures_negative = False
     severity, lane = "high", "lead"
     attack = ("T1059", "T1071", "T1095")
     benign = ("package managers and update checks run from scripts", "monitoring or backup scripts calling out",
-              "web applications making approved outbound API calls",
+              "web applications and their daemons making approved outbound API calls",
               "name resolution: resolvers and address sorting call connect() on UDP sockets")
     next_checks = ("process_tree for the connecting process", "network records for the same destination and time",
                    "entity_timeline of the host around the connection")
 
-    def match(self, e: TypedEvent) -> list[Match]:
-        if e.get("socket.syscall") != "connect":
-            return []
-        ip, port = canon_ip(e.get("destination.ip")), e.get("destination.port")
-        if not external(ip) or not port:          # port 0: a route probe, never a connection
-            return []
-        reason, lane = process_interest(e)
-        if reason is None:
-            return []
-        claim = (f"An auditd connect() record on {e.host} shows {_process_words(e)}, {reason}, calling connect() "
-                 f"to non-private address {ip} port {port} at {e.ts.isoformat()}; {connect_phrase(e)}. "
-                 f"{SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
-        preds = [pf(e, "socket.syscall"), pf(e, "process.executable"), pf(e, "destination.ip")]
-        if e.has("process.user"):
-            preds.append(pf(e, "process.user"))
-        # the outcome is part of the identity: a refused call must never hide a later successful one
-        key = f"{e.host}|{e.get('process.executable')}|{e.get('process.user')}|{ip}|{port}|{e.outcome}"
-        return [Match(self.id, claim, self.claim_type, [e], preds, e.ts, self.severity, lane, "high",
-                      e.entities(), group_key=key)]
+    def __init__(self):
+        super().__init__()
+        self.pids = PidTable()
+        self.groups: dict[str, list[TypedEvent]] = defaultdict(list)
+        self.info: dict[str, dict] = {}
+
+    def consume(self, events):
+        for e in events:
+            if e.family == "process_exec":
+                self.pids.add(e)
+                continue
+            if e.family != "net_socket" or e.get("socket.syscall") != "connect":
+                continue
+            if not e.has("process.executable") or not e.has("destination.ip"):
+                self.missing_required += 1
+                continue
+            self.evaluated += 1
+            ip, port = canon_ip(e.get("destination.ip")), e.get("destination.port")
+            if not external(ip) or not port:          # port 0: a route probe, never a connection
+                continue
+            reason, lane = process_interest(e)
+            if reason is None:
+                continue
+            key = f"{e.host}|{e.get('process.executable')}|{e.get('process.user')}|{port}"
+            info = self.info.setdefault(key, {"count": 0, "dests": Counter(), "outcomes": Counter(),
+                                              "first": e.ts, "last": e.ts, "reason": reason, "lane": lane})
+            info["count"] += 1
+            info["dests"][ip] += 1
+            info["outcomes"][str(e.outcome)] += 1
+            info["first"], info["last"] = min(info["first"], e.ts), max(info["last"], e.ts)
+            if len(self.groups[key]) < EXAMPLE_LIMIT:
+                self.groups[key].append(e)
+        return []
+
+    def finalize(self):
+        out = []
+        for key in sorted(self.groups):
+            evs = sorted(self.groups[key], key=lambda x: (x.ts, x.id))
+            info, e0 = self.info[key], evs[0]
+            verdict, chain = self.pids.ancestry(e0.host, e0.get("process.ppid"), e0.ts.timestamp())
+            lane, notes = lineage_lane(info["reason"], info["lane"], verdict, chain)
+            if lane == "high" and all(o == Outcome.failure for o in info["outcomes"]):
+                lane = "lead"
+                notes.append("lane lowered to lead: every connect() call failed")
+            dests = ", ".join(f"{ip} ({n})" for ip, n in info["dests"].most_common(8))
+            more = f" and {len(info['dests']) - 8} more" if len(info["dests"]) > 8 else ""
+            outcomes = ", ".join(f"{n} {w}" for w, n in (
+                ("succeeded", info["outcomes"].get(Outcome.success, 0)),
+                ("failed", info["outcomes"].get(Outcome.failure, 0)),
+                ("with unknown or in-progress outcome", info["outcomes"].get(Outcome.unknown, 0))) if n)
+            port = e0.get("destination.port")
+            if verdict == "web_server":
+                lineage = f" Its ancestry includes the web server '{chain[-1][0]}'."
+            elif verdict == "service_manager":
+                lineage = " Its ancestry reaches the service manager with no web server."
+            else:
+                lineage = " Its ancestry is not fully recorded in the window."
+            claim = (f"auditd connect() records on {e0.host} show {_process_words(e0)}, {info['reason']}, making "
+                     f"{info['count']} connect() call(s) to {len(info['dests'])} non-private address(es) on port "
+                     f"{port} ({info['first'].isoformat()} – {info['last'].isoformat()}): {dests}{more}; "
+                     f"{outcomes}.{lineage} {SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
+            preds = [pf(e0, "socket.syscall"), pf(e0, "process.executable"), pf(e0, "destination.port")]
+            if e0.has("process.user"):
+                preds.append(pf(e0, "process.user"))
+            m = Match(self.id, claim, self.claim_type, evs, preds, e0.ts, self.severity, lane, "high",
+                      e0.entities(), group_key=key)
+            m.notes.extend(notes)
+            if info["count"] > len(evs):
+                m.notes.append(f"{info['count']} matching connect() records; {len(evs)} are cited")
+            out.append(m)
+        return out
+
+    def retained_events(self) -> list[TypedEvent]:
+        return [e for evs in self.groups.values() for e in evs]
 
 
 # ---------------------------------------------------------------------------------------------

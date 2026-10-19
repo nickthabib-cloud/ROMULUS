@@ -16,6 +16,7 @@ from romulus.detect.correlation import StageMissing, canon_ip, external
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
+PERIODIC_BY_DESIGN = {"ntp"}      # Arkime parser protocol names whose normal operation is a fixed poll interval
 
 
 def _public(ip) -> bool:
@@ -88,7 +89,10 @@ class _Stitched(Playbook):
                 c = self.conns[key] = {"start": start, "end": end, "records": 0, "events": [], "c2s": 0, "s2c": 0,
                                        "src": e.get("source.ip"), "sport": e.get("source.port"),
                                        "dst": e.get("destination.ip"), "dport": e.get("destination.port"),
-                                       "transport": e.get("network.transport"), "observer": e.host}
+                                       "transport": e.get("network.transport"), "observer": e.host,
+                                       "protocols": set()}
+            protocols = e.get("network.protocols")
+            c["protocols"].update(protocols if isinstance(protocols, list) else [protocols] if protocols else [])
             c["start"], c["end"] = min(c["start"], start), max(c["end"], end)
             c["records"] += 1
             c["c2s"] += int(e.get("source.bytes") or 0)
@@ -168,12 +172,18 @@ class Beaconing(_Stitched):
             if mad / median > self.MAX_JITTER:
                 continue
             evs = self._events([c["events"][0] for c in sorted(conns, key=lambda c: c["start"])][:EXAMPLE_LIMIT])
+            # Protocols that are periodic by design, identified by Arkime's parser from packet content (not the
+            # port): still reported, in the context lane, never dropped
+            periodic = sorted(set.intersection(*(c["protocols"] for c in conns)) & PERIODIC_BY_DESIGN)
             claim = (f"Arkime recorded {len(conns)} separate {transport} connections from {src} to {dst} port {dport} "
                      f"({_iso(starts[0])} – {_iso(starts[-1])}) starting every {median:.0f} s (median), with a median "
-                     f"deviation of {mad:.1f} s between starts.")
+                     f"deviation of {mad:.1f} s between starts."
+                     + (f" Arkime's parser identified every connection as {', '.join(periodic)}, a protocol that is "
+                        f"periodic by design." if periodic else ""))
             preds = [pf(evs[0], "source.ip"), pf(evs[0], "destination.ip"), pf(evs[0], "destination.port")]
-            out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity, self.lane,
-                             "medium", evs[0].entities(), group_key=f"{src}|{dst}|{dport}|{transport}"))
+            out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity,
+                             "context" if periodic else self.lane, "medium", evs[0].entities(),
+                             group_key=f"{src}|{dst}|{dport}|{transport}"))
         return out
 
 
