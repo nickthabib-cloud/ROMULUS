@@ -134,6 +134,10 @@ class Repo:
         Refuses a hunt that may still be executing. An audit record of the deletion is kept."""
         now = now or utcnow()
         with write_txn(self.engine) as c:
+            # Take SQLite's write lock *before* reading liveness or citations. pysqlite defers BEGIN
+            # until the first write, so without this a worker in another process could claim the
+            # hunt, or publish a new citation, between our checks and our deletes.
+            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(id=t.hunt.c.id))
             h = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().first()
             if h is None:
                 raise KeyError(hunt_id)
@@ -145,7 +149,10 @@ class Repo:
                 raise ValueError(f"hunt {hunt_id} is {h['execution_state']} with a live worker lease; "
                                  f"let it finish (or wait for the lease to expire) before deleting")
 
-            # events this hunt stored that other hunts' candidates still cite: keep, reassign owner
+            # Events this hunt stored that ANY other hunt still uses: keep them and reassign ownership.
+            # Event IDs are global and the first hunt to store an event owns the row, so other hunts
+            # can depend on it through (a) their findings' event_ids, (b) their investigation steps'
+            # pivot digests, and (c) their own entity links (written by save_evidence per hunt).
             mine = {r.id for r in c.execute(select(t.typed_event.c.id).where(t.typed_event.c.hunt_id == hunt_id))}
             cited_by: dict[str, str] = {}
             for cid_hunt, eids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)
@@ -153,6 +160,29 @@ class Repo:
                 for eid in eids or []:
                     if eid in mine:
                         cited_by.setdefault(eid, cid_hunt)
+
+            def _strings(obj):
+                if isinstance(obj, str):
+                    yield obj
+                elif isinstance(obj, dict):
+                    for v in obj.values():
+                        yield from _strings(v)
+                elif isinstance(obj, list):
+                    for v in obj:
+                        yield from _strings(v)
+
+            for step_hunt, digest_, decision in c.execute(
+                    select(t.case.c.hunt_id, t.case_step.c.result_digest, t.case_step.c.decision)
+                    .join(t.case, t.case.c.id == t.case_step.c.case_id).where(t.case.c.hunt_id != hunt_id)):
+                for sval in _strings([digest_, decision]):
+                    if sval in mine:
+                        cited_by.setdefault(sval, step_hunt)
+            for ev_id, ent_hunt in c.execute(
+                    select(t.event_entity.c.event_id, t.entity.c.hunt_id)
+                    .join(t.entity, t.entity.c.id == t.event_entity.c.entity_id)
+                    .where(t.entity.c.hunt_id != hunt_id)):
+                if ev_id in mine:
+                    cited_by.setdefault(ev_id, ent_hunt)
             for eid, owner in cited_by.items():
                 c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(hunt_id=owner))
             drop_events = mine - set(cited_by)

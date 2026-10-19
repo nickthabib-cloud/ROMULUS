@@ -280,10 +280,36 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
         "versions": {"pack": hm["pack"]["version"], "normalizer": hm["normalizer"], "policy": hm["policy"],
                      "model": hm["model"], "romulus": hm["romulus_version"]},
-        "integrity": {"broken_citations": broken, "finalizable": broken == 0},
         "generated_by": actor,
     }
+    broken_inv = _broken_investigation_citations(repo, m["investigations"])
+    m["integrity"] = {"broken_citations": broken, "broken_investigation_citations": len(broken_inv),
+                      "broken_investigation_event_ids": broken_inv[:50],
+                      "finalizable": broken == 0 and not broken_inv}
     return _jsonable(m)
+
+
+def _broken_investigation_citations(repo: Repo, investigations) -> list[str]:
+    """Every evidence/event ID cited anywhere in the investigations section must still resolve to a
+    stored typed event; otherwise the report is degraded, not finalizable."""
+    cited: set[str] = set()
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in ("evidence_ids", "event_ids") and isinstance(v, list):
+                    cited.update(x for x in v if isinstance(x, str))
+                else:
+                    walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(investigations)
+    if not cited:
+        return []
+    found = {e["id"] for e in repo.events_by_ids(sorted(cited))}
+    return sorted(cited - found)
 
 
 def publish_revision(repo: Repo, hunt_id: str, actor: str) -> dict:

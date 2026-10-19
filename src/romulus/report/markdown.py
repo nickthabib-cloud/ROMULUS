@@ -55,7 +55,8 @@ def render(m: dict, banner: str = BANNER) -> str:
            f"| Lane counts | {esc(json.dumps(m['lane_counts'], sort_keys=True))} |",
            f"| Model investigator | {esc(m['agent'].get('status'))}: {esc(m['agent'].get('stop_reason', ''))} |",
            f"| Stop reason | {esc(m['stop_reason'])} |",
-           f"| Broken citations | {m['integrity']['broken_citations']} |", ""]
+           f"| Broken citations | {m['integrity']['broken_citations']} |",
+           f"| Broken investigation citations | {m['integrity'].get('broken_investigation_citations', 0)} |", ""]
     if not m["integrity"]["finalizable"]:
         out += [("> **Degraded report:** one or more citations could not be resolved to retained evidence. "
                  "Those findings are listed with the broken citation marked."), ""]

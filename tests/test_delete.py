@@ -126,3 +126,67 @@ def test_live_hunt_cannot_be_deleted_but_stale_one_can(env):
         conn.execute(t.hunt.update().where(t.hunt.c.id == "h1").values(lease_until=utcnow() - timedelta(minutes=5)))
     repo.delete_hunt("h1", actor="test")
     assert repo.get_hunt("h1") is None
+
+
+# ---------------------------------------------------------------- gate re-review regressions (B4, I1, minors)
+def _event_id(repo):
+    with repo.engine.connect() as c:
+        return c.execute(select(t.typed_event.c.id)).scalar_one()
+
+
+def _strip_h2_candidate(repo):
+    with repo.engine.begin() as c:
+        c.execute(t.candidate.delete().where(t.candidate.c.id == "cand-h2"))
+
+
+def test_evidence_cited_only_by_another_hunts_pivot_step_survives(env):
+    c, repo, s, pw = env
+    _strip_h2_candidate(repo)                          # no finding cites it: only an investigation step
+    eid = _event_id(repo)
+    repo.create_case({"id": "case-h2", "hunt_id": "h2", "title": "pivot", "priority": 1.0, "entities": [],
+                      "step_budget": 4})
+    repo.append_case_step("case-h2", 1, {"tool": "entity_timeline", "evidence_ids": [eid]}, True,
+                          result_digest={"status": "complete", "event_ids": [eid]})
+    repo.delete_hunt("h1", actor="test")
+    with repo.engine.connect() as conn:
+        assert conn.execute(select(t.typed_event.c.hunt_id).where(t.typed_event.c.id == eid)).scalar() == "h2"
+        assert conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+    from romulus.report.manifest import _broken_investigation_citations
+    assert _broken_investigation_citations(repo, {"cases": [{"pivot_steps": [{"evidence_ids": [eid]}]}]}) == []
+
+
+def test_evidence_linked_only_through_another_hunts_entities_survives(env):
+    c, repo, s, pw = env
+    _strip_h2_candidate(repo)
+    eid = _event_id(repo)
+    with repo.engine.begin() as conn:
+        conn.execute(t.entity.insert().values(id="h2:host:web01", hunt_id="h2", kind="host", value="web01",
+                                              event_count=1))
+        conn.execute(t.event_entity.insert().values(event_id=eid, entity_id="h2:host:web01", role="host"))
+    repo.delete_hunt("h1", actor="test")
+    with repo.engine.connect() as conn:
+        assert conn.execute(select(t.typed_event.c.hunt_id).where(t.typed_event.c.id == eid)).scalar() == "h2"
+        assert conn.execute(select(func.count()).select_from(t.event_entity)
+                            .where(t.event_entity.c.entity_id == "h2:host:web01")).scalar_one() == 1
+
+
+def test_missing_investigation_evidence_makes_report_not_finalizable(env):
+    c, repo, s, pw = env
+    from romulus.report.manifest import _broken_investigation_citations
+    assert _broken_investigation_citations(repo, {"cases": [{"steps": [{"event_ids": ["gone"]}]}]}) == ["gone"]
+
+
+def test_demoted_lead_loses_delete_rights_immediately(env):
+    c, repo, s, pw = env
+    _login(c, "lead1", pw)
+    token = _csrf(c.get("/hunts/h1/delete").text)
+    with repo.engine.begin() as conn:
+        conn.execute(t.user.update().where(t.user.c.username == "lead1").values(role="analyst"))
+    assert c.post("/hunts/h1/delete", data={"csrf": token, "confirm": "h1"}).status_code == 403
+    assert repo.get_hunt("h1") is not None
+
+
+def test_spoofed_deleted_banner_is_not_shown(env):
+    c, repo, s, pw = env
+    _login(c, "lead1", pw)
+    assert "permanently deleted" not in c.get("/?deleted=h1").text   # h1 exists, never deleted

@@ -94,7 +94,10 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     def hunts(request: Request):
         u = need(request)
         rows = [{**h, "lanes": repo.lane_counts(h["id"])} for h in repo.list_hunts()]
-        return page(request, "hunts.html", u, hunts=rows)
+        deleted = request.query_params.get("deleted", "")
+        # only confirm a deletion that the audit log actually records (the query string is spoofable)
+        confirmed = deleted if deleted and repo.latest_audit(deleted, "hunt.delete") else ""
+        return page(request, "hunts.html", u, hunts=rows, deleted=confirmed)
 
     @app.get("/hunts/new", response_class=HTMLResponse)
     def new_hunt_form(request: Request):
@@ -202,9 +205,16 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ deletion
     def need_lead(request: Request) -> dict:
+        """Lead check against the database, not just the cookie: a demoted or disabled account
+        must lose delete rights immediately, not when its 8-hour session expires."""
         u = need(request)
-        if u.get("r") != "lead":
-            raise HTTPException(403, "only a lead account can delete hunts")
+        from sqlalchemy import select as _select
+        from romulus.store import schema as _t
+        with repo.engine.connect() as c:
+            row = c.execute(_select(_t.user.c.role, _t.user.c.disabled)
+                            .where(_t.user.c.username == u.get("u"))).first()
+        if u.get("r") != "lead" or row is None or row.disabled or row.role != "lead":
+            raise HTTPException(403, "only an active lead account can delete hunts")
         return u
 
     @app.get("/hunts/{hunt_id}/delete", response_class=HTMLResponse)
@@ -234,11 +244,16 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         if s.reports_dir.resolve() in rdir.parents and rdir.is_dir():
             import shutil
             shutil.rmtree(rdir, ignore_errors=True)
-        try:
-            with repo.engine.connect() as c:          # return freed pages to the filesystem
-                c.exec_driver_sql("VACUUM")
-        except Exception:  # noqa: BLE001 - space reclaim is best-effort; the deletion already committed
-            pass
+        # Return freed pages to the filesystem, but never while a hunt may be writing: VACUUM blocks
+        # writers and could push a running sweep past its busy timeout. Compaction then simply waits
+        # for the next deletion made while nothing is running.
+        busy = any(h["execution_state"] in ("running", "planned", "paused") for h in repo.list_hunts())
+        if not busy:
+            try:
+                with repo.engine.connect() as c:
+                    c.exec_driver_sql("VACUUM")
+            except Exception:  # noqa: BLE001 - best-effort; the deletion already committed
+                pass
         return RedirectResponse(f"/?deleted={hunt_id}&removed={counts.get('candidates', 0)}", status_code=303)
 
     # ------------------------------------------------------------------ reports
