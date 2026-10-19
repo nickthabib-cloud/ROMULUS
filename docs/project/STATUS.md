@@ -17,7 +17,7 @@ _Last updated: 2026-10-19 by Claude (lead), M1 accepted._
   - Model quality (M2 bakeoff): ~33% invalid model outputs; agent has contributed no new findings on the lab yet.
 - **Process notes:** Claude does not edit the shell parser or the investigator (an assistant-side safety check stopped that work); those go to Codex via `Claude-Codex.md` (replace Claude's last message; date+time headers; execute-only rounds).
 
-- **Current milestone:** M1, implemented and locally tested on branch `codex/model-investigator`; the investigator and its pivot fix round are integration tested on the VM. Reviewer and owner-demo gates remain open.
+- **Current milestone:** M2 (evaluation harness and model bakeoff), **not started**. M1 is accepted and merged into `main` (2026-10-19). Start M2 in a fresh session: branch from `main` (e.g. `m2/evaluation`), begin with the `eval-custodian` gold opportunity inventory for SL700 e_a (ground truth on the VM at `/home/user/romulus-eval/sl700_e_a/`), then the scoring scripts, the simple-baseline runner and the model bakeoff (spec §12, §15; `docs/project/MILESTONES.md` → M2). Include the M1 carry-overs listed above.
 - **State:**
   - Sweep → decisions → coverage ledger → report manifest (immutable revisions, citation integrity) → technical Markdown/JSON → web UI (login, live stream, finding detail with highlighted raw evidence, triage, reports).
   - The 455-test local suite includes acceptance scenarios 13–17, hostile input, positive-only shell coverage, argv-layout and line-safe partial-prefix regressions, budget/fairness, owner-fenced lease/resume and pivot persistence, crash replay, direct-only pivots, and investigation reporting.
