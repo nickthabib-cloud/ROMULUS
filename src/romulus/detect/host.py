@@ -29,6 +29,20 @@ INTERNAL_NETS = [ipaddress.ip_network(n) for n in (
     "::1/128", "fc00::/7", "fe80::/10")]
 
 
+def interpreter_name(argv0: str) -> str:
+    """Normalize an argv[0] for membership checks without expanding the allow-list."""
+    name = basename(argv0)
+    if name.startswith("-"):
+        name = name[1:]
+    if name in INTERPRETERS:
+        return name
+    for base in sorted(INTERPRETERS, key=len, reverse=True):
+        suffix = name[len(base):] if name.startswith(base) else ""
+        if suffix and re.fullmatch(r"(?:\d+(?:\.\d+)*)|(?:\.\d+)+", suffix):
+            return base
+    return name
+
+
 def is_internal(ip: ipaddress._BaseAddress) -> bool:
     return any(ip in n for n in INTERNAL_NETS if n.version == ip.version)
 
@@ -84,7 +98,7 @@ def _interpreter_indicators(argv: list[str]) -> tuple[list[str], bool, bool]:
     out = []
     unevaluable = False
     prefix_only = False
-    name = basename(argv[0]) if argv else ""
+    name = interpreter_name(argv[0]) if argv else ""
     rest = argv[1:]
     if name in INTERPRETERS and (not rest or rest in (["-"], ["-i"], ["-p"])):
         out.append("interpreter reading commands from stdin (no script argument)")
@@ -96,7 +110,7 @@ def _interpreter_indicators(argv: list[str]) -> tuple[list[str], bool, bool]:
         if parsed.ok or parsed.partial:
             cmds = parsed.commands()
             if len(cmds) > 1 and cmds[0].argv and cmds[0].argv[0].startswith("/") and \
-                    cmds[0].name not in INTERPRETERS:
+                    interpreter_name(cmds[0].argv[0]) not in INTERPRETERS:
                 out.append(f"additional commands chained after application helper '{cmds[0].name}'")
             for c in cmds:
                 if c.name.startswith("python"):
@@ -146,7 +160,7 @@ class WebServiceSpawnsInterpreter(Playbook):
         matches = []
         for e in self.applicable(events):
             user, argv = e.get("process.user"), e.get("process.argv")
-            if user not in WEB_SERVICE_USERS or not argv or basename(argv[0]) not in INTERPRETERS:
+            if user not in WEB_SERVICE_USERS or not argv or interpreter_name(argv[0]) not in INTERPRETERS:
                 continue
             indicators, unevaluable, prefix_only = _interpreter_indicators(argv)
             if unevaluable:
@@ -227,7 +241,7 @@ class DownloaderFeedsInterpreter(Playbook):
     def consume(self, events):
         for e in sorted(self.applicable(events), key=lambda x: x.ts):
             argv = e.get("process.argv")
-            name = basename(argv[0])
+            name = interpreter_name(argv[0])
             key = (e.host, e.get("process.ppid"))
             if name in DOWNLOADERS and any("://" in a for a in argv[1:]):
                 self.pending[key] = [p for p in self.pending[key] if (e.ts - p.ts).total_seconds() <= self.MAX_GAP]
@@ -316,7 +330,7 @@ class DownloadPipedToShell(Playbook):
         for p in parsed.pipelines:
             names = [c.name for c in p.commands]
             for i, c in enumerate(p.commands[:-1]):
-                if c.name in DOWNLOADERS and names[i + 1] in INTERPRETERS:
+                if c.name in DOWNLOADERS and interpreter_name(p.commands[i + 1].argv[0]) in INTERPRETERS:
                     urls = [a for a in c.argv[1:] if "://" in a or a.count(".") >= 1 and not a.startswith("-")]
                     claim = (f"A process execution event on {e.host} records a shell started with a script that "
                              f"contains the pipeline '{c.name} … | {names[i + 1]}' (script: {_argv_summary([script])}); "
@@ -378,7 +392,7 @@ class ExecFromTempDir(Playbook):
         if not path.startswith(TEMP_DIRS):
             path = resolve(a0)
         via = ""
-        if not path.startswith(TEMP_DIRS) and basename(a0) in INTERPRETERS and len(argv) > 1:
+        if not path.startswith(TEMP_DIRS) and interpreter_name(a0) in INTERPRETERS and len(argv) > 1:
             # interpreter running a script file: first non-option argument is the program
             script = next((a for a in argv[1:] if not a.startswith("-")), "")
             layout = shell_script_of(argv)
@@ -386,7 +400,7 @@ class ExecFromTempDir(Playbook):
                 self.missing_required += 1      # cannot tell a script-file run from -c: unevaluable, not absent
                 return []
             if script and layout is None:
-                path, via = resolve(script), basename(a0)
+                path, via = resolve(script), interpreter_name(a0)
         if not path.startswith(TEMP_DIRS):
             return []
         fields = [pf(e, "process.argv")] + ([pf(e, "process.executable")] if exe else []) + \

