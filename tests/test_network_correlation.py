@@ -216,21 +216,44 @@ def link(*batches):
     return rule.finalize()
 
 
+def history(n=4, host="videoserver", local="198.51.100.10", observer_port=443, saddr="020001BBC00002AE"):
+    """n earlier, uniquely joined connects from host whose flows show `local` as its address."""
+    socks, nets = [], []
+    for i in range(1, n + 1):
+        t0 = T0 - 300 * i
+        start = datetime.fromtimestamp(t0, UTC).isoformat()
+        end = datetime.fromtimestamp(t0 + 10, UTC).isoformat()
+        socks.append(_sock(900 + i, saddr=saddr + "0" * 16, t0=t0, host=host, **SSHD))
+        nets += _network(flow(f"h{host}{i}", src=local, dport=observer_port, cid=f"1:{host}{i}=",
+                              sport=52000 + i, start=start, end=end))
+    return socks, nets
+
+
 @pytest.mark.parametrize("network_first", [False, True])
 def test_alert_on_joined_flow_is_attributed_to_the_process_in_either_order(network_first):
-    host, net = [_sock(**SSHD)], _network(flow(), alert())
-    matches = link(*([net, host] if network_first else [host, net]))
+    hs, hn = history()
+    host, net = hs + [_sock(**SSHD)], hn + _network(flow(), alert())
+    matches = [m for m in link(*([net, host] if network_first else [host, net])) if "port 4444" in m.claim]
     assert len(matches) == 1
     m = matches[0]
     assert m.claim_type == "correlated_observation" and m.proposed_lane == "high" and m.severity == "high"
     assert "inferred from address, port and time; it is not itself observed" in m.claim
     assert "1 IDS alert(s) on those connections: ET POLICY Meterpreter-like" in m.claim
-    assert "with local address(es) 198.51.100.10," in m.claim and "ambiguous" not in m.claim
+    assert "with local address(es) 198.51.100.10," in m.claim and "capped" not in m.claim
     assert {e.family for e in m.events} == {"net_socket", "net_flow", "net_alert"}
+    assert any("IPv4 connections from 198.51.100.10 in 5 of 5 joins" in n for n in m.notes)
+
+
+def test_without_an_established_host_address_the_link_is_stated_and_capped():
+    m = link([_sock(**SSHD)] + _network(flow(), alert()))[0]
+    assert m.proposed_lane == "lead"
+    assert "own address on sensor(s) inetfw is not established" in m.claim
+    assert "could belong to another machine" in m.claim and "not established, the lane is capped" in m.claim
 
 
 def test_notable_process_gets_its_network_evidence_without_an_alert():
-    m = link([_sock()] + _network(flow()))
+    hs, hn = history()
+    m = [m for m in link(hs + [_sock()] + hn + _network(flow())) if "port 4444" in m.claim]
     assert len(m) == 1 and m[0].proposed_lane == "high"
     assert "notable as an interpreter 'perl' running as web-service account 'www-data'" in m[0].claim
 
@@ -243,10 +266,10 @@ def test_flow_outside_the_join_window_is_not_linked():
     assert link([_sock()] + _network(flow(start="2024-11-18T14:27:10.000000+0000"))) == []
 
 
-def test_two_local_addresses_are_called_ambiguous():
+def test_two_local_addresses_are_called_ambiguous_and_capped():
     m = link([_sock()] + _network(flow("f1"), flow("f2", src="198.51.100.11", cid="1:def=", sport=51001)))[0]
     assert "It is ambiguous: more than one local address matched" in m.claim
-    assert "local address(es) 198.51.100.10, 198.51.100.11" in m.claim
+    assert "local address(es) 198.51.100.10, 198.51.100.11" in m.claim and m.proposed_lane == "lead"
 
 
 def test_low_severity_alert_with_ordinary_process_is_a_lead():
@@ -273,21 +296,79 @@ def test_alert_joined_by_two_hosts_is_shared_and_capped_at_lead():
     b = _sock(host="hostB", t0=T0 + 2, **SSHD)
     matches = link([a, b] + _network(flow(), alert()))
     assert len(matches) == 2 and all(m.proposed_lane == "lead" for m in matches)
-    assert all("the attribution is shared, so the lane is capped at lead" in m.claim for m in matches)
+    assert all("also join connect() calls by 1 other process(es)" in m.claim for m in matches)
+    assert all("attribution is shared" in m.claim for m in matches)
 
 
-def test_known_host_address_excludes_records_from_other_local_addresses():
-    https = "020001BBC00002AE" + "0" * 16                  # 192.0.2.174:443
-    earlier, prior = [], []
-    for i in range(1, 5):                                  # four unique joins agree on 198.51.100.10
-        t0 = T0 - 300 * i
-        start = datetime.fromtimestamp(t0, UTC).isoformat()
-        end = datetime.fromtimestamp(t0 + 10, UTC).isoformat()
-        earlier.append(_sock(i, saddr=https, t0=t0, **SSHD))
-        prior += _network(flow(f"p{i}", dport=443, cid=f"1:p{i}=", sport=52000 + i, start=start, end=end))
+def test_record_from_another_hosts_established_address_is_never_linked():
+    ha, na = history(host="videoserver", local="198.51.100.10")
+    hb, nb = history(host="corpdns", local="198.51.100.99", observer_port=53, saddr="02000035C00002AE")
     elsewhere = _network(flow(src="198.51.100.99"), alert(src="198.51.100.99"))
-    matches = link(earlier + [_sock(**SSHD)] + prior + elsewhere)
-    assert [m for m in matches if "port 4444" in m.claim] == []      # another machine's alert is not pinned here
+    matches = link(ha + hb + [_sock(**SSHD)] + na + nb + elsewhere)
+    assert [m for m in matches if "port 4444" in m.claim] == []      # corpdns's alert is not pinned here
+
+
+def test_unfamiliar_local_address_is_linked_but_stated_and_capped():
+    hs, hn = history(local="198.51.100.10")
+    m = [m for m in link(hs + [_sock(**SSHD)] + hn + _network(flow(src="198.51.100.99"),
+                                                                 alert(src="198.51.100.99")))
+         if "port 4444" in m.claim][0]
+    assert m.proposed_lane == "lead"
+    assert "198.51.100.99 differ from the address usually seen for videoserver" in m.claim
+
+
+def test_dual_stack_host_keeps_its_ipv6_records():
+    hs, hn = history(n=9)
+    saddr6 = "0A00115C" + "00000000" + "20010DB800000000000000000000BAD0" + "00000000"
+    v6 = _network(flow("v6", src="2001:db8::7", dst="2001:db8::bad0", cid="1:v6="))
+    m = [m for m in link(hs + [_sock(saddr=saddr6, exe="/usr/bin/bash", comm="bash", uid="0", user="root")]
+                         + hn + v6) if "2001:db8::bad0" in m.claim]
+    assert len(m) == 1 and m[0].proposed_lane == "lead"
+    assert "not established" in m[0].claim                        # no IPv6 history yet for this host
+
+
+def test_alert_without_severity_adds_no_lane():
+    no_sev = alert()
+    raw = json.loads(no_sev["_source"]["event"]["original"])
+    del raw["alert"]["severity"]
+    no_sev["_source"]["event"]["original"] = json.dumps(raw)
+    assert link([_sock(**SSHD)] + _network(flow(), no_sev)) == []
+
+
+def test_re_reading_a_partition_counts_each_record_once():
+    rule, stage = ProcessNetworkLink(), {}
+    batch = [_sock()] + _network(flow())
+    for _ in range(2):
+        rule.consume(batch)
+        stage.update({e.id: e for e in rule.drain_staged()})
+    rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    assert "made 1 connect() call(s)" in rule.finalize()[0].claim
+
+
+def test_a_cited_event_missing_from_the_stage_fails_loudly():
+    from romulus.detect.correlation import StageMissing
+    rule = ProcessNetworkLink()
+    rule.consume([_sock()] + _network(flow()))
+    rule.drain_staged()
+    rule.bind_loader(lambda ids: [])
+    with pytest.raises(StageMissing):
+        rule.finalize()
+
+
+def test_stage_is_removed_on_failure_and_stale_stages_are_cleared(tmp_path):
+    import os
+    from romulus.hunt.stage import PREFIX, EventStage, clear_stale_stages
+    stage = EventStage(tmp_path)
+    stage.put([_sock()], {"romulus-host-logs/s500videoserver": {"x": 1}})
+    stage_dir = next(tmp_path.glob(f"{PREFIX}*"))
+    stage.close()
+    assert not stage_dir.exists()
+    old = tmp_path / f"{PREFIX}old"
+    old.mkdir()
+    os.utime(old, (0, 0))
+    fresh = tmp_path / f"{PREFIX}fresh"
+    fresh.mkdir()
+    assert clear_stale_stages(tmp_path) == 1 and not old.exists() and fresh.exists()
 
 
 def test_web_account_to_internal_destination_has_no_process_component():

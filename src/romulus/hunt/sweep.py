@@ -68,11 +68,12 @@ def plan_partitions(client: ElasticClient, target: str, contract: FieldContract,
 class Sweep:
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
                  contracts: dict[str, FieldContract], on_candidate: Callable[[dict], None] | None = None,
-                 heartbeat: Callable[[], None] | None = None):
+                 heartbeat: Callable[[], None] | None = None, stage_dir=None):
         self.repo, self.client, self.hunt_id, self.window = repo, client, hunt_id, window
         self.contracts = contracts
         self.on_candidate = on_candidate or (lambda c: None)
         self.heartbeat = heartbeat or (lambda: None)
+        self.stage_dir = stage_dir
         self.pack: list[Playbook] = fresh_pack()
         self.partial_reasons: list[str] = []
         self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0}
@@ -228,7 +229,7 @@ class Sweep:
     def _event_stage(self) -> EventStage:
         stage = getattr(self, "_stage", None)
         if stage is None:
-            stage = self._stage = EventStage()
+            stage = self._stage = EventStage(self.stage_dir)
         return stage
 
     def _retain_aggregate_raw(self, pb: Playbook, raw_sources: dict[str, dict]):
@@ -250,6 +251,7 @@ class Sweep:
             if pb.staged:
                 stage = self._event_stage()
                 pb.bind_loader(stage.load)
+                pb.heartbeat = self.heartbeat
                 ms = pb.finalize()
                 for m in ms:
                     self._publish(m, None, {**agg_raw, **stage.raw_sources(m.events)})
@@ -278,6 +280,10 @@ class Sweep:
                 state = "no_match_complete"
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
                                     len(ms) + consumed_matches, evaluated)
+        self.close_stage()
+
+    def close_stage(self) -> None:
+        """Remove the disk stage (raw telemetry copies). Called by finalize and on every failure path."""
         stage = getattr(self, "_stage", None)
         if stage is not None:
             stage.close()

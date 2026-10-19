@@ -5,22 +5,46 @@ raw copies those events reference, go to a private SQLite file for the length of
 stays bounded however much traffic a mission network produces. At finalize the playbook loads back only
 the events it actually cites, and the sweep publishes them with their raw copies, so every citation
 resolves to a retained record.
+
+The stage holds raw telemetry, so it lives under the hunt data directory (mode 0700), is removed on
+every exit path the process controls, and stages left by a killed process are cleared at the next start.
 """
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 
 from romulus.evidence.typed import TypedEvent
 
+PREFIX = "romulus-stage-"
+STALE_SECONDS = 6 * 3600
+
+
+def clear_stale_stages(directory: str | Path, older_than: float = STALE_SECONDS) -> int:
+    """Remove stage directories a killed process left behind. Only ones older than any live sweep's
+    lease could be are removed; returns how many."""
+    root = Path(directory)
+    if not root.is_dir():
+        return 0
+    removed, cutoff = 0, time.time() - older_than
+    for child in root.glob(f"{PREFIX}*"):
+        if child.is_dir() and child.stat().st_mtime < cutoff:
+            shutil.rmtree(child, ignore_errors=True)
+            removed += 1
+    return removed
+
 
 class EventStage:
     def __init__(self, directory: str | Path | None = None):
-        self._dir = tempfile.TemporaryDirectory(prefix="romulus-stage-", dir=directory)
-        self.path = Path(self._dir.name) / "stage.db"
-        self.db = sqlite3.connect(self.path)
+        if directory is not None:
+            Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._dir = tempfile.mkdtemp(prefix=PREFIX, dir=directory)
+        self.path = Path(self._dir) / "stage.db"
+        self.db: sqlite3.Connection | None = sqlite3.connect(self.path)
         self.db.execute("PRAGMA journal_mode=OFF")
         self.db.execute("PRAGMA synchronous=OFF")
         self.db.execute("CREATE TABLE event (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
@@ -59,5 +83,14 @@ class EventStage:
         return out
 
     def close(self) -> None:
-        self.db.close()
-        self._dir.cleanup()
+        """Close the database before removing its directory (Windows cannot delete an open file)."""
+        if self.db is not None:
+            self.db.close()
+            self.db = None
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 - interpreter shutdown; nothing useful to report
+            pass

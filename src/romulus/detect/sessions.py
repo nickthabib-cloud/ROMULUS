@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.correlation import canon_ip, external
+from romulus.detect.correlation import StageMissing, canon_ip, external
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
@@ -53,6 +53,7 @@ class _Stitched(Playbook):
     def __init__(self):
         super().__init__()
         self.conns: dict[str, dict] = {}
+        self._seen: set[str] = set()
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
 
@@ -61,7 +62,10 @@ class _Stitched(Playbook):
         return out
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
-        return sorted(self.load(ids), key=lambda e: (e.ts, e.id))
+        loaded = self.load(ids)
+        if len(loaded) != len(set(ids)):
+            raise StageMissing(f"{self.id}: {len(set(ids)) - len(loaded)} cited event(s) absent from the stage")
+        return sorted(loaded, key=lambda e: (e.ts, e.id))
 
     def _conn_key(self, e: TypedEvent) -> str:
         cid = e.get("network.community_id")
@@ -71,7 +75,8 @@ class _Stitched(Playbook):
                f"{e.get('destination.ip')}:{e.get('destination.port')}"
 
     def consume(self, events):
-        for e in self.applicable(events):
+        for e in self.applicable([e for e in events if e.id not in self._seen]):
+            self._seen.add(e.id)               # re-reading a partition must not count a record twice
             start, end = _epoch(e.get("flow.start")), _epoch(e.get("flow.end"))
             if start is None or end is None:
                 self.evaluated -= 1
@@ -120,8 +125,6 @@ class LongExternalConnection(_Stitched):
             if _public(c["src"]) == _public(c["dst"]):
                 continue                          # both internal or both public: not a boundary connection
             evs = self._events(c["events"])
-            if not evs:
-                continue
             minutes = (c["end"] - c["start"]) / 60
             claim = (f"Arkime recorded {c['records']} session record(s) for one TCP connection {c['src']}:{c['sport']} "
                      f"-> {c['dst']}:{c['dport']} spanning {minutes:.0f} minutes ({_iso(c['start'])} – "
@@ -165,8 +168,6 @@ class Beaconing(_Stitched):
             if mad / median > self.MAX_JITTER:
                 continue
             evs = self._events([c["events"][0] for c in sorted(conns, key=lambda c: c["start"])][:EXAMPLE_LIMIT])
-            if not evs:
-                continue
             claim = (f"Arkime recorded {len(conns)} separate {transport} connections from {src} to {dst} port {dport} "
                      f"({_iso(starts[0])} – {_iso(starts[-1])}) starting every {median:.0f} s (median), with a median "
                      f"deviation of {mad:.1f} s between starts.")
@@ -213,8 +214,6 @@ class RareClientFingerprint(_Stitched):
             if len(p["sources"]) != 1 or len(p["conns"]) > self.MAX_CONNECTIONS:
                 continue
             evs = self._events(p["events"])
-            if not evs:
-                continue
             src = next(iter(p["sources"]))
             dsts = sorted({str(e.get("destination.ip")) for e in evs})
             claim = (f"{kind} client fingerprint {value} appears on {len(p['conns'])} connection(s) in this window, all "

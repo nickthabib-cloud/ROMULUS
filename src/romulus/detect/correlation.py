@@ -9,6 +9,7 @@ same network records also match another host's or process's connect() call.
 from __future__ import annotations
 
 import ipaddress
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -188,11 +189,22 @@ def _epoch(value) -> float | None:
     return None
 
 
-def alert_lane(n: Net) -> str:
-    """Exactly the lane SuricataAlertStack gives the same alert on its own."""
+def alert_lane(n: Net) -> str | None:
+    """Exactly the lane SuricataAlertStack gives the same alert on its own; None when the alert lacks the
+    severity that stack requires (it would not publish it either)."""
     if n.alert_cat == "Not Suspicious Traffic" or n.alert_sev == 3:
         return "context"
+    if n.alert_sev is None:
+        return None
     return "high" if n.alert_sev == 1 else "lead"
+
+
+def _version(ip: str) -> int:
+    return ipaddress.ip_address(ip).version
+
+
+class StageMissing(RuntimeError):
+    """A cited event is absent from the stage: a defect, never a reason to drop a finding quietly."""
 
 
 class ProcessNetworkLink(Playbook):
@@ -200,9 +212,14 @@ class ProcessNetworkLink(Playbook):
     remote endpoint (either direction) that start within the join window, plus records sharing their
     community ID inside the flow's own lifetime. Publishes when the joined records carry an IDS alert
     (the alert gets a process) or when the process meets the external-connection criteria (the process
-    gets its network evidence). Memory holds compact keys only; full events are staged on disk."""
+    gets its network evidence). Memory holds compact keys only; full events are staged on disk.
+
+    Attribution: a host's local address on a sensor (per IP version) is inferred from its unique joins.
+    A record whose local address is established for another host is never linked. A record whose local
+    address is not established for this host is linked but stated, and caps the lane at lead, as do
+    multiple local addresses and records shared with another process."""
     id = "corr.process_network_link"
-    version = "2"
+    version = "3"
     title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
     staged = True
@@ -217,14 +234,17 @@ class ProcessNetworkLink(Playbook):
               "benign IDS signatures on routine traffic")
     next_checks = ("flow detail for the linked community IDs", "process_tree for the connecting process",
                    "peer activity for the remote address across hosts and sessions")
+    HEARTBEAT_EVERY = 1000
 
     def __init__(self):
         super().__init__()
         self.sockets: list[Sock] = []
         self.by_endpoint: dict[tuple[str, int], list[Net]] = defaultdict(list)
         self.by_community: dict[str, list[Net]] = defaultdict(list)
+        self._seen: set[str] = set()
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
+        self.heartbeat = lambda: None
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
@@ -270,9 +290,13 @@ class ProcessNetworkLink(Playbook):
 
     def consume(self, events):
         for e in events:
+            if e.id in self._seen:
+                continue                      # re-reading a partition must not count a record twice
             if e.family == "net_socket":
+                self._seen.add(e.id)
                 self._sock(e)
             elif e.family in NETWORK_JOIN_FAMILIES:
+                self._seen.add(e.id)
                 self._net(e)
         return []
 
@@ -280,29 +304,42 @@ class ProcessNetworkLink(Playbook):
         return []           # staged on disk instead
 
     # ---- join ------------------------------------------------------------------------------
+    def _index(self) -> None:
+        self._starts = {}
+        for key, nets in self.by_endpoint.items():
+            nets.sort(key=lambda n: (n.start, n.id))
+            self._starts[key] = [n.start for n in nets]
+
     def _join(self, s: Sock) -> list[Net]:
-        direct = [n for n in self.by_endpoint.get((s.ip, s.port), [])
-                  if s.ts - JOIN_BEFORE <= n.start <= s.ts + JOIN_AFTER and n.local_side(s.ip, s.port)]
+        key = (s.ip, s.port)
+        nets, starts = self.by_endpoint.get(key, []), self._starts.get(key, [])
+        lo, hi = bisect_left(starts, s.ts - JOIN_BEFORE), bisect_right(starts, s.ts + JOIN_AFTER)
+        direct = [n for n in nets[lo:hi] if n.local_side(s.ip, s.port)]
         linked = {n.id: n for n in direct}
         for d in direct:
             if not d.cid:
                 continue
-            lo = d.start - FLOW_SLACK
-            hi = (d.end if d.end is not None else d.start + JOIN_AFTER) + FLOW_SLACK
+            first = d.start - FLOW_SLACK
+            last = (d.end if d.end is not None else d.start + JOIN_AFTER) + FLOW_SLACK
             pair = {(d.src, d.sport), (d.dst, d.dport)}
             for m in self.by_community[d.cid]:
-                if lo <= m.start <= hi and {(m.src, m.sport), (m.dst, m.dport)} == pair:
+                if first <= m.start <= last and {(m.src, m.sport), (m.dst, m.dport)} == pair:
                     linked.setdefault(m.id, m)
         return sorted(linked.values(), key=lambda n: (n.start, n.id))
 
     def finalize(self):
-        raw = {s.id: self._join(s) for s in self.sockets}
-        # pass 1: who else claims each network record, and each host's address as each sensor sees it
+        self._index()
+        raw: dict[str, list[Net]] = {}
+        for i, s in enumerate(self.sockets):
+            if i % self.HEARTBEAT_EVERY == 0:
+                self.heartbeat()
+            raw[s.id] = self._join(s)
+        # pass 1: who else claims each record, and each host's local address per (sensor, IP version)
         claimants: dict[str, set] = defaultdict(set)
         for s in self.sockets:
             for n in raw[s.id]:
                 claimants[n.id].add(s.claimant)
-        seen: dict[tuple[str, str], Counter] = defaultdict(Counter)
+        seen: dict[tuple[str, str, int], Counter] = defaultdict(Counter)
         for s in self.sockets:
             partners = raw[s.id]
             if not partners or any(len(claimants[n.id]) > 1 for n in partners):
@@ -312,19 +349,30 @@ class ProcessNetworkLink(Playbook):
                 by_observer[n.observer].add(n.local_side(s.ip, s.port))
             for observer, locals_ in by_observer.items():
                 if len(locals_) == 1:
-                    seen[(s.host, observer)][locals_.pop()] += 1
-        address: dict[tuple[str, str], tuple[str, int, int]] = {}
+                    local = locals_.pop()
+                    seen[(s.host, observer, _version(local))][local] += 1
+        address: dict[tuple[str, str, int], tuple[str, int, int]] = {}
         for key, counts in seen.items():
             best, n = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
             total = sum(counts.values())
             if n >= ADDRESS_MIN_JOINS and n / total >= ADDRESS_MIN_SHARE:
                 address[key] = (best, n, total)
-        # pass 2: when a host's address is known for a sensor, its records must carry it
-        joins: dict[str, list[Net]] = {}
+        owner: dict[tuple[str, str], set[str]] = defaultdict(set)      # (sensor, address) -> hosts
+        for (host, observer, _v), (best, _n, _t) in address.items():
+            owner[(observer, best)].add(host)
+        # pass 2: never link a record whose local address another host owns; mark unestablished ones
+        joins: dict[str, list[tuple[Net, str]]] = {}
         for s in self.sockets:
-            kept = [n for n in raw[s.id]
-                    if (s.host, n.observer) not in address
-                    or n.local_side(s.ip, s.port) == address[(s.host, n.observer)][0]]
+            kept = []
+            for n in raw[s.id]:
+                local = n.local_side(s.ip, s.port)
+                known = address.get((s.host, n.observer, _version(local)))
+                if known and local == known[0]:
+                    kept.append((n, "established"))
+                elif owner.get((n.observer, local), set()) - {s.host}:
+                    continue                              # positively another host's address on this sensor
+                else:
+                    kept.append((n, "differs" if known else "unestablished"))
             if kept:
                 joins[s.id] = kept
         groups: dict[str, list[Sock]] = defaultdict(list)
@@ -340,30 +388,43 @@ class ProcessNetworkLink(Playbook):
 
     def _group_match(self, key, socks, joins, claimants, address) -> Match | None:
         partners: dict[str, Net] = {}
+        attribution: dict[str, str] = {}
         for s in socks:
-            for n in joins[s.id]:
+            for n, status in joins[s.id]:
                 partners.setdefault(n.id, n)
+                attribution[n.id] = status
         alerts = [n for n in partners.values() if n.family == "net_alert"]
         notable = [s for s in socks if s.reason is not None]
-        if not alerts and not notable:
-            return None
         components = []
         if notable:
             lane = notable[0].process_lane
             if all(s.outcome == Outcome.failure for s in notable):
                 lane = "lead"                       # every notable call failed: an attempt, not a connection
             components.append(lane)
-        if alerts:
-            components.append(min((alert_lane(a) for a in alerts), key=LANE_RANK.__getitem__))
+        alert_lanes = [lane for lane in (alert_lane(a) for a in alerts) if lane is not None]
+        if alert_lanes:
+            components.append(min(alert_lanes, key=LANE_RANK.__getitem__))
+        if not components:
+            return None
         lane = min(components, key=LANE_RANK.__getitem__)
+        s0 = socks[0]
         others = sorted({c for n in partners.values() for c in claimants[n.id]} - {s.claimant for s in socks},
                         key=str)
-        if others and lane == "high":
+        locals_ = sorted({n.local_side(s0.ip, s0.port) for n in partners.values()} - {None})
+        unestablished = sorted({n.observer for n in partners.values() if attribution[n.id] == "unestablished"})
+        differs = sorted({n.local_side(s0.ip, s0.port) for n in partners.values()
+                          if attribution[n.id] == "differs"} - {None})
+        caps = []
+        if others:
+            caps.append("shared")
+        if len(locals_) > 1:
+            caps.append("ambiguous")
+        if unestablished or differs:
+            caps.append("unestablished")
+        if caps and lane == "high":
             lane = "lead"
-        s0 = socks[0]
         flows = [n for n in partners.values() if n.family in ("net_flow", "net_session")]
         connections = {n.cid or f"{n.src}:{n.sport}-{n.dst}:{n.dport}" for n in partners.values()}
-        locals_ = sorted({n.local_side(s0.ip, s0.port) for n in partners.values()} - {None})
         observers = sorted({n.observer for n in partners.values()})
         sigs = sorted({str(a.alert_sig) for a in alerts})
         outcomes = Counter(s.outcome for s in socks)
@@ -372,18 +433,19 @@ class ProcessNetworkLink(Playbook):
             n.id for n in sorted(partners.values(), key=lambda n: (n.family != "net_alert", n.start, n.id))
         ][:EXAMPLE_LIMIT]
         loaded = {e.id: e for e in self.load(ids)}
-        cited = [loaded[i] for i in ids if i in loaded]
-        first = loaded.get(s0.id)
-        if first is None:
-            return None
+        missing = [i for i in ids if i not in loaded]
+        if missing:
+            raise StageMissing(f"{self.id}: {len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
+        cited = [loaded[i] for i in ids]
+        first = loaded[s0.id]
         outcome_words = ", ".join(f"{n} {w}" for w, n in (
             ("succeeded", outcomes.get(Outcome.success, 0)), ("failed", outcomes.get(Outcome.failure, 0)),
             ("with unknown or in-progress outcome", outcomes.get(Outcome.unknown, 0))) if n)
         parts = [
-            (f"Observed on {s0.host} (auditd): {_process_words(first)} made {len(socks)} connect() call(s) to "
+            f"Observed on {s0.host} (auditd): {_process_words(first)} made {len(socks)} connect() call(s) to "
             f"{s0.ip} port {s0.port} that join network records "
             f"({datetime.fromtimestamp(socks[0].ts, UTC).isoformat()} – "
-            f"{datetime.fromtimestamp(socks[-1].ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."),
+            f"{datetime.fromtimestamp(socks[-1].ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}.",
             f"Observed by network sensor(s) {', '.join(observers)}: {len(flows)} flow or session record(s) across "
             f"{len(connections)} connection(s) to {s0.ip} port {s0.port} starting within seconds of those calls"
             + (f", with local address(es) {', '.join(locals_)}" if locals_ else "")
@@ -393,11 +455,21 @@ class ProcessNetworkLink(Playbook):
             "time; it is not itself observed"
             + (". It is ambiguous: more than one local address matched" if len(locals_) > 1 else "") + ".",
         ]
+        if unestablished:
+            parts.append(f"{s0.host}'s own address on sensor(s) {', '.join(unestablished)} is not established from "
+                         f"other joins, so these records could belong to another machine reaching the same "
+                         f"endpoint.")
+        if differs:
+            parts.append(f"Local address(es) {', '.join(differs)} differ from the address usually seen for "
+                         f"{s0.host} on the same sensor.")
         if others:
             names = "; ".join(f"{h} '{exe}' (pid {pid})" for h, exe, pid in others[:5])
             parts.append(f"The same network records also join connect() calls by {len(others)} other "
-                         f"process(es): {names}" + (" and more" if len(others) > 5 else "")
-                         + "; the attribution is shared, so the lane is capped at lead.")
+                         f"process(es): {names}" + (" and more" if len(others) > 5 else "") + ".")
+        if caps:
+            parts.append("Because the attribution is " + " and ".join(
+                {"shared": "shared", "ambiguous": "ambiguous", "unestablished": "not established"}[c] for c in caps)
+                + ", the lane is capped at lead.")
         if notable:
             parts.append(f"The process is notable as {notable[0].reason} calling connect() to a non-private "
                          f"address.")
@@ -411,12 +483,12 @@ class ProcessNetworkLink(Playbook):
         m = Match(self.id, " ".join(parts), self.claim_type, cited, preds, first.ts, LANE_SEVERITY[lane], lane,
                   "medium", first.entities(), group_key=key)
         for observer in observers:
-            known = address.get((s0.host, observer))
-            if known:
-                best, n, total = known
-                m.notes.append(f"inferred, not an asset record: sensor {observer} saw {s0.host}'s uniquely joined "
-                               f"connections from {best} in {n} of {total} joins; records from other local "
-                               f"addresses were not linked")
+            for version in (4, 6):
+                known = address.get((s0.host, observer, version))
+                if known:
+                    best, n, total = known
+                    m.notes.append(f"inferred, not an asset record: sensor {observer} saw {s0.host}'s uniquely "
+                                   f"joined IPv{version} connections from {best} in {n} of {total} joins")
         if len(socks) > EXAMPLE_LIMIT or len(partners) > EXAMPLE_LIMIT:
             m.notes.append(f"{len(socks)} connect() record(s) and {len(partners)} network record(s) joined; up to "
                            f"{EXAMPLE_LIMIT} of each are cited")
