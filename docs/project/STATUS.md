@@ -2,7 +2,7 @@
 
 ## Resume here
 
-_Last updated: 2026-10-19 23:10 EDT by Claude (lead)._
+_Last updated: 2026-10-19 23:50 EDT by Claude (lead)._
 
 - **Direction (owner, 2026-10-19):**
   - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5: deterministic expansion finds, and an optional model only explains leads and drafts the narrative.
@@ -30,20 +30,41 @@ _Last updated: 2026-10-19 23:10 EDT by Claude (lead)._
   - Model-off before the network work: recall 11/22 reported, 15/22 surfaced; P@10 1.00; 5.07 false leads per modelled hour.
   - Off, deterministic and model hunts are identical on every finding metric (`docs/eval/results/2026-10-19-sl700_e_a-ablation-456.md`).
   - Replay: v1 free-JSON 0.22 → v2 menu 0.53 with retry. The remaining error is escalating benign seeds.
-- **Owner actions pending:**
-  1. Run the two Elasticsearch commands that grant `romulus_agent` read on `arkime_sessions3-*` (role `romulus_arkime_reader`). Then the lead adds `arkime_sessions3-*` to `ES_INDEX_PATTERNS` in the VM `.env` (approved). Until then Arkime is unreadable.
-  2. ATT&CK STIX bundle download (`enterprise-attack.json`, about 40–50 MB, MITRE cti on GitHub): asked, not yet answered.
+- **Since the merge (2026-10-19 evening):**
+  - **Arkime is live.** The owner granted `romulus_agent` read-only access to `arkime_sessions3-*` (role `romulus_arkime_reader`; doctor confirms no write rights), and `ES_INDEX_PATTERNS` includes it. Long-connection rules catch both Meterpreter sessions and the exploit's held HTTP connection; beaconing catches the cron `curl` every 900 s.
+  - **Noise fix:** external-connection findings are grouped per (host, program, account, port); kernel-record lineage lowers web-service daemons to lead (it never raises a lane); NTP verified by the parser goes to context.
+  - **Field-role indicator matcher** (`ioc.indicator_match`, `content/indicators/*.yaml`). The seed list has about 80 exact tool names. On the lab, LinPEAS run by the attacker is high, and commands that only name it are context.
+  - **ATT&CK Enterprise 20.0 STIX** is vendored at `content/attack/` (pinned and verified).
+  - **v1 audit:** no v1 rule is kept; 15 ideas are queued as `v1_ports` in `content/research/backlog.yaml`. Spec lessons 11–14 added.
+- **Scores** (dev, gold v1; eval-custodian, `docs/eval/results/`):
+
+  | Run | Recall reported | Recall surfaced | P@10 | False leads/hour |
+  |---|---|---|---|---|
+  | 4: model-off baseline | 11/22 | 15/22 | 1.00 | 5.07 |
+  | 7: host↔network correlation | 12/22 | 17/22 | 0.80 | 6.23 |
+  | 8: + Arkime + noise fix | 12/22 | 17/22 (critical+high 12/13) | 0.90 | 5.28 |
+
+  Remaining misses are discovery ×4 and privesc ×1 (no rule matched), plus 5 lead-only (c2_channel, recon ×3, remote_login). The expansion engine and context rules target these.
+- **Deployed:** `5338122` (latest hunt `h20261019-234655-87fdcd`: 7 urgent / 15 high / 95 lead / 511 context, 0 errors). Nothing is pushed: the owner pushes, because Claude Code's classifier blocked `git push`.
+- **Codex:** brief written in `Claude-Codex.md` (2026-10-19 19:45 EDT) for the ADR-006 expansion engine:
+  - session id and honest IP timelines (the merge gate);
+  - link fetchers;
+  - `ContextPlaybook` with two reference rules;
+  - the deterministic loop;
+  - the incident graph in the manifest;
+  - renaming `bakeoff` to `replay`.
+
+  Waiting for the owner to start Codex.
 - **Owner decisions recorded (2026-10-19):**
   - f_a holdout on hold.
   - A different-storyline dataset later.
   - Malcolm after deterministic search is built out.
   - Ground-truth account isolation: explained as defence in depth, not required now; revisit before any holdout.
 - **Next:**
-  1. Custodian scores run 7.
-  2. v1 search-code review (detection engineer auditing the v1 catalogs; lead's code verdict in the session log).
-  3. Network slice 3: per-session packets through Arkime plus bounded TShark.
-  4. ADR-006 expansion engine and context rules (Codex).
-  5. Tune the external-connection rule's grouping.
+  1. The owner starts Codex on the expansion brief (ADR-006); the reviewer checks it before merge.
+  2. Lead: network slice 3, TShark on the packets of specific Arkime sessions (v1's explicit-ID PCAP fetch and TShark safety patterns).
+  3. Detection engineer: context-rule catalog (after the engine), plus lab-testable `v1_ports` and backlog items.
+  4. The eval-custodian scores after each step.
 - **Merge gates and known issues:**
   - Investigator v2 re-review findings on `0abb1fc` (spawned-case stall, stale schema after shrink, seed cards dropped, `valid_first` metric, deterministic errors treated as outages). Several may be fixed in Codex's later commits but are not re-verified. They only matter for agent mode, which is off by default.
   - IP `entity_timeline` on host targets searches only `systemd.journal` yet reports complete coverage (`hunt/pivot.py`). Must be fixed before any agent or expansion result counts.
