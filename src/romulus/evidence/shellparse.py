@@ -303,7 +303,9 @@ def parse_script(script: str) -> ParsedScript:
     return ParsedScript(pipelines=pipelines)
 
 
-SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "ash", "busybox"}
+POSIX_SHELLS = {"sh", "bash", "dash", "ash", "busybox"}
+NON_POSIX_SHELLS = {"zsh", "ksh", "fish", "csh", "tcsh"}
+SHELLS = POSIX_SHELLS | NON_POSIX_SHELLS
 
 
 @dataclass(frozen=True)
@@ -345,6 +347,11 @@ def shell_script_of(argv: list[str]) -> str | UnknownShellScript | None:
         return None
 
     args = argv[1:]
+    if name in NON_POSIX_SHELLS:
+        if _has_c_option(args):
+            return UnknownShellScript(f"the {name} shell grammar is not modelled")
+        return None
+
     if name != "busybox" and len(args) >= 2 and args[0] in {"-c", "-lc"}:
         script = args[1]
         if script and not script.startswith(("-", "+")):

