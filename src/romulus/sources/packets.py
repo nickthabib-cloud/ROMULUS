@@ -7,7 +7,7 @@ Read-only and bounded by construction:
 - TShark: an argv list (no shell), a path that must resolve inside an allowed directory, a display filter and
   field list chosen from fixed tables in this module (never from telemetry, users or a model), reassembly
   preferences pinned so a site's TShark profile cannot change what is seen, a timeout that kills the process,
-  memory and CPU limits, and no `-c`: `-c` limits packets read *before* the display filter and would silently
+  memory and CPU limits (applied by `prlimit`, so nothing runs in the forked child before exec), and no `-c`: `-c` limits packets read *before* the display filter and would silently
   drop later matches. The only per-run input is a list of TCP ports to decode as HTTP, and each must be an
   integer 1-65535 (Arkime saw HTTP there; TShark only dissects HTTP on its default ports otherwise).
   A capture that ends mid-packet is reported as truncated, so its results are partial.
@@ -44,11 +44,12 @@ PINNED_PREFS = ("tcp.desegment_tcp_streams:TRUE", "ip.defragment:TRUE", "ipv6.de
 
 # The only TShark queries this module runs: (display filter, fields). Adding one is a code change and a review.
 QUERIES = {
-    "http_responses": (
-        "http.response",
+    "http_messages": (
+        "http.request || http.response",
         ["frame.number", "frame.time_epoch", "frame.protocols", "tcp.stream", "ip.src", "ip.dst", "ipv6.src",
-         "ipv6.dst", "tcp.srcport", "tcp.dstport", "http.response.code", "http.content_type",
-         "http.content_length", "http.response_for.uri", "http.file_data"],
+         "ipv6.dst", "tcp.srcport", "tcp.dstport", "http.request.method", "http.response.code",
+         "http.content_type", "http.content_encoding", "http.content_length", "http.response_for.uri",
+         "http.file_data"],
     ),
 }
 
@@ -152,17 +153,6 @@ def _ports(ports) -> list[int]:
     return sorted(out)
 
 
-def _limits(timeout: int):
-    if os.name != "posix":
-        return None
-
-    def apply():                          # runs in the child before exec
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS, (TSHARK_MEMORY_BYTES, TSHARK_MEMORY_BYTES))
-        resource.setrlimit(resource.RLIMIT_CPU, (timeout + 5, timeout + 10))
-    return apply
-
-
 def tshark_command(s: Settings, path: Path, query: str, http_ports=()) -> list[str]:
     display_filter, fields = QUERIES[query]
     exe = shutil.which(s.tshark_bin) or s.tshark_bin
@@ -179,15 +169,22 @@ def tshark_command(s: Settings, path: Path, query: str, http_ports=()) -> list[s
     return cmd
 
 
+def limited(cmd: list[str], timeout: int) -> list[str]:
+    """Memory and CPU limits through prlimit(1) where it exists (util-linux; every supported Linux)."""
+    prlimit = shutil.which("prlimit") if os.name == "posix" else None
+    if not prlimit:
+        return cmd
+    return [prlimit, f"--as={TSHARK_MEMORY_BYTES}", f"--cpu={timeout + 5}", "--", *cmd]
+
+
 def run_tshark(s: Settings, pcap: Path, query: str, allowed_dirs: list[Path], timeout: int = 180,
                http_ports=()) -> TsharkResult:
     """Run one fixed query over a capture. Each row maps every query field to all its occurrences."""
     _, fields = QUERIES[query]
     path = _allowed(pcap, allowed_dirs)
-    cmd = tshark_command(s, path, query, http_ports)
+    cmd = limited(tshark_command(s, path, query, http_ports), timeout)
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False,
-                              preexec_fn=_limits(timeout))
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return TsharkResult(error=f"TShark exceeded {timeout} s")
     except OSError as exc:

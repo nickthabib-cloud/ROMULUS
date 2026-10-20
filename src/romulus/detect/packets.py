@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import ClassVar
 from urllib.parse import unquote, urlsplit
 
@@ -44,6 +45,9 @@ KNOWN_COMMANDS = {
     "done", "nslookup", "dig", "ping", "apt", "apt-get", "yum", "dnf", "pip", "pip3", "git", "busybox", "setsid",
     "powershell", "pwsh", "iex", "invoke-expression", "iwr", "invoke-webrequest", "certutil", "bitsadmin",
     "mshta", "rundll32", "regsvr32", "cmd", "start-process", "schtasks", "wmic", "reg",
+    # shell keywords and builtins, so ordinary script structure does not turn a script into "text"
+    "else", "elif", "esac", "case", "exit", "return", "local", "read", "test", "true", "false", "wait", "trap",
+    "umask", "shift", "break", "continue", "function", "until", "select", "declare", "readonly", "alias",
 }
 # Commands that fetch, run, decode or persist something. A command list with none of these (a cheat sheet,
 # a to-do list, build steps) is not called a script.
@@ -68,12 +72,22 @@ SCRIPT_OR_EXEC_EXTENSIONS = {"sh", "bash", "zsh", "ksh", "py", "pyw", "pl", "pm"
 DOCUMENT_TYPE_PREFIXES = ("text/markdown", "text/html", "text/css", "text/csv", "text/xml", "application/json",
                           "application/xml", "application/pdf", "image/", "audio/", "video/")
 MEDIA_TYPE_PREFIXES = ("application/pdf", "image/", "audio/", "video/")
+COMPRESSION_EXTENSIONS = {"gz", "tgz", "z", "zip", "bz2", "xz", "br", "zst"}
+COMPRESSION_ENCODINGS = {"gzip", "x-gzip", "deflate", "br", "compress", "x-compress", "zstd"}
 # What a pipe may hand text to and have it run.
 PIPE_RUNNERS = INTERPRETERS | {"exec", "eval", "source", "busybox", "xargs"}
+# Commands that put a file in place to run; a bare path invoked after one of these is a dropper's last step.
+STAGING_COMMANDS = {"curl", "wget", "chmod", "certutil", "bitsadmin", "iwr", "invoke-webrequest", "base64", "xxd",
+                    "cp", "mv", "tftp", "scp"}
+# Redirect targets whose only reason to be written by a served script is persistence or configuration change.
+PERSISTENCE_TARGET = re.compile(r"(^|/)\.ssh/|^/etc/|/cron|^/var/spool/|(^|/)\.(bash|zsh|ksh)rc$|"
+                                r"(^|/)\.(bash_)?profile$|(^|/)\.config/autostart|/systemd/|^/root/|"
+                                r"rc\.local$|ld\.so\.preload$")
+STAGING_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/")
 _TOKEN = re.compile(r"[A-Za-z0-9_./+-]+")
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _ESCAPED = re.compile(r"\\.")
-_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+_QUOTED = re.compile(r"'[^']*(?:'|$)|\"[^\"]*(?:\"|$)")       # an unclosed quote runs to the end of the line
 _PIPE = re.compile(r"(?<!\|)\|(?!\|)")
 _REDIRECT = re.compile(r"(?<![<>&])\d?>>?\s*([^\s;&|<>()]+)")
 
@@ -148,9 +162,13 @@ def analyze_body(body: bytes) -> BodyInfo:
     lines = [ln for ln in lines if ln and not ln.startswith("#")]
     if not lines or len(lines) > 400:
         return BodyInfo("text")
-    commands, piped, writes, executes = [], [], [], False
+    commands, piped, writes, executes, staged = [], [], [], False, False
+    staged_writes, invoked = set(), set()
     for ln in lines:
         if _ASSIGNMENT.match(ln):
+            continue
+        if ln.startswith("["):                                  # test builtin: [ ... ] / [[ ... ]]
+            commands.append("[")
             continue
         m = _TOKEN.match(ln)
         if not m:
@@ -158,11 +176,16 @@ def analyze_body(body: bytes) -> BodyInfo:
         token = m.group(0)
         name = basename(token).lower()
         if token.startswith(("./", "/")) and len(token) > 2:
+            # a bare path runs a program only in context: with arguments, or after a fetch, chmod or copy
+            # (a list of paths or `find` output is not a script)
             commands.append(f"path:{name}")
-            executes = True
+            invoked.add(name)
+            if (len(ln.split()) > 1 or staged) and _suffix(name) not in DOCUMENT_EXTENSIONS:
+                executes = True
         elif name in KNOWN_COMMANDS:
             commands.append(name)
             executes = executes or name in EXECUTION_COMMANDS
+            staged = staged or name in STAGING_COMMANDS
         else:
             return BodyInfo("text")
         bare = _QUOTED.sub("''", _ESCAPED.sub("_", ln))          # pipes and redirects outside quotes only
@@ -173,9 +196,16 @@ def analyze_body(body: bytes) -> BodyInfo:
                 piped.append(prog)
                 executes = True
         for target in _REDIRECT.findall(bare):
-            if target not in ("/dev/null", "/dev/stdout", "/dev/stderr"):
-                writes.append(target)
+            if target in ("/dev/null", "/dev/stdout", "/dev/stderr"):
+                continue
+            writes.append(target)
+            if PERSISTENCE_TARGET.search(target.replace("~", "/root")):
                 executes = True
+            elif target.startswith(STAGING_DIRS):
+                staged_writes.add(basename(target).lower())
+                staged = True
+    if staged_writes & invoked:                                 # written to a staging dir, then run
+        executes = True
     if not commands or not executes:
         return BodyInfo("text")
     return BodyInfo("script", "heuristic",
@@ -184,13 +214,18 @@ def analyze_body(body: bytes) -> BodyInfo:
                     piped_to=sorted(set(piped)), writes=list(dict.fromkeys(writes))[:10])
 
 
-def _name(path: str | None) -> str:
+def _name(path: str | None, encoding: str | None = None) -> str:
+    """The served file name. When the server set a compressing Content-Encoding, TShark has already undone it,
+    so a compression suffix describes the transfer, not the body, and is dropped."""
     raw = path or ""
     parts = urlsplit(raw)
     if parts.scheme and parts.netloc:
         raw = parts.path
     raw = raw.split("?", 1)[0].split("#", 1)[0]
-    return basename(unquote(raw)).lower()
+    name = basename(unquote(raw)).lower()
+    if (encoding or "").strip().lower() in COMPRESSION_ENCODINGS and _suffix(name) in COMPRESSION_EXTENSIONS:
+        name = name.rsplit(".", 1)[0]
+    return name
 
 
 def _suffix(name: str) -> str | None:
@@ -198,10 +233,10 @@ def _suffix(name: str) -> str | None:
     return suffixes[-1] if suffixes else None
 
 
-def declared_document(path: str | None, content_type: str | None) -> list[str]:
+def declared_document(path: str | None, content_type: str | None, encoding: str | None = None) -> list[str]:
     """Why the server presented this body as a document (file name and/or declared type); empty if it did not,
     or if the name says it is a script or program (then it is not disguised)."""
-    name = _name(path)
+    name = _name(path, encoding)
     suffix = _suffix(name)
     if suffix in SCRIPT_OR_EXEC_EXTENSIONS:
         return []
@@ -214,16 +249,21 @@ def declared_document(path: str | None, content_type: str | None) -> list[str]:
     return reasons
 
 
-def declared_media(path: str | None, content_type: str | None) -> bool:
+def declared_media(path: str | None, content_type: str | None, encoding: str | None = None) -> bool:
     """Declared as an image, media, office or archive file: no reading of a script makes that name honest."""
     ctype = (content_type or "").split(";", 1)[0].strip().lower()
-    return _suffix(_name(path)) in MEDIA_EXTENSIONS or ctype.startswith(MEDIA_TYPE_PREFIXES)
+    return _suffix(_name(path, encoding)) in MEDIA_EXTENSIONS or ctype.startswith(MEDIA_TYPE_PREFIXES)
+
+
+def _declared(e: TypedEvent) -> tuple[list[str], bool]:
+    args = (e.get("url.original"), e.get("http.content_type"), e.get("http.content_encoding"))
+    return declared_document(*args), declared_media(*args)
 
 
 class DisguisedScriptOrExecutable(Playbook):
     """Positive-only content rule over packet-reconstructed HTTP bodies."""
     id = "pcap.disguised_script_or_executable"
-    version = "2"
+    version = "3"
     title = "HTTP response body is a script or executable served as a document"
     kind: ClassVar[str] = "packet"            # runs only in the packet stage, never in the sweep
     families = ("http_body",)
@@ -233,7 +273,9 @@ class DisguisedScriptOrExecutable(Playbook):
     severity, lane = "high", "lead"
     attack = ("T1036.008", "T1105", "T1059")
     benign = ("installers or setup scripts deliberately served as text or Markdown",
-              "documentation that consists only of commands", "a misconfigured server's file names or types")
+              ("documentation that consists only of commands (for example, setup steps that append to a shell "
+               "profile)"),
+              "a misconfigured server's file names or types")
     next_checks = ("the client host's processes at the same time (did a downloader pipe it into an interpreter?)",
                    "other responses from the same server", "the body's hash on other hosts")
 
@@ -242,15 +284,18 @@ class DisguisedScriptOrExecutable(Playbook):
         self.groups: dict[tuple, list[TypedEvent]] = {}
         self.counts: dict[tuple, int] = {}
         self.clients: dict[tuple, set] = {}
+        self.spans: dict[tuple, tuple[datetime, datetime]] = {}
 
     def consume(self, events):
         for e in self.applicable(events):
             if e.get("http.body.kind") not in ("script", "executable"):
                 continue
-            if not declared_document(e.get("url.original"), e.get("http.content_type")):
+            if not _declared(e)[0]:
                 continue
             key = (e.get("file.sha256"), e.get("source.ip"), e.get("url.original"))
             self.counts[key] = self.counts.get(key, 0) + 1
+            lo, hi = self.spans.get(key, (e.ts, e.ts))
+            self.spans[key] = (min(lo, e.ts), max(hi, e.ts))
             self.clients.setdefault(key, set()).add(str(e.get("destination.ip")))
             group = self.groups.setdefault(key, [])
             if len(group) < 20:
@@ -277,14 +322,15 @@ class DisguisedScriptOrExecutable(Playbook):
             evs = sorted(self.groups[key], key=lambda x: (x.ts, x.id))
             e, n = evs[0], self.counts[key]
             basis = e.get("http.body.basis")
-            reasons = declared_document(e.get("url.original"), e.get("http.content_type"))
-            media = declared_media(e.get("url.original"), e.get("http.content_type"))
+            reasons, media = _declared(e)
             lane = "high" if basis == "magic" or (basis == "shebang" and media) else self.lane
+            confidence = "high" if basis in ("magic", "shebang") else "medium"
+            first, last = self.spans[key]
             clients = sorted(self.clients[key])
             size = e.get("file.size")
             claim = (f"Packets show {n} HTTP {e.get('http.response.status_code')} response(s) from "
                      f"{e.get('source.ip')} to {', '.join(clients[:5])}{' and more' if len(clients) > 5 else ''} "
-                     f"for '{show(e.get('url.original'))}' ({evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}), "
+                     f"for '{show(e.get('url.original'))}' ({first.isoformat()} – {last.isoformat()}), "
                      f"served as a document ({'; '.join(reasons)}), {self._what(e)}. The body is {size} bytes, "
                      f"SHA-256 {e.get('file.sha256')}. It is observed in the packets; whether a client executed it "
                      f"is not established by these records.")
@@ -293,7 +339,7 @@ class DisguisedScriptOrExecutable(Playbook):
                 preds.append(pf(e, "http.body.basis"))
             if e.has("http.content_type"):
                 preds.append(pf(e, "http.content_type"))
-            m = Match(self.id, claim, self.claim_type, evs, preds, e.ts, self.severity, lane, "high",
+            m = Match(self.id, claim, self.claim_type, evs, preds, e.ts, self.severity, lane, confidence,
                       e.entities(), group_key="|".join(map(str, key)))
             if n > len(evs):
                 m.notes.append(f"{n} matching responses; {len(evs)} are cited")

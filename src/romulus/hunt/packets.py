@@ -1,21 +1,26 @@
 """Packet stage: judge the content of selected HTTP sessions, after the sweep.
 
-1. Select candidate sessions from each Arkime session index with typed predicates only (SELECTION): HTTP
-   sessions overlapping the hunt window whose body Arkime classified as text or as an executable (scripts and
-   droppers hide there). Selection is exhaustive up to a cap; anything beyond the cap is recorded.
-2. Fetch their packets from Arkime by explicit session id (batches of 20, byte-capped) and let TShark rebuild
-   the HTTP responses with a fixed query.
-3. Map each response to its session *within its batch* by server and client address and port, using the
-   session's time span when two sessions share a 4-tuple. Turn each response body into a typed `http_body`
+1. Select candidate session documents from each Arkime session index with typed predicates only: HTTP sessions
+   overlapping the hunt window whose body Arkime classified as text or as an executable (scripts and droppers
+   hide there). Selection is exhaustive up to a cap; anything beyond the cap, or any shortfall between what the
+   index reported and what came back, is recorded. The selection actually used is stated in coverage.
+2. Arkime saves a long session as several documents ("segments") that keep the session's original firstPacket.
+   Segments of one session (same 4-tuple and firstPacket) form one logical session and are fetched in the same
+   batch where they fit.
+3. Fetch the packets from Arkime by explicit session id (batches of 20, byte-capped) and let TShark rebuild the
+   HTTP requests and responses with a fixed query.
+4. Map each response to its logical session *within its batch* by server and client address and port, using
+   the session's time span when two sessions share a 4-tuple. Turn each response body into a typed `http_body`
    event (what the bytes are, what the server said they were, size and hash of the whole body, a bounded
    excerpt as the retained raw copy) and run the packet rules over it batch by batch, keeping only the events
    the rules may cite.
-4. Publish matches through the normal admission path, and write one coverage cell per target. Every way work
-   can be lost makes the cell and the stage partial, from the same list of reasons: a partial or capped
-   selection, a failed or truncated batch, a fetched session with no response TShark could rebuild, a
-   response that maps to no session or to more than one, a frame holding several responses, a body that
-   cannot be decoded, or a response missing a field the rule needs. Packet rules are positive-only, so even a
-   complete stage is never a complete negative.
+5. Publish matches through the normal admission path, and write one coverage cell per target (non-Arkime
+   targets get a not-applicable cell). Every way work can be lost makes the cell and the stage partial, from
+   the same list of reasons: a partial, short or capped selection; a failed or truncated batch; a fetched
+   session with no HTTP message TShark could rebuild; a response that maps to no session or to more than one;
+   a frame holding several responses; a body that cannot be decoded; or a response missing a field the rule
+   needs. A session where TShark saw the request but the server never answered has no body to judge: it is
+   counted, not partial. Packet rules are positive-only, so even a complete stage is never a complete negative.
 
 Any failure here is recorded and the hunt continues: packet evidence enriches the sweep; it is never required.
 """
@@ -51,18 +56,23 @@ TEXT_BODY_MAGICS = ["text/plain", "text/x-shellscript", "text/x-sh", "text/x-pyt
                     "text/x-perl", "text/x-php", "text/x-ruby", "application/x-sh", "application/x-shellscript",
                     "application/x-executable", "application/x-sharedlib", "application/x-pie-executable",
                     "application/x-dosexec", "application/x-mach-binary"]
-SELECTION = ("Arkime sessions with protocol http and http.bodyMagic in a fixed list of text, script and "
-             "executable types, overlapping the hunt window (lastPacket at or after its start, firstPacket "
-             "before its end and at most 1 h before its start)")
-OVERLAP_LOOKBACK = timedelta(hours=1)
-MAX_SESSIONS = 500
+OVERLAP_LOOKBACK = timedelta(days=7)
+_SELECTED = ("Arkime session documents with protocol http and http.bodyMagic in a fixed list of text, script and "
+             "executable types, ")
+SELECTION_OVERLAP = (_SELECTED + f"overlapping the hunt window: lastPacket at or after its start, and firstPacket "
+                     f"before its end and at most {OVERLAP_LOOKBACK.days} days before its start (Arkime keeps a "
+                     "long session's original firstPacket on every saved segment)")
+SELECTION_WINDOW = (_SELECTED + "with firstPacket inside the hunt window; lastPacket is not range-searchable on "
+                    "this target, so sessions that began before the window are not selected")
+MAX_SESSIONS = 2000                       # session documents (segments), not logical sessions
 MAX_BODY_BYTES = 1024 * 1024
 EXCERPT_BYTES = 4096
 PCAP_TARGET = "arkime-pcap"
 SPAN_SLACK_S = 1.0
-COUNTERS = ("candidates", "fetched_sessions", "sessions_with_responses", "sessions_without_responses",
-            "responses", "outside_window", "unmapped_responses", "ambiguous_responses", "unseparable_frames",
-            "undecodable_bodies", "missing_required", "failed_batches", "truncated_batches", "matched")
+COUNTERS = ("candidates", "logical_sessions", "fetched_sessions", "sessions_with_responses",
+            "sessions_request_only", "sessions_without_messages", "responses", "outside_window",
+            "unmapped_responses", "ambiguous_responses", "unseparable_frames", "undecodable_bodies",
+            "missing_required", "failed_batches", "truncated_batches", "matched")
 
 
 def _first(value):
@@ -80,36 +90,40 @@ def _epoch(ms) -> float | None:
         return None
 
 
-def _candidates(client, target: str, contract, window: Window) -> tuple[list[dict], list[str], list[str]]:
-    """Returns (sessions, partial reasons, notes)."""
+def _candidates(client, target: str, contract, window: Window) -> tuple[list[dict], list[str], str]:
+    """Returns (session documents, partial reasons, the selection actually used)."""
     filters = [Predicate(field="protocol", op="eq", value="http"),
                Predicate(field="http.bodyMagic", op="in", value=TEXT_BODY_MAGICS)]
-    notes = []
     last = contract.spec("lastPacket")
     if last is not None and "gte" in last.ops:
+        selection = SELECTION_OVERLAP
         intent = SearchIntent(kind="raw", target=target, max_records=MAX_SESSIONS + 1,
                               purpose="packet-stage candidates",
                               window=Window(start=window.start - OVERLAP_LOOKBACK, end=window.end),
                               filters=[*filters, Predicate(field="lastPacket", op="gte",
                                                            value=window.start.isoformat())])
     else:
-        notes.append(f"{target}: lastPacket is not searchable, so sessions that began before the window are "
-                     "not selected")
+        selection = SELECTION_WINDOW
         intent = SearchIntent(kind="raw", target=target, window=window, max_records=MAX_SESSIONS + 1,
                               purpose="packet-stage candidates", filters=filters)
     try:
         out = execute(client, intent, contract)
     except CompileError as exc:
-        return [], [f"{target}: candidate selection failed: {exc}"], notes
+        return [], [f"{target}: candidate selection failed: {exc}"], selection
     if out.completeness == Completeness.failed:
-        return [], [f"{target}: candidate selection failed: {out.error}"], notes
+        return [], [f"{target}: candidate selection failed: {out.error}"], selection
     records = out.records
-    partial = [f"{target}: candidate selection partial: {r}" for r in out.reasons if not r.startswith("cap:")]
     if len(records) > MAX_SESSIONS:
         total = f" of {out.total}{'+' if out.total_relation != 'eq' else ''}" if out.total else ""
-        partial.append(f"{target}: candidate cap reached: first {MAX_SESSIONS}{total} sessions examined")
+        partial = [f"{target}: candidate selection partial: {r}" for r in out.reasons if not r.startswith("cap:")]
+        partial.append(f"{target}: candidate cap reached: first {MAX_SESSIONS}{total} session documents examined")
         records = records[:MAX_SESSIONS]
-    return records, partial, notes
+    else:
+        # below our cap, any shortfall the executor reports (fewer records than the total) is lost work
+        partial = [f"{target}: candidate selection partial: {r}" for r in out.reasons]
+        if out.total is not None and out.total_relation == "eq" and len(records) < out.total and not partial:
+            partial.append(f"{target}: candidate selection returned {len(records)} of {out.total} documents")
+    return records, partial, selection
 
 
 def _unclassified(client, target: str, contract, window: Window) -> int | None:
@@ -140,16 +154,51 @@ def _key(ip, port, cip, cport) -> tuple:
     return str(ip), str(port), str(cip), str(cport)
 
 
+def _tuple(sess: dict) -> tuple:
+    """(server ip, server port, client ip, client port) of a session document."""
+    src = sess["_source"]
+    client, server = src.get("source") or {}, src.get("destination") or {}
+    return _key(server.get("ip"), server.get("port"), client.get("ip"), client.get("port"))
+
+
+def _logical(sess: dict) -> tuple:
+    """Segments of one Arkime session share the 4-tuple and the original firstPacket."""
+    return _tuple(sess), sess["_source"].get("firstPacket")
+
+
+def _batches(sessions: list[dict]) -> list[list[dict]]:
+    """Batches of at most MAX_IDS_PER_REQUEST documents that keep a logical session's segments together, unless
+    one session alone has more segments than a batch holds."""
+    groups: dict[tuple, list[dict]] = {}
+    for sess in sessions:
+        groups.setdefault(_logical(sess), []).append(sess)
+    out: list[list[dict]] = []
+    current: list[dict] = []
+    for segs in groups.values():
+        if current and len(current) + len(segs) > MAX_IDS_PER_REQUEST:
+            out.append(current)
+            current = []
+        for seg in segs:
+            if len(current) == MAX_IDS_PER_REQUEST:
+                out.append(current)
+                current = []
+            current.append(seg)
+    if current:
+        out.append(current)
+    return out
+
+
 def _body_event(row: dict, addrs: tuple, ts: datetime, session: dict, index: str) -> tuple[TypedEvent, dict]:
     src_doc = session["_source"]
     sid = session["_id"]
     body = decode_hex_body(_first(row.get("http.file_data")), MAX_BODY_BYTES)
     info = analyze_body(body.head)
-    frame = _first(row.get("frame.number")) or "0"
-    native = f"{sid}#frame{frame}"
-    raw = {"arkime_session_id": sid, "node": src_doc.get("node"), "index": index, "frame": frame,
-           "tcp_stream": _first(row.get("tcp.stream")), "body_bytes": body.size, "body_sha256": body.sha256,
-           "body_analyzed_bytes": len(body.head), "body_excerpt_hex": body.head[:EXCERPT_BYTES].hex()}
+    epoch = _first(row.get("frame.time_epoch"))
+    native = f"{sid}@{epoch}"                 # stable across re-runs; frame numbers depend on batch composition
+    raw = {"arkime_session_id": sid, "node": src_doc.get("node"), "index": index, "frame_time_epoch": epoch,
+           "batch_frame": _first(row.get("frame.number")), "batch_tcp_stream": _first(row.get("tcp.stream")),
+           "body_bytes": body.size, "body_sha256": body.sha256, "body_analyzed_bytes": len(body.head),
+           "body_excerpt_hex": body.head[:EXCERPT_BYTES].hex()}
     ref = RawRef(target=f"{PCAP_TARGET}:{index}", native_id=native, digest=digest(raw))
     o = f"{native}:tshark"
     server_ip, sport, client_ip, cport = addrs
@@ -160,6 +209,7 @@ def _body_event(row: dict, addrs: tuple, ts: datetime, session: dict, index: str
         "url.original": fv(_first(row.get("http.response_for.uri")), f"{o}.http.response_for.uri"),
         "http.response.status_code": fv(int(code) if code else None, f"{o}.http.response.code"),
         "http.content_type": fv(_first(row.get("http.content_type")), f"{o}.http.content_type"),
+        "http.content_encoding": fv(_first(row.get("http.content_encoding")), f"{o}.http.content_encoding"),
         "file.size": fv(body.size, f"{o}.http.file_data#bytes"),
         "file.sha256": fv(body.sha256, f"{o}.http.file_data#sha256"),
         "http.body.kind": fv(info.kind, f"{o}.http.file_data#analysis"),
@@ -177,7 +227,7 @@ def _body_event(row: dict, addrs: tuple, ts: datetime, session: dict, index: str
     caveats = [f"content judged from the first {len(body.head)} bytes"] if body.cut else []
     event = TypedEvent(id=event_id("http_body", [ref]), family="http_body", ts=ts, host=src_doc.get("node"),
                        fields={k: v for k, v in f.items() if v.value is not None}, raw=[ref],
-                       normalizer="tshark-http@2", caveats=caveats)
+                       normalizer="tshark-http@3", caveats=caveats)
     return event, raw
 
 
@@ -201,15 +251,34 @@ class _Target:
         self.notes: list[str] = []
         self.pack = [cls() for cls in PACKET_PLAYBOOKS]
         self.raw_sources: dict[str, dict] = {}
+        self.spans: dict[tuple, tuple[float | None, float | None]] = {}
+        self.fetched: set[tuple] = set()
+        self.responded: set[tuple] = set()
+        self.requested: set[tuple] = set()
 
     def run(self, sessions: list[dict]) -> None:
-        for i in range(0, len(sessions), MAX_IDS_PER_REQUEST):
+        for sess in sessions:                           # a logical session spans all of its segments
+            first = _epoch(sess["_source"].get("firstPacket"))
+            last = _epoch(sess["_source"].get("lastPacket"))
+            lo, hi = self.spans.get(_logical(sess), (first, None))
+            ends = [x for x in (hi, last) if x is not None]
+            self.spans[_logical(sess)] = (lo, max(ends) if ends else None)
+        self.c["logical_sessions"] = len(self.spans)
+        for n, batch in enumerate(_batches(sessions)):
             self.heartbeat()
-            self._batch(i // MAX_IDS_PER_REQUEST, sessions[i:i + MAX_IDS_PER_REQUEST])
+            self._batch(n, batch)
+        silent = self.fetched - self.responded
+        self.c["fetched_sessions"] = len(self.fetched)
+        self.c["sessions_with_responses"] = len(self.responded)
+        self.c["sessions_request_only"] = len(silent & self.requested)
+        self.c["sessions_without_messages"] = len(silent - self.requested)
         missing = sum(pb.missing_required for pb in self.pack)
         self.c["missing_required"] = missing
-        for label, n in (("fetched session(s) had no HTTP response TShark could rebuild",
-                          self.c["sessions_without_responses"]),
+        if self.c["sessions_request_only"]:
+            self.notes.append(f"{self.name}: {self.c['sessions_request_only']} session(s) had an HTTP request and no "
+                              "response (nothing served, nothing to judge)")
+        for label, n in (("fetched session(s) had no HTTP message TShark could rebuild",
+                          self.c["sessions_without_messages"]),
                          ("response(s) mapped to no selected session", self.c["unmapped_responses"]),
                          ("response(s) matched more than one session", self.c["ambiguous_responses"]),
                          ("frame(s) held several HTTP responses that cannot be separated", self.c["unseparable_frames"]),
@@ -229,29 +298,33 @@ class _Target:
             error = fetched.error or (None if fetched.path else "no packets")
         if error:
             self.c["failed_batches"] += 1
-            self.partial.append(f"{self.name}: batch {n} ({len(batch)} sessions) not examined: {error}")
+            self.partial.append(f"{self.name}: batch {n} ({len(batch)} session documents) not examined: {error}")
             return
-        result = run_tshark(self.s, fetched.path, "http_responses", [self.work], http_ports=_ports(batch))
+        result = run_tshark(self.s, fetched.path, "http_messages", [self.work], http_ports=_ports(batch))
         pcap.unlink(missing_ok=True)
         if result.error:
             self.c["failed_batches"] += 1
-            self.partial.append(f"{self.name}: batch {n} ({len(batch)} sessions) not examined: {result.error}")
+            self.partial.append(f"{self.name}: batch {n} ({len(batch)} session documents) not examined: "
+                                f"{result.error}")
             return
-        self.c["fetched_sessions"] += len(batch)
         if fetched.capped or result.truncated:
             self.c["truncated_batches"] += 1
             self.partial.append(f"{self.name}: batch {n} capture incomplete "
                                 f"({'download byte cap' if fetched.capped else 'capture cut short'})")
-        by_tuple: dict[tuple, list[dict]] = {}
+        segments: dict[tuple, list[dict]] = {}
+        by_tuple: dict[tuple, list[tuple]] = {}
         for sess in batch:
-            src = sess["_source"]
-            client, server = src.get("source") or {}, src.get("destination") or {}
-            by_tuple.setdefault(_key(server.get("ip"), server.get("port"), client.get("ip"), client.get("port")),
-                                []).append(sess)
-        seen: set[str] = set()
+            lkey = _logical(sess)
+            if lkey not in segments:
+                by_tuple.setdefault(lkey[0], []).append(lkey)
+            segments.setdefault(lkey, []).append(sess)
+        self.fetched |= set(segments)
         events: list[TypedEvent] = []
         raws: dict[str, dict] = {}
         for row in result.rows:
+            if row.get("http.request.method") and not row.get("http.response.code"):
+                self._request(row, by_tuple)
+                continue
             if max(len(row.get(f) or []) for f in ("http.response.code", "http.file_data",
                                                     "http.response_for.uri")) > 1:
                 self.c["unseparable_frames"] += 1
@@ -262,20 +335,19 @@ class _Target:
                 self.c["unmapped_responses"] += 1
                 continue
             ts = datetime.fromtimestamp(float(epoch), UTC)
-            sessions = by_tuple.get(_key(*addrs), [])
-            if len(sessions) > 1:
-                sessions = [x for x in sessions if self._spans(x, ts.timestamp())]
-            if not sessions:
+            owners = self._owners(by_tuple.get(_key(*addrs), []), ts.timestamp())
+            if not owners:
                 self.c["unmapped_responses"] += 1
                 continue
-            if len(sessions) > 1:
+            if len(owners) > 1:
                 self.c["ambiguous_responses"] += 1
                 continue
-            sess = sessions[0]
-            seen.add(sess["_id"])
+            lkey = owners[0]
+            self.responded.add(lkey)
             if not self.window.start <= ts < self.window.end:
                 self.c["outside_window"] += 1
                 continue
+            sess = self._segment(segments[lkey], ts.timestamp())
             try:
                 ev, raw = _body_event(row, addrs, ts, sess, self.name)
             except (PacketError, ValueError) as exc:
@@ -284,8 +356,6 @@ class _Target:
                 continue
             events.append(ev)
             raws[ev.raw[0].key] = raw
-        self.c["sessions_with_responses"] += len(seen)
-        self.c["sessions_without_responses"] += len(batch) - len(seen)
         self.c["responses"] += len(events)
         for pb in self.pack:
             pb.consume(events)
@@ -293,10 +363,38 @@ class _Target:
         keep = {e.raw[0].key for pb in self.pack for e in pb.retained_events()}
         self.raw_sources = {k: v for k, v in self.raw_sources.items() if k in keep}
 
+    def _request(self, row: dict, by_tuple: dict) -> None:
+        """A request travels client -> server, so its addresses are the response's, reversed."""
+        cip, cport, sip, sport = _addresses(row)
+        epoch = _first(row.get("frame.time_epoch"))
+        if epoch and all((cip, cport, sip, sport)):
+            owners = self._owners(by_tuple.get(_key(sip, sport, cip, cport), []), float(epoch))
+            if len(owners) == 1:
+                self.requested.add(owners[0])
+
+    def _owners(self, lkeys: list[tuple], t: float) -> list[tuple]:
+        if len(lkeys) <= 1:
+            return lkeys
+        return [k for k in lkeys if self._within(self.spans.get(k), t)]
+
     @staticmethod
-    def _spans(sess: dict, t: float) -> bool:
-        first, last = _epoch(sess["_source"].get("firstPacket")), _epoch(sess["_source"].get("lastPacket"))
+    def _within(span, t: float) -> bool:
+        first, last = span or (None, None)
         return first is not None and last is not None and first - SPAN_SLACK_S <= t <= last + SPAN_SLACK_S
+
+    @staticmethod
+    def _segment(segs: list[dict], t: float) -> dict:
+        """The segment that holds time t: the earliest whose lastPacket is not before t."""
+        ordered = sorted(segs, key=lambda x: _epoch(x["_source"].get("lastPacket")) or 0.0)
+        return next((x for x in ordered if (_epoch(x["_source"].get("lastPacket")) or 0.0) + SPAN_SLACK_S >= t),
+                    ordered[-1])
+
+
+def _not_applicable(repo, hunt_id: str, window: Window, targets: list[str]) -> None:
+    for target in targets:
+        for cls in PACKET_PLAYBOOKS:
+            repo.set_rule_cell(hunt_id, cls.id, cls.version, target, window.key(), "not_applicable_no_events", 0, 0,
+                               {"reason": "not an Arkime session target: no packets to examine"})
 
 
 def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, contracts: dict,
@@ -304,9 +402,10 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
                      owner_token: str | None = None) -> dict:
     heartbeat = heartbeat or (lambda: None)
     targets = [t for t, c in contracts.items() if c is not None and getattr(c, "time_field", "") == "firstPacket"]
-    summary = {"status": "skipped", "finished": False, "targets": targets, "selection": SELECTION,
+    summary = {"status": "skipped", "finished": False, "targets": targets, "selection": {},
                **dict.fromkeys(COUNTERS, 0), "http_sessions_without_body_type": {}, "partial_reasons": [],
                "notes": []}
+    _not_applicable(repo, hunt_id, window, [t for t in contracts if t not in targets])
     if not targets:
         summary.update(finished=True, notes=["no Arkime session target in this hunt"])
         return summary
@@ -318,15 +417,14 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
     try:
         for target in targets:
             run = _Target(s, target, window, work, packets, heartbeat)
-            sessions, partial, notes = _candidates(client, target, contracts[target], window)
+            sessions, partial, selection = _candidates(client, target, contracts[target], window)
             run.c["candidates"] = len(sessions)
             run.partial += partial
-            run.notes += notes
-            summary["http_sessions_without_body_type"][target] = _unclassified(client, target, contracts[target],
-                                                                                window)
+            summary["selection"][target] = selection
+            unclassified = _unclassified(client, target, contracts[target], window)
+            summary["http_sessions_without_body_type"][target] = unclassified
             run.run(sessions)
             heartbeat()
-            cell_target = f"{PCAP_TARGET}:{target}"
             for pb in run.pack:
                 matches = pb.finalize()
                 for m in matches:
@@ -334,11 +432,10 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
                 run.c["matched"] += len(matches)
                 state = ("match_on_partial" if run.partial else "matched") if matches else \
                     ("positive_only_partial" if run.partial else "positive_only")
-                repo.set_rule_cell(hunt_id, pb.id, pb.version, cell_target, window.key(), state, len(matches),
-                                   pb.evaluated, {**run.c, "selection": SELECTION,
-                                                  "http_sessions_without_body_type":
-                                                      summary["http_sessions_without_body_type"][target],
-                                                  "reasons": run.partial[:20], "notes": run.notes})
+                repo.set_rule_cell(hunt_id, pb.id, pb.version, f"{PCAP_TARGET}:{target}", window.key(), state,
+                                   len(matches), pb.evaluated,
+                                   {**run.c, "selection": selection, "http_sessions_without_body_type": unclassified,
+                                    "reasons": run.partial[:20], "notes": run.notes})
             for k in COUNTERS:
                 summary[k] += run.c[k]
             summary["partial_reasons"] += run.partial
