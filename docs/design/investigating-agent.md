@@ -1,12 +1,10 @@
 # The investigating agent
 
-_Design for ADR-008 (accepted 2026-10-20). Provider: ADR-007. Status: not implemented._
-
 ## Goal
 
 After the deterministic sweep and expansion, an AI agent works the hunt the way a senior analyst would:
 
-- it reads everything ROMULUS found;
+- it reads everything the tool found;
 - it forms hypotheses about what the adversary did;
 - it follows leads to test them, and finds further indicators;
 - it connects the pieces into a bigger picture.
