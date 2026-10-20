@@ -6,7 +6,7 @@ import re
 
 BANNER = "UNCLASSIFIED // FOR TRAINING USE"
 _MD_SPECIAL = re.compile(r"([\\`*_{}\[\]<>#|])")
-_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x1b]")
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x1b\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 
 
 def esc(text) -> str:
