@@ -69,8 +69,16 @@ class TypedEvent(BaseModel):
         return out
 
 
+# A typed event is one normalization's view of raw records, and the store keeps one row per event id. The id
+# therefore carries the evidence version: a hunt run with improved normalization stores its own rows instead of
+# silently reusing an older hunt's (eval run 10: stale rows without process.session_id hid every login-session
+# link). Bump on any change to how raw records become typed events; tests/test_evidence_version.py enforces it.
+EVIDENCE_VERSION = 2
+
+
 def event_id(family: str, refs: list[RawRef]) -> str:
-    h = hashlib.sha256((family + "|" + "|".join(sorted(r.key for r in refs))).encode()).hexdigest()
+    h = hashlib.sha256((f"v{EVIDENCE_VERSION}|" + family + "|"
+                        + "|".join(sorted(r.key for r in refs))).encode()).hexdigest()
     return h[:24]
 
 

@@ -16,9 +16,9 @@ from romulus.evidence.auditd import (
     parse_sockaddr,
     socket_syscall,
 )
-from romulus.evidence.typed import Outcome, RawRef, TypedEvent, event_id, fv
+from romulus.evidence.typed import EVIDENCE_VERSION, Outcome, RawRef, TypedEvent, event_id, fv
 
-NORMALIZER_VERSION = "lab-ecs@1"
+NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
 
 
 class Skip(Exception):
