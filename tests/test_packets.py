@@ -743,6 +743,8 @@ def test_a_response_arkime_saw_but_tshark_could_not_rebuild_is_partial(tmp_path,
     repo, summary = _stage(tmp_path, monkeypatch, sessions=sessions, rows=rows)
     assert summary["sessions_unrebuilt_response"] == 1 and summary["sessions_request_only"] == 0
     _partial(repo, summary, "a response Arkime recorded that TShark could not rebuild")
+    assert summary["unexamined_sessions"] == {TARGET: {"unrebuilt_response": [streamed["_id"]]}}
+    assert _cell(repo)["detail"]["unexamined_sessions"] == {"unrebuilt_response": [streamed["_id"]]}
 
 
 def test_overlapping_same_tuple_sessions_are_ambiguous_and_partial(tmp_path, monkeypatch):

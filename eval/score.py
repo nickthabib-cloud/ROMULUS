@@ -64,7 +64,8 @@ def score(gold_dir, db_path, hunt_id, run_id, mode="dev", adjudications=None, fe
         source_check = {}
         # every ES-backed citation, including Arkime sessions read from their ES index (key canonicalized)
         rep = {c["key"]: (c["target"], c["native_id"], c["digest"]) for m in matches
-               if m.item.lane in M.REPORTED_LANES for c in m.item.locators if c["key"] and c["key"][0] in ("es", "arkime")}
+               if m.item.lane in M.REPORTED_LANES for c in m.item.locators if c["key"] and c["key"][0] in ("es", "arkime")
+               and not str(c["target"]).startswith("arkime-pcap:")}   # packet-stage digests are of rebuilt bodies
         rep_keys = {k: v[2] for k, v in rep.items()}
         by_index: dict[str, list[str]] = {}
         for target, nid, _d in rep.values():

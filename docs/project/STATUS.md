@@ -2,68 +2,56 @@
 
 ## Resume here
 
-_Last updated: 2026-10-20 07:24 EDT by Codex._
+_Last updated: 2026-10-20 08:40 EDT by Claude (lead)._
 
 - **Direction (owner, 2026-10-19):**
-  - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5: deterministic expansion finds, and an optional model only explains leads and drafts the narrative.
+  - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5.
   - The New hunt page has an "Agentic hunt" checkbox, unchecked by default. `AGENT_MODE` defaults to `off`.
-  - The spec (`ENGINEERING_MASTER_PROMPT.md`) is a set of suggestions, not requirements. Propose better routes when they exist. The goal is to find indicators of compromise wherever ROMULUS is sent, correlating host logs with network telemetry.
-- **Branch under review:** `codex/expansion` at the eleven-step expansion fix series, based on `m2/evaluation` at `d59a79f`; independently reviewed, live-tested on the VM, and not pushed. The base merges:
-  - investigator v2 (`codex/investigator-v2`, `0bfd0d2`);
-  - host↔network correlation and Arkime (`m2/network-correlation`);
-  - the research register (round 1).
-- **What's in it now:**
-  - `net_socket` events from auditd connect/SOCKADDR.
-  - `host.interpreter_external_connection`.
-  - `corr.process_network_link`: a host connect() joined to Suricata or Arkime records, disk-staged, with the link worded as inferred.
-  - Arkime session indices as a target (`net_session`), with `net.long_external_connection`, `net.beaconing` and `net.rare_client_fingerprint`.
-  - Investigator modes model / deterministic / off.
-  - The replay harness (`romulus replay export|run|summary`).
-  - Deterministic expansion with persisted anchors and typed links, global tiered round-robin scheduling, a depth reserve, durable physical-query checkpoints, two anchor-gated context playbooks, crash-safe resume, canonical cross-hunt manifests, explicit accounting, and incident-graph reporting.
-  - Tests: 740 pass; changed-file Ruff, `archmap --check`, and `git diff --check` are clean. The independent final reviewer returned PASS.
-- **Latest lab hunts** (model-off, e_a 10:00–17:30 UTC):
-  - Default runs `h20261020-110635-1f8437` and `h20261020-110952-5bb543` both completed within scope over 1,816,068 records / 326,534 events with 0 errors and identical lanes: 7 urgent / 18 high / 95 lead / 511 context. Each immutable r1 report has 120 findings/leads, no broken finding/incident/investigation citations, and is finalizable.
-  - Expansion distributed the 180 physical-source-query budget across 25 anchors (22 depth 0, 2 depth 1, 1 depth 2), all honestly `expanded_partial`. It produced three high `context.post_access_discovery` findings and formed 96 incidents: 91 size 1, one size 4, two size 5, one size 7, and one size 8, with 53 observed and 45 inferred edges.
-  - The two canonical manifests are byte-identical: 1,669,044 bytes, SHA-256 `d5d11e72aa397583a25295ac7f0a33cc54edae15234df67d8f1a032ee490c5ff`.
-  - `--no-expand` run `h20261020-111303-330c65` completed within scope with 0 errors, 7 urgent / 15 high / 95 lead / 511 context, 117 singleton incidents, 0 anchors/links, and no broken citations. Wall/RSS: default A 3:09.37 / 2,621,356 KiB; default B 3:04.48 / 2,620,320 KiB; no-expand 1:53.43 / 2,620,396 KiB. No ground-truth scoring was performed by Codex.
-- **Evaluation so far (dev set e_a, gold v1: 22 observable):**
-  - Model-off before the network work: recall 11/22 reported, 15/22 surfaced; P@10 1.00; 5.07 false leads per modelled hour.
-  - Off, deterministic and model hunts are identical on every finding metric (`docs/eval/results/2026-10-19-sl700_e_a-ablation-456.md`).
-  - Replay: v1 free-JSON 0.22 → v2 menu 0.53 with retry. The remaining error is escalating benign seeds.
-- **Since the merge (2026-10-19 evening):**
-  - **Arkime is live.** The owner granted `romulus_agent` read-only access to `arkime_sessions3-*` (role `romulus_arkime_reader`; doctor confirms no write rights), and `ES_INDEX_PATTERNS` includes it. Long-connection rules catch both Meterpreter sessions and the exploit's held HTTP connection; beaconing catches the cron `curl` every 900 s.
-  - **Noise fix:** external-connection findings are grouped per (host, program, account, port); kernel-record lineage lowers web-service daemons to lead (it never raises a lane); NTP verified by the parser goes to context.
-  - **Field-role indicator matcher** (`ioc.indicator_match`, `content/indicators/*.yaml`). The seed list has about 80 exact tool names. On the lab, LinPEAS run by the attacker is high, and commands that only name it are context.
-  - **ATT&CK Enterprise 20.0 STIX** is vendored at `content/attack/` (pinned and verified).
-  - **v1 audit:** no v1 rule is kept; 15 ideas are queued as `v1_ports` in `content/research/backlog.yaml`. Spec lessons 11–14 added.
-- **Scores** (dev, gold v1; eval-custodian, `docs/eval/results/`):
+  - The spec is a set of suggestions. The goal is to find indicators of compromise wherever ROMULUS is sent, correlating host logs with network telemetry.
+- **Branches:**
+  - **`m2/evaluation` at `082e94c`** (not pushed). It merges the packet stage (M4 slice 3, `m2/packets`). The reviewer passed it after four rounds.
+  - **`codex/expansion` at `fdac0ba`.** The ADR-006 expansion engine plus Codex's fix round 1. The merge-gate reviewer **FAILED** it:
+    - **Blocking B-1:** a network anchor's victim host is an IP string used as a `host.name` predicate, so the host-side links come back as false-complete.
+    - **Important:** I-1 (a direct indicator is capped at lead when reached through an inferred link); I-2 (the per-fetch query cap is soft); I-3 (aggregate findings bridge incidents).
+    - **Fix round 2** is briefed in `Claude-Codex.md` (2026-10-20 07:49 EDT) and is waiting for the owner to start Codex. It includes merging `m2/evaluation` (the packet stage runs before expansion; the pack is `m3-pack@2`).
+  - **`m2/integration-trial` at `8baae62`:** the lead's trial merge of packets onto `fdac0ba`, kept as Codex's reference for resolving the conflicts.
+- **Packet stage (new):**
+  - **Selection:** Arkime HTTP sessions whose body Arkime typed as text or an executable, overlapping the hunt window. Mid-save segments are grouped into one logical session.
+  - **Fetch:** packets come from Arkime by explicit id. A multi-segment session is fetched one segment at a time in order, then merged with `mergecap`.
+  - **TShark:** a fixed JSON query, pinned reassembly preferences, limits applied through `prlimit`.
+  - **Rule:** `pcap.disguised_script_or_executable` (positive-only). Heuristic matches are lead lane, medium confidence.
+  - **Honest coverage:** every lost-work path is partial. The selection used, and the ids of any sessions not judged, are stated in coverage.
+- **Deployed:** `8baae62`. Latest hunt `h20261020-115054-da2ab3` (no-expand, agent off, e_a 10:00–17:30 UTC):
+  - `partial`; the only reason is 2 ZoneMinder streaming responses TShark could not rebuild;
+  - 7 urgent / 15 high / 97 lead / 511 context; 1:56 wall time; 2.6 GB RSS.
+- **Scores** (dev set e_a, gold v1, 22 observable; eval-custodian, `docs/eval/results/`):
 
   | Run | Recall reported | Recall surfaced | P@10 | False leads/hour |
   |---|---|---|---|---|
   | 4: model-off baseline | 11/22 | 15/22 | 1.00 | 5.07 |
   | 7: host↔network correlation | 12/22 | 17/22 | 0.80 | 6.23 |
   | 8: + Arkime + noise fix | 12/22 | 17/22 (critical+high 12/13) | 0.90 | 5.28 |
+  | 9: + packet stage (no expansion) | 12/22 | 17/22 (critical+high 12/13) | 0.90 | 5.14 |
 
-  Remaining misses are discovery ×4 and privesc ×1 (no rule matched), plus 5 lead-only (c2_channel, recon ×3, remote_login). The expansion engine and context rules target these.
-- **Deployed/live-tested product tree:** the final `codex/expansion` source tree. The canonical projection was corrected after the hunts from their persisted, identical semantic data, reviewed again, and redeployed. Nothing is pushed: the owner pushes.
-- **Codex expansion fix round:** complete and handed back in `Claude-Codex.md`. It includes fair bounded scheduling, safe inferred-link handling, normalized login sessions, honest IP coverage, durable resume budgets, context deduplication, incident correlation, canonical manifests, and local plus live validation.
-- **Owner decisions recorded (2026-10-19):**
-  - f_a holdout on hold.
-  - A different-storyline dataset later.
-  - Malcolm after deterministic search is built out.
-  - Ground-truth account isolation: explained as defence in depth, not required now; revisit before any holdout.
+  - **Run 9:** both packet leads match gold: the stager served as `/TODO.md` and the authorized_keys drop. But each is for an opportunity the host rules already reported, so recall is unchanged.
+  - **Misses:** discovery ×4 and privesc ×1 (no rule matched); 5 lead-only (c2_channel, recon ×3, remote_login).
+  - Expansion plus context rules are the next lever for these. Codex's round-1 live run added 3 high context findings and connected incidents, but it is not scored yet because of the review FAIL.
+- **Owner actions pending:**
+  1. Start Codex on expansion fix round 2 (`Claude-Codex.md`).
+  2. Copy the run 9 private eval files from the VM's `/tmp/r9priv/` into `/home/user/romulus-eval/sl700_e_a/`, then delete `/tmp/r9priv` and `/tmp/r9h`. The session's permission rules blocked the eval-custodian from writing there.
+  3. Push `m2/evaluation`; Claude Code cannot push.
+  4. Decide the false-leads-per-hour ceiling (PROTOCOL §14).
 - **Next:**
-  1. Lead reviews the handback and merges the eleven-step `codex/expansion` series if accepted; the independent reviewer gate is PASS.
-  2. Lead: network slice 3, TShark on the packets of specific Arkime sessions (v1's explicit-ID PCAP fetch and TShark safety patterns).
-  3. Detection engineer: context-rule catalog (after the engine), plus lab-testable `v1_ports` and backlog items.
-  4. The eval-custodian scores after each step.
-- **Merge gates and known issues:**
-  - Investigator v2 re-review findings on `0abb1fc` (spawned-case stall, stale schema after shrink, seed cards dropped, `valid_first` metric, deterministic errors treated as outages). Several may be fixed in Codex's later commits but are not re-verified. They only matter for agent mode, which is off by default.
-  - The live 180-query budget is now fair and bounded, but all 25 anchors remain partial and later broad link tiers (`source_ip` and `account`) were not reached. Tune the budget/tier policy only with explicit completeness and false-lead measurements.
+  1. Codex fix round 2. Then the reviewer re-checks, the lead merges into `m2/evaluation`, deploys, runs a default (expansion) hunt, and the eval-custodian scores it as run 10.
+  2. Then tune the expansion budget and tiers by score, and add the context-rule catalog (detection-engineer) aimed at the discovery and privesc misses.
+  3. The attack-path timeline page and template narrative (M3).
+- **Known issues:**
+  - Investigator v2 re-review findings on `0abb1fc` (agent mode only, which is off by default).
+  - `host.ssh_authorized_keys_write` misses key appends made inside downloaded scripts. The packet rule catches the lab case; kernel file records are the general fix (M4).
 - **Process notes:**
-  - Investigator and shell-parser code goes to Codex via `Claude-Codex.md`. The file is gitignored; replace Claude's last message; old text may be cleared at a new conversation.
+  - Investigator, shell-parser and expansion code goes to Codex via `Claude-Codex.md`. The file is gitignored; replace Claude's last message; old text may be cleared at a new conversation.
   - The eval-custodian never deploys without asking.
-  - Owner direction: detection breadth is a primary goal (spec §7), plus a detection catalog page (spec §7; M4/M6).
+  - Detection breadth is a primary goal (spec §7).
 
 ## Milestone summary
 
@@ -91,16 +79,6 @@ _Last updated: 2026-10-20 07:24 EDT by Codex._
 ## Session log
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
-
-- **2026-10-20 EDT (expansion reviewer-fix round, Codex)**:
-  - Merged the current evaluation base and addressed every reviewer finding in ten ordered fix commits after the merge: event-backed incident edges; inferred flow-host links; fair global-tier scheduling; context dedupe; aggregate-key fan-out; audit-login normalization; honest IP coverage; durable query checkpoints and exception safety; canonical manifests; and controller/report hardening.
-  - Two independent follow-up reviews found and verified seven additional boundary defects. Fixes preserve unresolved IP inventory coverage, checkpoint before I/O, restart earlier tiers for new anchors, reject unusable flow endpoints, cap inferred direct findings at lead, preserve the child-query reserve, and sort canonical collections after rekeying. Final reviewer result: PASS.
-  - Final local proof: 740 tests pass; changed-surface Ruff, architecture map, and diff checks pass. Deployed and ran two default hunts plus one no-expand hunt. Default expansion adds three cited high context findings and forms multi-finding incidents; both canonical manifests are byte-identical. No model calls or ground-truth scoring were performed.
-
-- **2026-10-20 UTC (deterministic expansion, Codex)**:
-  - Implemented the ADR-006 expansion slice in seven commits: session/IP truth, typed links, anchor-gated context rules, crash-safe controller, incident graph, replay rename, and verification hardening. Source access remains in the hunt layer; `romulus.agent` cannot import `romulus.sources`.
-  - Developed the slices red-first. Final local proof: 670 tests pass; changed-file Ruff passes; `scripts/archmap.py --check` passes. A live manifest comparison exposed nondeterministic Suricata signature-note ordering; a tie-breaker and regression test fixed it without changing detection semantics.
-  - Deployed the clean product tree and ran two matching expanded hunts plus one `--no-expand` hunt. The expanded reports are semantically identical, finalizable, and have zero broken citations. Live accounting also exposed the source-budget concentration issue described above; no expansion-derived finding was claimed.
 
 - **2026-10-19 (evening: direction change, network correlation, merges)**:
   - Owner dropped the model bakeoff (ADR-005), then set deterministic search first with the model optional (ADR-006, from a parallel design thread). Codex built investigator v2. The custodian showed off, deterministic and model hunts identical on findings; replay 0.22 → 0.53.
