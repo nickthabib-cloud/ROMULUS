@@ -14,6 +14,8 @@ The final report opens with its **AI assessment**: the agent's overall hypothesi
 
 For testing purposes the model is reached through any OpenAI API. Actual teams use their own LLM server.
 
+The full plan (how the agent connects to a model, keeps telemetry on site, what it may add, the report's AI assessment, safety and budgets) is in [`docs/architecture/ai-investigating-agent.md`](docs/architecture/ai-investigating-agent.md).
+
 Outputs:
 
 - ranked findings
@@ -65,7 +67,7 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 | `tests/` | Unit, acceptance, hostile-input and regression tests |
 | `scripts/` | `deploy.ps1` (deploy to a Linux host over SSH), `web-restart.sh`, `archmap.py`, `smoke_live.py` |
 | `content/` | Indicator lists and vendored MITRE ATT&CK data |
-| `docs/architecture/` | Architecture overview and the generated module map |
+| `docs/architecture/` | Architecture overview, the generated module map, and the planned AI investigating agent |
 | `.env.example` | Configuration template. Copy it to `$ROMULUS_HOME/.env`, then `chmod 600` |
 
 ## Getting started
@@ -80,7 +82,7 @@ cp .env.example "$ROMULUS_HOME/.env"   # fill in sources, model endpoint and sec
 
 Use a **read-only** Elasticsearch account, never the `elastic` superuser. The model is optional: leave `OLLAMA_URL` empty to run model-off. If you use Ollama, keep `OLLAMA_NUM_CTX` explicit, because Ollama truncates prompts silently.
 
-Every setting, including agent provider keys, lives in `.env`.
+Every setting, including agent provider keys, lives in `.env`. A lead-only Settings page for credentials is planned for a later release.
 
 ### Run
 

@@ -34,7 +34,7 @@ packet stage: Arkime sessions ─► packets ─► TShark ─► http_body even
                             │
 expansion: anchors ─► typed links (lineage, session, flow, …) ─► context rules ─► incident graph
                             │
-optional model investigator ─► validated typed pivots
+AI investigating agent (planned) ─► hypotheses, typed pivots, AI assessment
                             │
 report ─► ReportManifest ─► JSON | Markdown | web (findings, incidents, narratives, timeline)
 ```
@@ -52,7 +52,7 @@ Coverage cells are written at every stage that can lose information (compile, ex
 | `detect` | Playbooks and typed evaluators: sweep rules, context rules, packet rules, indicator lists |
 | `decide` | Admission gates, lanes, priority, triage and suppressions |
 | `hunt` | Hunt orchestration: manifest, sweep, packet stage, deterministic expansion, pivots, resume |
-| `agent` | Optional model investigator: cases, briefs, validated decisions, typed pivots |
+| `agent` | Optional model investigator today: cases, briefs, validated decisions, typed pivots. The planned AI investigating agent builds on it: [`ai-investigating-agent.md`](ai-investigating-agent.md) |
 | `report` | Report manifest, incident graph and narratives, attack-path timeline layout, renderers |
 | `web` | FastAPI app, server-rendered templates, local auth |
 | `replay` | Replaying frozen investigator briefs through the model decision path |
