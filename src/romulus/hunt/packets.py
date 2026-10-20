@@ -73,6 +73,7 @@ MAX_BODY_BYTES = 1024 * 1024
 EXCERPT_BYTES = 4096
 PCAP_TARGET = "arkime-pcap"
 SPAN_SLACK_S = 1.0
+MAX_LISTED_IDS = 50
 COUNTERS = ("candidates", "logical_sessions", "multi_segment_sessions", "fetched_sessions", "sessions_with_responses",
             "sessions_request_only", "sessions_unrebuilt_response", "sessions_without_messages", "responses", "outside_window",
             "unmapped_responses", "ambiguous_responses", "unseparable_frames", "undecodable_bodies",
@@ -277,6 +278,7 @@ class _Target:
         self.responded: set[tuple] = set()
         self.requested: set[tuple] = set()
         self.docs: dict[tuple, list[dict]] = {}
+        self.unexamined: dict[str, list[str]] = {}
 
     def run(self, sessions: list[dict]) -> None:
         for sess in sessions:                           # a logical session spans all of its segments
@@ -299,6 +301,10 @@ class _Target:
         self.c["sessions_request_only"] = len(unanswered)
         self.c["sessions_unrebuilt_response"] = len(asked - unanswered)
         self.c["sessions_without_messages"] = len(silent - self.requested)
+        # name the sessions behind each count, so a reviewer can check what was not judged
+        self.unexamined = {label: self._ids(keys) for label, keys in (
+            ("request_only", unanswered), ("unrebuilt_response", asked - unanswered),
+            ("without_messages", silent - self.requested)) if keys}
         missing = sum(pb.missing_required for pb in self.pack)
         self.c["missing_required"] = missing
         if self.c["sessions_request_only"]:
@@ -418,6 +424,10 @@ class _Target:
         keep = {e.raw[0].key for pb in self.pack for e in pb.retained_events()}
         self.raw_sources = {k: v for k, v in self.raw_sources.items() if k in keep}
 
+    def _ids(self, keys: set[tuple]) -> list[str]:
+        """Arkime session ids (every segment) of these logical sessions, sorted and capped."""
+        return sorted(seg["_id"] for k in keys for seg in self.docs.get(k, []))[:MAX_LISTED_IDS]
+
     def _request(self, row: dict, by_tuple: dict) -> None:
         """A request travels client -> server, so its addresses are the response's, reversed."""
         cip, cport, sip, sport = _addresses(row)
@@ -459,7 +469,7 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
     targets = [t for t, c in contracts.items() if c is not None and getattr(c, "time_field", "") == "firstPacket"]
     summary = {"status": "skipped", "finished": False, "targets": targets, "selection": {},
                **dict.fromkeys(COUNTERS, 0), "http_sessions_without_body_type": {}, "partial_reasons": [],
-               "notes": []}
+               "notes": [], "unexamined_sessions": {}}
     _not_applicable(repo, hunt_id, window, [t for t in contracts if t not in targets])
     if not targets:
         summary.update(finished=True, notes=["no Arkime session target in this hunt"])
@@ -490,11 +500,14 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
                 repo.set_rule_cell(hunt_id, pb.id, pb.version, f"{PCAP_TARGET}:{target}", window.key(), state,
                                    len(matches), pb.evaluated,
                                    {**run.c, "selection": selection, "http_sessions_without_body_type": unclassified,
-                                    "reasons": run.partial[:20], "notes": run.notes})
+                                    "reasons": run.partial[:20], "notes": run.notes,
+                                    "unexamined_sessions": run.unexamined})
             for k in COUNTERS:
                 summary[k] += run.c[k]
             summary["partial_reasons"] += run.partial
             summary["notes"] += run.notes
+            if run.unexamined:
+                summary["unexamined_sessions"][target] = run.unexamined
         summary["status"] = "partial" if summary["partial_reasons"] else "complete"
         summary["finished"] = True
     finally:
