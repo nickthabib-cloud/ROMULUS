@@ -88,6 +88,26 @@ def test_unset_audit_login_user_id_stays_absent(sentinel):
     assert not events[0].has("process.auid")
 
 
+@pytest.mark.parametrize("record_type", ["USER_LOGIN", "USER_START"])
+def test_audit_login_records_normalize_to_typed_auth_events(record_type):
+    raw = (
+        f'type={record_type} msg=audit(1731950250.400:76807): pid=900 uid=0 auid=1001 '
+        'ses=128 acct="alice" exe="/usr/sbin/sshd" addr=203.0.113.8 terminal=/dev/pts/0 '
+        'res=success'
+    )
+
+    events, skips, errors = normalize_hits([hit("login-1", "linux.audit", raw)])
+
+    assert errors == [] and skips == {} and len(events) == 1
+    auth = events[0]
+    assert auth.family == "auth" and auth.outcome == Outcome.success
+    assert auth.get("auth.service") == "sshd"
+    assert auth.get("process.session_id") == 128
+    assert auth.get("process.auid") == "1001"
+    assert auth.get("user.name") == "alice"
+    assert auth.get("source.ip") == "203.0.113.8"
+
+
 def test_non_exec_audit_groups_are_counted_not_dropped_silently():
     path = 'type=PATH msg=audit(1731950250.528:76831): item=0 name="log/audit/audit.log" inode=1 nametype=NORMAL'
     events, skips, _ = normalize_hits([hit("p1", "linux.audit", path)])

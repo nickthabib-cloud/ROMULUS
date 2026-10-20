@@ -132,6 +132,50 @@ def _syscall_process_fields(sid: str, rs: AuditRecord) -> dict:
 
 SOCKET_COMPANIONS = {"SYSCALL", "SOCKADDR", "PROCTITLE"}
 EINPROGRESS = "-115"
+AUDIT_LOGIN_TYPES = {"USER_LOGIN", "USER_START"}
+
+
+def normalize_audit_auth_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent:
+    """Normalize authoritative audit login/session records into the shared auth family."""
+    login_members = sorted(
+        ((hit, record) for hit, record in members if record.type in AUDIT_LOGIN_TYPES),
+        key=lambda item: (item[1].type != "USER_LOGIN", item[0]["_id"]),
+    )
+    hit, record = login_members[0]
+    native_id = hit["_id"]
+    refs = [_ref(item_hit) for item_hit, item_record in login_members]
+    origin = f"{native_id}:event.original#auditd:{record.type}"
+    fields = {
+        "auth.method": fv(record.type.lower(), f"{origin}.type"),
+    }
+    executable = record.fields.get("exe")
+    if executable:
+        service = executable.rsplit("/", 1)[-1]
+        fields["auth.service"] = fv(service, f"{origin}.exe")
+    session_id = record.fields.get("ses")
+    if session_id and session_id.isdigit() and session_id != "4294967295":
+        fields["process.session_id"] = fv(int(session_id), f"{origin}.ses")
+    auid = record.fields.get("auid")
+    if auid not in {None, "", "-1", "4294967295"}:
+        fields["process.auid"] = fv(auid, f"{origin}.auid")
+    account = record.fields.get("acct") or record.enriched.get("AUID") or record.enriched.get("UID")
+    if account not in {None, "", "?", "(null)", "(none)"}:
+        fields["user.name"] = fv(account, f"{origin}.acct")
+    address = record.fields.get("addr")
+    if address not in {None, "", "?", "(null)", "(none)", "0.0.0.0", "::"}:
+        fields["source.ip"] = fv(address, f"{origin}.addr")
+    pid = record.fields.get("pid")
+    if pid and pid.isdigit():
+        fields["process.pid"] = fv(int(pid), f"{origin}.pid")
+    result = (record.fields.get("res") or "").strip("'\"").lower()
+    outcome = (Outcome.success if result in {"success", "yes"}
+               else Outcome.failure if result in {"failed", "failure", "no"}
+               else Outcome.unknown)
+    return TypedEvent(
+        id=event_id("auth", refs), family="auth", ts=datetime.fromtimestamp(record.ts, UTC),
+        host=host or None, outcome=outcome, fields=fields, raw=refs,
+        normalizer=NORMALIZER_VERSION,
+    )
 
 
 def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], syscall: str) -> TypedEvent:
@@ -461,6 +505,12 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
                      and t in EXEC_COMPANIONS | SOCKET_COMPANIONS and t != "EXECVE")
         if dup:
             errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
+            continue
+        if types & AUDIT_LOGIN_TYPES:
+            try:
+                events.append(normalize_audit_auth_group(host, members))
+            except (ValueError, KeyError, TypeError) as e:
+                errors.append((members[0][0]["_id"], f"linux.audit.auth: {e}"))
             continue
         if "EXECVE" not in types:
             sys_rec = next((r for _, r in members if r.type == "SYSCALL"), None)

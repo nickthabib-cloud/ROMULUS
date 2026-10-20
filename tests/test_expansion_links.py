@@ -4,6 +4,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from romulus.agent.models import PivotCoverage, PivotTimeRange
+from romulus.detect.base import ContextAnchor, ContextLink
+from romulus.detect.context import EntryPointPromotion
+from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow, usable_key
 from romulus.hunt.pivot import PivotEventBatch
@@ -274,6 +277,44 @@ def test_login_session_never_crosses_session_ids_even_when_auid_matches():
     )
 
     assert other.id not in result.event_ids
+
+
+def test_normalized_audit_login_reaches_session_link_and_entry_promotion():
+    raw = (
+        'type=USER_LOGIN msg=audit(1731950250.400:76807): pid=900 uid=0 auid=1001 '
+        'ses=42 acct="alice" exe="/usr/sbin/sshd" addr=203.0.113.8 res=success'
+    )
+    hit = {
+        "_id": "audit-login", "_index": "host-x",
+        "_source": {
+            "@timestamp": "2024-11-18T14:00:50+00:00", "host": {"name": "web1"},
+            "event": {"dataset": "linux.audit", "original": raw},
+        },
+    }
+    [login], skips, errors = normalize_hits([hit])
+    assert skips == {} and errors == []
+    root = event(
+        "root", "process_exec", process__pid=100, process__session_id=42, process__auid="1001",
+    )
+    anchor_request = anchor("login_session", root)
+
+    linked = LinkFetcher(FakePivot([login]), T0, T1).fetch(
+        anchor_request, "login_session", window(),
+    )
+    context_anchor = ContextAnchor(
+        id="F-anchor", anchor_class="credential_access", lane="urgent",
+        claim="credential access followed the login", events=[root],
+    )
+    context_link = ContextLink(
+        id=linked.id, link_type=linked.link_type, strength=linked.strength,
+        key=linked.key, evidence_events=[root, login], status=linked.status,
+    )
+
+    matches = EntryPointPromotion().consume_linked(context_anchor, context_link, [login])
+
+    assert linked.event_ids == [login.id]
+    assert len(matches) == 1
+    assert matches[0].proposed_lane == "high"
 
 
 def test_network_flow_exact_tuple_queries_both_directions():

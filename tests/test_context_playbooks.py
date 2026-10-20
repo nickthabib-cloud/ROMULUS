@@ -71,11 +71,17 @@ def test_post_access_discovery_rejects_mentions_and_near_names(argv):
     assert PostAccessDiscovery().consume_linked(anchor(), link(), [observed]) == []
 
 
-def test_context_rule_never_fires_without_an_anchor():
-    observed = event("discovery", process__argv=["whoami"], process__session_id=42)
+def test_context_rules_reject_real_events_reached_by_disallowed_gates():
+    discovery = event("discovery", process__argv=["whoami"], process__session_id=42)
+    login = event(
+        "login", family="auth", auth__service="sshd", source__ip="203.0.113.8",
+        user__name="root", outcome=Outcome.success,
+    )
 
-    assert PostAccessDiscovery().consume_linked(None, link(), [observed]) == []
-    assert EntryPointPromotion().consume_linked(None, link(), [observed]) == []
+    assert PostAccessDiscovery().consume_linked(anchor("network_observation"), link(), [discovery]) == []
+    assert EntryPointPromotion().consume_linked(
+        anchor("credential_access"), link(link_type="process_lineage"), [login],
+    ) == []
 
 
 def test_inferred_link_caps_context_finding_at_lead_and_labels_hypothesis():
@@ -200,3 +206,21 @@ def test_context_coverage_cell_is_scoped_to_anchor_and_link():
     assert row["partition"] == "anchor:F-anchor|link:L-session"
     assert row["state"] == "matched"
     assert row["detail"]["strength"] == "observed"
+
+
+def test_incompatible_context_family_never_writes_complete_negative():
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": []}, "digest", "test")
+    process = event("process-only", process__argv=["/bin/true"], process__session_id=42)
+
+    evaluate_context(repo, "h1", anchor(), link(), [process])
+
+    row = next(
+        cell for cell in repo.rule_cells("h1")
+        if cell["rule_id"] == "context.entry_point_promotion"
+    )
+    assert row["evaluated"] == 0
+    assert row["state"] in {"not_applicable_no_events", "evaluated_partial"}
+    assert row["state"] != "no_match_complete"

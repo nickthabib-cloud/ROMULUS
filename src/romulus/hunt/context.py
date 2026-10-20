@@ -38,6 +38,8 @@ def evaluate_context(
             state = "match_on_partial" if partial else "matched"
         elif not applicable:
             state = "not_applicable_no_events"
+        elif evaluated == 0:
+            state = "evaluated_partial" if partial or missing else "not_applicable_no_events"
         elif not playbook.assures_negative:
             state = "positive_only_partial" if partial else "positive_only"
         else:
