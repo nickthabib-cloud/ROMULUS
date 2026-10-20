@@ -104,7 +104,12 @@ def target_to_key(target: str, native_id: str) -> tuple | None:
     ES: target is the index name and native_id the document _id. Arkime sessions are read from their ES index
     (target 'arkime_sessions3-*', native_id = the sessions3 _id), which canonicalizes to the gold Arkime key.
     PCAP refs are assumed to be 'pcap:<sha256-or-basename>' + frame (re-check when that adapter lands).
+    Packet-stage refs (HTTP bodies rebuilt by TShark from an Arkime session's packets) are
+    target 'arkime-pcap:<sessions3 index>', native_id '<sessions3 _id>@<response epoch>': they canonicalize to
+    the Arkime session key of that _id (PROTOCOL §13, 2026-10-20).
     """
+    if target.startswith("arkime-pcap:"):
+        return locator_key("arkime", str(native_id).rsplit("@", 1)[0])
     if target.startswith("arkime"):
         return locator_key("arkime", native_id)
     if target.startswith("pcap:"):
