@@ -1,5 +1,5 @@
 # ROMULUS
-NOTE: This tool is a very early proof of concept. I'm updating and making changes daily.
+NOTE: This tool is a very early proof of concept in progress. I'm updating and making changes daily.
 
 A defensive, AI-assisted threat-hunting tool.
 
