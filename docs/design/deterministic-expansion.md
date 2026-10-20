@@ -1,10 +1,8 @@
 # Deterministic expansion and the optional narrative model
 
-**Status:** Direction approved by the owner 2026-10-19 (deterministic expansion, attack-path timeline as the main output, optional model for narrative and lead explanations). The owner's answers to the open questions are recorded at the end. Implements ADR-006.
-
 ## Goal
 
-Find more of the attack without a model: start from what the sweep is sure about, follow typed links, and judge each linked record in that context. Show the result as an attack-path timeline so the analyst can see how everything happened and connect it. If a team has a model, it can explain leads and write the story. Every finding, lane, link and coverage cell is the same with or without the model.
+Find more of the attack without a model: start from what the sweep is sure about, follow typed links, and judge each linked record in that context. Show the result as an attack-path timeline so the analyst can see how everything happened and connect it. If a team has a model, it can pivot, explain leads, and write the story. Every finding, lane, link and coverage cell is the same with or without the model.
 
 ## Pipeline
 
@@ -114,8 +112,6 @@ The owner's main use: see the indicators on a timeline and connect them. The att
 - **Reports:** the Markdown and DOCX reports carry the same timeline (as an image plus a table of every link with its style, key and evidence), rendered from the manifest.
 
 ## 6. Narrative: template or model
-
-> **2026-10-20:** ADR-008 replaces the model parts of §6 and §6b. The agent's AI assessment replaces the model narrative, and its notes replace lead explanations (`docs/design/investigating-agent.md`). The template narrative below stays as the no-agent fallback.
 
 The narrative is drafted **after** the manifest revision is final, one incident at a time, plus one executive summary.
 
