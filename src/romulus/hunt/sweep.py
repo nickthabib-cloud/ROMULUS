@@ -23,7 +23,8 @@ log = logging.getLogger("romulus.sweep")
 PARTITION_MAX_DOCS = 120_000
 HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
-DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket"}, "linux.audit.socket": {"net_socket"},
+# linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
+DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth"}, "linux.audit.socket": {"net_socket"},
                     "arkime.session": {"net_session"},
                     "systemd.journal": {"auth", "privilege_use"},
                     "apache.access": {"http_access"}, "apache.error": {"web_error"},
@@ -179,7 +180,7 @@ class Sweep:
         # records retrieved but of a dataset/event type no normalizer supports: we cannot say what
         # they contain, so no rule may claim a complete negative over this partition
         unsupported = {k: v for k, v in skips.items()
-                       if k.startswith("dataset:") or k.startswith("suricata event_type")}
+                       if k.startswith(("dataset:", "suricata event_type"))}
         partial = out.completeness != Completeness.complete or bool(errors) or bool(unsupported)
         if partial:
             self.partial_reasons.append(f"{target} {pkey}: {out.reasons or ''} normalization_errors={len(errors)}"

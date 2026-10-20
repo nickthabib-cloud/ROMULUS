@@ -236,7 +236,7 @@ def test_aggregate_anchor_expands_each_distinct_process_id():
     assert lineage_keys == {100, 200}
 
 
-def test_network_anchor_uses_internal_endpoint_instead_of_sensor_host():
+def test_network_anchor_has_no_host_identity_and_never_uses_an_ip_or_the_sensor():
     network_event = TypedEvent(
         id="network-anchor", family="net_alert", ts=T0, host="sensor1", outcome=Outcome.success,
         fields={
@@ -251,8 +251,8 @@ def test_network_anchor_uses_internal_endpoint_instead_of_sensor_host():
     ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo), max_source_queries=0).run()
 
     anchor_row = repo.expansion_anchors("h1")[0]
-    assert anchor_row["host"] == "10.0.0.8"
-    assert anchor_row["host"] != "sensor1"
+    assert anchor_row["host"] is None                      # an address is not a host identity (review B-1)
+    assert ExpansionEngine._victim_ips([network_event]) == ["10.0.0.8"]
 
 
 def test_network_anchor_without_internal_endpoint_never_uses_sensor_host():
@@ -369,7 +369,7 @@ def test_inferred_link_context_candidate_is_lead_and_keeps_provenance():
     assert candidates[0]["source_link_id"].startswith("L-F-anchor-process_lineage")
 
 
-def test_inferred_link_caps_direct_pivot_finding_at_lead_and_labels_hypothesis():
+def test_inferred_link_keeps_a_direct_finding_lane_and_labels_only_the_relation_a_hypothesis():
     repo = repo_with_anchor()
     credential_read = event(
         "credential-read", ts=T0 + timedelta(minutes=1),
@@ -389,8 +389,11 @@ def test_inferred_link_caps_direct_pivot_finding_at_lead_and_labels_hypothesis()
         candidate for candidate in repo.candidates("h1")
         if candidate["rule_id"] == "host.credential_store_read"
     )
-    assert finding["lane"] == "lead"
-    assert "hypothesis" in finding["claim"].lower()
+    # strong indicators are reported on their own (review I-1): the inferred link never lowers the lane
+    assert finding["lane"] in ("urgent", "high")
+    assert "relation to f-anchor" in finding["claim"].lower() and "hypothesis" in finding["claim"].lower()
+    assert any("relation to the anchor is a hypothesis" in note
+               for note in finding["gate_results"]["_notes"])
 
 
 def test_nested_windows_each_evaluate_the_event_but_publish_one_context_finding():

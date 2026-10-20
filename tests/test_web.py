@@ -148,6 +148,7 @@ def test_hunt_page_shows_expansion_accounting_instead_of_seed_wording(tmp_path):
 
     assert page.status_code == 200
     assert "Expansion accounting" in page.text
+    assert "incident graph" in page.text and "technical report" in page.text
     assert "1 anchor(s)" in page.text
     assert "1 expanded partial" in page.text
     assert "unworked seed" not in page.text

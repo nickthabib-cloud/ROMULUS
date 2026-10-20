@@ -104,6 +104,8 @@ class EntryPointPromotion(ContextPlaybook):
         for event in self.applicable(events):
             if event.get("auth.service") != "sshd" or event.outcome != Outcome.success:
                 continue
+            if event.get("auth.phase") == "session_open":     # the login itself promotes, once
+                continue
             try:
                 source = ipaddress.ip_address(str(event.get("source.ip")))
             except ValueError:

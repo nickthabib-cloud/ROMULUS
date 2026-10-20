@@ -8,6 +8,14 @@ from romulus.store.db import digest
 from romulus.store.repo import Repo
 
 _PLAYBOOKS = {playbook.id: playbook for playbook in ALL_PLAYBOOKS}
+# Rules whose one finding groups events of different processes, flows or sessions by a rule key. Two anchors
+# that each reach a different member of the group are not thereby related, so such a finding is a leaf: it
+# joins an incident only when everything it is observed-linked to is already one incident.
+GROUPING_KINDS = frozenset({"aggregate", "packet"})
+
+
+def _groups(rule_id: str) -> bool:
+    return getattr(_PLAYBOOKS.get(rule_id), "kind", "direct") in GROUPING_KINDS
 _TACTICS = {
     "T1190": ("initial-access",),
     "T1078": ("initial-access", "persistence", "privilege-escalation", "defense-evasion"),
@@ -90,9 +98,17 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         if left_root != right_root:
             parent[max(left_root, right_root)] = min(left_root, right_root)
 
-    for edge in edges:
-        if edge["style"] == "observed":
+    observed = [edge for edge in edges if edge["style"] == "observed"]
+    grouping = {item for item, finding in finding_by_id.items() if _groups(finding["rule_id"])}
+    for edge in observed:
+        if edge["from"] not in grouping and edge["to"] not in grouping:
             union(edge["from"], edge["to"])
+    for item in sorted(grouping):
+        neighbours = {find(edge["to"] if edge["from"] == item else edge["from"]) for edge in observed
+                      if item in (edge["from"], edge["to"])
+                      and (edge["to"] if edge["from"] == item else edge["from"]) not in grouping}
+        if len(neighbours) == 1:
+            union(item, next(iter(neighbours)))
     components: dict[str, list[str]] = defaultdict(list)
     for finding_id in sorted(finding_by_id):
         components[find(finding_id)].append(finding_id)

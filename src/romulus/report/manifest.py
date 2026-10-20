@@ -82,6 +82,9 @@ POSITIVE_ONLY_CLAIMS = {
         "not assessable by design: positive-only rule (the audit rule set's scope, meaning which syscalls, address "
         "families and ports it records, is not visible in telemetry, so a missing connect() record proves nothing)"
     ),
+    "pcap.disguised_script_or_executable": (
+        "not assessable by design: positive-only packet-content rule over the HTTP sessions the packet stage selected (a body that does not look like a script or executable proves nothing)"
+    ),
     "ioc.indicator_match": (
         "not assessable by design: positive-only indicator lists (names, addresses, domains and fingerprints can change, so a list that matches nothing proves nothing)"
     ),
@@ -98,6 +101,21 @@ POSITIVE_ONLY_RULE_IDS = frozenset({cls.id for cls in ALL_PLAYBOOKS if not cls.a
                                    | set(POSITIVE_ONLY_CLAIMS))
 
 
+PCAP_CELL_PREFIX = "arkime-pcap:"
+
+
+def _scope(cell: dict) -> list[str]:
+    """What a cell says it examined, when it says so (the packet stage names its selection)."""
+    detail = cell.get("detail") or {}
+    if not isinstance(detail, dict) or not detail.get("selection"):
+        return []
+    out = [f"examined on {cell['target'].removeprefix(PCAP_CELL_PREFIX)}: {detail['selection']}"]
+    if isinstance(detail.get("http_sessions_without_body_type"), int):
+        out.append(f"{detail['http_sessions_without_body_type']} HTTP session(s) there had no body type and were "
+                   "outside that selection")
+    return out
+
+
 def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None,
               sweep_finished: bool = True) -> dict:
     """Per-rule negative claim. 'complete' requires: the sweep finished, every manifest target has
@@ -108,11 +126,14 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
     by_rule: dict[str, Counter] = defaultdict(Counter)
     evaluated: Counter = Counter()
     rule_targets: dict[str, set] = defaultdict(set)
+    scope: dict[str, list[str]] = defaultdict(list)
     for c in cells:
         by_rule[c["rule_id"]][c["state"]] += 1
         if c["target"] != "*":
             evaluated[c["rule_id"]] += c["evaluated"] or 0
-            rule_targets[c["rule_id"]].add(c["target"])
+            # packet-stage cells are written per source target as "arkime-pcap:<target>"
+            rule_targets[c["rule_id"]].add(c["target"].removeprefix(PCAP_CELL_PREFIX))
+        scope[c["rule_id"]] += _scope(c)
     for rid in rule_ids or []:
         by_rule.setdefault(rid, Counter())
     rows = []
@@ -125,19 +146,22 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
             reasons.append(f"no evaluation recorded for target(s) {missing}")
         bad = {s: n for s, n in states.items() if s in UNRESOLVED_STATES}
         if bad:
-            reasons.append("partial, failed or unexecuted partitions " + ", ".join(f"{s}={n}" for s, n in bad.items()))
+            reasons.append("partial, failed or unexecuted partitions "
+                           + ", ".join(f"{s}={n}" for s, n in sorted(bad.items())))
         if not states:
             reasons.append("never evaluated")
         matched = any(s.startswith("match") for s in states)
         if matched:
-            claim = "none (rule matched)" + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
+            claim = "none (rule matched)" + "".join(f"; {s}" for s in dict.fromkeys(scope[rule])) \
+                + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
         elif states.get("positive_only") or states.get("positive_only_partial") or rule in POSITIVE_ONLY_RULE_IDS:
             # decided by what the rule can prove *now*, not by cells stored under an older pack: a hunt swept
             # before a rule became positive-only must not render its old no_match_complete as "complete"
             claim = POSITIVE_ONLY_CLAIMS.get(
                 rule,
                 _po("the rule identifies programs or actions from argv or text"),
-            ) + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
+            ) + "".join(f"; {s}" for s in dict.fromkeys(scope[rule])) \
+                + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
         elif reasons:
             claim = "unresolved: " + "; ".join(reasons)
         elif states.get("no_match_complete") and not (states.get("not_applicable_no_events") and
@@ -512,6 +536,13 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
         "link_type": edge["link_type"], "style": edge["style"],
     } for edge in manifest["incident_graph"]["edges"]]
     canonical["findings"].sort(key=lambda finding: finding["id"])
+    for finding in canonical["findings"]:
+        gates = finding.get("gates") or {}
+        if gates.get("_context_reaches"):        # stored sorted by hunt-scoped link ids; re-sort by content
+            gates["_context_reaches"] = sorted(
+                gates["_context_reaches"],
+                key=lambda reach: json.dumps(reach, sort_keys=True, separators=(",", ":"), default=str),
+            )
     observed_at = {finding["id"]: finding["observed_at"] for finding in canonical["findings"]}
     graph["nodes"].sort(key=lambda node: node["id"])
     for link in graph["links"]:

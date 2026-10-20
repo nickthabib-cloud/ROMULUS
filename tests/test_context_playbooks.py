@@ -280,3 +280,14 @@ def test_incompatible_context_family_never_writes_complete_negative():
     assert row["evaluated"] == 0
     assert row["state"] in {"not_applicable_no_events", "evaluated_partial"}
     assert row["state"] != "no_match_complete"
+
+
+def test_entry_point_promotion_fires_once_per_login_not_for_the_session_opening():
+    login = event("login", family="auth", auth__service="sshd", auth__phase="login", source__ip="203.0.113.8",
+                  user__name="root", outcome=Outcome.success)
+    session_open = event("open", family="auth", auth__service="sshd", auth__phase="session_open",
+                         source__ip="203.0.113.8", user__name="root", outcome=Outcome.success)
+    matches = EntryPointPromotion().consume_linked(anchor("credential_access"), link(), [login, session_open])
+    assert len(matches) == 1
+    cited = {e.id for e in matches[0].events}
+    assert "login" in cited and "open" not in cited

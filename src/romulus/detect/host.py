@@ -659,7 +659,7 @@ class SshLoginFromExternal(Playbook):
     # argv/text-identified programs and actions: findings only, never a complete negative
     # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
-    version = "2"
+    version = "3"
     title = "Successful SSH login from a non-private source address"
     kind = "aggregate"
     families = ("auth",)
@@ -679,6 +679,8 @@ class SshLoginFromExternal(Playbook):
         for e in self.applicable(events):
             if e.get("auth.service") != "sshd" or e.outcome != Outcome.success:
                 continue
+            if e.get("auth.phase") == "session_open":      # a PAM session opening is not an authentication
+                continue
             try:
                 ip = ipaddress.ip_address(e.get("source.ip"))
             except ValueError:
@@ -691,13 +693,22 @@ class SshLoginFromExternal(Playbook):
     def finalize(self):
         out = []
         for (host, user, ip), evs in self.groups.items():
-            evs.sort(key=lambda x: x.ts)
-            claim = (f"{len(evs)} successful SSH authentication record(s) on {host} for account '{user}' from "
-                     f"non-private address {ip} ({evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}).")
+            evs.sort(key=lambda x: (x.ts, x.id))
+            # Each login appears once per collected source (journal sshd "Accepted", audit USER_LOGIN), so the
+            # login count is the larger per-source count, never their sum.
+            journal = sum(1 for e in evs if e.get("auth.phase") != "login")
+            audit = sum(1 for e in evs if e.get("auth.phase") == "login")
+            logins = max(journal, audit)
+            sources = "; ".join(part for part in (
+                f"{journal} sshd 'Accepted' journal record(s)" if journal else "",
+                f"{audit} audit USER_LOGIN record(s)" if audit else "") if part)
+            claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from non-private address "
+                     f"{ip} ({evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}; {sources}).")
             m = Match(self.id, claim, self.claim_type, evs[:20], [pf(evs[0], "source.ip"), pf(evs[0], "user.name")],
                       evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}")
             if len(evs) > 20:
-                m.notes.append(f"{len(evs) - 20} further matching records retained by reference only")
+                m.notes.append(f"{len(evs)} matching records; the first 20 are cited and the time range covers "
+                               "all of them")
             out.append(m)
         return out
 

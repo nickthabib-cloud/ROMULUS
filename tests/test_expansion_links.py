@@ -490,3 +490,25 @@ def test_flow_host_side_refuses_unusable_loopback_endpoint_key():
     assert result.status == "unsupported"
     assert result.reasons == ["required typed key is unusable"]
     assert not pivot.calls
+
+
+@pytest.mark.parametrize("acct, phase_type, phase", [("unset", "USER_LOGIN", "login"),
+                                                      ("(unknown)", "USER_START", "session_open")])
+def test_audit_login_placeholders_are_not_user_names_and_the_phase_is_typed(acct, phase_type, phase):
+    raw = (f'type={phase_type} msg=audit(1731950250.400:76807): pid=900 uid=0 auid=1001 '
+           f'ses=42 acct="{acct}" exe="/usr/sbin/sshd" addr=203.0.113.8 res=success')
+    hit = {"_id": "audit-login", "_index": "host-x", "_source": {
+        "@timestamp": "2024-11-18T14:00:50+00:00", "host": {"name": "web1"},
+        "event": {"dataset": "linux.audit", "original": raw}}}
+    [login], _skips, errors = normalize_hits([hit])
+    assert errors == [] and login.get("user.name") != acct and login.get("auth.phase") == phase
+
+
+def test_a_failed_login_by_an_unknown_user_is_never_attributed_to_the_logging_process():
+    raw = ('type=USER_LOGIN msg=audit(1731950250.400:76807): pid=900 uid=0 auid=4294967295 ses=4294967295 '
+           'acct="(unknown)" exe="/usr/sbin/sshd" addr=198.51.100.7 res=failed\x1dUID="root" AUID="unset"')
+    hit = {"_id": "audit-fail", "_index": "host-x", "_source": {
+        "@timestamp": "2024-11-18T14:00:50+00:00", "host": {"name": "web1"},
+        "event": {"dataset": "linux.audit", "original": raw}}}
+    [login], _skips, errors = normalize_hits([hit])
+    assert errors == [] and not login.has("user.name")                     # not 'root' (sshd's uid)

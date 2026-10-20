@@ -96,13 +96,7 @@ def cmd_hunt(args) -> int:
                 investigations = investigations_for_hunt(repo, h["id"])
                 inv_summary = investigations["summary"]
                 print(f"{h['id']}  {h['execution_state']:24} {h['detection_result'] or '-':40} "
-                      f"lanes={repo.lane_counts(h['id'])} agent={agent.get('status', '-')} "
-                      f"mode={inv_summary.get('mode', 'model')} "
-                      f"unworked={agent.get('unworked_count', '-')} "
-                      f"partial_pivots={agent.get('partial_pivots', 0)} "
-                      f"fallbacks={inv_summary.get('deterministic_fallbacks', 0)} "
-                      f"menu_hidden={inv_summary.get('menu_hidden_options', 0)} "
-                      f"analyst_flags={len(agent.get('analyst_flags') or [])}")
+                      f"lanes={repo.lane_counts(h['id'])} " + _stage_status(repo, h["id"], agent, inv_summary))
                 for case in investigations["cases"]:
                     descriptions = [choice["description"] for choice in case["chosen_options"]]
                     if descriptions:
@@ -247,6 +241,32 @@ def cmd_replay(args) -> int:
               f"{row['valid_first']:>6} {row['valid_with_retry']:>6} {row['truncated']:>5} {row['output_limit']:>5} "
               f"{row['errors']:>4} {row['median_latency_ms'] or '-':>8} {row['median_decode_tokens_per_s'] or '-':>6}")
     return EXIT_OK
+
+
+def _stage_status(repo, hunt_id: str, agent: dict, inv_summary: dict) -> str:
+    """One status line per stage. With the investigator off, its 'unworked' count would list every finding;
+    expansion and packet accounting say what the deterministic stages did instead."""
+    parts = []
+    packet_audit = repo.latest_audit(hunt_id, "hunt.packet_summary")
+    if packet_audit:
+        packet = packet_audit["detail"]
+        parts.append(f"packets={packet.get('status', '-')} responses={packet.get('responses', 0)} "
+                     f"matched={packet.get('matched', 0)}")
+    expansion_audit = repo.latest_audit(hunt_id, "hunt.expansion_summary")
+    if expansion_audit:
+        expansion = expansion_audit["detail"]
+        parts.append(f"expansion={expansion.get('status', '-')} anchors={expansion.get('anchors', 0)} "
+                     f"(complete {expansion.get('expanded_complete', 0)}, partial {expansion.get('expanded_partial', 0)}, "
+                     f"unexpanded {len(expansion.get('unexpanded') or [])}) queries={expansion.get('source_queries', '-')}")
+    if agent.get("status") in (None, "disabled"):
+        parts.append("agent=off")
+    else:
+        parts.append(f"agent={agent.get('status', '-')} mode={inv_summary.get('mode', 'model')} "
+                     f"unworked={agent.get('unworked_count', '-')} partial_pivots={agent.get('partial_pivots', 0)} "
+                     f"fallbacks={inv_summary.get('deterministic_fallbacks', 0)} "
+                     f"menu_hidden={inv_summary.get('menu_hidden_options', 0)} "
+                     f"analyst_flags={len(agent.get('analyst_flags') or [])}")
+    return " ".join(parts)
 
 
 def main(argv: list[str] | None = None) -> int:

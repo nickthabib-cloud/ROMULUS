@@ -7,12 +7,21 @@ from romulus.detect.correlation import CORRELATION_PLAYBOOKS
 from romulus.detect.host import HOST_PLAYBOOKS
 from romulus.detect.indicators import INDICATOR_PLAYBOOKS
 from romulus.detect.network import NETWORK_PLAYBOOKS
+from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
 
-PACK_VERSION = "m3-pack@1"
+PACK_VERSION = "m3-pack@2"
 ALL_PLAYBOOKS = (HOST_PLAYBOOKS + NETWORK_PLAYBOOKS + SESSION_PLAYBOOKS + CORRELATION_PLAYBOOKS
-                 + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS)
+                 + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
+
+
+_KINDS = {playbook.id: playbook.kind for playbook in ALL_PLAYBOOKS}
+
+
+def rule_kind(rule_id: str) -> str:
+    """The declared kind of a registered rule (direct | aggregate | context | packet); 'direct' if unknown."""
+    return _KINDS.get(rule_id, "direct")
 
 
 def anchor_class_for_rule(rule_id: str) -> str:
@@ -22,7 +31,8 @@ def anchor_class_for_rule(rule_id: str) -> str:
 
 def fresh_pack():
     """New evaluator instances for one hunt (they carry aggregate state)."""
-    return [cls() for cls in ALL_PLAYBOOKS if cls.kind != "context"]
+    # context rules run only in expansion, packet rules only in the packet stage
+    return [cls() for cls in ALL_PLAYBOOKS if cls.kind not in ("context", "packet")]
 
 
 def fresh_direct_pack():

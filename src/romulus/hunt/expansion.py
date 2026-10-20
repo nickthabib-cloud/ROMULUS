@@ -12,10 +12,18 @@ from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.host import is_internal
-from romulus.detect.registry import anchor_class_for_rule, fresh_direct_pack
+from romulus.detect.registry import anchor_class_for_rule, fresh_direct_pack, rule_kind
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.context import evaluate_context
-from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult, LinkType, LinkWindow, usable_key
+from romulus.hunt.links import (
+    HOST_SIDE_LINKS,
+    LinkAnchor,
+    LinkFetcher,
+    LinkResult,
+    LinkType,
+    LinkWindow,
+    usable_key,
+)
 from romulus.hunt.publish import publish_match
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
@@ -78,22 +86,41 @@ class ExpansionEngine:
 
     @staticmethod
     def _anchor_host(events: list[TypedEvent]) -> str | None:
-        direct_host = next(
+        """The host identity of a host-attributed anchor. A network-only anchor has none: its `host` is the
+        sensor, and its internal endpoint is an address, not a host name (see `_victim_ips`)."""
+        return next(
             (event.host for event in events if event.family not in NETWORK_FAMILIES and event.host), None,
         )
-        if direct_host:
-            return direct_host
+
+    @staticmethod
+    def _victim_ips(events: list[TypedEvent]) -> list[str]:
+        """Internal endpoint addresses of a network anchor, in address order."""
         internal = set()
         for event in events:
             for field in ("source.ip", "destination.ip"):
-                value = event.get(field)
                 try:
-                    address = ipaddress.ip_address(str(value))
+                    address = ipaddress.ip_address(str(event.get(field)))
                 except ValueError:
                     continue
-                if is_internal(address):
-                    internal.add(str(address))
-        return min(internal) if internal else None
+                if is_internal(address) and usable_key(str(address)):
+                    internal.add(address)
+        return [str(address) for address in sorted(internal, key=lambda a: (a.version, int(a)))]
+
+    def _victim_variants(self, finding_id: str, variants: list[LinkAnchor],
+                         events: list[TypedEvent]) -> tuple[list[LinkAnchor], list[str]]:
+        """Host-side links of a network anchor run once per internal endpoint, each against the host that
+        endpoint resolves to; an endpoint that resolves to no single host carries the reason instead."""
+        ips = self._victim_ips(events)
+        if not ips:
+            return variants, []
+        resolve = getattr(self.fetcher, "resolve_host", None)
+        out = []
+        for variant in variants:
+            for ip in ips:
+                host, reason = (resolve(finding_id, ip) if resolve is not None
+                                else (None, f"victim host unknown for {ip}: host resolution is unavailable"))
+                out.append(variant.model_copy(update={"host": host, "victim_ip": ip, "host_reason": reason}))
+        return out[:MAX_ANCHOR_KEYS], [item.victim_ip for item in out[MAX_ANCHOR_KEYS:]]
 
     @staticmethod
     def _link_anchors(anchor: LinkAnchor, link_type: LinkType) -> tuple[list[LinkAnchor], list[dict]]:
@@ -138,6 +165,10 @@ class ExpansionEngine:
         depths = {row["id"]: row["depth"] for row in self.repo.expansion_anchors(self.hunt_id)}
         for candidate in self.repo.candidates(self.hunt_id, ["urgent", "high"]):
             if candidate["id"] in existing:
+                continue
+            # A context finding is already the product of a link from an anchor; expanding it again would
+            # refetch the same session or lineage at depth + 1 and drain the reserve (review minor).
+            if rule_kind(candidate["rule_id"]) == "context":
                 continue
             parent = candidate.get("source_anchor_id")
             depth = depths.get(parent, -1) + 1 if parent else 0
@@ -203,11 +234,12 @@ class ExpansionEngine:
         for playbook in fresh_direct_pack():
             for match in playbook.consume(events):
                 if result.strength == "inferred":
-                    match.claim += (f" This is a hypothesis linked to {candidate['id']} by inferred "
-                                    f"{result.link_type} link {result.id}; the actor is not proven identical.")
-                    if match.proposed_lane in ("urgent", "high"):
-                        match.proposed_lane = "lead"
-                        match.notes.append("lane capped at lead: the expansion link is inferred")
+                    # The finding stands on its own cited records and keeps its own lane (strong indicators are
+                    # reported on their own). Only its relation to the anchor is inferred.
+                    match.claim += (f" Its relation to {candidate['id']} rests on inferred {result.link_type} link "
+                                    f"{result.id} and is a hypothesis; the actor is not proven identical.")
+                    match.notes.append("reached through an inferred expansion link: the relation to the anchor "
+                                       "is a hypothesis, the finding itself is not")
                 publish_match(
                     self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                     source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
@@ -254,6 +286,7 @@ class ExpansionEngine:
         if self.max_source_queries == 0:
             root_budget = 0
         stop_reason = "fixpoint"
+        source_failed = False
         while True:
             self._seed_anchors()
             all_rows = self.repo.expansion_anchors(self.hunt_id)
@@ -288,6 +321,13 @@ class ExpansionEngine:
                             if item.label == window_label
                         )
                         variants, dropped = self._link_anchors(base_anchor, link_type)
+                        if link_type in HOST_SIDE_LINKS and not base_anchor.host:
+                            variants, dropped_ips = self._victim_variants(candidate["id"], variants, anchor_events)
+                            if dropped_ips:
+                                anchor_reasons[anchor_row["id"]].append(
+                                    "keys_not_expanded:" + json.dumps(
+                                        [{"victim_ip": ip} for ip in dropped_ips],
+                                        sort_keys=True, separators=(",", ":")))
                         if dropped:
                             anchor_reasons[anchor_row["id"]].append(
                                 "keys_not_expanded:" + json.dumps(
@@ -312,6 +352,9 @@ class ExpansionEngine:
                     break
             if not slots:
                 break
+            spent = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
+            if isinstance(spent, int):
+                query_count = max(query_count, spent)
             made_progress = False
             known_anchor_ids = {row["id"] for row in all_rows}
             for slot_index, (anchor_row, candidate, anchor, link_type, window, stored) in enumerate(slots):
@@ -360,6 +403,7 @@ class ExpansionEngine:
                     )
                 if result.status == "failed":
                     stop_reason = "source_failure"
+                    source_failed = True
                 self._seed_anchors()
                 if self.after_link:
                     self.after_link(result)
@@ -381,8 +425,11 @@ class ExpansionEngine:
                 status = "expanded_partial" if reasons else "expanded_complete"
             self.repo.update_expansion_anchor(row["id"], status, reasons, owner_token=self.owner_token)
         anchors = self.repo.expansion_anchors(self.hunt_id)
+        if source_failed and stop_reason != "source_failure":
+            stop_reason = f"{stop_reason}; source_failure"
         summary = {
-            "status": "completed" if stop_reason in {"fixpoint", "depth_limit", "budget"} else "partial",
+            "status": ("completed" if not source_failed and stop_reason in {"fixpoint", "depth_limit", "budget"}
+                       else "partial"),
             "stop_reason": stop_reason, "anchors": len(anchors),
             "expanded_complete": sum(row["status"] == "expanded_complete" for row in anchors),
             "expanded_partial": sum(row["status"] == "expanded_partial" for row in anchors),
