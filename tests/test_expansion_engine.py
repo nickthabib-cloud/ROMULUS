@@ -11,7 +11,7 @@ from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkResult
 from romulus.report.manifest import build_manifest
 from romulus.sources.models import Window
-from romulus.store.db import make_engine, migrate
+from romulus.store.db import digest, make_engine, migrate
 from romulus.store.repo import Repo
 
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
@@ -104,6 +104,32 @@ def add_anchor(repo, candidate_id, host, *, ts=T0):
     })
 
 
+def repo_with_aggregate_anchor(events, *, candidate_id="F-aggregate"):
+    repo = repo_with_anchor(candidate_id=candidate_id)
+    repo.save_evidence("h1", events, {}, None)
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.candidate.update().where(
+            tables.candidate.c.id == candidate_id,
+        ).values(event_ids=[item.id for item in events], ts=events[0].ts))
+    return repo
+
+
+class KeyRecordingFetcher(ScriptedFetcher):
+    def result_id(self, anchor, link_type, window):
+        pid = anchor.events[0].get("process.pid") if anchor.events else None
+        return "L-" + digest({
+            "anchor": anchor.finding_id, "link": link_type, "window": window.label, "pid": pid,
+        })[:20]
+
+    def fetch(self, anchor, link_type, window, *, query_cap=None):
+        result = super().fetch(anchor, link_type, window, query_cap=query_cap)
+        pid = anchor.events[0].get("process.pid") if anchor.events else None
+        result.id = self.result_id(anchor, link_type, window)
+        result.key = {"host": anchor.host, "pid": pid}
+        return result
+
+
 def stable_state(repo):
     return {
         "anchors": [{k: row[k] for k in ("id", "candidate_id", "depth", "parent_anchor_id", "status", "reasons")}
@@ -161,6 +187,75 @@ def test_tier_scheduler_gives_each_host_a_fetch_before_dense_anchor_can_starve_i
 
     assert [call[0] for call in fetcher.calls[:2]] == ["F-one", "F-two"]
     assert fetcher.query_caps[:2] == [2, 2]
+
+
+def test_aggregate_anchor_expands_each_distinct_process_id():
+    first = event("aggregate-one")
+    first.fields["process.pid"] = fv(100, "aggregate-one:pid")
+    second = event("aggregate-two", ts=T0 + timedelta(seconds=1))
+    second.fields["process.pid"] = fv(200, "aggregate-two:pid")
+    repo = repo_with_aggregate_anchor([first, second])
+    fetcher = KeyRecordingFetcher(repo)
+
+    ExpansionEngine(repo, "h1", WINDOW, fetcher).run()
+
+    lineage_keys = {
+        row["key"]["pid"] for row in repo.expansion_links("h1")
+        if row["link_type"] == "process_lineage"
+    }
+    assert lineage_keys == {100, 200}
+
+
+def test_network_anchor_uses_internal_endpoint_instead_of_sensor_host():
+    network_event = TypedEvent(
+        id="network-anchor", family="net_alert", ts=T0, host="sensor1", outcome=Outcome.success,
+        fields={
+            "source.ip": fv("203.0.113.8", "network-anchor:src"),
+            "destination.ip": fv("10.0.0.8", "network-anchor:dst"),
+        },
+        raw=[RawRef(target="network-x", native_id="network-anchor", digest="d")],
+        normalizer="test@1",
+    )
+    repo = repo_with_aggregate_anchor([network_event], candidate_id="F-network")
+
+    ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo), max_source_queries=0).run()
+
+    anchor_row = repo.expansion_anchors("h1")[0]
+    assert anchor_row["host"] == "10.0.0.8"
+    assert anchor_row["host"] != "sensor1"
+
+
+def test_network_anchor_without_internal_endpoint_never_uses_sensor_host():
+    network_event = TypedEvent(
+        id="public-network-anchor", family="net_alert", ts=T0, host="sensor1",
+        fields={
+            "source.ip": fv("203.0.113.8", "public-network-anchor:src"),
+            "destination.ip": fv("198.51.100.9", "public-network-anchor:dst"),
+        },
+        raw=[RawRef(target="network-x", native_id="public-network-anchor", digest="d")],
+        normalizer="test@1",
+    )
+    repo = repo_with_aggregate_anchor([network_event], candidate_id="F-public-network")
+
+    ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo), max_source_queries=0).run()
+
+    assert repo.expansion_anchors("h1")[0]["host"] is None
+
+
+def test_dropped_aggregate_keys_make_anchor_partial_and_list_the_keys():
+    events = []
+    for pid in range(100, 109):
+        item = event(f"aggregate-{pid}", ts=T0 + timedelta(seconds=pid - 100))
+        item.fields["process.pid"] = fv(pid, f"aggregate-{pid}:pid")
+        events.append(item)
+    repo = repo_with_aggregate_anchor(events)
+
+    ExpansionEngine(repo, "h1", WINDOW, KeyRecordingFetcher(repo)).run()
+
+    anchor_row = repo.expansion_anchors("h1")[0]
+    assert anchor_row["status"] == "expanded_partial"
+    assert any(reason.startswith("keys_not_expanded:") for reason in anchor_row["reasons"])
+    assert any('"process.pid":108' in reason for reason in anchor_row["reasons"])
 
 
 def test_resume_continues_after_crash_without_repeating_evaluated_links():

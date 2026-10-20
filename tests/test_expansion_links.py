@@ -136,7 +136,7 @@ def test_usable_key_rejects_sentinels_and_non_routable_ips(value):
     assert not usable_key(value)
 
 
-@pytest.mark.parametrize("link_type", ["login_session", "process_lineage"])
+@pytest.mark.parametrize("link_type", ["login_session", "process_lineage", "host_after_anchor"])
 def test_host_bound_observed_links_refuse_missing_host(link_type):
     anchor_event, _linked = cases()[link_type]
     pivot = FakePivot([])

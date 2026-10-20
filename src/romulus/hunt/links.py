@@ -120,9 +120,7 @@ class LinkFetcher:
         query_cap: int | None = None,
     ) -> LinkResult:
         key, strength, intents, retain, select, unsupported_reason = self._plan(anchor, link_type, window)
-        fetch_key = digest({
-            "anchor": anchor.finding_id, "link": link_type, "window": window.model_dump(mode="json"), "key": key,
-        })
+        fetch_key = self._fetch_key(anchor, link_type, window, key)
         if fetch_key in self._cache:
             return self._cache[fetch_key]
         if not intents:
@@ -151,6 +149,17 @@ class LinkFetcher:
         )
         self._cache[fetch_key] = result
         return result
+
+    @staticmethod
+    def _fetch_key(anchor: LinkAnchor, link_type: LinkType, window: LinkWindow, key: dict) -> str:
+        return digest({
+            "anchor": anchor.finding_id, "link": link_type,
+            "window": window.model_dump(mode="json"), "key": key,
+        })
+
+    def result_id(self, anchor: LinkAnchor, link_type: LinkType, window: LinkWindow) -> str:
+        key, *_rest = self._plan(anchor, link_type, window)
+        return "link-" + self._fetch_key(anchor, link_type, window, key)[:20]
 
     def _plan(self, anchor: LinkAnchor, link_type: LinkType, window: LinkWindow):
         handlers = {

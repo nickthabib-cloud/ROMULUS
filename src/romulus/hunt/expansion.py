@@ -1,6 +1,8 @@
 """Crash-safe deterministic post-sweep expansion over typed links."""
 from __future__ import annotations
 
+import ipaddress
+import json
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
@@ -9,10 +11,11 @@ from datetime import UTC, datetime, timedelta
 from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.base import ContextAnchor, ContextLink
+from romulus.detect.host import is_internal
 from romulus.detect.registry import fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.context import evaluate_context
-from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult, LinkType, LinkWindow
+from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult, LinkType, LinkWindow, usable_key
 from romulus.hunt.publish import publish_match
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
@@ -29,6 +32,9 @@ TIER_PLAN: tuple[tuple[str, tuple[LinkType, ...], str], ...] = (
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 DEFAULT_MAX_DEPTH = 3
 DEFAULT_MAX_SOURCE_QUERIES = 180
+MAX_ANCHOR_KEYS = 8
+NETWORK_FAMILIES = {"net_alert", "net_flow", "net_session", "dns_query", "http_tx",
+                    "file_transfer", "tls_session", "ssh_session"}
 
 
 def _utc(value: datetime) -> datetime:
@@ -81,6 +87,63 @@ class ExpansionEngine:
         events = [TypedEvent.model_validate(row["event"]) for row in rows]
         return sorted(events, key=lambda event: (event.ts, event.id))
 
+    @staticmethod
+    def _anchor_host(events: list[TypedEvent]) -> str | None:
+        direct_host = next(
+            (event.host for event in events if event.family not in NETWORK_FAMILIES and event.host), None,
+        )
+        if direct_host:
+            return direct_host
+        internal = set()
+        for event in events:
+            for field in ("source.ip", "destination.ip"):
+                value = event.get(field)
+                try:
+                    address = ipaddress.ip_address(str(value))
+                except ValueError:
+                    continue
+                if is_internal(address):
+                    internal.add(str(address))
+        return min(internal) if internal else None
+
+    @staticmethod
+    def _link_anchors(anchor: LinkAnchor, link_type: LinkType) -> tuple[list[LinkAnchor], list[dict]]:
+        keyed: dict[str, tuple[dict, TypedEvent]] = {}
+        for event in anchor.events:
+            key: dict | None = None
+            if link_type == "process_lineage" and usable_key(event.get("process.pid")):
+                key = {"process.pid": event.get("process.pid")}
+            elif link_type == "login_session" and usable_key(event.get("process.session_id")):
+                key = {
+                    "process.session_id": event.get("process.session_id"),
+                    "process.auid": event.get("process.auid") if usable_key(event.get("process.auid")) else None,
+                }
+            elif link_type in {"network_flow", "flow_host_side"}:
+                community_id = event.get("network.community_id")
+                flow_tuple = [event.get(field) for field in (
+                    "network.transport", "source.ip", "source.port",
+                    "destination.ip", "destination.port",
+                )]
+                if usable_key(community_id):
+                    key = {"network.community_id": community_id}
+                elif all(usable_key(value) for value in flow_tuple):
+                    key = {"five_tuple": flow_tuple}
+            elif link_type == "source_ip" and usable_key(event.get("source.ip")):
+                key = {"source.ip": event.get("source.ip")}
+            elif link_type == "account":
+                if usable_key(event.get("user.name")):
+                    key = {"user.name": event.get("user.name")}
+                elif usable_key(event.get("process.auid")):
+                    key = {"process.auid": event.get("process.auid")}
+            if key is not None:
+                keyed.setdefault(json.dumps(key, sort_keys=True, separators=(",", ":")), (key, event))
+        if not keyed:
+            return [anchor], []
+        ordered = [keyed[token] for token in sorted(keyed)]
+        kept, dropped = ordered[:MAX_ANCHOR_KEYS], ordered[MAX_ANCHOR_KEYS:]
+        variants = [anchor.model_copy(update={"events": [event]}) for _key, event in kept]
+        return variants, [key for key, _event in dropped]
+
     def _seed_anchors(self) -> None:
         existing = {row["candidate_id"] for row in self.repo.expansion_anchors(self.hunt_id)}
         depths = {row["id"]: row["depth"] for row in self.repo.expansion_anchors(self.hunt_id)}
@@ -90,7 +153,7 @@ class ExpansionEngine:
             parent = candidate.get("source_anchor_id")
             depth = depths.get(parent, -1) + 1 if parent else 0
             events = self._events(candidate["event_ids"])
-            host = next((event.host for event in events if event.host), None)
+            host = self._anchor_host(events)
             self.repo.save_expansion_anchor({
                 "id": candidate["id"], "hunt_id": self.hunt_id, "candidate_id": candidate["id"],
                 "depth": depth, "parent_anchor_id": parent, "host": host, "lane": candidate["lane"],
@@ -210,19 +273,37 @@ class ExpansionEngine:
                     for anchor_row in ordered:
                         candidate = self.repo.candidate(anchor_row["candidate_id"])
                         candidate_ts = _utc(candidate["ts"])
+                        anchor_events = self._events(candidate["event_ids"])
+                        base_anchor = LinkAnchor(
+                            finding_id=candidate["id"], ts=candidate_ts, host=anchor_row["host"],
+                            event_ids=candidate["event_ids"], events=anchor_events,
+                        )
                         window = next(
                             item for item in expansion_windows(candidate_ts, self.window)
                             if item.label == window_label
                         )
-                        stored = self.repo.expansion_link_for(
-                            candidate["id"], link_type, window.label, window.start, window.end,
-                        )
-                        if not (stored and stored["evaluated"]):
-                            slots.append((anchor_row, candidate, link_type, window, stored))
+                        variants, dropped = self._link_anchors(base_anchor, link_type)
+                        if dropped:
+                            anchor_reasons[anchor_row["id"]].append(
+                                "keys_not_expanded:" + json.dumps(
+                                    dropped, sort_keys=True, separators=(",", ":"),
+                                ),
+                            )
+                        for variant in variants:
+                            if hasattr(self.fetcher, "result_id"):
+                                stored = self.repo.expansion_link(
+                                    self.fetcher.result_id(variant, link_type, window),
+                                )
+                            else:
+                                stored = self.repo.expansion_link_for(
+                                    candidate["id"], link_type, window.label, window.start, window.end,
+                                )
+                            if not (stored and stored["evaluated"]):
+                                slots.append((anchor_row, candidate, variant, link_type, window, stored))
                 if not slots:
                     break
                 made_progress = False
-                for slot_index, (anchor_row, candidate, link_type, window, stored) in enumerate(slots):
+                for slot_index, (anchor_row, candidate, anchor, link_type, window, stored) in enumerate(slots):
                     budget_reason = self._budget_reason(query_count)
                     if budget_reason:
                         stop_reason = "budget"
@@ -244,10 +325,6 @@ class ExpansionEngine:
                     query_cap = min(12, max(2, remaining // max(1, remaining_slots)))
                     self.heartbeat()
                     anchor_events = self._events(candidate["event_ids"])
-                    anchor = LinkAnchor(
-                        finding_id=candidate["id"], ts=_utc(candidate["ts"]), host=anchor_row["host"],
-                        event_ids=candidate["event_ids"], events=anchor_events,
-                    )
                     result = self._stored_result(stored) if stored else self.fetcher.fetch(
                         anchor, link_type, window, query_cap=query_cap,
                     )
