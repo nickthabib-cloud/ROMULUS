@@ -1,18 +1,19 @@
 # ROMULUS
+NOTE: This tool is a very early proof of concept. I'm updating and making changes daily.
 
 A defensive, AI-assisted threat-hunting tool.
 
-ROMULUS runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. Deterministic expansion then follows typed links from the strongest findings (process lineage, login session, network flow), judges the linked records in context, and assembles incidents. Every claim cites the raw evidence. ROMULUS can work with or without a language model by performing deterministic searches (ADR-006).
+ROMULUS runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. Deterministic expansion then follows typed links from the strongest findings (process lineage, login session, network flow), judges the linked records in context, and assembles incidents. Every claim cites the raw evidence. ROMULUS can work with or without a large language model by performing deterministic searches.
 
-**Planned: the AI investigating agent** (ADR-008, [design](docs/design/investigating-agent.md)). After the deterministic layer, the agent:
-- reads every indicator ROMULUS found;
+**Planned: the AI investigating agent**. After the deterministic layer, the agent:
+- reads every indicator found in initial sweeps;
 - develops hypotheses about malicious activity;
 - follows further leads through typed, read-only pivots, and finds more indicators;
 - connects them into a bigger picture.
 
 The final report opens with its **AI assessment**: the agent's overall hypothesis, every sentence cited, labelled as AI-generated and unconfirmed. The agent can add findings, labelled as agent findings and capped at `high`. It can never hide, close or demote findings.
 
-For testing purposes the model is reached through any OpenAI API (ADR-007). Actual teams use their own LLM server.
+For testing purposes the model is reached through any OpenAI API. Earlier iterations used a local LLM through Ollama, but compute limitations hindered adequate agentic investigations. Actual teams use their own LLM server.
 
 Outputs:
 
@@ -53,8 +54,8 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 - **Core:** Python 3.12, organized as a modular monolith (`src/romulus/`).
 - **State:** SQLite (WAL) is the single state authority; Alembic handles migrations.
 - **Web UI:** FastAPI + Jinja + server-sent events. It has argon2 logins, lead/analyst roles, CSRF protection and a strict CSP.
-- **Model:** optional local Ollama today. Planned: any OpenAI-compatible endpoint for the agent (ADR-007). The agent is scored on and off by the evaluation harness.
-- **The Agent:** Uses native tool calling through the investigator, an explicit controller with SQLite as the only state (ADR-001, ADR-008).
+- **Model:** optional local Ollama today. Planned: any OpenAI-compatible endpoint for the agent. The agent is scored on and off by the evaluation harness.
+- **The Agent:** Uses native tool calling through the investigator, an explicit controller with SQLite as the only state.
 
 ## Repository layout
 
