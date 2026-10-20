@@ -97,6 +97,11 @@ POSITIVE_ONLY_CLAIMS = {
 }
 
 
+# A rule may state its own reason; the table above wins where both exist.
+_RULE_POSITIVE_ONLY = {cls.id: _po(cls.positive_only_reason) for cls in ALL_PLAYBOOKS
+                       if not cls.assures_negative and cls.positive_only_reason}
+
+
 POSITIVE_ONLY_RULE_IDS = frozenset({cls.id for cls in ALL_PLAYBOOKS if not cls.assures_negative}
                                    | set(POSITIVE_ONLY_CLAIMS))
 
@@ -157,7 +162,7 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         elif states.get("positive_only") or states.get("positive_only_partial") or rule in POSITIVE_ONLY_RULE_IDS:
             # decided by what the rule can prove *now*, not by cells stored under an older pack: a hunt swept
             # before a rule became positive-only must not render its old no_match_complete as "complete"
-            claim = POSITIVE_ONLY_CLAIMS.get(
+            claim = POSITIVE_ONLY_CLAIMS.get(rule) or _RULE_POSITIVE_ONLY.get(
                 rule,
                 _po("the rule identifies programs or actions from argv or text"),
             ) + "".join(f"; {s}" for s in dict.fromkeys(scope[rule])) \

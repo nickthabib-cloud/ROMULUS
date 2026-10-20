@@ -378,3 +378,13 @@ def test_expansion_engine_publishes_lateral_context_finding():
     assert len(lateral) == 1
     assert "10.0.0.9:22" in lateral[0]["claim"] and lateral[0]["lane"] == "high"
     assert lateral[0]["source_anchor_id"] == "F-anchor"
+
+
+def test_the_report_states_each_new_rules_own_positive_only_reason():
+    from romulus.detect.context import CONTEXT_PLAYBOOKS
+    from romulus.report.manifest import _RULE_POSITIVE_ONLY, POSITIVE_ONLY_CLAIMS
+    for cls in CONTEXT_PLAYBOOKS:
+        if cls.assures_negative:
+            continue
+        claim = POSITIVE_ONLY_CLAIMS.get(cls.id) or _RULE_POSITIVE_ONLY.get(cls.id)
+        assert claim and claim.startswith("not assessable by design"), cls.id
