@@ -1,7 +1,5 @@
 # Investigator v2: menu-driven decisions for a small model
 
-**Status:** Approved by the owner 2026-10-19, including the deterministic fallback mode and the acceptance targets. Implements ADR-005. Everything not changed here stays as in `model-investigator.md` (cases, clustering, budgets, leases, resume, reporting, the ADR-003 pivot executor).
-
 ## Principle
 
 The model chooses; the controller composes. Every value the controller already knows (IDs, entities, tools, windows, claims, lanes) is offered, never typed by the model. The model's job is judgment: which next move, on what evidence, and why.
