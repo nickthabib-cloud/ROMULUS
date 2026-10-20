@@ -2,76 +2,56 @@
 
 ## Resume here
 
-_Last updated: 2026-10-19 23:50 EDT by Claude (lead)._
+_Last updated: 2026-10-20 08:40 EDT by Claude (lead)._
 
 - **Direction (owner, 2026-10-19):**
-  - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5: deterministic expansion finds, and an optional model only explains leads and drafts the narrative.
+  - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5.
   - The New hunt page has an "Agentic hunt" checkbox, unchecked by default. `AGENT_MODE` defaults to `off`.
-  - The spec (`ENGINEERING_MASTER_PROMPT.md`) is a set of suggestions, not requirements. Propose better routes when they exist. The goal is to find indicators of compromise wherever ROMULUS is sent, correlating host logs with network telemetry.
-- **Branch:** `m2/evaluation` at `b8be0dc`, deployed to the VM, not pushed. It merges:
-  - investigator v2 (`codex/investigator-v2`, `0bfd0d2`);
-  - host↔network correlation and Arkime (`m2/network-correlation`);
-  - the research register (round 1).
-- **What's in it now:**
-  - `net_socket` events from auditd connect/SOCKADDR.
-  - `host.interpreter_external_connection`.
-  - `corr.process_network_link`: a host connect() joined to Suricata or Arkime records, disk-staged, with the link worded as inferred.
-  - Arkime session indices as a target (`net_session`), with `net.long_external_connection`, `net.beaconing` and `net.rare_client_fingerprint`.
-  - Investigator modes model / deterministic / off.
-  - The replay harness (`romulus model bakeoff*`), to be renamed.
-  - Tests: 590 pass; `archmap --check` is clean.
-- **Latest lab hunt** `h20261019-225437-045bc8` (model-off, e_a 10:00–17:30 UTC):
-  - `completed_within_scope`; 1,791,438 records; 301,582 events; 0 errors.
-  - Lanes: 7 urgent / 15 high / 107 lead / 505 context.
-  - **New:** the www-data `python3.9` C2 connect to `192.42.1.174:4444` is high and joined to its Suricata flows; the root handler (81 connects) and the cron `curl` to `:80` are leads.
-  - **Noise:** about 20 leads from root `python3.10` calling Ubuntu update servers (one candidate per destination; tuning item), plus 2 ZoneMinder Perl highs at boot.
-  - The eval-custodian is scoring it as run 7.
-- **Evaluation so far (dev set e_a, gold v1: 22 observable):**
-  - Model-off before the network work: recall 11/22 reported, 15/22 surfaced; P@10 1.00; 5.07 false leads per modelled hour.
-  - Off, deterministic and model hunts are identical on every finding metric (`docs/eval/results/2026-10-19-sl700_e_a-ablation-456.md`).
-  - Replay: v1 free-JSON 0.22 → v2 menu 0.53 with retry. The remaining error is escalating benign seeds.
-- **Since the merge (2026-10-19 evening):**
-  - **Arkime is live.** The owner granted `romulus_agent` read-only access to `arkime_sessions3-*` (role `romulus_arkime_reader`; doctor confirms no write rights), and `ES_INDEX_PATTERNS` includes it. Long-connection rules catch both Meterpreter sessions and the exploit's held HTTP connection; beaconing catches the cron `curl` every 900 s.
-  - **Noise fix:** external-connection findings are grouped per (host, program, account, port); kernel-record lineage lowers web-service daemons to lead (it never raises a lane); NTP verified by the parser goes to context.
-  - **Field-role indicator matcher** (`ioc.indicator_match`, `content/indicators/*.yaml`). The seed list has about 80 exact tool names. On the lab, LinPEAS run by the attacker is high, and commands that only name it are context.
-  - **ATT&CK Enterprise 20.0 STIX** is vendored at `content/attack/` (pinned and verified).
-  - **v1 audit:** no v1 rule is kept; 15 ideas are queued as `v1_ports` in `content/research/backlog.yaml`. Spec lessons 11–14 added.
-- **Scores** (dev, gold v1; eval-custodian, `docs/eval/results/`):
+  - The spec is a set of suggestions. The goal is to find indicators of compromise wherever ROMULUS is sent, correlating host logs with network telemetry.
+- **Branches:**
+  - **`m2/evaluation` at `082e94c`** (not pushed). It merges the packet stage (M4 slice 3, `m2/packets`). The reviewer passed it after four rounds.
+  - **`codex/expansion` at `fdac0ba`.** The ADR-006 expansion engine plus Codex's fix round 1. The merge-gate reviewer **FAILED** it:
+    - **Blocking B-1:** a network anchor's victim host is an IP string used as a `host.name` predicate, so the host-side links come back as false-complete.
+    - **Important:** I-1 (a direct indicator is capped at lead when reached through an inferred link); I-2 (the per-fetch query cap is soft); I-3 (aggregate findings bridge incidents).
+    - **Fix round 2** is briefed in `Claude-Codex.md` (2026-10-20 07:49 EDT) and is waiting for the owner to start Codex. It includes merging `m2/evaluation` (the packet stage runs before expansion; the pack is `m3-pack@2`).
+  - **`m2/integration-trial` at `8baae62`:** the lead's trial merge of packets onto `fdac0ba`, kept as Codex's reference for resolving the conflicts.
+- **Packet stage (new):**
+  - **Selection:** Arkime HTTP sessions whose body Arkime typed as text or an executable, overlapping the hunt window. Mid-save segments are grouped into one logical session.
+  - **Fetch:** packets come from Arkime by explicit id. A multi-segment session is fetched one segment at a time in order, then merged with `mergecap`.
+  - **TShark:** a fixed JSON query, pinned reassembly preferences, limits applied through `prlimit`.
+  - **Rule:** `pcap.disguised_script_or_executable` (positive-only). Heuristic matches are lead lane, medium confidence.
+  - **Honest coverage:** every lost-work path is partial. The selection used, and the ids of any sessions not judged, are stated in coverage.
+- **Deployed:** `8baae62`. Latest hunt `h20261020-115054-da2ab3` (no-expand, agent off, e_a 10:00–17:30 UTC):
+  - `partial`; the only reason is 2 ZoneMinder streaming responses TShark could not rebuild;
+  - 7 urgent / 15 high / 97 lead / 511 context; 1:56 wall time; 2.6 GB RSS.
+- **Scores** (dev set e_a, gold v1, 22 observable; eval-custodian, `docs/eval/results/`):
 
   | Run | Recall reported | Recall surfaced | P@10 | False leads/hour |
   |---|---|---|---|---|
   | 4: model-off baseline | 11/22 | 15/22 | 1.00 | 5.07 |
   | 7: host↔network correlation | 12/22 | 17/22 | 0.80 | 6.23 |
   | 8: + Arkime + noise fix | 12/22 | 17/22 (critical+high 12/13) | 0.90 | 5.28 |
+  | 9: + packet stage (no expansion) | 12/22 | 17/22 (critical+high 12/13) | 0.90 | 5.14 |
 
-  Remaining misses are discovery ×4 and privesc ×1 (no rule matched), plus 5 lead-only (c2_channel, recon ×3, remote_login). The expansion engine and context rules target these.
-- **Deployed:** `5338122` (latest hunt `h20261019-234655-87fdcd`: 7 urgent / 15 high / 95 lead / 511 context, 0 errors). Nothing is pushed: the owner pushes, because Claude Code's classifier blocked `git push`.
-- **Codex:** brief written in `Claude-Codex.md` (2026-10-19 19:45 EDT) for the ADR-006 expansion engine:
-  - session id and honest IP timelines (the merge gate);
-  - link fetchers;
-  - `ContextPlaybook` with two reference rules;
-  - the deterministic loop;
-  - the incident graph in the manifest;
-  - renaming `bakeoff` to `replay`.
-
-  Waiting for the owner to start Codex.
-- **Owner decisions recorded (2026-10-19):**
-  - f_a holdout on hold.
-  - A different-storyline dataset later.
-  - Malcolm after deterministic search is built out.
-  - Ground-truth account isolation: explained as defence in depth, not required now; revisit before any holdout.
+  - **Run 9:** both packet leads match gold: the stager served as `/TODO.md` and the authorized_keys drop. But each is for an opportunity the host rules already reported, so recall is unchanged.
+  - **Misses:** discovery ×4 and privesc ×1 (no rule matched); 5 lead-only (c2_channel, recon ×3, remote_login).
+  - Expansion plus context rules are the next lever for these. Codex's round-1 live run added 3 high context findings and connected incidents, but it is not scored yet because of the review FAIL.
+- **Owner actions pending:**
+  1. Start Codex on expansion fix round 2 (`Claude-Codex.md`).
+  2. Copy the run 9 private eval files from the VM's `/tmp/r9priv/` into `/home/user/romulus-eval/sl700_e_a/`, then delete `/tmp/r9priv` and `/tmp/r9h`. The session's permission rules blocked the eval-custodian from writing there.
+  3. Push `m2/evaluation`; Claude Code cannot push.
+  4. Decide the false-leads-per-hour ceiling (PROTOCOL §14).
 - **Next:**
-  1. The owner starts Codex on the expansion brief (ADR-006); the reviewer checks it before merge.
-  2. Lead: network slice 3, TShark on the packets of specific Arkime sessions (v1's explicit-ID PCAP fetch and TShark safety patterns).
-  3. Detection engineer: context-rule catalog (after the engine), plus lab-testable `v1_ports` and backlog items.
-  4. The eval-custodian scores after each step.
-- **Merge gates and known issues:**
-  - Investigator v2 re-review findings on `0abb1fc` (spawned-case stall, stale schema after shrink, seed cards dropped, `valid_first` metric, deterministic errors treated as outages). Several may be fixed in Codex's later commits but are not re-verified. They only matter for agent mode, which is off by default.
-  - IP `entity_timeline` on host targets searches only `systemd.journal` yet reports complete coverage (`hunt/pivot.py`). Must be fixed before any agent or expansion result counts.
+  1. Codex fix round 2. Then the reviewer re-checks, the lead merges into `m2/evaluation`, deploys, runs a default (expansion) hunt, and the eval-custodian scores it as run 10.
+  2. Then tune the expansion budget and tiers by score, and add the context-rule catalog (detection-engineer) aimed at the discovery and privesc misses.
+  3. The attack-path timeline page and template narrative (M3).
+- **Known issues:**
+  - Investigator v2 re-review findings on `0abb1fc` (agent mode only, which is off by default).
+  - `host.ssh_authorized_keys_write` misses key appends made inside downloaded scripts. The packet rule catches the lab case; kernel file records are the general fix (M4).
 - **Process notes:**
-  - Investigator and shell-parser code goes to Codex via `Claude-Codex.md`. The file is gitignored; replace Claude's last message; old text may be cleared at a new conversation.
+  - Investigator, shell-parser and expansion code goes to Codex via `Claude-Codex.md`. The file is gitignored; replace Claude's last message; old text may be cleared at a new conversation.
   - The eval-custodian never deploys without asking.
-  - Owner direction: detection breadth is a primary goal (spec §7), plus a detection catalog page (spec §7; M4/M6).
+  - Detection breadth is a primary goal (spec §7).
 
 ## Milestone summary
 
