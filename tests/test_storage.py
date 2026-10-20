@@ -1,6 +1,8 @@
 """Database storage hygiene: a capped write-ahead log, compaction, and the doctor warning."""
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import inspect
+
 from romulus import cli
 from romulus.config import Settings
 from romulus.doctor import check_db_space
@@ -24,6 +26,15 @@ def test_wal_size_limit_is_set_on_every_connection(tmp_path):
     engine = make_engine(tmp_path / "x.db")
     with engine.connect() as c:
         assert c.exec_driver_sql("PRAGMA journal_size_limit").scalar() == WAL_SIZE_LIMIT
+
+
+def test_latest_migration_adds_durable_expansion_fields(tmp_path):
+    engine = make_engine(tmp_path / "migrated.db")
+    migrate(engine)
+
+    inspector = inspect(engine)
+    assert "source_queries" in {column["name"] for column in inspector.get_columns("task")}
+    assert "group_key" in {column["name"] for column in inspector.get_columns("candidate")}
 
 
 def test_compact_returns_freed_pages_and_truncates_the_log(tmp_path):

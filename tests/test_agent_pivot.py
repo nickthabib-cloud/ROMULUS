@@ -22,7 +22,7 @@ from romulus.hunt import pivot as pivot_module
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.publish import publish_match
 from romulus.sources.compile import compile_es
-from romulus.sources.models import Completeness, SearchOutcome
+from romulus.sources.models import Completeness, SearchIntent, SearchOutcome, Window
 from romulus.sources.profile import contract_from_types
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -62,6 +62,59 @@ def _process_event(argv=None, *, event_id="event-1", ts=START) -> TypedEvent:
     )
 
 
+def test_executor_counts_and_stops_actual_source_queries(monkeypatch):
+    calls = []
+
+    def fake_execute(_client, intent, _contract, *, pit=None):
+        calls.append(intent)
+        return SearchOutcome(
+            target=intent.target, fingerprint="fp", started_at=START, ended_at=START,
+            completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+        )
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    executor = PivotExecutor(_repo(), FakeClient(), "h1", {"host-x": contract}, source_query_budget=2)
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+
+    outcomes = [executor._execute(intent, contract) for _ in range(3)]
+
+    assert len(calls) == 2
+    assert executor.source_queries == 2
+    assert outcomes[2].completeness == Completeness.failed
+    assert outcomes[2].reasons == ["expansion_source_query_budget:2"]
+
+
+def test_fetch_query_cap_leaves_unattempted_ranges_unresolved(monkeypatch):
+    calls = []
+
+    def fake_execute(_client, intent, _contract, *, pit=None):
+        calls.append(intent)
+        return SearchOutcome(
+            target=intent.target, fingerprint="fp", started_at=START, ended_at=START,
+            completeness=Completeness.partial, reasons=["cap:1<total:30000"],
+            total=30000, total_relation="eq", returned=1,
+        )
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    executor = PivotExecutor(_repo(), FakeClient(), "h1", {"host-x": contract})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=1)
+
+    batch = executor.fetch_intents(
+        "F-anchor", "fetch-key", [intent], lambda _event: True, query_cap=2,
+    )
+
+    assert len(calls) == 2
+    assert executor.source_queries == 2
+    assert batch.status == "partial"
+    assert "expansion_link_query_cap:2" in batch.reasons
+    assert any(
+        interval.reason == "expansion_link_query_cap:2"
+        for cell in batch.coverage for interval in cell.unresolved_ranges
+    )
+
+
 def test_shared_publication_sets_source_case_and_keeps_machine_policy():
     repo = _repo()
     playbook = CredentialStoreRead()
@@ -89,23 +142,48 @@ def test_pivot_pack_contains_only_direct_playbooks():
     assert "net.port_scan" not in {playbook.id for playbook in pack}
 
 
-def test_ip_timeline_queries_both_network_sides_and_safe_journal_superset(monkeypatch):
+def test_ip_timeline_searches_each_host_dataset_and_reports_dataset_coverage(monkeypatch):
     seen = []
 
     def fake_execute(_client, intent, _contract, *, pit=None):
         seen.append(intent)
+        dataset = next((p.value for p in intent.filters if p.field == "event.dataset"), None)
+        dataset = dataset if isinstance(dataset, str) else None
+        record = ({
+            "_id": f"raw-{dataset}", "_index": intent.target,
+            "_source": {"event": {"dataset": dataset}},
+        } if dataset in {"linux.audit", "systemd.journal", "apache.access"} else None)
         return SearchOutcome(
             target=intent.target, fingerprint="fp", started_at=START, ended_at=START,
-            completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+            completeness=Completeness.complete, total=int(record is not None), total_relation="eq",
+            returned=int(record is not None), records=[record] if record else [],
         )
 
+    def fake_normalize(records):
+        if not records:
+            return [], {}, []
+        dataset = records[0]["_source"]["event"]["dataset"]
+        family, field = {
+            "linux.audit": ("net_socket", "destination.ip"),
+            "systemd.journal": ("auth", "source.ip"),
+            "apache.access": ("http_access", "source.ip"),
+        }[dataset]
+        event = TypedEvent(
+            id=f"event-{dataset}", family=family, ts=START, host="video",
+            fields={field: fv("203.0.113.8", f"raw-{dataset}:{field}")},
+            raw=[RawRef(target="romulus-host-x", native_id=f"raw-{dataset}", digest="d")],
+            normalizer="test@1",
+        )
+        return [event], {}, []
+
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    monkeypatch.setattr(pivot_module, "normalize_hits", fake_normalize)
     contracts = {
         "romulus-network-x": contract_from_types("romulus-network-x", {
             "@timestamp": "date", "source.ip": "ip", "destination.ip": "ip", "event.dataset": "keyword",
         }),
         "romulus-host-x": contract_from_types("romulus-host-x", {
-            "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+            "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword", "source.ip": "ip",
         }),
     }
     request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
@@ -128,10 +206,151 @@ def test_ip_timeline_queries_both_network_sides_and_safe_journal_superset(monkey
         [("source.ip", "eq", "203.0.113.8")],
         [("destination.ip", "eq", "203.0.113.8")],
     ]
-    journal = next(intent for intent in seen if "host" in intent.target)
-    assert [(p.field, p.op, p.value) for p in journal.filters] == [
-        ("event.dataset", "eq", "systemd.journal"),
+    host_intents = [intent for intent in seen if "host" in intent.target]
+    assert [next(p.value for p in intent.filters if p.field == "event.dataset")
+            for intent in host_intents] == [
+        "linux.audit", "systemd.journal", "apache.access", "apache.error",
     ]
+    apache = next(intent for intent in host_intents
+                  if any(p.value == "apache.access" for p in intent.filters))
+    assert [[(p.field, p.op, p.value) for p in group] for group in apache.any_of] == [
+        [("source.ip", "eq", "203.0.113.8")],
+    ]
+    for dataset in ("linux.audit", "systemd.journal"):
+        intent = next(intent for intent in host_intents
+                      if any(p.value == dataset for p in intent.filters))
+        assert [[(p.field, p.op, p.value) for p in group] for group in intent.any_of] == [
+            [("source.ip", "eq", "203.0.113.8")],
+        ]
+    assert {item["family"] for item in result.event_summaries} == {
+        "net_socket", "auth", "http_access",
+    }
+    assert {(cell.target, cell.dataset, cell.status) for cell in result.coverage} == {
+        ("romulus-network-x", None, "complete"),
+        ("romulus-host-x", "linux.audit", "complete"),
+        ("romulus-host-x", "systemd.journal", "complete"),
+        ("romulus-host-x", "apache.access", "complete"),
+        ("romulus-host-x", "apache.error", "complete"),
+    }
+
+
+def test_ip_timeline_marks_unsearchable_host_datasets_unresolved(monkeypatch):
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="romulus-network-x", fingerprint="fp", started_at=START, ended_at=START,
+        completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+    ))
+    contracts = {
+        "romulus-network-x": contract_from_types("romulus-network-x", {
+            "@timestamp": "date", "source.ip": "ip", "destination.ip": "ip", "event.dataset": "keyword",
+        }),
+        "romulus-host-x": contract_from_types("romulus-host-x", {"@timestamp": "date"}),
+    }
+    request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
+        entity=EntityRef(kind="ip", value="203.0.113.8", role="src"), start=START, end=END,
+    ))
+
+    result = PivotExecutor(_repo(), FakeClient(), "h1", contracts).run("case-1", request)
+
+    assert result.status == "partial"
+    unresolved = [cell for cell in result.coverage if cell.target == "romulus-host-x"]
+    assert {cell.dataset for cell in unresolved} == {
+        "linux.audit", "systemd.journal", "apache.access", "apache.error",
+    }
+    assert all(cell.status == "partial" and cell.unresolved_ranges for cell in unresolved)
+
+
+def test_ip_timeline_profiles_every_target_and_refuses_skipped_dataset_completeness(monkeypatch):
+    seen = []
+
+    def fake_execute(_client, intent, _contract, *, pit=None):
+        seen.append(intent)
+        return SearchOutcome(
+            target=intent.target, fingerprint="fp", started_at=START, ended_at=START,
+            completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+        )
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    contracts = {
+        "romulus-host-x": contract_from_types("romulus-host-x", {
+            "@timestamp": "date", "event.dataset": "keyword", "source.ip": "ip",
+            "destination.ip": "ip",
+        }),
+        "romulus-network-x": contract_from_types("romulus-network-x", {
+            "@timestamp": "date", "event.dataset": "keyword", "source.ip": "ip",
+            "destination.ip": "ip",
+        }),
+        "arkime_sessions3-x": contract_from_types("arkime_sessions3-x", {
+            "firstPacket": "date", "lastPacket": "date", "source.ip": "ip",
+            "destination.ip": "ip", "network.community_id": "keyword",
+        }),
+    }
+    inventory = {
+        "romulus-host-x": {"linux.audit", "zoneminder"},
+        "romulus-network-x": {"suricata.eve.alert"},
+        "arkime_sessions3-x": {"tls"},
+    }
+    request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
+        entity=EntityRef(kind="ip", value="203.0.113.8", role="src"), start=START, end=END,
+    ))
+
+    result = PivotExecutor(
+        _repo(), FakeClient(), "h1", contracts, dataset_inventory=inventory,
+    ).run("case-1", request)
+
+    assert {cell.target for cell in result.coverage} == set(contracts)
+    zoneminder = next(cell for cell in result.coverage if cell.dataset == "zoneminder")
+    assert zoneminder.status == "partial"
+    assert zoneminder.reasons == ["dataset_not_normalized:zoneminder"]
+    arkime = next(intent for intent in seen if intent.target == "arkime_sessions3-x")
+    assert not any(predicate.field == "event.dataset" for predicate in arkime.filters)
+    assert {predicate.field for group in arkime.any_of for predicate in group} == {
+        "source.ip", "destination.ip",
+    }
+    assert all(
+        cell.status != "complete" for cell in result.coverage
+        if cell.dataset == "zoneminder"
+    )
+
+
+def test_ip_timeline_marks_unhandled_audit_address_types_unresolved(monkeypatch):
+    raw = (
+        'type=CRED_ACQ msg=audit(1731950250.400:76808): pid=900 uid=0 auid=1001 '
+        'ses=128 acct="alice" exe="/usr/sbin/sshd" addr=203.0.113.8 res=success'
+    )
+
+    def fake_execute(_client, intent, _contract, *, pit=None):
+        record = {
+            "_id": "cred-1", "_index": intent.target,
+            "_source": {
+                "@timestamp": START.isoformat(), "host": {"name": "web1"},
+                "event": {"dataset": "linux.audit", "original": raw},
+            },
+        }
+        return SearchOutcome(
+            target=intent.target, fingerprint="fp", started_at=START, ended_at=START,
+            completeness=Completeness.complete, total=1, total_relation="eq", returned=1,
+            records=[record],
+        )
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    contracts = {
+        "romulus-host-x": contract_from_types("romulus-host-x", {
+            "@timestamp": "date", "event.dataset": "keyword", "source.ip": "ip",
+        }),
+    }
+    request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
+        entity=EntityRef(kind="ip", value="203.0.113.8", role="src"), start=START, end=END,
+    ))
+
+    result = PivotExecutor(
+        _repo(), FakeClient(), "h1", contracts,
+        dataset_inventory={"romulus-host-x": {"linux.audit"}},
+    ).run("case-1", request)
+
+    assert result.status == "partial"
+    assert "audit_address_type_not_normalized:CRED_ACQ" in result.reasons
+    assert result.coverage[0].status == "partial"
+    assert result.coverage[0].unresolved_ranges
 
 
 def test_each_tool_compiles_source_filters_for_only_the_families_it_summarizes():
@@ -408,7 +627,8 @@ def test_capped_dense_pivot_splits_and_late_event_reaches_time_spread_digest(mon
     assert result.event_summaries[-1]["id"] == "late-29"
     assert all(not event_id.startswith("discarded-parent") for event_id in result.event_ids)
     assert [segment.model_dump(mode="json") for segment in result.coverage] == [{
-        "target": "romulus-host-x", "start": "2024-11-18T14:00:00Z", "end": "2024-11-18T14:20:00Z",
+        "target": "romulus-host-x", "dataset": None,
+        "start": "2024-11-18T14:00:00Z", "end": "2024-11-18T14:20:00Z",
         "status": "complete", "reasons": [], "returned": 60, "total": 60,
         "covered_ranges": [
             {

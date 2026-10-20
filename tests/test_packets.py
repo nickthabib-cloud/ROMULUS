@@ -861,3 +861,19 @@ def test_stale_packet_directories_are_cleared(tmp_path):
     old = time.time() - 7 * 3600
     os.utime(stale, (old, old))
     assert clear_stale_stages(tmp_path) == 1 and not stale.exists()
+
+
+def test_packet_stage_runs_before_expansion_so_its_findings_can_anchor(tmp_path, monkeypatch):
+    settings = _hunt(tmp_path)
+    monkeypatch.setattr(hunt_run, "Sweep", _FakeSweep)
+    order = []
+    monkeypatch.setattr(hunt_run, "run_packet_stage", lambda *a, **k: order.append("packets") or {
+        "status": "complete", "finished": True, "partial_reasons": []})
+    monkeypatch.setattr(hunt_run, "_run_expansion", lambda *a, **k: order.append("expansion") or {
+        "status": "completed", "unexpanded": []})
+    hunt_run.run_hunt(settings, "h1")
+    assert order == ["packets", "expansion"]
+
+
+def test_the_sweep_pack_has_neither_packet_nor_context_rules():
+    assert {p.kind for p in fresh_pack()}.isdisjoint({"packet", "context"})

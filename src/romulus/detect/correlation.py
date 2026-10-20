@@ -119,11 +119,15 @@ class PidTable:
         entries = self.execs.get((host, pid), [])
         latest = None
         for entry in entries:                      # one pid rarely has more than a few execs in a window
-            if entry[0] <= ts + 1.0:
+            if entry[0] <= ts:
                 latest = entry
             else:
                 break
         return latest
+
+    def lookup(self, host: str, pid: int, ts: float):
+        """Latest exec identity for a PID at or before `ts`; public for expansion lineage links."""
+        return self._lookup(host, pid, ts)
 
     def ancestry(self, host: str, ppid, ts: float) -> tuple[str, list[tuple[str, str]]]:
         """Walk up from a parent pid. Returns (verdict, [(exe, raw id)]) with verdict 'web_server' when a web

@@ -21,10 +21,10 @@ SSHD = {"exe": "/usr/sbin/sshd", "comm": "sshd", "uid": "0", "user": "root"}
 
 
 def syscall(serial=500, *, nr=42, arch="c000003e", success="yes", exit_code="0", exe="/usr/bin/perl",
-            comm="perl", uid="33", user="www-data", t0=T0, pid=200):
+            comm="perl", uid="33", user="www-data", t0=T0, pid=200, session_id="4294967295"):
     return (f"type=SYSCALL msg=audit({t0:.3f}:{serial}): arch={arch} syscall={nr} success={success} "
             f"exit={exit_code} a0=3 a1=7ffc a2=10 a3=0 items=0 ppid=100 pid={pid} auid=4294967295 uid={uid} "
-            f"gid={uid} euid={uid} tty=(none) ses=4294967295 comm=\"{comm}\" exe=\"{exe}\" subj==unconfined "
+            f"gid={uid} euid={uid} tty=(none) ses={session_id} comm=\"{comm}\" exe=\"{exe}\" subj==unconfined "
             f"key=\"T1043_Commonly_Used_Port\"\x1dARCH=x86_64 SYSCALL=connect AUID=\"unset\" UID=\"{user}\" "
             f"EUID=\"{user}\"")
 
@@ -97,6 +97,16 @@ def test_connect_group_becomes_a_typed_net_socket_event():
     assert e.fields["destination.ip"].origin.startswith("k1:")
     assert {r.native_id for r in e.raw} == {"s1", "k1"}
     assert ("ip", ATTACKER, "dst") in e.entities() and ("host", "videoserver", "host") in e.entities()
+    assert not e.has("process.session_id")
+
+
+def test_connect_group_keeps_set_audit_session_id():
+    events, _, errors = normalize_hits([
+        audit_hit("s1", syscall(session_id="42")), audit_hit("k1", sockaddr()),
+    ])
+
+    assert errors == []
+    assert events[0].get("process.session_id") == 42
 
 
 def test_socket_time_is_the_audit_header_epoch():
@@ -479,3 +489,40 @@ def test_correlated_candidate_citations_are_all_retained(monkeypatch, order):
     assert len(cites) == 4 and all(c["status"] == "retained" for c in cites), cites
     window = {c["rule_id"]: c["state"] for c in repo.rule_cells("h1") if c["target"] == "*"}
     assert window["corr.process_network_link"] == "matched"
+
+
+def test_sweep_lineage_never_uses_an_exec_after_the_socket(monkeypatch):
+    future = T0 + 0.5
+    future_ts = datetime.fromtimestamp(future, UTC).isoformat().replace("+00:00", "Z")
+    records = [
+        audit_hit("s1", syscall()),
+        audit_hit("k1", sockaddr()),
+        audit_hit(
+            "e1",
+            f'type=EXECVE msg=audit({future:.3f}:900): argc=1 a0="/usr/bin/perl"',
+            ts=future_ts,
+        ),
+        audit_hit(
+            "e2",
+            (f'type=SYSCALL msg=audit({future:.3f}:900): arch=c000003e syscall=59 success=yes exit=0 '
+             'ppid=1 pid=100 auid=4294967295 uid=33 gid=33 euid=33 comm="perl" '
+             'exe="/usr/bin/perl" AUID="unset" UID="www-data" EUID="www-data"'),
+            ts=future_ts,
+        ),
+    ]
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _outcome(intent, records))
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": ["romulus-host-logs"]}, "d", "t")
+    start = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
+    window = Window(start=start, end=start + timedelta(hours=1))
+
+    sweep = sw.Sweep(repo, _Client(), "h1", window, {"romulus-host-logs": None})
+    sweep.run_partition("romulus-host-logs", None, [], window, est=len(records))
+    sweep.finalize()
+
+    finding = next(c for c in repo.candidates("h1")
+                   if c["rule_id"] == "host.interpreter_external_connection")
+    assert finding["lane"] == "high"
+    assert "ancestry is not fully recorded" in finding["claim"]

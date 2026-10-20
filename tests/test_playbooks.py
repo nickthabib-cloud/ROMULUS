@@ -42,9 +42,9 @@ def test_web_user_routine_shapes_collapse_and_injection_escalates():
     m = run(host.WebServiceSpawnsInterpreter, routine + [injected, stdin_shell])
     assert sum(1 for x in m if x.proposed_lane == "context") == 1           # 50 routine runs -> 1 context item
     # command chaining after an application helper: high
-    assert [x for x in m if "zmu" in x.claim][0].proposed_lane == "high"
+    assert next(x for x in m if "zmu" in x.claim).proposed_lane == "high"
     # web account running an interpreter that reads commands from stdin: RCE-shaped -> urgent
-    stdin_item = [x for x in m if "(argv: /bin/sh)" in x.claim][0]
+    stdin_item = next(x for x in m if "(argv: /bin/sh)" in x.claim)
     assert stdin_item.proposed_lane == "urgent" and stdin_item.severity == "critical"
 
 
@@ -126,8 +126,8 @@ def test_web_user_partial_script_prefix_can_supply_positive_chaining_indicator()
     pb = host.WebServiceSpawnsInterpreter()
     argv = [
         "sh", "-c",
-        r"/usr/bin/zmu -A -a -m ;echo exec\(__import__\(\'zlib\'\).decompress\(payload\)\)"
-        "\n" r"exec $(which python || which python3) -",
+        (r"/usr/bin/zmu -A -a -m ;echo exec\(__import__\(\'zlib\'\).decompress\(payload\)\)"
+         "\n" r"exec $(which python || which python3) -"),
     ]
 
     immediate = pb.consume([exec_ev(argv, user="www-data")])
@@ -592,7 +592,7 @@ def test_alert_lanes_by_severity_and_category():
                                          _alert(3, cat="Not Suspicious Traffic", src="198.51.100.6")])
     lanes = sorted(x.proposed_lane for x in m)
     assert lanes == ["context", "high", "lead"]
-    high = [x for x in m if x.proposed_lane == "high"][0]
+    high = next(x for x in m if x.proposed_lane == "high")
     assert "raised 2 " in high.claim and "not proof" in high.claim
 
 
@@ -605,6 +605,20 @@ def test_many_signatures_from_one_scanner_are_one_item():
         evs.append(e)
     m = run(network.SuricataAlertStack, evs)
     assert len(m) == 1 and "300 distinct signature(s)" in m[0].claim
+
+
+def test_alert_signature_note_is_deterministic_when_names_match():
+    evs = []
+    for signature_id in range(30):
+        e = _alert(1)
+        e.fields["alert.signature_id"].value = signature_id
+        e.fields["alert.signature"].value = "ET TEST repeated name"
+        evs.append(e)
+
+    match = run(network.SuricataAlertStack, evs)[0]
+
+    expected = sorted(range(30), key=str)
+    assert match.notes[-1] == f"signatures: {expected}"
 
 
 # ---------------------------------------------------------------- web scan burst (cross-partition)

@@ -1,4 +1,4 @@
-"""Run frozen bakeoff tasks against candidate models through the production model path.
+"""Run frozen replay tasks against candidate models through the production model path.
 
 Each call goes through ``OllamaClient.chat_json`` with the frozen per-call menu schema and output budget,
 then the production v2 resolver and the controller's duplicate-pivot check, exactly as the investigator
@@ -31,10 +31,10 @@ from romulus.agent.ollama import ModelUnavailable, OllamaClient
 from romulus.agent.options import Menu
 from romulus.agent.resolver import resolve_output
 from romulus.agent.tools import parse_tool_request
-from romulus.bakeoff.export import MAX_OUT
 from romulus.config import Settings
+from romulus.replay.export import MAX_OUT
 
-RESULT_SCHEMA = "bakeoff-result/1"
+RESULT_SCHEMA = "replay-result/1"
 PRODUCTION_SEED = 7
 _TELEMETRY = re.compile(r"<UNTRUSTED_TELEMETRY>\n(.*)\n</UNTRUSTED_TELEMETRY>\Z", re.DOTALL)
 _TIMINGS = ("total_duration", "load_duration", "prompt_eval_count", "prompt_eval_duration", "eval_count",
@@ -245,7 +245,7 @@ def _key(row: dict) -> tuple:
     return row["task_id"], row["model"], row["num_ctx"], row["think"], row["seed"], row["max_out"]
 
 
-def run_bakeoff(settings: Settings, tasks: list[dict], models: list[str], num_ctx_values: list[int],
+def run_replay(settings: Settings, tasks: list[dict], models: list[str], num_ctx_values: list[int],
                 think_values: list[bool], seeds: list[int], out_path: str | Path, run_id: str,
                 max_out: int = MAX_OUT, retry: bool = True, inner_transport: httpx.BaseTransport | None = None,
                 progress: Callable[[str], None] | None = None) -> dict:

@@ -1,4 +1,4 @@
-"""Model bakeoff (spec §12): frozen investigator briefs replayed against candidate models.
+"""Investigator replay: frozen production briefs replayed through the model decision path.
 
 ``export`` rebuilds the exact briefs a hunt's investigator sent, from a read-only copy of the store.
 ``runner`` sends them through the production Ollama client, decision schema and validation, and records

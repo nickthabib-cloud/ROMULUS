@@ -43,6 +43,12 @@ def outcome_sentence(m: dict) -> str:
 
 def render(m: dict, banner: str = BANNER) -> str:
     h = m["hunt"]
+    graph = m.get("incident_graph") or {"incidents": [], "links": [], "nodes": [], "edges": []}
+    link_strength = {link["id"]: link["style"] for link in graph["links"]}
+    link_strength.update({
+        link["id"]: link["strength"]
+        for link in (m.get("investigations") or {}).get("link_accounting", [])
+    })
     out = [banner, "", f"# ROMULUS technical report: hunt `{h['id']}`", "",
            f"Revision {m['revision']['number']} (`{m['revision']['id']}`)"
            + (f", supersedes `{m['revision']['supersedes']}`" if m["revision"]["supersedes"] else ""), "",
@@ -81,6 +87,10 @@ def render(m: dict, banner: str = BANNER) -> str:
         if f.get("source_case_id"):
             out += [(f"- Investigator chain: [case `{esc(f['source_case_id'])}`]"
                      f"(#case-{_anchor(f['source_case_id'])})"), ""]
+        if f.get("source_anchor_id"):
+            strength = link_strength.get(f.get("source_link_id"), "unknown-strength")
+            out += [(f"- Expansion chain: anchor `{esc(f['source_anchor_id'])}` via {esc(strength)} link "
+                     f"`{esc(f.get('source_link_id') or '')}`"), ""]
         out += ["**Predicate fields (what the claim rests on)**", "", "| Field | Value | Origin |", "|---|---|---|"]
         for p in f["predicate_fields"]:
             v = json.dumps(p["value"], ensure_ascii=False)
@@ -99,6 +109,42 @@ def render(m: dict, banner: str = BANNER) -> str:
             out.append(f"| … | {len(f['citations']) - 25} more citations in the JSON manifest | | | |")
         out.append("")
 
+    out += ["## Incidents", "",
+            ("Incidents are connected only by observed typed links. Inferred links remain visible hypotheses and "
+             "never merge incident counts."), "",
+            "| Incident | Entry point | Findings | Hosts | Accounts | ATT&CK tactics | Observed edges | Inferred edges |",
+            "|---|---|---:|---|---|---|---:|---:|"]
+    for incident in graph["incidents"]:
+        out.append(
+            f"| {esc(incident['id'])} | {esc(incident['entry_point'])} | {len(incident['finding_ids'])} | "
+            f"{esc(', '.join(incident['hosts']) or 'none')} | {esc(', '.join(incident['accounts']) or 'none')} | "
+            f"{esc(', '.join(incident['attack_tactics']) or 'none')} | {incident['observed_edges']} | "
+            f"{incident['inferred_edges']} |"
+        )
+    if not graph["incidents"]:
+        out.append("| none | none | 0 | none | none | none | 0 | 0 |")
+    out += ["", "**Attack-path timelines**", ""]
+    for incident in graph["incidents"]:
+        timeline = " → ".join(f"[{esc(item)}](#f-{item})" for item in incident["timeline"])
+        out += [f"- `{esc(incident['id'])}`: {timeline}",
+                f"  - Open ends: {esc(json.dumps(incident['open_ends'], sort_keys=True))}"]
+    if not graph["incidents"]:
+        out.append("- No reportable findings or leads formed an incident.")
+    out += ["", "**Expansion links**", "",
+            "| Link | Anchor | Targets | Type | Style | Status | Key | Evidence |",
+            "|---|---|---|---|---|---|---|---|"]
+    for link in graph["links"]:
+        out.append(
+            f"| {esc(link['id'])} | {esc(link['anchor_finding_id'])} | "
+            f"{esc(', '.join(link['target_finding_ids']) or 'none')} | {esc(link['link_type'])} | "
+            f"{esc(link['style'])} | {esc(link['status'])} | "
+            f"{esc(json.dumps(link['key'], ensure_ascii=False, sort_keys=True))} | "
+            f"{esc(', '.join(link['evidence_ids']) or 'none')} |"
+        )
+    if not graph["links"]:
+        out.append("| none | none | none | none | none | none | none | none |")
+    out.append("")
+
     investigations = m.get("investigations") or {
         "summary": {}, "seed_partition": {}, "cases": [], "unworked_seed_ids": [],
         "model_contribution": {}, "incomplete_case_ids": [], "analyst_flags": [],
@@ -106,10 +152,13 @@ def render(m: dict, banner: str = BANNER) -> str:
     inv_summary = investigations["summary"]
     partitions = investigations["seed_partition"]
     contributions = investigations["model_contribution"]
+    expansion_accounting = investigations.get("anchor_accounting")
+    intro = (("Deterministic expansion records every anchor and link without model judgment.")
+             if expansion_accounting else
+             ("Model conclusions are recorded as cited analyst guidance. They remain separate from deterministic "
+              "machine claims, lanes, and coverage results."))
     out += [
-        "## Investigations", "",
-        ("Model conclusions are recorded as cited analyst guidance. They remain separate from deterministic "
-         "machine claims, lanes, and coverage results."), "",
+        "## Investigations", "", intro, "",
         "| Item | Value |", "|---|---|",
         f"| Status | {esc(inv_summary.get('status', 'unknown'))} |",
         f"| Agent mode | {esc(inv_summary.get('mode', 'model'))} |",
@@ -124,11 +173,24 @@ def render(m: dict, banner: str = BANNER) -> str:
         f"| Deterministic fallbacks | {inv_summary.get('deterministic_fallbacks', 0)} |",
         f"| Constraint defects | {inv_summary.get('constraint_defects', 0)} |",
         f"| Menu options hidden by cap | {inv_summary.get('menu_hidden_options', 0)} |", "",
-        "**Seed accounting**", "",
-        f"- Concluded: {esc(', '.join(partitions.get('concluded', [])) or 'none')}",
-        f"- Assigned but unfinished: {esc(', '.join(partitions.get('assigned_unfinished', [])) or 'none')}",
-        f"- Unassigned: {esc(', '.join(partitions.get('unassigned', [])) or 'none')}", "",
     ]
+    if expansion_accounting:
+        out += ["**Anchor accounting**", "",
+                f"- Expanded complete: {esc(', '.join(expansion_accounting['expanded_complete']) or 'none')}",
+                f"- Expanded partial: {esc(', '.join(expansion_accounting['expanded_partial']) or 'none')}",
+                f"- Unexpanded: {esc(', '.join(expansion_accounting['unexpanded']) or 'none')}",
+                f"- Pending: {esc(', '.join(expansion_accounting['pending']) or 'none')}", ""]
+        for anchor in expansion_accounting["anchors"]:
+            out.append(
+                f"- `{esc(anchor['id'])}` depth {anchor['depth']} · **{esc(anchor['status'])}** · "
+                f"{esc('; '.join(anchor['reasons']) or 'no gaps')}"
+            )
+        out.append("")
+    else:
+        out += ["**Seed accounting**", "",
+                f"- Concluded: {esc(', '.join(partitions.get('concluded', [])) or 'none')}",
+                f"- Assigned but unfinished: {esc(', '.join(partitions.get('assigned_unfinished', [])) or 'none')}",
+                f"- Unassigned: {esc(', '.join(partitions.get('unassigned', [])) or 'none')}", ""]
     analyst_flags = investigations.get("analyst_flags") or []
     if analyst_flags:
         out += ["**Analyst review required**", ""]

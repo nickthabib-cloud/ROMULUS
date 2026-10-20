@@ -34,7 +34,7 @@ def raw_digest(source: dict) -> str:
 
 
 def _ts(s: str) -> datetime:
-    return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC)
+    return datetime.fromisoformat(s).astimezone(UTC)
 
 
 def _ref(hit: dict) -> RawRef:
@@ -48,6 +48,17 @@ def _get(src: dict, path: str):
             return None
         cur = cur[part]
     return cur
+
+
+def _audit_boot_field(members: list[tuple[dict, AuditRecord]]) -> dict:
+    """Preserve an ECS boot identity when the shipper supplied one for an audit group."""
+    for hit, _record in members:
+        source = hit["_source"]
+        for path in ("host.boot.id", "system.boot.id"):
+            value = _get(source, path)
+            if value not in (None, ""):
+                return {"host.boot.id": fv(value, f"{hit['_id']}:{path}")}
+    return {}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -114,8 +125,13 @@ def _syscall_process_fields(sid: str, rs: AuditRecord) -> dict:
     if rs.fields.get("comm"):
         f["process.comm"] = fv(rs.fields["comm"], f"{sid}:event.original#auditd:SYSCALL.comm")
     for name, key in (("process.uid", "uid"), ("process.euid", "euid"), ("process.auid", "auid")):
-        if key in rs.fields:
+        if key in rs.fields and not (key == "auid" and rs.fields[key] in {"-1", "4294967295"}):
             f[name] = fv(rs.fields[key], f"{sid}:event.original#auditd:SYSCALL.{key}")
+    session_id = rs.fields.get("ses")
+    if session_id and session_id.isdigit() and session_id != "4294967295":
+        f["process.session_id"] = fv(
+            int(session_id), f"{sid}:event.original#auditd:SYSCALL.ses",
+        )
     for name, key in (("process.user", "UID"), ("process.effective_user", "EUID"),
                       ("process.login_user", "AUID")):
         if key in rs.enriched:
@@ -127,6 +143,59 @@ def _syscall_process_fields(sid: str, rs: AuditRecord) -> dict:
 
 SOCKET_COMPANIONS = {"SYSCALL", "SOCKADDR", "PROCTITLE"}
 EINPROGRESS = "-115"
+AUDIT_LOGIN_TYPES = {"USER_LOGIN", "USER_START"}
+# What an auth record is: an authentication decision, a completed login, or a (PAM) session opening. One login
+# can appear as all three (journal sshd "Accepted", audit USER_LOGIN, audit USER_START); rules count logins.
+AUTH_PHASE = {"USER_LOGIN": "login", "USER_START": "session_open"}
+
+
+def normalize_audit_auth_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent:
+    """Normalize authoritative audit login/session records into the shared auth family."""
+    login_members = sorted(
+        ((hit, record) for hit, record in members if record.type in AUDIT_LOGIN_TYPES),
+        key=lambda item: (item[1].type != "USER_LOGIN", item[0]["_id"]),
+    )
+    hit, record = login_members[0]
+    native_id = hit["_id"]
+    refs = [_ref(item_hit) for item_hit, item_record in login_members]
+    origin = f"{native_id}:event.original#auditd:{record.type}"
+    fields = {
+        "auth.method": fv(record.type.lower(), f"{origin}.type"),
+        "auth.phase": fv(AUTH_PHASE[record.type], f"{origin}.type"),
+        **_audit_boot_field(members),
+    }
+    executable = record.fields.get("exe")
+    if executable:
+        service = executable.rsplit("/", 1)[-1]
+        fields["auth.service"] = fv(service, f"{origin}.exe")
+    session_id = record.fields.get("ses")
+    if session_id and session_id.isdigit() and session_id != "4294967295":
+        fields["process.session_id"] = fv(int(session_id), f"{origin}.ses")
+    auid = record.fields.get("auid")
+    if auid not in {None, "", "-1", "4294967295"}:
+        fields["process.auid"] = fv(auid, f"{origin}.auid")
+    # The login account is `acct`, else the audit (login) uid's name. Never UID: that is the process writing the
+    # record (sshd), so a failed login by an unknown user would read as root.
+    placeholders = {None, "", "?", "(null)", "(none)", "unset", "(unknown)"}
+    if record.fields.get("acct") not in placeholders:
+        fields["user.name"] = fv(record.fields["acct"], f"{origin}.acct")
+    elif record.enriched.get("AUID") not in placeholders:
+        fields["user.name"] = fv(record.enriched["AUID"], f"{origin}.AUID")
+    address = record.fields.get("addr")
+    if address not in {None, "", "?", "(null)", "(none)", "0.0.0.0", "::"}:
+        fields["source.ip"] = fv(address, f"{origin}.addr")
+    pid = record.fields.get("pid")
+    if pid and pid.isdigit():
+        fields["process.pid"] = fv(int(pid), f"{origin}.pid")
+    result = (record.fields.get("res") or "").strip("'\"").lower()
+    outcome = (Outcome.success if result in {"success", "yes"}
+               else Outcome.failure if result in {"failed", "failure", "no"}
+               else Outcome.unknown)
+    return TypedEvent(
+        id=event_id("auth", refs), family="auth", ts=datetime.fromtimestamp(record.ts, UTC),
+        host=host or None, outcome=outcome, fields=fields, raw=refs,
+        normalizer=NORMALIZER_VERSION,
+    )
 
 
 def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], syscall: str) -> TypedEvent:
@@ -139,6 +208,7 @@ def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], s
     refs = [_ref(h) for h, r in members if r.type in SOCKET_COMPANIONS]
     f = {"socket.syscall": fv(syscall, f"{sid}:event.original#auditd:SYSCALL.arch+syscall"),
          "audit.serial": fv(rs.serial, f"{sid}:event.original#auditd:msg.serial"),
+         **_audit_boot_field(members),
          **_syscall_process_fields(sid, rs)}
     if rs.fields.get("key") not in (None, "(null)"):
         f["audit.key"] = fv(rs.fields["key"], f"{sid}:event.original#auditd:SYSCALL.key")
@@ -190,6 +260,7 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
         "process.argv": fv(argv, f"{nid}:event.original#auditd:EXECVE.a*"),
         "process.args_count": fv(len(argv), f"{nid}:event.original#auditd:EXECVE.argc"),
         "audit.serial": fv(r_exec.serial, f"{nid}:event.original#auditd:msg.serial"),
+        **_audit_boot_field(members),
     }
     caveats = []
     outcome = Outcome.unknown
@@ -233,7 +304,7 @@ def normalize_journal(hit: dict) -> TypedEvent:
     except json.JSONDecodeError as e:
         raise ValueError(f"journal event.original is not JSON: {e}") from e
     if not isinstance(j, dict):
-        raise ValueError("journal event.original is not a JSON object")
+        raise TypeError("journal event.original is not a JSON object")
     if j.get("_TRANSPORT") == "audit" or j.get("SYSLOG_IDENTIFIER") == "audit":
         raise Skip("journal copy of an audit record (normalized from linux.audit)")
     ident = j.get("SYSLOG_IDENTIFIER") or j.get("_COMM")
@@ -251,6 +322,7 @@ def normalize_journal(hit: dict) -> TypedEvent:
                 f = {**base,
                      "auth.service": fv("sshd", f"{nid}:event.original#journal:SYSLOG_IDENTIFIER"),
                      "auth.method": fv(g.get("method"), f"{nid}:event.original#journal:MESSAGE~sshd"),
+                     "auth.phase": fv("authentication", f"{nid}:event.original#journal:MESSAGE~sshd"),
                      "user.name": fv(g["user"], f"{nid}:event.original#journal:MESSAGE~sshd"),
                      "source.ip": fv(g["ip"], f"{nid}:event.original#journal:MESSAGE~sshd")}
                 if g.get("port"):
@@ -391,7 +463,7 @@ def is_arkime_session(src: dict) -> bool:
 
 def _epoch_ms(value) -> datetime:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise ValueError(f"Arkime packet time is not epoch milliseconds: {value!r}")
+        raise TypeError(f"Arkime packet time is not epoch milliseconds: {value!r}")
     return datetime.fromtimestamp(value / 1000, UTC)
 
 
@@ -456,6 +528,12 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
                      and t in EXEC_COMPANIONS | SOCKET_COMPANIONS and t != "EXECVE")
         if dup:
             errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
+            continue
+        if types & AUDIT_LOGIN_TYPES:
+            try:
+                events.append(normalize_audit_auth_group(host, members))
+            except (ValueError, KeyError, TypeError) as e:
+                errors.append((members[0][0]["_id"], f"linux.audit.auth: {e}"))
             continue
         if "EXECVE" not in types:
             sys_rec = next((r for _, r in members if r.type == "SYSCALL"), None)

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
@@ -15,7 +17,8 @@ from romulus.agent.tools import (
     ToolRequest,
 )
 from romulus.detect.registry import fresh_direct_pack
-from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.auditd import AuditParseError, parse_record
+from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, normalize_hits
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.publish import publish_match
 from romulus.sources.es import ElasticClient, SourceError
@@ -43,8 +46,21 @@ _ISO_NANOS = re.compile(
 )
 
 
-def _is_network(target: str) -> bool:
-    return "network" in target.lower()
+@dataclass
+class PivotEventBatch:
+    """Typed source results for a deterministic link fetch, before playbook evaluation."""
+
+    status: str
+    task_ids: list[str]
+    events: list[TypedEvent]
+    raw_sources: dict[str, dict]
+    coverage: list[PivotCoverage]
+    reasons: list[str]
+    duration_ms: int
+
+
+def _is_network(target: str, contract: FieldContract | None = None) -> bool:
+    return "network" in target.lower() or bool(contract and contract.time_field == "firstPacket")
 
 
 def _supports(contract: FieldContract, field: str, op: str = "eq") -> bool:
@@ -226,8 +242,9 @@ def _safe_sample_interval(outcome: SearchOutcome, intent: SearchIntent,
 
 def _coalesce_coverage(segments: list[PivotCoverage]) -> list[PivotCoverage]:
     merged: list[PivotCoverage] = []
-    for segment in sorted(segments, key=lambda item: (item.target, item.start, item.end)):
+    for segment in sorted(segments, key=lambda item: (item.target, item.dataset or "", item.start, item.end)):
         if (merged and merged[-1].target == segment.target and merged[-1].end == segment.start
+                and merged[-1].dataset == segment.dataset
                 and merged[-1].status == segment.status and merged[-1].reasons == segment.reasons):
             previous = merged[-1]
             total = previous.total + segment.total if previous.total is not None and segment.total is not None else None
@@ -243,19 +260,44 @@ def _coalesce_coverage(segments: list[PivotCoverage]) -> list[PivotCoverage]:
     return merged
 
 
+# The most physical queries `_sample_terminal` spends on one capped leaf (head, tail, before, after).
+MAX_SAMPLE_QUERIES = 4
+
+
 class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
 
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str,
-                 contracts: dict[str, FieldContract], heartbeat=None, owner_token: str | None = None):
+                 contracts: dict[str, FieldContract], heartbeat=None, owner_token: str | None = None,
+                 source_query_budget: int | None = None,
+                 dataset_inventory: dict[str, set[str] | list[str] | tuple[str, ...]] | None = None):
         self.repo = repo
         self.client = client
         self.hunt_id = hunt_id
         self.contracts = contracts
         self.heartbeat = heartbeat or (lambda: None)
         self.owner_token = owner_token
+        self.source_query_budget = source_query_budget
+        self.source_queries = 0
+        self.dataset_inventory = {
+            target: tuple(sorted(datasets)) for target, datasets in (dataset_inventory or {}).items()
+        }
 
-    def _execute(self, intent: SearchIntent, contract: FieldContract, *, pit=None) -> SearchOutcome:
+    def _execute(
+        self, intent: SearchIntent, contract: FieldContract, *, pit=None,
+        spend_task_id: str | None = None,
+    ) -> SearchOutcome:
+        if self.source_query_budget is not None and self.source_queries >= self.source_query_budget:
+            now = datetime.now(UTC)
+            reason = f"expansion_source_query_budget:{self.source_query_budget}"
+            return SearchOutcome(
+                target=intent.target, fingerprint=digest(intent.model_dump(mode="json")),
+                started_at=now, ended_at=now, completeness=Completeness.failed,
+                reasons=[reason], error=reason,
+            )
+        if spend_task_id is not None:
+            self.repo.record_task_source_query(spend_task_id, owner_token=self.owner_token)
+        self.source_queries += 1
         self.heartbeat()
         outcome = (execute(self.client, intent, contract) if pit is None
                    else execute(self.client, intent, contract, pit=pit))
@@ -266,16 +308,40 @@ class PivotExecutor:
         args = request.arguments
         window = Window(start=args.start, end=args.end)
         intents: list[SearchIntent] = []
+        dataset_inventory = getattr(self, "dataset_inventory", {})
         for target, contract in self.contracts.items():
-            network = _is_network(target)
+            network = _is_network(target, contract)
             filters: list[Predicate] = []
             any_of: list[list[Predicate]] = []
 
             if isinstance(request, EntityTimelineRequest):
                 entity = args.entity
-                if entity.kind == "ip" and network:
+                if entity.kind == "ip" and contract.time_field == "firstPacket":
+                    if not (_supports(contract, "source.ip") and _supports(contract, "destination.ip")):
+                        continue
+                    any_of = [
+                        [Predicate(field="source.ip", op="eq", value=entity.value)],
+                        [Predicate(field="destination.ip", op="eq", value=entity.value)],
+                    ]
+                elif entity.kind == "ip" and network:
                     if not (_supports(contract, "event.dataset", "in")
                             and _supports(contract, "source.ip") and _supports(contract, "destination.ip")):
+                        continue
+                    inventoried = dataset_inventory.get(target)
+                    if inventoried is not None:
+                        for dataset in inventoried:
+                            if dataset not in NETWORK_TIMELINE_DATASETS:
+                                continue
+                            intents.append(SearchIntent(
+                                kind="raw", target=target, window=window,
+                                filters=[Predicate(field="event.dataset", op="eq", value=dataset)],
+                                any_of=[
+                                    [Predicate(field="source.ip", op="eq", value=entity.value)],
+                                    [Predicate(field="destination.ip", op="eq", value=entity.value)],
+                                ],
+                                max_records=MAX_PIVOT_RECORDS,
+                                purpose=f"agent:{request.tool}:{dataset}",
+                            ))
                         continue
                     filters = [Predicate(field="event.dataset", op="in", value=NETWORK_TIMELINE_DATASETS)]
                     any_of = [
@@ -285,7 +351,26 @@ class PivotExecutor:
                 elif entity.kind == "ip" and not network:
                     if not _supports(contract, "event.dataset"):
                         continue
-                    filters = [Predicate(field="event.dataset", op="eq", value="systemd.journal")]
+                    datasets = dataset_inventory.get(target, tuple(HOST_TIMELINE_DATASETS))
+                    for dataset in datasets:
+                        if dataset not in HOST_TIMELINE_DATASETS:
+                            continue
+                        dataset_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
+                        dataset_any_of: list[list[Predicate]] = []
+                        for field in ("source.ip", "destination.ip"):
+                            if _supports(contract, field):
+                                dataset_any_of.append([
+                                    Predicate(field=field, op="eq", value=entity.value),
+                                ])
+                        if target in dataset_inventory and not dataset_any_of:
+                            continue
+                        intents.append(SearchIntent(
+                            kind="raw", target=target, window=window,
+                            filters=dataset_filters, any_of=dataset_any_of,
+                            max_records=MAX_PIVOT_RECORDS,
+                            purpose=f"agent:{request.tool}:{dataset}",
+                        ))
+                    continue
                 elif (entity.kind == "host" and not network
                       and _supports(contract, "event.dataset", "in") and _supports(contract, "host.name")):
                     filters = [
@@ -328,14 +413,159 @@ class PivotExecutor:
             ))
         return intents
 
-    def _execute_partitions(self, intent: SearchIntent, contract: FieldContract,
-                            anchor_ts: datetime | None = None):
+    def plan(self, request: ToolRequest) -> tuple[list[SearchIntent], list[PivotCoverage]]:
+        """Plan executable intents and every known unresolved dataset cell together."""
+        intents = self._intents(request)
+        return intents, self._unsearchable_ip_coverage(request, intents)
+
+    @staticmethod
+    def _intent_dataset(intent: SearchIntent) -> str | None:
+        for predicate in intent.filters:
+            if predicate.field == "event.dataset" and predicate.op == "eq" and isinstance(predicate.value, str):
+                return predicate.value
+        return None
+
+    @staticmethod
+    def _ip_normalization_reasons(intent: SearchIntent, records: list[dict]) -> list[str]:
+        if (PivotExecutor._intent_dataset(intent) != "linux.audit"
+                or "entity_timeline" not in intent.purpose):
+            return []
+        reasons = set()
+        for record in records:
+            raw = _source_value(record.get("_source") or {}, "event.original")
+            if not raw:
+                continue
+            try:
+                audit = parse_record(raw)
+            except AuditParseError:
+                continue
+            address = audit.fields.get("addr")
+            if (audit.type.startswith(("USER_", "CRED_"))
+                    and audit.type not in AUDIT_LOGIN_TYPES
+                    and address not in {None, "", "?", "(null)", "(none)", "0.0.0.0", "::"}):
+                reasons.add(f"audit_address_type_not_normalized:{audit.type}")
+        return sorted(reasons)
+
+    def _unsearchable_ip_coverage(
+        self, request: ToolRequest, intents: list[SearchIntent] | None = None,
+    ) -> list[PivotCoverage]:
+        if not isinstance(request, EntityTimelineRequest) or request.arguments.entity.kind != "ip":
+            return []
+        args = request.arguments
+        unresolved: list[PivotCoverage] = []
+        intents = intents or []
+        planned = {(intent.target, PivotExecutor._intent_dataset(intent)) for intent in intents}
+        for target, contract in self.contracts.items():
+            inventoried = self.dataset_inventory.get(target)
+            if inventoried is not None:
+                if contract.time_field == "firstPacket":
+                    if any(intent.target == target for intent in intents):
+                        continue
+                    reason = "key not pushable; full-dataset scan refused"
+                    unresolved.append(PivotCoverage(
+                        target=target, dataset=None, start=args.start, end=args.end,
+                        status="partial", reasons=[reason], returned=0, total=None,
+                        unresolved_ranges=[_range(args.start, args.end, reason)],
+                    ))
+                    continue
+                normalized = set(NETWORK_TIMELINE_DATASETS if _is_network(target, contract)
+                                 else HOST_TIMELINE_DATASETS)
+                for dataset in inventoried:
+                    if (target, dataset) in planned:
+                        continue
+                    reason = (f"dataset_not_normalized:{dataset}" if dataset not in normalized
+                              else f"dataset_unsearchable:{dataset}:IP predicate unavailable")
+                    unresolved.append(PivotCoverage(
+                        target=target, dataset=dataset, start=args.start, end=args.end,
+                        status="partial", reasons=[reason], returned=0, total=None,
+                        unresolved_ranges=[_range(args.start, args.end, reason)],
+                    ))
+                continue
+            if _is_network(target, contract):
+                continue
+            if _supports(contract, "event.dataset"):
+                continue
+            for dataset in HOST_TIMELINE_DATASETS:
+                reason = f"dataset_unsearchable:{dataset}:event.dataset predicate unavailable"
+                unresolved.append(PivotCoverage(
+                    target=target, dataset=dataset, start=args.start, end=args.end,
+                    status="partial", reasons=[reason], returned=0, total=None,
+                    unresolved_ranges=[_range(args.start, args.end, reason)],
+                ))
+        return unresolved
+
+    def resolve_host_ip(self, owner: str, ip: str, start: datetime, end: datetime) -> tuple[str | None, str | None]:
+        """Resolve a network endpoint to one host identity from typed host records: the `host.name` values of
+        records whose `host.ip` equals the address, over the hunt window. Returns (host, None) for exactly one
+        name, else (None, reason). The lookup is a budgeted, durable task: a resumed hunt reuses its outcome."""
+        targets = [(target, contract) for target, contract in sorted(self.contracts.items())
+                   if not _is_network(target, contract) and _supports(contract, "host.ip")
+                   and (contract.spec("host.name") is not None and contract.spec("host.name").aggregatable)]
+        if not targets:
+            return None, f"victim host unknown for {ip}: no host source has a searchable host.ip field"
+        fingerprint = digest({"hunt": self.hunt_id, "resolve_host_ip": ip, "start": start.isoformat(),
+                              "end": end.isoformat(), "targets": [target for target, _ in targets]})
+        task_id = "t-" + fingerprint[:20]
+        prior = self.repo.task(task_id)
+        if prior and prior["state"] == "evaluated" and isinstance(prior.get("outcome"), dict):
+            return prior["outcome"].get("host"), prior["outcome"].get("reason")
+        intent_record = {"resolve_host_ip": ip, "targets": [target for target, _ in targets]}
+        self.repo.upsert_task(task_id, self.hunt_id, "expansion_link", "host-resolution", intent_record,
+                              fingerprint, owner_token=self.owner_token)
+        self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
+        names: set[str] = set()
+        incomplete: list[str] = []
+        for target, contract in targets:
+            intent = SearchIntent(kind="aggregate", target=target, window=Window(start=start, end=end),
+                                  filters=[Predicate(field="host.ip", op="eq", value=ip)], group_by=["host.name"],
+                                  purpose="expansion:resolve_host_ip")
+            outcome = self._execute(intent, contract, spend_task_id=task_id)
+            if outcome.completeness != Completeness.complete:
+                incomplete.append(f"{target}: {'; '.join(outcome.reasons or [outcome.error or 'incomplete'])}")
+            names.update(str(bucket["key"].get("host.name")) for bucket in outcome.buckets
+                         if bucket["key"].get("host.name") not in (None, ""))
+        if incomplete:
+            host, reason = None, f"victim host unresolved for {ip}: host lookup incomplete ({'; '.join(incomplete)})"
+        elif len(names) == 1:
+            host, reason = next(iter(names)), None
+        elif not names:
+            host, reason = None, f"victim host unknown for {ip}: no host record carries host.ip {ip}"
+        else:
+            host, reason = None, f"victim host ambiguous for {ip}: {sorted(names)[:5]}"
+        # An incomplete lookup (timeout, shard failure, budget) is not a final answer: it stays retryable.
+        self.repo.update_task(task_id, "partial" if incomplete else "evaluated",
+                              outcome={"host": host, "reason": reason}, owner_token=self.owner_token)
+        return host, reason
+
+    def _execute_partitions(
+        self,
+        intent: SearchIntent,
+        contract: FieldContract,
+        anchor_ts: datetime | None = None,
+        *,
+        fetch_query_start: int | None = None,
+        query_cap: int | None = None,
+        spend_task_id: str | None = None,
+    ):
         """Breadth-first capped-window splitting keeps late activity represented within a fixed leaf budget."""
         pending = deque([intent])
         leaves = []
         while pending:
             current = pending.popleft()
-            outcome = self._execute(current, contract)
+            if (query_cap is not None and fetch_query_start is not None
+                    and self.source_queries - fetch_query_start >= query_cap):
+                now = datetime.now(UTC)
+                reason = f"expansion_link_query_cap:{query_cap}"
+                outcome = SearchOutcome(
+                    target=current.target, fingerprint=digest(current.model_dump(mode="json")),
+                    started_at=now, ended_at=now, completeness=Completeness.partial,
+                    reasons=[reason], returned=0,
+                )
+                leaves.append((current, outcome, [], [
+                    _range(current.window.start, current.window.end, reason),
+                ]))
+                continue
+            outcome = self._execute(current, contract, spend_task_id=spend_task_id)
             if _is_capped(outcome.reasons) and (current.window.end - current.window.start) > MIN_PIVOT_SPLIT * 2:
                 projected_leaves = len(leaves) + len(pending) + 2
                 if projected_leaves <= MAX_PIVOT_PARTITIONS:
@@ -354,9 +584,18 @@ class PivotExecutor:
                 outcome = outcome.model_copy(update={
                     "reasons": sorted(set(outcome.reasons + [f"pivot_min_split:{int(MIN_PIVOT_SPLIT.total_seconds())}s"])),
                 })
-            if _is_capped(outcome.reasons):
+            # The cap is hard: a capped leaf is sampled only when every sampling query fits under it.
+            if (_is_capped(outcome.reasons) and query_cap is not None and fetch_query_start is not None
+                    and self.source_queries - fetch_query_start + MAX_SAMPLE_QUERIES > query_cap):
+                reason = f"expansion_link_query_cap:{query_cap}"
+                outcome = outcome.model_copy(update={
+                    "reasons": sorted(set(outcome.reasons + [reason])),
+                })
+                covered_ranges = []
+                unresolved_ranges = [_range(current.window.start, current.window.end, reason)]
+            elif _is_capped(outcome.reasons):
                 outcome, covered_ranges, unresolved_ranges = self._sample_terminal(
-                    current, outcome, contract, anchor_ts,
+                    current, outcome, contract, anchor_ts, spend_task_id=spend_task_id,
                 )
             elif outcome.completeness == Completeness.complete:
                 covered_ranges = [_range(
@@ -372,8 +611,122 @@ class PivotExecutor:
             leaves.append((current, outcome, covered_ranges, unresolved_ranges))
         return leaves
 
-    def _sample_terminal(self, intent: SearchIntent, initial: SearchOutcome,
-                         contract: FieldContract, anchor_ts: datetime | None):
+    def fetch_intents(
+        self,
+        owner: str,
+        fetch_key: str,
+        intents: list[SearchIntent],
+        retain: Callable[[TypedEvent], bool],
+        *,
+        anchor_ts: datetime | None = None,
+        query_cap: int | None = None,
+        planning_coverage: list[PivotCoverage] | None = None,
+    ) -> PivotEventBatch:
+        """Execute deterministic typed link intents without evaluating any playbook."""
+        if anchor_ts is not None:
+            # SQLite drops timezone metadata; persisted hunt timestamps are defined as UTC.
+            anchor_ts = (anchor_ts.replace(tzinfo=UTC) if anchor_ts.tzinfo is None
+                         else anchor_ts.astimezone(UTC))
+        started = perf_counter()
+        task_ids: list[str] = []
+        retained: dict[str, TypedEvent] = {}
+        raw_sources: dict[str, dict] = {}
+        coverage: list[PivotCoverage] = list(planning_coverage or [])
+        reasons: list[str] = [reason for cell in coverage for reason in cell.reasons]
+        successful = 0
+        incomplete = bool(coverage)
+        fetch_query_start = self.source_queries
+        for intent in intents:
+            fingerprint = digest({"fetch_key": fetch_key, "intent": intent.model_dump(mode="json")})
+            task_id = "t-" + fingerprint[:20]
+            task_ids.append(task_id)
+            self.repo.upsert_task(
+                task_id, self.hunt_id, "expansion_link", owner,
+                intent.model_dump(mode="json"), fingerprint, owner_token=self.owner_token,
+            )
+            self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
+            task_coverage: list[PivotCoverage] = []
+            task_reasons: list[str] = []
+            task_error = None
+            task_successes = 0
+            for leaf_intent, outcome, covered_ranges, unresolved_ranges in self._execute_partitions(
+                    intent, self.contracts[intent.target], anchor_ts,
+                    fetch_query_start=fetch_query_start, query_cap=query_cap,
+                    spend_task_id=task_id):
+                leaf_reasons = list(outcome.reasons)
+                selected: list[TypedEvent] = []
+                if outcome.completeness == Completeness.failed:
+                    task_error = task_error or outcome.error
+                    leaf_reasons.extend(outcome.reasons or [outcome.error or "source execution failed"])
+                    status = "failed"
+                else:
+                    successful += 1
+                    task_successes += 1
+                    events, _skips, errors = normalize_hits(outcome.records)
+                    normalization_reasons = self._ip_normalization_reasons(leaf_intent, outcome.records)
+                    leaf_reasons.extend(normalization_reasons)
+                    if errors or normalization_reasons:
+                        if errors:
+                            leaf_reasons.append(f"normalization_errors:{len(errors)}")
+                        covered_ranges = []
+                        unresolved_ranges = [_range(
+                            leaf_intent.window.start, leaf_intent.window.end,
+                            "; ".join(sorted(set(normalization_reasons + (
+                                [f"normalization_errors:{len(errors)}"] if errors else []
+                            )))),
+                        )]
+                    selected = [event for event in events if retain(event)]
+                    sources = {
+                        f"{record['_index']}/{record['_id']}": record["_source"]
+                        for record in outcome.records
+                    }
+                    raw_sources.update(sources)
+                    self.repo.save_evidence(
+                        self.hunt_id, selected, sources, task_id, owner_token=self.owner_token,
+                    )
+                    retained.update({event.id: event for event in selected})
+                    status = ("complete" if outcome.completeness == Completeness.complete
+                              and not errors and not normalization_reasons else "partial")
+                incomplete |= status != "complete"
+                reasons.extend(leaf_reasons)
+                task_reasons.extend(leaf_reasons)
+                task_coverage.append(PivotCoverage(
+                    target=intent.target, dataset=self._intent_dataset(intent),
+                    start=leaf_intent.window.start.astimezone(UTC),
+                    end=leaf_intent.window.end.astimezone(UTC), status=status,
+                    reasons=sorted(set(leaf_reasons)), returned=outcome.returned, total=outcome.total,
+                    covered_ranges=covered_ranges, unresolved_ranges=unresolved_ranges,
+                ))
+            task_coverage = _coalesce_coverage(task_coverage)
+            coverage.extend(task_coverage)
+            outcome_digest = {
+                "completeness": "failed" if task_successes == 0 else (
+                    "partial" if any(cell.status != "complete" for cell in task_coverage) else "complete"
+                ),
+                "reasons": sorted(set(task_reasons)),
+                "coverage": [cell.model_dump(mode="json") for cell in task_coverage],
+                "event_ids": sorted(event.id for event in retained.values()),
+            }
+            if task_successes == 0:
+                self.repo.update_task(
+                    task_id, "failed", outcome=outcome_digest, error=task_error,
+                    owner_token=self.owner_token,
+                )
+            else:
+                self.repo.update_task(task_id, "evaluated", outcome=outcome_digest, owner_token=self.owner_token)
+        status = "failed" if successful == 0 else "partial" if incomplete else "complete"
+        return PivotEventBatch(
+            status=status, task_ids=task_ids,
+            events=sorted(retained.values(), key=lambda event: (event.ts, event.id)),
+            raw_sources=raw_sources, coverage=_coalesce_coverage(coverage),
+            reasons=sorted(set(reasons)), duration_ms=int((perf_counter() - started) * 1000),
+        )
+
+    def _sample_terminal(
+        self, intent: SearchIntent, initial: SearchOutcome,
+        contract: FieldContract, anchor_ts: datetime | None,
+        *, spend_task_id: str | None = None,
+    ):
         """Sample a dense leaf in both directions and around its anchor on one PIT snapshot."""
         planning_reasons = [
             reason for reason in initial.reasons
@@ -384,7 +737,9 @@ class PivotExecutor:
         try:
             with self.client.point_in_time(intent.target) as pit:
                 head_intent = intent.model_copy(update={"order": "asc"})
-                head = self._execute(head_intent, contract, pit=pit)
+                head = self._execute(
+                    head_intent, contract, pit=pit, spend_task_id=spend_task_id,
+                )
                 attempts.append((head_intent, head))
                 if (head.completeness == Completeness.complete and not head.reasons
                         and _safe_sample_interval(head, head_intent, contract) is not None):
@@ -394,7 +749,9 @@ class PivotExecutor:
                     )], []
 
                 tail_intent = intent.model_copy(update={"order": "desc"})
-                tail = self._execute(tail_intent, contract, pit=pit)
+                tail = self._execute(
+                    tail_intent, contract, pit=pit, spend_task_id=spend_task_id,
+                )
                 attempts.append((tail_intent, tail))
                 if (tail.completeness == Completeness.complete and not tail.reasons
                         and _safe_sample_interval(tail, tail_intent, contract) is not None):
@@ -414,8 +771,12 @@ class PivotExecutor:
                         "window": Window(start=anchor_ts, end=intent.window.end),
                         "order": "asc",
                     })
-                    attempts.append((before, self._execute(before, contract, pit=pit)))
-                    attempts.append((after, self._execute(after, contract, pit=pit)))
+                    attempts.append((before, self._execute(
+                        before, contract, pit=pit, spend_task_id=spend_task_id,
+                    )))
+                    attempts.append((after, self._execute(
+                        after, contract, pit=pit, spend_task_id=spend_task_id,
+                    )))
         except SourceError as exc:
             reasons = sorted(set(initial.reasons + planning_reasons + [
                 "pivot_shared_pit_error", "source_error",
@@ -555,23 +916,28 @@ class PivotExecutor:
             return PivotResult(status="unsupported", reasons=[
                 "ids_alerts requires an IP entity; network host.name identifies the observer sensor",
             ])
-        intents = self._intents(request)
+        intents, planning_coverage = self.plan(request)
         if not intents:
+            if planning_coverage:
+                return PivotResult(
+                    status="partial", coverage=planning_coverage,
+                    reasons=sorted({reason for cell in planning_coverage for reason in cell.reasons}),
+                )
             return PivotResult(status="unsupported", reasons=["no compatible source contract"])
 
         task_ids: list[str] = []
         retained: list[TypedEvent] = []
         raw_sources: dict[str, dict] = {}
-        reasons: list[str] = []
-        coverage: list[PivotCoverage] = []
+        reasons: list[str] = [reason for cell in planning_coverage for reason in cell.reasons]
+        coverage: list[PivotCoverage] = list(planning_coverage)
         successful_outcomes = 0
-        incomplete = False
+        incomplete = bool(planning_coverage)
 
         for intent in intents:
             fingerprint = digest({
                 "case_id": case_id,
                 "tool": request.model_dump(mode="json"),
-                "target": intent.target,
+                "intent": intent.model_dump(mode="json"),
                 "anchor_ts": anchor_ts.isoformat() if anchor_ts is not None else None,
             })
             task_id = "t-" + fingerprint[:20]
@@ -591,7 +957,8 @@ class PivotExecutor:
             target_error = None
             target_successes = 0
             for leaf_intent, outcome, covered_ranges, unresolved_ranges in self._execute_partitions(
-                    intent, self.contracts[intent.target], anchor_ts):
+                    intent, self.contracts[intent.target], anchor_ts,
+                    spend_task_id=task_id):
                 leaf_reasons = list(outcome.reasons)
                 if outcome.completeness == Completeness.failed:
                     incomplete = True
@@ -605,12 +972,17 @@ class PivotExecutor:
                     successful_outcomes += 1
                     target_successes += 1
                     events, _skips, errors = normalize_hits(outcome.records)
-                    if errors:
-                        leaf_reasons.append(f"normalization_errors:{len(errors)}")
+                    normalization_reasons = self._ip_normalization_reasons(leaf_intent, outcome.records)
+                    leaf_reasons.extend(normalization_reasons)
+                    if errors or normalization_reasons:
+                        if errors:
+                            leaf_reasons.append(f"normalization_errors:{len(errors)}")
                         covered_ranges = []
                         unresolved_ranges = [_range(
                             leaf_intent.window.start, leaf_intent.window.end,
-                            f"normalization_errors:{len(errors)}",
+                            "; ".join(sorted(set(normalization_reasons + (
+                                [f"normalization_errors:{len(errors)}"] if errors else []
+                            )))),
                         )]
                     selected = [event for event in events if self._retain(request, event)]
                     sources = {
@@ -622,7 +994,8 @@ class PivotExecutor:
                         self.hunt_id, selected, sources, task_id, owner_token=self.owner_token,
                     )
                     retained.extend(selected)
-                    status = "complete" if outcome.completeness == Completeness.complete and not errors else "partial"
+                    status = ("complete" if outcome.completeness == Completeness.complete
+                              and not errors and not normalization_reasons else "partial")
                 incomplete |= status != "complete"
                 reasons.extend(leaf_reasons)
                 target_reasons.extend(leaf_reasons)
@@ -633,6 +1006,7 @@ class PivotExecutor:
                     target_total += outcome.total
                 target_coverage.append(PivotCoverage(
                     target=intent.target,
+                    dataset=self._intent_dataset(intent),
                     start=leaf_intent.window.start.astimezone(UTC),
                     end=leaf_intent.window.end.astimezone(UTC),
                     status=status, reasons=sorted(set(leaf_reasons)), returned=outcome.returned,

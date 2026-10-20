@@ -126,7 +126,7 @@ class Repo:
             row = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             return dict(row)
 
-    FINISHED_STATES = {"completed_within_scope", "partial", "failed", "canceled"}
+    FINISHED_STATES: ClassVar[set[str]] = {"completed_within_scope", "partial", "failed", "canceled"}
 
     def delete_hunt(self, hunt_id: str, actor: str, now: datetime | None = None) -> dict[str, int]:
         """Permanently delete one hunt and everything only it owns. Evidence that another hunt still
@@ -211,6 +211,8 @@ class Repo:
             c.execute(t.raw_record.update().where(t.raw_record.c.first_task_id.in_(task_ids))
                       .values(first_task_id=None))
             c.execute(t.hunt.update().where(t.hunt.c.parent_hunt_id == hunt_id).values(parent_hunt_id=None))
+            rm("expansion_links", t.expansion_link.delete().where(t.expansion_link.c.hunt_id == hunt_id))
+            rm("expansion_anchors", t.expansion_anchor.delete().where(t.expansion_anchor.c.hunt_id == hunt_id))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
             rm("candidates", t.candidate.delete().where(t.candidate.c.hunt_id == hunt_id))
             rm("case_steps", t.case_step.delete().where(t.case_step.c.case_id.in_(case_ids)))
@@ -292,6 +294,11 @@ class Repo:
                                         "priority": priority, "attempts": 0, "created_at": utcnow(),
                                         "updated_at": utcnow()}], ["id"])
 
+    def task(self, task_id: str) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.task).where(t.task.c.id == task_id)).mappings().first()
+            return dict(row) if row else None
+
     def task_state(self, task_id: str) -> str | None:
         with self.engine.connect() as c:
             return c.execute(select(t.task.c.state).where(t.task.c.id == task_id)).scalar()
@@ -317,6 +324,32 @@ class Repo:
             if attempt:
                 vals["attempts"] = t.task.c.attempts + 1
             c.execute(t.task.update().where(t.task.c.id == task_id).values(**vals))
+
+    def record_task_source_query(self, task_id: str, *, owner_token: str | None = None) -> int:
+        """Checkpoint one physical source call before I/O so crashes can only under-spend."""
+        with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.task.c.hunt_id).where(t.task.c.id == task_id)).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
+            c.execute(t.task.update().where(t.task.c.id == task_id).values(
+                source_queries=t.task.c.source_queries + 1,
+                updated_at=utcnow(),
+            ))
+            return int(c.execute(select(t.task.c.source_queries).where(
+                t.task.c.id == task_id,
+            )).scalar_one())
+
+    def expansion_source_queries(self, hunt_id: str) -> int:
+        """Durable physical-query spend for expansion, including an interrupted link."""
+        with self.engine.connect() as c:
+            task_spend = int(c.execute(select(func.coalesce(func.sum(t.task.c.source_queries), 0)).where(
+                t.task.c.hunt_id == hunt_id, t.task.c.kind == "expansion_link",
+            )).scalar_one())
+            link_spend = int(c.execute(select(func.coalesce(func.sum(t.expansion_link.c.query_spend), 0)).where(
+                t.expansion_link.c.hunt_id == hunt_id,
+            )).scalar_one())
+        # Completed links and tasks describe the same calls. The max also supports
+        # databases upgraded from link-only accounting without double-counting.
+        return max(task_spend, link_spend)
 
     def tasks(self, hunt_id: str) -> list[dict]:
         with self.engine.connect() as c:
@@ -384,6 +417,95 @@ class Repo:
         with self.engine.connect() as c:
             r = c.execute(select(t.candidate).where(t.candidate.c.id == cid)).mappings().first()
             return dict(r) if r else None
+
+    def update_context_candidate(
+        self, candidate_id: str, values: dict, *, owner_token: str | None = None,
+    ) -> None:
+        """Merge repeated context reachability without changing direct-finding identity semantics."""
+        allowed = {
+            "claim", "event_ids", "severity", "confidence", "lane", "priority",
+            "priority_reasons", "gate_results", "source_anchor_id", "source_link_id",
+        }
+        if not values or not set(values) <= allowed:
+            raise ValueError("unsupported context candidate update")
+        with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.candidate.c.hunt_id).where(
+                t.candidate.c.id == candidate_id,
+            )).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
+            c.execute(t.candidate.update().where(t.candidate.c.id == candidate_id).values(**values))
+
+    # ---- deterministic expansion -----------------------------------------------------------
+    def save_expansion_anchor(self, row: dict, *, owner_token: str | None = None) -> bool:
+        now = utcnow()
+        values = {**row, "created_at": now, "updated_at": now}
+        with write_txn(self.engine) as c:
+            self._fence_lease(c, row["hunt_id"], owner_token)
+            result = c.execute(insert(t.expansion_anchor).values(values).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            return bool(result.rowcount)
+
+    def update_expansion_anchor(self, anchor_id: str, status: str, reasons: list[str],
+                                *, owner_token: str | None = None) -> None:
+        with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.expansion_anchor.c.hunt_id).where(
+                t.expansion_anchor.c.id == anchor_id,
+            )).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
+            c.execute(t.expansion_anchor.update().where(t.expansion_anchor.c.id == anchor_id).values(
+                status=status, reasons=reasons, updated_at=utcnow(),
+            ))
+
+    def expansion_anchors(self, hunt_id: str) -> list[dict]:
+        q = (select(t.expansion_anchor).where(t.expansion_anchor.c.hunt_id == hunt_id)
+             .order_by(t.expansion_anchor.c.depth, t.expansion_anchor.c.ts, t.expansion_anchor.c.id))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(q).mappings()]
+
+    def save_expansion_link(self, row: dict, *, owner_token: str | None = None) -> bool:
+        now = utcnow()
+        values = {**row, "created_at": now, "updated_at": now}
+        with write_txn(self.engine) as c:
+            self._fence_lease(c, row["hunt_id"], owner_token)
+            result = c.execute(insert(t.expansion_link).values(values).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            return bool(result.rowcount)
+
+    def mark_expansion_link_evaluated(self, link_id: str, *, owner_token: str | None = None) -> None:
+        with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.expansion_link.c.hunt_id).where(
+                t.expansion_link.c.id == link_id,
+            )).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
+            c.execute(t.expansion_link.update().where(t.expansion_link.c.id == link_id).values(
+                evaluated=1, updated_at=utcnow(),
+            ))
+
+    def expansion_link(self, link_id: str) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.expansion_link).where(t.expansion_link.c.id == link_id)).mappings().first()
+            return dict(row) if row else None
+
+    def expansion_link_for(self, anchor_id: str, link_type: str, label: str,
+                           start: datetime, end: datetime) -> dict | None:
+        q = select(t.expansion_link).where(
+            t.expansion_link.c.anchor_id == anchor_id,
+            t.expansion_link.c.link_type == link_type,
+            t.expansion_link.c.window_label == label,
+            t.expansion_link.c.window_start == start,
+            t.expansion_link.c.window_end == end,
+        )
+        with self.engine.connect() as c:
+            row = c.execute(q).mappings().first()
+            return dict(row) if row else None
+
+    def expansion_links(self, hunt_id: str) -> list[dict]:
+        q = (select(t.expansion_link).where(t.expansion_link.c.hunt_id == hunt_id)
+             .order_by(t.expansion_link.c.created_at, t.expansion_link.c.id))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(q).mappings()]
 
     def add_disposition(self, cid: str, actor: str, status: str, note: str | None):
         with write_txn(self.engine) as c:
@@ -524,8 +646,10 @@ class Repo:
 
     # ---- coverage ---------------------------------------------------------------------------
     def set_rule_cell(self, hunt_id: str, rule_id: str, version: str, target: str, partition: str, state: str,
-                      matched: int, evaluated: int, detail: dict | None = None):
+                      matched: int, evaluated: int, detail: dict | None = None,
+                      *, owner_token: str | None = None):
         with write_txn(self.engine) as c:
+            self._fence_lease(c, hunt_id, owner_token)
             stmt = insert(t.rule_run).values(hunt_id=hunt_id, rule_id=rule_id, rule_version=version, target=target,
                                              partition=partition, state=state, matched=matched, evaluated=evaluated,
                                              detail=detail or {})

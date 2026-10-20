@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
+from datetime import UTC
 
 from sqlalchemy import func, select
 
 from romulus.agent.cases import seed_candidate_ids
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.registry import ALL_PLAYBOOKS
+from romulus.report.incidents import build_incident_graph
 from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
 from romulus.store.repo import Repo, raw_id
@@ -90,6 +92,8 @@ POSITIVE_ONLY_CLAIMS = {
         "not assessable by design: positive-only correlation (a join between host connect() records and "
         "network-sensor records that finds nothing proves nothing; each side sees only part of the traffic)"
     ),
+    "context.post_access_discovery": _po("discovery behavior is identified from argv and only evaluated after "
+                                         "an anchor link; absence outside that linked scope proves nothing"),
 }
 
 
@@ -190,11 +194,49 @@ def _case_conclusion(summary: str | None) -> dict | None:
     return parsed if isinstance(parsed, dict) else {"model_conclusion": "legacy_summary", "reasoning": str(parsed)}
 
 
+def _expansion_investigations(repo: Repo, hunt_id: str, audit: dict) -> dict:
+    anchors = repo.expansion_anchors(hunt_id)
+    links = repo.expansion_links(hunt_id)
+    by_status = {
+        status: [row["id"] for row in anchors if row["status"] == status]
+        for status in ("expanded_complete", "expanded_partial", "unexpanded", "pending")
+    }
+    return {
+        "summary": {
+            "status": audit.get("status", "unknown"), "mode": "deterministic_expansion",
+            "anchors": len(anchors), "links": len(links),
+            "unworked_count": len(by_status["unexpanded"] + by_status["pending"]),
+            "partial_links": sum(row["status"] != "complete" for row in links),
+        },
+        "anchor_accounting": {
+            **by_status,
+            "anchors": [{
+                "id": row["id"], "candidate_id": row["candidate_id"], "depth": row["depth"],
+                "parent_anchor_id": row["parent_anchor_id"], "status": row["status"],
+                "reasons": row["reasons"],
+            } for row in anchors],
+        },
+        "link_accounting": [{
+            "id": row["id"], "anchor_id": row["anchor_id"], "link_type": row["link_type"],
+            "strength": row["strength"], "status": row["status"], "evidence_ids": row["evidence_ids"],
+            "reasons": row["reasons"],
+        } for row in links],
+        "model_contribution": {"model_calls": 0, "pivot_steps": 0, "pivot_proposals": 0,
+                               "candidate_ids": []},
+        "seed_partition": {"concluded": [], "assigned_unfinished": [], "unassigned": []},
+        "unworked_seed_ids": by_status["unexpanded"] + by_status["pending"],
+        "analyst_flags": [], "incomplete_case_ids": [], "pivot_gaps": [], "cases": [],
+    }
+
+
 def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dict) -> dict:
     hunt = repo.get_hunt(hunt_id) or {}
     hunt_manifest = hunt.get("manifest") or {}
     agent_mode = agent.get("mode") or hunt_manifest.get("agent_mode") or "model"
     cases = repo.cases(hunt_id)
+    expansion_audit = repo.latest_audit(hunt_id, "hunt.expansion_summary")
+    if expansion_audit and not cases and (agent.get("mode") in (None, "off") or agent.get("status") == "disabled"):
+        return _expansion_investigations(repo, hunt_id, expansion_audit.get("detail") or {})
     seed_candidates = {
         candidate["id"]: candidate
         for candidate in candidates
@@ -364,6 +406,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             "gates": gates, "notes": notes, "benign_alternatives": c["benign_alternatives"],
             "next_checks": c["next_checks"], "citations": _citations(repo, c),
             "source_case_id": c.get("source_case_id"),
+            "source_anchor_id": c.get("source_anchor_id"),
+            "source_link_id": c.get("source_link_id"),
             "analyst_status": disp[-1]["status"] if disp else "new",
             "disposition_history": [{"actor": d["actor"], "at": str(d["at"]), "status": d["status"],
                                      "note": d["note"]} for d in disp],
@@ -377,6 +421,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                              .order_by(t.audit_event.c.id.desc())).scalar()
     broken = sum(1 for f in findings for c in f["citations"] if c["status"].startswith("broken"))
     hm = h["manifest"]
+    incident_graph = build_incident_graph(repo, hunt_id, findings)
     m = {
         "schema": MANIFEST_SCHEMA,
         "hunt": {"id": hunt_id, "style": hm["style"], "hypothesis": hm.get("hypothesis", ""),
@@ -393,15 +438,153 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "tasks": {s: n for s, n in tasks},
         "agent": agent or {"status": "unknown"},
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
+        "incident_graph": incident_graph,
         "versions": {"pack": hm["pack"]["version"], "normalizer": hm["normalizer"], "policy": hm["policy"],
                      "model": hm["model"], "romulus": hm["romulus_version"]},
         "generated_by": actor,
     }
     broken_inv = _broken_investigation_citations(repo, m["investigations"])
+    broken_incidents = _broken_investigation_citations(repo, incident_graph)
     m["integrity"] = {"broken_citations": broken, "broken_investigation_citations": len(broken_inv),
                       "broken_investigation_event_ids": broken_inv[:50],
-                      "finalizable": broken == 0 and not broken_inv}
+                      "broken_incident_citations": len(broken_incidents),
+                      "broken_incident_event_ids": broken_incidents[:50],
+                      "finalizable": broken == 0 and not broken_inv and not broken_incidents}
     return _jsonable(m)
+
+
+def _content_candidate_key(repo: Repo, candidate: dict) -> str:
+    raw_keys = set()
+    for row in repo.events_by_ids(candidate["event_ids"]):
+        for reference in row["event"].get("raw", []):
+            raw_keys.add(f"{reference['target']}/{reference['native_id']}")
+    evidence_identity = candidate.get("group_key") or sorted(raw_keys) or sorted(candidate["event_ids"])
+    return "F-" + digest({
+        "rule_id": candidate["rule_id"], "evidence_identity": evidence_identity,
+    })[:20]
+
+
+def _as_utc(value):
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> dict:
+    """Return a cross-hunt deterministic report projection with content-scoped identities."""
+    manifest = build_manifest(repo, hunt_id, actor)
+    candidates = repo.candidates(hunt_id)
+    candidate_keys = {row["id"]: _content_candidate_key(repo, row) for row in candidates}
+    candidate_rows = {row["id"]: row for row in candidates}
+    link_rows = repo.expansion_links(hunt_id)
+    link_keys = {}
+    link_windows = {}
+    for row in link_rows:
+        anchor = candidate_rows.get(row["anchor_id"])
+        anchor_key = candidate_keys.get(row["anchor_id"], row["anchor_id"])
+        anchor_ts = _as_utc(anchor["ts"]) if anchor is not None else _as_utc(row["window_start"])
+        offsets = {
+            "start_seconds": (_as_utc(row["window_start"]) - anchor_ts).total_seconds(),
+            "end_seconds": (_as_utc(row["window_end"]) - anchor_ts).total_seconds(),
+        }
+        link_keys[row["id"]] = "L-" + digest({
+            "anchor": anchor_key, "link_type": row["link_type"],
+            "window_offsets": offsets, "key": row["key"],
+        })[:20]
+        link_windows[row["id"]] = {"label": row["window_label"], **offsets}
+
+    incident_keys = {}
+    for incident in manifest["incident_graph"]["incidents"]:
+        members = sorted(candidate_keys[item] for item in incident["finding_ids"])
+        incident_keys[incident["id"]] = "I-" + digest(members)[:20]
+    case_keys = {}
+    for case in manifest["investigations"].get("cases", []):
+        case_keys[case["id"]] = "C-" + digest({
+            "seed_candidate_keys": sorted(candidate_keys.get(item, item)
+                                             for item in case.get("seed_candidate_ids", [])),
+            "title": case.get("title"), "entities": case.get("entities", []),
+        })[:20]
+    identity_map = {**candidate_keys, **link_keys, **incident_keys, **case_keys}
+    drop_keys = {"started_at", "ended_at", "created_at", "updated_at", "duration_ms",
+                 "task_id", "task_ids", "at"}
+
+    def canonicalize(value):
+        if isinstance(value, dict):
+            return {
+                key: canonicalize(item)
+                for key, item in value.items()
+                if key not in drop_keys
+            }
+        if isinstance(value, list):
+            return [canonicalize(item) for item in value]
+        if isinstance(value, str):
+            if value in identity_map:
+                return identity_map[value]
+            for scoped, content in sorted(identity_map.items(), key=lambda item: (-len(item[0]), item[0])):
+                value = value.replace(scoped, content)
+            return value
+        return value
+
+    canonical = canonicalize(manifest)
+    canonical["schema"] = "canonical-report-manifest@1"
+    canonical["hunt"].pop("id", None)
+    graph = canonical["incident_graph"]
+    for source, projected in zip(manifest["incident_graph"]["links"], graph["links"], strict=True):
+        projected["window"] = link_windows.get(source["id"], projected.get("window"))
+    graph["edges"] = [{
+        "pair": [candidate_keys[edge["from"]], candidate_keys[edge["to"]]],
+        "link_key": link_keys[edge["link_id"]],
+        "link_type": edge["link_type"], "style": edge["style"],
+    } for edge in manifest["incident_graph"]["edges"]]
+    canonical["findings"].sort(key=lambda finding: finding["id"])
+    observed_at = {finding["id"]: finding["observed_at"] for finding in canonical["findings"]}
+    graph["nodes"].sort(key=lambda node: node["id"])
+    for link in graph["links"]:
+        link["target_finding_ids"] = sorted(link["target_finding_ids"])
+    graph["links"].sort(key=lambda link: link["id"])
+    graph["edges"].sort(key=lambda edge: (edge["pair"], edge["link_key"]))
+    for incident in graph["incidents"]:
+        incident["finding_ids"] = sorted(incident["finding_ids"])
+        incident["timeline"] = sorted(
+            incident["timeline"], key=lambda item: (observed_at.get(item, ""), item),
+        )
+        incident["link_ids"] = sorted(incident["link_ids"])
+        member_ids = set(incident["finding_ids"])
+        incoming = {
+            edge["pair"][1] for edge in graph["edges"]
+            if edge["style"] == "observed" and set(edge["pair"]) <= member_ids
+        }
+        entry_candidates = member_ids - incoming
+        incident["entry_point"] = min(
+            entry_candidates or member_ids,
+            key=lambda item: (observed_at.get(item, ""), item),
+        )
+        open_ends = incident["open_ends"]
+        for key in ("unexpanded_anchors", "pending_anchors", "unresolved_links"):
+            open_ends[key] = sorted(
+                open_ends.get(key, []),
+                key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+            )
+    graph["incidents"].sort(key=lambda incident: incident["id"])
+    investigations = canonical["investigations"]
+    for key in ("unworked_seed_ids", "incomplete_case_ids"):
+        investigations[key] = sorted(investigations.get(key, []))
+    for key in ("concluded", "assigned_unfinished", "unassigned"):
+        investigations["seed_partition"][key] = sorted(
+            investigations["seed_partition"].get(key, []),
+        )
+    investigations["model_contribution"]["candidate_ids"] = sorted(
+        investigations["model_contribution"].get("candidate_ids", []),
+    )
+    anchor_accounting = investigations.get("anchor_accounting")
+    if anchor_accounting:
+        for key in ("expanded_complete", "expanded_partial", "unexpanded", "pending"):
+            anchor_accounting[key] = sorted(anchor_accounting.get(key, []))
+        anchor_accounting["anchors"] = sorted(
+            anchor_accounting.get("anchors", []), key=lambda item: item["id"],
+        )
+        investigations["link_accounting"] = sorted(
+            investigations.get("link_accounting", []), key=lambda item: item["id"],
+        )
+    return _jsonable(canonical)
 
 
 def _broken_investigation_citations(repo: Repo, investigations) -> list[str]:

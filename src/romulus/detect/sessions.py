@@ -46,6 +46,7 @@ class _Stitched(Playbook):
     """Groups net_session records into connections by community ID (or the 5-tuple when absent). Memory
     holds per-connection summaries and event ids; the events themselves are staged on disk."""
     kind = "aggregate"
+    anchor_class = "network_observation"
     staged = True
     claim_type = "network_observation"
     families = ("net_session",)

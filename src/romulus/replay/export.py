@@ -1,4 +1,4 @@
-"""Rebuild the investigator's historical briefs as frozen bakeoff tasks.
+"""Rebuild the investigator's historical briefs as frozen replay tasks.
 
 For every model call a hunt's investigator made, the case is rewound to the state it had just before that
 step and ``build_brief`` (the production builder) is run again, once per requested ``num_ctx``. The rebuilt
@@ -31,7 +31,7 @@ from romulus.agent.tools import tool_catalog
 from romulus.store.db import digest, make_engine
 from romulus.store.repo import Repo
 
-TASK_SCHEMA = "bakeoff-task/1"
+TASK_SCHEMA = "replay-task/1"
 MAX_OUT = 900          # the controller's fixed output budget per call
 
 
@@ -39,7 +39,7 @@ MAX_OUT = 900          # the controller's fixed output budget per call
 def readonly_repo(db_path: str | Path) -> Iterator[Repo]:
     """A Repo over a private snapshot of the store; the live database is only ever opened read-only."""
     source_uri = Path(db_path).resolve().as_uri() + "?mode=ro"
-    with tempfile.TemporaryDirectory(prefix="romulus-bakeoff-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="romulus-replay-") as tmp:
         snapshot = Path(tmp) / "snapshot.db"
         src = sqlite3.connect(source_uri, uri=True)
         dst = sqlite3.connect(snapshot)
