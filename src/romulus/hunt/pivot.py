@@ -260,6 +260,10 @@ def _coalesce_coverage(segments: list[PivotCoverage]) -> list[PivotCoverage]:
     return merged
 
 
+# The most physical queries `_sample_terminal` spends on one capped leaf (head, tail, before, after).
+MAX_SAMPLE_QUERIES = 4
+
+
 class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
 
@@ -578,8 +582,9 @@ class PivotExecutor:
                 outcome = outcome.model_copy(update={
                     "reasons": sorted(set(outcome.reasons + [f"pivot_min_split:{int(MIN_PIVOT_SPLIT.total_seconds())}s"])),
                 })
+            # The cap is hard: a capped leaf is sampled only when every sampling query fits under it.
             if (_is_capped(outcome.reasons) and query_cap is not None and fetch_query_start is not None
-                    and self.source_queries - fetch_query_start >= query_cap):
+                    and self.source_queries - fetch_query_start + MAX_SAMPLE_QUERIES > query_cap):
                 reason = f"expansion_link_query_cap:{query_cap}"
                 outcome = outcome.model_copy(update={
                     "reasons": sorted(set(outcome.reasons + [reason])),
