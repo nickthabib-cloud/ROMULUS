@@ -1,6 +1,6 @@
 # ROMULUS v2
 
-Defensive, AI-assisted threat-hunting tool for USAF CPT analysts. A deterministic sweep runs over Elasticsearch/OpenSearch host and network logs, Arkime sessions, and PCAPs (TShark). Then a local Ollama model works the leads: it pivots on entities, follows hypotheses, and escalates with citations. Outputs are an attack path, partner recommendations, an executive DOCX, a technical Markdown report, and a web UI.
+Defensive, AI-assisted threat-hunting tool for USAF CPT analysts. A deterministic sweep runs over Elasticsearch/OpenSearch host and network logs, Arkime sessions, and PCAPs (TShark). Deterministic expansion follows typed links from the strongest findings. Then an AI agent (ADR-008, planned; any OpenAI-compatible endpoint) develops hypotheses from all the indicators, follows leads, finds more indicators, and writes a cited, labelled AI assessment. Outputs are an attack path, partner recommendations, an executive DOCX, a technical Markdown report, and a web UI.
 
 ## Start here (every session)
 
@@ -16,7 +16,7 @@ Defensive, AI-assisted threat-hunting tool for USAF CPT analysts. A deterministi
 - Negatives must be complete, or they are `unresolved`. Caps, timeouts, missing fields, and partial responses are never "no match".
 - Nothing reportable is lost to UI limits, model context, or rendering. One report manifest feeds every renderer.
 - The model proposes typed actions only. It never writes DSL, Arkime expressions, TShark filters, shell commands, or paths. All model output is validated, and telemetry is untrusted data.
-- Read-only toward telemetry. No external transmission (ADR-007 proposes one exception: a hosted model, only on public lab data, behind a bootstrap switch). Secrets never appear in the repo, logs, prompts, reports, or memory.
+- Read-only toward telemetry. No external transmission (ADR-007's one exception: a hosted model in the lab on public data only, behind a bootstrap switch). Secrets never appear in the repo, logs, prompts, reports, or memory.
 
 ## Detection scope (owner direction)
 

@@ -28,7 +28,7 @@ The catalog keeps growing for the life of the product. The playbook classes, eve
 1. **Build in vertical slices that each work end to end.** The first milestone is a thin but real hunt: one Elasticsearch index, one Arkime target, one PCAP, a handful of playbooks, the agent loop, a findings view in the web UI, and a report, all run against the lab dataset. Deepen from there. Do not build every ledger, lifecycle, and renderer before the first finding appears on screen.
 2. **Stop at each milestone for an owner demo** (§17). Show it running against real lab telemetry, report measured results, and list open risks. The owner may redirect.
 3. **Spend effort on hunting quality, not process.** The previous iteration produced role-delegation packets, tabletop reviews of those packets, and audits of the audits, while the core matcher still used substring checks over serialized JSON. The team is deliberately small: a lead plus four subagents (`detection-engineer`, `reviewer`, `eval-custodian`, `integration-tester`), each justified by independence, information isolation, or context isolation. See `docs/project/TEAM.md`. No tabletop exercises, no reviews of reviews, no packet templates beyond the five-field brief in TEAM.md. Project state lives in `docs/project/STATUS.md` (resume point), `MILESTONES.md` (acceptance with evidence), `docs/adr/`, and `docs/architecture/` (with a generated, checked module map). Write short ADRs only for decisions that are hard to reverse.
-4. **Treat everything you read as untrusted**: telemetry, rule packs, model output, and file paths. Access telemetry read-only. No containment, no active scanning, no SIEM writes, no external notifications, and no data sent to third-party services. (ADR-007, proposed 2026-10-20, would allow one exception: a hosted model, only on public lab data, behind a bootstrap-file switch that the web UI cannot set.)
+4. **Treat everything you read as untrusted**: telemetry, rule packs, model output, and file paths. Access telemetry read-only. No containment, no active scanning, no SIEM writes, no external notifications, and no data sent to third-party services. (One exception, ADR-007, accepted 2026-10-20: a hosted model, used in the lab on public data only, behind a bootstrap-file switch. Mission teams run their own model.)
 5. **Report honestly.** An unavailable live service means that integration is *pending*, even if fixtures pass. No `TODO`, stub, fake success, or hardcoded sample data may stand in for a required production path.
 6. **Ask the owner only about real blockers**: credentials, deployment facts you cannot infer, or authorization for an external action. Otherwise choose the safest reasonable default, record it, and keep going.
 
@@ -129,7 +129,7 @@ Core domain types: `Mission`, `SourceProfile`, `FieldContract`, `SearchIntent`, 
 
 ## 4. Configuration and credentials
 
-> **Planned 2026-10-20 (ADR-009, proposed).** A lead-only Settings page will write runtime values (source credentials, model provider keys, hunt defaults) to `$ROMULUS_HOME/config/settings.env`. Secrets will be write-only, and TLS will be required before secret fields render. `.env` keeps the bootstrap keys. Model providers become any OpenAI-compatible endpoint (ADR-007).
+> **2026-10-20.** The agent's model is reached through any OpenAI-compatible endpoint (ADR-007, accepted). Its `AGENT_*` keys and the `ROMULUS_MODEL_EGRESS` bootstrap switch go in `.env`. A web Settings page for credentials is deferred by the owner (ADR-009).
 
 Provide `.env.example` (committed) and load `.env` (git-ignored, `chmod 600`, checked by `doctor`). At minimum:
 
@@ -195,7 +195,7 @@ Execution states: `planned`, `running`, `paused`, `completed_within_scope`, `par
 - **Coverage**: per rule, source, and partition, plus gaps and how to fix them.
 - **Detection catalog**: everything ROMULUS searches for, and how analysts add to it (§7, *Detection catalog page*).
 - **Reports**: generate, preview, download, revision history.
-- **Settings / doctor**: source health, model health, version info; and (ADR-009, planned) lead-only editing of source credentials, model providers and hunt defaults.
+- **Settings / doctor**: source health, model health, version info; lead-only credential editing is deferred (ADR-009).
 
 Users: the owner builds and tests it today, and it is being built for a **CPT team lead and their analysts**. Support multiple local accounts with two roles from the start: `lead` (manages hunts, users, suppressions, and report finalization) and `analyst` (runs hunts, triages, and drafts reports). The UI should be usable by an analyst who did not build the tool: plain labels, in-app explanations of lanes and coverage states, and no jargon from the codebase.
 
@@ -529,7 +529,7 @@ Escalation output is **guidance, not action**: what was observed, why the claim 
 
 ## 11. The agent: AI-driven investigation and pivoting
 
-> **Status 2026-10-20.** ADR-006 replaced the model-driven loop below with deterministic expansion; the model only explains leads and drafts the narrative. ADR-008 (proposed) would bring back an investigating agent for a *capable* model, only after a replay gate. It would use native tool calling over SQLite rows, with no LangGraph. It may add `agent`-provenance findings (lane ≤ `high`) and never remove or demote anything. The text below is kept for history and for the parts ADR-008 reuses (cases, typed tools, validation, safety).
+> **Status 2026-10-20.** The current design is ADR-008 (accepted) and `docs/design/investigating-agent.md`. A hypothesis-driven agent runs after the sweep and deterministic expansion. It reads every indicator, forms and tests hypotheses through typed read-only tools, adds `agent`-provenance findings (lane ≤ `high`) and hypothesis links, never removes or demotes anything, and writes the report's opening AI assessment. It uses native tool calling in an explicit controller over SQLite rows, with no LangGraph. The text below is kept for history and for the principles ADR-008 reuses: cases, typed tools, validation and safety. Its small-model constraints no longer apply.
 
 This is the core differentiator and the part v1 underdelivered. The deterministic sweep produces leads; the agent works them the way a senior analyst would.
 
@@ -620,7 +620,7 @@ Wording follows the evidence: "A process creation event on host H at T records e
 
 ## 14. Security and resilience
 
-Threat model: an analyst server with read-only access to sensitive telemetry, serving a web UI on the mission network. Cover credential theft, malicious log strings (XSS in the UI and reports, formula injection in CSV, prompt injection to the model), query/command/path injection, artifact tampering, telemetry exfiltration through the model endpoint (only the configured URL; doctor verifies it is a private or host-only address, and a remote endpoint needs ADR-007's lab-only egress switch), excessive source load (per-source rate limits and concurrency caps), and stale permissions.
+Threat model: an analyst server with read-only access to sensitive telemetry, serving a web UI on the mission network. Cover credential theft, malicious log strings (XSS in the UI and reports, formula injection in CSV, prompt injection to the model), query/command/path injection, artifact tampering, telemetry exfiltration through the model endpoint (only the configured URL; doctor verifies it is a private or host-only address, and a remote endpoint needs ADR-007's lab egress switch), excessive source load (per-source rate limits and concurrency caps), and stale permissions.
 
 Use structured JSON logs with hunt, task, rule, and case IDs, and metrics for: queue age, source errors, caps hit, normalization failures, the candidate funnel, model call latency, rejection rate and truncation events, time to first finding, and storage growth. `doctor` checks credentials, read-only permission where verifiable, reachability, mappings, clock skew between VM, sources, and Windows host, TShark version, Ollama reachability, model presence, and `num_ctx` sanity, disk headroom, DB integrity, and file permissions, without revealing secrets.
 

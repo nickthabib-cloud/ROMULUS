@@ -2,16 +2,18 @@
 
 ## Resume here
 
-_Last updated: 2026-10-20 16:55 EDT by Claude (lead)._
+_Last updated: 2026-10-20 17:30 EDT by Claude (lead)._
 
 - **Direction (owner, 2026-10-19):**
   - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5: deterministic expansion finds, and an optional model only explains leads and drafts the narrative.
   - The New hunt page has an "Agentic hunt" checkbox, unchecked by default. `AGENT_MODE` defaults to `off`.
   - The spec (`ENGINEERING_MASTER_PROMPT.md`) is a set of suggestions, not requirements. Propose better routes when they exist. The goal is to find indicators of compromise wherever ROMULUS is sent, correlating host logs with network telemetry.
-- **Owner proposals (2026-10-20), documented, not implemented, shape pending sign-off.** The roadmap entry is Track A in MILESTONES.md.
-  - **ADR-007, an API-key model provider.** Recommended shape: one OpenAI-compatible adapter, which also serves vLLM, llama.cpp and Ollama `/v1`. Remote endpoints need the bootstrap switch `ROMULUS_MODEL_EGRESS=lab-public-data` and may be used on public lab data only, with banners and manifest provenance. Evaluate a frontier model as the ceiling and a mission-class open-weight model as the claim.
-  - **ADR-008, a capable-model agent.** A replay gate comes first; then a native tool-calling loop over SQLite rows that may add `agent` findings (≤ `high`) and never subtract. Still no LangGraph: a stronger model removes ADR-001's small-model objection, not its state-authority one.
-  - **ADR-009, a settings page.** Lead-only, writing `$ROMULUS_HOME/config/settings.env` atomically. Secrets are write-only, bootstrap keys can't be edited, and TLS comes first, so web TLS moves up from M7.
+- **Owner decisions (2026-10-20):**
+  - **Build the AI investigating agent** (ADR-008, accepted; `docs/design/investigating-agent.md`). It forms hypotheses from all the indicators, follows leads, finds more indicators, and paints the bigger picture. The report opens with its cited, labelled AI assessment.
+  - The agent is a native tool-calling loop in the explicit controller, over SQLite rows, with no LangGraph. It adds `agent` findings (≤ `high`) and hypothesis links, and never subtracts.
+  - **Model access** (ADR-007, accepted): any OpenAI-compatible endpoint. Teams run their own powerful model. The lab uses a hosted API on public data behind `ROMULUS_MODEL_EGRESS=lab-public-data`.
+  - **Credentials page deferred** (ADR-009); configuration stays in `.env`.
+  - Roadmap: Track A1–A9 in MILESTONES.md.
 - **Branch under review:** `codex/expansion` at the eleven-step expansion fix series, based on `m2/evaluation` at `d59a79f`; independently reviewed, live-tested on the VM, and not pushed. The base merges:
   - investigator v2 (`codex/investigator-v2`, `0bfd0d2`);
   - host↔network correlation and Arkime (`m2/network-correlation`);
@@ -61,7 +63,7 @@ _Last updated: 2026-10-20 16:55 EDT by Claude (lead)._
   2. Lead: network slice 3, TShark on the packets of specific Arkime sessions (v1's explicit-ID PCAP fetch and TShark safety patterns).
   3. Detection engineer: context-rule catalog (after the engine), plus lab-testable `v1_ports` and backlog items.
   4. The eval-custodian scores after each step.
-  5. Once the owner signs off on ADR-007/008/009, Track A runs in this order: A1 web TLS → A2 settings page → A3 provider port → A4 capable-model replay gate (eval-custodian, thresholds pre-registered) → A5 agent only if A4 passes.
+  5. Track A (agent): A1 provider port (lead) → A2 dossier and tools, A3 controller and hypotheses, A4 admission (Codex via `Claude-Codex.md`) → A5 AI assessment and A6 UI (lead) → A7 safety tests → A8 scoring. `reviewer` gates each slice.
 - **Merge gates and known issues:**
   - Investigator v2 re-review findings on `0abb1fc` (spawned-case stall, stale schema after shrink, seed cards dropped, `valid_first` metric, deterministic errors treated as outages). Several may be fixed in Codex's later commits but are not re-verified. They only matter for agent mode, which is off by default.
   - The live 180-query budget is now fair and bounded, but all 25 anchors remain partial and later broad link tiers (`source_ip` and `account`) were not reached. Tune the budget/tier policy only with explicit completeness and false-lead measurements.
@@ -88,9 +90,10 @@ _Last updated: 2026-10-20 16:55 EDT by Claude (lead)._
 |---|---|---|
 | Lab data is one small, Linux-only storyline (SL700); all SL700 variants share attacker scripts | Overfitting; weak generalization claims | f_a holdout plus at least one different-storyline dataset before claiming general effectiveness |
 | Lab mapping was produced by v1's custom importer, not a standard shipper | Field contracts may not transfer to real mission data | Profile-driven field contracts; add standard-shipper fixtures (Elastic Agent, Winlogbeat, Zeek, Malcolm) |
-| 8 GiB VRAM limits model size and context | Weak agent judgment | ADR-005: menu-driven, constrained decisions sized for qwen3:8b; replay evaluation on every investigator change. ADR-007/008 (proposed): test a capable model through an OpenAI-compatible endpoint |
-| Developing against a frontier API model overstates what a CPT kit can run | Agent looks good in the lab and fails on the mission | ADR-007: product claims only from a mission-class open-weight model; frontier numbers labelled "ceiling"; agent wins converted to deterministic rules (ADR-008) |
-| Hosted model egress used on non-public data | Data spill | ADR-007: bootstrap-only switch the UI cannot set; doctor fails without it; banners; unset in release builds and release-gate checks |
+| 8 GiB VRAM limits model size and context | Weak agent judgment | ADR-005: menu-driven, constrained decisions sized for qwen3:8b; replay evaluation on every investigator change. ADR-007/008: the agent uses the team's powerful model through an OpenAI-compatible endpoint; the lab uses a hosted API |
+| The lab's hosted model may differ from the model a team fields | Agent quality in the lab may not carry over | ADR-007: every result names its model; rerun on the team's model class before a release claim; agent wins converted to deterministic rules (ADR-008) |
+| Hosted model egress used on non-public data | Data spill | ADR-007: bootstrap-only switch; doctor fails without it; banners; unset in release builds and release-gate checks; teams' own servers count as local |
+| Prompt injection through telemetry steers a capable agent | Misleading hypotheses or agent findings | Typed read-only tools; add-never-subtract; claim checker; scenario 13 extended to tool calls (Track A7) |
 | AttackMate timestamps have no stated timezone | Misaligned scoring | eval-custodian aligns against telemetry before scoring |
 | No Malcolm or ICS-protocol data in the lab | ICS playbooks only fixture-tested | Public ICS PCAPs; Malcolm VM in M4 |
 | VM RAM headroom ~4.6 GiB | Hunts compete with ES and Kibana | nice'd TShark, bounded concurrency; resize before M3 |
@@ -98,6 +101,11 @@ _Last updated: 2026-10-20 16:55 EDT by Claude (lead)._
 ## Session log
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
+
+- **2026-10-20 17:30 EDT (owner decisions: AI agent accepted, credentials page deferred; Claude)**:
+  - The owner decided to build the hypothesis-driven agent, with no build gate. Teams will run their own powerful model, not public APIs; the lab uses a hosted API on public data. The owner asked for the single best way to run the agent, and deferred the credentials page.
+  - ADR-007 and ADR-008 were rewritten as accepted, and ADR-009 marked deferred. Wrote `docs/design/investigating-agent.md`: dossier, tools, hypotheses, loop, admission, AI assessment, safety, budgets, measurement and work split. Track A is now A1–A9, web TLS is back in M7 hardening, and the settings page is in M7. README, spec §0.4, §4, §5 and §11, CLAUDE.md and the expansion design §6 were updated to match.
+  - Docs only: no code changed and no tests were run.
 
 - **2026-10-20 16:55 EDT (owner proposals: model providers, capable agent, settings page; Claude)**:
   - The owner asked for an API-key model provider (for example OpenAI) as a stand-in for a strong local model, a re-examination of LangGraph, and a credentials page in the UI. The lead scrutinized the proposals against the evidence from ADR-005 and ADR-006 and the invariants, and wrote ADR-007, ADR-008 and ADR-009 (all *proposed*).

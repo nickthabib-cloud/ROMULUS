@@ -115,6 +115,8 @@ The owner's main use: see the indicators on a timeline and connect them. The att
 
 ## 6. Narrative: template or model
 
+> **2026-10-20:** ADR-008 replaces the model parts of §6 and §6b. The agent's AI assessment replaces the model narrative, and its notes replace lead explanations (`docs/design/investigating-agent.md`). The template narrative below stays as the no-agent fallback.
+
 The narrative is drafted **after** the manifest revision is final, one incident at a time, plus one executive summary.
 
 **Template (always available).** Deterministic text per incident: entry point, then each finding in time order with its claim, then the open ends and coverage caveats. It is plain and complete. It is the default with no model and the fallback whenever the model step fails.
@@ -183,7 +185,7 @@ Ship the explanations if they are accurate. Ship the opinion label and sort togg
 | Complete negatives or `unresolved` | Context negatives are scoped to a link and only complete when its fetch was complete. Capped fetches keep exact uncovered ranges. |
 | Nothing lost | Incidents and narratives are in the manifest. Unexpanded anchors and removed narrative sentences are listed. |
 | Model output validated; telemetry untrusted | The model sees alias cards, not telemetry, and outputs cited sentences only. A checker removes unsupported ones. |
-| Read-only, no external transmission | Expansion uses the existing read-only adapters. The model endpoint must be a private or host-only address (ADR-007 proposes a lab-only remote exception for public data). |
+| Read-only, no external transmission | Expansion uses the existing read-only adapters. The model endpoint must be a private or host-only address (ADR-007 allows a hosted model in the lab on public data only). |
 
 ## 9. Measurement and acceptance
 

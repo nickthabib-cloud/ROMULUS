@@ -1,6 +1,6 @@
 # ADR-009: A lead-only settings page writes a managed config file; secrets are write-only; TLS first
 
-**Status:** Proposed 2026-10-20 (owner direction: enter credentials in the web UI instead of editing `.env`). The lead's recommended shape is below; it awaits the owner's sign-off. Not implemented.
+**Status:** Deferred 2026-10-20 (owner: "hold off on the credentials page and do that later"). The shape below is the recommendation for when it is picked up. Until then, all configuration, including agent provider keys (ADR-007), stays in `.env`. Not implemented.
 
 ## Context
 

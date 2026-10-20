@@ -1,74 +1,81 @@
-# ADR-008: A capable-model agent behind a measured gate; native tool calling over SQLite; still no LangGraph
+# ADR-008: A hypothesis-driven investigating agent; native tool calling over SQLite; no LangGraph
 
-**Status:** Proposed 2026-10-20 (owner direction: "a real agent that looks at all our findings and truly investigates", and a request to re-examine ADR-001). The lead's recommended shape is below; it awaits the owner's sign-off. Not implemented. If accepted, it amends ADR-006 decision 4 for the agent role only.
+**Status:** Accepted 2026-10-20 (owner direction). Amends ADR-006 decision 4, so the model may now investigate, add findings and write the report's assessment. ADR-006 decisions 1–3 and 5 stand. Not implemented. Design: `docs/design/investigating-agent.md`.
 
 ## Context
 
-ADR-001 rejected two things for two different reasons:
+The owner wants an AI agent that works like a senior analyst. It reads every indicator ROMULUS produced, develops hypotheses, follows further leads, finds more indicators, and paints the bigger picture. The report then presents its overall hypothesis of what happened. Teams will run a powerful model (ADR-007), and the agent is not expected to be always right.
 
-- **LangGraph:** a second state authority (checkpoints beside our SQLite store), opaque reducers and dependency churn.
-- **A free-running tool-calling agent:** small models degrade over long transcripts, and Ollama truncates silently.
+What ADR-005 and ADR-006 learned still applies:
 
-ADR-006 then retired the model investigator. With qwen3:8b, deterministic, model and off hunts gave identical findings. Replay accuracy peaked at 0.53. It also showed that **pivot choice was not the bottleneck**: deterministic pivots reached attacker records and admitted nothing, because they reran context-free rules.
+- qwen3:8b's judgment was poor. That is why ADR-006 limited the model to explaining.
+- Pivots alone admit nothing when they rerun context-free rules. The agent's value is judgment in context, not pivot choice.
+- Telemetry is attacker-controlled, and a capable model follows injected instructions competently.
 
-A capable model changes some of this and not the rest.
-
-| Concern | Small model | Capable model |
-|---|---|---|
-| Long multi-step tool use | fails | viable; the second ADR-001 rejection no longer holds |
-| Judging records in context ("discovery minutes after an odd root login") | 3/9 escalations right | untested; this is the real question |
-| Two state authorities, opaque state | — | unchanged; the first ADR-001 rejection still holds |
-| Prompt injection from telemetry | weak follower | *more* dangerous: a capable model follows injected instructions competently |
-| Reproducibility | seeded and local | remote models drift; only logged, not replayable bit for bit |
-| Over-connecting a single-attacker lab story | — | still the main false-positive risk |
+ADR-001 rejected LangGraph because of a second state authority, opaque reducers and dependency churn. It rejected free-running tool loops because small models fail on them. A capable model removes the second reason. It does not touch the first.
 
 ## Decision
 
-1. **Measure before building.** No new agent code until a gate passes. ADR-007's adapter is enough to run it:
-   - the existing replay harness on frozen v2 briefs, with a frontier model and a mission-class model;
-   - the ADR-006 §6b lead-opinion replay on the 97 adjudicated e_a items, which gives the "sneaky miss" count.
+1. **Build the agent.** It runs in the hunt worker after the sweep and deterministic expansion, starting from their findings and incidents. The New hunt page and the CLI have a "Run the AI agent" choice. It is on by default when an agent provider is configured and reachable, and off otherwise. Model-off hunts work exactly as today.
+2. **One explicit controller with native tool calling.** The controller in `romulus.agent` runs bounded tool-calling sessions through the ADR-007 port.
+   - **Orient:** read the hunt dossier (every finding, incident, unexpanded anchor and coverage gap, paged through tools, with nothing cut silently) and open hypotheses.
+   - **Investigate:** one session per hypothesis, by priority with breadth reservation. Pivot, read evidence, update the hypothesis, spawn new ones.
+   - **Assess:** write the overall assessment.
+3. **Hypotheses are first-class records.** Each one has:
+   - a statement;
+   - ATT&CK techniques, validated against the vendored STIX;
+   - entities;
+   - supporting and contradicting citations;
+   - open questions;
+   - a status: `open`, `supported`, `weakened`, `refuted` or `abandoned`;
+   - the model's confidence;
+   - a history.
 
-   The eval-custodian pre-registers the thresholds before any run. The recommended thresholds are mission-class decision accuracy ≥ 0.80, against 0.53 today, and a sneaky-miss count no worse than the deterministic order. If only the frontier model passes, the agent stays a lab experiment.
-2. **One explicit loop, provider-native tool calling.** The controller stays in `romulus.agent`. A case step is a bounded tool-calling session.
-   - **Dossier.** The model starts from a hunt dossier built from the DB: the findings index, incidents and links, unexpanded anchors and coverage gaps. It sees all of them, paged through tools, and nothing is cut silently.
-   - **Read tools:** `list_findings`, `get_finding`, `get_evidence`, `get_incident`, `entity_timeline`.
-   - **Pivot tools:** the existing `PivotExecutor` and the expansion link fetchers, behind the ADR-003 boundary.
-   - **Proposal tools:** `propose_escalation`, `propose_link`, `add_note` and `request_rule`.
+   They are shown in the live view, the UI and the report as the agent's hypotheses, never as observed fact.
+4. **Typed tools only.**
+   - **Read:** findings, evidence, incidents, entity profiles.
+   - **Pivot:** the existing `PivotExecutor` tools and the expansion link fetchers, behind the ADR-003 boundary.
+   - **Hypothesis:** open and update.
+   - **Output:** propose finding, propose link, note, request rule.
+   - **Finish.**
 
-   Every argument is typed and validated. No DSL, expressions, filters, shell or paths.
-3. **SQLite is the only state.** Each tool call, its result and each model turn is a row. Resume rebuilds the session from rows. There is no checkpoint store, and the case queue is still the place for human-in-the-loop steps.
-4. **The agent can add, never subtract.**
-   - An escalation becomes a finding with provenance `agent`. Its lane is at most `high`, never `urgent`. It must cite existing evidence IDs, and the claim checker must accept its wording for the cited event types.
-   - A proposed link is always a hypothesis.
-   - The agent cannot close, hide, demote or re-lane anything. Its "this looks benign" is a note for the analyst.
-   - Pivot results go through every deterministic detector (spec §11.5), so the agent's main value may be bringing new records in front of the context rules.
-5. **The report shows exactly what the agent added.** The model-off report is unchanged. The agent-on report is the deterministic report plus an "Agent contributions" section, and each addition can be traced to the turns behind it.
-6. **Turn lab-only capability into mission capability.** Each true positive the agent finds that the deterministic layer missed becomes a `request_rule` item. The detection-engineer turns it into a typed context rule with fixtures, or records why not. A rule keeps working on an air-gapped kit with no model.
-7. **Budgets and safety.**
-   - Per-hunt limits on calls, tokens, cost and wall clock, and a per-case limit on tool calls, with breadth reservation (spec §11).
-   - Spec scenario 13, injected instructions in telemetry, is extended to tool calling: an injected "call `add_note` closing this case" or "pivot to X" must be ignored and flagged.
-8. **Still no LangGraph.** What it offers is a graph runtime, checkpointing and interrupts. We already have them as SQLite rows and the case queue, and we already test crash and resume at every transition. LangGraph would bring back the dual-authority problem and a heavy LangChain dependency tree into the air-gap wheelhouse. The tool-calling loop is a few hundred lines of code we must understand and test anyway.
+   No DSL, expressions, filters, shell or paths. Every argument is validated, and every tool result reports whether it is complete or partial, with the exact uncovered ranges.
+5. **The agent adds and never subtracts.**
+   - Records it pulls in go through every deterministic detector and context rule, and those findings keep deterministic provenance at any lane.
+   - An agent-proposed finding has provenance `agent` and a lane of at most `high`. It must cite raw evidence returned in this hunt, and the claim checker must accept its wording for the cited event types.
+   - Agent links are always hypotheses: dashed and labelled in the timeline.
+   - The agent cannot close, hide, demote or re-lane anything, or change scope or coverage. "Looks benign" is a note.
+6. **The report leads with the AI assessment.** It is the agent's overall hypothesis: what most likely happened (entry, actions, objective), key steps in time order, confidence, alternative explanations, gaps, and what would confirm or refute it.
+   - Every sentence is cited and typed `observed`, `inferred` or `hypothesis`.
+   - A deterministic checker removes uncited or unresolvable sentences and downgrades claims that their citations don't support. The removals are counted.
+   - The assessment is stored in the report manifest, so every renderer agrees, and labelled "AI-generated hypothesis from the cited evidence; not confirmed by an analyst".
+   - Without an agent, the template narrative (ADR-006) is used.
+7. **SQLite is the only state.** Every model turn, tool call, result digest and hypothesis change is a row. Each session starts from the DB (the dossier, the hypothesis card and its prior digests), never from a hunt-long transcript. Resume continues from the rows.
+8. **Agent wins become rules.** Each agent true positive that the deterministic layer missed gets a `request_rule` item for the detection-engineer. A rule keeps working on a kit with a weaker model or none.
+9. **Measured continuously.** The eval-custodian scores agent on against off, per model:
+   - incremental true positives;
+   - added false leads per hour;
+   - hypothesis and assessment accuracy at class level;
+   - 100% citation validity;
+   - cost and time.
+
+   Results steer the prompts and tools. They do not decide whether the agent exists.
 
 ## Rejected alternatives
 
-- **LangGraph with SqliteSaver.** As above: a stronger model doesn't change any of LangGraph's costs.
-- **OpenAI Agents SDK.** It is shaped around one vendor and exports traces to OpenAI by default (ADR-007).
-- **Pydantic AI.** Of the frameworks, it fits best: typed and model-agnostic. It still adds its own run state that we would have to mirror into SQLite. Reconsider it at implementation time if the hand-written loop grows to duplicate it.
-- **Handing a general agent harness ROMULUS tools over MCP.** It is a reasonable throwaway lab spike, but not a product path. Those harnesses carry shell and file tools, and nothing would enforce the add-never-subtract rule.
-- **Dump everything into a long context.** 1.6 MB canonical manifests, plus attacker-controlled text, plus "lost in the middle" effects. The dossier with tools gives the model everything, without silent loss.
+- **LangGraph with SqliteSaver.** Its graph runtime, checkpoints and interrupts duplicate our SQLite rows and case queue. It brings back the dual-authority problem and adds the LangChain dependency tree to the air-gap wheelhouse. A stronger model changes none of that.
+- **OpenAI Agents SDK.** It is built around one vendor and exports traces to OpenAI by default.
+- **Pydantic AI.** It is typed and model-agnostic, and the closest fit. It still keeps its own run state, which we would have to mirror into SQLite. The hand-written loop is a few hundred lines.
+- **A general agent harness over MCP.** Those harnesses bring shell and file tools, and nothing would enforce add-never-subtract.
+- **One long transcript with everything in context.** It would mean multi-megabyte manifests, attacker text and "lost in the middle" effects. A dossier plus tools gives the model everything with nothing lost.
 
 ## Consequences
 
-- If the gate passes, a design doc (`docs/design/capable-model-agent.md`) comes first, then Codex implements through `Claude-Codex.md` and `reviewer` gates the merge.
-- Acceptance measures, on e_a (dev) and a holdout before any claim:
-  - incremental true positives, agent on against off;
-  - false leads per hour that the agent adds;
-  - 100% citation validity;
-  - injection tests pass;
-  - cost and wall time per hunt;
-  - deterministic findings identical with the agent on and off.
-- The qwen3:8b menu investigator (`agent_mode=model`) is retired once this lands. Template narrative and model-off operation are unchanged.
+- The qwen3:8b menu investigator (ADR-005 v2, `agent_mode=model|deterministic`) is retired when this lands. The expansion engine stays the deterministic floor.
+- ADR-006 §6b lead explanations fold into the agent's notes, and its per-incident model narrative is replaced by the AI assessment. The template narrative stays.
+- Spec scenario 13 is extended to tool calls: injected "close this", "pivot to X" or "mark benign" must be ignored and flagged.
+- Codex implements the engine through `Claude-Codex.md`. The lead owns the provider port, UI and renderers. `reviewer` gates each slice.
 
 ## Revisit if
 
-The mission-class model fails the gate. The model then keeps only the ADR-006 roles: explaining leads and writing the narrative. Also revisit if real multi-agent branching with mid-run human approvals appears (ADR-001's original trigger).
+Measurements show agent findings or assessments adding more false leads than true positives on the dev set and a holdout, or a need for multi-agent branching with mid-run human approvals (ADR-001's original trigger).

@@ -1,6 +1,6 @@
 # ROMULUS roadmap and milestone checklists
 
-_Rewritten 2026-10-19 after the owner's direction changes (ADR-005, ADR-006). Track A (model providers, settings page, capable-model agent) added 2026-10-20 (ADR-007/008/009, proposed). This file supersedes the milestone list in spec §17; the spec is a set of suggestions, and this is the plan we actually follow._
+_Rewritten 2026-10-19 after the owner's direction changes (ADR-005, ADR-006). Track A (the AI investigating agent) added 2026-10-20 (ADR-007, ADR-008). This file supersedes the milestone list in spec §17; the spec is a set of suggestions, and this is the plan we actually follow._
 
 Check an item only with **evidence**: a test, a results file, a commit or a demo note. The lead owns this file; subagents propose evidence, the lead verifies it. Status words: `implemented` · `locally tested` · `integration tested` · `lab evaluated` · `holdout evaluated` · `production validated`.
 
@@ -9,8 +9,8 @@ Check an item only with **evidence**: a test, a results file, a commit or a demo
 **Goal (owner):** a tool a CPT can take to any mission network that finds indicators of compromise in host logs and network telemetry, correlates them, and helps the analyst follow leads. It works fully without a language model.
 
 **Direction (decided):**
-- **Deterministic first** (ADR-006). The sweep, correlation and expansion find things. A model, if a team has one, only explains leads and drafts narrative, and it is off by default.
-- **A capable model is tested, not assumed** (proposed, ADR-007/008). Any OpenAI-compatible endpoint can serve the model. That covers a strong local server on a mission kit, and a hosted API on public lab data only. A real tool-calling agent is built only if a mission-class model passes a pre-registered replay gate. It can add cited findings but never remove any. Its wins become deterministic rules.
+- **Deterministic floor** (ADR-006). The sweep, correlation and expansion find things with no model, and their results never depend on one.
+- **An AI agent on top** (ADR-007, ADR-008). Teams run a powerful model on their own infrastructure, reached through any OpenAI-compatible endpoint. The lab uses a hosted API on public data only. The agent forms hypotheses from all the indicators, follows leads, finds more indicators, and writes the report's opening AI assessment. It adds cited, labelled findings and never removes or demotes any. Its wins become deterministic rules.
 - **Host and network together.** auditd, journal and web logs; Suricata; Arkime sessions; packets through Arkime and TShark.
 - **Breadth from research, not from the lab.** The ATT&CK v20 register, tool and LOTL catalogs and the backlog (`content/research/`) drive new detections. The e_a lab is a dev set only.
 - **Trustworthy output stays non-negotiable.** Typed fields only, claims no stronger than their fields, honest negatives, every claim cited, read-only access.
@@ -47,16 +47,12 @@ Check an item only with **evidence**: a test, a results file, a commit or a demo
   - a separate ground-truth account (not needed now).
 - **Accepted:** ATT&CK Enterprise 20.0 STIX vendored.
 
-## Owner proposals (2026-10-20), shape pending sign-off
+## Owner decisions log (2026-10-20)
 
-- **API-key model provider** (for example OpenAI) as a stand-in for the strong local model a team would run. Recommended shape: ADR-007. Build one OpenAI-compatible adapter, which also reaches vLLM, llama.cpp and Ollama `/v1`. Remote endpoints only with a bootstrap-file egress switch, only on public lab data, with a banner on every hunt and report. Evaluate a frontier model as the ceiling and a mission-class open-weight model as what actually ships.
-- **A real investigating agent; LangGraph reconsidered.** Recommended shape: ADR-008. A stronger model removes ADR-001's small-model objection to tool-calling loops, but not its LangGraph objection. Run the replay gate first. Then build a native tool-calling loop over SQLite rows: the agent adds `agent`-provenance findings, at most `high`, and never subtracts.
-- **Credentials page in the UI.** Recommended shape: ADR-009. Lead-only, writing `$ROMULUS_HOME/config/settings.env` atomically. Secrets are write-only, bootstrap keys can't be edited, and TLS is required before secret fields render.
-- **Decisions the owner still owes:**
-  - accept or amend ADR-007/008/009;
-  - the per-hunt model spend ceiling;
-  - which frontier and mission-class models to test;
-  - the gate thresholds, which the eval-custodian pre-registers.
+- **AI agent: build it** (ADR-008). It develops hypotheses from every indicator, follows further leads, finds more indicators and paints the bigger picture. The report opens with its overall hypothesis. The owner does not expect it to be always right; it is labelled and cited.
+- **Model access** (ADR-007): one OpenAI-compatible adapter. Mission teams run their own powerful model, not public commercial APIs. The lab uses a hosted API (for example OpenAI) on the public SL700 data, behind the bootstrap egress switch.
+- **How to run it:** the lead's recommendation, accepted. A native tool-calling loop in an explicit controller, with SQLite as the only state, and no LangGraph or other agent framework (`docs/design/investigating-agent.md`).
+- **Credentials page: deferred** (ADR-009). Configuration, including agent keys, stays in `.env` for now.
 
 ---
 
@@ -104,53 +100,55 @@ Goal: turn the five "evaluated, no rule matched" misses and the lead-only items 
 - [ ] **Scored:** recall on discovery and privesc rises without any class falling; false leads per hour stay within the ceiling; a determinism check passes.
 - [ ] **Owner decision:** the false-leads-per-hour ceiling (PROTOCOL §14).
 
-## Track A: model providers, settings page and the capable-model agent (proposed 2026-10-20)
+## Track A: the AI investigating agent. Accepted 2026-10-20
 
-Goal: stop editing `.env` by hand, and find out with numbers whether a capable model adds detection value. Runs alongside M3 and M4. A1–A3 are product work in any case. A5 happens only if A4's gate passes. Everything here waits on the owner's sign-off on ADR-007/008/009.
+Goal: a hypothesis-driven agent that works every hunt after the deterministic layer, and a report that opens with its cited, labelled assessment. Design: `docs/design/investigating-agent.md`. Runs alongside M3 and M4. The engine is built by Codex through `Claude-Codex.md`, and `reviewer` gates every slice.
 
-- [ ] **A1. Web TLS first** (lead; moved up from M7): `romulus web tls-init` (self-signed, under `$ROMULUS_HOME/tls/`), with the lab UI served over HTTPS. This is a prerequisite for A2.
-- [ ] **A2. Settings page** (lead, ADR-009):
-  - lead-only `/settings` for sources, model providers and hunt defaults;
-  - the `settings.env` layer in `load_settings` with per-key source reporting;
-  - write-only secrets;
-  - bootstrap keys refused;
-  - step-up password on save;
-  - "Test" runs the doctor check on the submitted values;
-  - tests for rendering, precedence, atomic write and redaction;
-  - `reviewer` gate (security boundary).
-- [ ] **A3. Model-provider port** (lead, ADR-007):
-  - `ollama` and `openai_compatible` adapters behind one interface, with a provider per role;
-  - truncation, usage and finish-reason checks for every adapter;
-  - the egress class and `ROMULUS_MODEL_EGRESS=lab-public-data` bootstrap switch;
-  - hunt and report banners;
-  - manifest provenance;
-  - per-hunt token and cost budget;
+- [ ] **A1. Provider port** (lead, ADR-007):
+  - `openai_compatible` and `ollama` adapters behind one interface;
+  - truncation, usage and finish-reason checks for both;
+  - egress class, the `ROMULUS_MODEL_EGRESS=lab-public-data` bootstrap switch and `MODEL_LOCAL_HOSTS`;
+  - manifest provenance and banners;
+  - per-hunt budgets;
   - doctor provider check;
-  - `reviewer` gate.
-- [ ] **A4. Capable-model gate** (eval-custodian; no new agent code):
-  - thresholds pre-registered first;
-  - the replay harness on frozen v2 briefs with one frontier and one mission-class model;
-  - the ADR-006 §6b lead-opinion replay (sneaky-miss count);
-  - results in `docs/eval/results/`.
-
-  Recommended pass bar: mission-class accuracy ≥ 0.80 (qwen3:8b scores 0.53), and sneaky misses no worse than the deterministic order.
-- [ ] **A5. Tool-calling agent, only if A4 passes** (Codex via `Claude-Codex.md`; ADR-008):
-  - design doc first;
-  - a hunt dossier with read, pivot and proposal tools;
-  - every turn and tool call is a SQLite row, and resume rebuilds from rows;
-  - add-never-subtract (`agent` provenance, lane ≤ `high`, claim checker);
-  - an "Agent contributions" report section;
-  - the injection suite extended to tool calls;
-  - `reviewer` gate.
-- [ ] **A6. Agent wins become rules** (detection-engineer): each agent true positive the deterministic layer missed gets a `request_rule` item, turned into a typed context rule with fixtures, or retired with a reason.
-- [ ] **A7. Scored** (eval-custodian), agent on against off, on e_a and then a holdout:
+  - `AGENT_*` keys in `.env.example`.
+- [ ] **A2. Dossier and tools** (Codex):
+  - the alias-based hunt dossier, with every finding, incident, gap and unexpanded anchor, paged and never silently cut;
+  - read tools;
+  - pivot tools over `PivotExecutor` and the expansion link fetchers;
+  - complete or partial coverage state on every result.
+- [ ] **A3. Controller and hypotheses** (Codex):
+  - orient → investigate ×N → assess;
+  - the `agent_hypotheses` table with history;
+  - bounded sessions rebuilt from the DB, with breadth reservation and concurrency;
+  - budgets, outage handling, `hunt resume`.
+- [ ] **A4. Admission of agent output** (Codex):
+  - `agent`-provenance findings, lane ≤ `high`, cites and claim checker;
+  - agent links drawn as hypotheses;
+  - notes;
+  - `request_rule` items;
+  - add-never-subtract tests.
+- [ ] **A5. AI assessment in the report** (Codex for the manifest, lead for the renderers):
+  - `ai_assessment` with sentence-level cites and kinds;
+  - the deterministic checker and its removal counts;
+  - labelled first section in Markdown, JSON and web;
+  - template narrative fallback;
+  - a "Re-run assessment" revision.
+- [ ] **A6. UI and CLI** (lead):
+  - New hunt "Run the AI agent" checkbox, on when a provider is reachable;
+  - live view of hypotheses, tool calls and agent findings;
+  - hypotheses tab;
+  - `hunt start --agent/--no-agent`.
+- [ ] **A7. Safety tests** (detection-engineer and Codex): spec scenario 13 extended to tool calls (injected close, benign or pivot instructions are ignored and flagged).
+- [ ] **A8. Scored** (eval-custodian), agent on against off, per model, on e_a and then a holdout:
   - incremental true positives;
   - added false leads per hour;
+  - hypothesis and assessment accuracy at class level;
   - 100% citation validity;
-  - cost and wall time;
+  - cost and time;
   - deterministic findings identical either way.
-
-  The frontier-model numbers are labelled "ceiling, not deployable".
+- [ ] **A9. Agent wins become rules** (detection-engineer): each `request_rule` becomes a typed context rule with fixtures, or is retired with a reason.
+- [ ] **Retire** the v2 menu investigator (`agent_mode=model|deterministic`) once A3 lands.
 
 ## M4: network and packet depth
 
@@ -197,16 +195,14 @@ Goal: know how ROMULUS performs on data it was not built around. This can start 
 - [ ] **f_a holdout** (when the owner approves the download). It shows robustness to variants of the same storyline only.
 - [ ] Owner-agreed targets checked: ≥90% of critical+high, ≥80% overall, P@10 ≥ 0.8, false leads under the ceiling. Where telemetry can't support a target, say so.
 
-## M7: reports, optional model features, hardening
+## M7: reports, settings, hardening
 
 - [ ] **Executive DOCX** from a template, including the attack-path image; read-back consistency test; LibreOffice page renders.
 - [ ] **Recommendations** linked to findings and ATT&CK mitigations; IOC export.
-- [ ] **Optional model** (ADR-006 §6–6b; any provider from Track A3):
-  - lead explanations, after the replay "sneaky-miss" gate;
-  - cited narrative drafts with a deterministic checker;
-  - the report-page "draft narrative" action.
+- [ ] **AI assessment in the executive DOCX** (Track A5's manifest section, labelled; template narrative when no agent ran).
+- [ ] **Settings page** (ADR-009, deferred by the owner): lead-only credentials and provider settings in `settings.env`, write-only secrets, TLS first.
 - [ ] **Triage:** suppressions with expiry; `lead`/`analyst` roles; detection catalog tier 3 (a typed local-rule builder, never DSL).
-- [ ] **Hardening:** security review (including the settings page and the egress mode), backup and restore drill, offline wheelhouse install, and the release gate review (spec §15 gates 1–9).
+- [ ] **Hardening:** web TLS, security review (including the agent tools, the egress mode and the settings page), backup and restore drill, offline wheelhouse install, and the release gate review (spec §15 gates 1–9).
 
 ## After M7: standing work
 
