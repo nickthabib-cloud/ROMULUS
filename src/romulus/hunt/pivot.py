@@ -17,7 +17,8 @@ from romulus.agent.tools import (
     ToolRequest,
 )
 from romulus.detect.registry import fresh_direct_pack
-from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.auditd import AuditParseError, parse_record
+from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, normalize_hits
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.publish import publish_match
 from romulus.sources.es import ElasticClient, SourceError
@@ -264,7 +265,8 @@ class PivotExecutor:
 
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str,
                  contracts: dict[str, FieldContract], heartbeat=None, owner_token: str | None = None,
-                 source_query_budget: int | None = None):
+                 source_query_budget: int | None = None,
+                 dataset_inventory: dict[str, set[str] | list[str] | tuple[str, ...]] | None = None):
         self.repo = repo
         self.client = client
         self.hunt_id = hunt_id
@@ -273,6 +275,9 @@ class PivotExecutor:
         self.owner_token = owner_token
         self.source_query_budget = source_query_budget
         self.source_queries = 0
+        self.dataset_inventory = {
+            target: tuple(sorted(datasets)) for target, datasets in (dataset_inventory or {}).items()
+        }
 
     def _execute(self, intent: SearchIntent, contract: FieldContract, *, pit=None) -> SearchOutcome:
         if self.source_query_budget is not None and self.source_queries >= self.source_query_budget:
@@ -294,6 +299,7 @@ class PivotExecutor:
         args = request.arguments
         window = Window(start=args.start, end=args.end)
         intents: list[SearchIntent] = []
+        dataset_inventory = getattr(self, "dataset_inventory", {})
         for target, contract in self.contracts.items():
             network = _is_network(target, contract)
             filters: list[Predicate] = []
@@ -301,9 +307,32 @@ class PivotExecutor:
 
             if isinstance(request, EntityTimelineRequest):
                 entity = args.entity
-                if entity.kind == "ip" and network:
+                if entity.kind == "ip" and contract.time_field == "firstPacket":
+                    if not (_supports(contract, "source.ip") and _supports(contract, "destination.ip")):
+                        continue
+                    any_of = [
+                        [Predicate(field="source.ip", op="eq", value=entity.value)],
+                        [Predicate(field="destination.ip", op="eq", value=entity.value)],
+                    ]
+                elif entity.kind == "ip" and network:
                     if not (_supports(contract, "event.dataset", "in")
                             and _supports(contract, "source.ip") and _supports(contract, "destination.ip")):
+                        continue
+                    inventoried = dataset_inventory.get(target)
+                    if inventoried is not None:
+                        for dataset in inventoried:
+                            if dataset not in NETWORK_TIMELINE_DATASETS:
+                                continue
+                            intents.append(SearchIntent(
+                                kind="raw", target=target, window=window,
+                                filters=[Predicate(field="event.dataset", op="eq", value=dataset)],
+                                any_of=[
+                                    [Predicate(field="source.ip", op="eq", value=entity.value)],
+                                    [Predicate(field="destination.ip", op="eq", value=entity.value)],
+                                ],
+                                max_records=MAX_PIVOT_RECORDS,
+                                purpose=f"agent:{request.tool}:{dataset}",
+                            ))
                         continue
                     filters = [Predicate(field="event.dataset", op="in", value=NETWORK_TIMELINE_DATASETS)]
                     any_of = [
@@ -313,15 +342,19 @@ class PivotExecutor:
                 elif entity.kind == "ip" and not network:
                     if not _supports(contract, "event.dataset"):
                         continue
-                    for dataset in HOST_TIMELINE_DATASETS:
+                    datasets = dataset_inventory.get(target, tuple(HOST_TIMELINE_DATASETS))
+                    for dataset in datasets:
+                        if dataset not in HOST_TIMELINE_DATASETS:
+                            continue
                         dataset_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
                         dataset_any_of: list[list[Predicate]] = []
-                        if dataset.startswith("apache."):
-                            for field in ("source.ip", "destination.ip"):
-                                if _supports(contract, field):
-                                    dataset_any_of.append([
-                                        Predicate(field=field, op="eq", value=entity.value),
-                                    ])
+                        for field in ("source.ip", "destination.ip"):
+                            if _supports(contract, field):
+                                dataset_any_of.append([
+                                    Predicate(field=field, op="eq", value=entity.value),
+                                ])
+                        if target in dataset_inventory and not dataset_any_of:
+                            continue
                         intents.append(SearchIntent(
                             kind="raw", target=target, window=window,
                             filters=dataset_filters, any_of=dataset_any_of,
@@ -378,12 +411,62 @@ class PivotExecutor:
                 return predicate.value
         return None
 
-    def _unsearchable_ip_coverage(self, request: ToolRequest) -> list[PivotCoverage]:
+    @staticmethod
+    def _ip_normalization_reasons(intent: SearchIntent, records: list[dict]) -> list[str]:
+        if (PivotExecutor._intent_dataset(intent) != "linux.audit"
+                or "entity_timeline" not in intent.purpose):
+            return []
+        reasons = set()
+        for record in records:
+            raw = _source_value(record.get("_source") or {}, "event.original")
+            if not raw:
+                continue
+            try:
+                audit = parse_record(raw)
+            except AuditParseError:
+                continue
+            address = audit.fields.get("addr")
+            if (audit.type.startswith(("USER_", "CRED_"))
+                    and audit.type not in AUDIT_LOGIN_TYPES
+                    and address not in {None, "", "?", "(null)", "(none)", "0.0.0.0", "::"}):
+                reasons.add(f"audit_address_type_not_normalized:{audit.type}")
+        return sorted(reasons)
+
+    def _unsearchable_ip_coverage(
+        self, request: ToolRequest, intents: list[SearchIntent] | None = None,
+    ) -> list[PivotCoverage]:
         if not isinstance(request, EntityTimelineRequest) or request.arguments.entity.kind != "ip":
             return []
         args = request.arguments
         unresolved: list[PivotCoverage] = []
+        intents = intents or []
+        planned = {(intent.target, self._intent_dataset(intent)) for intent in intents}
         for target, contract in self.contracts.items():
+            inventoried = self.dataset_inventory.get(target)
+            if inventoried is not None:
+                if contract.time_field == "firstPacket":
+                    if any(intent.target == target for intent in intents):
+                        continue
+                    reason = "key not pushable; full-dataset scan refused"
+                    unresolved.append(PivotCoverage(
+                        target=target, dataset=None, start=args.start, end=args.end,
+                        status="partial", reasons=[reason], returned=0, total=None,
+                        unresolved_ranges=[_range(args.start, args.end, reason)],
+                    ))
+                    continue
+                normalized = set(NETWORK_TIMELINE_DATASETS if _is_network(target, contract)
+                                 else HOST_TIMELINE_DATASETS)
+                for dataset in inventoried:
+                    if (target, dataset) in planned:
+                        continue
+                    reason = (f"dataset_not_normalized:{dataset}" if dataset not in normalized
+                              else f"dataset_unsearchable:{dataset}:IP predicate unavailable")
+                    unresolved.append(PivotCoverage(
+                        target=target, dataset=dataset, start=args.start, end=args.end,
+                        status="partial", reasons=[reason], returned=0, total=None,
+                        unresolved_ranges=[_range(args.start, args.end, reason)],
+                    ))
+                continue
             if _is_network(target, contract):
                 continue
             if _supports(contract, "event.dataset"):
@@ -519,12 +602,17 @@ class PivotExecutor:
                     successful += 1
                     task_successes += 1
                     events, _skips, errors = normalize_hits(outcome.records)
-                    if errors:
-                        leaf_reasons.append(f"normalization_errors:{len(errors)}")
+                    normalization_reasons = self._ip_normalization_reasons(leaf_intent, outcome.records)
+                    leaf_reasons.extend(normalization_reasons)
+                    if errors or normalization_reasons:
+                        if errors:
+                            leaf_reasons.append(f"normalization_errors:{len(errors)}")
                         covered_ranges = []
                         unresolved_ranges = [_range(
                             leaf_intent.window.start, leaf_intent.window.end,
-                            f"normalization_errors:{len(errors)}",
+                            "; ".join(sorted(set(normalization_reasons + (
+                                [f"normalization_errors:{len(errors)}"] if errors else []
+                            )))),
                         )]
                     selected = [event for event in events if retain(event)]
                     sources = {
@@ -536,7 +624,8 @@ class PivotExecutor:
                         self.hunt_id, selected, sources, task_id, owner_token=self.owner_token,
                     )
                     retained.update({event.id: event for event in selected})
-                    status = "complete" if outcome.completeness == Completeness.complete and not errors else "partial"
+                    status = ("complete" if outcome.completeness == Completeness.complete
+                              and not errors and not normalization_reasons else "partial")
                 incomplete |= status != "complete"
                 reasons.extend(leaf_reasons)
                 task_reasons.extend(leaf_reasons)
@@ -756,7 +845,7 @@ class PivotExecutor:
                 "ids_alerts requires an IP entity; network host.name identifies the observer sensor",
             ])
         intents = self._intents(request)
-        planning_coverage = self._unsearchable_ip_coverage(request)
+        planning_coverage = self._unsearchable_ip_coverage(request, intents)
         if not intents:
             if planning_coverage:
                 return PivotResult(
@@ -811,12 +900,17 @@ class PivotExecutor:
                     successful_outcomes += 1
                     target_successes += 1
                     events, _skips, errors = normalize_hits(outcome.records)
-                    if errors:
-                        leaf_reasons.append(f"normalization_errors:{len(errors)}")
+                    normalization_reasons = self._ip_normalization_reasons(leaf_intent, outcome.records)
+                    leaf_reasons.extend(normalization_reasons)
+                    if errors or normalization_reasons:
+                        if errors:
+                            leaf_reasons.append(f"normalization_errors:{len(errors)}")
                         covered_ranges = []
                         unresolved_ranges = [_range(
                             leaf_intent.window.start, leaf_intent.window.end,
-                            f"normalization_errors:{len(errors)}",
+                            "; ".join(sorted(set(normalization_reasons + (
+                                [f"normalization_errors:{len(errors)}"] if errors else []
+                            )))),
                         )]
                     selected = [event for event in events if self._retain(request, event)]
                     sources = {
@@ -828,7 +922,8 @@ class PivotExecutor:
                         self.hunt_id, selected, sources, task_id, owner_token=self.owner_token,
                     )
                     retained.extend(selected)
-                    status = "complete" if outcome.completeness == Completeness.complete and not errors else "partial"
+                    status = ("complete" if outcome.completeness == Completeness.complete
+                              and not errors and not normalization_reasons else "partial")
                 incomplete |= status != "complete"
                 reasons.extend(leaf_reasons)
                 target_reasons.extend(leaf_reasons)

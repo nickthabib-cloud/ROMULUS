@@ -141,6 +141,10 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
     executor = PivotExecutor(
         repo, client, hunt["id"], contracts, heartbeat=heartbeat, owner_token=owner_token,
         source_query_budget=max_source_queries,
+        dataset_inventory={
+            target: set(profile.get("datasets", {}))
+            for target, profile in manifest.get("source_profiles", {}).items()
+        },
     )
     budget_seconds = float((manifest.get("budgets") or {}).get("wall_clock_minutes", 120)) * 60
     started_at = hunt.get("started_at")
@@ -162,8 +166,13 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
     def heartbeat():
         repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
 
+    hunt = repo.get_hunt(hunt_id)
     executor = PivotExecutor(
         repo, client, hunt_id, contracts, heartbeat=heartbeat, owner_token=owner_token,
+        dataset_inventory={
+            target: set(profile.get("datasets", {}))
+            for target, profile in hunt["manifest"].get("source_profiles", {}).items()
+        },
     )
 
     return Investigator(
