@@ -2,17 +2,17 @@
 
 A defensive, AI-assisted threat-hunting tool.
 
-ROMULUS runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. Deterministic expansion then follows typed links from the strongest findings (process lineage, login session, network flow), judges the linked records in context, and assembles incidents. Every claim cites the raw evidence. ROMULUS works fully without a language model ([ADR-006](docs/adr/ADR-006-deterministic-expansion-optional-model.md)).
+ROMULUS runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. Deterministic expansion then follows typed links from the strongest findings (process lineage, login session, network flow), judges the linked records in context, and assembles incidents. Every claim cites the raw evidence. ROMULUS can work with or without a language model by performing deterministic searches ([ADR-006](docs/adr/ADR-006-deterministic-expansion-optional-model.md)).
 
 **Planned: the AI investigating agent** ([ADR-008](docs/adr/ADR-008-capable-model-agent-no-langgraph.md), [design](docs/design/investigating-agent.md)). After the deterministic layer, the agent:
 - reads every indicator ROMULUS found;
-- develops hypotheses about what the adversary did;
+- develops hypotheses about malicious activity;
 - follows further leads through typed, read-only pivots, and finds more indicators;
 - connects them into a bigger picture.
 
-The report opens with its **AI assessment**: the agent's overall hypothesis, every sentence cited, labelled as AI-generated and unconfirmed. The agent can add findings, labelled as agent findings and capped at `high`. It can never hide, close or demote anything.
+The final report opens with its **AI assessment**: the agent's overall hypothesis, every sentence cited, labelled as AI-generated and unconfirmed. The agent can add findings, labelled as agent findings and capped at `high`. It can never hide, close or demote findings.
 
-The model is reached through any OpenAI-compatible endpoint ([ADR-007](docs/adr/ADR-007-model-providers-and-lab-egress.md)). Teams use their own server, such as vLLM; the lab uses a hosted API on public data only.
+For testing purposes the model is reached through any OpenAI API ([ADR-007](docs/adr/ADR-007-model-providers-and-lab-egress.md)). Actual teams use their own LLM server.
 
 Outputs:
 
@@ -22,45 +22,25 @@ Outputs:
 - a technical Markdown/JSON report (an executive DOCX is planned)
 - a browser UI for analysts
 
-> **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 evaluation is closing and M3 (deterministic expansion) is in progress. Track A (the AI investigating agent) is accepted and not yet built. This is lab software under active development and is not yet validated for production missions. See [`docs/project/STATUS.md`](docs/project/STATUS.md) for the current state and [`docs/project/MILESTONES.md`](docs/project/MILESTONES.md) for the roadmap.
+> **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 evaluation is closing and M3 (deterministic expansion) is in progress. Track A (the AI investigating agent) is in progress. This is lab software under active development and is not yet validated for production missions. See [`docs/project/STATUS.md`](docs/project/STATUS.md) for the current state and [`docs/project/MILESTONES.md`](docs/project/MILESTONES.md) for the roadmap.
 
 ## Detection scope
 
 The goal is to find any malicious activity the telemetry can show, on any mission network. The detection catalog is built from systematic research:
-- every MITRE ATT&CK Enterprise and ICS technique;
-- the public detection corpora (Sigma, CAR, Atomic Red Team, LOLBAS/GTFOBins, ET Open and others);
-- every telemetry family a hunt may meet: Windows, AD, Linux, macOS, identity and cloud logs, network devices, Zeek, Suricata, PCAP and ICS protocols.
+- MITRE ATT&CK Enterprise and ICS techniques;
+- Public detection corpora (Sigma, CAR, Atomic Red Team, LOLBAS/GTFOBins, ET Open and others);
+- Any telemetry family a hunt may meet: Windows, AD, Linux, macOS, identity and cloud logs, network devices, Zeek, Suricata, PCAP and ICS protocols.
 
 A generated ATT&CK coverage matrix will show what is covered, what is evaluated, and where the gaps are. The M1 starter set is 15 Linux and network playbooks, chosen for the lab data.
 
 ## Design principles
 
-These are non-negotiable. The full text is §1 of [`ENGINEERING_MASTER_PROMPT.md`](ENGINEERING_MASTER_PROMPT.md).
-
-- **A mention is not an action.** Detection uses typed fields. It never substring-matches serialized records.
 - **Strong indicators are reported on their own, immediately.** Correlation and attack paths come second. Inferred links are labeled as hypotheses.
-- **Negatives must be complete, or they are `unresolved`.** Caps, timeouts, missing fields and partial responses never count as "no match". A rule may claim a complete negative only from evidence that proves absence ([ADR-004](docs/adr/ADR-004-negatives-only-from-kernel-records.md)).
 - **Nothing reportable is lost** to UI limits, model context or rendering. One immutable report manifest feeds every renderer, and every citation is checked.
-- **The model proposes typed actions only.** It never writes query DSL, Arkime expressions, TShark filters, shell commands or paths. All model output is validated, and telemetry is treated as untrusted data.
+- **The model proposes typed actions only.** It require input validation for DSL queries, Arkime expressions, TShark filters. All model output is validated, and telemetry is treated as untrusted data.
 - **Read-only toward telemetry.** Nothing is transmitted externally. Secrets never appear in the repo, logs, prompts or reports. One exception (ADR-007): a hosted model, used in the lab on public data only. It needs an install-time switch, puts a banner on every hunt and report that used it, and is never on in release builds.
 
 ## How it works
-
-```
-mission ─► source inventory ─► field contracts
-   │
-   ▼
-planner ─► search intent ─► compiled query ─► adapter (ES / Arkime / TShark)
-                                                   │
-                     typed events + entities ◄─────┘
-                               │
-            detect (playbooks) ─► candidates ─► decide ─► findings (lanes)
-                               │                    ▲
-                               ▼                    │
-              agent: cases ─► brief ─► model ─► validate ─► typed pivot
-                               │
-                     report manifest ─► JSON | Markdown | web
-```
 
 A coverage ledger records every stage that can lose information: compile, execute, ingest, normalize and evaluate. That way the report can say exactly what was and wasn't assessed.
 
@@ -74,7 +54,7 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 - **State:** SQLite (WAL) is the single state authority; Alembic handles migrations.
 - **Web UI:** FastAPI + Jinja + server-sent events. It has argon2 logins, lead/analyst roles, CSRF protection and a strict CSP.
 - **Model:** optional local Ollama today. Planned: any OpenAI-compatible endpoint for the agent (ADR-007). The agent is scored on and off by the evaluation harness.
-- **No agent framework:** the investigator is an explicit controller with SQLite as the only state ([ADR-001](docs/adr/ADR-001-no-langgraph.md)). The planned agent ([ADR-008](docs/adr/ADR-008-capable-model-agent-no-langgraph.md)) uses native tool calling in the same controller. It has no LangGraph or other agent framework.
+- **The Agent:** Uses native tool calling through the investigator, an explicit controller with SQLite as the only state ([ADR-001](docs/adr/ADR-001-no-langgraph.md)). ([ADR-008](docs/adr/ADR-008-capable-model-agent-no-langgraph.md))
 
 ## Repository layout
 
@@ -132,8 +112,5 @@ Install the dev dependencies (`pytest`, `respx`, `ruff`) first.
 
 ## Lab and evaluation
 
-Development is evaluated against the public AInception SL700 dataset, loaded into Elasticsearch and Arkime on a lab VM. Ground truth is kept out of the runtime and is read only by the evaluation role. Lab results are reported with the spec's status words (`implemented`, `locally tested`, `integration tested`, `lab evaluated`, `holdout evaluated`, `production validated`), never as general effectiveness claims.
+Development is evaluated against the public Zenodo dataset, loaded into Elasticsearch and Arkime on a lab VM. Ground truth is kept out of the runtime and is read only by the evaluation role. Lab results are reported with the spec's status words (`implemented`, `locally tested`, `integration tested`, `lab evaluated`, `holdout evaluated`, `production validated`), never as general effectiveness claims.
 
-## History
-
-This repository previously held ROMULUS v1. The v1 `main` is preserved on the [`archive/v1-main`](https://github.com/nickthabib-cloud/ROMULUS/tree/archive/v1-main) branch.
