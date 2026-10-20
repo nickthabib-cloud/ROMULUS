@@ -174,8 +174,10 @@ def normalize_audit_auth_group(host: str, members: list[tuple[dict, AuditRecord]
     auid = record.fields.get("auid")
     if auid not in {None, "", "-1", "4294967295"}:
         fields["process.auid"] = fv(auid, f"{origin}.auid")
-    account = record.fields.get("acct") or record.enriched.get("AUID") or record.enriched.get("UID")
-    if account not in {None, "", "?", "(null)", "(none)"}:
+    placeholders = {None, "", "?", "(null)", "(none)", "unset", "(unknown)"}
+    account = next((value for value in (record.fields.get("acct"), record.enriched.get("AUID"),
+                                        record.enriched.get("UID")) if value not in placeholders), None)
+    if account is not None:
         fields["user.name"] = fv(account, f"{origin}.acct")
     address = record.fields.get("addr")
     if address not in {None, "", "?", "(null)", "(none)", "0.0.0.0", "::"}:
