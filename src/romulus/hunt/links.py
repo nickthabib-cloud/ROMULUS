@@ -21,7 +21,9 @@ LinkType = Literal[
 ]
 LinkStrength = Literal["observed", "inferred"]
 
-UNUSABLE_TEXT_KEYS = {"", "-1", "4294967295", "(null)", "(none)", "unset"}
+UNUSABLE_TEXT_KEYS = {"", "-1", "4294967295", "(null)", "(none)", "unset", "(unknown)"}
+# Links that need a host identity: they search one host's own records.
+HOST_SIDE_LINKS = frozenset({"process_lineage", "login_session", "host_after_anchor"})
 
 
 def usable_key(value: Any) -> bool:
@@ -55,7 +57,9 @@ class LinkAnchor(BaseModel):
 
     finding_id: str
     ts: datetime
-    host: str | None = None
+    host: str | None = None                  # a host identity from typed records; never an IP
+    victim_ip: str | None = None             # set when `host` was resolved (or not) from a network endpoint
+    host_reason: str | None = None           # why no host identity is available for victim_ip
     event_ids: list[str] = Field(default_factory=list)
     events: list[TypedEvent] = Field(default_factory=list)
 
@@ -86,6 +90,17 @@ def _value(anchor: LinkAnchor, field: str):
     return None
 
 
+def _victim(anchor: LinkAnchor) -> dict:
+    return {"victim_ip": anchor.victim_ip} if anchor.victim_ip else {}
+
+
+def _host_reason(anchor: LinkAnchor) -> str | None:
+    """Why a host-side link cannot run for this anchor, or None when it has a usable host identity."""
+    if usable_key(anchor.host):
+        return None
+    return anchor.host_reason or "required typed key is unusable"
+
+
 def _tuple(event: TypedEvent) -> tuple | None:
     values = (
         event.get("network.transport"), event.get("source.ip"), event.get("source.port"),
@@ -111,6 +126,16 @@ class LinkFetcher:
         self.hunt_start = hunt_start.astimezone(UTC)
         self.hunt_end = hunt_end.astimezone(UTC)
         self._cache: dict[str, LinkResult] = {}
+        self._hosts: dict[str, tuple[str | None, str | None]] = {}
+
+    def resolve_host(self, owner: str, ip: str) -> tuple[str | None, str | None]:
+        """A network endpoint's host identity from typed host records (`host.ip`), or why there is none.
+        Exactly one host name resolves; none or several is a reason, never a guess."""
+        if ip not in self._hosts:
+            resolver = getattr(self.executor, "resolve_host_ip", None)
+            self._hosts[ip] = (resolver(owner, ip, self.hunt_start, self.hunt_end) if resolver is not None
+                               else (None, f"victim host unknown for {ip}: host resolution is unavailable"))
+        return self._hosts[ip]
 
     def fetch(
         self,
@@ -215,10 +240,26 @@ class LinkFetcher:
                 ))
         return intents
 
+    def _endpoint_intents(self, window: LinkWindow, endpoints: list[list]):
+        """Audit socket records on any host whose remote endpoint is one of these (ip, port) pairs."""
+        intents = []
+        for target, contract in sorted(self.executor.contracts.items()):
+            if (_is_network(target, contract) or not _supports(contract, "event.dataset")
+                    or not all(_supports(contract, field) for field in ("destination.ip", "destination.port"))):
+                continue
+            intents.append(SearchIntent(
+                kind="raw", target=target, window=Window(start=window.start, end=window.end),
+                filters=[Predicate(field="event.dataset", op="eq", value="linux.audit")],
+                any_of=[[Predicate(field="destination.ip", op="eq", value=ip),
+                         Predicate(field="destination.port", op="eq", value=port)] for ip, port in endpoints],
+                max_records=MAX_PIVOT_RECORDS, purpose="expansion:flow_host_side",
+            ))
+        return intents
+
     def _lineage(self, anchor: LinkAnchor, window: LinkWindow):
         pid = _value(anchor, "process.pid")
         boot_id = _value(anchor, "host.boot.id")
-        key = {"host": anchor.host, "pid": pid, "host.boot.id": boot_id}
+        key = {"host": anchor.host, "pid": pid, "host.boot.id": boot_id, **_victim(anchor)}
         intents = self._host_intents(window, ("linux.audit",), anchor.host) if isinstance(pid, int) else []
 
         def select(events):
@@ -286,7 +327,7 @@ class LinkFetcher:
                     parent, when = ancestor.get("process.ppid"), ancestor.ts.timestamp()
             return list(related.values())
 
-        reason = None if usable_key(anchor.host) and usable_key(pid) else "required typed key is unusable"
+        reason = _host_reason(anchor) or (None if usable_key(pid) else "required typed key is unusable")
         return (key, "observed", intents if reason is None else [],
                 lambda event: event.family == "process_exec", select, reason, [])
 
@@ -294,10 +335,8 @@ class LinkFetcher:
         session_id, auid = _value(anchor, "process.session_id"), _value(anchor, "process.auid")
         boot_id = _value(anchor, "host.boot.id")
         key = {"host": anchor.host, "process.session_id": session_id, "process.auid": auid,
-               "host.boot.id": boot_id}
-        reason = None
-        if not usable_key(anchor.host) or not usable_key(session_id):
-            reason = "required typed key is unusable"
+               "host.boot.id": boot_id, **_victim(anchor)}
+        reason = _host_reason(anchor) or (None if usable_key(session_id) else "required typed key is unusable")
         intents = self._host_intents(window, ("linux.audit",), anchor.host) if reason is None else []
 
         def matches(event):
@@ -358,19 +397,32 @@ class LinkFetcher:
                 lambda events: [event for event in events if matches(event)], reason, [])
 
     def _flow_host_side(self, anchor: LinkAnchor, window: LinkWindow):
+        """Kernel socket records whose remote endpoint is one side of the flow. With a host identity, that host's
+        records; without one (a network-only anchor), every host's, found by the endpoint itself as a pushable
+        predicate, so the host comes from the matching records rather than from a guess."""
         five_tuple = next((_tuple(event) for event in anchor.events if _tuple(event) is not None), None)
         endpoints = [] if five_tuple is None else [
             [five_tuple[1], five_tuple[2]], [five_tuple[3], five_tuple[4]],
         ]
-        key = {"host.name": anchor.host, "flow_endpoints": endpoints, "actor": "inferred"}
+        any_host = anchor.host is None
+        key = {"host.name": anchor.host, "flow_endpoints": endpoints, "actor": "inferred",
+               **({"any_host": True} if any_host else {})}
         reason = None
-        if (not usable_key(anchor.host) or not endpoints
-                or not all(usable_key(component) for endpoint in endpoints for component in endpoint)):
+        if (not endpoints
+                or not all(usable_key(component) for endpoint in endpoints for component in endpoint)
+                or (not any_host and not usable_key(anchor.host))):
             reason = "required typed key is unusable"
-        intents = self._host_intents(window, ("linux.audit",), anchor.host) if reason is None else []
+        if reason is not None:
+            intents = []
+        elif any_host:
+            intents = self._endpoint_intents(window, endpoints)
+            if not intents:
+                reason = "key not pushable; full-dataset scan refused"
+        else:
+            intents = self._host_intents(window, ("linux.audit",), anchor.host)
 
         def matches(event):
-            return (event.family == "net_socket" and event.host == anchor.host
+            return (event.family == "net_socket" and (any_host or event.host == anchor.host)
                     and [event.get("destination.ip"), event.get("destination.port")] in endpoints)
 
         return (key, "inferred", intents, matches,
@@ -427,10 +479,10 @@ class LinkFetcher:
                 lambda events: [event for event in events if matches(event)], reason, [])
 
     def _host_after(self, anchor: LinkAnchor, window: LinkWindow):
-        key = {"host.name": anchor.host, "time_relation": "after", "actor": "inferred"}
-        if not usable_key(anchor.host):
-            return (key, "inferred", [], lambda _event: False, lambda _events: [],
-                    "required typed key is unusable", [])
+        key = {"host.name": anchor.host, "time_relation": "after", "actor": "inferred", **_victim(anchor)}
+        reason = _host_reason(anchor)
+        if reason:
+            return (key, "inferred", [], lambda _event: False, lambda _events: [], reason, [])
         request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
             entity={"kind": "host", "value": anchor.host, "role": "host"},
             start=max(anchor.ts, window.start), end=window.end,

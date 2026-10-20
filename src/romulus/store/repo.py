@@ -294,6 +294,11 @@ class Repo:
                                         "priority": priority, "attempts": 0, "created_at": utcnow(),
                                         "updated_at": utcnow()}], ["id"])
 
+    def task(self, task_id: str) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.task).where(t.task.c.id == task_id)).mappings().first()
+            return dict(row) if row else None
+
     def task_state(self, task_id: str) -> str | None:
         with self.engine.connect() as c:
             return c.execute(select(t.task.c.state).where(t.task.c.id == task_id)).scalar()

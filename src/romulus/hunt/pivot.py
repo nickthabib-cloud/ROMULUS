@@ -490,6 +490,47 @@ class PivotExecutor:
                 ))
         return unresolved
 
+    def resolve_host_ip(self, owner: str, ip: str, start: datetime, end: datetime) -> tuple[str | None, str | None]:
+        """Resolve a network endpoint to one host identity from typed host records: the `host.name` values of
+        records whose `host.ip` equals the address, over the hunt window. Returns (host, None) for exactly one
+        name, else (None, reason). The lookup is a budgeted, durable task: a resumed hunt reuses its outcome."""
+        targets = [(target, contract) for target, contract in sorted(self.contracts.items())
+                   if not _is_network(target, contract) and _supports(contract, "host.ip")
+                   and (contract.spec("host.name") is not None and contract.spec("host.name").aggregatable)]
+        if not targets:
+            return None, f"victim host unknown for {ip}: no host source has a searchable host.ip field"
+        fingerprint = digest({"resolve_host_ip": ip, "start": start.isoformat(), "end": end.isoformat()})
+        task_id = "t-" + fingerprint[:20]
+        prior = self.repo.task(task_id)
+        if prior and prior["state"] == "evaluated" and isinstance(prior.get("outcome"), dict):
+            return prior["outcome"].get("host"), prior["outcome"].get("reason")
+        intent_record = {"resolve_host_ip": ip, "targets": [target for target, _ in targets]}
+        self.repo.upsert_task(task_id, self.hunt_id, "expansion_link", "host-resolution", intent_record,
+                              fingerprint, owner_token=self.owner_token)
+        self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
+        names: set[str] = set()
+        incomplete: list[str] = []
+        for target, contract in targets:
+            intent = SearchIntent(kind="aggregate", target=target, window=Window(start=start, end=end),
+                                  filters=[Predicate(field="host.ip", op="eq", value=ip)], group_by=["host.name"],
+                                  purpose="expansion:resolve_host_ip")
+            outcome = self._execute(intent, contract, spend_task_id=task_id)
+            if outcome.completeness != Completeness.complete:
+                incomplete.append(f"{target}: {'; '.join(outcome.reasons or [outcome.error or 'incomplete'])}")
+            names.update(str(bucket["key"].get("host.name")) for bucket in outcome.buckets
+                         if bucket["key"].get("host.name") not in (None, ""))
+        if incomplete:
+            host, reason = None, f"victim host unresolved for {ip}: host lookup incomplete ({'; '.join(incomplete)})"
+        elif len(names) == 1:
+            host, reason = next(iter(names)), None
+        elif not names:
+            host, reason = None, f"victim host unknown for {ip}: no host record carries host.ip {ip}"
+        else:
+            host, reason = None, f"victim host ambiguous for {ip}: {sorted(names)[:5]}"
+        self.repo.update_task(task_id, "evaluated", outcome={"host": host, "reason": reason},
+                              owner_token=self.owner_token)
+        return host, reason
+
     def _execute_partitions(
         self,
         intent: SearchIntent,
