@@ -225,11 +225,13 @@ _TAR_LONG_MODE = {"--create": "c", "--extract": "x", "--get": "x", "--list": "t"
                   "--update": "u", "--concatenate": "r"}
 
 
-def tar_spec(args: list[str]) -> tuple[bool, list[str]]:
-    """(is_staging, input paths) for a tar invocation. Only create/append/update modes stage data; extract
-    and list do not. The archive file (-f) and chdir (-C) values are not inputs."""
+def tar_spec(args: list[str]) -> tuple[bool, list[str], str | None]:
+    """(is_staging, input paths, chdir) for a tar invocation. Only create/append/update modes stage data;
+    extract and list do not. The archive file (-f) and chdir (-C) values are not inputs; the chdir is returned
+    so inputs can be resolved against it."""
     modes: set[str] = set()
     inputs: list[str] = []
+    chdir: str | None = None
 
     def apply(letters: str) -> int:
         for ch in letters:
@@ -247,20 +249,31 @@ def tar_spec(args: list[str]) -> tuple[bool, list[str]]:
             inputs.extend(args[index + 1:])
             break
         if arg.startswith("--"):
-            key = arg.split("=", 1)[0]
+            key, _, inline = arg.partition("=")
             if key in _TAR_LONG_MODE:
                 modes.add(_TAR_LONG_MODE[key])
+            elif key == "--directory":
+                chdir = inline if "=" in arg else (args[index + 1] if index + 1 < len(args) else None)
+                index += 0 if "=" in arg else 1
             elif key in _TAR_LONG_VALUE and "=" not in arg:
                 index += 1
             index += 1
             continue
         if arg.startswith("-"):
-            index += 1 + apply(arg[1:])
+            letters = arg[1:]
+            apply(letters)
+            consumed = 0
+            for ch in letters:
+                if ch in _TAR_VALUE_LETTERS and index + 1 + consumed < len(args):
+                    if ch == "C":
+                        chdir = args[index + 1 + consumed]
+                    consumed += 1
+            index += 1 + consumed
             continue
         inputs.append(arg)
         index += 1
     is_staging = bool(modes & set("cru")) and not (modes & set("xt"))
-    return is_staging, inputs
+    return is_staging, inputs, chdir
 
 
 # ------------------------------------------------------------------------------------------------
@@ -277,8 +290,16 @@ _CLIENT_VALUE_OPTS = {
               "--timeout", "--contimeout", "--port", "--block-size", "-B", "--modify-window", "--max-size",
               "--min-size", "--address", "--sockopts", "--password-file", "--out-format", "--chmod",
               "--backup-dir", "--suffix"},
-    "nc": {"-e", "-c", "-p", "-s", "-w", "-i", "-x", "-X", "-q", "-b", "-g", "-G", "-O", "-T"},
+    "nc": {"-e", "-c", "-p", "-s", "-w", "-i", "-x", "-X", "-q", "-b", "-g", "-G", "-O", "-T",
+           "--exec", "--sh-exec", "--lua-exec", "--source", "--source-port", "--wait", "--proxy",
+           "--proxy-type", "--proxy-auth", "--ssl-cert", "--ssl-key", "--max-conns", "--delay",
+           "--output", "--idle-timeout"},
 }
+
+
+def client_operands(name: str, args: list[str]) -> list[str]:
+    """Non-option operands of a remote-service client, in order."""
+    return operands_after_options(args, _CLIENT_VALUE_OPTS.get(name, set()))
 
 
 def operands_after_options(args: list[str], value_opts: set[str]) -> list[str]:

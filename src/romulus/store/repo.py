@@ -437,6 +437,7 @@ class Repo:
         allowed = {
             "claim", "event_ids", "severity", "confidence", "lane", "priority",
             "priority_reasons", "gate_results", "source_anchor_id", "source_link_id",
+            "predicate_fields", "entities", "ts",
         }
         if not values or not set(values) <= allowed:
             raise ValueError("unsupported context candidate update")

@@ -156,7 +156,7 @@ class ContextPlaybook(Playbook):
                 match.notes.append("lane capped at lead: the context link is inferred")
             elif link.strength == "observed" and match.proposed_lane == "urgent":
                 match.proposed_lane = "high"
-                match.notes.append("lane capped at high until context rules are lab evaluated")
+                match.notes.append("lane capped at high: a context finding never reaches the urgent lane")
             cited = {event.id: event for event in match.events + anchor.events + link.evidence_events}
             match.events = sorted(cited.values(), key=lambda event: (event.ts, event.id))
         return matches

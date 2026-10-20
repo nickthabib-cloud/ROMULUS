@@ -62,16 +62,24 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         ),
     )
     stronger = LANE_ORDER.get(row["lane"], 9) < LANE_ORDER.get(existing["lane"], 9)
+    # A wider expansion window re-runs the rule over more of the same session and so cites a superset of the
+    # evidence. When the incoming evaluation grew the evidence, adopt its freshly built claim and predicate so
+    # the published claim matches the merged records regardless of which window was evaluated first. The lane
+    # only ever rises (a merge never lowers it).
+    grew = set(row["event_ids"]) > set(existing["event_ids"])
     updates = {
         "gate_results": gates,
         "event_ids": sorted(set(existing["event_ids"] + row["event_ids"])),
     }
-    if stronger:
+    if stronger or grew:
         updates.update({
             key: row[key] for key in (
-                "claim", "severity", "confidence", "lane", "priority", "priority_reasons",
-                "source_anchor_id", "source_link_id",
+                "claim", "predicate_fields", "entities", "ts", "source_anchor_id", "source_link_id",
             )
+        })
+    if stronger:
+        updates.update({
+            key: row[key] for key in ("severity", "confidence", "lane", "priority", "priority_reasons")
         })
     repo.update_context_candidate(row["id"], updates, owner_token=owner_token)
     return repo.candidate(row["id"])

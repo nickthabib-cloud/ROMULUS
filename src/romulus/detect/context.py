@@ -8,7 +8,8 @@ assure a complete negative.
 
 Findings are aggregated per session so that one foothold does not produce one finding per command, and lanes
 follow a deliberate policy: a broad rule sits at `lead` until stronger context (a discovery burst, an
-unbrokered root process, a staged-then-exfiltrated file, a client-plus-connect to an admin port) raises it.
+unbrokered root transition, a staged-then-exfiltrated file, a client-plus-matching-connect to an admin port)
+raises it. Every matching record is cited; the claim text lists up to a fixed number and gives exact totals.
 """
 from __future__ import annotations
 
@@ -28,19 +29,20 @@ from romulus.detect.base import (
 )
 from romulus.detect.host import is_internal
 from romulus.detect.linux_argv import (
+    client_operands,
     is_suid_perm,
     is_under,
     nc_destination,
     normalize_path,
-    operands_after_options,
     program,
     read_operands,
+    remote_endpoint,
     scp_remote_host,
     split_flags,
     ssh_destination,
     tar_spec,
 )
-from romulus.evidence.shellparse import parse_script, shell_script_of
+from romulus.evidence.shellparse import UnknownShellScript, parse_script, shell_script_of
 from romulus.evidence.typed import Outcome, TypedEvent
 
 # Anchor classes that denote a host-attributed foothold whose session or lineage is worth judging. A
@@ -56,8 +58,9 @@ EXEC_REQUIRED = {"process_exec": ("process.executable", "process.argv")}
 # Directories whose enumeration is post-access reconnaissance rather than routine listing.
 SENSITIVE_DIRS = ("/etc", "/root", "/home", "/var/www", "/opt", "/srv", "/boot", "/var/log", "/var/lib")
 # Elevation helpers: a root process brokered by one of these is a normal elevation, not an exploit signal.
-ELEVATION_HELPERS = {"sudo", "su", "pkexec", "doas"}
-CITE_LIMIT = 12
+ELEVATION_HELPERS = {"sudo", "su", "pkexec", "doas", "run0"}
+# How many items the claim text lists before "and N more"; every matching record is still cited.
+CLAIM_DISPLAY = 8
 
 
 def _context_suffix(anchor: ContextAnchor, link: ContextLink) -> str:
@@ -89,19 +92,77 @@ def _outcome_summary(events: list[TypedEvent]) -> tuple[str, bool, bool]:
     return text, counts[Outcome.success] > 0, counts[Outcome.failure] > 0
 
 
-def _cite(events: list[TypedEvent]) -> list[TypedEvent]:
-    return sorted(events, key=lambda event: (event.ts, event.id))[:CITE_LIMIT]
-
-
-def _predicate(events: list[TypedEvent], *fields: str):
-    out = []
+def _dedup_sorted(events: list[TypedEvent]) -> list[TypedEvent]:
+    seen: dict[str, TypedEvent] = {}
     for event in events:
+        seen[event.id] = event
+    return sorted(seen.values(), key=lambda event: (event.ts, event.id))
+
+
+def _and_more(items: list[str]) -> str:
+    """List up to CLAIM_DISPLAY items, then 'and N more' with the exact remaining count."""
+    unique = list(dict.fromkeys(items))
+    shown = unique[:CLAIM_DISPLAY]
+    text = ", ".join(shown)
+    if len(unique) > len(shown):
+        text += f", and {len(unique) - len(shown)} more"
+    return text
+
+
+def _predicate_all(events: list[TypedEvent], *fields: str):
+    """One predicate field per cited record for each present field, so every citation has field lineage."""
+    out = []
+    for event in _dedup_sorted(events):
         for name in fields:
             if event.has(name):
                 out.append(pf(event, name))
-        if out:
-            break
     return out
+
+
+# ------------------------------------------------------------------------------------------------
+# Process-lineage helpers (shared by privilege and lateral rules).
+# ------------------------------------------------------------------------------------------------
+
+def _exec_index(events: list[TypedEvent]) -> dict:
+    index: dict[tuple, list[TypedEvent]] = defaultdict(list)
+    for event in events:
+        if event.family != "process_exec":
+            continue
+        pid = event.get("process.pid")
+        if isinstance(pid, int):
+            index[(event.host, pid)].append(event)
+    for bucket in index.values():
+        bucket.sort(key=lambda event: (event.ts, event.id))
+    return index
+
+
+def _latest_at(index: dict, host, pid, ts) -> TypedEvent | None:
+    if not isinstance(pid, int):
+        return None
+    best = None
+    for event in index.get((host, pid), ()):
+        if event.ts <= ts:
+            best = event
+        else:
+            break
+    return best
+
+
+def _ancestors(index: dict, event: TypedEvent, limit: int = 24) -> tuple[list[TypedEvent], bool]:
+    """Lineage ancestors through the ppid chain, and whether the chain was fully established (reached a session
+    leader / pid 0 or 1). A broken chain (an unknown parent) returns complete=False."""
+    out: list[TypedEvent] = []
+    pid = event.get("process.ppid")
+    ts = event.ts
+    for _ in range(limit):
+        if not isinstance(pid, int) or pid in (0, 1):
+            return out, True
+        ancestor = _latest_at(index, event.host, pid, ts)
+        if ancestor is None:
+            return out, False
+        out.append(ancestor)
+        pid, ts = ancestor.get("process.ppid"), ancestor.ts
+    return out, True
 
 
 class _HostContextRule(ContextPlaybook):
@@ -113,9 +174,8 @@ class _HostContextRule(ContextPlaybook):
     assures_negative = False
     claim_type = "correlated_observation"
 
-    def _finish(self, match: Match, cited: list[TypedEvent], anchor: ContextAnchor,
-                link: ContextLink) -> Match:
-        # M7: a failed exec cannot carry a high-lane claim on its own.
+    def _finish(self, match: Match, cited: list[TypedEvent]) -> Match:
+        # A failed exec cannot carry a high-lane claim on its own.
         _summary, succeeded, failed = _outcome_summary(cited)
         if match.proposed_lane == "high" and failed and not succeeded:
             match.proposed_lane, match.severity = "lead", "medium"
@@ -199,6 +259,7 @@ def _ls_is_sensitive(args: list[str], cwd: str | None) -> bool:
 
 def _env_is_discovery(args: list[str]) -> bool:
     # env/printenv only enumerate when no command follows. `#!/usr/bin/env python3` runs as [env, python3, x].
+    from romulus.detect.linux_argv import operands_after_options
     return all("=" in operand for operand in operands_after_options(args, _ENV_VALUE))
 
 
@@ -284,21 +345,20 @@ class PostAccessDiscovery(_HostContextRule):
         out = []
         for key, hits in groups.items():
             techniques = sorted({technique for technique, _behavior, _event in hits})
-            behaviors = sorted({behavior for _technique, behavior, _event in hits})
-            cited = _cite([event for _t, _b, event in hits])
-            summary, _succeeded, _failed = _outcome_summary([event for _t, _b, event in hits])
+            behaviors = [behavior for _technique, behavior, _event in hits]
+            cited = _dedup_sorted([event for _t, _b, event in hits])
+            summary, _succeeded, _failed = _outcome_summary(cited)
             lane = "high" if len(techniques) >= 3 else "lead"
-            burst = ("a discovery burst" if lane == "high"
-                     else "discovery activity")
-            claim = (f"On {key[0]}, {burst}: {len(hits)} command(s) across {len(techniques)} distinct "
-                     f"discovery class(es) [{', '.join(behaviors)}] ran in this session. {summary}. "
-                     f"{_context_suffix(anchor, link)}")
+            burst = "a discovery burst" if lane == "high" else "discovery activity"
+            claim = (f"On {key[0]}, {burst}: {len(cited)} command(s) across {len(techniques)} distinct "
+                     f"discovery class(es) [{_and_more(sorted(set(behaviors)))}] ran in this session. "
+                     f"{summary}. {_context_suffix(anchor, link)}")
             match = Match(self.id, claim, self.claim_type, cited,
-                          _predicate(cited, "process.executable", "process.argv"), cited[0].ts,
+                          _predicate_all(cited, "process.executable", "process.argv"), cited[0].ts,
                           "high" if lane == "high" else "medium", lane, "medium",
                           cited[0].entities(), group_key=f"discovery|{_group_id(key)}")
             match.notes.extend(techniques)
-            out.append(self._finish(match, cited, anchor, link))
+            out.append(self._finish(match, cited))
         return out
 
 
@@ -311,13 +371,12 @@ _SUDO_VALUE_LETTERS = set("ugUChprtDR")
 
 
 def _sudo_is_list(args: list[str]) -> bool:
-    """True when sudo's own options request --list, parsing only sudo options and stopping at the command."""
+    """True when sudo's own options request --list, parsing only sudo options and stopping at the command. A
+    value letter inside a short group consumes the rest of the group, but an `l` seen before it still counts."""
     index = 0
     while index < len(args):
         arg = args[index]
         if arg == "--list" or arg.startswith("--list"):
-            return True
-        if arg in {"-l", "-ll"}:
             return True
         if arg in _SUDO_VALUE_OPTS:
             index += 2
@@ -326,24 +385,35 @@ def _sudo_is_list(args: list[str]) -> bool:
             index += 1
             continue
         if arg.startswith("-") and arg != "-":
-            letters = set(arg[1:])
-            if letters & _SUDO_VALUE_LETTERS:
-                return False                      # a value-taking option; not a plain -l
-            if "l" in letters:
-                return True
+            for letter in arg[1:]:
+                if letter == "l":
+                    return True
+                if letter in _SUDO_VALUE_LETTERS:
+                    break                          # consumes the rest of the group as its value
             index += 1
             continue
-        return False                              # first operand is the command sudo will run
+        return False                               # first operand is the command sudo will run
     return False
 
 
-def _root_identity(event: TypedEvent) -> str | None:
-    """The typed field that shows effective uid 0, or None. euid is preferred when both are present."""
-    if str(event.get("process.euid")) == "0":
-        return "process.euid"
+_PRIVATE_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk", "identity"}
+
+
+def _matched_root_field(event: TypedEvent) -> str | None:
     if str(event.get("process.uid")) == "0":
         return "process.uid"
+    if str(event.get("process.euid")) == "0":
+        return "process.euid"
     return None
+
+
+def _is_real_root(event: TypedEvent) -> bool:
+    return str(event.get("process.uid")) == "0"
+
+
+def _is_euid_only(event: TypedEvent) -> bool:
+    uid = event.get("process.uid")
+    return str(event.get("process.euid")) == "0" and uid is not None and str(uid) not in {"0", "4294967295", "-1"}
 
 
 def _login_user_is_nonroot(event: TypedEvent) -> bool:
@@ -369,12 +439,12 @@ def _classify_probe(prog, event: TypedEvent) -> tuple[str, str] | None:
 
 class PrivilegeProbing(_HostContextRule):
     id = "context.privilege_probing"
-    version = "2"
+    version = "3"
     title = "Privilege probing or escalation in an anchored session or lineage"
     families = ("process_exec",)
     positive_only_reason = ("the probing commands and the setuid/sudo/capability operands are identified from "
-                            "argv, and an effective-uid-0 process is visible only when its exec was recorded; "
-                            "absence proves neither that privileges were not probed nor that none were gained")
+                            "argv, and a root process is visible only when its exec was recorded; absence proves "
+                            "neither that privileges were not probed nor that none were gained")
     severity, lane = "medium", "lead"
     attack = ("T1548", "T1548.001", "T1548.003", "T1068")
     benign = ("an administrator checking their own sudo rights or auditing setuid binaries",
@@ -386,61 +456,126 @@ class PrivilegeProbing(_HostContextRule):
 
     def match_linked(self, anchor, link, events):
         eligible = self.eligible(events, EXEC_REQUIRED)
+        index = _exec_index(eligible)
         probes: dict[tuple, list[tuple[str, str, TypedEvent]]] = defaultdict(list)
-        helper_ts: dict[tuple, float] = {}
-        root_events: dict[tuple, TypedEvent] = {}
+        setuid: dict[tuple, list[tuple[str, TypedEvent]]] = defaultdict(list)
+        helper_first: dict[tuple, object] = {}
+        transitions: list[tuple[TypedEvent, TypedEvent | None, tuple]] = []
+        seen_transition: set[tuple] = set()
         for event in sorted(eligible, key=lambda item: (item.ts, item.id)):
             prog = program(event)
             if prog is None:
                 continue
             key = _session_key(event, anchor)
-            if prog.name in ELEVATION_HELPERS and key not in helper_ts:
-                helper_ts[key] = event.ts.timestamp()
+            if prog.name in ELEVATION_HELPERS and key not in helper_first:
+                helper_first[key] = event.ts
             found = _classify_probe(prog, event)
             if found is not None:
                 probes[key].append((found[0], found[1], event))
-            if (key not in root_events and _root_identity(event) is not None
-                    and _login_user_is_nonroot(event)):
-                root_events[key] = event
+            if not _login_user_is_nonroot(event):
+                continue
+            if _is_real_root(event):
+                parent = _latest_at(index, event.host, event.get("process.ppid"), event.ts)
+                if parent is not None and _is_real_root(parent):
+                    continue                        # inherited root, not a transition
+                tkey = (event.host, event.get("host.boot.id"), key[2], event.get("process.pid"),
+                        event.get("process.executable"))
+                if tkey in seen_transition:
+                    continue
+                seen_transition.add(tkey)
+                transitions.append((event, parent, key))
+            elif _is_euid_only(event) and prog.name not in ELEVATION_HELPERS:
+                setuid[key].append((prog.name, event))
 
+        out = []
+        out.extend(self._probe_findings(probes, anchor, link))
+        out.extend(self._transition_findings(transitions, index, helper_first, anchor, link))
+        out.extend(self._setuid_findings(setuid, anchor, link))
+        return out
+
+    def _probe_findings(self, probes, anchor, link):
         out = []
         for key, hits in probes.items():
             techniques = sorted({technique for technique, _b, _e in hits})
-            behaviors = sorted({behavior for _t, behavior, _e in hits})
-            cited = _cite([event for _t, _b, event in hits])
-            summary, _s, _f = _outcome_summary([event for _t, _b, event in hits])
-            claim = (f"On {key[0]}, privilege probing in this session: {', '.join(behaviors)}. {summary}. "
+            behaviors = [behavior for _t, behavior, _e in hits]
+            cited = _dedup_sorted([event for _t, _b, event in hits])
+            summary, _s, _f = _outcome_summary(cited)
+            claim = (f"On {key[0]}, privilege probing in this session: {_and_more(behaviors)}. {summary}. "
                      f"{_context_suffix(anchor, link)}")
             match = Match(self.id, claim, self.claim_type, cited,
-                          _predicate(cited, "process.executable", "process.argv"), cited[0].ts,
+                          _predicate_all(cited, "process.executable", "process.argv"), cited[0].ts,
                           "medium", "lead", "medium", cited[0].entities(),
                           group_key=f"privprobe|{_group_id(key)}")
             match.notes.extend(techniques)
-            out.append(self._finish(match, cited, anchor, link))
+            out.append(self._finish(match, cited))
+        return out
 
-        for key, event in root_events.items():
-            field = _root_identity(event)
-            brokered = key in helper_ts and helper_ts[key] <= event.ts.timestamp()
-            lane = "lead" if brokered else "high"
-            auid = event.get("process.auid")
-            broker = ("an elevation helper (sudo/su/pkexec/doas) earlier in the session brokered it"
-                      if brokered else "no elevation helper preceded it in the session (an exploit signal)")
-            claim = (f"On {key[0]}, a process ran with {field.split('.')[-1]}=0 (root) while the session's "
-                     f"kernel-recorded login user is the non-root account auid={auid}; {broker}. "
-                     f"{outcome_phrase(event)}. {_context_suffix(anchor, link)}")
-            match = Match(self.id, claim, self.claim_type, [event],
-                          _predicate([event], field, "process.auid", "process.executable"), event.ts,
-                          "high" if lane == "high" else "medium", lane, "medium", event.entities(),
-                          group_key=f"euid0|{_group_id(key)}")
+    def _transition_findings(self, transitions, index, helper_first, anchor, link):
+        out = []
+        for event, parent, key in transitions:
+            ancestors, _complete = _ancestors(index, event)
+            helper_ancestor = next(
+                (a for a in ancestors
+                 if (prog := program(a)) is not None and prog.name in ELEVATION_HELPERS), None)
+            lineage_known = parent is not None
+            earlier_helper = key in helper_first and helper_first[key] <= event.ts
+            cited = [event]
+            if helper_ancestor is not None:
+                cited.append(helper_ancestor)
+                lane, techniques = "lead", ["T1548"]
+                note = (f"an elevation helper ({basename(str(helper_ancestor.get('process.executable')))}) is a "
+                        "lineage ancestor through the ppid chain, so this is a brokered elevation")
+            elif not lineage_known:
+                if earlier_helper:
+                    lane, techniques = "lead", ["T1548"]
+                    note = ("the process lineage could not be established from the linked records, and an "
+                            "elevation helper ran earlier in the session; brokering cannot be ruled out")
+                else:
+                    lane, techniques = "high", ["T1548", "T1068"]
+                    note = ("the process lineage could not be established from the linked records and no "
+                            "elevation helper ran earlier in the session")
+            else:
+                lane, techniques = "high", ["T1548", "T1068"]
+                note = ("no elevation helper is an ancestor in the recorded lineage"
+                        + ("; a helper ran earlier in the session but is not an ancestor"
+                           if earlier_helper else ""))
+            field = _matched_root_field(event) or "process.uid"
+            auid, pid = event.get("process.auid"), event.get("process.pid")
+            exe = basename(str(event.get("process.executable")))
+            claim = (f"On {event.host}, a process ({exe}, pid {pid}) ran with uid=0 (a root transition whose "
+                     f"parent is not root) while the session's kernel-recorded login user is the non-root "
+                     f"account auid={auid}; {note}. {outcome_phrase(event)}. {_context_suffix(anchor, link)}")
+            match = Match(self.id, claim, self.claim_type, _dedup_sorted(cited),
+                          _predicate_all(cited, field, "process.uid", "process.euid", "process.auid",
+                                         "process.executable", "process.ppid"),
+                          event.ts, "high" if lane == "high" else "medium", lane, "medium", event.entities(),
+                          group_key=f"euid0|{event.host}|{event.get('host.boot.id')}|{key[2]}|{pid}|"
+                                    f"{event.get('process.executable')}")
+            match.notes.extend(techniques)
+            out.append(self._finish(match, [event]))
+        return out
+
+    def _setuid_findings(self, setuid, anchor, link):
+        out = []
+        for key, hits in setuid.items():
+            names = [name for name, _e in hits]
+            cited = _dedup_sorted([event for _n, event in hits])
+            summary, _s, _f = _outcome_summary(cited)
+            claim = (f"On {key[0]}, a setuid program ran with euid=0 while its real uid is non-root "
+                     f"({_and_more(sorted(set(names)))}); this is a setuid-binary elevation, not a root "
+                     f"transition. {summary}. {_context_suffix(anchor, link)}")
+            match = Match(self.id, claim, self.claim_type, cited,
+                          _predicate_all(cited, "process.euid", "process.uid", "process.auid",
+                                         "process.executable"),
+                          cited[0].ts, "medium", "lead", "medium", cited[0].entities(),
+                          group_key=f"setuid|{_group_id(key)}")
             match.notes.append("T1548")
-            if not brokered:
-                match.notes.append("T1068")
-            out.append(self._finish(match, [event], anchor, link))
+            out.append(self._finish(match, cited))
         return out
 
 
 # ================================================================================================
-# Credential access (T1003.008, T1552.001, T1552.003, T1552.004, T1555.003, T1555.005).
+# Credential access (T1003, T1003.008, T1552.001, T1552.003, T1552.004, T1555.003, T1555.005).
 # ================================================================================================
 
 _SHADOW_SET = {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-", "/etc/security/opasswd"}
@@ -448,6 +583,15 @@ _HISTORY_NAMES = {".bash_history", ".zsh_history", ".sh_history", ".ash_history"
                   ".mysql_history", ".psql_history", ".rediscli_history"}
 _PROC_MEM = re.compile(r"^/proc/\d+/mem$")
 _PROC_SHADOW = re.compile(r"^/proc/\d+/root/etc/g?shadow$")
+
+
+def _is_private_key_path(path: str, name: str) -> bool:
+    if name in _PRIVATE_KEY_NAMES:
+        return True
+    if name.startswith("ssh_host_") and name.endswith("_key"):
+        return True
+    under_ssh = "/.ssh/" in path or path.startswith("/etc/ssh/")
+    return under_ssh and not name.endswith(".pub") and name.endswith(("_key", ".pem", ".key"))
 
 
 def classify_credential(path: str) -> tuple[str, str, str] | None:
@@ -460,8 +604,7 @@ def classify_credential(path: str) -> tuple[str, str, str] | None:
         return ("T1003", "high", f"process memory via {path}")
     if _PROC_SHADOW.match(path):
         return ("T1003.008", "high", f"the host password-hash file through {path}")
-    if (name.startswith("id_") and not name.endswith(".pub")) or \
-            (name.startswith("ssh_host_") and name.endswith("_key")) or name == "identity":
+    if _is_private_key_path(path, name):
         return ("T1552.004", "high", f"the private key file {path}")
     if path.startswith("/etc/ssl/private/") and name.endswith((".key", ".pem")):
         return ("T1552.004", "high", f"the private key file {path}")
@@ -507,7 +650,7 @@ class CredentialAccessInContext(_HostContextRule):
                    "the other commands in the same session")
 
     def match_linked(self, anchor, link, events):
-        groups: dict[tuple, list[tuple[str, str, TypedEvent]]] = defaultdict(list)
+        groups: dict[tuple, list[tuple[str, TypedEvent]]] = defaultdict(list)
         for event in self.eligible(events, EXEC_REQUIRED):
             prog = program(event)
             if prog is None:
@@ -521,76 +664,185 @@ class CredentialAccessInContext(_HostContextRule):
 
         out = []
         for (key, technique, lane), hits in groups.items():
-            cited = _cite([event for _desc, event in hits])
-            descs = sorted({desc for desc, _event in hits})
-            summary, _s, _f = _outcome_summary([event for _desc, event in hits])
-            claim = (f"On {key[0]}, a file-reading tool was run against {', '.join(descs)} in this session. "
-                     f"{summary}. {_context_suffix(anchor, link)}")
+            cited = _dedup_sorted([event for _desc, event in hits])
+            descs = [desc for desc, _event in hits]
+            summary, _s, _f = _outcome_summary(cited)
+            claim = (f"On {key[0]}, a file-reading tool was run against {_and_more(sorted(set(descs)))} in this "
+                     f"session. {summary}. {_context_suffix(anchor, link)}")
             match = Match(self.id, claim, self.claim_type, cited,
-                          _predicate(cited, "process.executable", "process.argv"), cited[0].ts,
+                          _predicate_all(cited, "process.executable", "process.argv"), cited[0].ts,
                           "high" if lane == "high" else "medium", lane, "medium", cited[0].entities(),
                           group_key=f"cred|{_group_id(key)}|{technique}")
             match.notes.append(technique)
-            out.append(self._finish(match, cited, anchor, link))
+            out.append(self._finish(match, cited))
         return out
 
 
 # ================================================================================================
-# Staging and transfer (T1560.001, T1074.001, T1027.013, T1048, T1570, T1021.004).
+# Staging and transfer (T1560.001, T1074.001, T1027.013, T1048, T1570, T1021.004, T1105).
 # ================================================================================================
 
-_ARCHIVERS = {"tar", "zip", "7z", "7za", "cpio", "pax"}
 _COMPRESSORS = {"gzip", "bzip2", "xz", "zstd", "pigz", "lz4", "compress"}
 _ENCODERS = {"base64", "base32", "xxd", "uuencode"}
-_DECODE_FLAGS = {"-d", "--decode", "--uncompress", "-r"}
+_DECOMPRESS_NAMES = {"gunzip", "bunzip2", "unxz", "unzstd", "zcat", "lzcat", "bzcat", "xzcat", "uncompress",
+                     "lz4cat"}
+_DECODE_BY_TOOL = {
+    "gzip": {"-d", "--decompress", "--uncompress"}, "bzip2": {"-d", "--decompress"},
+    "xz": {"-d", "--decompress"}, "zstd": {"-d", "--decompress", "--uncompress"},
+    "lz4": {"-d", "--decompress"}, "compress": {"-d", "--uncompress"}, "pigz": {"-d", "--decompress"},
+    "base64": {"-d", "--decode"}, "base32": {"-d", "--decode"}, "xxd": {"-r"},
+}
 
 
-def _sensitive_input(inputs: list[str], cwd: str | None) -> str | None:
+def _sensitive_input(inputs: list[str], base: str | None) -> str | None:
     for item in inputs:
-        path = normalize_path(item, cwd)
+        path = normalize_path(item, base)
         if path and is_under(path, SENSITIVE_DIRS):
             return path
     return None
 
 
-def _shell_devtcp_target(event: TypedEvent) -> str | None:
-    """A /dev/tcp or /dev/udp redirection target inside a shell -c command's script text."""
+def _is_decode(name: str, args: list[str]) -> bool:
+    flags, _operands = split_flags(args)
+    return bool(flags & _DECODE_BY_TOOL.get(name, set()))
+
+
+def _shell_devtcp(event: TypedEvent) -> tuple[str, str, str] | None:
+    """Classify a shell -c command's /dev/tcp or /dev/udp redirection. Outbound write -> T1048 transfer;
+    inbound read -> T1105 ingress. A shell -c whose script cannot be safely parsed is 'unknown' (counted)."""
     argv = event.get("process.argv")
     if not isinstance(argv, list):
         return None
     script = shell_script_of([str(item) for item in argv])
-    if not isinstance(script, str):
-        return None
+    if script is None:
+        return None                                # not a shell -c command
+    if isinstance(script, UnknownShellScript):
+        return ("T1048", "unknown", "a shell -c command whose script position is not safely modelled")
     parsed = parse_script(script)
+    if not parsed.ok:
+        return ("T1048", "unknown", "a shell -c command whose script text could not be fully parsed")
+    out_target = in_target = None
     for command in parsed.commands():
-        for _op, target in command.redirects:
-            if target.startswith(("/dev/tcp/", "/dev/udp/")):
-                return target
+        for op, target in command.redirects:
+            if not target.startswith(("/dev/tcp/", "/dev/udp/")):
+                continue
+            if ">" in op:
+                out_target = target
+            elif "<" in op:
+                in_target = target
+    if out_target is not None:
+        return ("T1048", "transfer", f"shell command text that redirects output to {out_target}")
+    if in_target is not None:
+        return ("T1105", "ingress", f"shell command text that reads from {in_target}")
+    return None
+
+
+def _curl_upload_files(args: list[str]) -> list[str]:
+    data_flags = {"-d", "--data", "--data-binary", "--data-urlencode"}
+    upload_flags = {"-T", "--upload-file"}
+    form_flags = {"-F", "--form"}
+    files: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        key, _, inline = arg.partition("=")
+        if arg in upload_flags and index + 1 < len(args):
+            files.append(args[index + 1]); index += 2; continue
+        if key in upload_flags and "=" in arg:
+            files.append(inline); index += 1; continue
+        if arg.startswith("-d") and len(arg) > 2 and arg[2] == "@":
+            files.append(arg[3:]); index += 1; continue
+        if arg in data_flags and index + 1 < len(args):
+            files += _curl_data_file(arg, args[index + 1]); index += 2; continue
+        if key in data_flags and "=" in arg:
+            files += _curl_data_file(key, inline); index += 1; continue
+        if arg in form_flags and index + 1 < len(args):
+            files += _curl_form_file(args[index + 1]); index += 2; continue
+        if key in form_flags and "=" in arg:
+            files += _curl_form_file(inline); index += 1; continue
+        index += 1
+    return [f for f in dict.fromkeys(files) if f]
+
+
+def _curl_data_file(flag: str, value: str) -> list[str]:
+    if flag == "--data-urlencode":
+        if value.startswith("@"):
+            return [value[1:]]
+        if "@" in value:
+            return [value.split("@", 1)[1]]
+        return []
+    return [value[1:]] if value.startswith("@") else []
+
+
+def _curl_form_file(value: str) -> list[str]:
+    if "=" not in value:
+        return []
+    rhs = value.split("=", 1)[1]
+    if rhs.startswith(("@", "<")):
+        return [rhs[1:].split(";", 1)[0]]
+    return []
+
+
+def _wget_upload_files(args: list[str]) -> list[str]:
+    upload_flags = {"--post-file", "--body-file"}
+    files: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        key, _, inline = arg.partition("=")
+        if arg in upload_flags and index + 1 < len(args):
+            files.append(args[index + 1]); index += 2; continue
+        if key in upload_flags and "=" in arg:
+            files.append(inline); index += 1; continue
+        index += 1
+    return [f for f in files if f]
+
+
+def _client_transfer(name: str, args: list[str]) -> tuple[str, str, str] | None:
+    operands = client_operands(name, args)
+    if not operands:
+        return None
+    destination = remote_endpoint(operands[-1])
+    if destination:
+        technique = "T1021.004" if name in {"scp", "sftp"} else "T1570"
+        return (technique, "transfer",
+                f"an outbound '{name}' transfer to remote host '{destination}' (the destination operand)")
+    for operand in operands[:-1]:
+        source = remote_endpoint(operand)
+        if source:
+            return ("T1105", "ingress", f"an inbound '{name}' copy from remote host '{source}'")
     return None
 
 
 def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
-    """(technique, kind, description) where kind is 'stage' or 'transfer', or None. 'stage' is reported only
-    for a sensitive input."""
+    """(technique, kind, description); kind is 'stage', 'transfer', 'ingress' or 'unknown'. 'stage' needs a
+    sensitive input; 'unknown' means a shell -c script that could not be parsed (counted as partial)."""
     name, args = prog.name, prog.args
     cwd = event.get("process.cwd")
-    flags, _operands = split_flags(args)
     if name == "tar":
-        staging, inputs = tar_spec(args)
-        sensitive = _sensitive_input(inputs, cwd) if staging else None
+        staging, inputs, chdir = tar_spec(args)
+        sensitive = _sensitive_input(inputs, chdir or cwd) if staging else None
         if sensitive:
-            return ("T1560.001", "stage", f"an archive over the sensitive path {sensitive}")
+            return ("T1560.001", "stage", f"a tar archive over the sensitive path {sensitive}")
         return None
-    if name in _ARCHIVERS or name in _COMPRESSORS:
-        if flags & _DECODE_FLAGS or name in {"gunzip", "bunzip2", "unxz", "unzip", "zcat", "lzcat"}:
+    if name in _COMPRESSORS:
+        if name in _DECOMPRESS_NAMES or _is_decode(name, args):
             return None
         _flags, operands = split_flags(args)
         sensitive = _sensitive_input(operands, cwd)
         if sensitive:
-            return ("T1560.001", "stage", f"an archive/compression command over the sensitive path {sensitive}")
+            return ("T1560.001", "stage", f"a '{name}' compression over the sensitive path {sensitive}")
+        return None
+    if name in {"zip", "7z", "7za"}:
+        flags, operands = split_flags(args)
+        if flags & {"-d", "--delete"}:
+            return None                            # zip -d deletes entries, it does not stage
+        sensitive = _sensitive_input(operands[1:], cwd)   # first operand is the archive (output)
+        if sensitive:
+            return ("T1560.001", "stage", f"a '{name}' archive over the sensitive path {sensitive}")
         return None
     if name in _ENCODERS:
-        if flags & _DECODE_FLAGS:
+        if _is_decode(name, args):
             return None
         _flags, operands = split_flags(args)
         sensitive = _sensitive_input(operands, cwd)
@@ -598,75 +850,37 @@ def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
             return ("T1027.013", "stage", f"an encoding command ('{name}') over the sensitive path {sensitive}")
         return None
     if name in {"scp", "sftp", "rsync"}:
-        host = scp_remote_host(name, args)
-        if host:
-            technique = "T1021.004" if name in {"scp", "sftp"} else "T1570"
-            return (technique, "transfer", f"an outbound '{name}' transfer to remote host '{host}'")
-        return None
+        return _client_transfer(name, args)
     if name == "curl":
-        if flags & {"-T", "--upload-file", "-F", "--form"} or any(
-                a.startswith(("-d", "--data")) and "@" in _value_of(args, a) for a in args):
-            files = _upload_files(args, {"-T", "--upload-file"}, data_flags=True)
-            return ("T1048", "transfer", f"an outbound 'curl' invoked with upload options naming file(s) {files}")
+        files = _curl_upload_files(args)
+        if files:
+            return ("T1048", "transfer",
+                    f"an outbound 'curl' invoked with upload options naming file(s) {', '.join(files)}")
         return None
     if name == "wget":
-        if flags & {"--post-file", "--body-file"} or any(a.startswith(("--post-file=", "--body-file=",
-                                                                        "--post-data=")) for a in args) \
-                or "--post-data" in flags:
-            files = _upload_files(args, {"--post-file", "--body-file"}, data_flags=False)
-            return ("T1048", "transfer", f"an outbound 'wget' invoked with upload options naming file(s) {files}")
+        files = _wget_upload_files(args)
+        if files:
+            return ("T1048", "transfer",
+                    f"an outbound 'wget' invoked with upload options naming file(s) {', '.join(files)}")
         return None
     if name == "nc":
         host, listen = nc_destination(args)
         if host and not listen:
             return ("T1048", "transfer", f"an outbound 'nc' client connection to '{host}'")
         return None
-    target = _shell_devtcp_target(event)
-    if target is not None:
-        return ("T1048", "transfer", f"shell command text that redirects to {target}")
-    return None
-
-
-def _value_of(args: list[str], flag: str) -> str:
-    if "=" in flag:
-        return flag.split("=", 1)[1]
-    if flag.startswith("-d") and len(flag) > 2:
-        return flag[2:]
-    try:
-        index = args.index(flag)
-    except ValueError:
-        return ""
-    return args[index + 1] if index + 1 < len(args) else ""
-
-
-def _upload_files(args: list[str], value_flags: set[str], *, data_flags: bool) -> str:
-    files = []
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg in value_flags and index + 1 < len(args):
-            files.append(args[index + 1])
-            index += 2
-            continue
-        for flag in value_flags:
-            if arg.startswith(flag + "="):
-                files.append(arg.split("=", 1)[1])
-        if data_flags and "@" in arg and arg.startswith(("-d", "--data")):
-            files.append(arg.split("@", 1)[1])
-        index += 1
-    return ", ".join(sorted({f for f in files if f})) or "(unnamed)"
+    return _shell_devtcp(event)
 
 
 class StagingAndTransfer(_HostContextRule):
     id = "context.staging_and_transfer"
     version = "2"
-    title = "Data staging or outbound transfer in an anchored session or lineage"
+    title = "Data staging or transfer in an anchored session or lineage"
     families = ("process_exec",)
     positive_only_reason = ("the archiver, encoder or transfer tool and its operands are identified from argv "
                             "and shell script text; the command line shows intent and direction but not that "
-                            "bytes were staged or left the host, so absence proves nothing")
+                            "bytes were staged or moved, so absence proves nothing")
     severity, lane = "medium", "lead"
-    attack = ("T1560.001", "T1074.001", "T1027.013", "T1048", "T1570", "T1021.004")
+    attack = ("T1560.001", "T1074.001", "T1027.013", "T1048", "T1570", "T1021.004", "T1105")
     benign = ("a backup job archiving configuration or data directories",
               "a deployment copying files to another host",
               "a packaging or build step that compresses source trees")
@@ -675,7 +889,8 @@ class StagingAndTransfer(_HostContextRule):
                    "the other commands in the same session")
 
     def match_linked(self, anchor, link, events):
-        groups: dict[tuple, dict[str, list]] = defaultdict(lambda: {"stage": [], "transfer": [], "tech": set()})
+        groups: dict[tuple, dict] = defaultdict(
+            lambda: {"stage": [], "transfer": [], "ingress": [], "tech": set()})
         for event in self.eligible(events, EXEC_REQUIRED):
             prog = program(event)
             if prog is None:
@@ -684,26 +899,33 @@ class StagingAndTransfer(_HostContextRule):
             if found is None:
                 continue
             technique, kind, desc = found
+            if kind == "unknown":
+                self.missing_required += 1         # an unparseable shell -c is partial, never a clean no-match
+                continue
             bucket = groups[_session_key(event, anchor)]
             bucket[kind].append((desc, event))
             bucket["tech"].add(technique)
 
         out = []
         for key, bucket in groups.items():
-            staged, transferred = bucket["stage"], bucket["transfer"]
-            cited = _cite([event for _desc, event in staged + transferred])
-            descs = sorted({desc for _k in ("stage", "transfer") for desc, _e in bucket[_k]})
-            summary, _s, _f = _outcome_summary([event for _desc, event in staged + transferred])
-            lane = "high" if staged and transferred else "lead"
+            kinds = [k for k in ("stage", "transfer", "ingress") if bucket[k]]
+            all_hits = [item for k in kinds for item in bucket[k]]
+            cited = _dedup_sorted([event for _desc, event in all_hits])
+            descs = [desc for _desc_kind in kinds for desc, _e in bucket[_desc_kind]]
+            summary, _s, _f = _outcome_summary(cited)
+            # High only when a sensitive input was staged and the session also ran an outbound transfer. An
+            # inbound copy (ingress) does not count toward that combination.
+            lane = "high" if bucket["stage"] and bucket["transfer"] else "lead"
             headline = ("sensitive data was staged and the session also ran an outbound transfer"
-                        if lane == "high" else "data staging or an outbound transfer")
-            claim = (f"On {key[0]}, {headline}: {'; '.join(descs)}. {summary}. {_context_suffix(anchor, link)}")
+                        if lane == "high" else "data staging or transfer")
+            claim = (f"On {key[0]}, {headline}: {_and_more(sorted(set(descs)))}. {summary}. "
+                     f"{_context_suffix(anchor, link)}")
             match = Match(self.id, claim, self.claim_type, cited,
-                          _predicate(cited, "process.executable", "process.argv"), cited[0].ts,
+                          _predicate_all(cited, "process.executable", "process.argv"), cited[0].ts,
                           "high" if lane == "high" else "medium", lane, "medium", cited[0].entities(),
                           group_key=f"stage|{_group_id(key)}")
             match.notes.extend(sorted(bucket["tech"]))
-            out.append(self._finish(match, cited, anchor, link))
+            out.append(self._finish(match, cited))
         return out
 
 
@@ -736,9 +958,26 @@ def _smbclient_target(args: list[str]) -> str | None:
     return None
 
 
+def _ip_literal(value: str | None):
+    if value is None:
+        return None
+    try:
+        return ipaddress.ip_address(str(value))
+    except ValueError:
+        return None
+
+
+class _Client:
+    __slots__ = ("event", "pid", "service", "target", "target_ip")
+
+    def __init__(self, event, service, target, pid):
+        self.event, self.service, self.target, self.pid = event, service, target, pid
+        self.target_ip = _ip_literal(target)
+
+
 class LateralMovement(_HostContextRule):
     id = "context.lateral_movement"
-    version = "2"
+    version = "3"
     title = "Lateral remote-service use from an anchored session or lineage"
     anchor_class = "lateral_movement"
     families = ("process_exec", "net_socket")
@@ -759,9 +998,10 @@ class LateralMovement(_HostContextRule):
             events, {"process_exec": ("process.executable", "process.argv"),
                      "net_socket": ("destination.ip", "destination.port")},
         )
-        # (session, target) -> {"exec":[...], "socket":[(event, success)], "tech":set}
-        groups: dict[tuple, dict] = defaultdict(lambda: {"exec": [], "socket": [], "tech": set()})
-        client_exec_ts: dict[tuple, list[float]] = defaultdict(list)
+        index = _exec_index(eligible)
+        clients: dict[tuple, list[_Client]] = defaultdict(list)
+        exec_groups: dict[tuple, dict] = defaultdict(lambda: {"exec": [], "tech": set()})
+        socket_groups: dict[tuple, dict] = defaultdict(lambda: {"socket": [], "tech": set()})
         for event in sorted(eligible, key=lambda item: (item.ts, item.id)):
             session = _session_key(event, anchor)
             if event.family == "process_exec":
@@ -774,63 +1014,104 @@ class LateralMovement(_HostContextRule):
                 if not target:
                     continue
                 technique, service = _REMOTE_CLIENTS[prog.name]
-                bucket = groups[(session, f"host:{target}")]
+                clients[session].append(_Client(event, service, target, event.get("process.pid")))
+                bucket = exec_groups[(session, f"host:{target}")]
                 bucket["exec"].append((event, service, target))
                 bucket["tech"].add(technique)
-                client_exec_ts[session].append(event.ts.timestamp())
             else:
                 if event.get("socket.syscall") != "connect":
                     continue
-                try:
-                    destination = ipaddress.ip_address(str(event.get("destination.ip")))
-                except ValueError:
-                    continue
+                destination = _ip_literal(event.get("destination.ip"))
                 port = event.get("destination.port")
-                if not _admin_internal(destination) or port not in _ADMIN_PORTS:
+                if destination is None or not _admin_internal(destination) or port not in _ADMIN_PORTS:
                     continue
                 technique, service = _ADMIN_PORTS[port]
-                bucket = groups[(session, f"addr:{destination}:{port}")]
-                bucket["socket"].append((event, service, event.outcome == Outcome.success, destination, port))
+                bucket = socket_groups[(session, f"addr:{destination}:{port}")]
+                bucket["socket"].append((event, service, destination, port))
                 bucket["tech"].add(technique)
 
         out = []
-        for (session, target), bucket in groups.items():
-            match = self._build(session, target, bucket, client_exec_ts[session], anchor, link)
-            if match is not None:
-                out.append(match)
+        for (session, target), bucket in exec_groups.items():
+            out.append(self._exec_finding(session, target, bucket, anchor, link))
+        for (session, target), bucket in socket_groups.items():
+            out.append(self._socket_finding(session, target, bucket, clients.get(session, []), index,
+                                            anchor, link))
         return out
 
-    def _build(self, session, target, bucket, exec_ts, anchor, link):
-        exec_hits, socket_hits = bucket["exec"], bucket["socket"]
-        cited = _cite([event for event, *_ in exec_hits] + [event for event, *_ in socket_hits])
-        if not cited:
-            return None
-        lane = "lead"
+    def _exec_finding(self, session, target, bucket, anchor, link):
+        cited = _dedup_sorted([event for event, *_ in bucket["exec"]])
+        lines = [f"the {service} client toward '{host}' (host as given on the command line; not resolved in "
+                 f"telemetry); {outcome_phrase(event)}" for event, service, host in bucket["exec"]]
+        claim = (f"On {session[0]}, lateral remote-service use: {_and_more(lines)}. "
+                 f"{_context_suffix(anchor, link)}")
+        match = Match(self.id, claim, self.claim_type, cited,
+                      _predicate_all(cited, "process.executable", "process.argv"), cited[0].ts,
+                      "medium", "lead", "medium", cited[0].entities(),
+                      group_key=f"lateral|{_group_id(session)}|{target}")
+        match.notes.extend(sorted(bucket["tech"]))
+        return self._finish(match, cited)
+
+    def _socket_finding(self, session, target, bucket, clients, index, anchor, link):
+        socket_events = [event for event, *_ in bucket["socket"]]
+        matched_client = None
+        matched_success = False
+        for event, _service, destination, _port in bucket["socket"]:
+            if event.outcome != Outcome.success:
+                continue
+            client = self._matching_client(event, destination, clients, index)
+            if client is not None:
+                matched_client, matched_success = client, True
+                break
         lines = []
-        for event, service, host in exec_hits[:CITE_LIMIT]:
-            lines.append(f"the {service} client toward '{host}' (host as given on the command line; not resolved "
-                         f"in telemetry); {outcome_phrase(event)}")
-        for event, service, success, destination, port in socket_hits[:CITE_LIMIT]:
+        for event, service, destination, port in bucket["socket"]:
             outcome = ("the connect() succeeded" if event.outcome == Outcome.success
                        else "the connect() failed" if event.outcome == Outcome.failure
                        else "the connect() outcome is unknown")
             lines.append(f"a kernel connect() to the internal {service} address {destination}:{port} "
                          f"(observed internal address, not a resolved host name); {outcome}")
-            if success and any(ts <= event.ts.timestamp() for ts in exec_ts):
-                lane = "high"
-        headline = ("a remote-service client was followed by a successful connect to an internal admin port"
-                    if lane == "high" else "lateral remote-service use")
-        claim = (f"On {session[0]}, {headline}: {'; '.join(lines)}. {_context_suffix(anchor, link)}")
-        predicate = _predicate([event for event, *_ in exec_hits], "process.executable", "process.argv") or \
-            _predicate([event for event, *_ in socket_hits], "destination.ip", "destination.port")
+        cited = list(socket_events)
+        tech = set(bucket["tech"])
+        if matched_success and matched_client is not None:
+            cited.append(matched_client.event)
+            tech.update(_REMOTE_CLIENTS.get(program(matched_client.event).name, ("", ""))[:1])
+            lane = "high"
+            relation = (f"this connect matches the {matched_client.service} client toward "
+                        f"'{matched_client.target}' (same target or process lineage)")
+        else:
+            lane = "lead"
+            relation = ("no remote-service client exec in this session matches this connect by target or "
+                        "process lineage; any relation to a client is temporal only")
+        cited = _dedup_sorted(cited)
+        headline = ("a remote-service client was followed by a matching successful connect to an internal admin "
+                    "port" if lane == "high" else "a connect to an internal admin port")
+        claim = (f"On {session[0]}, {headline}: {_and_more(lines)}. {relation}. {_context_suffix(anchor, link)}")
+        predicate = _predicate_all(socket_events, "destination.ip", "destination.port", "process.pid")
+        if matched_client is not None:
+            predicate += _predicate_all([matched_client.event], "process.executable", "process.argv")
         match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts,
                       "high" if lane == "high" else "medium", lane, "medium", cited[0].entities(),
                       group_key=f"lateral|{_group_id(session)}|{target}")
-        match.notes.extend(sorted(bucket["tech"]))
-        # A client exec whose own outcome failed does not by itself justify high; _finish guards exec-only.
-        if not socket_hits:
-            return self._finish(match, cited, anchor, link)
+        match.notes.extend(sorted(tech - {""}))
         return match
+
+    @staticmethod
+    def _matching_client(socket_event, destination, clients, index):
+        for client in clients:                     # IP-literal target match
+            if client.target_ip is not None and client.target_ip == destination:
+                return client
+        pids = set()
+        pid = socket_event.get("process.pid")
+        if isinstance(pid, int):
+            pids.add(pid)
+        ancestors, _complete = _ancestors(index, socket_event)
+        for ancestor in ancestors:
+            ancestor_pid = ancestor.get("process.pid")
+            if isinstance(ancestor_pid, int):
+                pids.add(ancestor_pid)
+        for client in clients:
+            if client.pid in pids:
+                return client
+        return None
 
 
 # ================================================================================================
@@ -841,7 +1122,7 @@ class EntryPointPromotion(ContextPlaybook):
     """A successful external sshd login that began an anchored session is promoted once per
     (host, boot, session). The login or authentication-phase record is preferred; the PAM session-open record
     is the fallback, worded as such. If any record of the session has an internal source, it is not promoted;
-    if no record carries a source, it is capped at lead with the source called unknown."""
+    if no record carries a source, it stays a lead with the source called unknown (never a high promotion)."""
 
     id = "context.entry_point_promotion"
     version = "3"
@@ -883,6 +1164,7 @@ class EntryPointPromotion(ContextPlaybook):
                 else:
                     external_source = str(address)
             candidates.append(event)
+        # If any record of this session has an internal source, this is not an external entry point.
         if not candidates or has_internal_source:
             return []
 
@@ -905,7 +1187,7 @@ class EntryPointPromotion(ContextPlaybook):
             lane, confidence = "lead", "medium"
             descriptor = ("The session-open record of a remote SSH login" if is_session_open
                           else "A successful remote SSH login")
-            lead = f"{descriptor} on {chosen.host} (its source address was not recorded)"
+            lead = f"{descriptor} on {chosen.host} (its source address was not recorded; not confirmed external)"
         claim = (f"{lead} began the observed login session that later performed {anchor.id}. "
                  f"{_context_suffix(anchor, link)}")
         predicate = [pf(chosen, "auth.service")]
