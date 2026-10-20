@@ -443,3 +443,13 @@ def test_default_and_no_expand_hunts_have_identical_sweep_findings(tmp_path, mon
     added = [row for row in repo.candidates("h-default") if row["source_anchor_id"]]
     assert [row["rule_id"] for row in added] == ["host.credential_store_read"]
     assert not [row for row in repo.candidates("h-sweep-only") if row["source_anchor_id"]]
+
+
+def test_resume_refuses_a_hunt_normalized_by_another_evidence_version(tmp_path):
+    settings = Settings(agent_mode="off", home=tmp_path)
+    repo = hunt_run.open_repo(settings)
+    manifest = _manifest()
+    manifest["normalizer"] = "lab-ecs@1"
+    repo.create_hunt("h-old", manifest, "digest", "test")
+    with pytest.raises(RuntimeError, match="Start a new hunt"):
+        hunt_run.resume_hunt(settings, "h-old")

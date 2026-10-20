@@ -2,35 +2,61 @@
 
 Typed events are stored once per event id. When normalization improved without a version change, a new hunt
 silently reused an older hunt's rows (no `process.session_id`), and every login-session link went unsupported.
-The event id now carries EVIDENCE_VERSION. This test pins the evidence package's source to that version: if you
-changed how raw records become typed events, bump EVIDENCE_VERSION in `evidence/typed.py` and record the new
-digest here. If you only changed comments or formatting, record the new digest with the same version.
+Event ids now carry the version of the producer that made them. These tests pin each producer's source to its
+version: if you changed how raw records become typed events, bump the version and record the new digest here. If
+you only changed comments or formatting, record the new digest under the same version.
 """
 import hashlib
+import inspect
 from pathlib import Path
 
+from romulus.detect import packets as packet_rules
 from romulus.evidence import typed
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import EVIDENCE_VERSION, RawRef, event_id
+from romulus.hunt import packets as packet_stage
+from romulus.sources import packets as packet_sources
 
-PINNED = {2: "59f5eae93909cfd6ea0bb01deb055f1dea9a2a03a48f7e431339eea939c76b7d"}
+# The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
+EVIDENCE_FILES = ("__init__.py", "auditd.py", "normalize.py", "typed.py")
+PINNED_EVIDENCE = {2: "d39d9e4e918c7953c71c7645bb68ef9aae9b63de127b5d90f1d2e86308a342e3"}
+# The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events.
+PACKET_FUNCTIONS = (packet_stage._body_event, packet_rules.analyze_body, packet_rules._text, packet_rules._shebang,
+                    packet_sources.decode_hex_body)
+PINNED_PACKETS = {"tshark-http@3": "f713ee1694770676e99febf6e0a50b24846f6d1c4884c69e923fed3157c814ce"}
 
 
-def _sources_digest() -> str:
+def _files_digest() -> str:
     h = hashlib.sha256()
-    for path in sorted(Path(typed.__file__).parent.glob("*.py")):
-        h.update(path.name.encode() + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    for name in EVIDENCE_FILES:
+        path = Path(typed.__file__).parent / name
+        h.update(name.encode() + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
     return h.hexdigest()
 
 
-def test_evidence_sources_match_the_pinned_version():
-    assert PINNED.get(EVIDENCE_VERSION) == _sources_digest(), (
-        "romulus/evidence changed: if normalization output changed, bump EVIDENCE_VERSION; then record the new "
-        f"digest {_sources_digest()} for version {EVIDENCE_VERSION} in tests/test_evidence_version.py")
+def _functions_digest() -> str:
+    h = hashlib.sha256()
+    for fn in PACKET_FUNCTIONS:
+        h.update(fn.__qualname__.encode() + b"\0" + inspect.getsource(fn).replace("\r\n", "\n").encode() + b"\0")
+    return h.hexdigest()
 
 
-def test_the_event_id_and_normalizer_carry_the_version():
+def test_evidence_normalization_matches_the_pinned_version():
+    assert PINNED_EVIDENCE.get(EVIDENCE_VERSION) == _files_digest(), (
+        "evidence normalization changed: if its output changed, bump EVIDENCE_VERSION in evidence/typed.py; then "
+        f"record {_files_digest()} for version {EVIDENCE_VERSION} in tests/test_evidence_version.py")
+
+
+def test_packet_normalization_matches_the_pinned_version():
+    version = packet_stage.PACKET_NORMALIZER
+    assert PINNED_PACKETS.get(version) == _functions_digest(), (
+        "packet normalization changed: if its output changed, bump PACKET_NORMALIZER in hunt/packets.py; then "
+        f"record {_functions_digest()} for {version} in tests/test_evidence_version.py")
+
+
+def test_event_ids_carry_the_producer_and_version():
     ref = RawRef(target="idx", native_id="doc-1")
     assert NORMALIZER_VERSION.endswith(f"@{EVIDENCE_VERSION}")
     legacy = hashlib.sha256(b"process_exec|" + ref.key.encode()).hexdigest()[:24]
-    assert event_id("process_exec", [ref]) != legacy            # never collides with pre-versioned rows
+    assert event_id("process_exec", [ref]) != legacy                    # never collides with pre-versioned rows
+    assert event_id("http_body", [ref], "tshark-http@3") != event_id("http_body", [ref], "tshark-http@4")

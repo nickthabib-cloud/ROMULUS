@@ -5,7 +5,7 @@ import ipaddress
 
 from romulus.detect.base import ContextAnchor, ContextLink, ContextPlaybook, Match, basename, pf
 from romulus.detect.host import is_internal
-from romulus.evidence.typed import Outcome
+from romulus.evidence.typed import Outcome, raw_identity
 
 DISCOVERY_COMMANDS = {
     "id": ("T1033", "identity enumeration"),
@@ -77,7 +77,7 @@ class PostAccessDiscovery(ContextPlaybook):
             match = Match(
                 self.id, claim, self.claim_type, [event], predicate, event.ts,
                 self.severity, self.lane, "medium", event.entities(),
-                group_key=event.id,
+                group_key=raw_identity(event),
             )
             match.notes.append(technique)
             out.append(match)
@@ -119,7 +119,7 @@ class EntryPointPromotion(ContextPlaybook):
                 self.id, claim, self.claim_type, [event],
                 [pf(event, "source.ip"), pf(event, "user.name")], event.ts,
                 self.severity, self.lane, "high", event.entities(),
-                group_key=event.id,
+                group_key=raw_identity(event),
             ))
         return out
 

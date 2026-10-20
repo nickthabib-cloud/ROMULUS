@@ -6,6 +6,7 @@ from datetime import datetime
 
 from romulus.agent.controller import Investigator
 from romulus.config import Settings
+from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkFetcher
 from romulus.hunt.manifest import build_manifest, new_hunt_id
@@ -328,6 +329,12 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dic
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
         raise KeyError(hunt_id)
+    recorded = (hunt.get("manifest") or {}).get("normalizer")
+    if recorded and recorded != NORMALIZER_VERSION:
+        # Its sweep evidence has the old event ids; new fetches would get new ones, so a record could be both
+        # the anchor and its own "linked" activity. Start a new hunt instead.
+        raise RuntimeError(f"hunt {hunt_id} was normalized with {recorded}; this build is {NORMALIZER_VERSION}. "
+                           "Start a new hunt over the same window instead of resuming.")
     sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")
     sweep_summary = dict(sweep_audit["detail"]) if sweep_audit else {}
     if hunt["execution_state"] == "running" and not sweep_summary.get("finished"):

@@ -76,10 +76,17 @@ class TypedEvent(BaseModel):
 EVIDENCE_VERSION = 2
 
 
-def event_id(family: str, refs: list[RawRef]) -> str:
-    h = hashlib.sha256((f"v{EVIDENCE_VERSION}|" + family + "|"
+def event_id(family: str, refs: list[RawRef], producer: str = "") -> str:
+    """Identity of one producer's typed view of raw records. `producer` names a normalizer outside this package
+    (for example the packet stage's), so its own version bumps also give new rows."""
+    h = hashlib.sha256((f"v{EVIDENCE_VERSION}|{producer}|" + family + "|"
                         + "|".join(sorted(r.key for r in refs))).encode()).hexdigest()
     return h[:24]
+
+
+def raw_identity(event: TypedEvent) -> str:
+    """A version-independent identity for grouping: the raw records the event views."""
+    return "+".join(sorted(r.key for r in event.raw))
 
 
 def fv(value, origin: str) -> FieldValue:
