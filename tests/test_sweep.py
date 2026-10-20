@@ -382,24 +382,23 @@ def test_temp_script_operand_rule_is_positive_only_for_unmodelled_interpreter_op
 
 
 def test_every_host_rule_is_positive_only_and_every_negative_assuring_rule_is_typed():
-    """Option B invariant: a rule may assure a negative only if it is not argv/text-identified.
-    Host rules identify programs from argv/text, so all are positive-only until kernel-record
-    rules exist (M3). Network rules rest on typed fields and keep their negatives."""
+    """A rule may assure a negative only if it is not argv/text-identified. Host rules identify programs from
+    argv/text, so all are positive-only until kernel-record rules exist. Network rules rest on typed fields
+    and keep their negatives."""
     from romulus.detect.host import HOST_PLAYBOOKS
     from romulus.detect.network import NETWORK_PLAYBOOKS
     assert all(not cls.assures_negative for cls in HOST_PLAYBOOKS)
-    # network rules keep typed-field negatives, except the self-reported user agent (ADR-004)
+    # network rules keep typed-field negatives, except the self-reported user agent
     assert {cls.id for cls in NETWORK_PLAYBOOKS if not cls.assures_negative} == {"net.tool_user_agent_http"}
     from romulus.detect.registry import ALL_PLAYBOOKS
     from romulus.report.manifest import POSITIVE_ONLY_CLAIMS
     all_ids = {cls.id for cls in ALL_PLAYBOOKS}
-    # Every positive-only rule must carry an explicit, non-rule-naming reason it assures no negative. The
-    # report holds a copy in POSITIVE_ONLY_CLAIMS; a detect-owned rule may instead declare its own
-    # `positive_only_reason` until the lead mirrors it into the report (new M3 context rules do this).
+    # Every positive-only rule must carry an explicit, non-rule-naming reason it assures no negative, either in
+    # the report table or as the rule's own `positive_only_reason`.
     for cls in ALL_PLAYBOOKS:
         if cls.assures_negative:
             continue
-        reason = POSITIVE_ONLY_CLAIMS.get(cls.id) or cls.positive_only_reason
+        reason = cls.positive_only_reason or POSITIVE_ONLY_CLAIMS.get(cls.id)
         assert reason, cls.id
         assert not [other for other in all_ids if other in reason], (cls.id, reason)
     for rid, claim in POSITIVE_ONLY_CLAIMS.items():

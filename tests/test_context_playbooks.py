@@ -62,7 +62,8 @@ def test_post_access_discovery_matches_attack_behavior_classes(argv, technique):
     assert "F-anchor" in match.claim and "L-session" in match.claim
     assert {item.id for item in match.events} == {"discovery", "anchor-event", "link-event"}
     decision = decide(match, "hunt-1")
-    assert decision.admitted and decision.lane == "high"
+    # one discovery class in the session is a lead; a burst of three or more is a high (see test_context_catalog)
+    assert decision.admitted and decision.lane == "lead"
 
 
 @pytest.mark.parametrize("argv", [
@@ -124,10 +125,14 @@ def test_context_candidate_dedupes_by_rule_event_and_keeps_every_reach():
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"targets": []}, "digest", "test")
-    observed = event(
-        "discovery", process__executable="/usr/bin/uname",
-        process__argv=["uname", "-a"], process__session_id=42,
-    )
+    # a discovery burst (three distinct classes) in one session: a high through an observed link, capped to
+    # lead through the inferred one. All reach the same (host, session) finding.
+    observed = [
+        event("whoami", process__executable="/usr/bin/whoami", process__argv=["whoami"], process__session_id=42),
+        event("uname", process__executable="/usr/bin/uname", process__argv=["uname", "-a"],
+              process__session_id=42),
+        event("ss", process__executable="/usr/bin/ss", process__argv=["ss", "-tunap"], process__session_id=42),
+    ]
     playbook = PostAccessDiscovery()
     inferred_link = link(strength="inferred", link_type="process_lineage")
     inferred_link.id = "L-inferred"
@@ -136,8 +141,8 @@ def test_context_candidate_dedupes_by_rule_event_and_keeps_every_reach():
     third_link = link(strength="observed", link_type="process_lineage")
     third_link.id = "L-third"
 
-    first = playbook.consume_linked(anchor(), inferred_link, [observed])[0]
-    second = PostAccessDiscovery().consume_linked(anchor(), observed_link, [observed])[0]
+    first = playbook.consume_linked(anchor(), inferred_link, observed)[0]
+    second = PostAccessDiscovery().consume_linked(anchor(), observed_link, observed)[0]
     publish_match(
         repo, "h1", playbook, first, None, {}, source_anchor_id="F-anchor",
         source_link_id=inferred_link.id,
@@ -150,7 +155,7 @@ def test_context_candidate_dedupes_by_rule_event_and_keeps_every_reach():
         context_reach={"anchor_id": "F-anchor", "link_id": observed_link.id,
                        "link_type": observed_link.link_type, "strength": observed_link.strength},
     )
-    third = PostAccessDiscovery().consume_linked(anchor(), third_link, [observed])[0]
+    third = PostAccessDiscovery().consume_linked(anchor(), third_link, observed)[0]
     publish_match(
         repo, "h1", PostAccessDiscovery(), third, None, {}, source_anchor_id="F-anchor",
         source_link_id=third_link.id,
