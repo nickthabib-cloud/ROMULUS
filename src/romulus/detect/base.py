@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import ClassVar
+from typing import Any, ClassVar, Literal
 
 from romulus.evidence.typed import Outcome, TypedEvent
 
@@ -36,6 +36,26 @@ class Match:
     group_key: str = ""              # stable dedupe identity for aggregates
 
 
+@dataclass
+class ContextAnchor:
+    id: str
+    anchor_class: str
+    lane: str
+    claim: str
+    events: list[TypedEvent]
+
+
+@dataclass
+class ContextLink:
+    id: str
+    link_type: str
+    strength: Literal["observed", "inferred"]
+    key: dict[str, Any]
+    evidence_events: list[TypedEvent]
+    status: str
+    reasons: list[str] = field(default_factory=list)
+
+
 def pf(ev: TypedEvent, name: str) -> PredicateField:
     f = ev.fields[name]
     return PredicateField(field=name, value=f.value, origin=f.origin)
@@ -53,7 +73,7 @@ class Playbook:
     attack: ClassVar[tuple[str, ...]] = ()
     benign: ClassVar[tuple[str, ...]] = ()
     next_checks: ClassVar[tuple[str, ...]] = ()
-    kind: ClassVar[str] = "direct"            # direct | aggregate
+    kind: ClassVar[str] = "direct"            # direct | aggregate | context
     # False for rules that read script *text*: text can show intent but can never prove that something
     # did not run, so such rules publish positives only and never write a complete negative.
     assures_negative: ClassVar[bool] = True
@@ -103,6 +123,44 @@ class Playbook:
         exactly these, so no published citation can point at a raw record that was never retained."""
         groups = getattr(self, "groups", {}) or {}
         return [e for evs in groups.values() for e in evs]
+
+
+class ContextPlaybook(Playbook):
+    """A rule that may evaluate only evidence reached through an explicit anchor link."""
+
+    kind: ClassVar[str] = "context"
+    anchor_classes: ClassVar[tuple[str, ...]] = ("*",)
+    link_types: ClassVar[tuple[str, ...]] = ()
+
+    def consume(self, events: list[TypedEvent]) -> list[Match]:
+        return []
+
+    def consume_linked(
+        self, anchor: ContextAnchor | None, link: ContextLink,
+        events: list[TypedEvent],
+    ) -> list[Match]:
+        if anchor is None:
+            return []
+        if "*" not in self.anchor_classes and anchor.anchor_class not in self.anchor_classes:
+            return []
+        if link.link_type not in self.link_types:
+            return []
+        matches = self.match_linked(anchor, link, events)
+        for match in matches:
+            if link.strength == "inferred" and match.proposed_lane in ("urgent", "high"):
+                match.proposed_lane = "lead"
+                match.notes.append("lane capped at lead: the context link is inferred")
+            elif link.strength == "observed" and match.proposed_lane == "urgent":
+                match.proposed_lane = "high"
+                match.notes.append("lane capped at high until context rules are lab evaluated")
+            cited = {event.id: event for event in match.events + anchor.events + link.evidence_events}
+            match.events = sorted(cited.values(), key=lambda event: (event.ts, event.id))
+        return matches
+
+    def match_linked(
+        self, anchor: ContextAnchor, link: ContextLink, events: list[TypedEvent],
+    ) -> list[Match]:
+        return []
 
 
 def outcome_phrase(e: TypedEvent) -> str:

@@ -87,6 +87,8 @@ POSITIVE_ONLY_CLAIMS = {
         "not assessable by design: positive-only correlation (a join between host connect() records and "
         "network-sensor records that finds nothing proves nothing; each side sees only part of the traffic)"
     ),
+    "context.post_access_discovery": _po("discovery behavior is identified from argv and only evaluated after "
+                                         "an anchor link; absence outside that linked scope proves nothing"),
 }
 
 
