@@ -249,9 +249,22 @@ class PortScan(_Grouped):
     next_checks = ("ids_alerts for the source", "web.scan_burst / http_requests from the source afterwards",
                    "ip_sessions for the source across the network")
     MIN_PORTS = 25
+    version = "2"
+
+    @staticmethod
+    def _reply_direction(e) -> bool:
+        """A flow from a well-known service port to an unprivileged port is a service answering a client, not a
+        probe: counting it made a busy server look like a scanner of thousands of ephemeral ports."""
+        try:
+            sport, dport = int(e.get("source.port")), int(e.get("destination.port"))
+        except (TypeError, ValueError):
+            return False
+        return sport < 1024 <= dport
 
     def consume(self, events):
         for e in self.applicable(events):
+            if self._reply_direction(e):
+                continue
             key = (e.get("source.ip"), e.get("destination.ip"))
             self.keep(key, e)
             ports = self.extra[key]["ports"]

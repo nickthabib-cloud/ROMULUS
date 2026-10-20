@@ -25,6 +25,45 @@ SCRIPT_FILE_INTERPRETERS = {"python", "python2", "python3", "perl", "ruby", "php
 AWK_INTERPRETERS = {"awk", "gawk"}
 DOWNLOADERS = {"curl", "wget", "fetch", "tftp"}
 TEMP_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/")
+# Directories the package manager owns. A web-service account cannot write there without root, so a script
+# operand there is a packaged helper the application ships (cgi-bin is excluded: it is where web code lives).
+PACKAGED_DIRS = ("/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/usr/share/", "/bin/", "/sbin/", "/usr/lib/")
+NOT_PACKAGED = ("/usr/lib/cgi-bin/",)
+
+
+# Options that take inline code or a module: the command is then not "run this script file".
+_INLINE_OPTIONS = {"-c", "-e", "-E", "-m", "-r", "--eval", "--command"}
+# Options that consume the next argument (perl -I dir, python -W arg, -X opt).
+_VALUE_OPTIONS = {"-I", "-W", "-X", "-M", "-x"}
+
+
+def _script_file(argv: list[str]) -> str | None:
+    """The script file a non-shell interpreter runs, skipping flag-only options (perl -wT, python3 -u); None
+    for inline code, modules, or anything not modelled."""
+    args, i = argv[1:], 0
+    while i < len(args):
+        arg = args[i]
+        if arg in _INLINE_OPTIONS or arg.startswith(("-e", "-c")) and len(arg) > 2 and not arg[1:].isalpha():
+            return None
+        if arg in _VALUE_OPTIONS:
+            i += 2
+            continue
+        if arg.startswith("-"):
+            if any(ch in arg[1:] for ch in "ceEmr"):     # bundled flags hiding inline code (perl -we '...')
+                return None
+            i += 1
+            continue
+        return arg
+    return None
+
+
+def _packaged_script(argv: list[str]) -> str | None:
+    from romulus.detect.indicators import script_operand
+    name = interpreter_name(argv[0]) if argv else ""
+    script = script_operand(argv) if name in SHELLS else _script_file(argv)
+    if script and script.startswith(PACKAGED_DIRS) and not script.startswith(NOT_PACKAGED):
+        return script
+    return None
 CRED_FILES = {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"}
 FILE_READERS = {"cat", "head", "tail", "less", "more", "cp", "base64", "xxd", "od", "strings", "tac", "nl",
                 "dd", "tar", "vi", "vim", "nano", "view", "rsync", "scp"}
@@ -180,7 +219,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     # argv/text-identified programs and actions: findings only, never a complete negative
     # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
-    version = "4"
+    version = "5"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -241,6 +280,17 @@ class WebServiceSpawnsInterpreter(Playbook):
         for key, evs in self.shapes.items():
             host_, user, shape = key
             n = self.counts[key]
+            packaged = _packaged_script(evs[0].get("process.argv") or [])
+            if packaged and n <= self.RARE_MAX:
+                # Rare, no typed indicator, and the script is one the package manager installed: the
+                # application's own helper (daemon start-up, maintenance), not code a web request supplied.
+                claim = (f"Packaged helper: account '{user}' on {host_} ran '{shape}' {n} time(s) in the window; "
+                         f"the script operand '{packaged}' is in a package-managed directory and the command line "
+                         f"carries no typed indicator (retained for context).")
+                out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
+                                 evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
+                                 group_key=f"packaged|{host_}|{user}|{shape}"))
+                continue
             if n > self.RARE_MAX:
                 claim = (f"Routine pattern: account '{user}' on {host_} executed '{shape}' {n} times in the window "
                          f"(stack-counted; retained for context).")
@@ -444,9 +494,16 @@ class ExecFromTempDir(Playbook):
                       self.lane, "high", _exec_entities(e))]
 
 
+# Debian/Ubuntu debconf runs each package's extracted config script as /tmp/<package>.config.XXXXXX with the
+# maintainer-script action and the version: `sh /tmp/openssh-server.config.AbC123 configure 1:8.9p1`.
+_DEBCONF_CONFIG = re.compile(r"^/tmp/[a-z0-9][a-z0-9+.-]*\.config\.[A-Za-z0-9]{6}$")
+_DEBCONF_ACTIONS = {"configure", "reconfigure"}
+
+
 class ScriptFromTempDir(Playbook):
     """Positive-only argv indicator: an interpreter was given a temp-directory script operand."""
     id = "host.script_from_temp_dir"
+    version = "2"
     title = "Interpreter started with a script operand in a temporary directory"
     claim_type = "script_content"
     assures_negative = False
@@ -482,6 +539,14 @@ class ScriptFromTempDir(Playbook):
         fields = [pf(e, "process.argv")]
         if e.get("process.cwd"):
             fields.append(pf(e, "process.cwd"))
+        rest = argv[argv.index(script) + 1:] if script in argv else []
+        if _DEBCONF_CONFIG.match(path) and rest and rest[0] in _DEBCONF_ACTIONS:
+            claim = (f"A process execution event on {e.host} records '{name}' running '{path}' with "
+                     f"'{rest[0]}' (argv: {_argv_summary(argv)}); {outcome_phrase(e)}. The name and arguments follow "
+                     f"the Debian debconf convention for a package's configuration script during installation "
+                     f"(retained for context).")
+            return [Match(self.id, claim, self.claim_type, [e], fields, e.ts, "low", "context", "medium",
+                          _exec_entities(e))]
         claim = (f"A process execution event on {e.host} records that interpreter '{name}' was started with "
                  f"temp-directory script operand '{path}' (argv: {_argv_summary(argv)}); {outcome_phrase(e)}. "
                  f"The argv identifies a script operand; whether that script ran is not established by this event.")
