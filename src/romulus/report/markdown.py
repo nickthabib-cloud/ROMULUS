@@ -135,6 +135,12 @@ def render(m: dict, banner: str = BANNER) -> str:
             out.append(f"  - {tag}{esc(sentence['text'])}" + (f" ({cites})" if cites else ""))
     if not multi:
         out.append("- No incident has more than one finding.")
+    analyst = m.get("analyst_links") or []
+    if analyst:
+        out += ["", "**Analyst-asserted links (not proven)**", "",
+                "| From | To | Relation | By | Note |", "|---|---|---|---|---|"]
+        out += [f"| [{esc(a['from_finding'])}](#f-{a['from_finding']}) | [{esc(a['to_finding'])}](#f-{a['to_finding']}) "
+                f"| {esc(a['relation'])} | {esc(a['actor'])} | {esc(a.get('note') or '')} |" for a in analyst]
     out += ["", "**Attack-path timelines**", ""]
     for incident in graph["incidents"]:
         timeline = " → ".join(f"[{esc(item)}](#f-{item})" for item in incident["timeline"])

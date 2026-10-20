@@ -219,6 +219,7 @@ class Repo:
             c.execute(t.raw_record.update().where(t.raw_record.c.first_task_id.in_(task_ids))
                       .values(first_task_id=None))
             c.execute(t.hunt.update().where(t.hunt.c.parent_hunt_id == hunt_id).values(parent_hunt_id=None))
+            rm("analyst_links", t.analyst_link.delete().where(t.analyst_link.c.hunt_id == hunt_id))
             rm("expansion_links", t.expansion_link.delete().where(t.expansion_link.c.hunt_id == hunt_id))
             rm("expansion_anchors", t.expansion_anchor.delete().where(t.expansion_anchor.c.hunt_id == hunt_id))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
@@ -508,6 +509,31 @@ class Repo:
         with self.engine.connect() as c:
             row = c.execute(q).mappings().first()
             return dict(row) if row else None
+
+    def add_analyst_link(self, hunt_id: str, from_finding: str, to_finding: str, relation: str,
+                         note: str | None, actor: str) -> dict:
+        """Record an analyst's asserted relation between two findings of this hunt (never an observed link)."""
+        relation = " ".join(relation.split())[:200]
+        if not relation or from_finding == to_finding:
+            raise ValueError("an analyst link needs two different findings and a relation")
+        with write_txn(self.engine) as c:
+            owners = dict(c.execute(select(t.candidate.c.id, t.candidate.c.hunt_id)
+                                    .where(t.candidate.c.id.in_([from_finding, to_finding]))).all())
+            if owners.get(from_finding) != hunt_id or owners.get(to_finding) != hunt_id:
+                raise ValueError("both findings must belong to this hunt")
+            row = {"id": "AL-" + uuid.uuid4().hex[:16], "hunt_id": hunt_id, "from_finding": from_finding,
+                   "to_finding": to_finding, "relation": relation, "note": (note or "").strip()[:2000] or None,
+                   "actor": actor, "created_at": utcnow()}
+            c.execute(t.analyst_link.insert().values(**row))
+            c.execute(t.audit_event.insert().values(at=utcnow(), actor=actor, action="analyst_link.add",
+                                                    hunt_id=hunt_id, detail={k: str(v) for k, v in row.items()}))
+        return row
+
+    def analyst_links(self, hunt_id: str) -> list[dict]:
+        q = (select(t.analyst_link).where(t.analyst_link.c.hunt_id == hunt_id)
+             .order_by(t.analyst_link.c.created_at, t.analyst_link.c.id))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(q).mappings()]
 
     def expansion_links(self, hunt_id: str) -> list[dict]:
         q = (select(t.expansion_link).where(t.expansion_link.c.hunt_id == hunt_id)

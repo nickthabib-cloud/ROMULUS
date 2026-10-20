@@ -440,6 +440,11 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "agent": agent or {"status": "unknown"},
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
         "incident_graph": incident_graph,
+        # an analyst's asserted relations: shown as assertions, never as observed or inferred links
+        "analyst_links": [{"id": a["id"], "from_finding": a["from_finding"], "to_finding": a["to_finding"],
+                           "relation": a["relation"], "note": a["note"], "actor": a["actor"],
+                           "created_at": str(a["created_at"]), "status": "analyst assertion, not proven"}
+                          for a in repo.analyst_links(hunt_id)],
         "versions": {"pack": hm["pack"]["version"], "normalizer": hm["normalizer"], "policy": hm["policy"],
                      "model": hm["model"], "romulus": hm["romulus_version"]},
         "generated_by": actor,

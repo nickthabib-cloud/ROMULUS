@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Attack path · {{ h.id }}{% endblock %}
+{% block content %}
+<p><a href="/hunts/{{ h.id }}">← {{ h.id }}</a></p>
+<h1>Attack-path timeline</h1>
+<p class="help">Findings (urgent, high, lead) on rows by host, account and IP across the hunt window.
+  <span class="key k-observed">observed link</span> joins records by a typed key;
+  <span class="key k-inferred">inferred link</span> is a hypothesis, not proof of the same actor;
+  <span class="key k-analyst">analyst assertion</span> is an analyst's judgement and is never shown as proven.</p>
+
+<form method="get" class="filters">
+  <fieldset><legend>Lanes</legend>
+    {% for l in all_lanes %}<label><input type="checkbox" name="lane" value="{{ l }}" {% if l in tl.filters.lanes %}checked{% endif %}> {{ l }}</label>{% endfor %}
+  </fieldset>
+  <fieldset><legend>Rows</legend>
+    {% for k in all_kinds %}<label><input type="checkbox" name="kind" value="{{ k }}" {% if k in tl.filters.kinds %}checked{% endif %}> {{ k }}</label>{% endfor %}
+  </fieldset>
+  <fieldset><legend>Links</legend>
+    {% for s in all_styles %}<label><input type="checkbox" name="style" value="{{ s }}" {% if s in tl.filters.styles %}checked{% endif %}> {{ s }}</label>{% endfor %}
+  </fieldset>
+  <button type="submit">Apply</button>
+</form>
+
+<p class="help">Showing {{ tl.shown_findings }} finding(s) on {{ tl.rows|length }} row(s) with {{ tl.links|length }} link(s).
+  Hidden by filters: {{ tl.hidden.findings_by_lane }} finding(s) by lane, {{ tl.hidden.rows_by_kind }} row(s) by kind,
+  {% for s, n in tl.hidden.links_by_style.items() %}{{ n }} {{ s }} link(s), {% endfor %}
+  {{ tl.hidden.links_without_both_ends }} link(s) whose ends are not both shown.
+  {% if tl.hidden.rows_beyond_page %}<b>{{ tl.hidden.rows_beyond_page }} row(s) beyond this page are not drawn; narrow the filters.</b>{% endif %}
+  {% if tl.hidden.findings_without_row %}{{ tl.hidden.findings_without_row }} finding(s) have no host, account or IP and appear only in the findings list.{% endif %}</p>
+
+<div class="timeline-wrap">
+<svg class="timeline" viewBox="0 0 {{ tl.width }} {{ tl.height }}" width="{{ tl.width }}" height="{{ tl.height }}" role="img" aria-label="Attack-path timeline">
+  {% for tick in tl.ticks %}
+  <line class="tick" x1="{{ tick.x }}" y1="20" x2="{{ tick.x }}" y2="{{ tl.height - 10 }}"></line>
+  <text class="tick-label" x="{{ tick.x }}" y="14">{{ tick.label }}</text>
+  {% endfor %}
+  {% for row in tl.rows %}
+  <text class="row-label" x="8" y="{{ row.y + 4 }}">{{ row.kind }}: {{ row.value[:28] }}</text>
+  <line class="row-line" x1="{{ tl.left }}" y1="{{ row.y }}" x2="{{ tl.width - 30 }}" y2="{{ row.y }}"></line>
+  {% endfor %}
+  {% for link in tl.links %}
+  <line class="link link-{{ link.style }}" x1="{{ link.x1 }}" y1="{{ link.y1 }}" x2="{{ link.x2 }}" y2="{{ link.y2 }}"><title>{{ link.style }}: {{ link.label }} ({{ link.from }} → {{ link.to }})</title></line>
+  {% endfor %}
+  {% for row in tl.rows %}{% for item in row["items"] %}
+  <a href="/findings/{{ item.id }}"><circle class="mark m-{{ item.lane }}" cx="{{ item.x }}" cy="{{ item.y }}" r="6"><title>{{ item.lane }} · {{ item.ts }} · {{ item.title }}: {{ item.claim }}</title></circle></a>
+  {% endfor %}{% endfor %}
+</svg>
+</div>
+
+<h2>Add an analyst link</h2>
+<p class="help">Record a relation you judge exists between two findings. It is stored with your name, drawn in its own style, and labelled as an assertion: it never joins incidents and never reads as proven.</p>
+<form method="post" action="/hunts/{{ h.id }}/links" class="card">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>From <select name="from_finding">{% for f in pick %}<option value="{{ f.id }}">{{ f.lane }} · {{ f.observed_at }} · {{ f.title }}</option>{% endfor %}</select></label>
+  <label>To <select name="to_finding">{% for f in pick %}<option value="{{ f.id }}">{{ f.lane }} · {{ f.observed_at }} · {{ f.title }}</option>{% endfor %}</select></label>
+  <label>Relation <input name="relation" maxlength="200" required placeholder="e.g. same operator, follow-on step"></label>
+  <label>Note <textarea name="note" rows="2" maxlength="2000"></textarea></label>
+  <button type="submit">Add analyst link</button>
+</form>
+{% if analyst_links %}
+<h2>Analyst assertions</h2>
+<table class="grid"><thead><tr><th>From</th><th>To</th><th>Relation</th><th>By</th><th>When</th><th>Note</th></tr></thead><tbody>
+{% for a in analyst_links %}<tr><td class="mono"><a href="/findings/{{ a.from_finding }}">{{ a.from_finding }}</a></td><td class="mono"><a href="/findings/{{ a.to_finding }}">{{ a.to_finding }}</a></td>
+<td>{{ a.relation }} <span class="help">(assertion, not proven)</span></td><td>{{ a.actor }}</td><td class="small">{{ a.created_at }}</td><td>{{ a.note or "" }}</td></tr>{% endfor %}
+</tbody></table>
+{% endif %}
+{% endblock %}
