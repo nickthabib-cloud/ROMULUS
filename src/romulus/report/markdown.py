@@ -14,6 +14,11 @@ def esc(text) -> str:
     return _MD_SPECIAL.sub(r"\\\1", _CTRL.sub("", str(text)))
 
 
+def cell(text) -> str:
+    """A table cell: inline-safe and on one line, so a newline cannot end the row."""
+    return " ".join(esc(text).split())
+
+
 def fence(text: str, lang: str = "text") -> str:
     """Fence longer than any backtick run in the content, so telemetry cannot close it."""
     text = _CTRL.sub("", text)
@@ -140,7 +145,7 @@ def render(m: dict, banner: str = BANNER) -> str:
         out += ["", "**Analyst-asserted links (not proven)**", "",
                 "| From | To | Relation | By | Note |", "|---|---|---|---|---|"]
         out += [f"| [{esc(a['from_finding'])}](#f-{a['from_finding']}) | [{esc(a['to_finding'])}](#f-{a['to_finding']}) "
-                f"| {esc(a['relation'])} | {esc(a['actor'])} | {esc(a.get('note') or '')} |" for a in analyst]
+                f"| {cell(a['relation'])} | {cell(a['actor'])} | {cell(a.get('note') or '')} |" for a in analyst]
     out += ["", "**Attack-path timelines**", ""]
     for incident in graph["incidents"]:
         timeline = " → ".join(f"[{esc(item)}](#f-{item})" for item in incident["timeline"])

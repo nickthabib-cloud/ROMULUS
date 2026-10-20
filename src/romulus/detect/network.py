@@ -249,12 +249,15 @@ class PortScan(_Grouped):
     next_checks = ("ids_alerts for the source", "web.scan_burst / http_requests from the source afterwards",
                    "ip_sessions for the source across the network")
     MIN_PORTS = 25
-    version = "2"
+    # Modern stacks pick client ports from 32768 and up (Linux 32768-60999, Windows 49152-65535), so a service's
+    # answers go to ports there; a sweep of service ports lands mostly below it.
+    EPHEMERAL_FLOOR = 32768
+    version = "3"
 
     @staticmethod
-    def _reply_direction(e) -> bool:
-        """A flow from a well-known service port to an unprivileged port is a service answering a client, not a
-        probe: counting it made a busy server look like a scanner of thousands of ephemeral ports."""
+    def _reply_shaped(e) -> bool:
+        """A flow from a well-known port to an unprivileged port: a service answering a client, or a probe sent
+        from a fixed low source port (nmap -g 53) to slip past stateless filters. The shape alone cannot tell."""
         try:
             sport, dport = int(e.get("source.port")), int(e.get("destination.port"))
         except (TypeError, ValueError):
@@ -263,9 +266,8 @@ class PortScan(_Grouped):
 
     def consume(self, events):
         for e in self.applicable(events):
-            if self._reply_direction(e):
-                continue
-            key = (e.get("source.ip"), e.get("destination.ip"))
+            reply = self._reply_shaped(e)
+            key = (e.get("source.ip"), e.get("destination.ip"), reply)
             self.keep(key, e)
             ports = self.extra[key]["ports"]
             if len(ports) < 70000:
@@ -273,6 +275,8 @@ class PortScan(_Grouped):
                     ports.add(int(e.get("destination.port")))
                 except (TypeError, ValueError):
                     self.missing_required += 1
+            if reply and len(self.extra[key]["sports"]) < 20:
+                self.extra[key]["sports"].add(int(e.get("source.port")))
         return []
 
     def finalize(self):
@@ -281,14 +285,27 @@ class PortScan(_Grouped):
             ports = self.extra[key]["ports"]
             if len(ports) < self.MIN_PORTS:
                 continue
-            src, dst = key
+            src, dst, reply = key
             sample = sorted(ports)[:12]
+            lane, severity, group_key = self.lane, self.severity, f"{src}|{dst}"
             claim = (f"{self.counts[key]} flow record(s) from {src} to {dst} covering {len(ports)} distinct destination "
                      f"ports ({self.span(key)}); e.g. {sample}.")
+            if reply:
+                sports = sorted(self.extra[key]["sports"])
+                low = sum(1 for p in ports if p < self.EPHEMERAL_FLOOR)
+                group_key = f"{src}|{dst}|from-low-port"
+                claim += (f" Every record comes from source port(s) {sports[:5]} below 1024: the shape of a service "
+                          f"answering a client, and also of a scan sent from a fixed low source port.")
+                if low < self.MIN_PORTS:
+                    # Answers to client ports: kept visible, not a lead.
+                    lane, severity = "context", "low"
+                    claim += (f" {len(ports) - low} of the destination ports are in the client (ephemeral) range "
+                              f"(retained for context).")
+                else:
+                    claim += f" {low} of the destination ports are below the client (ephemeral) range."
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
                                                                      pf(evs[0], "destination.ip")],
-                             evs[0].ts, self.severity, self.lane, "high", evs[0].entities(),
-                             group_key=f"{src}|{dst}"))
+                             evs[0].ts, severity, lane, "high", evs[0].entities(), group_key=group_key))
         return out
 
 

@@ -11,7 +11,14 @@ from romulus.agent.models import PivotCoverage
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
 from romulus.detect.correlation import PidTable
 from romulus.evidence.typed import TypedEvent
-from romulus.hunt.pivot import MAX_PIVOT_RECORDS, PivotExecutor, _is_network, _range, _supports
+from romulus.hunt.pivot import (
+    HOST_LOOKUP_BUDGET,
+    MAX_PIVOT_RECORDS,
+    PivotExecutor,
+    _is_network,
+    _range,
+    _supports,
+)
 from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.store.db import digest
 
@@ -133,14 +140,21 @@ class LinkFetcher:
         self._cache: dict[str, LinkResult] = {}
         self._hosts: dict[str, tuple[str | None, str | None]] = {}
 
-    def resolve_host(self, owner: str, ip: str) -> tuple[str | None, str | None]:
+    def resolve_host(self, owner: str, ip: str, query_cap: int | None = None) -> tuple[str | None, str | None]:
         """A network endpoint's host identity from typed host records (`host.ip`), or why there is none.
-        Exactly one host name resolves; none or several is a reason, never a guess."""
-        if ip not in self._hosts:
-            resolver = getattr(self.executor, "resolve_host_ip", None)
-            self._hosts[ip] = (resolver(owner, ip, self.hunt_start, self.hunt_end) if resolver is not None
-                               else (None, f"victim host unknown for {ip}: host resolution is unavailable"))
-        return self._hosts[ip]
+        Exactly one host name resolves; none or several is a reason, never a guess. A lookup refused because it
+        would pass `query_cap` is not remembered, so a later anchor with budget can still make it."""
+        if ip in self._hosts:
+            return self._hosts[ip]
+        resolver = getattr(self.executor, "resolve_host_ip", None)
+        if resolver is None:
+            result = (None, f"victim host unknown for {ip}: host resolution is unavailable")
+        else:
+            result = resolver(owner, ip, self.hunt_start, self.hunt_end, query_cap=query_cap)
+            if result[0] is None and (result[1] or "").endswith(HOST_LOOKUP_BUDGET):
+                return result
+        self._hosts[ip] = result
+        return result
 
     def fetch(
         self,

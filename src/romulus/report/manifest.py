@@ -572,7 +572,7 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
             key=lambda item: (observed_at.get(item, ""), item),
         )
         open_ends = incident["open_ends"]
-        for key in ("unexpanded_anchors", "pending_anchors", "unresolved_links"):
+        for key in ("unexpanded_anchors", "pending_anchors", "partial_anchors", "unresolved_links"):
             open_ends[key] = sorted(
                 open_ends.get(key, []),
                 key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),

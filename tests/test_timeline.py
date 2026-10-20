@@ -1,4 +1,4 @@
-"""Attack-path timeline (M3): rows by host, account and IP; link styles keep provenance; filters say what they
+"""Attack-path timeline: rows by host, account and IP; link styles keep provenance; filters say what they
 hide; analyst links are stored, audited and always labelled as assertions."""
 from datetime import UTC, datetime, timedelta
 
@@ -42,6 +42,8 @@ def test_filters_report_what_they_hide():
     assert tl["hidden"]["findings_by_lane"] == 1 and tl["hidden"]["links_by_style"] == {"inferred": 1}
     tl = build_timeline(findings, edges, [], T0, T0 + timedelta(hours=1), kinds=["host"])
     assert tl["hidden"]["rows_by_kind"] == 1 and tl["hidden"]["links_without_both_ends"] == 1
+    tl = build_timeline(findings, edges, [], T0, T0 + timedelta(hours=1), kinds=["account"])
+    assert tl["shown_findings"] == 0 and tl["hidden"]["findings_on_hidden_rows"] == 2     # counted, not "shown"
 
 
 def test_timeline_page_renders_escapes_and_accepts_analyst_links_only_with_csrf(client, tmp_path):  # noqa: F811
@@ -75,10 +77,22 @@ def test_analyst_links_are_validated_audited_and_reach_the_manifest_as_assertion
         repo.add_analyst_link("h1", cid, cid, "self", None, "web:a")
     with pytest.raises(ValueError):
         repo.add_analyst_link("h1", cid, "not-in-this-hunt", "x", None, "web:a")
-    link = repo.add_analyst_link("h1", cid, f"{cid}-b", "  same   operator ", "note", "web:analyst1")
+    _copy_candidate(repo, cid, f"{cid}-ctx")
+    from sqlalchemy import update
+
+    from romulus.store import schema
+    with repo.engine.begin() as c:
+        c.execute(update(schema.candidate).where(schema.candidate.c.id == f"{cid}-ctx").values(lane="context"))
+    with pytest.raises(ValueError):                       # only reportable findings can be joined
+        repo.add_analyst_link("h1", cid, f"{cid}-ctx", "x", None, "web:a")
+    link = repo.add_analyst_link("h1", cid, f"{cid}-b", "  same   operator ", "line one\n| injected | row |",
+                                 "web:analyst1")
     assert link["relation"] == "same operator"
     assert repo.latest_audit("h1", "analyst_link.add")["detail"]["id"] == link["id"]
     manifest = publish_revision(repo, "h1", "test")
     assert manifest["analyst_links"][0]["status"] == "analyst assertion, not proven"
-    assert "Analyst-asserted links (not proven)" in render(manifest)
+    text = render(manifest)
+    assert "Analyst-asserted links (not proven)" in text
+    row = next(line for line in text.splitlines() if "same operator" in line)
+    assert "line one" in row and "injected" in row                     # the note stays inside its table row
     assert all(edge["style"] != "analyst" for edge in manifest["incident_graph"]["edges"])

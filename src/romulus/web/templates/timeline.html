@@ -25,6 +25,7 @@
   Hidden by filters: {{ tl.hidden.findings_by_lane }} finding(s) by lane, {{ tl.hidden.rows_by_kind }} row(s) by kind,
   {% for s, n in tl.hidden.links_by_style.items() %}{{ n }} {{ s }} link(s), {% endfor %}
   {{ tl.hidden.links_without_both_ends }} link(s) whose ends are not both shown.
+  {% if tl.hidden.findings_on_hidden_rows %}{{ tl.hidden.findings_on_hidden_rows }} finding(s) sit only on rows hidden by kind or beyond this page.{% endif %}
   {% if tl.hidden.rows_beyond_page %}<b>{{ tl.hidden.rows_beyond_page }} row(s) beyond this page are not drawn; narrow the filters.</b>{% endif %}
   {% if tl.hidden.findings_without_row %}{{ tl.hidden.findings_without_row }} finding(s) have no host, account or IP and appear only in the findings list.{% endif %}</p>
 

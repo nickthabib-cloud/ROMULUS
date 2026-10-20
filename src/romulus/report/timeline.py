@@ -44,7 +44,7 @@ def build_timeline(findings: list[dict], edges: list[dict], analyst_links: list[
     reportable = [f for f in findings if f["lane"] in LANES]
     shown = [f for f in reportable if f["lane"] in lanes]
     hidden = {"findings_by_lane": len(reportable) - len(shown), "rows_by_kind": 0, "rows_beyond_page": 0,
-              "findings_without_row": 0, "links_by_style": defaultdict(int), "links_without_both_ends": 0}
+              "findings_without_row": 0, "findings_on_hidden_rows": 0, "links_by_style": defaultdict(int), "links_without_both_ends": 0}
 
     row_items: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for f in sorted(shown, key=lambda f: (_ts(f["observed_at"]), f["id"])):
@@ -70,6 +70,7 @@ def build_timeline(findings: list[dict], edges: list[dict], analyst_links: list[
                           "title": titles.get(f["rule_id"], f["rule_id"]), "claim": f["claim"][:300]})
         rows.append({"kind": kind, "value": value, "y": y, "items": items})
 
+    hidden["findings_on_hidden_rows"] = sum(1 for f in shown if _rows_of(f) and f["id"] not in primary)
     links = []
     candidates = [{"from": e["from"], "to": e["to"], "style": e["style"],
                    "label": e["link_type"].replace("_", " ")} for e in edges]
@@ -92,5 +93,5 @@ def build_timeline(findings: list[dict], edges: list[dict], analyst_links: list[
         ticks.append({"x": round(LEFT + frac * (WIDTH - LEFT - RIGHT), 1), "label": ts.strftime("%m-%d %H:%M")})
     hidden["links_by_style"] = dict(hidden["links_by_style"])
     return {"width": WIDTH, "height": TOP + max(len(rows), 1) * ROW_H + 30, "left": LEFT, "rows": rows,
-            "links": links, "ticks": ticks, "hidden": hidden, "shown_findings": len(shown),
+            "links": links, "ticks": ticks, "hidden": hidden, "shown_findings": len(primary),
             "filters": {"lanes": sorted(lanes), "kinds": sorted(kinds), "styles": sorted(styles)}}

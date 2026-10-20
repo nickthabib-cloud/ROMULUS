@@ -62,6 +62,8 @@ def expansion_windows(ts: datetime, hunt_window: Window) -> list[LinkWindow]:
     return out
 
 
+RESERVED_REASON = "source query budget reserved for discovered anchors"
+
 class ExpansionEngine:
     def __init__(
         self, repo: Repo, hunt_id: str, hunt_window: Window, fetcher: LinkFetcher,
@@ -107,24 +109,22 @@ class ExpansionEngine:
         return [str(address) for address in sorted(internal, key=lambda a: (a.version, int(a)))]
 
     def _victim_variants(self, finding_id: str, variants: list[LinkAnchor], events: list[TypedEvent],
-                         can_spend: bool = True) -> tuple[list[LinkAnchor], list[str]]:
+                         query_cap: int | None = None) -> tuple[list[LinkAnchor], list[str]]:
         """Host-side links of a network anchor run once per internal endpoint, each against the host that
         endpoint resolves to; an endpoint that resolves to no single host carries the reason instead.
-        A lookup not yet made is made only while the anchor's share of the query budget allows it."""
+        A lookup not yet made (in this run or a resumed one) is made only while it fits under `query_cap`,
+        the anchor's share of the query budget, checked against the live query count before each lookup."""
         ips = self._victim_ips(events)
         if not ips:
             return variants, []
         resolve = getattr(self.fetcher, "resolve_host", None)
-        known = getattr(self.fetcher, "_hosts", {})
         out = []
         for variant in variants:
             for ip in ips:
                 if resolve is None:
                     host, reason = None, f"victim host unknown for {ip}: host resolution is unavailable"
-                elif can_spend or ip in known:
-                    host, reason = resolve(finding_id, ip)
                 else:
-                    host, reason = None, f"victim host not resolved for {ip}: source query budget exhausted"
+                    host, reason = resolve(finding_id, ip, query_cap=query_cap)
                 out.append(variant.model_copy(update={"host": host, "victim_ip": ip, "host_reason": reason}))
         return out[:MAX_ANCHOR_KEYS], [item.victim_ip for item in out[MAX_ANCHOR_KEYS:]]
 
@@ -294,14 +294,22 @@ class ExpansionEngine:
         stop_reason = "fixpoint"
         source_failed = False
         reserve = self.max_source_queries - root_budget
+        reserve_blocked: dict[str, int] = {}     # root anchor id -> the root cap it was blocked under
         while True:
             self._seed_anchors()
             all_rows = self.repo.expansion_anchors(self.hunt_id)
-            # The reserve exists for anchors discovered by expansion. While none is waiting, half of it is
-            # released to root anchors; the other half still guarantees discovered anchors a fetch.
-            children_waiting = any(row["depth"] > 0 and row["status"] == "pending" and row["id"] not in blocked_anchors
-                                   for row in all_rows)
-            root_cap = root_budget if children_waiting else root_budget + reserve // 2
+            # The reserve exists for anchors discovered by expansion. While none that can still expand is
+            # waiting, half of it is released to root anchors, but only when the other half still covers one
+            # fetch (two queries), so a discovered anchor is never starved.
+            children_waiting = any(0 < row["depth"] < self.max_depth and row["status"] == "pending"
+                                   and row["id"] not in blocked_anchors for row in all_rows)
+            releasable = reserve // 2 if reserve - reserve // 2 >= 2 else 0
+            root_cap = root_budget if children_waiting else root_budget + releasable
+            for anchor_id, blocked_cap in list(reserve_blocked.items()):
+                if root_cap > blocked_cap:       # the reserve was released since: the root may spend again
+                    del reserve_blocked[anchor_id]
+                    blocked_anchors.discard(anchor_id)
+                    anchor_reasons[anchor_id] = [r for r in anchor_reasons[anchor_id] if r != RESERVED_REASON]
             eligible = []
             for row in all_rows:
                 if row["status"] != "pending" or row["id"] in blocked_anchors:
@@ -336,7 +344,7 @@ class ExpansionEngine:
                         if link_type in HOST_SIDE_LINKS and not base_anchor.host:
                             cap = root_cap if anchor_row["depth"] == 0 else self.max_source_queries
                             variants, dropped_ips = self._victim_variants(
-                                candidate["id"], variants, anchor_events, can_spend=query_count < cap)
+                                candidate["id"], variants, anchor_events, query_cap=cap)
                             if dropped_ips:
                                 anchor_reasons[anchor_row["id"]].append(
                                     "keys_not_expanded:" + json.dumps(
@@ -392,8 +400,9 @@ class ExpansionEngine:
                 # let that floor cross the root-anchor reserve or the global cap.
                 if not stored and remaining < 2:
                     stop_reason = "budget"
-                    reason = ("source query budget reserved for discovered anchors"
-                              if anchor_row["depth"] == 0 else "source query budget exhausted")
+                    reason = RESERVED_REASON if anchor_row["depth"] == 0 else "source query budget exhausted"
+                    if anchor_row["depth"] == 0:
+                        reserve_blocked[anchor_row["id"]] = root_cap
                     anchor_reasons[anchor_row["id"]].append(reason)
                     blocked_anchors.add(anchor_row["id"])
                     continue

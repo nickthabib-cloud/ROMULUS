@@ -355,3 +355,58 @@ def test_no_host_lookup_is_spent_once_the_budget_is_used():
     executor = PredicateExecutor(repo, [], contracts(host_ip=True))
     ExpansionEngine(repo, "h1", WINDOW, LinkFetcher(executor, WINDOW.start, WINDOW.end), max_source_queries=0).run()
     assert executor.source_queries == 0
+
+
+def _many_network_roots(count):
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
+                            "targets": [], "budgets": {}}, "digest", "test")
+    for i in range(count):
+        alert = ev(f"alert{i}", "net_alert", host="sensor1", target="network-x", ts=T0 + timedelta(minutes=i),
+                   source__ip=f"10.0.0.{10 + i}", source__port=50000 + i, destination__ip="203.0.113.8",
+                   destination__port=443, network__transport="tcp")
+        repo.save_evidence("h1", [alert], {}, None)
+        repo.save_candidate({
+            "id": f"F-{i:02d}", "hunt_id": "h1", "rule_id": "net.suricata_alert", "rule_version": "1",
+            "claim": "alert", "claim_type": "network_observation", "event_ids": [alert.id], "predicate_fields": [],
+            "entities": [["host", "sensor1", "observer"]], "ts": alert.ts, "severity": "high", "confidence": "high",
+            "lane": "high", "priority": 50.0, "priority_reasons": [], "gate_results": {}, "benign_alternatives": [],
+            "next_checks": [], "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+        })
+    return repo
+
+
+def test_host_lookups_stop_at_the_root_share_of_the_budget_by_the_live_query_count():
+    repo = _many_network_roots(16)
+    repo.upsert_task("t-pre", "h1", "expansion_link", "F-00", {}, "fp")
+    for _ in range(30):                                      # 30 of 40 queries already spent
+        repo.record_task_source_query("t-pre")
+    executor = PredicateExecutor(repo, [], contracts(host_ip=True))
+    ExpansionEngine(repo, "h1", WINDOW, LinkFetcher(executor, WINDOW.start, WINDOW.end), max_depth=2,
+                    max_source_queries=40).run()
+    lookups = sum(1 for intent in executor.sent if intent.purpose == "expansion:resolve_host_ip")
+    root_cap = 32 + 8 // 2                                   # root budget plus the released half of the reserve
+    assert executor.source_queries <= root_cap and lookups <= root_cap - 30
+
+
+def test_a_resumed_run_reuses_a_durable_lookup_even_past_the_cap():
+    repo = network_anchor_repo()
+    first = PredicateExecutor(repo, [ev("web1-ip", "process_exec", host="web1", target="host-x",
+                                        host__ip="10.0.0.2", process__pid=1)], contracts(host_ip=True))
+    assert first.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end) == ("web1", None)
+    resumed = PredicateExecutor(repo, [], contracts(host_ip=True))
+    fetcher = LinkFetcher(resumed, WINDOW.start, WINDOW.end)
+    assert fetcher.resolve_host("F-net", "10.0.0.2", query_cap=0) == ("web1", None)
+    assert resumed.source_queries == 0
+
+
+def test_a_lookup_refused_for_budget_is_not_remembered_as_an_answer():
+    repo = network_anchor_repo()
+    executor = PredicateExecutor(repo, [ev("web1-ip", "process_exec", host="web1", target="host-x",
+                                           host__ip="10.0.0.2", process__pid=1)], contracts(host_ip=True))
+    fetcher = LinkFetcher(executor, WINDOW.start, WINDOW.end)
+    host, reason = fetcher.resolve_host("F-net", "10.0.0.2", query_cap=0)
+    assert host is None and reason.endswith("source query budget exhausted") and executor.source_queries == 0
+    assert fetcher.resolve_host("F-net", "10.0.0.2", query_cap=5) == ("web1", None)

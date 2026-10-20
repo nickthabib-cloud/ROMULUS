@@ -39,7 +39,7 @@ def _title(rule_id: str) -> str:
 
 
 def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: list[dict]) -> list[dict]:
-    """A deterministic account of one incident, built from typed fields only (ADR-006 template narrative).
+    """A deterministic account of one incident, built from typed fields only, in time order.
     Each sentence carries its citations and a kind: `observed` (what the cited findings record), `mapping`
     (rule metadata such as ATT&CK tactics), `hypothesis` (inferred links) or `gap` (what is not known)."""
     members = incident["timeline"]
@@ -51,26 +51,39 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
                  f"{last['observed_at']}."),
         "cites": list(members), "kind": "observed",
     }]
-    entry = finding_by_id[incident["entry_point"]]
-    sentences.append({
-        "text": f"It begins with {_title(entry['rule_id'])} ({entry['lane']}) at {entry['observed_at']}.",
-        "cites": [entry["id"]], "kind": "observed",
-    })
     member_set = set(members)
     observed_into: dict[str, dict] = {}
     for edge in sorted(edges, key=lambda e: (e["from"], e["to"], e["link_id"])):
         if edge["style"] == "observed" and edge["from"] in member_set and edge["to"] in member_set:
             observed_into.setdefault(edge["to"], edge)
-    for item in members:
-        if item == entry["id"]:
-            continue
-        finding = finding_by_id[item]
+
+    def reached(item: str) -> tuple[str, list[str]]:
         edge = observed_into.get(item)
-        how = (f", reached from {edge['from']} by an observed {edge['link_type'].replace('_', ' ')} link"
-               if edge else "")
+        if not edge:
+            return "", []
+        return f", reached from {edge['from']} by an observed {edge['link_type'].replace('_', ' ')} link", [edge["from"]]
+
+    how, via = reached(first["id"])
+    sentences.append({
+        "text": (f"The earliest finding is {_title(first['rule_id'])} ({first['lane']}) at "
+                 f"{first['observed_at']}{how}."),
+        "cites": [first["id"]] + via, "kind": "observed",
+    })
+    entry = finding_by_id[incident["entry_point"]]
+    if entry["id"] != first["id"]:
+        # Observed links can reach back in time (a login session, the same process), so the finding no observed
+        # link leads into is not always the earliest one.
+        sentences.append({
+            "text": (f"No observed link leads into {_title(entry['rule_id'])} at {entry['observed_at']}; "
+                     f"expansion treats it as the entry point."),
+            "cites": [entry["id"]], "kind": "observed",
+        })
+    for item in members[1:]:
+        finding = finding_by_id[item]
+        how, via = reached(item)
         sentences.append({
             "text": f"Then {_title(finding['rule_id'])} ({finding['lane']}) at {finding['observed_at']}{how}.",
-            "cites": [item] + ([edge["from"]] if edge else []), "kind": "observed",
+            "cites": [item] + via, "kind": "observed",
         })
     if incident["attack_tactics"]:
         sentences.append({
@@ -88,11 +101,12 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
             "cites": sorted({x for a, b, _t in inferred for x in (a, b)}), "kind": "hypothesis",
         })
     ends = incident["open_ends"]
-    gaps = (len(ends["unexpanded_anchors"]) + len(ends["pending_anchors"]), len(ends["unresolved_links"]))
+    gaps = (len(ends["unexpanded_anchors"]) + len(ends["pending_anchors"]), len(ends.get("partial_anchors", [])),
+            len(ends["unresolved_links"]))
     if any(gaps):
         sentences.append({
-            "text": (f"This account may be incomplete: {gaps[0]} anchor(s) were not expanded and {gaps[1]} link(s) "
-                     f"were not fully resolved."),
+            "text": (f"This account may be incomplete: {gaps[0]} anchor(s) were not expanded, {gaps[1]} were expanded "
+                     f"only in part, and {gaps[2]} link(s) were not fully resolved."),
             "cites": [], "kind": "gap",
         })
     return sentences
@@ -201,6 +215,9 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         pending = [{"anchor_id": item, "reasons": anchor_by_id[item]["reasons"]}
                    for item in finding_ids if item in anchor_by_id
                    and anchor_by_id[item]["status"] == "pending"]
+        partial = [{"anchor_id": item, "reasons": anchor_by_id[item]["reasons"]}
+                   for item in finding_ids if item in anchor_by_id
+                   and anchor_by_id[item]["status"] == "expanded_partial"]
         unresolved = [{"link_id": link["id"], "status": link["status"], "reasons": link["reasons"]}
                       for link in incident_links if link["status"] != "complete"]
         incident = {
@@ -213,7 +230,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
                                   for edge in edges),
             "inferred_edges": sum(edge["style"] == "inferred" and edge["from"] in member_set
                                   for edge in edges),
-            "open_ends": {"unexpanded_anchors": unexpanded, "pending_anchors": pending,
+            "open_ends": {"unexpanded_anchors": unexpanded, "pending_anchors": pending, "partial_anchors": partial,
                           "unresolved_links": unresolved},
         }
         incident["narrative"] = incident_narrative(incident, finding_by_id, edges)

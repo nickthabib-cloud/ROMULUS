@@ -13,6 +13,9 @@ from sqlalchemy.dialects.sqlite import insert
 from romulus.store import schema as t
 from romulus.store.db import utcnow, write_txn
 
+# Lanes an analyst may join with an asserted link (the report's reportable lanes).
+REPORTABLE_LANES = ("urgent", "high", "lead")
+
 
 def _upsert_ignore(conn, table, rows: list[dict], keys: list[str]):
     if not rows:
@@ -517,10 +520,13 @@ class Repo:
         if not relation or from_finding == to_finding:
             raise ValueError("an analyst link needs two different findings and a relation")
         with write_txn(self.engine) as c:
-            owners = dict(c.execute(select(t.candidate.c.id, t.candidate.c.hunt_id)
-                                    .where(t.candidate.c.id.in_([from_finding, to_finding]))).all())
-            if owners.get(from_finding) != hunt_id or owners.get(to_finding) != hunt_id:
+            rows = {row.id: row for row in c.execute(
+                select(t.candidate.c.id, t.candidate.c.hunt_id, t.candidate.c.lane)
+                .where(t.candidate.c.id.in_([from_finding, to_finding])))}
+            if any(item not in rows or rows[item].hunt_id != hunt_id for item in (from_finding, to_finding)):
                 raise ValueError("both findings must belong to this hunt")
+            if any(rows[item].lane not in REPORTABLE_LANES for item in (from_finding, to_finding)):
+                raise ValueError("analyst links join reportable findings (urgent, high or lead)")
             row = {"id": "AL-" + uuid.uuid4().hex[:16], "hunt_id": hunt_id, "from_finding": from_finding,
                    "to_finding": to_finding, "relation": relation, "note": (note or "").strip()[:2000] or None,
                    "actor": actor, "created_at": utcnow()}
