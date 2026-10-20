@@ -6,7 +6,7 @@ import pytest
 from romulus.decide.policy import decide
 from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.context import EntryPointPromotion, PostAccessDiscovery
-from romulus.detect.registry import fresh_context_pack, fresh_pack
+from romulus.detect.registry import anchor_class_for_rule, fresh_context_pack, fresh_pack, pack_manifest
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt.context import evaluate_context
 from romulus.hunt.publish import publish_match
@@ -49,7 +49,10 @@ def link(strength="observed", link_type="login_session", status="complete"):
     (["groups"], "T1069"),
 ])
 def test_post_access_discovery_matches_attack_behavior_classes(argv, technique):
-    observed = event("discovery", process__argv=argv, process__session_id=42)
+    observed = event(
+        "discovery", process__executable=f"/usr/bin/{argv[0]}",
+        process__argv=argv, process__session_id=42,
+    )
 
     matches = PostAccessDiscovery().consume_linked(anchor(), link(), [observed])
 
@@ -66,13 +69,19 @@ def test_post_access_discovery_matches_attack_behavior_classes(argv, technique):
     ["echo", "whoami"], ["whoami-helper"], ["getent", "hosts", "example.test"], ["ipcalc", "10.0.0.1"],
 ])
 def test_post_access_discovery_rejects_mentions_and_near_names(argv):
-    observed = event("benign", process__argv=argv, process__session_id=42)
+    observed = event(
+        "benign", process__executable=f"/usr/bin/{argv[0]}",
+        process__argv=argv, process__session_id=42,
+    )
 
     assert PostAccessDiscovery().consume_linked(anchor(), link(), [observed]) == []
 
 
 def test_context_rules_reject_real_events_reached_by_disallowed_gates():
-    discovery = event("discovery", process__argv=["whoami"], process__session_id=42)
+    discovery = event(
+        "discovery", process__executable="/usr/bin/whoami",
+        process__argv=["whoami"], process__session_id=42,
+    )
     login = event(
         "login", family="auth", auth__service="sshd", source__ip="203.0.113.8",
         user__name="root", outcome=Outcome.success,
@@ -85,7 +94,10 @@ def test_context_rules_reject_real_events_reached_by_disallowed_gates():
 
 
 def test_inferred_link_caps_context_finding_at_lead_and_labels_hypothesis():
-    observed = event("discovery", process__argv=["uname", "-a"], process__session_id=42)
+    observed = event(
+        "discovery", process__executable="/usr/bin/uname",
+        process__argv=["uname", "-a"], process__session_id=42,
+    )
 
     match = PostAccessDiscovery().consume_linked(
         anchor(), link(strength="inferred", link_type="process_lineage"), [observed],
@@ -97,9 +109,9 @@ def test_inferred_link_caps_context_finding_at_lead_and_labels_hypothesis():
 
 def test_host_after_link_does_not_turn_routine_discovery_into_context_findings():
     routine = [
-        event("id", process__argv=["id"]),
-        event("uname", process__argv=["uname", "-a"]),
-        event("ip", process__argv=["ip", "addr"]),
+        event("id", process__executable="/usr/bin/id", process__argv=["id"]),
+        event("uname", process__executable="/usr/bin/uname", process__argv=["uname", "-a"]),
+        event("ip", process__executable="/usr/sbin/ip", process__argv=["ip", "addr"]),
     ]
 
     assert PostAccessDiscovery().consume_linked(
@@ -112,7 +124,10 @@ def test_context_candidate_dedupes_by_rule_event_and_keeps_every_reach():
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"targets": []}, "digest", "test")
-    observed = event("discovery", process__argv=["uname", "-a"], process__session_id=42)
+    observed = event(
+        "discovery", process__executable="/usr/bin/uname",
+        process__argv=["uname", "-a"], process__session_id=42,
+    )
     playbook = PostAccessDiscovery()
     inferred_link = link(strength="inferred", link_type="process_lineage")
     inferred_link.id = "L-inferred"
@@ -190,12 +205,36 @@ def test_context_pack_is_excluded_from_sweep_pack():
     assert all(playbook.kind != "context" for playbook in fresh_pack())
 
 
+def test_anchor_classes_are_declared_and_resolved_by_exact_rule_id():
+    assert all(row["anchor_class"] for row in pack_manifest())
+    assert anchor_class_for_rule("host.ssh_login_external_source") == "remote_login"
+    assert anchor_class_for_rule("host.web_service_spawns_interpreter") == "web_shell"
+    assert anchor_class_for_rule("custom.ssh_web_credential") == "execution"
+
+
+def test_post_access_discovery_uses_kernel_executable_not_spoofable_argv_zero():
+    spoofed = event(
+        "spoofed", process__executable="/usr/bin/echo",
+        process__argv=["whoami"], process__session_id=42,
+    )
+    renamed = event(
+        "renamed", process__executable="/usr/bin/whoami",
+        process__argv=["totally-benign-name"], process__session_id=42,
+    )
+
+    assert PostAccessDiscovery().consume_linked(anchor(), link(), [spoofed]) == []
+    assert len(PostAccessDiscovery().consume_linked(anchor(), link(), [renamed])) == 1
+
+
 def test_context_coverage_cell_is_scoped_to_anchor_and_link():
     engine = make_engine(":memory:")
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"targets": []}, "digest", "test")
-    observed = event("discovery", process__argv=["whoami"], process__session_id=42)
+    observed = event(
+        "discovery", process__executable="/usr/bin/whoami",
+        process__argv=["whoami"], process__session_id=42,
+    )
 
     evaluated = evaluate_context(repo, "h1", anchor(), link(), [observed])
 
@@ -206,6 +245,23 @@ def test_context_coverage_cell_is_scoped_to_anchor_and_link():
     assert row["partition"] == "anchor:F-anchor|link:L-session"
     assert row["state"] == "matched"
     assert row["detail"]["strength"] == "observed"
+
+
+def test_context_coverage_write_is_lease_fenced():
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": []}, "digest", "test")
+    owner = repo.claim_hunt("h1", 60)["lease_owner"]
+    observed = event(
+        "discovery", process__executable="/usr/bin/whoami",
+        process__argv=["whoami"], process__session_id=42,
+    )
+
+    with pytest.raises(RuntimeError, match="lease ownership lost"):
+        evaluate_context(repo, "h1", anchor(), link(), [observed], owner_token="stale")
+
+    assert evaluate_context(repo, "h1", anchor(), link(), [observed], owner_token=owner)
 
 
 def test_incompatible_context_family_never_writes_complete_negative():

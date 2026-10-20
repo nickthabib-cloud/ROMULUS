@@ -12,7 +12,7 @@ from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.host import is_internal
-from romulus.detect.registry import fresh_direct_pack
+from romulus.detect.registry import anchor_class_for_rule, fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.context import evaluate_context
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult, LinkType, LinkWindow, usable_key
@@ -52,17 +52,6 @@ def expansion_windows(ts: datetime, hunt_window: Window) -> list[LinkWindow]:
         if window_start < window_end:
             out.append(LinkWindow(label=label, start=window_start, end=window_end))
     return out
-
-
-def _anchor_class(rule_id: str) -> str:
-    lowered = rule_id.lower()
-    if "ssh" in lowered or "remote_login" in lowered:
-        return "remote_login"
-    if "web" in lowered or "interpreter" in lowered:
-        return "web_shell"
-    if "credential" in lowered:
-        return "credential_access"
-    return "execution"
 
 
 class ExpansionEngine:
@@ -213,19 +202,28 @@ class ExpansionEngine:
         events = self._events(result.event_ids)
         for playbook in fresh_direct_pack():
             for match in playbook.consume(events):
+                if result.strength == "inferred":
+                    match.claim += (f" This is a hypothesis linked to {candidate['id']} by inferred "
+                                    f"{result.link_type} link {result.id}; the actor is not proven identical.")
+                    if match.proposed_lane in ("urgent", "high"):
+                        match.proposed_lane = "lead"
+                        match.notes.append("lane capped at lead: the expansion link is inferred")
                 publish_match(
                     self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                     source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
                 )
         context_anchor = ContextAnchor(
-            id=candidate["id"], anchor_class=_anchor_class(candidate["rule_id"]), lane=candidate["lane"],
+            id=candidate["id"], anchor_class=anchor_class_for_rule(candidate["rule_id"]), lane=candidate["lane"],
             claim=candidate["claim"], events=anchor_events,
         )
         context_link = ContextLink(
             id=result.id, link_type=result.link_type, strength=result.strength, key=result.key,
             evidence_events=self._events(result.evidence_ids), status=result.status, reasons=result.reasons,
         )
-        for evaluated in evaluate_context(self.repo, self.hunt_id, context_anchor, context_link, events):
+        for evaluated in evaluate_context(
+            self.repo, self.hunt_id, context_anchor, context_link, events,
+            owner_token=self.owner_token,
+        ):
             publish_match(
                 self.repo, self.hunt_id, evaluated.playbook, evaluated.match,
                 result.task_ids[0] if result.task_ids else None, {},
@@ -246,8 +244,7 @@ class ExpansionEngine:
 
     def run(self) -> dict:
         self._seed_anchors()
-        existing_links = self.repo.expansion_links(self.hunt_id)
-        query_count = sum(row["query_spend"] for row in existing_links)
+        query_count = self.repo.expansion_source_queries(self.hunt_id)
         executor = getattr(self.fetcher, "executor", None)
         if executor is not None and hasattr(executor, "source_queries"):
             executor.source_queries = query_count
@@ -257,23 +254,26 @@ class ExpansionEngine:
         if self.max_source_queries == 0:
             root_budget = 0
         stop_reason = "fixpoint"
-        for _tier, link_types, window_label in TIER_PLAN:
-            while True:
-                self._seed_anchors()
-                all_rows = self.repo.expansion_anchors(self.hunt_id)
-                eligible = []
-                for row in all_rows:
-                    if row["status"] != "pending" or row["id"] in blocked_anchors:
-                        continue
-                    if row["depth"] > self.max_depth:
-                        reason = f"maximum expansion depth {self.max_depth} exceeded"
-                        anchor_reasons[row["id"]].append(reason)
-                        blocked_anchors.add(row["id"])
-                        stop_reason = "depth_limit"
-                        continue
-                    eligible.append(row)
-                ordered = self._ordered_anchors(eligible)
-                slots = []
+        while True:
+            self._seed_anchors()
+            all_rows = self.repo.expansion_anchors(self.hunt_id)
+            eligible = []
+            for row in all_rows:
+                if row["status"] != "pending" or row["id"] in blocked_anchors:
+                    continue
+                if row["depth"] >= self.max_depth:
+                    reason = f"maximum expansion depth {self.max_depth} reached"
+                    anchor_reasons[row["id"]].append(reason)
+                    blocked_anchors.add(row["id"])
+                    stop_reason = "depth_limit"
+                    continue
+                eligible.append(row)
+            ordered = self._ordered_anchors(eligible)
+            slots = []
+            # Always choose the globally lowest unfinished tier. A newly discovered
+            # anchor therefore receives T1 before any surviving T2+ work continues.
+            for _tier, link_types, window_label in TIER_PLAN:
+                tier_slots = []
                 for link_type in link_types:
                     for anchor_row in ordered:
                         candidate = self.repo.candidate(anchor_row["candidate_id"])
@@ -304,53 +304,69 @@ class ExpansionEngine:
                                     candidate["id"], link_type, window.label, window.start, window.end,
                                 )
                             if not (stored and stored["evaluated"]):
-                                slots.append((anchor_row, candidate, variant, link_type, window, stored))
-                if not slots:
+                                tier_slots.append((
+                                    anchor_row, candidate, variant, link_type, window, stored,
+                                ))
+                if tier_slots:
+                    slots = tier_slots
                     break
-                made_progress = False
-                for slot_index, (anchor_row, candidate, anchor, link_type, window, stored) in enumerate(slots):
+            if not slots:
+                break
+            made_progress = False
+            known_anchor_ids = {row["id"] for row in all_rows}
+            for slot_index, (anchor_row, candidate, anchor, link_type, window, stored) in enumerate(slots):
+                if stored:
+                    budget_reason = None
+                else:
                     budget_reason = self._budget_reason(query_count)
-                    if budget_reason:
-                        stop_reason = "budget"
-                        anchor_reasons[anchor_row["id"]].append(budget_reason)
-                        blocked_anchors.add(anchor_row["id"])
-                        continue
+                if budget_reason:
+                    stop_reason = "budget"
+                    anchor_reasons[anchor_row["id"]].append(budget_reason)
+                    blocked_anchors.add(anchor_row["id"])
+                    continue
+                if stored:
+                    remaining = self.max_source_queries - query_count
+                else:
                     allowed_budget = self.max_source_queries
                     if anchor_row["depth"] == 0:
                         allowed_budget = root_budget
                     remaining = allowed_budget - query_count
-                    if remaining <= 0:
-                        stop_reason = "budget"
-                        reason = ("source query budget reserved for discovered anchors"
-                                  if anchor_row["depth"] == 0 else "source query budget exhausted")
-                        anchor_reasons[anchor_row["id"]].append(reason)
-                        blocked_anchors.add(anchor_row["id"])
-                        continue
-                    remaining_slots = len(slots) - slot_index
-                    query_cap = min(12, max(2, remaining // max(1, remaining_slots)))
-                    self.heartbeat()
-                    anchor_events = self._events(candidate["event_ids"])
-                    result = self._stored_result(stored) if stored else self.fetcher.fetch(
-                        anchor, link_type, window, query_cap=query_cap,
+                # Every physical fetch is budgeted for at least two queries. Do not
+                # let that floor cross the root-anchor reserve or the global cap.
+                if not stored and remaining < 2:
+                    stop_reason = "budget"
+                    reason = ("source query budget reserved for discovered anchors"
+                              if anchor_row["depth"] == 0 else "source query budget exhausted")
+                    anchor_reasons[anchor_row["id"]].append(reason)
+                    blocked_anchors.add(anchor_row["id"])
+                    continue
+                remaining_slots = len(slots) - slot_index
+                query_cap = min(12, max(2, remaining // max(1, remaining_slots)))
+                self.heartbeat()
+                anchor_events = self._events(candidate["event_ids"])
+                result = self._stored_result(stored) if stored else self.fetcher.fetch(
+                    anchor, link_type, window, query_cap=query_cap,
+                )
+                if not stored:
+                    self._persist_link(result)
+                    actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
+                    query_count = (actual_queries if actual_queries is not None
+                                   else query_count + result.query_spend)
+                self._evaluate(candidate, anchor_events, result)
+                made_progress = True
+                if result.status != "complete":
+                    anchor_reasons[anchor_row["id"]].extend(
+                        result.reasons or [f"{link_type} {result.status}"],
                     )
-                    if not stored:
-                        self._persist_link(result)
-                        actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
-                        query_count = (actual_queries if actual_queries is not None
-                                       else query_count + result.query_spend)
-                    self._evaluate(candidate, anchor_events, result)
-                    made_progress = True
-                    if result.status != "complete":
-                        anchor_reasons[anchor_row["id"]].extend(
-                            result.reasons or [f"{link_type} {result.status}"],
-                        )
-                    if result.status == "failed":
-                        stop_reason = "source_failure"
-                    self._seed_anchors()
-                    if self.after_link:
-                        self.after_link(result)
-                if not made_progress:
+                if result.status == "failed":
+                    stop_reason = "source_failure"
+                self._seed_anchors()
+                if self.after_link:
+                    self.after_link(result)
+                if {row["id"] for row in self.repo.expansion_anchors(self.hunt_id)} - known_anchor_ids:
                     break
+            if not made_progress:
+                continue
 
         final_links = self.repo.expansion_links(self.hunt_id)
         for row in self.repo.expansion_anchors(self.hunt_id):

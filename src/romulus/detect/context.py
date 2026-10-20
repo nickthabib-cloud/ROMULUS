@@ -26,11 +26,11 @@ DISCOVERY_COMMANDS = {
 }
 
 
-def _discovery(argv: list[str]) -> tuple[str, str] | None:
-    if not argv:
+def _discovery(executable: str, argv: list[str] | None) -> tuple[str, str] | None:
+    if not executable:
         return None
-    name = basename(str(argv[0]))
-    if name == "getent" and len(argv) >= 2:
+    name = basename(executable)
+    if name == "getent" and argv and len(argv) >= 2:
         return ({"passwd": ("T1087", "account enumeration"),
                  "group": ("T1069", "permission-group enumeration")}.get(str(argv[1])))
     return DISCOVERY_COMMANDS.get(name)
@@ -47,10 +47,11 @@ class PostAccessDiscovery(ContextPlaybook):
     id = "context.post_access_discovery"
     version = "1"
     title = "Discovery command in an anchored session or process lineage"
+    anchor_class = "execution"
     anchor_classes = ("initial_access", "remote_login", "web_shell", "execution", "credential_access")
     link_types = ("login_session", "process_lineage")
     families = ("process_exec",)
-    required_fields = ("process.argv",)
+    required_fields = ("process.executable",)
     assures_negative = False
     claim_type = "correlated_observation"
     severity, lane = "high", "high"
@@ -61,15 +62,20 @@ class PostAccessDiscovery(ContextPlaybook):
     def match_linked(self, anchor, link, events):
         out = []
         for event in self.applicable(events):
-            found = _discovery(event.get("process.argv"))
+            executable = str(event.get("process.executable"))
+            argv = event.get("process.argv")
+            found = _discovery(executable, argv)
             if found is None:
                 continue
             technique, behavior = found
-            command = basename(str(event.get("process.argv")[0]))
-            claim = (f"A process execution record on {event.host} contains the argv-identified {behavior} command "
+            command = basename(executable)
+            predicate = [pf(event, "process.executable")]
+            if command == "getent" and event.has("process.argv"):
+                predicate.append(pf(event, "process.argv"))
+            claim = (f"A process execution record on {event.host} contains the executable-identified {behavior} command "
                      f"'{command}'. {_context_suffix(anchor, link)}")
             match = Match(
-                self.id, claim, self.claim_type, [event], [pf(event, "process.argv")], event.ts,
+                self.id, claim, self.claim_type, [event], predicate, event.ts,
                 self.severity, self.lane, "medium", event.entities(),
                 group_key=event.id,
             )
@@ -82,6 +88,7 @@ class EntryPointPromotion(ContextPlaybook):
     id = "context.entry_point_promotion"
     version = "1"
     title = "Remote-login entry point linked to a later anchor-class finding"
+    anchor_class = "remote_login"
     anchor_classes = ("*",)
     link_types = ("login_session",)
     families = ("auth",)

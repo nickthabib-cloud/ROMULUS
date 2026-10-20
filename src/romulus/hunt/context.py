@@ -18,6 +18,7 @@ class ContextEvaluation:
 
 def evaluate_context(
     repo: Repo, hunt_id: str, anchor: ContextAnchor, link: ContextLink, events,
+    *, owner_token: str | None = None,
 ) -> list[ContextEvaluation]:
     evaluations = []
     for playbook in fresh_context_pack():
@@ -49,5 +50,6 @@ def evaluate_context(
             f"anchor:{anchor.id}|link:{link.id}", state, len(admitted), evaluated,
             {"anchor_id": anchor.id, "link_id": link.id, "link_type": link.link_type,
              "strength": link.strength, "missing_required": missing, "reasons": link.reasons},
+            owner_token=owner_token,
         )
     return evaluations

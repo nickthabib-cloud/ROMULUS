@@ -55,13 +55,17 @@ def test_execve_split_long_argument_reassembles():
 
 
 def test_exec_group_joins_syscall_and_keeps_unknowns_explicit():
-    events, _skips, errors = normalize_hits([hit("e1", "linux.audit", EXECVE_HEX), hit("s1", "linux.audit", SYSCALL)])
+    events, _skips, errors = normalize_hits([
+        hit("e1", "linux.audit", EXECVE_HEX, system={"boot": {"id": "boot-a"}}),
+        hit("s1", "linux.audit", SYSCALL, system={"boot": {"id": "boot-a"}}),
+    ])
     assert errors == [] and len(events) == 1
     ev = events[0]
     assert ev.family == "process_exec" and ev.outcome == Outcome.success
     assert ev.get("process.user") == "root" and ev.get("process.ppid") == 80935
     assert ev.get("process.executable") == "/usr/bin/dash"
     assert ev.get("process.session_id") == 128
+    assert ev.get("host.boot.id") == "boot-a"
     assert ev.fields["process.session_id"].origin.endswith("auditd:SYSCALL.ses")
     assert {r.native_id for r in ev.raw} == {"e1", "s1"}
     # without the SYSCALL companion: outcome/uid unknown, with a caveat (never defaulted)

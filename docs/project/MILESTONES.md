@@ -70,14 +70,14 @@ ES adapter, typed normalizers, 15 playbooks, decide/lanes, model investigator v1
 
 Goal: turn the five "evaluated, no rule matched" misses and the lead-only items into findings by judging records in context, and show the attack as a timeline.
 
-- [ ] **Codex, expansion round (briefed 2026-10-19):**
+- [x] **Codex, expansion round (completed and reviewer-passed 2026-10-20):**
   - `ses` normalization and honest IP timelines (the merge gate);
   - link fetchers;
   - the `ContextPlaybook` kind with two reference rules;
   - the deterministic loop (depth 3, anchor accounting, resume);
   - the incident graph in the manifest;
   - renaming `bakeoff` to `replay`.
-- [ ] `reviewer` gate on the expansion branch, then merge.
+- [x] `reviewer` gate on the expansion branch (PASS after live-found canonical ordering fix); merge remains with the lead/owner.
 - [ ] **Context-rule catalog** (`detection-engineer`, from ATT&CK classes):
   - post-access discovery;
   - privilege probing and escalation;

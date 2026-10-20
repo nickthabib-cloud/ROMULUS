@@ -118,6 +118,9 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         unexpanded = [{"anchor_id": item, "reasons": anchor_by_id[item]["reasons"]}
                       for item in finding_ids if item in anchor_by_id
                       and anchor_by_id[item]["status"] == "unexpanded"]
+        pending = [{"anchor_id": item, "reasons": anchor_by_id[item]["reasons"]}
+                   for item in finding_ids if item in anchor_by_id
+                   and anchor_by_id[item]["status"] == "pending"]
         unresolved = [{"link_id": link["id"], "status": link["status"], "reasons": link["reasons"]}
                       for link in incident_links if link["status"] != "complete"]
         incidents.append({
@@ -130,7 +133,8 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
                                   for edge in edges),
             "inferred_edges": sum(edge["style"] == "inferred" and edge["from"] in member_set
                                   for edge in edges),
-            "open_ends": {"unexpanded_anchors": unexpanded, "unresolved_links": unresolved},
+            "open_ends": {"unexpanded_anchors": unexpanded, "pending_anchors": pending,
+                          "unresolved_links": unresolved},
         })
     incidents.sort(key=lambda incident: (finding_by_id[incident["finding_ids"][0]]["observed_at"], incident["id"]))
     return {"nodes": nodes, "edges": edges, "links": links, "incidents": incidents}

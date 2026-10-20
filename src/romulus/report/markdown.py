@@ -43,6 +43,12 @@ def outcome_sentence(m: dict) -> str:
 
 def render(m: dict, banner: str = BANNER) -> str:
     h = m["hunt"]
+    graph = m.get("incident_graph") or {"incidents": [], "links": [], "nodes": [], "edges": []}
+    link_strength = {link["id"]: link["style"] for link in graph["links"]}
+    link_strength.update({
+        link["id"]: link["strength"]
+        for link in (m.get("investigations") or {}).get("link_accounting", [])
+    })
     out = [banner, "", f"# ROMULUS technical report: hunt `{h['id']}`", "",
            f"Revision {m['revision']['number']} (`{m['revision']['id']}`)"
            + (f", supersedes `{m['revision']['supersedes']}`" if m["revision"]["supersedes"] else ""), "",
@@ -82,7 +88,8 @@ def render(m: dict, banner: str = BANNER) -> str:
             out += [(f"- Investigator chain: [case `{esc(f['source_case_id'])}`]"
                      f"(#case-{_anchor(f['source_case_id'])})"), ""]
         if f.get("source_anchor_id"):
-            out += [(f"- Expansion chain: anchor `{esc(f['source_anchor_id'])}` via link "
+            strength = link_strength.get(f.get("source_link_id"), "unknown-strength")
+            out += [(f"- Expansion chain: anchor `{esc(f['source_anchor_id'])}` via {esc(strength)} link "
                      f"`{esc(f.get('source_link_id') or '')}`"), ""]
         out += ["**Predicate fields (what the claim rests on)**", "", "| Field | Value | Origin |", "|---|---|---|"]
         for p in f["predicate_fields"]:
@@ -102,7 +109,6 @@ def render(m: dict, banner: str = BANNER) -> str:
             out.append(f"| … | {len(f['citations']) - 25} more citations in the JSON manifest | | | |")
         out.append("")
 
-    graph = m.get("incident_graph") or {"incidents": [], "links": [], "nodes": [], "edges": []}
     out += ["## Incidents", "",
             ("Incidents are connected only by observed typed links. Inferred links remain visible hypotheses and "
              "never merge incident counts."), "",

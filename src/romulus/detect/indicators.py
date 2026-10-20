@@ -144,6 +144,7 @@ _SET = load_indicators()
 
 class IndicatorMatch(Playbook):
     id = "ioc.indicator_match"
+    anchor_class = "indicator"
     version = f"1+{_SET.digest}"
     title = "Indicator list match in the field that gives it meaning"
     kind = "aggregate"

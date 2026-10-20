@@ -320,6 +320,32 @@ class Repo:
                 vals["attempts"] = t.task.c.attempts + 1
             c.execute(t.task.update().where(t.task.c.id == task_id).values(**vals))
 
+    def record_task_source_query(self, task_id: str, *, owner_token: str | None = None) -> int:
+        """Checkpoint one physical source call before I/O so crashes can only under-spend."""
+        with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.task.c.hunt_id).where(t.task.c.id == task_id)).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
+            c.execute(t.task.update().where(t.task.c.id == task_id).values(
+                source_queries=t.task.c.source_queries + 1,
+                updated_at=utcnow(),
+            ))
+            return int(c.execute(select(t.task.c.source_queries).where(
+                t.task.c.id == task_id,
+            )).scalar_one())
+
+    def expansion_source_queries(self, hunt_id: str) -> int:
+        """Durable physical-query spend for expansion, including an interrupted link."""
+        with self.engine.connect() as c:
+            task_spend = int(c.execute(select(func.coalesce(func.sum(t.task.c.source_queries), 0)).where(
+                t.task.c.hunt_id == hunt_id, t.task.c.kind == "expansion_link",
+            )).scalar_one())
+            link_spend = int(c.execute(select(func.coalesce(func.sum(t.expansion_link.c.query_spend), 0)).where(
+                t.expansion_link.c.hunt_id == hunt_id,
+            )).scalar_one())
+        # Completed links and tasks describe the same calls. The max also supports
+        # databases upgraded from link-only accounting without double-counting.
+        return max(task_spend, link_spend)
+
     def tasks(self, hunt_id: str) -> list[dict]:
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(select(t.task).where(t.task.c.hunt_id == hunt_id)
@@ -615,8 +641,10 @@ class Repo:
 
     # ---- coverage ---------------------------------------------------------------------------
     def set_rule_cell(self, hunt_id: str, rule_id: str, version: str, target: str, partition: str, state: str,
-                      matched: int, evaluated: int, detail: dict | None = None):
+                      matched: int, evaluated: int, detail: dict | None = None,
+                      *, owner_token: str | None = None):
         with write_txn(self.engine) as c:
+            self._fence_lease(c, hunt_id, owner_token)
             stmt = insert(t.rule_run).values(hunt_id=hunt_id, rule_id=rule_id, rule_version=version, target=target,
                                              partition=partition, state=state, matched=matched, evaluated=evaluated,
                                              detail=detail or {})

@@ -120,21 +120,42 @@ class LinkFetcher:
         *,
         query_cap: int | None = None,
     ) -> LinkResult:
-        key, strength, intents, retain, select, unsupported_reason = self._plan(anchor, link_type, window)
+        key, strength, intents, retain, select, unsupported_reason, planning_coverage = self._plan(
+            anchor, link_type, window,
+        )
         fetch_key = self._fetch_key(anchor, link_type, window, key)
         if fetch_key in self._cache:
             return self._cache[fetch_key]
         if not intents:
+            if unsupported_reason:
+                result = LinkResult(
+                    id="link-" + fetch_key[:20], anchor_id=anchor.finding_id,
+                    link_type=link_type, window=window, strength=strength, key=key,
+                    status="unsupported", coverage=planning_coverage,
+                    reasons=[unsupported_reason],
+                )
+                self._cache[fetch_key] = result
+                return result
+            if planning_coverage:
+                reasons = sorted({reason for cell in planning_coverage for reason in cell.reasons})
+                result = LinkResult(
+                    id="link-" + fetch_key[:20], anchor_id=anchor.finding_id, link_type=link_type,
+                    window=window, strength=strength, key=key, status="partial",
+                    coverage=planning_coverage, reasons=reasons,
+                )
+                self._cache[fetch_key] = result
+                return result
             result = LinkResult(
                 id="link-" + fetch_key[:20], anchor_id=anchor.finding_id, link_type=link_type,
                 window=window, strength=strength, key=key, status="unsupported",
-                reasons=[unsupported_reason or "required typed key or compatible source contract is unavailable"],
+                reasons=["required typed key or compatible source contract is unavailable"],
             )
             self._cache[fetch_key] = result
             return result
         query_start = getattr(self.executor, "source_queries", 0)
         batch = self.executor.fetch_intents(
             anchor.finding_id, fetch_key, intents, retain, anchor_ts=anchor.ts, query_cap=query_cap,
+            planning_coverage=planning_coverage,
         )
         linked = select(batch.events)
         linked = sorted(
@@ -196,12 +217,14 @@ class LinkFetcher:
 
     def _lineage(self, anchor: LinkAnchor, window: LinkWindow):
         pid = _value(anchor, "process.pid")
-        key = {"host": anchor.host, "pid": pid}
+        boot_id = _value(anchor, "host.boot.id")
+        key = {"host": anchor.host, "pid": pid, "host.boot.id": boot_id}
         intents = self._host_intents(window, ("linux.audit",), anchor.host) if isinstance(pid, int) else []
 
         def select(events):
             all_events = {event.id: event for event in anchor.events + events
-                          if event.family == "process_exec" and event.host == anchor.host}
+                          if event.family == "process_exec" and event.host == anchor.host
+                          and (boot_id is None or event.get("host.boot.id") == boot_id)}
             root = next((event for event in anchor.events if event.get("process.pid") == pid), None)
             if root is None:
                 return []
@@ -214,8 +237,24 @@ class LinkFetcher:
             root_entry = table.lookup(anchor.host or "", pid, root.ts.timestamp())
             if root_entry is None:
                 return []
-            root_raw = root_entry[3]
+            root_raws = {root_entry[3]}
             related: dict[str, TypedEvent] = {}
+            root_parent = root.get("process.ppid")
+            root_session = root.get("process.session_id")
+            # An exec does not create a new process. Treat later exec records for the same
+            # pid/process boundary as continuations so their descendants remain in lineage.
+            for candidate in sorted(all_events.values(), key=lambda item: (item.ts, item.id)):
+                if candidate.id == root.id or candidate.ts < root.ts:
+                    continue
+                if (candidate.get("process.pid") != pid
+                        or candidate.get("process.ppid") != root_parent
+                        or (root_session is not None
+                            and candidate.get("process.session_id") != root_session)):
+                    continue
+                continuation = table.lookup(anchor.host or "", pid, candidate.ts.timestamp())
+                if continuation is not None:
+                    root_raws.add(continuation[3])
+                    related[candidate.id] = candidate
             parent, when = root.get("process.ppid"), root.ts.timestamp()
             for _ in range(32):
                 if not isinstance(parent, int) or parent in (0, 1):
@@ -238,7 +277,7 @@ class LinkFetcher:
                     entry = table.lookup(anchor.host or "", parent, when)
                     if entry is None:
                         break
-                    if entry[3] == root_raw:
+                    if entry[3] in root_raws:
                         related[candidate.id] = candidate
                         break
                     ancestor = by_raw.get(entry[3])
@@ -248,11 +287,14 @@ class LinkFetcher:
             return list(related.values())
 
         reason = None if usable_key(anchor.host) and usable_key(pid) else "required typed key is unusable"
-        return key, "observed", intents if reason is None else [], lambda event: event.family == "process_exec", select, reason
+        return (key, "observed", intents if reason is None else [],
+                lambda event: event.family == "process_exec", select, reason, [])
 
     def _session(self, anchor: LinkAnchor, window: LinkWindow):
         session_id, auid = _value(anchor, "process.session_id"), _value(anchor, "process.auid")
-        key = {"host": anchor.host, "process.session_id": session_id, "process.auid": auid}
+        boot_id = _value(anchor, "host.boot.id")
+        key = {"host": anchor.host, "process.session_id": session_id, "process.auid": auid,
+               "host.boot.id": boot_id}
         reason = None
         if not usable_key(anchor.host) or not usable_key(session_id):
             reason = "required typed key is unusable"
@@ -260,9 +302,11 @@ class LinkFetcher:
 
         def matches(event):
             return (event.host == anchor.host and event.get("process.session_id") == session_id
-                    and (auid is None or event.get("process.auid") == auid))
+                    and (auid is None or event.get("process.auid") == auid)
+                    and (boot_id is None or event.get("host.boot.id") == boot_id))
 
-        return key, "observed", intents, matches, lambda events: [event for event in events if matches(event)], reason
+        return (key, "observed", intents, matches,
+                lambda events: [event for event in events if matches(event)], reason, [])
 
     def _flow(self, anchor: LinkAnchor, window: LinkWindow):
         community_id = _value(anchor, "network.community_id")
@@ -310,7 +354,8 @@ class LinkFetcher:
             return bool(five_tuple and candidate_tuple and _tuple_matches(five_tuple, candidate_tuple))
 
         reason = None if usable_key(community_id) or (five_tuple and all(usable_key(item) for item in five_tuple)) else "required typed key is unusable"
-        return key, "observed", intents if reason is None else [], matches, lambda events: [event for event in events if matches(event)], reason
+        return (key, "observed", intents if reason is None else [], matches,
+                lambda events: [event for event in events if matches(event)], reason, [])
 
     def _flow_host_side(self, anchor: LinkAnchor, window: LinkWindow):
         five_tuple = next((_tuple(event) for event in anchor.events if _tuple(event) is not None), None)
@@ -319,7 +364,8 @@ class LinkFetcher:
         ]
         key = {"host.name": anchor.host, "flow_endpoints": endpoints, "actor": "inferred"}
         reason = None
-        if not usable_key(anchor.host) or not endpoints:
+        if (not usable_key(anchor.host) or not endpoints
+                or not all(usable_key(component) for endpoint in endpoints for component in endpoint)):
             reason = "required typed key is unusable"
         intents = self._host_intents(window, ("linux.audit",), anchor.host) if reason is None else []
 
@@ -327,31 +373,40 @@ class LinkFetcher:
             return (event.family == "net_socket" and event.host == anchor.host
                     and [event.get("destination.ip"), event.get("destination.port")] in endpoints)
 
-        return key, "inferred", intents, matches, lambda events: [event for event in events if matches(event)], reason
+        return (key, "inferred", intents, matches,
+                lambda events: [event for event in events if matches(event)], reason, [])
 
     def _source_ip(self, anchor: LinkAnchor, window: LinkWindow):
         source_ip = _value(anchor, "source.ip")
         key = {"source.ip": source_ip, "actor": "inferred"}
         if not usable_key(source_ip):
-            return key, "inferred", [], lambda _event: False, lambda _events: [], "required typed key is unusable"
+            return (key, "inferred", [], lambda _event: False, lambda _events: [],
+                    "required typed key is unusable", [])
         request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
             entity={"kind": "ip", "value": str(source_ip), "role": "src"},
             start=max(anchor.ts, window.start), end=window.end,
         ))
-        intents = [intent for intent in self.executor._intents(request) if any(
+        if hasattr(self.executor, "plan"):
+            all_intents, planning_coverage = self.executor.plan(request)
+        else:
+            all_intents, planning_coverage = self.executor._intents(request), []
+        intents = [intent for intent in all_intents if any(
             predicate.field in {"source.ip", "destination.ip"}
             for group in intent.any_of for predicate in group
         )]
         matches = lambda event: event.ts >= anchor.ts and event.get("source.ip") == source_ip
         reason = None if intents else "key not pushable; full-dataset scan refused"
-        return key, "inferred", intents, matches, lambda events: [event for event in events if matches(event)], reason
+        return (key, "inferred", intents, matches,
+                lambda events: [event for event in events if matches(event)], reason,
+                planning_coverage)
 
     def _account(self, anchor: LinkAnchor, window: LinkWindow):
         field = "user.name" if _value(anchor, "user.name") is not None else "process.auid"
         account = _value(anchor, field)
         key = {field: account, "actor": "inferred"}
         if not usable_key(account):
-            return key, "inferred", [], lambda _event: False, lambda _events: [], "required typed key is unusable"
+            return (key, "inferred", [], lambda _event: False, lambda _events: [],
+                    "required typed key is unusable", [])
         forward = LinkWindow(label=window.label, start=max(anchor.ts, window.start), end=window.end)
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
@@ -368,12 +423,14 @@ class LinkFetcher:
                     and event.get(field) == account)
 
         reason = None if intents else "key not pushable; full-dataset scan refused"
-        return key, "inferred", intents, matches, lambda events: [event for event in events if matches(event)], reason
+        return (key, "inferred", intents, matches,
+                lambda events: [event for event in events if matches(event)], reason, [])
 
     def _host_after(self, anchor: LinkAnchor, window: LinkWindow):
         key = {"host.name": anchor.host, "time_relation": "after", "actor": "inferred"}
         if not usable_key(anchor.host):
-            return key, "inferred", [], lambda _event: False, lambda _events: [], "required typed key is unusable"
+            return (key, "inferred", [], lambda _event: False, lambda _events: [],
+                    "required typed key is unusable", [])
         request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
             entity={"kind": "host", "value": anchor.host, "role": "host"},
             start=max(anchor.ts, window.start), end=window.end,
@@ -381,4 +438,5 @@ class LinkFetcher:
         intents = self.executor._intents(request)
         matches = lambda event: event.host == anchor.host and event.ts >= anchor.ts
         reason = None if intents else "key not pushable; full-dataset scan refused"
-        return key, "inferred", intents, matches, lambda events: [event for event in events if matches(event)], reason
+        return (key, "inferred", intents, matches,
+                lambda events: [event for event in events if matches(event)], reason, [])

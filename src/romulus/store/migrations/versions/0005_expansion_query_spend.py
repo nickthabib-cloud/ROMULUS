@@ -17,6 +17,17 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column(
             "query_spend", sa.Integer(), nullable=False, server_default="0",
         ))
+    # Pre-migration link rows have no durable physical-query count. Conservatively
+    # consume the default expansion budget rather than let a resume exceed it.
+    op.get_bind().execute(sa.text("""
+        UPDATE expansion_link
+        SET query_spend = 180
+        WHERE id IN (
+            SELECT MIN(id) FROM expansion_link
+            WHERE status != 'unsupported'
+            GROUP BY hunt_id
+        )
+    """))
 
 
 def downgrade() -> None:

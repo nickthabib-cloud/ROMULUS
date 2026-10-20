@@ -10,7 +10,18 @@
   {% if h.stop_reason %}<div class="wide"><span class="label">Stop reason</span> {{ h.stop_reason }}</div>{% endif %}
 </div>
 
-{% if agent %}
+{% if investigations.summary.mode == 'deterministic_expansion' %}
+<section id="expansion-summary">
+  <h2>Expansion accounting</h2>
+  <p><b>{{ investigations.summary.status }}</b> · {{ investigations.summary.anchors or 0 }} anchor(s)
+    · {{ investigations.anchor_accounting.expanded_complete | length }} expanded complete
+    · {{ investigations.anchor_accounting.expanded_partial | length }} expanded partial
+    · {{ investigations.anchor_accounting.unexpanded | length }} unexpanded
+    · {{ investigations.anchor_accounting.pending | length }} pending
+    · {{ investigations.summary.links or 0 }} link(s)
+    · {{ investigations.summary.partial_links or 0 }} incomplete link(s)</p>
+</section>
+{% elif agent %}
 <section id="agent-summary">
   <h2>Model investigator</h2>
   <p><b>{{ agent.status }}</b> · Mode {{ investigations.summary.mode }} · {{ agent.unworked_count or 0 }} unworked seed(s)

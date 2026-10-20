@@ -58,17 +58,33 @@ class FakePivot:
                 "destination.port": "integer",
             }),
         }
+        self.dataset_inventory = {}
 
     def _intents(self, request):
         from romulus.hunt.pivot import PivotExecutor
         return PivotExecutor._intents(self, request)
 
-    def fetch_intents(self, owner, fetch_key, intents, retain, *, anchor_ts=None, query_cap=None):
+    def plan(self, request):
+        from romulus.hunt.pivot import PivotExecutor
+        return PivotExecutor.plan(self, request)
+
+    def _unsearchable_ip_coverage(self, request, intents=None):
+        from romulus.hunt.pivot import PivotExecutor
+        return PivotExecutor._unsearchable_ip_coverage(self, request, intents)
+
+    def fetch_intents(
+        self, owner, fetch_key, intents, retain, *, anchor_ts=None, query_cap=None,
+        planning_coverage=None,
+    ):
         self.calls.append((owner, fetch_key, intents, anchor_ts, query_cap))
         selected = [item for item in self.events if retain(item)]
+        planned = list(planning_coverage or [])
+        status = "partial" if planned else self.status
         return PivotEventBatch(
-            status=self.status, task_ids=["task-1"], events=selected, raw_sources={},
-            coverage=coverage(self.status), reasons=[] if self.status == "complete" else ["cap:2<total:3"],
+            status=status, task_ids=["task-1"], events=selected, raw_sources={},
+            coverage=planned + coverage(self.status),
+            reasons=([reason for cell in planned for reason in cell.reasons]
+                     if planned else [] if self.status == "complete" else ["cap:2<total:3"]),
             duration_ms=1,
         )
 
@@ -191,6 +207,42 @@ def test_inferred_source_ip_link_refuses_unfiltered_host_dataset_scan():
     assert not pivot.calls
 
 
+def test_source_ip_link_with_only_unsearchable_inventory_is_unsupported():
+    anchor_event = event("ip-a", "http_access", source__ip=IP)
+    pivot = FakePivot([])
+    pivot.contracts = {
+        "host-x": contract_from_types("host-x", {
+            "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+        }),
+    }
+    pivot.dataset_inventory = {"host-x": ("zoneminder",)}
+
+    result = LinkFetcher(pivot, T0, T1).fetch(
+        anchor("source_ip", anchor_event), "source_ip", window(),
+    )
+
+    assert result.status == "unsupported"
+    assert result.reasons == ["key not pushable; full-dataset scan refused"]
+    assert any(cell.dataset == "zoneminder" and cell.status == "partial"
+               for cell in result.coverage)
+    assert not pivot.calls
+
+
+def test_source_ip_link_keeps_unsearchable_inventory_coverage_partial():
+    anchor_event = event("ip-a", "http_access", source__ip=IP)
+    pivot = FakePivot([])
+    pivot.dataset_inventory = {"host-x": ("linux.audit", "zoneminder")}
+
+    result = LinkFetcher(pivot, T0, T1).fetch(
+        anchor("source_ip", anchor_event), "source_ip", window(),
+    )
+
+    assert result.status == "partial"
+    assert any(cell.dataset == "zoneminder" and cell.status == "partial"
+               for cell in result.coverage)
+    assert "dataset_not_normalized:zoneminder" in result.reasons
+
+
 @pytest.mark.parametrize("link_type", sorted(cases()))
 def test_each_link_fetcher_returns_only_typed_matches(link_type):
     anchor_event, linked = cases(matched=True)[link_type]
@@ -279,6 +331,60 @@ def test_login_session_never_crosses_session_ids_even_when_auid_matches():
     assert other.id not in result.event_ids
 
 
+def test_login_session_stops_at_boot_boundary():
+    root = event(
+        "root", "process_exec", process__pid=100, process__session_id=42,
+        process__auid="1000", host__boot__id="boot-a",
+    )
+    same_boot = event(
+        "same-boot", "process_exec", ts=T0 + timedelta(seconds=1),
+        process__pid=101, process__session_id=42, process__auid="1000",
+        host__boot__id="boot-a",
+    )
+    next_boot = event(
+        "next-boot", "process_exec", ts=T0 + timedelta(seconds=2),
+        process__pid=102, process__session_id=42, process__auid="1000",
+        host__boot__id="boot-b",
+    )
+
+    result = LinkFetcher(FakePivot([root, same_boot, next_boot]), T0, T1).fetch(
+        anchor("login_session", root), "login_session", window(),
+    )
+
+    assert same_boot.id in result.event_ids
+    assert next_boot.id not in result.event_ids
+
+
+def test_process_lineage_follows_exec_in_place_and_stops_at_boot_boundary():
+    root = event(
+        "root", "process_exec", process__executable="/bin/sh", process__pid=100,
+        process__ppid=1, process__session_id=42, host__boot__id="boot-a",
+    )
+    continuation = event(
+        "exec-in-place", "process_exec", ts=T0 + timedelta(seconds=1),
+        process__executable="/usr/bin/python3", process__pid=100,
+        process__ppid=1, process__session_id=42, host__boot__id="boot-a",
+    )
+    child = event(
+        "child", "process_exec", ts=T0 + timedelta(seconds=2),
+        process__executable="/usr/bin/id", process__pid=101,
+        process__ppid=100, process__session_id=42, host__boot__id="boot-a",
+    )
+    next_boot_child = event(
+        "next-boot-child", "process_exec", ts=T0 + timedelta(seconds=3),
+        process__executable="/usr/bin/id", process__pid=102,
+        process__ppid=100, process__session_id=42, host__boot__id="boot-b",
+    )
+
+    result = LinkFetcher(
+        FakePivot([root, continuation, child, next_boot_child]), T0, T1,
+    ).fetch(anchor("process_lineage", root), "process_lineage", window())
+
+    assert continuation.id in result.event_ids
+    assert child.id in result.event_ids
+    assert next_boot_child.id not in result.event_ids
+
+
 def test_normalized_audit_login_reaches_session_link_and_entry_promotion():
     raw = (
         'type=USER_LOGIN msg=audit(1731950250.400:76807): pid=900 uid=0 auid=1001 '
@@ -363,3 +469,24 @@ def test_host_socket_endpoint_match_is_inferred_not_observed_network_flow():
     assert observed.strength == "observed"
     assert inferred.event_ids == [unrelated_process.id]
     assert inferred.strength == "inferred"
+
+
+def test_flow_host_side_refuses_unusable_loopback_endpoint_key():
+    flow = event(
+        "flow-loopback", "net_flow", host="sensor", source__ip="10.0.0.2",
+        source__port=50000, destination__ip="127.0.0.1", destination__port=443,
+        network__transport="tcp",
+    )
+    pivot = FakePivot([])
+
+    result = LinkFetcher(pivot, T0, T1).fetch(
+        LinkAnchor(
+            finding_id="finding-flow", ts=flow.ts, host="web1",
+            event_ids=[flow.id], events=[flow],
+        ),
+        "flow_host_side", window(),
+    )
+
+    assert result.status == "unsupported"
+    assert result.reasons == ["required typed key is unusable"]
+    assert not pivot.calls

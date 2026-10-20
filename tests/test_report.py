@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from romulus.decide.policy import decide
 from romulus.detect import host
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
-from romulus.report.manifest import canonical_manifest, publish_revision
+from romulus.report.manifest import _content_candidate_key, canonical_manifest, publish_revision
 from romulus.report.markdown import fence, outcome_sentence, render
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -119,6 +119,47 @@ def test_canonical_manifest_rekeys_links_incidents_and_edges_by_content():
     }
 
 
+def test_canonical_manifest_rekeys_ids_embedded_in_claims():
+    first_repo, _ = _repo_with_observed_incident("hunt-one", "one")
+    second_repo, _ = _repo_with_observed_incident("hunt-two", "two")
+    for repo, hunt_id in ((first_repo, "hunt-one"), (second_repo, "hunt-two")):
+        anchor_id = repo.expansion_anchors(hunt_id)[0]["id"]
+        link_id = repo.expansion_links(hunt_id)[0]["id"]
+        child_id = next(row["id"] for row in repo.candidates(hunt_id) if row["id"] != anchor_id)
+        with repo.engine.begin() as connection:
+            from romulus.store import schema as tables
+            connection.execute(tables.candidate.update().where(
+                tables.candidate.c.id == child_id,
+            ).values(claim=f"Reached from {anchor_id} through link {link_id}"))
+
+    assert canonical_manifest(first_repo, "hunt-one", "test") == canonical_manifest(
+        second_repo, "hunt-two", "test",
+    )
+
+
+def test_canonical_candidate_content_key_prefers_persisted_group_key():
+    first_repo, first_id = _repo_with_finding(hunt_id="hunt-one")
+    second_repo, second_id = _repo_with_finding(hunt_id="hunt-two")
+    with first_repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.candidate.update().where(
+            tables.candidate.c.id == first_id,
+        ).values(group_key="same-aggregate"))
+    with second_repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        event_row = connection.execute(tables.typed_event.select()).mappings().one()
+        event = dict(event_row["event"])
+        event["raw"][0]["native_id"] = "different-native-record"
+        connection.execute(tables.typed_event.update().values(event=event))
+        connection.execute(tables.candidate.update().where(
+            tables.candidate.c.id == second_id,
+        ).values(group_key="same-aggregate"))
+
+    assert _content_candidate_key(first_repo, first_repo.candidate(first_id)) == _content_candidate_key(
+        second_repo, second_repo.candidate(second_id),
+    )
+
+
 def test_manifest_citations_resolve_and_renderers_agree():
     repo, cid = _repo_with_finding()
     m = publish_revision(repo, "h1", "test")
@@ -189,6 +230,61 @@ def _copy_candidate(repo, source_id, new_id, *, source_case_id=None, host=None):
     if host:
         row["entities"] = [["host", host, "host"]]
     repo.save_candidate(row)
+
+
+def _repo_with_reversed_scoped_expansion(hunt_id, alpha_id, beta_id, alpha_link, beta_link):
+    repo, original_id = _repo_with_finding(hunt_id=hunt_id)
+    _copy_candidate(repo, original_id, alpha_id)
+    _copy_candidate(repo, original_id, beta_id)
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.candidate.update().where(
+            tables.candidate.c.id == alpha_id,
+        ).values(group_key="alpha", claim="Alpha finding"))
+        connection.execute(tables.candidate.update().where(
+            tables.candidate.c.id == beta_id,
+        ).values(group_key="beta", claim="Beta finding"))
+    for candidate_id in (alpha_id, beta_id):
+        repo.save_expansion_anchor({
+            "id": candidate_id, "hunt_id": hunt_id, "candidate_id": candidate_id,
+            "depth": 0, "parent_anchor_id": None, "host": "web01", "lane": "high",
+            "severity": "high", "ts": T, "status": "expanded_partial",
+            "reasons": ["source query budget exhausted"],
+        })
+    for candidate_id, link_id, pid in (
+        (alpha_id, alpha_link, 10), (beta_id, beta_link, 20),
+    ):
+        repo.save_expansion_link({
+            "id": link_id, "hunt_id": hunt_id, "anchor_id": candidate_id,
+            "link_type": "process_lineage", "window_label": "anchor ±5 min",
+            "window_start": T - timedelta(minutes=5), "window_end": T + timedelta(minutes=5),
+            "strength": "observed", "key": {"process.pid": pid}, "status": "partial",
+            "event_ids": ["ev1"], "evidence_ids": ["ev1"], "task_ids": [],
+            "coverage": [], "reasons": ["expansion_link_query_cap:2"],
+            "duration_ms": 1, "query_spend": 2, "evaluated": 1,
+        })
+    repo.audit("system", "hunt.expansion_summary", hunt_id, {
+        "status": "completed", "stop_reason": "budget",
+    })
+    return repo
+
+
+def test_canonical_manifest_resorts_collections_after_rekeying():
+    first = _repo_with_reversed_scoped_expansion(
+        "hunt-one", "z-alpha", "a-beta", "z-alpha-link", "a-beta-link",
+    )
+    second = _repo_with_reversed_scoped_expansion(
+        "hunt-two", "a-alpha", "z-beta", "a-alpha-link", "z-beta-link",
+    )
+
+    first_json = json.dumps(
+        canonical_manifest(first, "hunt-one", "test"), sort_keys=True, separators=(",", ":"),
+    )
+    second_json = json.dumps(
+        canonical_manifest(second, "hunt-two", "test"), sort_keys=True, separators=(",", ":"),
+    )
+
+    assert first_json == second_json
 
 
 def _add_investigation(repo, seed_id, *, hostile=""):
@@ -391,8 +487,22 @@ def test_incident_graph_records_inferred_link_without_merging_incidents():
     assert manifest["investigations"]["anchor_accounting"]["unexpanded"] == ["second-finding"]
     assert "## Incidents" in markdown
     assert r"host\_after\_anchor" in markdown and "inferred" in markdown
+    assert "via inferred link" in markdown
     assert "**Anchor accounting**" in markdown
     assert "**Seed accounting**" not in markdown
+
+
+def test_pending_expansion_anchor_is_an_incident_open_end():
+    repo, anchor_id = _repo_with_finding()
+    repo.save_expansion_anchor({
+        "id": anchor_id, "hunt_id": "h1", "candidate_id": anchor_id, "depth": 0,
+        "parent_anchor_id": None, "host": "web01", "lane": "high", "severity": "high",
+        "ts": T, "status": "pending", "reasons": [],
+    })
+
+    incident = publish_revision(repo, "h1", "test")["incident_graph"]["incidents"][0]
+
+    assert incident["open_ends"]["pending_anchors"] == [{"anchor_id": anchor_id, "reasons": []}]
 
 
 def test_observed_link_to_existing_finding_event_merges_incident():

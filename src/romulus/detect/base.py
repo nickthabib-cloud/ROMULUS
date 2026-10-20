@@ -74,6 +74,7 @@ class Playbook:
     benign: ClassVar[tuple[str, ...]] = ()
     next_checks: ClassVar[tuple[str, ...]] = ()
     kind: ClassVar[str] = "direct"            # direct | aggregate | context
+    anchor_class: ClassVar[str] = "execution"
     # False for rules that read script *text*: text can show intent but can never prove that something
     # did not run, so such rules publish positives only and never write a complete negative.
     assures_negative: ClassVar[bool] = True

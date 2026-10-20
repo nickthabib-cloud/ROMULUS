@@ -279,7 +279,10 @@ class PivotExecutor:
             target: tuple(sorted(datasets)) for target, datasets in (dataset_inventory or {}).items()
         }
 
-    def _execute(self, intent: SearchIntent, contract: FieldContract, *, pit=None) -> SearchOutcome:
+    def _execute(
+        self, intent: SearchIntent, contract: FieldContract, *, pit=None,
+        spend_task_id: str | None = None,
+    ) -> SearchOutcome:
         if self.source_query_budget is not None and self.source_queries >= self.source_query_budget:
             now = datetime.now(UTC)
             reason = f"expansion_source_query_budget:{self.source_query_budget}"
@@ -288,6 +291,8 @@ class PivotExecutor:
                 started_at=now, ended_at=now, completeness=Completeness.failed,
                 reasons=[reason], error=reason,
             )
+        if spend_task_id is not None:
+            self.repo.record_task_source_query(spend_task_id, owner_token=self.owner_token)
         self.source_queries += 1
         self.heartbeat()
         outcome = (execute(self.client, intent, contract) if pit is None
@@ -404,6 +409,11 @@ class PivotExecutor:
             ))
         return intents
 
+    def plan(self, request: ToolRequest) -> tuple[list[SearchIntent], list[PivotCoverage]]:
+        """Plan executable intents and every known unresolved dataset cell together."""
+        intents = self._intents(request)
+        return intents, self._unsearchable_ip_coverage(request, intents)
+
     @staticmethod
     def _intent_dataset(intent: SearchIntent) -> str | None:
         for predicate in intent.filters:
@@ -440,7 +450,7 @@ class PivotExecutor:
         args = request.arguments
         unresolved: list[PivotCoverage] = []
         intents = intents or []
-        planned = {(intent.target, self._intent_dataset(intent)) for intent in intents}
+        planned = {(intent.target, PivotExecutor._intent_dataset(intent)) for intent in intents}
         for target, contract in self.contracts.items():
             inventoried = self.dataset_inventory.get(target)
             if inventoried is not None:
@@ -488,6 +498,7 @@ class PivotExecutor:
         *,
         fetch_query_start: int | None = None,
         query_cap: int | None = None,
+        spend_task_id: str | None = None,
     ):
         """Breadth-first capped-window splitting keeps late activity represented within a fixed leaf budget."""
         pending = deque([intent])
@@ -507,7 +518,7 @@ class PivotExecutor:
                     _range(current.window.start, current.window.end, reason),
                 ]))
                 continue
-            outcome = self._execute(current, contract)
+            outcome = self._execute(current, contract, spend_task_id=spend_task_id)
             if _is_capped(outcome.reasons) and (current.window.end - current.window.start) > MIN_PIVOT_SPLIT * 2:
                 projected_leaves = len(leaves) + len(pending) + 2
                 if projected_leaves <= MAX_PIVOT_PARTITIONS:
@@ -536,7 +547,7 @@ class PivotExecutor:
                 unresolved_ranges = [_range(current.window.start, current.window.end, reason)]
             elif _is_capped(outcome.reasons):
                 outcome, covered_ranges, unresolved_ranges = self._sample_terminal(
-                    current, outcome, contract, anchor_ts,
+                    current, outcome, contract, anchor_ts, spend_task_id=spend_task_id,
                 )
             elif outcome.completeness == Completeness.complete:
                 covered_ranges = [_range(
@@ -561,6 +572,7 @@ class PivotExecutor:
         *,
         anchor_ts: datetime | None = None,
         query_cap: int | None = None,
+        planning_coverage: list[PivotCoverage] | None = None,
     ) -> PivotEventBatch:
         """Execute deterministic typed link intents without evaluating any playbook."""
         if anchor_ts is not None:
@@ -571,10 +583,10 @@ class PivotExecutor:
         task_ids: list[str] = []
         retained: dict[str, TypedEvent] = {}
         raw_sources: dict[str, dict] = {}
-        coverage: list[PivotCoverage] = []
-        reasons: list[str] = []
+        coverage: list[PivotCoverage] = list(planning_coverage or [])
+        reasons: list[str] = [reason for cell in coverage for reason in cell.reasons]
         successful = 0
-        incomplete = False
+        incomplete = bool(coverage)
         fetch_query_start = self.source_queries
         for intent in intents:
             fingerprint = digest({"fetch_key": fetch_key, "intent": intent.model_dump(mode="json")})
@@ -591,7 +603,8 @@ class PivotExecutor:
             task_successes = 0
             for leaf_intent, outcome, covered_ranges, unresolved_ranges in self._execute_partitions(
                     intent, self.contracts[intent.target], anchor_ts,
-                    fetch_query_start=fetch_query_start, query_cap=query_cap):
+                    fetch_query_start=fetch_query_start, query_cap=query_cap,
+                    spend_task_id=task_id):
                 leaf_reasons = list(outcome.reasons)
                 selected: list[TypedEvent] = []
                 if outcome.completeness == Completeness.failed:
@@ -661,8 +674,11 @@ class PivotExecutor:
             reasons=sorted(set(reasons)), duration_ms=int((perf_counter() - started) * 1000),
         )
 
-    def _sample_terminal(self, intent: SearchIntent, initial: SearchOutcome,
-                         contract: FieldContract, anchor_ts: datetime | None):
+    def _sample_terminal(
+        self, intent: SearchIntent, initial: SearchOutcome,
+        contract: FieldContract, anchor_ts: datetime | None,
+        *, spend_task_id: str | None = None,
+    ):
         """Sample a dense leaf in both directions and around its anchor on one PIT snapshot."""
         planning_reasons = [
             reason for reason in initial.reasons
@@ -673,7 +689,9 @@ class PivotExecutor:
         try:
             with self.client.point_in_time(intent.target) as pit:
                 head_intent = intent.model_copy(update={"order": "asc"})
-                head = self._execute(head_intent, contract, pit=pit)
+                head = self._execute(
+                    head_intent, contract, pit=pit, spend_task_id=spend_task_id,
+                )
                 attempts.append((head_intent, head))
                 if (head.completeness == Completeness.complete and not head.reasons
                         and _safe_sample_interval(head, head_intent, contract) is not None):
@@ -683,7 +701,9 @@ class PivotExecutor:
                     )], []
 
                 tail_intent = intent.model_copy(update={"order": "desc"})
-                tail = self._execute(tail_intent, contract, pit=pit)
+                tail = self._execute(
+                    tail_intent, contract, pit=pit, spend_task_id=spend_task_id,
+                )
                 attempts.append((tail_intent, tail))
                 if (tail.completeness == Completeness.complete and not tail.reasons
                         and _safe_sample_interval(tail, tail_intent, contract) is not None):
@@ -703,8 +723,12 @@ class PivotExecutor:
                         "window": Window(start=anchor_ts, end=intent.window.end),
                         "order": "asc",
                     })
-                    attempts.append((before, self._execute(before, contract, pit=pit)))
-                    attempts.append((after, self._execute(after, contract, pit=pit)))
+                    attempts.append((before, self._execute(
+                        before, contract, pit=pit, spend_task_id=spend_task_id,
+                    )))
+                    attempts.append((after, self._execute(
+                        after, contract, pit=pit, spend_task_id=spend_task_id,
+                    )))
         except SourceError as exc:
             reasons = sorted(set(initial.reasons + planning_reasons + [
                 "pivot_shared_pit_error", "source_error",
@@ -844,8 +868,7 @@ class PivotExecutor:
             return PivotResult(status="unsupported", reasons=[
                 "ids_alerts requires an IP entity; network host.name identifies the observer sensor",
             ])
-        intents = self._intents(request)
-        planning_coverage = self._unsearchable_ip_coverage(request, intents)
+        intents, planning_coverage = self.plan(request)
         if not intents:
             if planning_coverage:
                 return PivotResult(
@@ -886,7 +909,8 @@ class PivotExecutor:
             target_error = None
             target_successes = 0
             for leaf_intent, outcome, covered_ranges, unresolved_ranges in self._execute_partitions(
-                    intent, self.contracts[intent.target], anchor_ts):
+                    intent, self.contracts[intent.target], anchor_ts,
+                    spend_task_id=task_id):
                 leaf_reasons = list(outcome.reasons)
                 if outcome.completeness == Completeness.failed:
                     incomplete = True

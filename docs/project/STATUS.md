@@ -2,13 +2,13 @@
 
 ## Resume here
 
-_Last updated: 2026-10-20 01:20 UTC by Codex._
+_Last updated: 2026-10-20 07:24 EDT by Codex._
 
 - **Direction (owner, 2026-10-19):**
   - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5: deterministic expansion finds, and an optional model only explains leads and drafts the narrative.
   - The New hunt page has an "Agentic hunt" checkbox, unchecked by default. `AGENT_MODE` defaults to `off`.
   - The spec (`ENGINEERING_MASTER_PROMPT.md`) is a set of suggestions, not requirements. Propose better routes when they exist. The goal is to find indicators of compromise wherever ROMULUS is sent, correlating host logs with network telemetry.
-- **Branch under review:** `codex/expansion` at the seven-commit expansion series, based on `m2/evaluation` at `7f87fb5`; live-tested on the VM and not pushed. The base merges:
+- **Branch under review:** `codex/expansion` at the eleven-step expansion fix series, based on `m2/evaluation` at `d59a79f`; independently reviewed, live-tested on the VM, and not pushed. The base merges:
   - investigator v2 (`codex/investigator-v2`, `0bfd0d2`);
   - host↔network correlation and Arkime (`m2/network-correlation`);
   - the research register (round 1).
@@ -19,14 +19,13 @@ _Last updated: 2026-10-20 01:20 UTC by Codex._
   - Arkime session indices as a target (`net_session`), with `net.long_external_connection`, `net.beaconing` and `net.rare_client_fingerprint`.
   - Investigator modes model / deterministic / off.
   - The replay harness (`romulus replay export|run|summary`).
-  - Deterministic expansion with persisted anchors and typed links, two anchor-gated context playbooks, source-query budgeting, crash-safe resume, explicit unworked accounting, and incident-graph reporting.
-  - Tests: 670 pass; changed-file Ruff and `archmap --check` are clean.
-- **Latest lab hunt** `h20261020-011647-1df665` (model-off, deterministic expansion, e_a 10:00–17:30 UTC):
-  - `completed_within_scope`; 1,816,068 records; 326,212 events; 628 candidates; 0 errors; 3:03.46 wall clock; 2,823,096 KiB peak RSS.
-  - Lanes: 7 urgent / 15 high / 95 lead / 511 context. Report r1 has 117 findings/leads, 0 broken finding, incident, or investigation citations, and is finalizable.
-  - A back-to-back run (`h20261020-011321-7fe986`, 3:06.76, 2,821,632 KiB) produced the same semantic manifest after excluding hunt-scoped IDs and wall-clock metadata; canonical SHA-256 for both was `b77a955822a68cd6a61d8008f8c89e41b68a4b68c8fcc59be81e0ccbab5f71bb`.
-  - Expansion recorded 22 anchors and 15 typed links (2 complete, 3 partial, 1 failed, 9 unsupported), but the 180 actual-source-query budget was exhausted on the first ranked anchor. All 22 anchors are honestly unexpanded and no context finding was added. Budget distribution across anchors is the next effectiveness fix.
-  - Final-build `--no-expand` run `h20261020-012324-6f8220` completed with the same sweep lanes, 0 anchors/links, 0 broken citations, 1:50.16 wall clock, and 2,620,212 KiB peak RSS. No ground-truth scoring was performed by Codex.
+  - Deterministic expansion with persisted anchors and typed links, global tiered round-robin scheduling, a depth reserve, durable physical-query checkpoints, two anchor-gated context playbooks, crash-safe resume, canonical cross-hunt manifests, explicit accounting, and incident-graph reporting.
+  - Tests: 740 pass; changed-file Ruff, `archmap --check`, and `git diff --check` are clean. The independent final reviewer returned PASS.
+- **Latest lab hunts** (model-off, e_a 10:00–17:30 UTC):
+  - Default runs `h20261020-110635-1f8437` and `h20261020-110952-5bb543` both completed within scope over 1,816,068 records / 326,534 events with 0 errors and identical lanes: 7 urgent / 18 high / 95 lead / 511 context. Each immutable r1 report has 120 findings/leads, no broken finding/incident/investigation citations, and is finalizable.
+  - Expansion distributed the 180 physical-source-query budget across 25 anchors (22 depth 0, 2 depth 1, 1 depth 2), all honestly `expanded_partial`. It produced three high `context.post_access_discovery` findings and formed 96 incidents: 91 size 1, one size 4, two size 5, one size 7, and one size 8, with 53 observed and 45 inferred edges.
+  - The two canonical manifests are byte-identical: 1,669,044 bytes, SHA-256 `d5d11e72aa397583a25295ac7f0a33cc54edae15234df67d8f1a032ee490c5ff`.
+  - `--no-expand` run `h20261020-111303-330c65` completed within scope with 0 errors, 7 urgent / 15 high / 95 lead / 511 context, 117 singleton incidents, 0 anchors/links, and no broken citations. Wall/RSS: default A 3:09.37 / 2,621,356 KiB; default B 3:04.48 / 2,620,320 KiB; no-expand 1:53.43 / 2,620,396 KiB. No ground-truth scoring was performed by Codex.
 - **Evaluation so far (dev set e_a, gold v1: 22 observable):**
   - Model-off before the network work: recall 11/22 reported, 15/22 surfaced; P@10 1.00; 5.07 false leads per modelled hour.
   - Off, deterministic and model hunts are identical on every finding metric (`docs/eval/results/2026-10-19-sl700_e_a-ablation-456.md`).
@@ -46,21 +45,21 @@ _Last updated: 2026-10-20 01:20 UTC by Codex._
   | 8: + Arkime + noise fix | 12/22 | 17/22 (critical+high 12/13) | 0.90 | 5.28 |
 
   Remaining misses are discovery ×4 and privesc ×1 (no rule matched), plus 5 lead-only (c2_channel, recon ×3, remote_login). The expansion engine and context rules target these.
-- **Deployed/live-tested product tree:** the final `codex/expansion` HEAD; the two expanded hunts ran on the same product sources before the documentation-only amendment, and the final-build `--no-expand` hunt verified the exact deployed tree. Nothing is pushed: the owner pushes.
-- **Codex expansion round:** complete and handed back in `Claude-Codex.md`. It includes session normalization and honest IP timelines, typed link fetchers, `ContextPlaybook`, the deterministic controller, incident graphs, the `replay` rename, and local plus live validation.
+- **Deployed/live-tested product tree:** the final `codex/expansion` source tree. The canonical projection was corrected after the hunts from their persisted, identical semantic data, reviewed again, and redeployed. Nothing is pushed: the owner pushes.
+- **Codex expansion fix round:** complete and handed back in `Claude-Codex.md`. It includes fair bounded scheduling, safe inferred-link handling, normalized login sessions, honest IP coverage, durable resume budgets, context deduplication, incident correlation, canonical manifests, and local plus live validation.
 - **Owner decisions recorded (2026-10-19):**
   - f_a holdout on hold.
   - A different-storyline dataset later.
   - Malcolm after deterministic search is built out.
   - Ground-truth account isolation: explained as defence in depth, not required now; revisit before any holdout.
 - **Next:**
-  1. Reviewer checks `codex/expansion`; then merge the seven-commit series if accepted.
+  1. Lead reviews the handback and merges the eleven-step `codex/expansion` series if accepted; the independent reviewer gate is PASS.
   2. Lead: network slice 3, TShark on the packets of specific Arkime sessions (v1's explicit-ID PCAP fetch and TShark safety patterns).
   3. Detection engineer: context-rule catalog (after the engine), plus lab-testable `v1_ports` and backlog items.
   4. The eval-custodian scores after each step.
 - **Merge gates and known issues:**
   - Investigator v2 re-review findings on `0abb1fc` (spawned-case stall, stale schema after shrink, seed cards dropped, `valid_first` metric, deterministic errors treated as outages). Several may be fixed in Codex's later commits but are not re-verified. They only matter for agent mode, which is off by default.
-  - Live expansion spends the full 180-query source budget on the first anchor because dense account pivots split repeatedly. Add per-anchor/link reservations or round-robin source-query scheduling before treating expansion as effective on this dataset. The unset audit `auid=4294967295` also remains a poor inferred account key and should be normalized away or refused.
+  - The live 180-query budget is now fair and bounded, but all 25 anchors remain partial and later broad link tiers (`source_ip` and `account`) were not reached. Tune the budget/tier policy only with explicit completeness and false-lead measurements.
 - **Process notes:**
   - Investigator and shell-parser code goes to Codex via `Claude-Codex.md`. The file is gitignored; replace Claude's last message; old text may be cleared at a new conversation.
   - The eval-custodian never deploys without asking.
@@ -92,6 +91,11 @@ _Last updated: 2026-10-20 01:20 UTC by Codex._
 ## Session log
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
+
+- **2026-10-20 EDT (expansion reviewer-fix round, Codex)**:
+  - Merged the current evaluation base and addressed every reviewer finding in ten ordered fix commits after the merge: event-backed incident edges; inferred flow-host links; fair global-tier scheduling; context dedupe; aggregate-key fan-out; audit-login normalization; honest IP coverage; durable query checkpoints and exception safety; canonical manifests; and controller/report hardening.
+  - Two independent follow-up reviews found and verified seven additional boundary defects. Fixes preserve unresolved IP inventory coverage, checkpoint before I/O, restart earlier tiers for new anchors, reject unusable flow endpoints, cap inferred direct findings at lead, preserve the child-query reserve, and sort canonical collections after rekeying. Final reviewer result: PASS.
+  - Final local proof: 740 tests pass; changed-surface Ruff, architecture map, and diff checks pass. Deployed and ran two default hunts plus one no-expand hunt. Default expansion adds three cited high context findings and forms multi-finding incidents; both canonical manifests are byte-identical. No model calls or ground-truth scoring were performed.
 
 - **2026-10-20 UTC (deterministic expansion, Codex)**:
   - Implemented the ADR-006 expansion slice in seven commits: session/IP truth, typed links, anchor-gated context rules, crash-safe controller, incident graph, replay rename, and verification hardening. Source access remains in the hunt layer; `romulus.agent` cannot import `romulus.sources`.

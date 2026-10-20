@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from romulus.config import Settings
 from romulus.web.app import create_app
 from romulus.web.auth import create_user
-from tests.test_report import _add_investigation, _repo_with_finding
+from tests.test_report import T, _add_investigation, _repo_with_finding
 
 
 @pytest.fixture()
@@ -110,6 +110,47 @@ def test_hunt_page_shows_latest_agent_status_and_unworked_count(client):
     assert "model output failed twice; selected top-ranked pivot" in page.text
     assert "5 hidden option" in page.text
     assert "Analyst review required" in page.text
+
+
+def test_hunt_page_shows_expansion_accounting_instead_of_seed_wording(tmp_path):
+    from romulus.hunt import run as hr
+    from romulus.store import schema as tables
+
+    settings = Settings(home=tmp_path, secret_key=secrets.token_urlsafe(32))
+    app = create_app(settings)
+    repo = hr.open_repo(settings)
+    password = secrets.token_urlsafe(18)
+    create_user(repo.engine, "analyst1", password, "analyst")
+    source, finding_id = _repo_with_finding()
+    source.save_expansion_anchor({
+        "id": finding_id, "hunt_id": "h1", "candidate_id": finding_id, "depth": 0,
+        "parent_anchor_id": None, "host": "web01", "lane": "high", "severity": "high",
+        "ts": T,
+        "status": "expanded_partial", "reasons": ["source query budget exhausted"],
+    })
+    with source.engine.connect() as read, repo.engine.begin() as write:
+        for table in (
+            tables.hunt, tables.raw_record, tables.typed_event, tables.candidate,
+            tables.disposition_event, tables.expansion_anchor,
+        ):
+            rows = [dict(row) for row in read.execute(table.select()).mappings()]
+            if rows:
+                write.execute(table.insert(), rows)
+    repo.audit("system", "hunt.expansion_summary", "h1", {
+        "status": "completed", "mode": "deterministic_expansion", "anchors": 1,
+        "expanded_complete": 0, "expanded_partial": 1, "unexpanded": [],
+        "source_queries": 12,
+    })
+    client = TestClient(app)
+    _login(client, password)
+
+    page = client.get("/hunts/h1")
+
+    assert page.status_code == 200
+    assert "Expansion accounting" in page.text
+    assert "1 anchor(s)" in page.text
+    assert "1 expanded partial" in page.text
+    assert "unworked seed" not in page.text
 
 
 @pytest.mark.parametrize("form, mode", [({}, "off"), ({"agent": "model"}, "model")])

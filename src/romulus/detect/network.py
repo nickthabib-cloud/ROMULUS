@@ -19,6 +19,7 @@ def _registered(name: str) -> str:
 
 class _Grouped(Playbook):
     kind = "aggregate"
+    anchor_class = "network_observation"
     claim_type = "aggregate_observation"
 
     def __init__(self):

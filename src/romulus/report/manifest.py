@@ -435,7 +435,7 @@ def _content_candidate_key(repo: Repo, candidate: dict) -> str:
     for row in repo.events_by_ids(candidate["event_ids"]):
         for reference in row["event"].get("raw", []):
             raw_keys.add(f"{reference['target']}/{reference['native_id']}")
-    evidence_identity = sorted(raw_keys) or sorted(candidate["event_ids"])
+    evidence_identity = candidate.get("group_key") or sorted(raw_keys) or sorted(candidate["event_ids"])
     return "F-" + digest({
         "rule_id": candidate["rule_id"], "evidence_identity": evidence_identity,
     })[:20]
@@ -493,7 +493,11 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
         if isinstance(value, list):
             return [canonicalize(item) for item in value]
         if isinstance(value, str):
-            return identity_map.get(value, value)
+            if value in identity_map:
+                return identity_map[value]
+            for scoped, content in sorted(identity_map.items(), key=lambda item: (-len(item[0]), item[0])):
+                value = value.replace(scoped, content)
+            return value
         return value
 
     canonical = canonicalize(manifest)
@@ -510,6 +514,8 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     canonical["findings"].sort(key=lambda finding: finding["id"])
     observed_at = {finding["id"]: finding["observed_at"] for finding in canonical["findings"]}
     graph["nodes"].sort(key=lambda node: node["id"])
+    for link in graph["links"]:
+        link["target_finding_ids"] = sorted(link["target_finding_ids"])
     graph["links"].sort(key=lambda link: link["id"])
     graph["edges"].sort(key=lambda edge: (edge["pair"], edge["link_key"]))
     for incident in graph["incidents"]:
@@ -518,6 +524,22 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
             incident["timeline"], key=lambda item: (observed_at.get(item, ""), item),
         )
         incident["link_ids"] = sorted(incident["link_ids"])
+        member_ids = set(incident["finding_ids"])
+        incoming = {
+            edge["pair"][1] for edge in graph["edges"]
+            if edge["style"] == "observed" and set(edge["pair"]) <= member_ids
+        }
+        entry_candidates = member_ids - incoming
+        incident["entry_point"] = min(
+            entry_candidates or member_ids,
+            key=lambda item: (observed_at.get(item, ""), item),
+        )
+        open_ends = incident["open_ends"]
+        for key in ("unexpanded_anchors", "pending_anchors", "unresolved_links"):
+            open_ends[key] = sorted(
+                open_ends.get(key, []),
+                key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+            )
     graph["incidents"].sort(key=lambda incident: incident["id"])
     investigations = canonical["investigations"]
     for key in ("unworked_seed_ids", "incomplete_case_ids"):
@@ -525,6 +547,19 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     for key in ("concluded", "assigned_unfinished", "unassigned"):
         investigations["seed_partition"][key] = sorted(
             investigations["seed_partition"].get(key, []),
+        )
+    investigations["model_contribution"]["candidate_ids"] = sorted(
+        investigations["model_contribution"].get("candidate_ids", []),
+    )
+    anchor_accounting = investigations.get("anchor_accounting")
+    if anchor_accounting:
+        for key in ("expanded_complete", "expanded_partial", "unexpanded", "pending"):
+            anchor_accounting[key] = sorted(anchor_accounting.get(key, []))
+        anchor_accounting["anchors"] = sorted(
+            anchor_accounting.get("anchors", []), key=lambda item: item["id"],
+        )
+        investigations["link_accounting"] = sorted(
+            investigations.get("link_accounting", []), key=lambda item: item["id"],
         )
     return _jsonable(canonical)
 

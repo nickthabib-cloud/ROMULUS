@@ -137,6 +137,7 @@ class DurableBudgetFetcher(ScriptedFetcher):
     def __init__(self, repo, budget=180):
         super().__init__(repo)
         self.executor = type("Counter", (), {"source_queries": 0, "source_query_budget": budget})()
+        self.queries_executed = 0
 
     def result_id(self, anchor, link_type, window):
         return f"L-{anchor.finding_id}-{link_type}-{window.label}"
@@ -145,8 +146,17 @@ class DurableBudgetFetcher(ScriptedFetcher):
         remaining = self.executor.source_query_budget - self.executor.source_queries
         spent = min(query_cap or 0, max(0, remaining))
         self.executor.source_queries += spent
+        self.queries_executed += spent
+        task_id = f"T-durable-{len(self.calls) + 1}"
+        self.repo.upsert_task(
+            task_id, "h1", "expansion_link", anchor.finding_id,
+            {"link_type": link_type, "window": window.label}, f"fp-{task_id}",
+        )
+        for _ in range(spent):
+            self.repo.record_task_source_query(task_id)
         result = super().fetch(anchor, link_type, window, query_cap=query_cap)
         result.query_spend = spent
+        result.task_ids = [task_id]
         return result
 
 
@@ -312,14 +322,23 @@ def test_resume_seeds_budget_from_persisted_query_spend_and_uses_only_remainder(
         connection.execute(tables.expansion_anchor.update().where(
             tables.expansion_anchor.c.id == "F-anchor",
         ).values(depth=1))
+    repo.upsert_task(
+        "T-crash", "h1", "expansion_link", "F-anchor",
+        {"purpose": "crash checkpoint"}, "fp-crash",
+    )
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.task.update().where(
+            tables.task.c.id == "T-crash",
+        ).values(source_queries=170))
     repo.save_expansion_link({
         "id": "L-crash-checkpoint", "hunt_id": "h1", "anchor_id": "F-anchor",
         "link_type": "login_session", "window_label": "crash checkpoint",
         "window_start": WINDOW.start, "window_end": WINDOW.end,
         "strength": "observed", "key": {"checkpoint": True}, "status": "partial",
         "event_ids": [], "evidence_ids": [], "task_ids": ["T-crash"], "coverage": [],
-        "reasons": ["simulated crash after query 170"], "duration_ms": 1,
-        "query_spend": 170, "evaluated": 1,
+        "reasons": ["link checkpoint lagged physical query 170"], "duration_ms": 1,
+        "query_spend": 168, "evaluated": 1,
     })
     resumed = DurableBudgetFetcher(repo)
 
@@ -328,8 +347,9 @@ def test_resume_seeds_budget_from_persisted_query_spend_and_uses_only_remainder(
     ).run()
 
     assert resumed.executor.source_queries == 180
+    assert 170 + resumed.queries_executed == 180
     assert result["source_queries"] == 180
-    assert sum(row["query_spend"] for row in repo.expansion_links("h1")) == 180
+    assert repo.expansion_source_queries("h1") == 180
 
 
 def test_inferred_link_context_candidate_is_lead_and_keeps_provenance():
@@ -347,6 +367,138 @@ def test_inferred_link_context_candidate_is_lead_and_keeps_provenance():
     assert candidates[0]["lane"] == "lead"
     assert candidates[0]["source_anchor_id"] == "F-anchor"
     assert candidates[0]["source_link_id"].startswith("L-F-anchor-process_lineage")
+
+
+def test_inferred_link_caps_direct_pivot_finding_at_lead_and_labels_hypothesis():
+    repo = repo_with_anchor()
+    credential_read = event(
+        "credential-read", ts=T0 + timedelta(minutes=1),
+        argv=["/usr/bin/cat", "/etc/shadow"],
+    )
+    repo.save_evidence("h1", [credential_read], {}, None)
+
+    ExpansionEngine(
+        repo, "h1", WINDOW,
+        ScriptedFetcher(
+            repo, linked=credential_read, strength="inferred",
+            linked_type="host_after_anchor",
+        ),
+    ).run()
+
+    finding = next(
+        candidate for candidate in repo.candidates("h1")
+        if candidate["rule_id"] == "host.credential_store_read"
+    )
+    assert finding["lane"] == "lead"
+    assert "hypothesis" in finding["claim"].lower()
+
+
+def test_nested_windows_each_evaluate_the_event_but_publish_one_context_finding():
+    repo = repo_with_anchor()
+    discovery = event("discovery", ts=T0 + timedelta(minutes=1), argv=["/usr/bin/whoami"])
+    repo.save_evidence("h1", [discovery], {}, None)
+
+    ExpansionEngine(
+        repo, "h1", WINDOW,
+        ScriptedFetcher(repo, linked=discovery, linked_type="process_lineage"),
+    ).run()
+
+    context_candidates = [
+        row for row in repo.candidates("h1")
+        if row["rule_id"] == "context.post_access_discovery"
+    ]
+    cells = [
+        row for row in repo.rule_cells("h1")
+        if row["rule_id"] == "context.post_access_discovery"
+        and row["target"] == "link:process_lineage"
+        and row["partition"].startswith("anchor:F-anchor|")
+    ]
+    assert len(context_candidates) == 1
+    assert len(cells) == 3
+    assert all(row["evaluated"] == 1 and row["matched"] == 1 for row in cells)
+
+
+def test_anchor_at_maximum_depth_is_not_expanded():
+    repo = repo_with_anchor()
+    fetcher = ScriptedFetcher(repo)
+    engine = ExpansionEngine(repo, "h1", WINDOW, fetcher, max_depth=3)
+    engine._seed_anchors()
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.expansion_anchor.update().values(depth=3))
+
+    engine.run()
+
+    anchor_row = repo.expansion_anchors("h1")[0]
+    assert fetcher.calls == []
+    assert anchor_row["status"] == "unexpanded"
+    assert anchor_row["reasons"] == ["maximum expansion depth 3 reached"]
+
+
+def test_budget_stop_after_some_links_marks_anchor_expanded_partial():
+    repo = repo_with_anchor()
+
+    ExpansionEngine(
+        repo, "h1", WINDOW, BudgetedFetcher(repo), max_source_queries=4,
+    ).run()
+
+    anchor_row = repo.expansion_anchors("h1")[0]
+    assert repo.expansion_links("h1")
+    assert anchor_row["status"] == "expanded_partial"
+    assert any("budget" in reason for reason in anchor_row["reasons"])
+
+
+def test_root_anchor_preserves_query_reserve_for_newly_discovered_anchor():
+    repo = repo_with_anchor()
+    fetcher = BudgetedFetcher(repo)
+    inserted = False
+
+    def discover_child(_result):
+        nonlocal inserted
+        if inserted:
+            return
+        inserted = True
+        add_anchor(repo, "F-child", "web2", ts=T0 + timedelta(minutes=1))
+        with repo.engine.begin() as connection:
+            from romulus.store import schema as tables
+            connection.execute(tables.candidate.update().where(
+                tables.candidate.c.id == "F-child",
+            ).values(source_anchor_id="F-anchor"))
+
+    ExpansionEngine(
+        repo, "h1", WINDOW, fetcher, max_source_queries=4, after_link=discover_child,
+    ).run()
+
+    assert fetcher.executor.source_queries <= 4
+    assert sum(cap for call, cap in zip(fetcher.calls, fetcher.query_caps, strict=True)
+               if call[0] == "F-anchor") <= 3
+    assert any(call[0] == "F-child" for call in fetcher.calls)
+
+
+def test_new_anchor_discovered_in_tier_two_receives_tier_one_links():
+    repo = repo_with_anchor()
+    fetcher = ScriptedFetcher(repo)
+    inserted = False
+
+    def discover_after_tier_two(result):
+        nonlocal inserted
+        if inserted or result.link_type != "host_after_anchor" or result.window.label != "anchor ±5 min":
+            return
+        inserted = True
+        add_anchor(repo, "F-child", "web2", ts=T0 + timedelta(minutes=1))
+        with repo.engine.begin() as connection:
+            from romulus.store import schema as tables
+            connection.execute(tables.candidate.update().where(
+                tables.candidate.c.id == "F-child",
+            ).values(source_anchor_id="F-anchor"))
+
+    ExpansionEngine(repo, "h1", WINDOW, fetcher, after_link=discover_after_tier_two).run()
+
+    assert any(
+        finding_id == "F-child" and link_type == "login_session"
+        and label == "anchor ±5 min"
+        for finding_id, link_type, label in fetcher.calls
+    )
 
 
 def test_resume_runs_expansion_before_optional_agent_without_rerunning_sweep(tmp_path, monkeypatch):

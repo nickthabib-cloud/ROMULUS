@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import ipaddress
+import itertools
 import posixpath
 import re
 from collections import defaultdict
@@ -70,9 +71,7 @@ def _awk_script_file_of(argv: list[str]) -> str:
 
 def interpreter_name(argv0: str) -> str:
     """Normalize an argv[0] for membership checks without expanding the allow-list."""
-    name = basename(argv0)
-    if name.startswith("-"):
-        name = name[1:]
+    name = basename(argv0).removeprefix("-")
     if name in INTERPRETERS:
         return name
     for base in sorted(INTERPRETERS, key=len, reverse=True):
@@ -177,6 +176,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     """Stack-counted: routine shapes collapse into one context item; rare shapes become leads and
     are escalated only when typed argv indicators are present (rarity alone is not suspicion)."""
     id = "host.web_service_spawns_interpreter"
+    anchor_class = "web_shell"
     # argv/text-identified programs and actions: findings only, never a complete negative
     # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
@@ -326,7 +326,7 @@ class DownloaderFeedsInterpreter(Playbook):
             if len(ms) == 1:
                 out.append(ms[0])
                 continue
-            gaps = [(b.ts - a.ts).total_seconds() for a, b in zip(ms, ms[1:])]
+            gaps = [(b.ts - a.ts).total_seconds() for a, b in itertools.pairwise(ms)]
             gaps_sorted = sorted(gaps)
             median = gaps_sorted[len(gaps_sorted) // 2]
             regular = all(abs(g - median) <= max(5.0, 0.05 * median) for g in gaps)
@@ -572,6 +572,7 @@ class FirewallRuleChange(Playbook):
 
 class CredentialStoreRead(Playbook):
     id = "host.credential_store_read"
+    anchor_class = "credential_access"
     # argv/text-identified programs and actions: findings only, never a complete negative
     # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
@@ -606,6 +607,7 @@ class AuthorizedKeysWrite(Playbook):
     or a shell script containing a redirect into it (script content). Positive-only: shell-builtin
     redirects create no process, so absence can only be assured by file-access telemetry."""
     id = "host.ssh_authorized_keys_write"
+    anchor_class = "persistence"
     version = "3"
     title = "Command or script writing to an SSH authorized_keys file"
     assures_negative = False
@@ -653,6 +655,7 @@ class AuthorizedKeysWrite(Playbook):
 
 class SshLoginFromExternal(Playbook):
     id = "host.ssh_login_external_source"
+    anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
     # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False

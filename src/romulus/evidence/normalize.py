@@ -50,6 +50,17 @@ def _get(src: dict, path: str):
     return cur
 
 
+def _audit_boot_field(members: list[tuple[dict, AuditRecord]]) -> dict:
+    """Preserve an ECS boot identity when the shipper supplied one for an audit group."""
+    for hit, _record in members:
+        source = hit["_source"]
+        for path in ("host.boot.id", "system.boot.id"):
+            value = _get(source, path)
+            if value not in (None, ""):
+                return {"host.boot.id": fv(value, f"{hit['_id']}:{path}")}
+    return {}
+
+
 # ---------------------------------------------------------------------------------------------
 # linux.audit: multi-record events grouped by (host, serial)
 # ---------------------------------------------------------------------------------------------
@@ -147,6 +158,7 @@ def normalize_audit_auth_group(host: str, members: list[tuple[dict, AuditRecord]
     origin = f"{native_id}:event.original#auditd:{record.type}"
     fields = {
         "auth.method": fv(record.type.lower(), f"{origin}.type"),
+        **_audit_boot_field(members),
     }
     executable = record.fields.get("exe")
     if executable:
@@ -188,6 +200,7 @@ def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], s
     refs = [_ref(h) for h, r in members if r.type in SOCKET_COMPANIONS]
     f = {"socket.syscall": fv(syscall, f"{sid}:event.original#auditd:SYSCALL.arch+syscall"),
          "audit.serial": fv(rs.serial, f"{sid}:event.original#auditd:msg.serial"),
+         **_audit_boot_field(members),
          **_syscall_process_fields(sid, rs)}
     if rs.fields.get("key") not in (None, "(null)"):
         f["audit.key"] = fv(rs.fields["key"], f"{sid}:event.original#auditd:SYSCALL.key")
@@ -239,6 +252,7 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
         "process.argv": fv(argv, f"{nid}:event.original#auditd:EXECVE.a*"),
         "process.args_count": fv(len(argv), f"{nid}:event.original#auditd:EXECVE.argc"),
         "audit.serial": fv(r_exec.serial, f"{nid}:event.original#auditd:msg.serial"),
+        **_audit_boot_field(members),
     }
     caveats = []
     outcome = Outcome.unknown
