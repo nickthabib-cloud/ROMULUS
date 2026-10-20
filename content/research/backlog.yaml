@@ -1,7 +1,7 @@
 # ROMULUS research: prioritized detection backlog, round 1 (2026-10-19).
 # The 25 highest-value new detections for telemetry the lab has today (raw records present; some need a
 # normalizer extension, listed under prerequisites). Ranked by expected detection value and generality across
-# mission networks, not by what the SL700 dataset contains. Each card is a DRAFT selection card (spec §9 card
+# mission networks, not by what any one evaluation dataset contains. Each card is a DRAFT selection card (spec §9 card
 # fields: claim, telemetry, fidelity, benign causes, next pivot); a rule built from it still needs the full card,
 # typed predicate, retrieval superset, fixtures and review before it can be active.
 #
@@ -443,7 +443,7 @@ next_candidates:
 # search_matrix_catalog, behavior_packs). No v1 rule is kept as-is: active rules matched substrings of free text
 # (message/event.original treated as command lines), OR-encoded intended conjunctions, ignored outcomes, and carried
 # boilerplate metadata. These are the ideas and inventories worth re-implementing as typed v2 playbooks with fixtures.
-# effort: S <= 1 day, M = 2-4 days. lab: whether SL700 telemetry can exercise it.
+# effort: S <= 1 day, M = 2-4 days. lab: whether the dev dataset's telemetry can exercise it.
 v1_ports:
   - {id: V1-01, title: "authorized_keys write, then publickey login for the same account", v1: "CUR-SEQ-0866 + BH-LNX-006", design: "typed sequence: host.ssh_authorized_keys_write or auditd PATH CREATE/write on */.ssh/authorized_keys, then journal sshd 'Accepted publickey for U'; join host+account, ordered, max interval; link inferred", telemetry: [auditd_path, journal_sshd], lab: true, effort: M, extends: [BL-17, COR-26]}
   - {id: V1-02, title: "credential-material read by path class", v1: "52 CUR-LNX-SENSITIVE-* paths + matrix linux_sensitive_files", design: "typed path-class table (keytabs, kube config, CI credentials, vault, /proc/*/environ, shell history); argv operand match is positive-only; auditd PATH open is negative-capable where watched; exclude each file's owning daemon", telemetry: [auditd_exec, auditd_path], lab: true, effort: S-M}

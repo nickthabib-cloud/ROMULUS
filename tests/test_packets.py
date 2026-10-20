@@ -877,3 +877,24 @@ def test_packet_stage_runs_before_expansion_so_its_findings_can_anchor(tmp_path,
 
 def test_the_sweep_pack_has_neither_packet_nor_context_rules():
     assert {p.kind for p in fresh_pack()}.isdisjoint({"packet", "context"})
+
+
+def test_packet_raw_copies_and_events_carry_the_packet_normalizer_version():
+    """A stored raw copy from an older packet format must never share an id with a new one (review A)."""
+    row = _row(50000, T0.timestamp())
+    sess = _session("241118-SESS00000000", 50000)
+    ev, _raw = hp._body_event(row, hp._addresses(row), T0, sess, TARGET)
+    assert ev.raw[0].native_id.endswith(f"#{hp.PACKET_NORMALIZER}") and ev.normalizer == hp.PACKET_NORMALIZER
+    assert "batch_frame" not in _raw and "batch_tcp_stream" not in _raw
+
+
+def test_resume_refuses_a_hunt_whose_packets_were_rebuilt_by_another_version(tmp_path):
+    settings = _hunt(tmp_path)
+    repo = hunt_run.open_repo(settings)
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        hunt = repo.get_hunt("h1")
+        manifest = {**hunt["manifest"], "packet_normalizer": "tshark-http@1"}
+        connection.execute(tables.hunt.update().where(tables.hunt.c.id == "h1").values(manifest=manifest))
+    with pytest.raises(RuntimeError, match="rebuilt packets with tshark-http@1"):
+        hunt_run.resume_hunt(settings, "h1")

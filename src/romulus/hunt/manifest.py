@@ -9,6 +9,7 @@ from romulus.config import Settings
 from romulus.decide.policy import POLICY_VERSION
 from romulus.detect.registry import PACK_VERSION, pack_manifest
 from romulus.evidence.normalize import NORMALIZER_VERSION
+from romulus.hunt.packets import PACKET_NORMALIZER
 from romulus.sources.models import Window
 from romulus.store.db import digest
 
@@ -32,6 +33,7 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
                                 "datasets": p["datasets"]} for t, p in profiles.items()},
         "pack": {"version": PACK_VERSION, "playbooks": pack_manifest()},
         "normalizer": NORMALIZER_VERSION,
+        "packet_normalizer": PACKET_NORMALIZER,
         "policy": POLICY_VERSION,
         "model": {"triage": s.ollama_model_triage, "synthesis": s.synthesis_model, "num_ctx": s.ollama_num_ctx,
                   "think": s.ollama_think},

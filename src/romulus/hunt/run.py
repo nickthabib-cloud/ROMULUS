@@ -10,7 +10,7 @@ from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkFetcher
 from romulus.hunt.manifest import build_manifest, new_hunt_id
-from romulus.hunt.packets import run_packet_stage
+from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.stage import clear_stale_stages
 from romulus.hunt.sweep import Sweep
@@ -329,7 +329,12 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dic
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
         raise KeyError(hunt_id)
-    recorded = (hunt.get("manifest") or {}).get("normalizer")
+    recorded_manifest = hunt.get("manifest") or {}
+    recorded = recorded_manifest.get("normalizer")
+    packets_recorded = recorded_manifest.get("packet_normalizer")
+    if packets_recorded and packets_recorded != PACKET_NORMALIZER:
+        raise RuntimeError(f"hunt {hunt_id} rebuilt packets with {packets_recorded}; this build is {PACKET_NORMALIZER}. "
+                           "Start a new hunt over the same window instead of resuming.")
     if recorded and recorded != NORMALIZER_VERSION:
         # Its sweep evidence has the old event ids; new fetches would get new ones, so a record could be both
         # the anchor and its own "linked" activity. Start a new hunt instead.

@@ -73,7 +73,7 @@ class TypedEvent(BaseModel):
 # therefore carries the evidence version: a hunt run with improved normalization stores its own rows instead of
 # silently reusing an older hunt's (eval run 10: stale rows without process.session_id hid every login-session
 # link). Bump on any change to how raw records become typed events; tests/test_evidence_version.py enforces it.
-EVIDENCE_VERSION = 2
+EVIDENCE_VERSION = 3
 
 
 def event_id(family: str, refs: list[RawRef], producer: str = "") -> str:

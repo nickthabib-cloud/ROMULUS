@@ -74,7 +74,7 @@ EXCERPT_BYTES = 4096
 PCAP_TARGET = "arkime-pcap"
 # The packet stage's normalizer (HTTP body -> http_body). Bump on any change to `_body_event`, `analyze_body` or
 # `decode_hex_body`; tests/test_evidence_version.py pins them to this version.
-PACKET_NORMALIZER = "tshark-http@3"
+PACKET_NORMALIZER = "tshark-http@4"
 SPAN_SLACK_S = 1.0
 MAX_LISTED_IDS = 50
 COUNTERS = ("candidates", "logical_sessions", "multi_segment_sessions", "fetched_sessions", "sessions_with_responses",
@@ -219,7 +219,9 @@ def _body_event(row: dict, addrs: tuple, ts: datetime, session: dict, index: str
     body = decode_hex_body(_first(row.get("http.file_data")), MAX_BODY_BYTES)
     info = analyze_body(body.head)
     epoch = _first(row.get("frame.time_epoch"))
-    native = f"{sid}@{epoch}"                 # stable across re-runs; frame numbers depend on batch composition
+    # Stable across re-runs (frame numbers depend on batch composition). The packet normalizer is part of the
+    # identity because this stage synthesizes the raw copy: a new format must never collide with a stored one.
+    native = f"{sid}@{epoch}#{PACKET_NORMALIZER}"
     # Only facts of the session and the response: frame and stream numbers depend on which sessions shared
     # the batch capture, and would make the same response's raw copy differ between hunts.
     raw = {"arkime_session_id": sid, "node": src_doc.get("node"), "index": index, "frame_time_epoch": epoch,
