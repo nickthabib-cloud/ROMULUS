@@ -8,6 +8,7 @@ from romulus.agent.controller import Investigator
 from romulus.config import Settings
 from romulus.hunt.manifest import build_manifest, new_hunt_id
 from romulus.hunt.pivot import PivotExecutor
+from romulus.hunt.packets import run_packet_stage
 from romulus.hunt.stage import clear_stale_stages
 from romulus.hunt.sweep import Sweep
 from romulus.sources.es import ElasticClient
@@ -190,6 +191,13 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     repo.audit(
         "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,
     )
+    try:
+        packet_summary = run_packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat,
+                                          owner_token=owner_token)
+    except Exception as exc:          # noqa: BLE001 - packet evidence enriches; it must never sink the hunt
+        log.exception("packet stage failed")
+        packet_summary = {"status": "failed", "error": str(exc)[:300]}
+    repo.audit("system", "hunt.packet_summary", hunt_id, packet_summary, owner_token=owner_token)
     agent_summary = {
         "status": "disabled", "mode": "off", "partial": False,
         "stop_reason": "investigator disabled (agent mode off)",

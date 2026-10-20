@@ -80,6 +80,9 @@ POSITIVE_ONLY_CLAIMS = {
         "not assessable by design: positive-only rule (the audit rule set's scope, meaning which syscalls, address "
         "families and ports it records, is not visible in telemetry, so a missing connect() record proves nothing)"
     ),
+    "pcap.disguised_script_or_executable": (
+        "not assessable by design: positive-only packet-content rule over the HTTP sessions the packet stage selected (a body that does not look like a script or executable proves nothing)"
+    ),
     "ioc.indicator_match": (
         "not assessable by design: positive-only indicator lists (names, addresses, domains and fingerprints can change, so a list that matches nothing proves nothing)"
     ),
