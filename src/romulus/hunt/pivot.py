@@ -397,13 +397,33 @@ class PivotExecutor:
                 ))
         return unresolved
 
-    def _execute_partitions(self, intent: SearchIntent, contract: FieldContract,
-                            anchor_ts: datetime | None = None):
+    def _execute_partitions(
+        self,
+        intent: SearchIntent,
+        contract: FieldContract,
+        anchor_ts: datetime | None = None,
+        *,
+        fetch_query_start: int | None = None,
+        query_cap: int | None = None,
+    ):
         """Breadth-first capped-window splitting keeps late activity represented within a fixed leaf budget."""
         pending = deque([intent])
         leaves = []
         while pending:
             current = pending.popleft()
+            if (query_cap is not None and fetch_query_start is not None
+                    and self.source_queries - fetch_query_start >= query_cap):
+                now = datetime.now(UTC)
+                reason = f"expansion_link_query_cap:{query_cap}"
+                outcome = SearchOutcome(
+                    target=current.target, fingerprint=digest(current.model_dump(mode="json")),
+                    started_at=now, ended_at=now, completeness=Completeness.partial,
+                    reasons=[reason], returned=0,
+                )
+                leaves.append((current, outcome, [], [
+                    _range(current.window.start, current.window.end, reason),
+                ]))
+                continue
             outcome = self._execute(current, contract)
             if _is_capped(outcome.reasons) and (current.window.end - current.window.start) > MIN_PIVOT_SPLIT * 2:
                 projected_leaves = len(leaves) + len(pending) + 2
@@ -423,7 +443,15 @@ class PivotExecutor:
                 outcome = outcome.model_copy(update={
                     "reasons": sorted(set(outcome.reasons + [f"pivot_min_split:{int(MIN_PIVOT_SPLIT.total_seconds())}s"])),
                 })
-            if _is_capped(outcome.reasons):
+            if (_is_capped(outcome.reasons) and query_cap is not None and fetch_query_start is not None
+                    and self.source_queries - fetch_query_start >= query_cap):
+                reason = f"expansion_link_query_cap:{query_cap}"
+                outcome = outcome.model_copy(update={
+                    "reasons": sorted(set(outcome.reasons + [reason])),
+                })
+                covered_ranges = []
+                unresolved_ranges = [_range(current.window.start, current.window.end, reason)]
+            elif _is_capped(outcome.reasons):
                 outcome, covered_ranges, unresolved_ranges = self._sample_terminal(
                     current, outcome, contract, anchor_ts,
                 )
@@ -449,6 +477,7 @@ class PivotExecutor:
         retain: Callable[[TypedEvent], bool],
         *,
         anchor_ts: datetime | None = None,
+        query_cap: int | None = None,
     ) -> PivotEventBatch:
         """Execute deterministic typed link intents without evaluating any playbook."""
         if anchor_ts is not None:
@@ -463,6 +492,7 @@ class PivotExecutor:
         reasons: list[str] = []
         successful = 0
         incomplete = False
+        fetch_query_start = self.source_queries
         for intent in intents:
             fingerprint = digest({"fetch_key": fetch_key, "intent": intent.model_dump(mode="json")})
             task_id = "t-" + fingerprint[:20]
@@ -477,7 +507,8 @@ class PivotExecutor:
             task_error = None
             task_successes = 0
             for leaf_intent, outcome, covered_ranges, unresolved_ranges in self._execute_partitions(
-                    intent, self.contracts[intent.target], anchor_ts):
+                    intent, self.contracts[intent.target], anchor_ts,
+                    fetch_query_start=fetch_query_start, query_cap=query_cap):
                 leaf_reasons = list(outcome.reasons)
                 selected: list[TypedEvent] = []
                 if outcome.completeness == Completeness.failed:

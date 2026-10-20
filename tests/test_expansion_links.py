@@ -5,7 +5,7 @@ import pytest
 
 from romulus.agent.models import PivotCoverage, PivotTimeRange
 from romulus.evidence.typed import RawRef, TypedEvent, fv
-from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
+from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow, usable_key
 from romulus.hunt.pivot import PivotEventBatch
 from romulus.sources.profile import contract_from_types
 
@@ -46,7 +46,8 @@ class FakePivot:
         self.contracts = {
             "host-x": contract_from_types("host-x", {
                 "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
-                "source.ip": "ip", "destination.ip": "ip",
+                "source.ip": "ip", "destination.ip": "ip", "user.name": "keyword",
+                "process.auid": "keyword",
             }),
             "arkime_sessions3-x": contract_from_types("arkime_sessions3-x", {
                 "firstPacket": "date", "lastPacket": "date", "network.community_id": "keyword",
@@ -59,8 +60,8 @@ class FakePivot:
         from romulus.hunt.pivot import PivotExecutor
         return PivotExecutor._intents(self, request)
 
-    def fetch_intents(self, owner, fetch_key, intents, retain, *, anchor_ts=None):
-        self.calls.append((owner, fetch_key, intents, anchor_ts))
+    def fetch_intents(self, owner, fetch_key, intents, retain, *, anchor_ts=None, query_cap=None):
+        self.calls.append((owner, fetch_key, intents, anchor_ts, query_cap))
         selected = [item for item in self.events if retain(item)]
         return PivotEventBatch(
             status=self.status, task_ids=["task-1"], events=selected, raw_sources={},
@@ -125,6 +126,66 @@ def anchor(kind, anchor_event):
         finding_id=f"finding-{kind}", ts=anchor_event.ts, host=anchor_event.host,
         event_ids=[anchor_event.id], events=[anchor_event],
     )
+
+
+@pytest.mark.parametrize("value", [
+    None, "", "  ", 4294967295, -1, "4294967295", "-1", "(null)", "(none)", "unset",
+    "0.0.0.0", "::", "127.0.0.1", "::1",
+])
+def test_usable_key_rejects_sentinels_and_non_routable_ips(value):
+    assert not usable_key(value)
+
+
+@pytest.mark.parametrize("link_type", ["login_session", "process_lineage"])
+def test_host_bound_observed_links_refuse_missing_host(link_type):
+    anchor_event, _linked = cases()[link_type]
+    pivot = FakePivot([])
+    request = LinkAnchor(
+        finding_id=f"finding-{link_type}", ts=anchor_event.ts, host=None,
+        event_ids=[anchor_event.id], events=[anchor_event.model_copy(update={"host": None})],
+    )
+
+    result = LinkFetcher(pivot, T0, T1).fetch(request, link_type, window())
+
+    assert result.status == "unsupported"
+    assert not pivot.calls
+
+
+def test_inferred_account_link_refuses_unpushable_key_instead_of_full_scan():
+    anchor_event = event("account-a", "process_exec", user__name="root")
+    pivot = FakePivot([])
+    # This host contract deliberately has no user.name/process.auid predicate.
+    pivot.contracts = {
+        "host-x": contract_from_types("host-x", {
+            "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+        }),
+    }
+
+    result = LinkFetcher(pivot, T0, T1).fetch(
+        anchor("account", anchor_event), "account", window(),
+    )
+
+    assert result.status == "unsupported"
+    assert result.reasons == ["key not pushable; full-dataset scan refused"]
+    assert not pivot.calls
+
+
+def test_inferred_source_ip_link_refuses_unfiltered_host_dataset_scan():
+    anchor_event = event("ip-a", "http_access", source__ip=IP)
+    pivot = FakePivot([])
+    pivot.contracts = {
+        "host-x": contract_from_types("host-x", {
+            "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+        }),
+    }
+
+    result = LinkFetcher(pivot, T0, T1).fetch(
+        anchor("source_ip", anchor_event), "source_ip", window(),
+    )
+
+    assert result.status == "unsupported"
+    assert result.reasons == ["key not pushable; full-dataset scan refused"]
+    assert not pivot.calls
 
 
 @pytest.mark.parametrize("link_type", sorted(cases()))
@@ -225,7 +286,7 @@ def test_network_flow_exact_tuple_queries_both_directions():
     LinkFetcher(pivot, T0, T1).fetch(anchor("network_flow", root), "network_flow", window())
 
     network_intent = next(
-        intent for _owner, _key, intents, _ts in pivot.calls for intent in intents
+        intent for _owner, _key, intents, _ts, _cap in pivot.calls for intent in intents
         if intent.target == "arkime_sessions3-x"
     )
     assert [[(predicate.field, predicate.value) for predicate in group]

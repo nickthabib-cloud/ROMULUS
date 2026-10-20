@@ -85,6 +85,36 @@ def test_executor_counts_and_stops_actual_source_queries(monkeypatch):
     assert outcomes[2].reasons == ["expansion_source_query_budget:2"]
 
 
+def test_fetch_query_cap_leaves_unattempted_ranges_unresolved(monkeypatch):
+    calls = []
+
+    def fake_execute(_client, intent, _contract, *, pit=None):
+        calls.append(intent)
+        return SearchOutcome(
+            target=intent.target, fingerprint="fp", started_at=START, ended_at=START,
+            completeness=Completeness.partial, reasons=["cap:1<total:30000"],
+            total=30000, total_relation="eq", returned=1,
+        )
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    executor = PivotExecutor(_repo(), FakeClient(), "h1", {"host-x": contract})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=1)
+
+    batch = executor.fetch_intents(
+        "F-anchor", "fetch-key", [intent], lambda _event: True, query_cap=2,
+    )
+
+    assert len(calls) == 2
+    assert executor.source_queries == 2
+    assert batch.status == "partial"
+    assert "expansion_link_query_cap:2" in batch.reasons
+    assert any(
+        interval.reason == "expansion_link_query_cap:2"
+        for cell in batch.coverage for interval in cell.unresolved_ranges
+    )
+
+
 def test_shared_publication_sets_source_case_and_keeps_machine_policy():
     repo = _repo()
     playbook = CredentialStoreRead()

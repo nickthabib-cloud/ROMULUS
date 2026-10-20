@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from collections import Counter
+from collections import defaultdict, deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
@@ -17,8 +17,14 @@ from romulus.hunt.publish import publish_match
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
-LINK_ORDER: tuple[LinkType, ...] = (
-    "login_session", "process_lineage", "network_flow", "source_ip", "account", "host_after_anchor",
+TIER_PLAN: tuple[tuple[str, tuple[LinkType, ...], str], ...] = (
+    ("T1", ("login_session", "process_lineage", "network_flow"), "anchor ±5 min"),
+    ("T2", ("host_after_anchor", "flow_host_side"), "anchor ±5 min"),
+    ("T3", ("login_session", "process_lineage", "network_flow", "host_after_anchor",
+            "flow_host_side"), "anchor ±30 min"),
+    ("T4", ("source_ip", "account"), "anchor ±5 min"),
+    ("T5", ("login_session", "process_lineage", "network_flow", "host_after_anchor",
+            "flow_host_side", "source_ip", "account"), "anchor ±2 h"),
 )
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 DEFAULT_MAX_DEPTH = 3
@@ -93,14 +99,25 @@ class ExpansionEngine:
             existing.add(candidate["id"])
             depths[candidate["id"]] = depth
 
-    def _next_anchor(self, expanded_hosts: Counter) -> dict | None:
-        pending = [row for row in self.repo.expansion_anchors(self.hunt_id) if row["status"] == "pending"]
-        if not pending:
-            return None
-        return min(pending, key=lambda row: (
-            expanded_hosts[row["host"] or ""], LANE_ORDER.get(row["lane"], 9),
-            SEVERITY_ORDER.get(row["severity"], 9), _utc(row["ts"]), row["id"],
-        ))
+    @staticmethod
+    def _anchor_priority(row: dict) -> tuple:
+        return (
+            LANE_ORDER.get(row["lane"], 9), SEVERITY_ORDER.get(row["severity"], 9),
+            _utc(row["ts"]), row["id"],
+        )
+
+    def _ordered_anchors(self, rows: list[dict]) -> list[dict]:
+        """Round-robin hosts while retaining deterministic priority within each host."""
+        by_host: dict[str, deque[dict]] = defaultdict(deque)
+        for row in sorted(rows, key=self._anchor_priority):
+            by_host[row["host"] or ""].append(row)
+        hosts = sorted(by_host, key=lambda host: self._anchor_priority(by_host[host][0]))
+        ordered = []
+        while any(by_host.values()):
+            for host in hosts:
+                if by_host[host]:
+                    ordered.append(by_host[host].popleft())
+        return ordered
 
     @staticmethod
     def _stored_result(row: dict) -> LinkResult:
@@ -170,74 +187,105 @@ class ExpansionEngine:
         self._seed_anchors()
         existing_links = self.repo.expansion_links(self.hunt_id)
         query_count = len({task for row in existing_links for task in row["task_ids"]})
-        expanded_hosts = Counter(row["host"] or "" for row in self.repo.expansion_anchors(self.hunt_id)
-                                 if row["status"].startswith("expanded_"))
+        anchor_reasons: dict[str, list[str]] = defaultdict(list)
+        blocked_anchors: set[str] = set()
+        root_budget = self.max_source_queries - max(1, (self.max_source_queries + 4) // 5)
+        if self.max_source_queries == 0:
+            root_budget = 0
         stop_reason = "fixpoint"
-        while (anchor_row := self._next_anchor(expanded_hosts)) is not None:
-            budget_reason = self._budget_reason(query_count)
-            if budget_reason:
-                stop_reason = "budget"
-                for row in self.repo.expansion_anchors(self.hunt_id):
-                    if row["status"] == "pending":
-                        self.repo.update_expansion_anchor(row["id"], "unexpanded", [budget_reason],
-                                                          owner_token=self.owner_token)
-                break
-            if anchor_row["depth"] > self.max_depth:
-                stop_reason = "depth_limit"
-                self.repo.update_expansion_anchor(anchor_row["id"], "unexpanded", [
-                    f"maximum expansion depth {self.max_depth} exceeded",
-                ], owner_token=self.owner_token)
-                continue
-            self.heartbeat()
-            candidate = self.repo.candidate(anchor_row["candidate_id"])
-            anchor_events = self._events(candidate["event_ids"])
-            candidate_ts = _utc(candidate["ts"])
-            anchor = LinkAnchor(
-                finding_id=candidate["id"], ts=candidate_ts, host=anchor_row["host"],
-                event_ids=candidate["event_ids"], events=anchor_events,
-            )
-            reasons = []
-            for link_type in LINK_ORDER:
-                for window in expansion_windows(candidate_ts, self.window):
+        for _tier, link_types, window_label in TIER_PLAN:
+            while True:
+                self._seed_anchors()
+                all_rows = self.repo.expansion_anchors(self.hunt_id)
+                eligible = []
+                for row in all_rows:
+                    if row["status"] != "pending" or row["id"] in blocked_anchors:
+                        continue
+                    if row["depth"] > self.max_depth:
+                        reason = f"maximum expansion depth {self.max_depth} exceeded"
+                        anchor_reasons[row["id"]].append(reason)
+                        blocked_anchors.add(row["id"])
+                        stop_reason = "depth_limit"
+                        continue
+                    eligible.append(row)
+                ordered = self._ordered_anchors(eligible)
+                slots = []
+                for link_type in link_types:
+                    for anchor_row in ordered:
+                        candidate = self.repo.candidate(anchor_row["candidate_id"])
+                        candidate_ts = _utc(candidate["ts"])
+                        window = next(
+                            item for item in expansion_windows(candidate_ts, self.window)
+                            if item.label == window_label
+                        )
+                        stored = self.repo.expansion_link_for(
+                            candidate["id"], link_type, window.label, window.start, window.end,
+                        )
+                        if not (stored and stored["evaluated"]):
+                            slots.append((anchor_row, candidate, link_type, window, stored))
+                if not slots:
+                    break
+                made_progress = False
+                for slot_index, (anchor_row, candidate, link_type, window, stored) in enumerate(slots):
                     budget_reason = self._budget_reason(query_count)
                     if budget_reason:
                         stop_reason = "budget"
-                        reasons.append(budget_reason)
-                        break
-                    stored = self.repo.expansion_link_for(
-                        anchor.finding_id, link_type, window.label, window.start, window.end,
-                    )
-                    if stored and stored["evaluated"]:
-                        if stored["status"] != "complete":
-                            reasons.extend(stored["reasons"] or [f"{link_type} {stored['status']}"])
+                        anchor_reasons[anchor_row["id"]].append(budget_reason)
+                        blocked_anchors.add(anchor_row["id"])
                         continue
-                    result = self._stored_result(stored) if stored else self.fetcher.fetch(anchor, link_type, window)
+                    allowed_budget = self.max_source_queries
+                    if anchor_row["depth"] == 0:
+                        allowed_budget = root_budget
+                    remaining = allowed_budget - query_count
+                    if remaining <= 0:
+                        stop_reason = "budget"
+                        reason = ("source query budget reserved for discovered anchors"
+                                  if anchor_row["depth"] == 0 else "source query budget exhausted")
+                        anchor_reasons[anchor_row["id"]].append(reason)
+                        blocked_anchors.add(anchor_row["id"])
+                        continue
+                    remaining_slots = len(slots) - slot_index
+                    query_cap = min(12, max(2, remaining // max(1, remaining_slots)))
+                    self.heartbeat()
+                    anchor_events = self._events(candidate["event_ids"])
+                    anchor = LinkAnchor(
+                        finding_id=candidate["id"], ts=_utc(candidate["ts"]), host=anchor_row["host"],
+                        event_ids=candidate["event_ids"], events=anchor_events,
+                    )
+                    result = self._stored_result(stored) if stored else self.fetcher.fetch(
+                        anchor, link_type, window, query_cap=query_cap,
+                    )
                     if not stored:
                         self._persist_link(result)
                         actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
-                        query_count = actual_queries if actual_queries is not None else query_count + len(set(result.task_ids))
+                        query_count = (actual_queries if actual_queries is not None
+                                       else query_count + len(set(result.task_ids)))
                     self._evaluate(candidate, anchor_events, result)
+                    made_progress = True
                     if result.status != "complete":
-                        reasons.extend(result.reasons or [f"{link_type} {result.status}"])
+                        anchor_reasons[anchor_row["id"]].extend(
+                            result.reasons or [f"{link_type} {result.status}"],
+                        )
                     if result.status == "failed":
                         stop_reason = "source_failure"
                     self._seed_anchors()
                     if self.after_link:
                         self.after_link(result)
-                if reasons and reasons[-1] in {"source query budget exhausted", "hunt wall-clock budget exhausted"}:
+                if not made_progress:
                     break
-            if stop_reason == "budget" and any("budget exhausted" in reason for reason in reasons):
-                self.repo.update_expansion_anchor(anchor_row["id"], "unexpanded", sorted(set(reasons)),
-                                                  owner_token=self.owner_token)
-                for row in self.repo.expansion_anchors(self.hunt_id):
-                    if row["status"] == "pending":
-                        self.repo.update_expansion_anchor(row["id"], "unexpanded", [reasons[-1]],
-                                                          owner_token=self.owner_token)
-                break
-            status = "expanded_partial" if reasons else "expanded_complete"
-            self.repo.update_expansion_anchor(anchor_row["id"], status, sorted(set(reasons)),
-                                              owner_token=self.owner_token)
-            expanded_hosts[anchor_row["host"] or ""] += 1
+
+        final_links = self.repo.expansion_links(self.hunt_id)
+        for row in self.repo.expansion_anchors(self.hunt_id):
+            links = [link for link in final_links if link["anchor_id"] == row["id"]]
+            reasons = sorted(set(anchor_reasons[row["id"]] + [
+                reason for link in links if link["status"] != "complete"
+                for reason in (link["reasons"] or [f"{link['link_type']} {link['status']}"])
+            ]))
+            if row["id"] in blocked_anchors:
+                status = "expanded_partial" if links else "unexpanded"
+            else:
+                status = "expanded_partial" if reasons else "expanded_complete"
+            self.repo.update_expansion_anchor(row["id"], status, reasons, owner_token=self.owner_token)
         anchors = self.repo.expansion_anchors(self.hunt_id)
         summary = {
             "status": "completed" if stop_reason in {"fixpoint", "depth_limit", "budget"} else "partial",

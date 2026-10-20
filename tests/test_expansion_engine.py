@@ -61,7 +61,7 @@ class ScriptedFetcher:
         self.strength = strength
         self.calls = []
 
-    def fetch(self, anchor, link_type, window):
+    def fetch(self, anchor, link_type, window, *, query_cap=None):
         assert anchor.ts.tzinfo is not None and anchor.ts.utcoffset() == timedelta(0)
         self.calls.append((anchor.finding_id, link_type, window.label))
         event_ids = [self.linked.id] if self.linked is not None and link_type == "host_after_anchor" else []
@@ -75,6 +75,32 @@ class ScriptedFetcher:
                 status="complete", returned=len(event_ids), total=len(event_ids),
             )],
         )
+
+
+class BudgetedFetcher(ScriptedFetcher):
+    def __init__(self, repo):
+        super().__init__(repo)
+        self.executor = type("Counter", (), {"source_queries": 0})()
+        self.query_caps = []
+
+    def fetch(self, anchor, link_type, window, *, query_cap=None):
+        self.query_caps.append(query_cap)
+        self.executor.source_queries += query_cap or 0
+        return super().fetch(anchor, link_type, window, query_cap=query_cap)
+
+
+def add_anchor(repo, candidate_id, host, *, ts=T0):
+    anchor = event(f"{candidate_id}-event", host=host, ts=ts)
+    repo.save_evidence("h1", [anchor], {}, None)
+    repo.save_candidate({
+        "id": candidate_id, "hunt_id": "h1", "rule_id": "host.web_shell",
+        "rule_version": "1", "claim": "web service spawned a shell",
+        "claim_type": "observed_action", "event_ids": [anchor.id],
+        "predicate_fields": [], "entities": [["host", host, "host"]], "ts": anchor.ts,
+        "severity": "critical", "confidence": "high", "lane": "urgent", "priority": 100.0,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+    })
 
 
 def stable_state(repo):
@@ -123,6 +149,17 @@ def test_budget_exhaustion_lists_every_unworked_anchor():
     anchor = repo.expansion_anchors("h1")[0]
     assert anchor["status"] == "unexpanded"
     assert "source query budget exhausted" in anchor["reasons"]
+
+
+def test_tier_scheduler_gives_each_host_a_fetch_before_dense_anchor_can_starve_it():
+    repo = repo_with_anchor(host="web1", candidate_id="F-one")
+    add_anchor(repo, "F-two", "web2", ts=T0 + timedelta(seconds=1))
+    fetcher = BudgetedFetcher(repo)
+
+    ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=8).run()
+
+    assert [call[0] for call in fetcher.calls[:2]] == ["F-one", "F-two"]
+    assert fetcher.query_caps[:2] == [2, 2]
 
 
 def test_resume_continues_after_crash_without_repeating_evaluated_links():

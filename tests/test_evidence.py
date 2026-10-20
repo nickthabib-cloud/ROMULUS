@@ -78,6 +78,16 @@ def test_unset_audit_session_id_stays_absent():
     assert not events[0].has("process.session_id")
 
 
+@pytest.mark.parametrize("sentinel", ["4294967295", "-1"])
+def test_unset_audit_login_user_id_stays_absent(sentinel):
+    unset = SYSCALL.replace("auid=1001", f"auid={sentinel}")
+    events, _, errors = normalize_hits([hit("e1", "linux.audit", EXECVE_HEX),
+                                        hit("s1", "linux.audit", unset)])
+
+    assert errors == []
+    assert not events[0].has("process.auid")
+
+
 def test_non_exec_audit_groups_are_counted_not_dropped_silently():
     path = 'type=PATH msg=audit(1731950250.528:76831): item=0 name="log/audit/audit.log" inode=1 nametype=NORMAL'
     events, skips, _ = normalize_hits([hit("p1", "linux.audit", path)])
