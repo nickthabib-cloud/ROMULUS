@@ -1,4 +1,4 @@
-# ROMULUS v2
+# ROMULUS
 
 A defensive, AI-assisted threat-hunting tool.
 
