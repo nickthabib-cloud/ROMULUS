@@ -2,7 +2,7 @@
 
 ## Resume here
 
-_Last updated: 2026-10-20 17:30 EDT by Claude (lead)._
+_Last updated: 2026-10-20 17:45 EDT by Claude (lead)._
 
 - **Direction (owner, 2026-10-19):**
   - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5: deterministic expansion finds, and an optional model only explains leads and drafts the narrative.
@@ -14,7 +14,7 @@ _Last updated: 2026-10-20 17:30 EDT by Claude (lead)._
   - **Model access** (ADR-007, accepted): any OpenAI-compatible endpoint. Teams run their own powerful model. The lab uses a hosted API on public data behind `ROMULUS_MODEL_EGRESS=lab-public-data`.
   - **Credentials page deferred** (ADR-009); configuration stays in `.env`.
   - Roadmap: Track A1–A9 in MILESTONES.md.
-- **Branch under review:** `codex/expansion` at the eleven-step expansion fix series, based on `m2/evaluation` at `d59a79f`; independently reviewed, live-tested on the VM, and not pushed. The base merges:
+- **Merged to `main` and pushed to GitHub (2026-10-20, owner direction):** `codex/expansion` fast-forwarded into `main`. That covers the eleven-step expansion fix series on top of `m2/evaluation` (`d59a79f`), independently reviewed and live-tested on the VM, plus the Track A docs. The base merges:
   - investigator v2 (`codex/investigator-v2`, `0bfd0d2`);
   - host↔network correlation and Arkime (`m2/network-correlation`);
   - the research register (round 1).
@@ -51,7 +51,7 @@ _Last updated: 2026-10-20 17:30 EDT by Claude (lead)._
   | 8: + Arkime + noise fix | 12/22 | 17/22 (critical+high 12/13) | 0.90 | 5.28 |
 
   Remaining misses are discovery ×4 and privesc ×1 (no rule matched), plus 5 lead-only (c2_channel, recon ×3, remote_login). The expansion engine and context rules target these.
-- **Deployed/live-tested product tree:** the final `codex/expansion` source tree. The canonical projection was corrected after the hunts from their persisted, identical semantic data, reviewed again, and redeployed. Nothing is pushed: the owner pushes.
+- **Deployed/live-tested product tree:** the final `codex/expansion` source tree. The canonical projection was corrected after the hunts from their persisted, identical semantic data, reviewed again, and redeployed. It is now on `main` at GitHub.
 - **Codex expansion fix round:** complete and handed back in `Claude-Codex.md`. It includes fair bounded scheduling, safe inferred-link handling, normalized login sessions, honest IP coverage, durable resume budgets, context deduplication, incident correlation, canonical manifests, and local plus live validation.
 - **Owner decisions recorded (2026-10-19):**
   - f_a holdout on hold.
@@ -59,7 +59,7 @@ _Last updated: 2026-10-20 17:30 EDT by Claude (lead)._
   - Malcolm after deterministic search is built out.
   - Ground-truth account isolation: explained as defence in depth, not required now; revisit before any holdout.
 - **Next:**
-  1. Lead reviews the handback and merges the eleven-step `codex/expansion` series if accepted; the independent reviewer gate is PASS.
+  1. ~~Merge the `codex/expansion` series~~: done 2026-10-20; `main` is pushed. New work branches from `main`.
   2. Lead: network slice 3, TShark on the packets of specific Arkime sessions (v1's explicit-ID PCAP fetch and TShark safety patterns).
   3. Detection engineer: context-rule catalog (after the engine), plus lab-testable `v1_ports` and backlog items.
   4. The eval-custodian scores after each step.
@@ -78,8 +78,9 @@ _Last updated: 2026-10-20 17:30 EDT by Claude (lead)._
 |---|---|---|
 | Pre-M1 setup | done | this file, TEAM.md, `.claude/agents/`, ENVIRONMENT.md |
 | M1 thin end-to-end slice | accepted 2026-10-19 | 455-test suite; reviewer gate (option B, ADR-004); owner demo on `h20261019-093029-32dfef`; merged to `main` |
-| M2 evaluation (bakeoff dropped, ADR-005/006) | in progress | protocol, gold v1, scorer, replay harness; v2 investigator, network correlation and Arkime merged; deterministic default |
-| M3 full sources and coverage truth | not started | |
+| M2 evaluation (bakeoff dropped, ADR-005/006) | closing (on `main`) | protocol, gold v1, scorer, replay harness; v2 investigator, network correlation and Arkime merged; deterministic default |
+| M3 deterministic expansion and attack-path view | in progress | expansion engine reviewed, live-tested, merged to `main` 2026-10-20 |
+| Track A AI investigating agent | accepted, not started | ADR-007, ADR-008, `docs/design/investigating-agent.md` |
 | M4 detection depth (incl. Zeek, ICS, Malcolm) | not started | |
 | M5 synthesis and reports | not started | |
 | M6 hardening and holdout | not started | |
@@ -101,6 +102,8 @@ _Last updated: 2026-10-20 17:30 EDT by Claude (lead)._
 ## Session log
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
+
+- **2026-10-20 17:45 EDT (merge and push, Claude)**: Ran the local suite on `codex/expansion` (exit 0, about 740 tests). The owner directed the merge, so `main` was fast-forwarded to it (61 commits ahead of `origin/main` at `8296a27`) and pushed.
 
 - **2026-10-20 17:30 EDT (owner decisions: AI agent accepted, credentials page deferred; Claude)**:
   - The owner decided to build the hypothesis-driven agent, with no build gate. Teams will run their own powerful model, not public APIs; the lab uses a hosted API on public data. The owner asked for the single best way to run the agent, and deferred the credentials page.

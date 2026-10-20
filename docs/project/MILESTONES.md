@@ -71,7 +71,7 @@ ES adapter, typed normalizers, 15 playbooks, decide/lanes, model investigator v1
 - [x] Field-role indicator matcher (`ioc.indicator_match`) with a seed tool-name list.
 - [x] Storage: a capped write-ahead log and `romulus db compact` (2.1 GB → 25 MB).
 - [x] Scores (run 8): recall 12/22 reported and 17/22 surfaced (critical+high 12/13), P@10 0.90, 5.28 false leads per hour, 148/148 citations.
-- [ ] Push `m2/evaluation` to GitHub (owner; Claude's push is blocked).
+- [x] Pushed to GitHub: `main` fast-forwarded to `codex/expansion` on 2026-10-20 (owner direction).
 - ~~Simple "standard searches" baseline~~ dropped by the owner (fixing gaps beats building a straw man).
 
 ## M3: deterministic expansion and the attack-path view. In progress
@@ -85,7 +85,7 @@ Goal: turn the five "evaluated, no rule matched" misses and the lead-only items 
   - the deterministic loop (depth 3, anchor accounting, resume);
   - the incident graph in the manifest;
   - renaming `bakeoff` to `replay`.
-- [x] `reviewer` gate on the expansion branch (PASS after live-found canonical ordering fix); merge remains with the lead/owner.
+- [x] `reviewer` gate on the expansion branch (PASS after live-found canonical ordering fix); merged to `main` and pushed 2026-10-20.
 - [ ] **Context-rule catalog** (`detection-engineer`, from ATT&CK classes):
   - post-access discovery;
   - privilege probing and escalation;
