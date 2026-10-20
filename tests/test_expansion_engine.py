@@ -527,3 +527,11 @@ def test_resume_runs_expansion_before_optional_agent_without_rerunning_sweep(tmp
     hunt_run.resume_hunt(settings, "h1")
 
     assert order == ["expansion", "agent"]
+
+
+def test_roots_use_half_the_reserve_only_while_no_discovered_anchor_waits():
+    repo = repo_with_anchor()
+    fetcher = BudgetedFetcher(repo)
+    ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=20).run()
+    root_share, reserve = 16, 4                      # 20 minus the 20% reserve for discovered anchors
+    assert root_share < fetcher.executor.source_queries <= root_share + reserve // 2

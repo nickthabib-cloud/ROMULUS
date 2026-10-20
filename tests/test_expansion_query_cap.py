@@ -43,6 +43,7 @@ def test_a_capped_dense_leaf_never_exceeds_the_fetch_cap(monkeypatch, query_cap)
     assert executor.source_queries <= query_cap
     assert repo.expansion_source_queries("h1") == executor.source_queries
     assert batch.status != "complete"
+    assert all("returned" in (task["outcome"] or {}) for task in repo.tasks("h1"))
     if query_cap < 1 + MAX_SAMPLE_QUERIES:              # no room to sample: unresolved, and the reason says why
         assert executor.source_queries == 1
         assert f"expansion_link_query_cap:{query_cap}" in batch.reasons

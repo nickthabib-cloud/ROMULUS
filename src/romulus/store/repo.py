@@ -13,6 +13,9 @@ from sqlalchemy.dialects.sqlite import insert
 from romulus.store import schema as t
 from romulus.store.db import utcnow, write_txn
 
+# Lanes an analyst may join with an asserted link (the report's reportable lanes).
+REPORTABLE_LANES = ("urgent", "high", "lead")
+
 
 def _upsert_ignore(conn, table, rows: list[dict], keys: list[str]):
     if not rows:
@@ -152,7 +155,8 @@ class Repo:
             # Events this hunt stored that ANY other hunt still uses: keep them and reassign ownership.
             # Event IDs are global and the first hunt to store an event owns the row, so other hunts
             # can depend on it through (a) their findings' event_ids, (b) their investigation steps'
-            # pivot digests, and (c) their own entity links (written by save_evidence per hunt).
+            # pivot digests, (c) their own entity links (written by save_evidence per hunt), and (d) their
+            # expansion links.
             mine = {r.id for r in c.execute(select(t.typed_event.c.id).where(t.typed_event.c.hunt_id == hunt_id))}
             cited_by: dict[str, str] = {}
             for cid_hunt, eids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)
@@ -183,6 +187,13 @@ class Repo:
                     .where(t.entity.c.hunt_id != hunt_id)):
                 if ev_id in mine:
                     cited_by.setdefault(ev_id, ent_hunt)
+            # (d) other hunts' expansion links cite events they reached and the evidence they rest on
+            for link_hunt, link_events, link_evidence in c.execute(
+                    select(t.expansion_link.c.hunt_id, t.expansion_link.c.event_ids, t.expansion_link.c.evidence_ids)
+                    .where(t.expansion_link.c.hunt_id != hunt_id)):
+                for eid in [*(link_events or []), *(link_evidence or [])]:
+                    if eid in mine:
+                        cited_by.setdefault(eid, link_hunt)
             for eid, owner in cited_by.items():
                 c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(hunt_id=owner))
             drop_events = mine - set(cited_by)
@@ -211,6 +222,7 @@ class Repo:
             c.execute(t.raw_record.update().where(t.raw_record.c.first_task_id.in_(task_ids))
                       .values(first_task_id=None))
             c.execute(t.hunt.update().where(t.hunt.c.parent_hunt_id == hunt_id).values(parent_hunt_id=None))
+            rm("analyst_links", t.analyst_link.delete().where(t.analyst_link.c.hunt_id == hunt_id))
             rm("expansion_links", t.expansion_link.delete().where(t.expansion_link.c.hunt_id == hunt_id))
             rm("expansion_anchors", t.expansion_anchor.delete().where(t.expansion_anchor.c.hunt_id == hunt_id))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
@@ -500,6 +512,34 @@ class Repo:
         with self.engine.connect() as c:
             row = c.execute(q).mappings().first()
             return dict(row) if row else None
+
+    def add_analyst_link(self, hunt_id: str, from_finding: str, to_finding: str, relation: str,
+                         note: str | None, actor: str) -> dict:
+        """Record an analyst's asserted relation between two findings of this hunt (never an observed link)."""
+        relation = " ".join(relation.split())[:200]
+        if not relation or from_finding == to_finding:
+            raise ValueError("an analyst link needs two different findings and a relation")
+        with write_txn(self.engine) as c:
+            rows = {row.id: row for row in c.execute(
+                select(t.candidate.c.id, t.candidate.c.hunt_id, t.candidate.c.lane)
+                .where(t.candidate.c.id.in_([from_finding, to_finding])))}
+            if any(item not in rows or rows[item].hunt_id != hunt_id for item in (from_finding, to_finding)):
+                raise ValueError("both findings must belong to this hunt")
+            if any(rows[item].lane not in REPORTABLE_LANES for item in (from_finding, to_finding)):
+                raise ValueError("analyst links join reportable findings (urgent, high or lead)")
+            row = {"id": "AL-" + uuid.uuid4().hex[:16], "hunt_id": hunt_id, "from_finding": from_finding,
+                   "to_finding": to_finding, "relation": relation, "note": (note or "").strip()[:2000] or None,
+                   "actor": actor, "created_at": utcnow()}
+            c.execute(t.analyst_link.insert().values(**row))
+            c.execute(t.audit_event.insert().values(at=utcnow(), actor=actor, action="analyst_link.add",
+                                                    hunt_id=hunt_id, detail={k: str(v) for k, v in row.items()}))
+        return row
+
+    def analyst_links(self, hunt_id: str) -> list[dict]:
+        q = (select(t.analyst_link).where(t.analyst_link.c.hunt_id == hunt_id)
+             .order_by(t.analyst_link.c.created_at, t.analyst_link.c.id))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(q).mappings()]
 
     def expansion_links(self, hunt_id: str) -> list[dict]:
         q = (select(t.expansion_link).where(t.expansion_link.c.hunt_id == hunt_id)

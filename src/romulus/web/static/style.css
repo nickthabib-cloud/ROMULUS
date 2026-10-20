@@ -57,3 +57,20 @@ details { background: var(--panel); border: 1px solid var(--line); border-radius
 .btn-danger { display: inline-block; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--urgent);
   background: var(--urgent); color: #fff; text-decoration: none; cursor: pointer; font: inherit; }
 .danger-zone { margin-top: 28px; }
+
+/* attack-path timeline */
+.filters { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin: 10px 0; }
+.filters fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+.filters label { margin-right: 8px; }
+.timeline-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+svg.timeline .tick { stroke: var(--line); stroke-width: 1; }
+svg.timeline .tick-label, svg.timeline .row-label { fill: var(--muted); font-size: 11px; font-family: ui-monospace, Consolas, monospace; }
+svg.timeline .row-line { stroke: var(--line); stroke-width: 1; }
+svg.timeline .link { stroke-width: 2; fill: none; }
+svg.timeline .link-observed { stroke: var(--ink); }
+svg.timeline .link-inferred { stroke: var(--muted); stroke-dasharray: 6 4; }
+svg.timeline .link-analyst { stroke: var(--warn); stroke-dasharray: 2 4; }
+svg.timeline .mark { stroke: var(--panel); stroke-width: 1.5; }
+svg.timeline .m-urgent { fill: var(--urgent); } svg.timeline .m-high { fill: var(--high); } svg.timeline .m-lead { fill: var(--lead); }
+.key { padding: 0 6px; border-bottom: 2px solid var(--ink); } .key.k-inferred { border-bottom: 2px dashed var(--muted); }
+.key.k-analyst { border-bottom: 2px dotted var(--warn); }

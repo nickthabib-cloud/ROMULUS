@@ -159,6 +159,50 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                     coverage=cov["rules"], tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
                     investigations=investigations)
 
+    def _timeline_findings(hunt_id: str) -> list[dict]:
+        return [{"id": c["id"], "lane": c["lane"], "rule_id": c["rule_id"], "claim": c["claim"],
+                 "observed_at": str(c["ts"]), "entities": c["entities"], "event_ids": c["event_ids"],
+                 "source_link_id": c.get("source_link_id")}
+                for c in repo.candidates(hunt_id, ["urgent", "high", "lead"])]
+
+    @app.get("/hunts/{hunt_id}/timeline", response_class=HTMLResponse)
+    def timeline(request: Request, hunt_id: str):
+        from romulus.detect.registry import ALL_PLAYBOOKS
+        from romulus.report.incidents import build_incident_graph
+        from romulus.report.timeline import LANES, LINK_STYLES, ROW_KINDS, build_timeline
+        u = need(request)
+        h = repo.get_hunt(hunt_id)
+        if h is None:
+            raise HTTPException(404)
+        params = request.query_params
+        explicit = "lane" in params or "kind" in params or "style" in params
+        lanes = [v for v in params.getlist("lane") if v in LANES] if explicit else list(LANES)
+        kinds = [v for v in params.getlist("kind") if v in ROW_KINDS] if explicit else list(ROW_KINDS)
+        styles = [v for v in params.getlist("style") if v in LINK_STYLES] if explicit else list(LINK_STYLES)
+        findings = _timeline_findings(hunt_id)
+        graph = build_incident_graph(repo, hunt_id, findings)
+        titles = {p.id: p.title for p in ALL_PLAYBOOKS}
+        analyst = repo.analyst_links(hunt_id)
+        window = h["manifest"].get("window") or {}
+        tl = build_timeline(findings, graph["edges"], analyst, window.get("start"), window.get("end"),
+                            titles=titles, lanes=lanes, kinds=kinds, styles=styles)
+        pick = sorted(({**f, "title": titles.get(f["rule_id"], f["rule_id"])} for f in findings),
+                      key=lambda f: (f["observed_at"], f["id"]))
+        return page(request, "timeline.html", u, h=h, tl=tl, analyst_links=analyst, pick=pick,
+                    all_lanes=LANES, all_kinds=ROW_KINDS, all_styles=LINK_STYLES)
+
+    @app.post("/hunts/{hunt_id}/links")
+    def add_link(request: Request, hunt_id: str, from_finding: str = Form(...), to_finding: str = Form(...),
+                 relation: str = Form(...), note: str = Form(""), csrf: str = Form("")):
+        u = need(request)
+        if not csrf_ok(u, csrf):
+            raise HTTPException(403, "bad CSRF token")
+        try:
+            repo.add_analyst_link(hunt_id, from_finding, to_finding, relation, note, f"web:{u['u']}")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/hunts/{hunt_id}/timeline", status_code=303)
+
     @app.get("/hunts/{hunt_id}/stream")
     async def stream(request: Request, hunt_id: str):
         need(request)

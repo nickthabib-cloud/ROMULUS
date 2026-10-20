@@ -10,6 +10,8 @@
   {% if h.stop_reason %}<div class="wide"><span class="label">Stop reason</span> {{ h.stop_reason }}</div>{% endif %}
 </div>
 
+<p><a href="/hunts/{{ h.id }}/timeline">Attack-path timeline →</a></p>
+
 {% if investigations.summary.mode == 'deterministic_expansion' %}
 <section id="expansion-summary">
   <h2>Expansion accounting</h2>

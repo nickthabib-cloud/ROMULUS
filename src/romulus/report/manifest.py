@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from romulus.agent.cases import seed_candidate_ids
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.registry import ALL_PLAYBOOKS
-from romulus.report.incidents import build_incident_graph
+from romulus.report.incidents import build_incident_graph, incident_narrative
 from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
 from romulus.store.repo import Repo, raw_id
@@ -440,6 +440,11 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "agent": agent or {"status": "unknown"},
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
         "incident_graph": incident_graph,
+        # an analyst's asserted relations: shown as assertions, never as observed or inferred links
+        "analyst_links": [{"id": a["id"], "from_finding": a["from_finding"], "to_finding": a["to_finding"],
+                           "relation": a["relation"], "note": a["note"], "actor": a["actor"],
+                           "created_at": str(a["created_at"]), "status": "analyst assertion, not proven"}
+                          for a in repo.analyst_links(hunt_id)],
         "versions": {"pack": hm["pack"]["version"], "normalizer": hm["normalizer"], "policy": hm["policy"],
                      "model": hm["model"], "romulus": hm["romulus_version"]},
         "generated_by": actor,
@@ -544,6 +549,7 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
                 key=lambda reach: json.dumps(reach, sort_keys=True, separators=(",", ":"), default=str),
             )
     observed_at = {finding["id"]: finding["observed_at"] for finding in canonical["findings"]}
+    canonical_findings = {finding["id"]: finding for finding in canonical["findings"]}
     graph["nodes"].sort(key=lambda node: node["id"])
     for link in graph["links"]:
         link["target_finding_ids"] = sorted(link["target_finding_ids"])
@@ -566,11 +572,16 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
             key=lambda item: (observed_at.get(item, ""), item),
         )
         open_ends = incident["open_ends"]
-        for key in ("unexpanded_anchors", "pending_anchors", "unresolved_links"):
+        for key in ("unexpanded_anchors", "pending_anchors", "partial_anchors", "unresolved_links"):
             open_ends[key] = sorted(
                 open_ends.get(key, []),
                 key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
             )
+        # the narrative follows the timeline: rebuild it from the content-ordered incident
+        incident["narrative"] = incident_narrative(incident, canonical_findings, [
+            {"from": edge["pair"][0], "to": edge["pair"][1], "link_id": edge["link_key"],
+             "link_type": edge["link_type"], "style": edge["style"]} for edge in graph["edges"]
+        ])
     graph["incidents"].sort(key=lambda incident: incident["id"])
     investigations = canonical["investigations"]
     for key in ("unworked_seed_ids", "incomplete_case_ids"):

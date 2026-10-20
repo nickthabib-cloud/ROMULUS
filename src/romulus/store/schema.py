@@ -209,6 +209,21 @@ expansion_link = Table(
 )
 Index("ix_expansion_link_anchor", expansion_link.c.anchor_id, expansion_link.c.link_type)
 
+# A relation an analyst asserts between two findings. Shown on the attack-path timeline in its own style and
+# labelled as an assertion: never an observed or inferred link, never merged into incidents.
+analyst_link = Table(
+    "analyst_link", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("from_finding", String, nullable=False),
+    Column("to_finding", String, nullable=False),
+    Column("relation", String, nullable=False),
+    Column("note", Text),
+    Column("actor", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_analyst_link_hunt", analyst_link.c.hunt_id)
+
 disposition_event = Table(
     "disposition_event", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),

@@ -190,3 +190,46 @@ def test_spoofed_deleted_banner_is_not_shown(env):
     c, repo, s, pw = env
     _login(c, "lead1", pw)
     assert "permanently deleted" not in c.get("/?deleted=h1").text   # h1 exists, never deleted
+
+
+def test_delete_keeps_events_another_hunts_expansion_links_cite():
+    """An event with no entities, reached only by another hunt's expansion link, must survive deletion."""
+    from romulus.evidence.typed import RawRef, TypedEvent, fv
+    from romulus.store.db import make_engine, migrate
+    from romulus.store.repo import Repo
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    for hunt_id in ("hA", "hB"):
+        repo.create_hunt(hunt_id, {}, "d", "t")
+        repo.set_hunt_state(hunt_id, "running")
+        repo.set_hunt_state(hunt_id, "completed_within_scope", detection_result="leads_only")
+    ts = utcnow()
+    shared = TypedEvent(id="ev-shared", family="process_exec", ts=ts, host=None,
+                        fields={"process.executable": fv("/bin/true", "x")},
+                        raw=[RawRef(target="idx", native_id="doc-1", digest="d")], normalizer="test@1")
+    repo.save_evidence("hA", [shared], {"idx/doc-1": {"k": 1}}, None)
+    anchor_event = TypedEvent(id="ev-anchor", family="process_exec", ts=ts, host="web1",
+                              fields={"process.executable": fv("/bin/sh", "x")},
+                              raw=[RawRef(target="idx", native_id="doc-2", digest="d")], normalizer="test@1")
+    repo.save_evidence("hB", [anchor_event], {"idx/doc-2": {"k": 2}}, None)
+    repo.save_candidate({
+        "id": "F-B", "hunt_id": "hB", "rule_id": "host.web_shell", "rule_version": "1", "claim": "c",
+        "claim_type": "observed_action", "event_ids": ["ev-anchor"], "predicate_fields": [], "entities": [],
+        "ts": ts, "severity": "high", "confidence": "high", "lane": "high", "priority": 1.0, "priority_reasons": [],
+        "gate_results": {}, "benign_alternatives": [], "next_checks": [], "source_case_id": None,
+        "source_anchor_id": None, "source_link_id": None})
+    repo.save_expansion_anchor({"id": "F-B", "hunt_id": "hB", "candidate_id": "F-B", "depth": 0,
+                                "parent_anchor_id": None, "host": "web1", "lane": "high", "severity": "high",
+                                "ts": ts, "status": "expanded_complete", "reasons": []})
+    repo.save_expansion_link({
+        "id": "L-B", "hunt_id": "hB", "anchor_id": "F-B", "link_type": "host_after_anchor",
+        "window_label": "anchor ±5 min", "window_start": ts, "window_end": ts, "strength": "inferred",
+        "key": {}, "status": "complete", "event_ids": ["ev-shared"], "evidence_ids": ["ev-anchor", "ev-shared"],
+        "task_ids": [], "coverage": [], "reasons": [], "duration_ms": 1, "query_spend": 1, "evaluated": 1})
+
+    repo.delete_hunt("hA", "lead")
+
+    kept = repo.events_by_ids(["ev-shared"])
+    assert len(kept) == 1 and kept[0]["hunt_id"] == "hB"
+    assert repo.raw_records([kept[0]["raw_ids"][0]])

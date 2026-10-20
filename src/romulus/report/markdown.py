@@ -14,6 +14,11 @@ def esc(text) -> str:
     return _MD_SPECIAL.sub(r"\\\1", _CTRL.sub("", str(text)))
 
 
+def cell(text) -> str:
+    """A table cell: inline-safe and on one line, so a newline cannot end the row."""
+    return " ".join(esc(text).split())
+
+
 def fence(text: str, lang: str = "text") -> str:
     """Fence longer than any backtick run in the content, so telemetry cannot close it."""
     text = _CTRL.sub("", text)
@@ -123,6 +128,24 @@ def render(m: dict, banner: str = BANNER) -> str:
         )
     if not graph["incidents"]:
         out.append("| none | none | 0 | none | none | none | 0 | 0 |")
+    multi = [incident for incident in graph["incidents"] if len(incident["finding_ids"]) > 1]
+    out += ["", "**Incident narratives**", "",
+            ("Template narratives built from typed fields only. Inferred links are hypotheses; gaps say what is "
+             "not known."), ""]
+    for incident in multi:
+        out.append(f"- `{esc(incident['id'])}`")
+        for sentence in incident.get("narrative", []):
+            cites = " ".join(f"[{esc(c)}](#f-{c})" for c in sentence["cites"][:12])
+            tag = "" if sentence["kind"] == "observed" else f"*{esc(sentence['kind'])}:* "
+            out.append(f"  - {tag}{esc(sentence['text'])}" + (f" ({cites})" if cites else ""))
+    if not multi:
+        out.append("- No incident has more than one finding.")
+    analyst = m.get("analyst_links") or []
+    if analyst:
+        out += ["", "**Analyst-asserted links (not proven)**", "",
+                "| From | To | Relation | By | Note |", "|---|---|---|---|---|"]
+        out += [f"| [{esc(a['from_finding'])}](#f-{a['from_finding']}) | [{esc(a['to_finding'])}](#f-{a['to_finding']}) "
+                f"| {cell(a['relation'])} | {cell(a['actor'])} | {cell(a.get('note') or '')} |" for a in analyst]
     out += ["", "**Attack-path timelines**", ""]
     for incident in graph["incidents"]:
         timeline = " → ".join(f"[{esc(item)}](#f-{item})" for item in incident["timeline"])

@@ -25,6 +25,87 @@ SCRIPT_FILE_INTERPRETERS = {"python", "python2", "python3", "perl", "ruby", "php
 AWK_INTERPRETERS = {"awk", "gawk"}
 DOWNLOADERS = {"curl", "wget", "fetch", "tftp"}
 TEMP_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/")
+# System directories the package manager owns. A web-service account cannot write there without root, so a
+# script operand there is usually a helper the application ships (cgi-bin is excluded: it is where web code lives).
+PACKAGED_DIRS = ("/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/usr/share/", "/bin/", "/sbin/", "/usr/lib/")
+NOT_PACKAGED = ("/usr/lib/cgi-bin/",)
+# Interpreter standard libraries and tool trees: their scripts run other code, consoles or servers (cProfile,
+# pdb, timeit, code, http.server), so a run of one is never an application helper.
+INTERPRETER_LIBRARIES = re.compile(
+    r"^/usr/(?:local/)?lib(?:64)?/(?:python[\d.]*|pypy[\d.]*|ruby|php[\d.]*|lua)(?:/|$)"
+    r"|^/usr/(?:local/)?share/(?:perl[\d.]*|perl5|ruby[\w.-]*|php[\w.-]*|lua)(?:/|$)"
+    r"|^/usr/lib(?:64)?/(?:[\w.-]+/)?perl[\d.]*(?:/|$)")
+# Packaged scripts that fetch, install, serve or open a console: dual-use from a web-service account.
+DUAL_USE_SCRIPTS = {"ssh-import-id", "ssh-import-id-gh", "ssh-import-id-lp", "pip", "pip2", "pip3", "easy_install",
+                    "lwp-download", "lwp-request", "lwp-mirror", "GET", "POST", "HEAD", "cpan", "gem", "npm",
+                    "irb", "pry", "ri", "erb", "pydoc", "pydoc3", "pdb", "pdb3", "idle", "idle3", "ipython",
+                    "ipython3", "jupyter", "perldoc", "perlbug", "php-cgi", "lua5.1", "lua5.3", "luarocks"}
+# Flag-only options per interpreter (no argument, no inline code). Anything else ends the packaged check.
+_FLAG_ONLY = {
+    "python": {"-u", "-B", "-b", "-bb", "-d", "-E", "-I", "-O", "-OO", "-q", "-s", "-S", "-v"},
+    "perl": {"-w", "-W", "-X", "-T", "-t", "-wT", "-Tw", "-tw", "-wt"},
+    "ruby": {"-w", "-W", "-v", "-d"},
+    "php": {"-q", "-n", "-H"},
+    "lua": {"-W"},
+}
+_URLISH = re.compile(r"://|^[\w.-]+@[\w.-]+(?::|$)|^(?:gh|lp):", re.ASCII)
+
+
+def _packaged_script(argv: list[str], cwd: str | None = None) -> str | None:
+    """The system-directory script a web-service interpreter run executes, when the command line is exactly
+    `<interpreter> [flag-only options] <absolute script> [args]`, nothing in it fetches or names a remote, and
+    nothing points it at files the web account can write (its working directory, path operands); None
+    otherwise (the run then stays a lead)."""
+    from romulus.detect.indicators import script_operand
+    name = interpreter_name(argv[0]) if argv else ""
+    if name in SHELLS:
+        script, rest = script_operand(argv), []
+        if script and script in argv:
+            rest = argv[argv.index(script) + 1:]
+    else:
+        flags = _FLAG_ONLY.get(name.rstrip("23"), set())
+        i = 1
+        while i < len(argv) and argv[i] in flags:
+            i += 1
+        if i >= len(argv) or argv[i].startswith(("-", "+")):
+            return None
+        script, rest = argv[i], argv[i + 1:]
+    if not script or not script.startswith("/"):
+        return None
+    path = _normalize_posix_path(script)
+    if not path.startswith(PACKAGED_DIRS) or path.startswith(NOT_PACKAGED) or INTERPRETER_LIBRARIES.match(path):
+        return None
+    if posixpath.basename(path) in DUAL_USE_SCRIPTS or any(_URLISH.search(a) for a in rest):
+        return None
+    # Build and task runners (rake, composer, pytest, flask) load code from the working directory.
+    if cwd and _normalize_posix_path(cwd) != "/" and _outside_system(cwd, cwd):
+        return None
+    if any(_outside_system(a, cwd) for a in rest):     # the helper is pointed at a file the web account can write
+        return None
+    return path
+
+
+_FILE_LIKE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
+
+
+def _outside_system(arg: str, cwd: str | None) -> bool:
+    """A path operand (or an option's `=path` value) outside the system directories. A relative path is
+    resolved against the working directory; without one it cannot be placed, so it counts as outside."""
+    value = arg.split("=", 1)[1] if arg.startswith("-") and "=" in arg else arg
+    if value.startswith("-") or not value:
+        return False
+    if not value.startswith("/"):
+        if "/" not in value and not _FILE_LIKE.search(value):
+            return False                                  # a word (startup, install), not a path
+        value = _resolve_script_path(value, cwd or "")
+        if not value:
+            return True
+    path = _normalize_posix_path(value)
+    if path == "/dev/null" or path.startswith("/etc/"):     # root-owned configuration, the null device
+        return False
+    return not path.startswith(PACKAGED_DIRS) or path.startswith(NOT_PACKAGED)
+
+
 CRED_FILES = {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"}
 FILE_READERS = {"cat", "head", "tail", "less", "more", "cp", "base64", "xxd", "od", "strings", "tac", "nl",
                 "dd", "tar", "vi", "vim", "nano", "view", "rsync", "scp"}
@@ -180,7 +261,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     # argv/text-identified programs and actions: findings only, never a complete negative
     # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
-    version = "4"
+    version = "8"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -210,7 +291,7 @@ class WebServiceSpawnsInterpreter(Playbook):
             if indicators:
                 matches.append(self._event_match(e, user, argv, indicators, prefix_only=prefix_only))
                 continue
-            key = (e.host, user, command_shape(argv))
+            key = (e.host, user, command_shape(argv), _packaged_script(argv, e.get("process.cwd")))
             self.counts[key] += 1
             if len(self.shapes[key]) < 20:
                 self.shapes[key].append(e)
@@ -239,14 +320,24 @@ class WebServiceSpawnsInterpreter(Playbook):
     def finalize(self):
         out = []
         for key, evs in self.shapes.items():
-            host_, user, shape = key
+            host_, user, shape, packaged = key
             n = self.counts[key]
+            if packaged and n <= self.RARE_MAX:
+                # Rare, no typed indicator, and the script sits where a web-service account cannot write: most
+                # likely the application's own helper (daemon start-up, maintenance), not code a request supplied.
+                claim = (f"System-directory helper: account '{user}' on {host_} ran '{shape}' {n} time(s) in the "
+                         f"window; the script operand '{packaged}' is under a system directory (package ownership "
+                         f"not verified) and the command line carries no typed indicator (retained for context).")
+                out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
+                                 evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
+                                 group_key=f"packaged|{host_}|{user}|{shape}"))
+                continue
             if n > self.RARE_MAX:
                 claim = (f"Routine pattern: account '{user}' on {host_} executed '{shape}' {n} times in the window "
                          f"(stack-counted; retained for context).")
                 out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
                                  evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
-                                 group_key=f"routine|{host_}|{user}|{shape}"))
+                                 group_key=f"routine|{host_}|{user}|{shape}" + (f"|{packaged}" if packaged else "")))
                 continue
             for e in evs:
                 argv = e.get("process.argv")
@@ -444,9 +535,16 @@ class ExecFromTempDir(Playbook):
                       self.lane, "high", _exec_entities(e))]
 
 
+# Debian/Ubuntu debconf runs each package's extracted config script as /tmp/<package>.config.XXXXXX with the
+# maintainer-script action and the version: `sh /tmp/openssh-server.config.AbC123 configure 1:8.9p1`.
+_DEBCONF_CONFIG = re.compile(r"^/tmp/[a-z0-9][a-z0-9+.-]*\.config\.[A-Za-z0-9]{6}$")
+_DEBCONF_ACTIONS = {"configure", "reconfigure"}
+
+
 class ScriptFromTempDir(Playbook):
     """Positive-only argv indicator: an interpreter was given a temp-directory script operand."""
     id = "host.script_from_temp_dir"
+    version = "3"
     title = "Interpreter started with a script operand in a temporary directory"
     claim_type = "script_content"
     assures_negative = False
@@ -482,6 +580,15 @@ class ScriptFromTempDir(Playbook):
         fields = [pf(e, "process.argv")]
         if e.get("process.cwd"):
             fields.append(pf(e, "process.cwd"))
+        rest = argv[argv.index(script) + 1:] if script in argv else []
+        as_root = e.get("process.uid") == "0" if e.get("process.uid") is not None else e.get("process.user") == "root"
+        if _DEBCONF_CONFIG.match(path) and rest and rest[0] in _DEBCONF_ACTIONS and as_root:
+            claim = (f"A process execution event on {e.host} records '{name}' running '{path}' with "
+                     f"'{rest[0]}' (argv: {_argv_summary(argv)}); {outcome_phrase(e)}. The name and arguments follow "
+                     f"the Debian debconf convention for a package's configuration script, run as root, during installation "
+                     f"(retained for context).")
+            return [Match(self.id, claim, self.claim_type, [e], fields, e.ts, "low", "context", "medium",
+                          _exec_entities(e))]
         claim = (f"A process execution event on {e.host} records that interpreter '{name}' was started with "
                  f"temp-directory script operand '{path}' (argv: {_argv_summary(argv)}); {outcome_phrase(e)}. "
                  f"The argv identifies a script operand; whether that script ran is not established by this event.")

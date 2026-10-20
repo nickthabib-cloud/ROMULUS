@@ -264,6 +264,9 @@ def _coalesce_coverage(segments: list[PivotCoverage]) -> list[PivotCoverage]:
 MAX_SAMPLE_QUERIES = 4
 
 
+# A host lookup refused for budget is not an answer: it is retried when budget allows.
+HOST_LOOKUP_BUDGET = "source query budget exhausted"
+
 class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
 
@@ -494,10 +497,12 @@ class PivotExecutor:
                 ))
         return unresolved
 
-    def resolve_host_ip(self, owner: str, ip: str, start: datetime, end: datetime) -> tuple[str | None, str | None]:
+    def resolve_host_ip(self, owner: str, ip: str, start: datetime, end: datetime,
+                        query_cap: int | None = None) -> tuple[str | None, str | None]:
         """Resolve a network endpoint to one host identity from typed host records: the `host.name` values of
         records whose `host.ip` equals the address, over the hunt window. Returns (host, None) for exactly one
-        name, else (None, reason). The lookup is a budgeted, durable task: a resumed hunt reuses its outcome."""
+        name, else (None, reason). The lookup is a budgeted, durable task: a resumed hunt reuses its outcome.
+        A new lookup is refused when its queries would take the executor past `query_cap`."""
         targets = [(target, contract) for target, contract in sorted(self.contracts.items())
                    if not _is_network(target, contract) and _supports(contract, "host.ip")
                    and (contract.spec("host.name") is not None and contract.spec("host.name").aggregatable)]
@@ -509,6 +514,8 @@ class PivotExecutor:
         prior = self.repo.task(task_id)
         if prior and prior["state"] == "evaluated" and isinstance(prior.get("outcome"), dict):
             return prior["outcome"].get("host"), prior["outcome"].get("reason")
+        if query_cap is not None and self.source_queries + len(targets) > query_cap:
+            return None, f"victim host not resolved for {ip}: {HOST_LOOKUP_BUDGET}"
         intent_record = {"resolve_host_ip": ip, "targets": [target for target, _ in targets]}
         self.repo.upsert_task(task_id, self.hunt_id, "expansion_link", "host-resolution", intent_record,
                               fingerprint, owner_token=self.owner_token)
@@ -706,6 +713,8 @@ class PivotExecutor:
                 "reasons": sorted(set(task_reasons)),
                 "coverage": [cell.model_dump(mode="json") for cell in task_coverage],
                 "event_ids": sorted(event.id for event in retained.values()),
+                # records the source returned for this task, so evaluation can count expansion's retrieval cost
+                "returned": sum(cell.returned or 0 for cell in task_coverage),
             }
             if task_successes == 0:
                 self.repo.update_task(
