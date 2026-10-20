@@ -15,7 +15,7 @@ EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
 def _env_file(args) -> Path:
     if args.env_file:
         return Path(args.env_file)
-    home = os.environ.get("ROMULUS_HOME", "/home/user/romulus-v2")
+    home = os.environ.get("ROMULUS_HOME", str(Path.home() / "romulus"))
     p = Path(home) / ".env"
     return p if p.exists() else Path(".env")
 

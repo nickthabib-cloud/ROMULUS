@@ -41,6 +41,8 @@ class OllamaClient:
                                  transport=transport)
 
     def available(self) -> bool:
+        if not self.s.ollama_url:
+            return False
         try:
             return self.http.get("/api/version", timeout=5).status_code == 200
         except httpx.HTTPError:
@@ -59,6 +61,8 @@ class OllamaClient:
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "options": {"num_ctx": num_ctx, "num_predict": max_out, "temperature": temperature, "seed": 7},
         }
+        if not self.s.ollama_url:
+            raise ModelUnavailable("no model endpoint configured (OLLAMA_URL is empty)")
         t0 = time.time()
         try:
             r = self.http.post("/api/chat", json=body)

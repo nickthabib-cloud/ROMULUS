@@ -1,6 +1,7 @@
 """Read-only environment checks: sources, least privilege, model endpoint, tools, storage."""
 from __future__ import annotations
 
+import ipaddress
 import os
 import shutil
 import stat
@@ -13,8 +14,6 @@ import httpx
 from romulus.config import Settings, redact_text
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.store.db import integrity_check, make_engine, migrate, space_report
-
-EVAL_ROOT = Path("/home/user/romulus-eval")
 
 
 @dataclass
@@ -75,11 +74,23 @@ def check_arkime(s: Settings) -> Check:
         return Check("arkime.reachable", "fail", redact_text(str(e), s))
 
 
+def _private_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback
+
+
 def check_ollama(s: Settings) -> list[Check]:
+    if not s.ollama_url:
+        return [Check("ollama.endpoint", "ok", "no model endpoint configured: model features are off (ADR-006)")]
     out = []
     base = s.ollama_url.rstrip("/")
     host = httpx.URL(base).host
-    if not (host.startswith(("192.168.", "10.")) or host in ("127.0.0.1", "localhost")):
+    if not _private_host(host):
         out.append(Check("ollama.endpoint", "fail", f"{host} is not a private/host-only address"))
     try:
         v = httpx.get(f"{base}/api/version", timeout=10).json().get("version")
@@ -108,9 +119,10 @@ def check_tshark(s: Settings) -> Check:
 
 def check_paths(s: Settings, env_file: Path | None) -> list[Check]:
     out = []
+    eval_root = s.eval_root.resolve() if s.eval_root else None
     for d in s.pcap_allowed_dirs:
         rd = d.resolve()
-        if EVAL_ROOT in (rd, *rd.parents) or rd in EVAL_ROOT.parents:
+        if eval_root is not None and (eval_root in (rd, *rd.parents) or rd in eval_root.parents):
             out.append(Check("paths.eval_isolation", "fail", f"PCAP allowlist {d} overlaps ground truth"))
         out.append(Check(f"paths.pcap[{d}]", "ok" if rd.is_dir() else "fail", "exists" if rd.is_dir() else "missing"))
     if env_file and env_file.exists() and os.name == "posix":

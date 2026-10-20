@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# (Re)start the ROMULUS web UI on the VM, tracked by PID file (never by pattern-matching process names).
+# (Re)start the ROMULUS web UI, tracked by PID file (never by pattern-matching process names).
+# ROMULUS_HOME defaults to the install this script belongs to ($ROMULUS_HOME/app/scripts/web-restart.sh).
 set -euo pipefail
-H=${ROMULUS_HOME:-/home/user/romulus-v2}
+H=${ROMULUS_HOME:-$(cd "$(dirname "$0")/../.." && pwd)}
 PIDF="$H/web.pid"
 if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
   kill "$(cat "$PIDF")"; sleep 1

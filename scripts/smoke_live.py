@@ -1,7 +1,8 @@
-"""Live smoke check (VM only): profile both lab indices, then normalize one window and report rates.
+"""Live smoke check: profile the first two configured index patterns, then normalize one window and report rates.
 
-Usage: venv/bin/python app/scripts/smoke_live.py [START] [END]
+Usage: ROMULUS_HOME=<install> venv/bin/python app/scripts/smoke_live.py START END
 """
+import os
 import sys
 import time
 from collections import Counter
@@ -15,10 +16,11 @@ from romulus.sources.execute import execute
 from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.sources.profile import build_profile
 
-s = load_settings(Path("/home/user/romulus-v2/.env"))
+if len(sys.argv) != 3:
+    sys.exit(__doc__)
+s = load_settings(Path(os.environ.get("ROMULUS_HOME", str(Path.home() / "romulus"))) / ".env")
 c = ElasticClient(s)
-start = datetime.fromisoformat(sys.argv[1] if len(sys.argv) > 1 else "2024-11-18T14:00:00+00:00")
-end = datetime.fromisoformat(sys.argv[2] if len(sys.argv) > 2 else "2024-11-18T16:00:00+00:00")
+start, end = datetime.fromisoformat(sys.argv[1]), datetime.fromisoformat(sys.argv[2])
 w = Window(start=start, end=end)
 host_idx, net_idx = s.es_index_patterns
 for idx in (host_idx, net_idx):

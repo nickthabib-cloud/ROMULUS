@@ -14,7 +14,7 @@ def _client(payload: dict) -> OllamaClient:
         return httpx.Response(200, json=payload)
 
     return OllamaClient(
-        Settings(ollama_num_ctx=2048),
+        Settings(ollama_url="http://model.test:11434", ollama_num_ctx=2048),
         transport=httpx.MockTransport(respond),
     )
 
@@ -169,3 +169,13 @@ def test_shrunk_retry_brief_pins_old_duplicate_result_digest():
     assert pinned["outcome"] == "partial"
     assert pinned["result_counts"]["matched_events"] == 20
     assert brief.token_estimate + 900 <= 2600
+
+
+def test_without_a_configured_endpoint_the_model_is_unavailable_not_a_crash():
+    import pytest
+
+    from romulus.agent.ollama import ModelUnavailable
+    client = OllamaClient(Settings())
+    assert client.available() is False
+    with pytest.raises(ModelUnavailable, match="no model endpoint configured"):
+        client.chat_json("m", "system", "user", {"type": "object"})

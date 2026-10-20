@@ -36,19 +36,23 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 
 class Settings(BaseModel):
-    home: Path = Path("/home/user/romulus-v2")
+    home: Path = Path.home() / "romulus"
     web_bind: str = "127.0.0.1:8443"
     web_tls_cert: str = ""
     web_tls_key: str = ""
     secret_key: SecretStr = SecretStr("")
 
-    ollama_url: str = "http://192.168.36.1:11434"
-    ollama_model_triage: str = "qwen3:8b"
+    # The model is optional (ADR-006): with no endpoint configured, model features are off.
+    ollama_url: str = ""
+    ollama_model_triage: str = ""
     ollama_model_synthesis: str = ""
     ollama_num_ctx: int = Field(default=8192, ge=2048, le=131072)
     ollama_timeout_seconds: int = Field(default=300, ge=5, le=3600)
     ollama_keep_alive: str = "30m"
     ollama_think: bool = False
+
+    # Evaluation ground truth, if this install has any: doctor refuses source paths that overlap it.
+    eval_root: Path | None = None
 
     es_url: str = "http://127.0.0.1:9200"
     es_flavor: str = "elasticsearch"
@@ -124,7 +128,7 @@ class Settings(BaseModel):
 
 
 ENV_MAP = {
-    "ROMULUS_HOME": "home", "ROMULUS_WEB_BIND": "web_bind", "ROMULUS_SECRET_KEY": "secret_key",
+    "ROMULUS_HOME": "home", "ROMULUS_EVAL_ROOT": "eval_root", "ROMULUS_WEB_BIND": "web_bind", "ROMULUS_SECRET_KEY": "secret_key",
     "ROMULUS_WEB_TLS_CERT": "web_tls_cert", "ROMULUS_WEB_TLS_KEY": "web_tls_key",
     "OLLAMA_URL": "ollama_url", "OLLAMA_MODEL_TRIAGE": "ollama_model_triage",
     "OLLAMA_MODEL_SYNTHESIS": "ollama_model_synthesis", "OLLAMA_NUM_CTX": "ollama_num_ctx",
