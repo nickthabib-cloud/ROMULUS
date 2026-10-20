@@ -81,7 +81,7 @@ STAGING_COMMANDS = {"curl", "wget", "chmod", "certutil", "bitsadmin", "iwr", "in
                     "cp", "mv", "tftp", "scp"}
 # Redirect targets whose only reason to be written by a served script is persistence or configuration change.
 PERSISTENCE_TARGET = re.compile(r"(^|/)\.ssh/|^/etc/|/cron|^/var/spool/|(^|/)\.(bash|zsh|ksh)rc$|"
-                                r"(^|/)\.(bash_)?profile$|(^|/)\.config/autostart|/systemd/|^/root/|"
+                                r"(^|/)\.(bash_)?profile$|(^|/)\.config/autostart|/systemd/|"
                                 r"rc\.local$|ld\.so\.preload$")
 STAGING_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/")
 _TOKEN = re.compile(r"[A-Za-z0-9_./+-]+")
@@ -167,20 +167,23 @@ def analyze_body(body: bytes) -> BodyInfo:
     for ln in lines:
         if _ASSIGNMENT.match(ln):
             continue
-        if ln.startswith("["):                                  # test builtin: [ ... ] / [[ ... ]]
-            commands.append("[")
-            continue
         m = _TOKEN.match(ln)
-        if not m:
-            return BodyInfo("text")
-        token = m.group(0)
+        token = "[" if ln.startswith("[") else (m.group(0) if m else "")
         name = basename(token).lower()
-        if token.startswith(("./", "/")) and len(token) > 2:
-            # a bare path runs a program only in context: with arguments, or after a fetch, chmod or copy
-            # (a list of paths or `find` output is not a script)
+        if token == "[":                                        # test builtin: [ ... ] && ... / [[ ... ]] || ...
+            commands.append("[")
+        elif not token:
+            return BodyInfo("text")
+        elif token.startswith(("./", "/")) and len(token) > 2:
+            # a bare path runs a program only in context: run from the working or a staging directory, with an
+            # option or backgrounded, or after a fetch, chmod or copy (a list of paths, `find` output or a path
+            # with a description is not a script)
             commands.append(f"path:{name}")
             invoked.add(name)
-            if (len(ln.split()) > 1 or staged) and _suffix(name) not in DOCUMENT_EXTENSIONS:
+            args = ln.split()[1:]
+            runs = (token.startswith("./") or token.startswith(STAGING_DIRS) or staged
+                    or any(a.startswith("-") or a == "&" for a in args))
+            if runs and _suffix(name) not in DOCUMENT_EXTENSIONS:
                 executes = True
         elif name in KNOWN_COMMANDS:
             commands.append(name)
@@ -192,7 +195,7 @@ def analyze_body(body: bytes) -> BodyInfo:
         for seg in _PIPE.split(bare)[1:]:
             t = _TOKEN.match(seg.strip())
             prog = basename(t.group(0)).lower() if t else ""
-            if prog in PIPE_RUNNERS:
+            if prog in PIPE_RUNNERS or prog in EXECUTION_COMMANDS:     # e.g. `| sh`, `| exec ...`, `| crontab -`
                 piped.append(prog)
                 executes = True
         for target in _REDIRECT.findall(bare):

@@ -4,11 +4,12 @@
    overlapping the hunt window whose body Arkime classified as text or as an executable (scripts and droppers
    hide there). Selection is exhaustive up to a cap; anything beyond the cap, or any shortfall between what the
    index reported and what came back, is recorded. The selection actually used is stated in coverage.
-2. Arkime saves a long session as several documents ("segments") that keep the session's original firstPacket.
-   Segments of one session (same 4-tuple and firstPacket) form one logical session and are fetched in the same
-   batch where they fit.
-3. Fetch the packets from Arkime by explicit session id (batches of 20, byte-capped) and let TShark rebuild the
-   HTTP requests and responses with a fixed query.
+2. Arkime saves a long session as several documents ("segments", one per 10,000 packets on the lab) that keep
+   the session's original firstPacket. Segments of one session (same 4-tuple and firstPacket) form one logical
+   session. Single-segment sessions are fetched in batches of 20 ids; a multi-segment session is fetched one
+   segment at a time, in lastPacket order, and merged chronologically, so TShark sees one connection in packet
+   order (a multi-id export is not in time order). Every fetch is byte-capped.
+3. Let TShark rebuild the HTTP requests and responses with a fixed query.
 4. Map each response to its logical session *within its batch* by server and client address and port, using
    the session's time span when two sessions share a 4-tuple. Turn each response body into a typed `http_body`
    event (what the bytes are, what the server said they were, size and hash of the whole body, a bounded
@@ -19,8 +20,10 @@
    the same list of reasons: a partial, short or capped selection; a failed or truncated batch; a fetched
    session with no HTTP message TShark could rebuild; a response that maps to no session or to more than one;
    a frame holding several responses; a body that cannot be decoded; or a response missing a field the rule
-   needs. A session where TShark saw the request but the server never answered has no body to judge: it is
-   counted, not partial. Packet rules are positive-only, so even a complete stage is never a complete negative.
+   needs. A session where TShark saw only the request is "request only" (counted and noted, nothing to judge)
+   only when Arkime agrees nobody answered: no HTTP status code and zero server bytes on every segment.
+   Otherwise a response existed that TShark could not rebuild (a streaming reply that never ends, lost
+   packets), and that is partial. Packet rules are positive-only, so even a complete stage is never a complete negative.
 
 Any failure here is recorded and the hunt continues: packet evidence enriches the sweep; it is never required.
 """
@@ -46,6 +49,7 @@ from romulus.sources.packets import (
     ArkimePackets,
     PacketError,
     decode_hex_body,
+    merge_captures,
     run_tshark,
 )
 from romulus.store.db import digest
@@ -69,8 +73,8 @@ MAX_BODY_BYTES = 1024 * 1024
 EXCERPT_BYTES = 4096
 PCAP_TARGET = "arkime-pcap"
 SPAN_SLACK_S = 1.0
-COUNTERS = ("candidates", "logical_sessions", "fetched_sessions", "sessions_with_responses",
-            "sessions_request_only", "sessions_without_messages", "responses", "outside_window",
+COUNTERS = ("candidates", "logical_sessions", "multi_segment_sessions", "fetched_sessions", "sessions_with_responses",
+            "sessions_request_only", "sessions_unrebuilt_response", "sessions_without_messages", "responses", "outside_window",
             "unmapped_responses", "ambiguous_responses", "unseparable_frames", "undecodable_bodies",
             "missing_required", "failed_batches", "truncated_batches", "matched")
 
@@ -166,26 +170,40 @@ def _logical(sess: dict) -> tuple:
     return _tuple(sess), sess["_source"].get("firstPacket")
 
 
-def _batches(sessions: list[dict]) -> list[list[dict]]:
-    """Batches of at most MAX_IDS_PER_REQUEST documents that keep a logical session's segments together, unless
-    one session alone has more segments than a batch holds."""
+def _last_packet(sess: dict) -> float:
+    return _epoch(sess["_source"].get("lastPacket")) or 0.0
+
+
+def _units(sessions: list[dict]) -> list[tuple[bool, list[dict]]]:
+    """Units of work: (False, up to MAX_IDS_PER_REQUEST single-segment sessions fetched in one request) or
+    (True, every segment of one multi-segment session in lastPacket order, fetched one by one and merged)."""
     groups: dict[tuple, list[dict]] = {}
     for sess in sessions:
         groups.setdefault(_logical(sess), []).append(sess)
-    out: list[list[dict]] = []
+    out: list[tuple[bool, list[dict]]] = []
     current: list[dict] = []
     for segs in groups.values():
-        if current and len(current) + len(segs) > MAX_IDS_PER_REQUEST:
-            out.append(current)
+        if len(segs) > 1:
+            out.append((True, sorted(segs, key=_last_packet)))
+            continue
+        current += segs
+        if len(current) == MAX_IDS_PER_REQUEST:
+            out.append((False, current))
             current = []
-        for seg in segs:
-            if len(current) == MAX_IDS_PER_REQUEST:
-                out.append(current)
-                current = []
-            current.append(seg)
     if current:
-        out.append(current)
+        out.append((False, current))
     return out
+
+
+def _answered_by_arkime(segs: list[dict]) -> bool:
+    """Arkime's own record of a reply: a parsed HTTP status code, or bytes from the server, on any segment."""
+    for seg in segs:
+        src = seg["_source"]
+        if (src.get("http") or {}).get("statuscode"):
+            return True
+        if ((src.get("server") or {}).get("bytes") or 0) > 0:
+            return True
+    return False
 
 
 def _body_event(row: dict, addrs: tuple, ts: datetime, session: dict, index: str) -> tuple[TypedEvent, dict]:
@@ -255,6 +273,7 @@ class _Target:
         self.fetched: set[tuple] = set()
         self.responded: set[tuple] = set()
         self.requested: set[tuple] = set()
+        self.docs: dict[tuple, list[dict]] = {}
 
     def run(self, sessions: list[dict]) -> None:
         for sess in sessions:                           # a logical session spans all of its segments
@@ -263,22 +282,30 @@ class _Target:
             lo, hi = self.spans.get(_logical(sess), (first, None))
             ends = [x for x in (hi, last) if x is not None]
             self.spans[_logical(sess)] = (lo, max(ends) if ends else None)
+            self.docs.setdefault(_logical(sess), []).append(sess)
         self.c["logical_sessions"] = len(self.spans)
-        for n, batch in enumerate(_batches(sessions)):
+        self.c["multi_segment_sessions"] = sum(1 for segs in self.docs.values() if len(segs) > 1)
+        for n, (merged, docs) in enumerate(_units(sessions)):
             self.heartbeat()
-            self._batch(n, batch)
+            self._batch(n, docs, merged)
         silent = self.fetched - self.responded
+        asked = silent & self.requested
+        unanswered = {k for k in asked if not _answered_by_arkime(self.docs.get(k, []))}
         self.c["fetched_sessions"] = len(self.fetched)
         self.c["sessions_with_responses"] = len(self.responded)
-        self.c["sessions_request_only"] = len(silent & self.requested)
+        self.c["sessions_request_only"] = len(unanswered)
+        self.c["sessions_unrebuilt_response"] = len(asked - unanswered)
         self.c["sessions_without_messages"] = len(silent - self.requested)
         missing = sum(pb.missing_required for pb in self.pack)
         self.c["missing_required"] = missing
         if self.c["sessions_request_only"]:
             self.notes.append(f"{self.name}: {self.c['sessions_request_only']} session(s) had an HTTP request and no "
-                              "response (nothing served, nothing to judge)")
+                              "response; Arkime also recorded no status code and no server bytes (nothing served, "
+                              "nothing to judge)")
         for label, n in (("fetched session(s) had no HTTP message TShark could rebuild",
                           self.c["sessions_without_messages"]),
+                         (("session(s) had a response Arkime recorded that TShark could not rebuild (for example a "
+                           "streaming reply that never ends, or lost packets)"), self.c["sessions_unrebuilt_response"]),
                          ("response(s) mapped to no selected session", self.c["unmapped_responses"]),
                          ("response(s) matched more than one session", self.c["ambiguous_responses"]),
                          ("frame(s) held several HTTP responses that cannot be separated", self.c["unseparable_frames"]),
@@ -287,30 +314,51 @@ class _Target:
             if n:
                 self.partial.append(f"{self.name}: {n} {label}")
 
-    def _batch(self, n: int, batch: list[dict]) -> None:
+    def _fetch(self, n: int, batch: list[dict], merged: bool) -> tuple[Path | None, bool, str | None]:
+        """(capture path, capped, error). A merged unit fetches each segment alone, in order, within one byte
+        budget, then merges them chronologically."""
         pcap = self.work / f"batch-{n}.pcap"
-        try:
+        if not merged:
             fetched = self.packets.fetch([b["_id"] for b in batch], pcap)
+            return fetched.path, fetched.capped, fetched.error or (None if fetched.path else "no packets")
+        budget = getattr(self.packets, "max_bytes", 32 * 1024 * 1024)
+        parts, total, capped = [], 0, False
+        try:
+            for i, seg in enumerate(batch):
+                fetched = self.packets.fetch([seg["_id"]], self.work / f"batch-{n}-seg{i}.pcap")
+                if fetched.error or fetched.path is None:
+                    return None, False, fetched.error or "no packets"
+                parts.append(fetched.path)
+                total += fetched.bytes
+                if fetched.capped or total >= budget:
+                    capped = True
+                    break
+            error = merge_captures(self.s, parts, pcap, [self.work])
+        finally:
+            for part in parts:
+                part.unlink(missing_ok=True)
+        return (None, capped, error) if error else (pcap, capped, None)
+
+    def _batch(self, n: int, batch: list[dict], merged: bool = False) -> None:
+        what = f"one session's {len(batch)} segments" if merged else f"{len(batch)} session documents"
+        try:
+            path, capped, error = self._fetch(n, batch, merged)
         except PacketError as exc:
-            fetched = None
-            error = str(exc)
-        else:
-            error = fetched.error or (None if fetched.path else "no packets")
+            path, capped, error = None, False, str(exc)
         if error:
             self.c["failed_batches"] += 1
-            self.partial.append(f"{self.name}: batch {n} ({len(batch)} session documents) not examined: {error}")
+            self.partial.append(f"{self.name}: batch {n} ({what}) not examined: {error}")
             return
-        result = run_tshark(self.s, fetched.path, "http_messages", [self.work], http_ports=_ports(batch))
-        pcap.unlink(missing_ok=True)
+        result = run_tshark(self.s, path, "http_messages", [self.work], http_ports=_ports(batch))
+        path.unlink(missing_ok=True)
         if result.error:
             self.c["failed_batches"] += 1
-            self.partial.append(f"{self.name}: batch {n} ({len(batch)} session documents) not examined: "
-                                f"{result.error}")
+            self.partial.append(f"{self.name}: batch {n} ({what}) not examined: {result.error}")
             return
-        if fetched.capped or result.truncated:
+        if capped or result.truncated:
             self.c["truncated_batches"] += 1
-            self.partial.append(f"{self.name}: batch {n} capture incomplete "
-                                f"({'download byte cap' if fetched.capped else 'capture cut short'})")
+            self.partial.append(f"{self.name}: batch {n} ({what}) capture incomplete "
+                                f"({'download byte cap' if capped else 'capture cut short'})")
         segments: dict[tuple, list[dict]] = {}
         by_tuple: dict[tuple, list[tuple]] = {}
         for sess in batch:

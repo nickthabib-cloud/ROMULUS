@@ -177,6 +177,26 @@ def limited(cmd: list[str], timeout: int) -> list[str]:
     return [prlimit, f"--as={TSHARK_MEMORY_BYTES}", f"--cpu={timeout + 5}", "--", *cmd]
 
 
+def merge_captures(s: Settings, parts: list[Path], dest: Path, allowed_dirs: list[Path], timeout: int = 120) -> str | None:
+    """Merge captures chronologically into one file (mergecap's default): the segments of one long Arkime session,
+    each fetched alone, become one capture in packet-time order so TShark can reassemble across them.
+    Returns an error, or None."""
+    paths = [_allowed(p, allowed_dirs) for p in parts]
+    out_dir = dest.parent.resolve(strict=True)
+    if not any(out_dir.is_relative_to(d.resolve()) for d in allowed_dirs if d.exists()):
+        raise PacketError("merge output is outside the allowed directories")
+    tshark = shutil.which(s.tshark_bin) or s.tshark_bin
+    exe = shutil.which("mergecap") or str(Path(tshark).with_name("mergecap"))
+    try:
+        proc = subprocess.run(limited([exe, "-w", str(dest), *map(str, paths)], timeout), capture_output=True,
+                              timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return f"mergecap exceeded {timeout} s"
+    except OSError as exc:
+        return f"mergecap could not start: {type(exc).__name__}"
+    return None if proc.returncode == 0 else f"mergecap failed (exit {proc.returncode})"
+
+
 def run_tshark(s: Settings, pcap: Path, query: str, allowed_dirs: list[Path], timeout: int = 180,
                http_ports=()) -> TsharkResult:
     """Run one fixed query over a capture. Each row maps every query field to all its occurrences."""
