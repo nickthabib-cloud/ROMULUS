@@ -275,3 +275,16 @@ def test_an_expansion_exception_leaves_partly_expanded_anchors_partial(tmp_path,
     assert summary["status"] == "failed"
     anchor = repo.expansion_anchors("h1")[0]
     assert anchor["status"] == "expanded_partial" and anchor["reasons"] == ["expansion error"]
+
+
+def test_a_host_target_without_ip_fields_leaves_the_ip_link_unresolved_not_silent():
+    repo = network_anchor_repo()
+    no_ip = {"host-x": contract_from_types("host-x", {"@timestamp": "date", "event.dataset": "keyword",
+                                                      "host.name": "keyword"})}
+    fetcher = LinkFetcher(PredicateExecutor(repo, [], no_ip), WINDOW.start, WINDOW.end)
+    anchor = LinkAnchor(finding_id="F-ip", ts=T0, host="web1",
+                        events=[ev("a", "http_access", host="web1", target="host-x", source__ip="203.0.113.8")])
+    window = LinkWindow(label="anchor ±5 min", start=T0 - timedelta(minutes=5), end=T0 + timedelta(minutes=5))
+    result = fetcher.fetch(anchor, "source_ip", window)
+    assert result.status != "complete"
+    assert any("IP predicate unavailable" in reason for cell in result.coverage for reason in cell.reasons)

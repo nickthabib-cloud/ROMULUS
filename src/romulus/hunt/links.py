@@ -11,7 +11,7 @@ from romulus.agent.models import PivotCoverage
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
 from romulus.detect.correlation import PidTable
 from romulus.evidence.typed import TypedEvent
-from romulus.hunt.pivot import MAX_PIVOT_RECORDS, PivotExecutor, _is_network, _supports
+from romulus.hunt.pivot import MAX_PIVOT_RECORDS, PivotExecutor, _is_network, _range, _supports
 from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.store.db import digest
 
@@ -455,6 +455,23 @@ class LinkFetcher:
             predicate.field in {"source.ip", "destination.ip"}
             for group in intent.any_of for predicate in group
         )]
+        # A planned intent without an IP predicate is refused, never run as a dataset scan; the dataset it
+        # would have covered is unresolved for this address, not silently absent (review minor).
+        planning_coverage = list(planning_coverage)
+        covered = {(cell.target, cell.dataset) for cell in planning_coverage}
+        for intent in all_intents:
+            if intent in intents:
+                continue
+            dataset = PivotExecutor._intent_dataset(intent)
+            if (intent.target, dataset) in covered:
+                continue
+            covered.add((intent.target, dataset))
+            unresolved = f"dataset_unsearchable:{dataset}:IP predicate unavailable"
+            planning_coverage.append(PivotCoverage(
+                target=intent.target, dataset=dataset, start=intent.window.start, end=intent.window.end,
+                status="partial", reasons=[unresolved], returned=0, total=None,
+                unresolved_ranges=[_range(intent.window.start, intent.window.end, unresolved)],
+            ))
         matches = lambda event: event.ts >= anchor.ts and event.get("source.ip") == source_ip
         reason = None if intents else "key not pushable; full-dataset scan refused"
         return (key, "inferred", intents, matches,

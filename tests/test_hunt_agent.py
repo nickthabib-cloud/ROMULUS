@@ -349,3 +349,97 @@ def test_cli_maps_agent_mode_and_no_agent_alias(monkeypatch, capsys, tmp_path, f
     assert code == 0
     assert seen["agent_mode"] == expected
     capsys.readouterr()
+
+
+def test_cli_status_shows_expansion_and_packet_accounting_when_the_agent_is_off(monkeypatch, capsys, tmp_path):
+    settings = Settings(agent_mode="off", home=tmp_path)
+    repo = _new_hunt(settings)
+    repo.claim_hunt("h1", 60)
+    repo.audit("system", "hunt.agent_summary", "h1", {"status": "disabled", "unworked_count": 9})
+    repo.audit("system", "hunt.packet_summary", "h1", {"status": "partial", "responses": 12, "matched": 2})
+    repo.audit("system", "hunt.expansion_summary", "h1", {
+        "status": "completed", "anchors": 3, "expanded_complete": 1, "expanded_partial": 2, "unexpanded": [],
+        "source_queries": 40})
+    repo.set_hunt_state("h1", "partial", detection_result="reportable_findings")
+    monkeypatch.setattr(cli, "load_settings", lambda _path: settings)
+
+    assert cli.main(["hunt", "status", "h1"]) == 0
+    output = capsys.readouterr().out
+    assert "expansion=completed anchors=3 (complete 1, partial 2, unexpanded 0) queries=40" in output
+    assert "packets=partial responses=12 matched=2" in output
+    assert "agent=off" in output and "unworked=" not in output
+
+
+def test_default_and_no_expand_hunts_have_identical_sweep_findings(tmp_path, monkeypatch):
+    """Expansion adds findings; it never changes, adds to or removes what the sweep found (review minor)."""
+    from romulus.evidence.typed import RawRef, TypedEvent, fv
+    from romulus.hunt.pivot import PivotEventBatch, PivotExecutor
+    from romulus.sources.profile import contract_from_types
+
+    def exec_event(event_id, ts, argv):
+        return TypedEvent(id=event_id, family="process_exec", ts=ts, host="web1",
+                          fields={"process.executable": fv(argv[0], f"{event_id}:exe"),
+                                  "process.argv": fv(argv, f"{event_id}:argv"), "process.pid": fv(10, f"{event_id}:pid")},
+                          raw=[RawRef(target="host-x", native_id=event_id, digest="d")], normalizer="test@1")
+
+    shell = exec_event("shell", START + timedelta(minutes=10), ["/bin/sh", "-c", "id"])
+    cred = exec_event("cred", START + timedelta(minutes=11), ["/usr/bin/cat", "/etc/shadow"])
+
+    class PublishingSweep(FakeSweep):
+        def __init__(self, repo, client, hunt_id, *args, **kwargs):
+            super().__init__()
+            self.repo, self.hunt_id = repo, hunt_id
+
+        def finalize(self):
+            self.repo.save_evidence(self.hunt_id, [shell], {}, None)
+            self.repo.save_candidate({
+                "id": f"{self.hunt_id}-sweep", "hunt_id": self.hunt_id, "rule_id": "host.web_shell",
+                "rule_version": "1", "claim": "web service spawned a shell", "claim_type": "observed_action",
+                "event_ids": [shell.id], "predicate_fields": [], "entities": [["host", "web1", "host"]],
+                "ts": shell.ts, "severity": "critical", "confidence": "high", "lane": "urgent", "priority": 100.0,
+                "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+                "group_key": "web1|shell", "source_case_id": None, "source_anchor_id": None,
+                "source_link_id": None,
+            })
+
+    class HostSource:
+        def __init__(self, repo, client, hunt_id, contracts, *args, owner_token=None, source_query_budget=None,
+                     **kwargs):
+            self.repo, self.hunt_id, self.owner_token = repo, hunt_id, owner_token
+            self.contracts = {"host-x": contract_from_types("host-x", {
+                "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword"})}
+            self.dataset_inventory, self.source_queries, self.source_query_budget = {}, 0, source_query_budget
+
+        def _intents(self, request):
+            return PivotExecutor._intents(self, request)
+
+        def fetch_intents(self, owner, fetch_key, intents, retain, **kwargs):
+            self.source_queries += len(intents)
+            hits = [e for e in (cred,) if retain(e)]
+            self.repo.save_evidence(self.hunt_id, hits, {}, None, owner_token=self.owner_token)
+            return PivotEventBatch(status="complete", task_ids=[], events=hits, raw_sources={}, coverage=[],
+                                   reasons=[], duration_ms=1)
+
+    monkeypatch.setattr(hunt_run, "Sweep", PublishingSweep)
+    monkeypatch.setattr(hunt_run, "PivotExecutor", HostSource)
+    settings = Settings(agent_mode="off", home=tmp_path)
+    repo = hunt_run.open_repo(settings)
+    for hunt_id, expand in (("h-default", True), ("h-sweep-only", False)):
+        manifest = _manifest()
+        manifest.update({"agent_mode": "off", "expansion": {"enabled": expand, "max_source_queries": 40}})
+        repo.create_hunt(hunt_id, manifest, "digest", "test")
+        hunt_run.run_hunt(settings, hunt_id, expand=expand)
+
+    def sweep_findings(hunt_id):
+        out = set()
+        for row in repo.candidates(hunt_id):
+            if row["source_anchor_id"] is None:
+                raws = sorted(ref["native_id"] for ev in repo.events_by_ids(row["event_ids"])
+                              for ref in ev["event"]["raw"])
+                out.add((row["rule_id"], row["group_key"], tuple(raws), row["lane"], row["claim"]))
+        return out
+
+    assert sweep_findings("h-default") == sweep_findings("h-sweep-only") != set()
+    added = [row for row in repo.candidates("h-default") if row["source_anchor_id"]]
+    assert [row["rule_id"] for row in added] == ["host.credential_store_read"]
+    assert not [row for row in repo.candidates("h-sweep-only") if row["source_anchor_id"]]
