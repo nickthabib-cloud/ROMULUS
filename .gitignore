@@ -42,8 +42,8 @@ Claude-Codex.md
 # agent worktrees (Claude Code)
 .claude/worktrees/
 
-# kept locally, never uploaded: the owner's spec, decision records, project management
-# (status, milestones, team, lab environment), evaluation records, and site-specific Claude setup
+# kept locally, never uploaded: AI working notes and project management (spec, decisions, status,
+# milestones, team, design and research notes, evaluation records, agent definitions, site-specific setup)
 ENGINEERING_MASTER_PROMPT.md
 docs/adr/
 docs/project/
@@ -51,3 +51,8 @@ docs/eval/
 eval/
 tests/test_eval_*.py
 CLAUDE.local.md
+CLAUDE.md
+.claude/
+docs/design/
+docs/research/
+content/research/

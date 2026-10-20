@@ -2,9 +2,9 @@
 
 A defensive, AI-assisted threat-hunting tool.
 
-ROMULUS runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. Deterministic expansion then follows typed links from the strongest findings (process lineage, login session, network flow), judges the linked records in context, and assembles incidents. Every claim cites the raw evidence. ROMULUS can work with or without a language model by performing deterministic searches (ADR-006).
+ROMULUS runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. Deterministic expansion then follows typed links from the strongest findings (process lineage, login session, network flow), judges the linked records in context, and assembles incidents. Every claim cites the raw evidence. ROMULUS can work with or without a language model by performing deterministic searches.
 
-**Planned: the AI investigating agent** (ADR-008, [design](docs/design/investigating-agent.md)). After the deterministic layer, the agent:
+**In progress: the AI investigating agent.** After the deterministic layer, the agent:
 - reads every indicator ROMULUS found;
 - develops hypotheses about malicious activity;
 - follows further leads through typed, read-only pivots, and finds more indicators;
@@ -12,17 +12,18 @@ ROMULUS runs a deterministic sweep over host and network telemetry: Elasticsearc
 
 The final report opens with its **AI assessment**: the agent's overall hypothesis, every sentence cited, labelled as AI-generated and unconfirmed. The agent can add findings, labelled as agent findings and capped at `high`. It can never hide, close or demote findings.
 
-For testing purposes the model is reached through any OpenAI API (ADR-007). Actual teams use their own LLM server.
+For testing purposes the model is reached through any OpenAI API. Actual teams use their own LLM server.
 
 Outputs:
 
 - ranked findings
-- an attack path
+- incidents with a cited, template narrative
+- an attack-path timeline
 - recommendations
 - a technical Markdown/JSON report (an executive DOCX is planned)
 - a browser UI for analysts
 
-> **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 evaluation is closing and M3 (deterministic expansion) is in progress. Track A (the AI investigating agent) is in progress. This is lab software under active development and is not yet validated for production missions.
+> **Status:** under active development and not yet validated for production missions.
 
 ## Detection scope
 
@@ -31,14 +32,14 @@ The goal is to find any malicious activity the telemetry can show, on any missio
 - Public detection corpora (Sigma, CAR, Atomic Red Team, LOLBAS/GTFOBins, ET Open and others);
 - Any telemetry family a hunt may meet: Windows, AD, Linux, macOS, identity and cloud logs, network devices, Zeek, Suricata, PCAP and ICS protocols.
 
-A generated ATT&CK coverage matrix will show what is covered, what is evaluated, and where the gaps are. The M1 starter set is 15 Linux and network playbooks.
+A generated ATT&CK coverage matrix will show what is covered, what is evaluated, and where the gaps are.
 
 ## Design principles
 
 - **Strong indicators are reported on their own, immediately.** Correlation and attack paths come second. Inferred links are labeled as hypotheses.
 - **Nothing reportable is lost** to UI limits, model context or rendering. One immutable report manifest feeds every renderer, and every citation is checked.
-- **The model proposes typed actions only.** It require input validation for DSL queries, Arkime expressions, TShark filters. All model output is validated, and telemetry is treated as untrusted data.
-- **Read-only toward telemetry.** Nothing is transmitted externally. Secrets never appear in the repo, logs, prompts or reports. One exception (ADR-007): a hosted model, used for testing on public data only. It needs an install-time switch, puts a banner on every hunt and report that used it, and is never on in release builds.
+- **The model proposes typed actions only.** It requires input validation for DSL queries, Arkime expressions, TShark filters. All model output is validated, and telemetry is treated as untrusted data.
+- **Read-only toward telemetry.** Nothing is transmitted externally. Secrets never appear in the repo, logs, prompts or reports. One exception: a hosted model, used for testing on public data only. It needs an install-time switch, puts a banner on every hunt and report that used it, and is never on in release builds.
 
 ## How it works
 
@@ -53,8 +54,8 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 - **Core:** Python 3.12, organized as a modular monolith (`src/romulus/`).
 - **State:** SQLite (WAL) is the single state authority; Alembic handles migrations.
 - **Web UI:** FastAPI + Jinja + server-sent events. It has argon2 logins, lead/analyst roles, CSRF protection and a strict CSP.
-- **Model:** optional local Ollama today. Planned: any OpenAI-compatible endpoint for the agent (ADR-007). The agent is scored on and off by the evaluation harness.
-- **The Agent:** Uses native tool calling through the investigator, an explicit controller with SQLite as the only state (ADR-001, ADR-008).
+- **Model:** optional; a local Ollama server today, any OpenAI-compatible endpoint for the agent.
+- **The Agent:** Uses native tool calling through the investigator, an explicit controller with SQLite as the only state. No agent framework.
 
 ## Repository layout
 
@@ -63,7 +64,8 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 | `src/romulus/` | `config`, `store`, `sources`, `evidence`, `detect`, `decide`, `hunt`, `agent`, `report`, `web`, `cli` |
 | `tests/` | Unit, acceptance, hostile-input and regression tests |
 | `scripts/` | `deploy.ps1` (deploy to a Linux host over SSH), `web-restart.sh`, `archmap.py`, `smoke_live.py` |
-| `docs/design/` | Design notes (deterministic expansion, network correlation, the investigating agent) |
+| `content/` | Indicator lists and vendored MITRE ATT&CK data |
+| `docs/architecture/` | Architecture overview and the generated module map |
 | `.env.example` | Configuration template. Copy it to `$ROMULUS_HOME/.env`, then `chmod 600` |
 
 ## Getting started
@@ -78,7 +80,7 @@ cp .env.example "$ROMULUS_HOME/.env"   # fill in sources, model endpoint and sec
 
 Use a **read-only** Elasticsearch account, never the `elastic` superuser. The model is optional: leave `OLLAMA_URL` empty to run model-off. If you use Ollama, keep `OLLAMA_NUM_CTX` explicit, because Ollama truncates prompts silently.
 
-Every setting, including agent provider keys, lives in `.env`. A lead-only Settings page for credentials is deferred to a later milestone (ADR-009).
+Every setting, including agent provider keys, lives in `.env`.
 
 ### Run
 
@@ -100,6 +102,8 @@ romulus --env-file .env hunt start --start 2026-01-01T10:00:00Z --end 2026-01-01
 | `user add <name> --role lead\|analyst` | Creates a web UI account (interactive) |
 | `web` | Serves the browser UI on `ROMULUS_WEB_BIND` |
 
+The web UI shows each hunt's findings, incidents and an attack-path timeline (`/hunts/<id>/timeline`).
+
 ### Tests
 
 ```bash
@@ -108,7 +112,6 @@ python -m pytest -q -p no:warnings
 
 Install the dev dependencies (`pytest`, `respx`, `ruff`) first.
 
-## Lab and evaluation
+## Evaluation
 
-Development is evaluated against the public Zenodo dataset, loaded into Elasticsearch and Arkime. Ground truth is kept out of the runtime and is read only by the evaluation role (set `ROMULUS_EVAL_ROOT` so `doctor` checks that no source path overlaps it). Lab results are reported with the status words (`implemented`, `locally tested`, `integration tested`, `lab evaluated`, `holdout evaluated`, `production validated`), never as general effectiveness claims.
-
+Development is evaluated against the public Zenodo dataset, loaded into Elasticsearch and Arkime. Ground truth is kept out of the runtime and is read only by the evaluator (set `ROMULUS_EVAL_ROOT` so `doctor` checks that no source path overlaps it). Results on a development dataset are never presented as general effectiveness claims.

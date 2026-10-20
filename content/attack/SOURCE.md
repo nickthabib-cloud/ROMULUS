@@ -11,4 +11,4 @@
 | Contents | 227 techniques, 479 sub-techniques (not revoked or deprecated) |
 | License | MITRE ATT&CK license, reproduced in `LICENSE.txt` (copyright designation and license must accompany any copy) |
 
-Approved by the owner 2026-10-19. Read it with `gzip.open`; verify the JSON SHA-256 above before use. Replace it only with a newer pinned release and a new row here.
+Read it with `gzip.open`; verify the JSON SHA-256 above before use. Replace it only with a newer pinned release and a new row here.
