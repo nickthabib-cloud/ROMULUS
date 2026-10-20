@@ -15,7 +15,8 @@ from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.store.db import digest
 
 LinkType = Literal[
-    "process_lineage", "login_session", "network_flow", "source_ip", "account", "host_after_anchor",
+    "process_lineage", "login_session", "network_flow", "flow_host_side",
+    "source_ip", "account", "host_after_anchor",
 ]
 LinkStrength = Literal["observed", "inferred"]
 
@@ -128,6 +129,7 @@ class LinkFetcher:
             "process_lineage": self._lineage,
             "login_session": self._session,
             "network_flow": self._flow,
+            "flow_host_side": self._flow_host_side,
             "source_ip": self._source_ip,
             "account": self._account,
             "host_after_anchor": self._host_after,
@@ -221,8 +223,8 @@ class LinkFetcher:
     def _flow(self, anchor: LinkAnchor, window: LinkWindow):
         community_id = _value(anchor, "network.community_id")
         five_tuple = next((_tuple(event) for event in anchor.events if _tuple(event) is not None), None)
-        key = ({"network.community_id": community_id, "host_side": "inferred"} if community_id else
-               {"five_tuple": list(five_tuple) if five_tuple else None, "host_side": "inferred"})
+        key = ({"network.community_id": community_id} if community_id else
+               {"five_tuple": list(five_tuple) if five_tuple else None})
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
             if not _is_network(target, contract):
@@ -253,27 +255,33 @@ class LinkFetcher:
                 filters=filters, any_of=any_of, max_records=MAX_PIVOT_RECORDS,
                 purpose="expansion:network_flow",
             ))
-        if anchor.host and five_tuple:
-            intents.extend(self._host_intents(window, ("linux.audit",), anchor.host))
-
         def matches(event):
+            if event.family not in {"net_flow", "net_alert", "net_session"}:
+                return False
             if community_id:
                 candidate_community = event.get("network.community_id")
                 if candidate_community is not None:
                     return candidate_community == community_id
-                if event.family != "net_socket":
-                    return False
             candidate_tuple = _tuple(event)
             if five_tuple and candidate_tuple and _tuple_matches(five_tuple, candidate_tuple):
                 return True
-            if event.family == "net_socket" and five_tuple:
-                _transport, src, sport, dst, dport = five_tuple
-                return ((event.get("destination.ip"), event.get("destination.port")) in {
-                    (src, sport), (dst, dport),
-                })
             return False
 
         return key, "observed", intents, matches, lambda events: [event for event in events if matches(event)]
+
+    def _flow_host_side(self, anchor: LinkAnchor, window: LinkWindow):
+        five_tuple = next((_tuple(event) for event in anchor.events if _tuple(event) is not None), None)
+        endpoints = [] if five_tuple is None else [
+            [five_tuple[1], five_tuple[2]], [five_tuple[3], five_tuple[4]],
+        ]
+        key = {"host.name": anchor.host, "flow_endpoints": endpoints, "actor": "inferred"}
+        intents = self._host_intents(window, ("linux.audit",), anchor.host) if anchor.host and endpoints else []
+
+        def matches(event):
+            return (event.family == "net_socket" and event.host == anchor.host
+                    and [event.get("destination.ip"), event.get("destination.port")] in endpoints)
+
+        return key, "inferred", intents, matches, lambda events: [event for event in events if matches(event)]
 
     def _source_ip(self, anchor: LinkAnchor, window: LinkWindow):
         source_ip = _value(anchor, "source.ip")

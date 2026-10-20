@@ -91,6 +91,11 @@ def cases(matched=True):
                        network__community_id="1:abc" if matched else "1:other",
                        source__ip="10.0.0.2", source__port=50000,
                        destination__ip=IP, destination__port=443, network__transport="tcp")
+    flow_socket = event(
+        "flow-socket", "net_socket", ts=T0 + timedelta(seconds=1),
+        destination__ip=IP if matched else "198.51.100.2", destination__port=443,
+        network__transport="tcp", process__pid=210,
+    )
 
     ip_anchor = event("ip-a", "http_access", source__ip=IP)
     ip_other = event("ip-b", "auth", ts=T0 + timedelta(seconds=1), host="other",
@@ -108,6 +113,7 @@ def cases(matched=True):
         "process_lineage": (lineage_anchor, lineage_other),
         "login_session": (session_anchor, session_other),
         "network_flow": (flow_anchor, flow_other),
+        "flow_host_side": (flow_anchor, flow_socket),
         "source_ip": (ip_anchor, ip_other),
         "account": (account_anchor, account_other),
         "host_after_anchor": (host_anchor, host_other),
@@ -132,10 +138,10 @@ def test_each_link_fetcher_returns_only_typed_matches(link_type):
     assert linked.id in result.event_ids
     assert result.key
     assert result.strength == ("inferred" if link_type in {
-        "source_ip", "account", "host_after_anchor",
+        "source_ip", "account", "host_after_anchor", "flow_host_side",
     } else "observed")
     if link_type == "network_flow":
-        assert result.key["host_side"] == "inferred"
+        assert "host_side" not in result.key
 
 
 @pytest.mark.parametrize("link_type", sorted(cases()))
@@ -229,3 +235,29 @@ def test_network_flow_exact_tuple_queries_both_directions():
         [("source.ip", IP), ("source.port", 443),
          ("destination.ip", "10.0.0.2"), ("destination.port", 50000)],
     ]
+
+
+def test_host_socket_endpoint_match_is_inferred_not_observed_network_flow():
+    flow = event(
+        "flow", "net_flow", host="sensor", network__community_id="1:abc",
+        source__ip="10.0.0.2", source__port=50000,
+        destination__ip=IP, destination__port=443, network__transport="tcp",
+    )
+    unrelated_process = event(
+        "socket", "net_socket", host="web1", ts=T0 + timedelta(minutes=2),
+        destination__ip=IP, destination__port=443, network__transport="tcp",
+        process__pid=900,
+    )
+    pivot = FakePivot([flow, unrelated_process])
+    request = LinkAnchor(
+        finding_id="finding-flow", ts=flow.ts, host="web1",
+        event_ids=[flow.id], events=[flow],
+    )
+
+    observed = LinkFetcher(pivot, T0, T1).fetch(request, "network_flow", window())
+    inferred = LinkFetcher(pivot, T0, T1).fetch(request, "flow_host_side", window())
+
+    assert unrelated_process.id not in observed.event_ids
+    assert observed.strength == "observed"
+    assert inferred.event_ids == [unrelated_process.id]
+    assert inferred.strength == "inferred"
