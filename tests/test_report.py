@@ -276,3 +276,49 @@ def test_completed_hunt_report_keeps_partial_pivot_gaps_in_investigations():
     assert manifest["investigations"]["pivot_gaps"][0]["status"] == "partial"
     assert "Execution state | completed\\_within\\_scope" in markdown
     assert "Partial pivot steps | 1" in markdown
+
+
+def test_incident_graph_records_inferred_link_without_merging_incidents():
+    repo, first_id = _repo_with_finding()
+    _copy_candidate(repo, first_id, "second-finding", host="db01")
+    with repo.engine.begin() as conn:
+        from romulus.store import schema as tables
+        conn.execute(tables.candidate.update().where(tables.candidate.c.id == "second-finding").values(
+            source_anchor_id=first_id, source_link_id="link-inferred",
+        ))
+    repo.save_expansion_anchor({
+        "id": first_id, "hunt_id": "h1", "candidate_id": first_id, "depth": 0,
+        "parent_anchor_id": None, "host": "web01", "lane": "high", "severity": "high", "ts": T,
+        "status": "expanded_partial", "reasons": ["host-after link is inferred"],
+    })
+    repo.save_expansion_anchor({
+        "id": "second-finding", "hunt_id": "h1", "candidate_id": "second-finding", "depth": 1,
+        "parent_anchor_id": first_id, "host": "db01", "lane": "high", "severity": "high", "ts": T,
+        "status": "unexpanded", "reasons": ["source query budget exhausted"],
+    })
+    repo.save_expansion_link({
+        "id": "link-inferred", "hunt_id": "h1", "anchor_id": first_id,
+        "link_type": "host_after_anchor", "window_label": "anchor ±5 min",
+        "window_start": T - timedelta(minutes=5), "window_end": T + timedelta(minutes=5),
+        "strength": "inferred", "key": {"host.name": "web01", "actor": "inferred"},
+        "status": "complete", "event_ids": ["ev1"], "evidence_ids": ["ev1"], "task_ids": [],
+        "coverage": [], "reasons": [], "duration_ms": 1, "evaluated": 1,
+    })
+    repo.audit("system", "hunt.expansion_summary", "h1", {
+        "status": "completed", "stop_reason": "budget", "anchors": 2,
+        "expanded_complete": 0, "expanded_partial": 1, "unexpanded": ["second-finding"],
+    })
+
+    manifest = publish_revision(repo, "h1", "test")
+    graph = manifest["incident_graph"]
+    markdown = render(manifest)
+
+    assert len(graph["incidents"]) == 2
+    assert graph["links"][0]["style"] == "inferred"
+    assert graph["links"][0]["target_finding_ids"] == ["second-finding"]
+    assert all(len(incident["finding_ids"]) == 1 for incident in graph["incidents"])
+    assert manifest["investigations"]["anchor_accounting"]["unexpanded"] == ["second-finding"]
+    assert "## Incidents" in markdown
+    assert r"host\_after\_anchor" in markdown and "inferred" in markdown
+    assert "**Anchor accounting**" in markdown
+    assert "**Seed accounting**" not in markdown

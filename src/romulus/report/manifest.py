@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from romulus.agent.cases import seed_candidate_ids
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.registry import ALL_PLAYBOOKS
+from romulus.report.incidents import build_incident_graph
 from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
 from romulus.store.repo import Repo, raw_id
@@ -169,11 +170,49 @@ def _case_conclusion(summary: str | None) -> dict | None:
     return parsed if isinstance(parsed, dict) else {"model_conclusion": "legacy_summary", "reasoning": str(parsed)}
 
 
+def _expansion_investigations(repo: Repo, hunt_id: str, audit: dict) -> dict:
+    anchors = repo.expansion_anchors(hunt_id)
+    links = repo.expansion_links(hunt_id)
+    by_status = {
+        status: [row["id"] for row in anchors if row["status"] == status]
+        for status in ("expanded_complete", "expanded_partial", "unexpanded", "pending")
+    }
+    return {
+        "summary": {
+            "status": audit.get("status", "unknown"), "mode": "deterministic_expansion",
+            "anchors": len(anchors), "links": len(links),
+            "unworked_count": len(by_status["unexpanded"] + by_status["pending"]),
+            "partial_links": sum(row["status"] != "complete" for row in links),
+        },
+        "anchor_accounting": {
+            **by_status,
+            "anchors": [{
+                "id": row["id"], "candidate_id": row["candidate_id"], "depth": row["depth"],
+                "parent_anchor_id": row["parent_anchor_id"], "status": row["status"],
+                "reasons": row["reasons"],
+            } for row in anchors],
+        },
+        "link_accounting": [{
+            "id": row["id"], "anchor_id": row["anchor_id"], "link_type": row["link_type"],
+            "strength": row["strength"], "status": row["status"], "evidence_ids": row["evidence_ids"],
+            "reasons": row["reasons"],
+        } for row in links],
+        "model_contribution": {"model_calls": 0, "pivot_steps": 0, "pivot_proposals": 0,
+                               "candidate_ids": []},
+        "seed_partition": {"concluded": [], "assigned_unfinished": [], "unassigned": []},
+        "unworked_seed_ids": by_status["unexpanded"] + by_status["pending"],
+        "analyst_flags": [], "incomplete_case_ids": [], "pivot_gaps": [], "cases": [],
+    }
+
+
 def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dict) -> dict:
     hunt = repo.get_hunt(hunt_id) or {}
     hunt_manifest = hunt.get("manifest") or {}
     agent_mode = agent.get("mode") or hunt_manifest.get("agent_mode") or "model"
     cases = repo.cases(hunt_id)
+    expansion_audit = repo.latest_audit(hunt_id, "hunt.expansion_summary")
+    if expansion_audit and not cases and (agent.get("mode") in (None, "off") or agent.get("status") == "disabled"):
+        return _expansion_investigations(repo, hunt_id, expansion_audit.get("detail") or {})
     seed_candidates = {
         candidate["id"]: candidate
         for candidate in candidates
@@ -343,6 +382,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             "gates": gates, "notes": notes, "benign_alternatives": c["benign_alternatives"],
             "next_checks": c["next_checks"], "citations": _citations(repo, c),
             "source_case_id": c.get("source_case_id"),
+            "source_anchor_id": c.get("source_anchor_id"),
+            "source_link_id": c.get("source_link_id"),
             "analyst_status": disp[-1]["status"] if disp else "new",
             "disposition_history": [{"actor": d["actor"], "at": str(d["at"]), "status": d["status"],
                                      "note": d["note"]} for d in disp],
@@ -356,6 +397,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                              .order_by(t.audit_event.c.id.desc())).scalar()
     broken = sum(1 for f in findings for c in f["citations"] if c["status"].startswith("broken"))
     hm = h["manifest"]
+    incident_graph = build_incident_graph(repo, hunt_id, findings)
     m = {
         "schema": MANIFEST_SCHEMA,
         "hunt": {"id": hunt_id, "style": hm["style"], "hypothesis": hm.get("hypothesis", ""),
@@ -372,14 +414,18 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "tasks": {s: n for s, n in tasks},
         "agent": agent or {"status": "unknown"},
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
+        "incident_graph": incident_graph,
         "versions": {"pack": hm["pack"]["version"], "normalizer": hm["normalizer"], "policy": hm["policy"],
                      "model": hm["model"], "romulus": hm["romulus_version"]},
         "generated_by": actor,
     }
     broken_inv = _broken_investigation_citations(repo, m["investigations"])
+    broken_incidents = _broken_investigation_citations(repo, incident_graph)
     m["integrity"] = {"broken_citations": broken, "broken_investigation_citations": len(broken_inv),
                       "broken_investigation_event_ids": broken_inv[:50],
-                      "finalizable": broken == 0 and not broken_inv}
+                      "broken_incident_citations": len(broken_incidents),
+                      "broken_incident_event_ids": broken_incidents[:50],
+                      "finalizable": broken == 0 and not broken_inv and not broken_incidents}
     return _jsonable(m)
 
 
