@@ -702,7 +702,7 @@ class SshLoginFromExternal(Playbook):
             sources = "; ".join(part for part in (
                 f"{journal} sshd 'Accepted' journal record(s)" if journal else "",
                 f"{audit} audit USER_LOGIN record(s)" if audit else "") if part)
-            claim = (f"{logins} successful SSH login(s) on {host} for account '{user}' from non-private address "
+            claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from non-private address "
                      f"{ip} ({evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}; {sources}).")
             m = Match(self.id, claim, self.claim_type, evs[:20], [pf(evs[0], "source.ip"), pf(evs[0], "user.name")],
                       evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}")

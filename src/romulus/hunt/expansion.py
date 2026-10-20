@@ -107,12 +107,12 @@ class ExpansionEngine:
         return [str(address) for address in sorted(internal, key=lambda a: (a.version, int(a)))]
 
     def _victim_variants(self, finding_id: str, variants: list[LinkAnchor],
-                         events: list[TypedEvent]) -> list[LinkAnchor]:
+                         events: list[TypedEvent]) -> tuple[list[LinkAnchor], list[str]]:
         """Host-side links of a network anchor run once per internal endpoint, each against the host that
         endpoint resolves to; an endpoint that resolves to no single host carries the reason instead."""
         ips = self._victim_ips(events)
         if not ips:
-            return variants
+            return variants, []
         resolve = getattr(self.fetcher, "resolve_host", None)
         out = []
         for variant in variants:
@@ -120,7 +120,7 @@ class ExpansionEngine:
                 host, reason = (resolve(finding_id, ip) if resolve is not None
                                 else (None, f"victim host unknown for {ip}: host resolution is unavailable"))
                 out.append(variant.model_copy(update={"host": host, "victim_ip": ip, "host_reason": reason}))
-        return out[:MAX_ANCHOR_KEYS]
+        return out[:MAX_ANCHOR_KEYS], [item.victim_ip for item in out[MAX_ANCHOR_KEYS:]]
 
     @staticmethod
     def _link_anchors(anchor: LinkAnchor, link_type: LinkType) -> tuple[list[LinkAnchor], list[dict]]:
@@ -322,7 +322,12 @@ class ExpansionEngine:
                         )
                         variants, dropped = self._link_anchors(base_anchor, link_type)
                         if link_type in HOST_SIDE_LINKS and not base_anchor.host:
-                            variants = self._victim_variants(candidate["id"], variants, anchor_events)
+                            variants, dropped_ips = self._victim_variants(candidate["id"], variants, anchor_events)
+                            if dropped_ips:
+                                anchor_reasons[anchor_row["id"]].append(
+                                    "keys_not_expanded:" + json.dumps(
+                                        [{"victim_ip": ip} for ip in dropped_ips],
+                                        sort_keys=True, separators=(",", ":")))
                         if dropped:
                             anchor_reasons[anchor_row["id"]].append(
                                 "keys_not_expanded:" + json.dumps(

@@ -174,11 +174,13 @@ def normalize_audit_auth_group(host: str, members: list[tuple[dict, AuditRecord]
     auid = record.fields.get("auid")
     if auid not in {None, "", "-1", "4294967295"}:
         fields["process.auid"] = fv(auid, f"{origin}.auid")
+    # The login account is `acct`, else the audit (login) uid's name. Never UID: that is the process writing the
+    # record (sshd), so a failed login by an unknown user would read as root.
     placeholders = {None, "", "?", "(null)", "(none)", "unset", "(unknown)"}
-    account = next((value for value in (record.fields.get("acct"), record.enriched.get("AUID"),
-                                        record.enriched.get("UID")) if value not in placeholders), None)
-    if account is not None:
-        fields["user.name"] = fv(account, f"{origin}.acct")
+    if record.fields.get("acct") not in placeholders:
+        fields["user.name"] = fv(record.fields["acct"], f"{origin}.acct")
+    elif record.enriched.get("AUID") not in placeholders:
+        fields["user.name"] = fv(record.enriched["AUID"], f"{origin}.AUID")
     address = record.fields.get("addr")
     if address not in {None, "", "?", "(null)", "(none)", "0.0.0.0", "::"}:
         fields["source.ip"] = fv(address, f"{origin}.addr")

@@ -502,3 +502,13 @@ def test_audit_login_placeholders_are_not_user_names_and_the_phase_is_typed(acct
         "event": {"dataset": "linux.audit", "original": raw}}}
     [login], _skips, errors = normalize_hits([hit])
     assert errors == [] and login.get("user.name") != acct and login.get("auth.phase") == phase
+
+
+def test_a_failed_login_by_an_unknown_user_is_never_attributed_to_the_logging_process():
+    raw = ('type=USER_LOGIN msg=audit(1731950250.400:76807): pid=900 uid=0 auid=4294967295 ses=4294967295 '
+           'acct="(unknown)" exe="/usr/sbin/sshd" addr=198.51.100.7 res=failed\x1dUID="root" AUID="unset"')
+    hit = {"_id": "audit-fail", "_index": "host-x", "_source": {
+        "@timestamp": "2024-11-18T14:00:50+00:00", "host": {"name": "web1"},
+        "event": {"dataset": "linux.audit", "original": raw}}}
+    [login], _skips, errors = normalize_hits([hit])
+    assert errors == [] and not login.has("user.name")                     # not 'root' (sshd's uid)

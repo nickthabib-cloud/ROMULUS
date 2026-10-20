@@ -503,7 +503,8 @@ class PivotExecutor:
                    and (contract.spec("host.name") is not None and contract.spec("host.name").aggregatable)]
         if not targets:
             return None, f"victim host unknown for {ip}: no host source has a searchable host.ip field"
-        fingerprint = digest({"resolve_host_ip": ip, "start": start.isoformat(), "end": end.isoformat()})
+        fingerprint = digest({"hunt": self.hunt_id, "resolve_host_ip": ip, "start": start.isoformat(),
+                              "end": end.isoformat(), "targets": [target for target, _ in targets]})
         task_id = "t-" + fingerprint[:20]
         prior = self.repo.task(task_id)
         if prior and prior["state"] == "evaluated" and isinstance(prior.get("outcome"), dict):
@@ -531,8 +532,9 @@ class PivotExecutor:
             host, reason = None, f"victim host unknown for {ip}: no host record carries host.ip {ip}"
         else:
             host, reason = None, f"victim host ambiguous for {ip}: {sorted(names)[:5]}"
-        self.repo.update_task(task_id, "evaluated", outcome={"host": host, "reason": reason},
-                              owner_token=self.owner_token)
+        # An incomplete lookup (timeout, shard failure, budget) is not a final answer: it stays retryable.
+        self.repo.update_task(task_id, "partial" if incomplete else "evaluated",
+                              outcome={"host": host, "reason": reason}, owner_token=self.owner_token)
         return host, reason
 
     def _execute_partitions(

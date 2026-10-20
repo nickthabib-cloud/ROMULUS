@@ -24,7 +24,7 @@ def test_logins_are_counted_once_across_sources_and_session_openings_are_not_log
     rule = SshLoginFromExternal()
     rule.consume(events)
     match = rule.finalize()[0]
-    assert match.claim.startswith("3 successful SSH login(s) on web1")
+    assert match.claim.startswith("At least 3 successful SSH login(s) on web1")
     assert "3 sshd 'Accepted' journal record(s); 3 audit USER_LOGIN record(s)" in match.claim
     assert not any(e.get("auth.phase") == "session_open" for e in match.events)
     assert f"– {(T0 + timedelta(minutes=20, seconds=1)).isoformat()};" in match.claim   # range = counted records
@@ -33,4 +33,4 @@ def test_logins_are_counted_once_across_sources_and_session_openings_are_not_log
 def test_one_source_alone_still_counts_its_logins():
     rule = SshLoginFromExternal()
     rule.consume([auth("l0", "login", ts=T0), auth("s0", "session_open", ts=T0)])
-    assert rule.finalize()[0].claim.startswith("1 successful SSH login(s)")
+    assert rule.finalize()[0].claim.startswith("At least 1 successful SSH login(s)")

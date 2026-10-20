@@ -288,3 +288,63 @@ def test_a_host_target_without_ip_fields_leaves_the_ip_link_unresolved_not_silen
     result = fetcher.fetch(anchor, "source_ip", window)
     assert result.status != "complete"
     assert any("IP predicate unavailable" in reason for cell in result.coverage for reason in cell.reasons)
+
+
+# ---- review round 3: host resolution belongs to its hunt; transient lookups are retried; endpoints listed
+
+def _second_hunt(repo, hunt_id="h2"):
+    repo.create_hunt(hunt_id, {"window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
+                               "targets": [], "budgets": {}}, "digest", "test")
+    return hunt_id
+
+
+def test_two_hunts_resolve_the_same_address_independently_and_both_pay_for_it():
+    repo = network_anchor_repo()
+    marker = [ev("web1-ip", "process_exec", host="web1", target="host-x", host__ip="10.0.0.2", process__pid=1)]
+    first = PredicateExecutor(repo, marker, contracts(host_ip=True))
+    assert first.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end) == ("web1", None)
+    second = PredicateExecutor(repo, marker, contracts(host_ip=True))
+    second.hunt_id = _second_hunt(repo)
+    assert second.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end) == ("web1", None)
+    assert first.source_queries == second.source_queries == 1               # identical hunts spend identically
+    assert repo.expansion_source_queries("h1") == repo.expansion_source_queries("h2") == 1
+
+
+def test_a_crashed_hunts_lookup_never_poisons_another_hunt():
+    repo = network_anchor_repo()
+    crashed = PredicateExecutor(repo, [], contracts(host_ip=True))
+    crashed.owner_token = repo.claim_hunt("h1", 600)["lease_owner"]          # its lease is still live
+    crashed._execute = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("killed mid-lookup"))
+    try:
+        crashed.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end)
+    except RuntimeError:
+        pass
+    other = PredicateExecutor(repo, [ev("web1-ip", "process_exec", host="web1", target="host-x",
+                                        host__ip="10.0.0.2", process__pid=1)], contracts(host_ip=True))
+    other.hunt_id = _second_hunt(repo)
+    other.owner_token = repo.claim_hunt("h2", 600)["lease_owner"]
+    assert other.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end) == ("web1", None)
+
+
+def test_an_incomplete_lookup_is_retried_not_stored_as_final():
+    repo = network_anchor_repo()
+    flaky = PredicateExecutor(repo, [ev("web1-ip", "process_exec", host="web1", target="host-x",
+                                        host__ip="10.0.0.2", process__pid=1)], contracts(host_ip=True))
+    real = flaky._execute
+    flaky._execute = lambda intent, contract, **kw: SearchOutcome(
+        target=intent.target, fingerprint="f", started_at=T0, ended_at=T0, completeness=Completeness.partial,
+        reasons=["timed_out"])
+    assert flaky.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end)[0] is None
+    flaky._execute = real
+    assert flaky.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end) == ("web1", None)
+
+
+def test_endpoints_beyond_the_cap_are_listed_not_dropped_silently():
+    from romulus.hunt.expansion import MAX_ANCHOR_KEYS
+    repo = network_anchor_repo()
+    events = [ev(f"f{i}", "net_flow", host="sensor1", target="network-x", source__ip=f"10.0.0.{i + 1}",
+                 destination__ip="203.0.113.8") for i in range(MAX_ANCHOR_KEYS + 2)]
+    engine = ExpansionEngine(repo, "h1", WINDOW, _fetcher(repo))
+    base = LinkAnchor(finding_id="F-net", ts=T0, events=events)
+    variants, dropped = engine._victim_variants("F-net", [base], events)
+    assert len(variants) == MAX_ANCHOR_KEYS and len(dropped) == 2
