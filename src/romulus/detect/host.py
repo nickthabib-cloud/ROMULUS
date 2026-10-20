@@ -16,7 +16,7 @@ from romulus.evidence.shellparse import (
     shell_script_file_of,
     shell_script_of,
 )
-from romulus.evidence.typed import Outcome, TypedEvent
+from romulus.evidence.typed import Outcome, TypedEvent, raw_identity
 
 WEB_SERVICE_USERS = {"www-data", "apache", "nginx", "httpd", "_www", "wwwrun"}
 INTERPRETERS = SHELLS | {"python", "python2", "python3", "perl", "ruby", "php", "lua", "nc", "ncat", "netcat",
@@ -305,7 +305,7 @@ class DownloaderFeedsInterpreter(Playbook):
                         m = Match(self.id, claim, self.claim_type, [d, e],
                                   [pf(d, "process.argv"), pf(d, "process.ppid"), pf(e, "process.argv"),
                                    pf(e, "process.ppid")], d.ts, self.severity, self.lane, "medium",
-                                  _exec_entities(d), group_key=f"{d.id}|{e.id}")
+                                  _exec_entities(d), group_key=f"{raw_identity(d)}|{raw_identity(e)}")
                         m.notes.append(f"download URL: {url}")
                         self.found.append(m)
                         self.groups[m.group_key] = [d, e]

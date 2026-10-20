@@ -72,6 +72,9 @@ MAX_SESSIONS = 2000                       # session documents (segments), not lo
 MAX_BODY_BYTES = 1024 * 1024
 EXCERPT_BYTES = 4096
 PCAP_TARGET = "arkime-pcap"
+# The packet stage's normalizer (HTTP body -> http_body). Bump on any change to `_body_event`, `analyze_body` or
+# `decode_hex_body`; tests/test_evidence_version.py pins them to this version.
+PACKET_NORMALIZER = "tshark-http@3"
 SPAN_SLACK_S = 1.0
 MAX_LISTED_IDS = 50
 COUNTERS = ("candidates", "logical_sessions", "multi_segment_sessions", "fetched_sessions", "sessions_with_responses",
@@ -217,8 +220,9 @@ def _body_event(row: dict, addrs: tuple, ts: datetime, session: dict, index: str
     info = analyze_body(body.head)
     epoch = _first(row.get("frame.time_epoch"))
     native = f"{sid}@{epoch}"                 # stable across re-runs; frame numbers depend on batch composition
+    # Only facts of the session and the response: frame and stream numbers depend on which sessions shared
+    # the batch capture, and would make the same response's raw copy differ between hunts.
     raw = {"arkime_session_id": sid, "node": src_doc.get("node"), "index": index, "frame_time_epoch": epoch,
-           "batch_frame": _first(row.get("frame.number")), "batch_tcp_stream": _first(row.get("tcp.stream")),
            "body_bytes": body.size, "body_sha256": body.sha256, "body_analyzed_bytes": len(body.head),
            "body_excerpt_hex": body.head[:EXCERPT_BYTES].hex()}
     ref = RawRef(target=f"{PCAP_TARGET}:{index}", native_id=native, digest=digest(raw))
@@ -247,9 +251,10 @@ def _body_event(row: dict, addrs: tuple, ts: datetime, session: dict, index: str
                                    f"{sid}:network.community_id"),
     }
     caveats = [f"content judged from the first {len(body.head)} bytes"] if body.cut else []
-    event = TypedEvent(id=event_id("http_body", [ref]), family="http_body", ts=ts, host=src_doc.get("node"),
+    event = TypedEvent(id=event_id("http_body", [ref], PACKET_NORMALIZER), family="http_body", ts=ts,
+                       host=src_doc.get("node"),
                        fields={k: v for k, v in f.items() if v.value is not None}, raw=[ref],
-                       normalizer="tshark-http@3", caveats=caveats)
+                       normalizer=PACKET_NORMALIZER, caveats=caveats)
     return event, raw
 
 
