@@ -55,16 +55,17 @@ def repo_with_anchor(*, host="web1", candidate_id="F-anchor"):
 
 
 class ScriptedFetcher:
-    def __init__(self, repo, *, linked=None, strength="observed"):
+    def __init__(self, repo, *, linked=None, strength="observed", linked_type="host_after_anchor"):
         self.repo = repo
         self.linked = linked
         self.strength = strength
+        self.linked_type = linked_type
         self.calls = []
 
     def fetch(self, anchor, link_type, window, *, query_cap=None):
         assert anchor.ts.tzinfo is not None and anchor.ts.utcoffset() == timedelta(0)
         self.calls.append((anchor.finding_id, link_type, window.label))
-        event_ids = [self.linked.id] if self.linked is not None and link_type == "host_after_anchor" else []
+        event_ids = [self.linked.id] if self.linked is not None and link_type == self.linked_type else []
         return LinkResult(
             id=f"L-{anchor.finding_id}-{link_type}-{window.label}", anchor_id=anchor.finding_id,
             link_type=link_type, window=window, strength=self.strength,
@@ -190,7 +191,9 @@ def test_inferred_link_context_candidate_is_lead_and_keeps_provenance():
     repo = repo_with_anchor()
     discovery = event("discovery", ts=T0 + timedelta(minutes=1), argv=["whoami"])
     repo.save_evidence("h1", [discovery], {}, None)
-    fetcher = ScriptedFetcher(repo, linked=discovery, strength="inferred")
+    fetcher = ScriptedFetcher(
+        repo, linked=discovery, strength="inferred", linked_type="process_lineage",
+    )
 
     ExpansionEngine(repo, "h1", WINDOW, fetcher).run()
 
@@ -198,7 +201,7 @@ def test_inferred_link_context_candidate_is_lead_and_keeps_provenance():
     assert len(candidates) == 1
     assert candidates[0]["lane"] == "lead"
     assert candidates[0]["source_anchor_id"] == "F-anchor"
-    assert candidates[0]["source_link_id"].startswith("L-F-anchor-host_after_anchor")
+    assert candidates[0]["source_link_id"].startswith("L-F-anchor-process_lineage")
 
 
 def test_resume_runs_expansion_before_optional_agent_without_rerunning_sweep(tmp_path, monkeypatch):

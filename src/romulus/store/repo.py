@@ -387,6 +387,23 @@ class Repo:
             r = c.execute(select(t.candidate).where(t.candidate.c.id == cid)).mappings().first()
             return dict(r) if r else None
 
+    def update_context_candidate(
+        self, candidate_id: str, values: dict, *, owner_token: str | None = None,
+    ) -> None:
+        """Merge repeated context reachability without changing direct-finding identity semantics."""
+        allowed = {
+            "claim", "event_ids", "severity", "confidence", "lane", "priority",
+            "priority_reasons", "gate_results", "source_anchor_id", "source_link_id",
+        }
+        if not values or not set(values) <= allowed:
+            raise ValueError("unsupported context candidate update")
+        with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.candidate.c.hunt_id).where(
+                t.candidate.c.id == candidate_id,
+            )).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
+            c.execute(t.candidate.update().where(t.candidate.c.id == candidate_id).values(**values))
+
     # ---- deterministic expansion -----------------------------------------------------------
     def save_expansion_anchor(self, row: dict, *, owner_token: str | None = None) -> bool:
         now = utcnow()

@@ -9,6 +9,7 @@ from romulus.detect.context import EntryPointPromotion, PostAccessDiscovery
 from romulus.detect.registry import fresh_context_pack, fresh_pack
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt.context import evaluate_context
+from romulus.hunt.publish import publish_match
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -81,11 +82,73 @@ def test_inferred_link_caps_context_finding_at_lead_and_labels_hypothesis():
     observed = event("discovery", process__argv=["uname", "-a"], process__session_id=42)
 
     match = PostAccessDiscovery().consume_linked(
-        anchor(), link(strength="inferred", link_type="host_after_anchor"), [observed],
+        anchor(), link(strength="inferred", link_type="process_lineage"), [observed],
     )[0]
 
     assert match.proposed_lane == "lead"
     assert "hypothesis" in match.claim.lower()
+
+
+def test_host_after_link_does_not_turn_routine_discovery_into_context_findings():
+    routine = [
+        event("id", process__argv=["id"]),
+        event("uname", process__argv=["uname", "-a"]),
+        event("ip", process__argv=["ip", "addr"]),
+    ]
+
+    assert PostAccessDiscovery().consume_linked(
+        anchor(), link(strength="inferred", link_type="host_after_anchor"), routine,
+    ) == []
+
+
+def test_context_candidate_dedupes_by_rule_event_and_keeps_every_reach():
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": []}, "digest", "test")
+    observed = event("discovery", process__argv=["uname", "-a"], process__session_id=42)
+    playbook = PostAccessDiscovery()
+    inferred_link = link(strength="inferred", link_type="process_lineage")
+    inferred_link.id = "L-inferred"
+    observed_link = link(strength="observed", link_type="login_session")
+    observed_link.id = "L-observed"
+    third_link = link(strength="observed", link_type="process_lineage")
+    third_link.id = "L-third"
+
+    first = playbook.consume_linked(anchor(), inferred_link, [observed])[0]
+    second = PostAccessDiscovery().consume_linked(anchor(), observed_link, [observed])[0]
+    publish_match(
+        repo, "h1", playbook, first, None, {}, source_anchor_id="F-anchor",
+        source_link_id=inferred_link.id,
+        context_reach={"anchor_id": "F-anchor", "link_id": inferred_link.id,
+                       "link_type": inferred_link.link_type, "strength": inferred_link.strength},
+    )
+    publish_match(
+        repo, "h1", PostAccessDiscovery(), second, None, {}, source_anchor_id="F-anchor",
+        source_link_id=observed_link.id,
+        context_reach={"anchor_id": "F-anchor", "link_id": observed_link.id,
+                       "link_type": observed_link.link_type, "strength": observed_link.strength},
+    )
+    third = PostAccessDiscovery().consume_linked(anchor(), third_link, [observed])[0]
+    publish_match(
+        repo, "h1", PostAccessDiscovery(), third, None, {}, source_anchor_id="F-anchor",
+        source_link_id=third_link.id,
+        context_reach={"anchor_id": "F-anchor", "link_id": third_link.id,
+                       "link_type": third_link.link_type, "strength": third_link.strength},
+    )
+
+    candidates = repo.candidates("h1")
+    assert len(candidates) == 1
+    assert candidates[0]["lane"] == "high"
+    assert candidates[0]["source_link_id"] == "L-observed"
+    assert candidates[0]["gate_results"]["_context_reaches"] == [
+        {"anchor_id": "F-anchor", "link_id": "L-inferred",
+         "link_type": "process_lineage", "strength": "inferred"},
+        {"anchor_id": "F-anchor", "link_id": "L-observed",
+         "link_type": "login_session", "strength": "observed"},
+        {"anchor_id": "F-anchor", "link_id": "L-third",
+         "link_type": "process_lineage", "strength": "observed"},
+    ]
 
 
 def test_entry_point_promotion_requires_successful_external_ssh_login_in_observed_session():

@@ -144,16 +144,8 @@ class ExpansionEngine:
         }, owner_token=self.owner_token)
 
     def _evaluate(self, candidate: dict, anchor_events: list[TypedEvent], result: LinkResult) -> None:
-        # Named windows are nested. Evaluate each linked record once per anchor/link type while still
-        # retaining every window's independent coverage row.
-        already_seen = {
-            event_id
-            for row in self.repo.expansion_links(self.hunt_id)
-            if row["anchor_id"] == result.anchor_id and row["link_type"] == result.link_type
-            and row["id"] != result.id and row["evaluated"]
-            for event_id in row["event_ids"]
-        }
-        events = self._events([event_id for event_id in result.event_ids if event_id not in already_seen])
+        # Every coverage cell evaluates every event. Publication owns cross-window deduplication.
+        events = self._events(result.event_ids)
         for playbook in fresh_direct_pack():
             for match in playbook.consume(events):
                 publish_match(
@@ -173,6 +165,10 @@ class ExpansionEngine:
                 self.repo, self.hunt_id, evaluated.playbook, evaluated.match,
                 result.task_ids[0] if result.task_ids else None, {},
                 source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
+                context_reach={
+                    "anchor_id": candidate["id"], "link_id": result.id,
+                    "link_type": result.link_type, "strength": result.strength,
+                },
             )
         self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
 

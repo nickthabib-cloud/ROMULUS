@@ -48,7 +48,7 @@ class PostAccessDiscovery(ContextPlaybook):
     version = "1"
     title = "Discovery command in an anchored session or process lineage"
     anchor_classes = ("initial_access", "remote_login", "web_shell", "execution", "credential_access")
-    link_types = ("login_session", "process_lineage", "host_after_anchor")
+    link_types = ("login_session", "process_lineage")
     families = ("process_exec",)
     required_fields = ("process.argv",)
     assures_negative = False
@@ -71,7 +71,7 @@ class PostAccessDiscovery(ContextPlaybook):
             match = Match(
                 self.id, claim, self.claim_type, [event], [pf(event, "process.argv")], event.ts,
                 self.severity, self.lane, "medium", event.entities(),
-                group_key=f"{anchor.id}|{link.id}|{event.id}",
+                group_key=event.id,
             )
             match.notes.append(technique)
             out.append(match)
@@ -110,7 +110,7 @@ class EntryPointPromotion(ContextPlaybook):
                 self.id, claim, self.claim_type, [event],
                 [pf(event, "source.ip"), pf(event, "user.name")], event.ts,
                 self.severity, self.lane, "high", event.entities(),
-                group_key=f"{anchor.id}|{link.id}|{event.id}",
+                group_key=event.id,
             ))
         return out
 
