@@ -1,11 +1,5 @@
 # Model investigator design
 
-## Scope
-
-Implement the explicit, resumable controller from spec section 11. Each model call receives one compact brief and proposes one typed decision. SQLite is the only state authority. The model cannot change deterministic rule results, finding claims, lanes, hunt scope, coverage, or source access.
-
-M1 includes `entity_timeline`, `auth_activity`, `process_tree`, and `ids_alerts`. Synthesis and the remaining starter tools stay in later milestones.
-
 ## Boundaries and pivot flow
 
 `romulus.agent` owns schemas, briefs, validation, clustering, scheduling, retries, fallbacks, and persistence; it imports no source adapter. The hunt-layer executor from ADR-003 converts accepted tools to typed `SearchIntent`s and uses the existing read-only execution path.
