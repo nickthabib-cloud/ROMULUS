@@ -1,7 +1,5 @@
 # Model Investigator Implementation Plan
 
-**Goal:** Build the durable M1 model investigator, safe typed pivots, agent-only resume, and investigation reporting required by acceptance scenarios 13–17.
-
 **Architecture:** `romulus.agent` owns model judgment and durable case state but no source adapter. `romulus.hunt.pivot` executes validated requests through existing read-only source machinery, evaluates only direct playbooks, and shares candidate publication with the sweep.
 
 **Tech Stack:** Python 3.12+, Pydantic 2, SQLAlchemy Core/Alembic, httpx/Ollama, pytest.
