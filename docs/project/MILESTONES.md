@@ -28,6 +28,7 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 - [ ] Simple "standard searches" baseline runner
 - [ ] ~~Model bakeoff~~ Investigator replay evaluation (task set, expected decisions, runner, qwen3:8b baseline) and ADR-005 — owner dropped the multi-model bakeoff 2026-10-19; stay on qwen3:8b
 - [ ] Investigator v2 design approved (`docs/design/investigator-v2.md`); implementation via Codex, then replay + e_a ablation
+- [x] Deterministic expansion controller, typed link fetchers, two anchor-gated context rules, explicit unworked accounting, and incident graph — **integration tested** on `h20261020-011321-7fe986` and `h20261020-011647-1df665`; semantic manifests match and all citation checks pass. Live effectiveness remains open because the source-query budget was consumed on the first anchor.
 - [ ] First lab evaluation results file with miss funnel — model-off done (`docs/eval/results/2026-10-19-sl700_e_a-1.md`); model-on, baseline and AMiner/Telosian columns pending
 
 ## M3: full sources and coverage truth
@@ -75,7 +76,7 @@ The scope is the whole research-driven catalog (spec §7 *Detection breadth*), n
 
 ## M5: synthesis and reports
 
-- [ ] Attack-path assembly (observed vs. inferred edges)
+- [~] Deterministic incident graph with observed/inferred link styles and open-end accounting is **locally tested** and report-rendered; live runs produced only single-finding incidents because expansion added no linked finding. Full attack-path assembly remains open.
 - [ ] Narrative with per-sentence citation checking
 - [ ] Recommendations linked to findings and ATT&CK mitigations
 - [ ] Executive DOCX from template; read-back consistency test; LibreOffice page renders

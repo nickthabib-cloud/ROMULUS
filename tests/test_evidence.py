@@ -5,7 +5,12 @@ import pytest
 
 from romulus.evidence.auditd import execve_argv, parse_record
 from romulus.evidence.normalize import normalize_hits
-from romulus.evidence.shellparse import UnknownShellScript, parse_script, shell_script_file_of, shell_script_of
+from romulus.evidence.shellparse import (
+    UnknownShellScript,
+    parse_script,
+    shell_script_file_of,
+    shell_script_of,
+)
 from romulus.evidence.typed import Outcome
 
 # shapes copied from the lab index (benign motd job)
@@ -50,7 +55,7 @@ def test_execve_split_long_argument_reassembles():
 
 
 def test_exec_group_joins_syscall_and_keeps_unknowns_explicit():
-    events, skips, errors = normalize_hits([hit("e1", "linux.audit", EXECVE_HEX), hit("s1", "linux.audit", SYSCALL)])
+    events, _skips, errors = normalize_hits([hit("e1", "linux.audit", EXECVE_HEX), hit("s1", "linux.audit", SYSCALL)])
     assert errors == [] and len(events) == 1
     ev = events[0]
     assert ev.family == "process_exec" and ev.outcome == Outcome.success
@@ -98,7 +103,7 @@ def test_sshd_accept_and_fail_outcomes():
 
 def test_sshd_text_mentioning_accepted_is_not_a_login():
     j = json.dumps({"SYSLOG_IDENTIFIER": "cron", "MESSAGE": "Accepted publickey for root from 203.0.113.5 port 1"})
-    events, skips, _ = normalize_hits([hit("c1", "systemd.journal", j)])
+    events, _skips, _ = normalize_hits([hit("c1", "systemd.journal", j)])
     assert events == []
 
 
@@ -401,7 +406,7 @@ def test_non_posix_shell_script_is_explicitly_unknown(shell):
 # ---------------------------------------------------------------- M1 gate regressions (B1, I4)
 def test_unparseable_audit_record_is_an_error_not_a_silent_drop():
     truncated = 'type=EXECVE msg=audit(1731950250.320:900): argc=3 a0="sh" a1="-c" a2="curl http://x | s'
-    events, skips, errors = normalize_hits([hit("t1", "linux.audit", truncated)])
+    events, _skips, errors = normalize_hits([hit("t1", "linux.audit", truncated)])
     assert events == [] and errors and "unparseable" in errors[0][1]
 
 
@@ -409,7 +414,7 @@ def test_audit_record_missing_raw_text_is_an_error():
     h = hit("m1", "linux.audit", "x")
     h["_source"]["event"].pop("original")
     h["_source"].pop("message")
-    events, skips, errors = normalize_hits([h])
+    events, _skips, errors = normalize_hits([h])
     assert events == [] and errors and "missing authoritative" in errors[0][1]
 
 
@@ -434,7 +439,7 @@ def test_ambiguous_duplicate_group_is_an_error():
 def test_journal_without_original_is_an_error():
     h = hit("j9", "systemd.journal", "Accepted publickey for root from 203.0.113.5 port 1 ssh2")
     h["_source"]["event"].pop("original")
-    events, skips, errors = normalize_hits([h])
+    events, _skips, errors = normalize_hits([h])
     assert events == [] and errors and "missing authoritative" in errors[0][1]
 
 

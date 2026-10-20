@@ -137,8 +137,10 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
     def heartbeat():
         repo.heartbeat_hunt(hunt["id"], _lease_seconds(s), owner_token=owner_token)
 
+    max_source_queries = int(config.get("max_source_queries", 180))
     executor = PivotExecutor(
         repo, client, hunt["id"], contracts, heartbeat=heartbeat, owner_token=owner_token,
+        source_query_budget=max_source_queries,
     )
     budget_seconds = float((manifest.get("budgets") or {}).get("wall_clock_minutes", 120)) * 60
     started_at = hunt.get("started_at")
@@ -149,7 +151,7 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
     return ExpansionEngine(
         repo, hunt["id"], window, LinkFetcher(executor, window.start, window.end),
         max_depth=int(config.get("max_depth", 3)),
-        max_source_queries=int(config.get("max_source_queries", 180)),
+        max_source_queries=max_source_queries,
         wall_clock_seconds=budget_seconds, owner_token=owner_token, heartbeat=heartbeat,
     ).run()
 

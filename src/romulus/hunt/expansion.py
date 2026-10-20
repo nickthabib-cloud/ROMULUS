@@ -106,7 +106,8 @@ class ExpansionEngine:
     def _stored_result(row: dict) -> LinkResult:
         return LinkResult(
             id=row["id"], anchor_id=row["anchor_id"], link_type=row["link_type"],
-            window=LinkWindow(label=row["window_label"], start=row["window_start"], end=row["window_end"]),
+            window=LinkWindow(label=row["window_label"], start=_utc(row["window_start"]),
+                              end=_utc(row["window_end"])),
             strength=row["strength"], key=row["key"], status=row["status"], event_ids=row["event_ids"],
             evidence_ids=row["evidence_ids"], task_ids=row["task_ids"],
             coverage=[PivotCoverage.model_validate(item) for item in row["coverage"]],
@@ -190,13 +191,14 @@ class ExpansionEngine:
             self.heartbeat()
             candidate = self.repo.candidate(anchor_row["candidate_id"])
             anchor_events = self._events(candidate["event_ids"])
+            candidate_ts = _utc(candidate["ts"])
             anchor = LinkAnchor(
-                finding_id=candidate["id"], ts=candidate["ts"], host=anchor_row["host"],
+                finding_id=candidate["id"], ts=candidate_ts, host=anchor_row["host"],
                 event_ids=candidate["event_ids"], events=anchor_events,
             )
             reasons = []
             for link_type in LINK_ORDER:
-                for window in expansion_windows(candidate["ts"], self.window):
+                for window in expansion_windows(candidate_ts, self.window):
                     budget_reason = self._budget_reason(query_count)
                     if budget_reason:
                         stop_reason = "budget"
@@ -212,7 +214,8 @@ class ExpansionEngine:
                     result = self._stored_result(stored) if stored else self.fetcher.fetch(anchor, link_type, window)
                     if not stored:
                         self._persist_link(result)
-                        query_count += len(set(result.task_ids))
+                        actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
+                        query_count = actual_queries if actual_queries is not None else query_count + len(set(result.task_ids))
                     self._evaluate(candidate, anchor_events, result)
                     if result.status != "complete":
                         reasons.extend(result.reasons or [f"{link_type} {result.status}"])

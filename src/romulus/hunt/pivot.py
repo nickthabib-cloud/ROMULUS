@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import Callable
 
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult, PivotTimeRange
 from romulus.agent.tools import (
@@ -263,15 +263,27 @@ class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
 
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str,
-                 contracts: dict[str, FieldContract], heartbeat=None, owner_token: str | None = None):
+                 contracts: dict[str, FieldContract], heartbeat=None, owner_token: str | None = None,
+                 source_query_budget: int | None = None):
         self.repo = repo
         self.client = client
         self.hunt_id = hunt_id
         self.contracts = contracts
         self.heartbeat = heartbeat or (lambda: None)
         self.owner_token = owner_token
+        self.source_query_budget = source_query_budget
+        self.source_queries = 0
 
     def _execute(self, intent: SearchIntent, contract: FieldContract, *, pit=None) -> SearchOutcome:
+        if self.source_query_budget is not None and self.source_queries >= self.source_query_budget:
+            now = datetime.now(UTC)
+            reason = f"expansion_source_query_budget:{self.source_query_budget}"
+            return SearchOutcome(
+                target=intent.target, fingerprint=digest(intent.model_dump(mode="json")),
+                started_at=now, ended_at=now, completeness=Completeness.failed,
+                reasons=[reason], error=reason,
+            )
+        self.source_queries += 1
         self.heartbeat()
         outcome = (execute(self.client, intent, contract) if pit is None
                    else execute(self.client, intent, contract, pit=pit))
@@ -439,6 +451,10 @@ class PivotExecutor:
         anchor_ts: datetime | None = None,
     ) -> PivotEventBatch:
         """Execute deterministic typed link intents without evaluating any playbook."""
+        if anchor_ts is not None:
+            # SQLite drops timezone metadata; persisted hunt timestamps are defined as UTC.
+            anchor_ts = (anchor_ts.replace(tzinfo=UTC) if anchor_ts.tzinfo is None
+                         else anchor_ts.astimezone(UTC))
         started = perf_counter()
         task_ids: list[str] = []
         retained: dict[str, TypedEvent] = {}

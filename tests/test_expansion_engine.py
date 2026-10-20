@@ -1,4 +1,5 @@
 """Deterministic expansion controller: accounting, budgets and resume."""
+import copy
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -8,6 +9,7 @@ from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import run as hunt_run
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkResult
+from romulus.report.manifest import build_manifest
 from romulus.sources.models import Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -33,7 +35,10 @@ def repo_with_anchor(*, host="web1", candidate_id="F-anchor"):
     repo = Repo(engine)
     repo.create_hunt("h1", {
         "window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
-        "targets": [], "budgets": {"wall_clock_minutes": 120},
+        "style": "broad", "hypothesis": "", "original_input": {}, "targets": [],
+        "pack": {"version": "test", "playbooks": []}, "normalizer": "test", "policy": "test",
+        "model": {}, "romulus_version": "test", "agent_mode": "off",
+        "budgets": {"wall_clock_minutes": 120},
     }, "digest", "test")
     anchor = event("anchor-event", host=host)
     repo.save_evidence("h1", [anchor], {}, None)
@@ -57,6 +62,7 @@ class ScriptedFetcher:
         self.calls = []
 
     def fetch(self, anchor, link_type, window):
+        assert anchor.ts.tzinfo is not None and anchor.ts.utcoffset() == timedelta(0)
         self.calls.append((anchor.finding_id, link_type, window.label))
         event_ids = [self.linked.id] if self.linked is not None and link_type == "host_after_anchor" else []
         return LinkResult(
@@ -81,15 +87,28 @@ def stable_state(repo):
     }
 
 
+def without_timing(manifest):
+    cleaned = copy.deepcopy(manifest)
+    cleaned["hunt"]["started_at"] = None
+    cleaned["hunt"]["ended_at"] = None
+    for finding in cleaned["findings"]:
+        for disposition in finding["disposition_history"]:
+            disposition["at"] = None
+    return cleaned
+
+
 def test_two_runs_have_identical_deterministic_expansion_state():
     states = []
+    manifests = []
     for _ in range(2):
         repo = repo_with_anchor()
         result = ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo)).run()
         assert result["stop_reason"] == "fixpoint"
         states.append(stable_state(repo))
+        manifests.append(build_manifest(repo, "h1", "test"))
 
     assert states[0] == states[1]
+    assert without_timing(manifests[0]) == without_timing(manifests[1])
 
 
 def test_budget_exhaustion_lists_every_unworked_anchor():

@@ -73,7 +73,7 @@ class SuricataAlertStack(_Grouped):
         for key, evs in self.groups.items():
             src, dst, cat, sev = key
             n = self.counts[key]
-            sigs = sorted(self.extra[key]["sigs"], key=lambda s: str(s[1]))
+            sigs = sorted(self.extra[key]["sigs"], key=lambda s: (str(s[1]), str(s[0])))
             if cat == "Not Suspicious Traffic" or sev == 3:
                 lane, severity = "context", "low"
             elif sev == 1:

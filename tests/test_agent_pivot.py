@@ -22,7 +22,7 @@ from romulus.hunt import pivot as pivot_module
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.publish import publish_match
 from romulus.sources.compile import compile_es
-from romulus.sources.models import Completeness, SearchOutcome
+from romulus.sources.models import Completeness, SearchIntent, SearchOutcome, Window
 from romulus.sources.profile import contract_from_types
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -60,6 +60,29 @@ def _process_event(argv=None, *, event_id="event-1", ts=START) -> TypedEvent:
         },
         raw=[RawRef(target="romulus-host-x", native_id=event_id, digest="d")], normalizer="test@1",
     )
+
+
+def test_executor_counts_and_stops_actual_source_queries(monkeypatch):
+    calls = []
+
+    def fake_execute(_client, intent, _contract, *, pit=None):
+        calls.append(intent)
+        return SearchOutcome(
+            target=intent.target, fingerprint="fp", started_at=START, ended_at=START,
+            completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+        )
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    executor = PivotExecutor(_repo(), FakeClient(), "h1", {"host-x": contract}, source_query_budget=2)
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+
+    outcomes = [executor._execute(intent, contract) for _ in range(3)]
+
+    assert len(calls) == 2
+    assert executor.source_queries == 2
+    assert outcomes[2].completeness == Completeness.failed
+    assert outcomes[2].reasons == ["expansion_source_query_budget:2"]
 
 
 def test_shared_publication_sets_source_case_and_keeps_machine_policy():

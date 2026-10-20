@@ -34,7 +34,7 @@ def raw_digest(source: dict) -> str:
 
 
 def _ts(s: str) -> datetime:
-    return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC)
+    return datetime.fromisoformat(s).astimezone(UTC)
 
 
 def _ref(hit: dict) -> RawRef:
@@ -238,7 +238,7 @@ def normalize_journal(hit: dict) -> TypedEvent:
     except json.JSONDecodeError as e:
         raise ValueError(f"journal event.original is not JSON: {e}") from e
     if not isinstance(j, dict):
-        raise ValueError("journal event.original is not a JSON object")
+        raise TypeError("journal event.original is not a JSON object")
     if j.get("_TRANSPORT") == "audit" or j.get("SYSLOG_IDENTIFIER") == "audit":
         raise Skip("journal copy of an audit record (normalized from linux.audit)")
     ident = j.get("SYSLOG_IDENTIFIER") or j.get("_COMM")
@@ -396,7 +396,7 @@ def is_arkime_session(src: dict) -> bool:
 
 def _epoch_ms(value) -> datetime:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise ValueError(f"Arkime packet time is not epoch milliseconds: {value!r}")
+        raise TypeError(f"Arkime packet time is not epoch milliseconds: {value!r}")
     return datetime.fromtimestamp(value / 1000, UTC)
 
 

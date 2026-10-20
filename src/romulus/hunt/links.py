@@ -10,7 +10,7 @@ from romulus.agent.models import PivotCoverage
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
 from romulus.detect.correlation import PidTable
 from romulus.evidence.typed import TypedEvent
-from romulus.hunt.pivot import MAX_PIVOT_RECORDS, PivotEventBatch, PivotExecutor, _is_network, _supports
+from romulus.hunt.pivot import MAX_PIVOT_RECORDS, PivotExecutor, _is_network, _supports
 from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.store.db import digest
 

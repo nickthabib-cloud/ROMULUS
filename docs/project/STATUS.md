@@ -2,13 +2,13 @@
 
 ## Resume here
 
-_Last updated: 2026-10-19 23:50 EDT by Claude (lead)._
+_Last updated: 2026-10-20 01:20 UTC by Codex._
 
 - **Direction (owner, 2026-10-19):**
   - Deterministic search comes first; the model is optional and off by default. ADR-006 (accepted) supersedes ADR-005 decisions 2–5: deterministic expansion finds, and an optional model only explains leads and drafts the narrative.
   - The New hunt page has an "Agentic hunt" checkbox, unchecked by default. `AGENT_MODE` defaults to `off`.
   - The spec (`ENGINEERING_MASTER_PROMPT.md`) is a set of suggestions, not requirements. Propose better routes when they exist. The goal is to find indicators of compromise wherever ROMULUS is sent, correlating host logs with network telemetry.
-- **Branch:** `m2/evaluation` at `b8be0dc`, deployed to the VM, not pushed. It merges:
+- **Branch under review:** `codex/expansion` at the seven-commit expansion series, based on `m2/evaluation` at `7f87fb5`; live-tested on the VM and not pushed. The base merges:
   - investigator v2 (`codex/investigator-v2`, `0bfd0d2`);
   - host↔network correlation and Arkime (`m2/network-correlation`);
   - the research register (round 1).
@@ -19,13 +19,14 @@ _Last updated: 2026-10-19 23:50 EDT by Claude (lead)._
   - Arkime session indices as a target (`net_session`), with `net.long_external_connection`, `net.beaconing` and `net.rare_client_fingerprint`.
   - Investigator modes model / deterministic / off.
   - The replay harness (`romulus replay export|run|summary`).
-  - Tests: 590 pass; `archmap --check` is clean.
-- **Latest lab hunt** `h20261019-225437-045bc8` (model-off, e_a 10:00–17:30 UTC):
-  - `completed_within_scope`; 1,791,438 records; 301,582 events; 0 errors.
-  - Lanes: 7 urgent / 15 high / 107 lead / 505 context.
-  - **New:** the www-data `python3.9` C2 connect to `192.42.1.174:4444` is high and joined to its Suricata flows; the root handler (81 connects) and the cron `curl` to `:80` are leads.
-  - **Noise:** about 20 leads from root `python3.10` calling Ubuntu update servers (one candidate per destination; tuning item), plus 2 ZoneMinder Perl highs at boot.
-  - The eval-custodian is scoring it as run 7.
+  - Deterministic expansion with persisted anchors and typed links, two anchor-gated context playbooks, source-query budgeting, crash-safe resume, explicit unworked accounting, and incident-graph reporting.
+  - Tests: 670 pass; changed-file Ruff and `archmap --check` are clean.
+- **Latest lab hunt** `h20261020-011647-1df665` (model-off, deterministic expansion, e_a 10:00–17:30 UTC):
+  - `completed_within_scope`; 1,816,068 records; 326,212 events; 628 candidates; 0 errors; 3:03.46 wall clock; 2,823,096 KiB peak RSS.
+  - Lanes: 7 urgent / 15 high / 95 lead / 511 context. Report r1 has 117 findings/leads, 0 broken finding, incident, or investigation citations, and is finalizable.
+  - A back-to-back run (`h20261020-011321-7fe986`, 3:06.76, 2,821,632 KiB) produced the same semantic manifest after excluding hunt-scoped IDs and wall-clock metadata; canonical SHA-256 for both was `b77a955822a68cd6a61d8008f8c89e41b68a4b68c8fcc59be81e0ccbab5f71bb`.
+  - Expansion recorded 22 anchors and 15 typed links (2 complete, 3 partial, 1 failed, 9 unsupported), but the 180 actual-source-query budget was exhausted on the first ranked anchor. All 22 anchors are honestly unexpanded and no context finding was added. Budget distribution across anchors is the next effectiveness fix.
+  - Final-build `--no-expand` run `h20261020-012324-6f8220` completed with the same sweep lanes, 0 anchors/links, 0 broken citations, 1:50.16 wall clock, and 2,620,212 KiB peak RSS. No ground-truth scoring was performed by Codex.
 - **Evaluation so far (dev set e_a, gold v1: 22 observable):**
   - Model-off before the network work: recall 11/22 reported, 15/22 surfaced; P@10 1.00; 5.07 false leads per modelled hour.
   - Off, deterministic and model hunts are identical on every finding metric (`docs/eval/results/2026-10-19-sl700_e_a-ablation-456.md`).
@@ -45,29 +46,21 @@ _Last updated: 2026-10-19 23:50 EDT by Claude (lead)._
   | 8: + Arkime + noise fix | 12/22 | 17/22 (critical+high 12/13) | 0.90 | 5.28 |
 
   Remaining misses are discovery ×4 and privesc ×1 (no rule matched), plus 5 lead-only (c2_channel, recon ×3, remote_login). The expansion engine and context rules target these.
-- **Deployed:** `5338122` (latest hunt `h20261019-234655-87fdcd`: 7 urgent / 15 high / 95 lead / 511 context, 0 errors). Nothing is pushed: the owner pushes, because Claude Code's classifier blocked `git push`.
-- **Codex:** brief written in `Claude-Codex.md` (2026-10-19 19:45 EDT) for the ADR-006 expansion engine:
-  - session id and honest IP timelines (the merge gate);
-  - link fetchers;
-  - `ContextPlaybook` with two reference rules;
-  - the deterministic loop;
-  - the incident graph in the manifest;
-  - expansion and incident-graph lab validation.
-
-  Waiting for the owner to start Codex.
+- **Deployed/live-tested product tree:** the final `codex/expansion` HEAD; the two expanded hunts ran on the same product sources before the documentation-only amendment, and the final-build `--no-expand` hunt verified the exact deployed tree. Nothing is pushed: the owner pushes.
+- **Codex expansion round:** complete and handed back in `Claude-Codex.md`. It includes session normalization and honest IP timelines, typed link fetchers, `ContextPlaybook`, the deterministic controller, incident graphs, the `replay` rename, and local plus live validation.
 - **Owner decisions recorded (2026-10-19):**
   - f_a holdout on hold.
   - A different-storyline dataset later.
   - Malcolm after deterministic search is built out.
   - Ground-truth account isolation: explained as defence in depth, not required now; revisit before any holdout.
 - **Next:**
-  1. The owner starts Codex on the expansion brief (ADR-006); the reviewer checks it before merge.
+  1. Reviewer checks `codex/expansion`; then merge the seven-commit series if accepted.
   2. Lead: network slice 3, TShark on the packets of specific Arkime sessions (v1's explicit-ID PCAP fetch and TShark safety patterns).
   3. Detection engineer: context-rule catalog (after the engine), plus lab-testable `v1_ports` and backlog items.
   4. The eval-custodian scores after each step.
 - **Merge gates and known issues:**
   - Investigator v2 re-review findings on `0abb1fc` (spawned-case stall, stale schema after shrink, seed cards dropped, `valid_first` metric, deterministic errors treated as outages). Several may be fixed in Codex's later commits but are not re-verified. They only matter for agent mode, which is off by default.
-  - IP `entity_timeline` on host targets searches only `systemd.journal` yet reports complete coverage (`hunt/pivot.py`). Must be fixed before any agent or expansion result counts.
+  - Live expansion spends the full 180-query source budget on the first anchor because dense account pivots split repeatedly. Add per-anchor/link reservations or round-robin source-query scheduling before treating expansion as effective on this dataset. The unset audit `auid=4294967295` also remains a poor inferred account key and should be normalized away or refused.
 - **Process notes:**
   - Investigator and shell-parser code goes to Codex via `Claude-Codex.md`. The file is gitignored; replace Claude's last message; old text may be cleared at a new conversation.
   - The eval-custodian never deploys without asking.
@@ -99,6 +92,11 @@ _Last updated: 2026-10-19 23:50 EDT by Claude (lead)._
 ## Session log
 
 Newest first. One entry per session where state changed: what was done, what was verified and how, and what was decided.
+
+- **2026-10-20 UTC (deterministic expansion, Codex)**:
+  - Implemented the ADR-006 expansion slice in seven commits: session/IP truth, typed links, anchor-gated context rules, crash-safe controller, incident graph, replay rename, and verification hardening. Source access remains in the hunt layer; `romulus.agent` cannot import `romulus.sources`.
+  - Developed the slices red-first. Final local proof: 670 tests pass; changed-file Ruff passes; `scripts/archmap.py --check` passes. A live manifest comparison exposed nondeterministic Suricata signature-note ordering; a tie-breaker and regression test fixed it without changing detection semantics.
+  - Deployed the clean product tree and ran two matching expanded hunts plus one `--no-expand` hunt. The expanded reports are semantically identical, finalizable, and have zero broken citations. Live accounting also exposed the source-budget concentration issue described above; no expansion-derived finding was claimed.
 
 - **2026-10-19 (evening: direction change, network correlation, merges)**:
   - Owner dropped the model bakeoff (ADR-005), then set deterministic search first with the model optional (ADR-006, from a parallel design thread). Codex built investigator v2. The custodian showed off, deterministic and model hunts identical on findings; replay 0.22 → 0.53.
