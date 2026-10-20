@@ -180,7 +180,7 @@ class Sweep:
         # records retrieved but of a dataset/event type no normalizer supports: we cannot say what
         # they contain, so no rule may claim a complete negative over this partition
         unsupported = {k: v for k, v in skips.items()
-                       if k.startswith("dataset:") or k.startswith("suricata event_type")}
+                       if k.startswith(("dataset:", "suricata event_type"))}
         partial = out.completeness != Completeness.complete or bool(errors) or bool(unsupported)
         if partial:
             self.partial_reasons.append(f"{target} {pkey}: {out.reasons or ''} normalization_errors={len(errors)}"

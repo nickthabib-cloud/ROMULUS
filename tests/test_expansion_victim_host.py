@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt.expansion import ExpansionEngine
-from romulus.hunt.links import LinkFetcher
+from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
 from romulus.hunt.pivot import PivotEventBatch, PivotExecutor
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.sources.profile import contract_from_types
@@ -208,3 +208,70 @@ def test_without_a_host_ip_field_no_query_is_spent():
     executor = PredicateExecutor(repo, [], contracts(host_ip=False))
     host, reason = executor.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end)
     assert host is None and "no host source has a searchable host.ip" in reason and executor.source_queries == 0
+
+
+# ---- review minors: flow strength by distance, honest forward windows, no context-anchor cascade,
+#      partial anchors after an exception
+def _fetcher(repo, events=()):
+    return LinkFetcher(PredicateExecutor(repo, list(events), contracts()), WINDOW.start, WINDOW.end)
+
+
+def _flow_anchor():
+    alert = ev("alert", "net_alert", host="sensor1", target="network-x", source__ip="10.0.0.2",
+               source__port=50000, destination__ip="203.0.113.8", destination__port=443,
+               network__transport="tcp", network__community_id="1:abc")
+    return LinkAnchor(finding_id="F-net", ts=T0, event_ids=[alert.id], events=[alert])
+
+
+def test_a_flow_join_is_observed_near_the_anchor_and_inferred_far_from_it():
+    repo = network_anchor_repo()
+    fetcher = _fetcher(repo)
+    near = fetcher.fetch(_flow_anchor(), "network_flow",
+                         LinkWindow(label="anchor ±5 min", start=T0 - timedelta(minutes=5), end=T0 + timedelta(minutes=5)))
+    far = fetcher.fetch(_flow_anchor(), "network_flow",
+                        LinkWindow(label="anchor ±2 h", start=T0 - timedelta(hours=1), end=T0 + timedelta(hours=2)))
+    assert near.strength == "observed" and far.strength == "inferred"
+
+
+def test_forward_links_persist_the_window_they_searched():
+    repo = network_anchor_repo()
+    anchor = LinkAnchor(finding_id="F-host", ts=T0, host="web1",
+                        events=[ev("a", "process_exec", host="web1", target="host-x", process__pid=1,
+                                   user__name="alice")])
+    window = LinkWindow(label="anchor ±30 min", start=T0 - timedelta(minutes=30), end=T0 + timedelta(minutes=30))
+    result = _fetcher(repo).fetch(anchor, "host_after_anchor", window)
+    assert result.window.start == T0 and result.window.end == window.end
+
+
+def test_context_findings_are_not_expansion_anchors():
+    repo = network_anchor_repo()
+    row = repo.candidate("F-net")
+    keys = ("hunt_id", "rule_version", "claim", "claim_type", "event_ids", "predicate_fields", "entities", "ts",
+            "severity", "confidence", "priority", "priority_reasons", "gate_results", "benign_alternatives",
+            "next_checks", "source_case_id", "source_anchor_id", "source_link_id")
+    repo.save_candidate({**{k: row[k] for k in keys}, "id": "F-context",
+                         "rule_id": "context.post_access_discovery", "lane": "high"})
+    ExpansionEngine(repo, "h1", WINDOW, _fetcher(repo), max_source_queries=0).run()
+    assert {a["candidate_id"] for a in repo.expansion_anchors("h1")} == {"F-net"}
+
+
+def test_an_expansion_exception_leaves_partly_expanded_anchors_partial(tmp_path, monkeypatch):
+    from romulus.hunt import run as hunt_run
+    repo = network_anchor_repo()
+    calls = []
+
+    class Boom(ExpansionEngine):
+        def _evaluate(self, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return super()._evaluate(*args, **kwargs)
+
+    def run_expansion(s, repo_, client, hunt, contracts_, window, owner_token):
+        return Boom(repo_, hunt["id"], WINDOW, _fetcher(repo_)).run()
+
+    monkeypatch.setattr(hunt_run, "_run_expansion", run_expansion)
+    summary = hunt_run._run_expansion_safely(None, repo, None, repo.get_hunt("h1"), {}, WINDOW, None)
+    assert summary["status"] == "failed"
+    anchor = repo.expansion_anchors("h1")[0]
+    assert anchor["status"] == "expanded_partial" and anchor["reasons"] == ["expansion error"]

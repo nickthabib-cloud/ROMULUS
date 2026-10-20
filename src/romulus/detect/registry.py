@@ -16,6 +16,14 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + NETWORK_PLAYBOOKS + SESSION_PLAYBOOKS + CORREL
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
 
+_KINDS = {playbook.id: playbook.kind for playbook in ALL_PLAYBOOKS}
+
+
+def rule_kind(rule_id: str) -> str:
+    """The declared kind of a registered rule (direct | aggregate | context | packet); 'direct' if unknown."""
+    return _KINDS.get(rule_id, "direct")
+
+
 def anchor_class_for_rule(rule_id: str) -> str:
     """Resolve only registered rule identities; rule-name substrings carry no semantics."""
     return _ANCHOR_CLASSES.get(rule_id, Playbook.anchor_class)

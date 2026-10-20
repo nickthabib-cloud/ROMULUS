@@ -177,10 +177,13 @@ def _run_expansion_safely(
         return _run_expansion(s, repo, client, hunt, contracts, window, owner_token)
     except Exception as exc:
         log.exception("expansion failed")
+        linked = {link["anchor_id"] for link in repo.expansion_links(hunt["id"])}
         for anchor in repo.expansion_anchors(hunt["id"]):
             if anchor["status"] == "pending":
+                # an anchor some of whose links ran was partly expanded, not unexpanded (review minor)
                 repo.update_expansion_anchor(
-                    anchor["id"], "unexpanded", ["expansion error"], owner_token=owner_token,
+                    anchor["id"], "expanded_partial" if anchor["id"] in linked else "unexpanded",
+                    ["expansion error"], owner_token=owner_token,
                 )
         summary = {
             "status": "failed", "stop_reason": f"expansion error: {exc}",

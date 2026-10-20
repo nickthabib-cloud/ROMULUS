@@ -12,7 +12,7 @@ from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.host import is_internal
-from romulus.detect.registry import anchor_class_for_rule, fresh_direct_pack
+from romulus.detect.registry import anchor_class_for_rule, fresh_direct_pack, rule_kind
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.context import evaluate_context
 from romulus.hunt.links import (
@@ -165,6 +165,10 @@ class ExpansionEngine:
         depths = {row["id"]: row["depth"] for row in self.repo.expansion_anchors(self.hunt_id)}
         for candidate in self.repo.candidates(self.hunt_id, ["urgent", "high"]):
             if candidate["id"] in existing:
+                continue
+            # A context finding is already the product of a link from an anchor; expanding it again would
+            # refetch the same session or lineage at depth + 1 and drain the reserve (review minor).
+            if rule_kind(candidate["rule_id"]) == "context":
                 continue
             parent = candidate.get("source_anchor_id")
             depth = depths.get(parent, -1) + 1 if parent else 0

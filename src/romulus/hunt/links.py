@@ -1,7 +1,7 @@
 """Typed deterministic link fetchers for post-sweep expansion."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
 from typing import Any, Literal
 
@@ -20,6 +20,11 @@ LinkType = Literal[
     "source_ip", "account", "host_after_anchor",
 ]
 LinkStrength = Literal["observed", "inferred"]
+# Links that look only forward from the anchor: they fetch [anchor, window end), and say so.
+FORWARD_LINKS = frozenset({"source_ip", "account", "host_after_anchor"})
+# A flow key (community ID, 5-tuple) is time-free: port reuse and fixed-port UDP (123, 514) can join different
+# flows far apart in time, so a flow join is observed only close to the anchor.
+OBSERVED_FLOW_SPAN = timedelta(minutes=10)
 
 UNUSABLE_TEXT_KEYS = {"", "-1", "4294967295", "(null)", "(none)", "unset", "(unknown)"}
 # Links that need a host identity: they search one host's own records.
@@ -151,6 +156,9 @@ class LinkFetcher:
         fetch_key = self._fetch_key(anchor, link_type, window, key)
         if fetch_key in self._cache:
             return self._cache[fetch_key]
+        if link_type in FORWARD_LINKS:          # persist the window actually searched
+            anchor_ts = anchor.ts.astimezone(UTC) if anchor.ts.tzinfo else anchor.ts.replace(tzinfo=UTC)
+            window = LinkWindow(label=window.label, start=max(anchor_ts, window.start), end=window.end)
         if not intents:
             if unsupported_reason:
                 result = LinkResult(
@@ -393,7 +401,8 @@ class LinkFetcher:
             return bool(five_tuple and candidate_tuple and _tuple_matches(five_tuple, candidate_tuple))
 
         reason = None if usable_key(community_id) or (five_tuple and all(usable_key(item) for item in five_tuple)) else "required typed key is unusable"
-        return (key, "observed", intents if reason is None else [], matches,
+        strength = "observed" if window.end - window.start <= OBSERVED_FLOW_SPAN else "inferred"
+        return (key, strength, intents if reason is None else [], matches,
                 lambda events: [event for event in events if matches(event)], reason, [])
 
     def _flow_host_side(self, anchor: LinkAnchor, window: LinkWindow):
