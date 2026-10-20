@@ -702,6 +702,8 @@ Starting targets to test, set with the owner before running the holdout: ≥90% 
 
 ## 17. Milestones (each ends with an owner demo)
 
+> **Superseded 2026-10-19.** The current plan is `docs/project/MILESTONES.md` (deterministic-first, ADR-006; host and network together; breadth from research; generalization evidence). The text below is kept for history.
+
 **M1, thin end-to-end slice.** Package, config, `doctor`, DB plus migrations, hunt manifest, ES adapter with source profile and field contract, about 5 host playbooks plus about 3 network playbooks (Suricata alert stacking, beaconing, rare DNS), typed normalization for the lab's main event families, finding admission, the agent loop with 3–4 pivot tools on the default model, a minimal web UI (hunt list, live hunt view, finding detail), and a JSON plus Markdown technical report. Deployed to the VM over SSH. Demo: a real hunt on the SL700 `e_a` lab data producing cited findings and at least one agent pivot chain.
 
 **M2, evaluation harness and model bakeoff.** Gold opportunity inventory for the lab dataset, metric scripts, simple-baseline comparison, model bakeoff, and the selected model ADR. *(2026-10-19: the bakeoff is replaced by the investigator replay evaluation and ADR-005; see §12.)* Demo: measured recall/precision/time on the lab set, with the miss funnel.

@@ -489,3 +489,40 @@ def test_correlated_candidate_citations_are_all_retained(monkeypatch, order):
     assert len(cites) == 4 and all(c["status"] == "retained" for c in cites), cites
     window = {c["rule_id"]: c["state"] for c in repo.rule_cells("h1") if c["target"] == "*"}
     assert window["corr.process_network_link"] == "matched"
+
+
+def test_sweep_lineage_never_uses_an_exec_after_the_socket(monkeypatch):
+    future = T0 + 0.5
+    future_ts = datetime.fromtimestamp(future, UTC).isoformat().replace("+00:00", "Z")
+    records = [
+        audit_hit("s1", syscall()),
+        audit_hit("k1", sockaddr()),
+        audit_hit(
+            "e1",
+            f'type=EXECVE msg=audit({future:.3f}:900): argc=1 a0="/usr/bin/perl"',
+            ts=future_ts,
+        ),
+        audit_hit(
+            "e2",
+            (f'type=SYSCALL msg=audit({future:.3f}:900): arch=c000003e syscall=59 success=yes exit=0 '
+             'ppid=1 pid=100 auid=4294967295 uid=33 gid=33 euid=33 comm="perl" '
+             'exe="/usr/bin/perl" AUID="unset" UID="www-data" EUID="www-data"'),
+            ts=future_ts,
+        ),
+    ]
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _outcome(intent, records))
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": ["romulus-host-logs"]}, "d", "t")
+    start = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
+    window = Window(start=start, end=start + timedelta(hours=1))
+
+    sweep = sw.Sweep(repo, _Client(), "h1", window, {"romulus-host-logs": None})
+    sweep.run_partition("romulus-host-logs", None, [], window, est=len(records))
+    sweep.finalize()
+
+    finding = next(c for c in repo.candidates("h1")
+                   if c["rule_id"] == "host.interpreter_external_connection")
+    assert finding["lane"] == "high"
+    assert "ancestry is not fully recorded" in finding["claim"]

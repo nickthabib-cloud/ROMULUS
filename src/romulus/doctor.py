@@ -12,7 +12,7 @@ import httpx
 
 from romulus.config import Settings, redact_text
 from romulus.sources.es import ElasticClient, SourceError
-from romulus.store.db import integrity_check, make_engine, migrate
+from romulus.store.db import integrity_check, make_engine, migrate, space_report
 
 EVAL_ROOT = Path("/home/user/romulus-eval")
 
@@ -79,7 +79,7 @@ def check_ollama(s: Settings) -> list[Check]:
     out = []
     base = s.ollama_url.rstrip("/")
     host = httpx.URL(base).host
-    if not (host.startswith("192.168.") or host.startswith("10.") or host in ("127.0.0.1", "localhost")):
+    if not (host.startswith(("192.168.", "10.")) or host in ("127.0.0.1", "localhost")):
         out.append(Check("ollama.endpoint", "fail", f"{host} is not a private/host-only address"))
     try:
         v = httpx.get(f"{base}/api/version", timeout=10).json().get("version")
@@ -129,6 +129,18 @@ def check_db(s: Settings) -> Check:
     return Check("db.integrity", "ok" if res == "ok" else "fail", f"{s.db_path}: {res}")
 
 
+def check_db_space(s: Settings) -> Check:
+    """Warn when most of the database file is reclaimable (free pages or an oversized write-ahead log)."""
+    rep = space_report(make_engine(s.db_path))
+    reclaim = rep["free_bytes"] + rep["wal_bytes"]
+    total = rep["file_bytes"] + rep["wal_bytes"]
+    detail = (f"file {rep['file_bytes'] / 1e6:.0f} MB, write-ahead log {rep['wal_bytes'] / 1e6:.0f} MB, "
+              f"reclaimable {reclaim / 1e6:.0f} MB")
+    big = reclaim > 200e6 and total and reclaim / total > 0.5
+    return Check("db.space", "warn" if big else "ok",
+                 detail + ("; run `romulus db compact` when no hunt is running" if big else ""))
+
+
 def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks = check_es(s)
     checks.append(check_arkime(s))
@@ -136,4 +148,5 @@ def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks.append(check_tshark(s))
     checks += check_paths(s, env_file)
     checks.append(check_db(s))
+    checks.append(check_db_space(s))
     return checks
