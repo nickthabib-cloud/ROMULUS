@@ -392,9 +392,16 @@ def test_every_host_rule_is_positive_only_and_every_negative_assuring_rule_is_ty
     assert {cls.id for cls in NETWORK_PLAYBOOKS if not cls.assures_negative} == {"net.tool_user_agent_http"}
     from romulus.detect.registry import ALL_PLAYBOOKS
     from romulus.report.manifest import POSITIVE_ONLY_CLAIMS
-    positive_only = {cls.id for cls in ALL_PLAYBOOKS if not cls.assures_negative}
-    assert positive_only <= set(POSITIVE_ONLY_CLAIMS)
     all_ids = {cls.id for cls in ALL_PLAYBOOKS}
+    # Every positive-only rule must carry an explicit, non-rule-naming reason it assures no negative. The
+    # report holds a copy in POSITIVE_ONLY_CLAIMS; a detect-owned rule may instead declare its own
+    # `positive_only_reason` until the lead mirrors it into the report (new M3 context rules do this).
+    for cls in ALL_PLAYBOOKS:
+        if cls.assures_negative:
+            continue
+        reason = POSITIVE_ONLY_CLAIMS.get(cls.id) or cls.positive_only_reason
+        assert reason, cls.id
+        assert not [other for other in all_ids if other in reason], (cls.id, reason)
     for rid, claim in POSITIVE_ONLY_CLAIMS.items():
         # a positive-only claim may not name any rule as its assurance
         assert not [other for other in all_ids if other in claim], (rid, claim)

@@ -78,6 +78,9 @@ class Playbook:
     # False for rules that read script *text*: text can show intent but can never prove that something
     # did not run, so such rules publish positives only and never write a complete negative.
     assures_negative: ClassVar[bool] = True
+    # A positive-only rule carries its own explicit, non-rule-naming reason for assuring no negative (spec
+    # §7 catalog detail, §9). The report may also hold a copy; this is the rule's own source of truth.
+    positive_only_reason: ClassVar[str] = ""
 
     def __init__(self) -> None:
         self.evaluated = 0
