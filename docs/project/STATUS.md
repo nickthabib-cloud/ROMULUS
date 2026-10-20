@@ -18,7 +18,7 @@ _Last updated: 2026-10-19 23:50 EDT by Claude (lead)._
   - `corr.process_network_link`: a host connect() joined to Suricata or Arkime records, disk-staged, with the link worded as inferred.
   - Arkime session indices as a target (`net_session`), with `net.long_external_connection`, `net.beaconing` and `net.rare_client_fingerprint`.
   - Investigator modes model / deterministic / off.
-  - The replay harness (`romulus model bakeoff*`), to be renamed.
+  - The replay harness (`romulus replay export|run|summary`).
   - Tests: 590 pass; `archmap --check` is clean.
 - **Latest lab hunt** `h20261019-225437-045bc8` (model-off, e_a 10:00–17:30 UTC):
   - `completed_within_scope`; 1,791,438 records; 301,582 events; 0 errors.
@@ -52,7 +52,7 @@ _Last updated: 2026-10-19 23:50 EDT by Claude (lead)._
   - `ContextPlaybook` with two reference rules;
   - the deterministic loop;
   - the incident graph in the manifest;
-  - renaming `bakeoff` to `replay`.
+  - expansion and incident-graph lab validation.
 
   Waiting for the owner to start Codex.
 - **Owner decisions recorded (2026-10-19):**

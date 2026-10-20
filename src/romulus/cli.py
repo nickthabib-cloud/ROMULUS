@@ -184,11 +184,11 @@ def cmd_web(args) -> int:
     return EXIT_OK
 
 
-def cmd_model(args) -> int:
-    from romulus.bakeoff.export import export_tasks, read_jsonl, readonly_repo, write_jsonl
-    from romulus.bakeoff.runner import run_bakeoff, summarize
+def cmd_replay(args) -> int:
+    from romulus.replay.export import export_tasks, read_jsonl, readonly_repo, write_jsonl
+    from romulus.replay.runner import run_replay, summarize
     s = load_settings(_env_file(args))
-    if args.action == "bakeoff-export":
+    if args.action == "export":
         variants = read_jsonl(args.variants) if args.variants else None
         with readonly_repo(s.db_path) as repo:
             tasks, stats = export_tasks(repo, args.hunt, args.num_ctx or [s.ollama_num_ctx], variants)
@@ -198,7 +198,7 @@ def cmd_model(args) -> int:
               f"(digest match {stats['digest_match']}, mismatch {stats['digest_mismatch']}, "
               f"variants {stats['variants']}, unfit briefs {stats['unfit_briefs']}) -> {args.out}")
         return EXIT_OK
-    if args.action == "bakeoff":
+    if args.action == "run":
         tasks = read_jsonl(args.tasks)
         if args.task:
             wanted = set(args.task)
@@ -206,9 +206,9 @@ def cmd_model(args) -> int:
         if args.limit:
             tasks = tasks[:args.limit]
         think = {"off": [False], "on": [True], "both": [False, True]}[args.think]
-        counts = run_bakeoff(s, tasks, args.model or [s.ollama_model_triage], args.num_ctx or [s.ollama_num_ctx],
-                             think, args.seed or [7], args.out, args.run_id, max_out=args.max_out,
-                             retry=not args.no_retry, progress=None if args.json else print)
+        counts = run_replay(s, tasks, args.model or [s.ollama_model_triage], args.num_ctx or [s.ollama_num_ctx],
+                            think, args.seed or [7], args.out, args.run_id, max_out=args.max_out,
+                            retry=not args.no_retry, progress=None if args.json else print)
         print(json.dumps(counts) if args.json else f"done: {counts} -> {args.out}")
         return EXIT_OK
     rows = summarize(read_jsonl(args.results))
@@ -251,34 +251,34 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("username")
     up.add_argument("--role", choices=["lead", "analyst"], default="analyst")
     sub.add_parser("web", help="serve the browser UI on ROMULUS_WEB_BIND")
-    mp = sub.add_parser("model", help="model bakeoff: export frozen investigator briefs, run candidates, summarize")
-    mp.add_argument("action", choices=["bakeoff-export", "bakeoff", "bakeoff-summary"])
-    mp.add_argument("--hunt", help="bakeoff-export: hunt whose investigator calls become tasks")
-    mp.add_argument("--variants", help="bakeoff-export: JSONL of {variant, task_id, mutations[]}")
-    mp.add_argument("--tasks", help="bakeoff: task JSONL from bakeoff-export")
-    mp.add_argument("--task", action="append", help="bakeoff: run only this task id (repeatable)")
-    mp.add_argument("--limit", type=int, help="bakeoff: run only the first N tasks")
-    mp.add_argument("--model", action="append", help="bakeoff: candidate model (repeatable)")
-    mp.add_argument("--num-ctx", type=int, action="append", help="num_ctx value (repeatable)")
-    mp.add_argument("--think", choices=["off", "on", "both"], default="off")
-    mp.add_argument("--seed", type=int, action="append", help="bakeoff: seed (7 = production; repeatable)")
-    mp.add_argument("--max-out", type=int, default=900, help="bakeoff: output token budget (production 900)")
-    mp.add_argument("--no-retry", action="store_true", help="bakeoff: no second attempt after a rejection")
-    mp.add_argument("--run-id", default="bakeoff", help="bakeoff: run label recorded on every row")
-    mp.add_argument("--results", help="bakeoff-summary: result JSONL")
-    mp.add_argument("--out", help="output JSONL (bakeoff appends and resumes)")
+    replay = sub.add_parser("replay", help="export frozen investigator briefs, run them, and summarize results")
+    replay.add_argument("action", choices=["export", "run", "summary"])
+    replay.add_argument("--hunt", help="export: hunt whose investigator calls become tasks")
+    replay.add_argument("--variants", help="export: JSONL of {variant, task_id, mutations[]}")
+    replay.add_argument("--tasks", help="run: task JSONL from replay export")
+    replay.add_argument("--task", action="append", help="run: run only this task id (repeatable)")
+    replay.add_argument("--limit", type=int, help="run: run only the first N tasks")
+    replay.add_argument("--model", action="append", help="run: candidate model (repeatable)")
+    replay.add_argument("--num-ctx", type=int, action="append", help="num_ctx value (repeatable)")
+    replay.add_argument("--think", choices=["off", "on", "both"], default="off")
+    replay.add_argument("--seed", type=int, action="append", help="run: seed (7 = production; repeatable)")
+    replay.add_argument("--max-out", type=int, default=900, help="run: output token budget (production 900)")
+    replay.add_argument("--no-retry", action="store_true", help="run: no second attempt after a rejection")
+    replay.add_argument("--run-id", default="replay", help="run: label recorded on every row")
+    replay.add_argument("--results", help="summary: result JSONL")
+    replay.add_argument("--out", help="output JSONL (run appends and resumes)")
     args = p.parse_args(argv)
-    if args.cmd == "model":
-        needed = {"bakeoff-export": ("hunt", "out"), "bakeoff": ("tasks", "out"), "bakeoff-summary": ("results",)}
+    if args.cmd == "replay":
+        needed = {"export": ("hunt", "out"), "run": ("tasks", "out"), "summary": ("results",)}
         missing = [name for name in needed[args.action] if not getattr(args, name)]
         if missing:
-            p.error(f"model {args.action} needs " + ", ".join(f"--{name}" for name in missing))
+            p.error(f"replay {args.action} needs " + ", ".join(f"--{name}" for name in missing))
     if args.cmd == "hunt" and args.action == "start" and not (args.start and args.end):
         p.error("hunt start needs --start and --end")
     if args.cmd == "hunt" and args.action == "resume" and not args.hunt_id:
         p.error("hunt resume needs a hunt id")
     handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report,
-                "user": cmd_user, "web": cmd_web, "model": cmd_model}
+                "user": cmd_user, "web": cmd_web, "replay": cmd_replay}
     return handlers[args.cmd](args)
 
 

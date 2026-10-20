@@ -21,7 +21,7 @@ Status words: `implemented` · `locally tested` · `integration tested` · `lab 
 - [x] `reviewer` milestone review: no Blocking findings open. Concluded 2026-10-19 after the final scoped check; fixes in `a76f155`, verified with the reviewer's own probes; merged to `m1/thin-slice` (ADR-004 option B).
 - [x] Owner demo recorded in STATUS.md (2026-10-19: technical report walkthrough of `h20261019-093029-32dfef` and owner exploration of the web UI).
 
-## M2: evaluation harness and model bakeoff
+## M2: evaluation harness and investigator replay
 
 - [x] Gold opportunity inventory for e_a (eval-custodian; on the VM, not the repo) — v1, 2026-10-19: 27 opportunities, 22 observable
 - [x] Scoring scripts plus `docs/eval/PROTOCOL.md` — protocol 2026-10-19; scorer in `eval/` (12 tests), scores from the hunt DB read-only

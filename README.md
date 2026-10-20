@@ -10,7 +10,7 @@ ROMULUS first runs a deterministic sweep over host and network telemetry: Elasti
 - a technical Markdown/JSON report (an executive DOCX is planned)
 - a browser UI for analysts
 
-> **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 (evaluation harness and model bakeoff) is next. This is lab software under active development and is not yet validated for production missions. See [`docs/project/STATUS.md`](docs/project/STATUS.md) for the current state and [`docs/project/MILESTONES.md`](docs/project/MILESTONES.md) for the roadmap.
+> **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 evaluation and deterministic expansion are in progress. This is lab software under active development and is not yet validated for production missions. See [`docs/project/STATUS.md`](docs/project/STATUS.md) for the current state and [`docs/project/MILESTONES.md`](docs/project/MILESTONES.md) for the roadmap.
 
 ## Detection scope
 
@@ -61,7 +61,7 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 - **Core:** Python 3.12, organized as a modular monolith (`src/romulus/`).
 - **State:** SQLite (WAL) is the single state authority; Alembic handles migrations.
 - **Web UI:** FastAPI + Jinja + server-sent events. It has argon2 logins, lead/analyst roles, CSRF protection and a strict CSP.
-- **Model:** local Ollama. The default model will be chosen by the M2 bakeoff.
+- **Model:** optional local Ollama; investigator changes are measured with the frozen replay harness.
 - **No agent framework:** the investigator is an explicit controller ([ADR-001](docs/adr/ADR-001-no-langgraph.md)).
 
 ## Repository layout

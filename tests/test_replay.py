@@ -1,17 +1,18 @@
-"""Model bakeoff: exact brief reconstruction from the store, and the runner's production-path judging."""
+"""Investigator replay: exact brief reconstruction and production-path judging."""
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
 import httpx
 
+from romulus import cli
 from romulus.agent.controller import Investigator
 from romulus.agent.models import EntityRef, PivotResult
 from romulus.agent.ollama import ModelResult
-from romulus.bakeoff.export import export_tasks, read_jsonl, readonly_repo, write_jsonl
-from romulus.bakeoff.runner import brief_from_task, judge, run_bakeoff, summarize
 from romulus.config import Settings
 from romulus.evidence.typed import TypedEvent
+from romulus.replay.export import export_tasks, read_jsonl, readonly_repo, write_jsonl
+from romulus.replay.runner import brief_from_task, judge, run_replay, summarize
 from romulus.sources.models import Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -255,7 +256,7 @@ def test_runner_judges_through_the_production_path_and_resumes(tmp_path):
     fake = FakeOllama(lambda _body: _selection("O999"))
     out = tmp_path / "results.jsonl"
 
-    counts = run_bakeoff(Settings(agent_mode="model", ollama_num_ctx=CTX), read_jsonl(tasks_path), ["m:1"], [CTX], [False], [7, 8],
+    counts = run_replay(Settings(agent_mode="model", ollama_num_ctx=CTX), read_jsonl(tasks_path), ["m:1"], [CTX], [False], [7, 8],
                          out, "t1", inner_transport=httpx.MockTransport(fake))
 
     rows = [row for row in read_jsonl(out) if row["kind"] == "result"]
@@ -271,7 +272,7 @@ def test_runner_judges_through_the_production_path_and_resumes(tmp_path):
     info = [row for row in read_jsonl(out) if row["kind"] == "model_info"]
     assert info and info[0]["quantization"] == "Q4_K_M" and info[0]["loaded_vram_bytes"] == 6
 
-    again = run_bakeoff(Settings(agent_mode="model", ollama_num_ctx=CTX), read_jsonl(tasks_path), ["m:1"], [CTX], [False], [7, 8],
+    again = run_replay(Settings(agent_mode="model", ollama_num_ctx=CTX), read_jsonl(tasks_path), ["m:1"], [CTX], [False], [7, 8],
                         out, "t1", inner_transport=httpx.MockTransport(fake))
     assert again["calls"] == 0 and again["skipped_done"] == 2
 
@@ -317,7 +318,7 @@ def test_runner_accepts_a_valid_close_and_rejects_hostile_citations(tmp_path):
         return _choose_description(user, "close this case")
     out = tmp_path / "results.jsonl"
 
-    run_bakeoff(Settings(agent_mode="model", ollama_num_ctx=CTX), chosen, ["m:1"], [CTX], [False], [7], out, "t2",
+    run_replay(Settings(agent_mode="model", ollama_num_ctx=CTX), chosen, ["m:1"], [CTX], [False], [7], out, "t2",
                 retry=False, inner_transport=httpx.MockTransport(FakeOllama(close)))
 
     by_task = {row["task_id"]: row for row in read_jsonl(out) if row["kind"] == "result"}
@@ -325,3 +326,13 @@ def test_runner_accepts_a_valid_close_and_rejects_hostile_citations(tmp_path):
     assert by_task[base_id + "+inj"]["schema_valid"] is True
     assert by_task[base_id + "+inj"]["validation_ok"] is False
     assert "untrusted instruction-like telemetry" in by_task[base_id + "+inj"]["errors"][0]
+
+
+def test_replay_summary_cli_uses_new_top_level_command(tmp_path, capsys):
+    results = tmp_path / "results.jsonl"
+    results.write_text("", encoding="utf-8")
+
+    code = cli.main(["--json", "replay", "summary", "--results", str(results)])
+
+    assert code == 0
+    assert capsys.readouterr().out.strip() == "[]"

@@ -79,7 +79,7 @@ Acceptance targets (owner-approved 2026-10-19):
 | Piece | Owner |
 |---|---|
 | Option generator, aliasing, per-call schema, resolver (in `romulus.agent`) | Codex via `Claude-Codex.md` |
-| Replay harness adapted to v2 briefs (`romulus.bakeoff`, to be renamed `replay`) | Lead |
+| Replay harness adapted to v2 briefs (`romulus.replay`) | Complete |
 | Expected decisions, scoring, ablation | eval-custodian |
 | Review of the agent changes | `reviewer` |
 
