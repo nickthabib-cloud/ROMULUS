@@ -257,6 +257,34 @@ def test_expansion_exception_is_audited_and_finishes_hunt_partial(tmp_path, monk
     assert audit["error"] == "expansion exploded"
 
 
+def test_no_expand_preserves_the_nonempty_sweep_only_finding_set(tmp_path, monkeypatch):
+    settings = Settings(agent_mode="off", home=tmp_path)
+    repo = hunt_run.open_repo(settings)
+    manifest = _manifest()
+    manifest.update({"agent_mode": "off", "expansion": {"enabled": False}})
+    repo.create_hunt("h-no-expand", manifest, "digest", "test")
+    repo.save_candidate({
+        "id": "sweep-only", "hunt_id": "h-no-expand", "rule_id": "host.test", "rule_version": "1",
+        "claim": "sweep finding", "claim_type": "observed_action", "event_ids": [],
+        "predicate_fields": [], "entities": [["host", "web1", "host"]], "ts": START,
+        "severity": "high", "confidence": "high", "lane": "high", "priority": 1.0,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+    })
+    sweep_only = [{key: row[key] for key in ("rule_id", "claim", "event_ids", "lane")}
+                  for row in repo.candidates("h-no-expand")]
+    monkeypatch.setattr(hunt_run, "Sweep", FakeSweep)
+
+    result = hunt_run.run_hunt(settings, "h-no-expand", expand=False)
+
+    after = hunt_run.open_repo(settings)
+    findings = [{key: row[key] for key in ("rule_id", "claim", "event_ids", "lane")}
+                for row in after.candidates("h-no-expand")]
+    assert findings == sweep_only
+    assert result["expansion"]["status"] == "disabled"
+    assert after.expansion_anchors("h-no-expand") == []
+
+
 def test_cli_status_shows_completed_hunt_and_agent_partial_pivots(monkeypatch, capsys, tmp_path):
     settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)

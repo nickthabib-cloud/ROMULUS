@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
+from datetime import UTC
 
 from sqlalchemy import func, select
 
@@ -427,6 +428,105 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                       "broken_incident_event_ids": broken_incidents[:50],
                       "finalizable": broken == 0 and not broken_inv and not broken_incidents}
     return _jsonable(m)
+
+
+def _content_candidate_key(repo: Repo, candidate: dict) -> str:
+    raw_keys = set()
+    for row in repo.events_by_ids(candidate["event_ids"]):
+        for reference in row["event"].get("raw", []):
+            raw_keys.add(f"{reference['target']}/{reference['native_id']}")
+    evidence_identity = sorted(raw_keys) or sorted(candidate["event_ids"])
+    return "F-" + digest({
+        "rule_id": candidate["rule_id"], "evidence_identity": evidence_identity,
+    })[:20]
+
+
+def _as_utc(value):
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> dict:
+    """Return a cross-hunt deterministic report projection with content-scoped identities."""
+    manifest = build_manifest(repo, hunt_id, actor)
+    candidates = repo.candidates(hunt_id)
+    candidate_keys = {row["id"]: _content_candidate_key(repo, row) for row in candidates}
+    candidate_rows = {row["id"]: row for row in candidates}
+    link_rows = repo.expansion_links(hunt_id)
+    link_keys = {}
+    link_windows = {}
+    for row in link_rows:
+        anchor = candidate_rows.get(row["anchor_id"])
+        anchor_key = candidate_keys.get(row["anchor_id"], row["anchor_id"])
+        anchor_ts = _as_utc(anchor["ts"]) if anchor is not None else _as_utc(row["window_start"])
+        offsets = {
+            "start_seconds": (_as_utc(row["window_start"]) - anchor_ts).total_seconds(),
+            "end_seconds": (_as_utc(row["window_end"]) - anchor_ts).total_seconds(),
+        }
+        link_keys[row["id"]] = "L-" + digest({
+            "anchor": anchor_key, "link_type": row["link_type"],
+            "window_offsets": offsets, "key": row["key"],
+        })[:20]
+        link_windows[row["id"]] = {"label": row["window_label"], **offsets}
+
+    incident_keys = {}
+    for incident in manifest["incident_graph"]["incidents"]:
+        members = sorted(candidate_keys[item] for item in incident["finding_ids"])
+        incident_keys[incident["id"]] = "I-" + digest(members)[:20]
+    case_keys = {}
+    for case in manifest["investigations"].get("cases", []):
+        case_keys[case["id"]] = "C-" + digest({
+            "seed_candidate_keys": sorted(candidate_keys.get(item, item)
+                                             for item in case.get("seed_candidate_ids", [])),
+            "title": case.get("title"), "entities": case.get("entities", []),
+        })[:20]
+    identity_map = {**candidate_keys, **link_keys, **incident_keys, **case_keys}
+    drop_keys = {"started_at", "ended_at", "created_at", "updated_at", "duration_ms",
+                 "task_id", "task_ids", "at"}
+
+    def canonicalize(value):
+        if isinstance(value, dict):
+            return {
+                key: canonicalize(item)
+                for key, item in value.items()
+                if key not in drop_keys
+            }
+        if isinstance(value, list):
+            return [canonicalize(item) for item in value]
+        if isinstance(value, str):
+            return identity_map.get(value, value)
+        return value
+
+    canonical = canonicalize(manifest)
+    canonical["schema"] = "canonical-report-manifest@1"
+    canonical["hunt"].pop("id", None)
+    graph = canonical["incident_graph"]
+    for source, projected in zip(manifest["incident_graph"]["links"], graph["links"], strict=True):
+        projected["window"] = link_windows.get(source["id"], projected.get("window"))
+    graph["edges"] = [{
+        "pair": [candidate_keys[edge["from"]], candidate_keys[edge["to"]]],
+        "link_key": link_keys[edge["link_id"]],
+        "link_type": edge["link_type"], "style": edge["style"],
+    } for edge in manifest["incident_graph"]["edges"]]
+    canonical["findings"].sort(key=lambda finding: finding["id"])
+    observed_at = {finding["id"]: finding["observed_at"] for finding in canonical["findings"]}
+    graph["nodes"].sort(key=lambda node: node["id"])
+    graph["links"].sort(key=lambda link: link["id"])
+    graph["edges"].sort(key=lambda edge: (edge["pair"], edge["link_key"]))
+    for incident in graph["incidents"]:
+        incident["finding_ids"] = sorted(incident["finding_ids"])
+        incident["timeline"] = sorted(
+            incident["timeline"], key=lambda item: (observed_at.get(item, ""), item),
+        )
+        incident["link_ids"] = sorted(incident["link_ids"])
+    graph["incidents"].sort(key=lambda incident: incident["id"])
+    investigations = canonical["investigations"]
+    for key in ("unworked_seed_ids", "incomplete_case_ids"):
+        investigations[key] = sorted(investigations.get(key, []))
+    for key in ("concluded", "assigned_unfinished", "unassigned"):
+        investigations["seed_partition"][key] = sorted(
+            investigations["seed_partition"].get(key, []),
+        )
+    return _jsonable(canonical)
 
 
 def _broken_investigation_citations(repo: Repo, investigations) -> list[str]:

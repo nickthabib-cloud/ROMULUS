@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from romulus.decide.policy import decide
 from romulus.detect import host
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
-from romulus.report.manifest import publish_revision
+from romulus.report.manifest import canonical_manifest, publish_revision
 from romulus.report.markdown import fence, outcome_sentence, render
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -14,7 +14,7 @@ from romulus.store.repo import Repo
 T = datetime(2024, 11, 18, 15, 19, tzinfo=UTC)
 
 
-def _repo_with_finding(claim_suffix=""):
+def _repo_with_finding(claim_suffix="", *, hunt_id="h1"):
     e = make_engine(":memory:")
     migrate(e)
     repo = Repo(e)
@@ -22,8 +22,8 @@ def _repo_with_finding(claim_suffix=""):
                 "window": {"start": "2024-11-18T10:00:00+00:00", "end": "2024-11-18T17:30:00+00:00"},
                 "original_input": {}, "targets": ["idx"], "pack": {"version": "p"}, "normalizer": "n",
                 "policy": "d", "model": {}, "romulus_version": "0"}
-    repo.create_hunt("h1", manifest, "dig", "test")
-    repo.set_hunt_state("h1", "running")
+    repo.create_hunt(hunt_id, manifest, "dig", "test")
+    repo.set_hunt_state(hunt_id, "running")
     argv = ["cat", "/etc/shadow" + claim_suffix] if not claim_suffix else ["cat", "/etc/shadow"]
     ev = TypedEvent(id="ev1", family="process_exec", ts=T, host="web01", outcome=Outcome.success,
                     fields={"process.argv": fv(argv, "raw1:event.original")},
@@ -31,12 +31,12 @@ def _repo_with_finding(claim_suffix=""):
     m = host.CredentialStoreRead().consume([ev])[0]
     if claim_suffix:
         m.claim += claim_suffix
-    d = decide(m, "h1")
-    repo.save_evidence("h1", [ev], {"idx/raw1": {"message": "x"}}, None)
+    d = decide(m, hunt_id)
+    repo.save_evidence(hunt_id, [ev], {"idx/raw1": {"message": "x"}}, None)
     # make the retained digest match the reference
     with e.begin() as c:
         c.exec_driver_sql("update raw_record set digest='abc'")
-    repo.save_candidate({"id": d.candidate_id, "hunt_id": "h1", "rule_id": m.playbook_id, "rule_version": "1",
+    repo.save_candidate({"id": d.candidate_id, "hunt_id": hunt_id, "rule_id": m.playbook_id, "rule_version": "1",
                          "claim": m.claim, "claim_type": m.claim_type, "event_ids": ["ev1"],
                          "predicate_fields": [{"field": p.field, "value": p.value, "origin": p.origin}
                                               for p in m.predicate],
@@ -44,8 +44,79 @@ def _repo_with_finding(claim_suffix=""):
                          "confidence": d.confidence, "lane": d.lane, "priority": d.priority,
                          "priority_reasons": d.priority_reasons, "gate_results": {**d.gates, "_notes": d.notes},
                          "benign_alternatives": ["backup"], "next_checks": ["auth_activity"], "source_case_id": None})
-    repo.set_hunt_state("h1", "partial", detection_result="reportable_findings", stop_reason="test")
+    repo.set_hunt_state(hunt_id, "partial", detection_result="reportable_findings", stop_reason="test")
     return repo, d.candidate_id
+
+
+def test_canonical_manifests_are_byte_identical_across_hunt_ids():
+    first_repo, first_id = _repo_with_finding(hunt_id="hunt-one")
+    second_repo, second_id = _repo_with_finding(hunt_id="hunt-two")
+    assert first_id != second_id
+
+    first = json.dumps(canonical_manifest(first_repo, "hunt-one", "test"), sort_keys=True, separators=(",", ":"))
+    second = json.dumps(canonical_manifest(second_repo, "hunt-two", "test"), sort_keys=True, separators=(",", ":"))
+
+    assert first == second
+    assert "hunt-one" not in first
+    assert "hunt-two" not in second
+
+
+def _repo_with_observed_incident(hunt_id, suffix):
+    repo, anchor_id = _repo_with_finding(hunt_id=hunt_id)
+    linked = TypedEvent(
+        id="shared-linked-event", family="process_exec", ts=T + timedelta(seconds=1),
+        host="web01", outcome=Outcome.success,
+        fields={"process.argv": fv(["id"], "raw2:event.original")},
+        raw=[RawRef(target="idx", native_id="raw2", digest="def")], normalizer="t",
+    )
+    repo.save_evidence(hunt_id, [linked], {"idx/raw2": {"message": "id"}}, None)
+    child_id = f"child-{suffix}"
+    link_id = f"link-{suffix}"
+    _copy_candidate(repo, anchor_id, child_id)
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.raw_record.update().where(
+            tables.raw_record.c.native_id == "raw2",
+        ).values(digest="def"))
+        connection.execute(tables.candidate.update().where(
+            tables.candidate.c.id == child_id,
+        ).values(event_ids=[linked.id], claim="Same linked finding", source_anchor_id=None,
+                 source_link_id=None))
+    repo.save_expansion_anchor({
+        "id": anchor_id, "hunt_id": hunt_id, "candidate_id": anchor_id, "depth": 0,
+        "parent_anchor_id": None, "host": "web01", "lane": "high", "severity": "high",
+        "ts": T, "status": "expanded_complete", "reasons": [],
+    })
+    repo.save_expansion_link({
+        "id": link_id, "hunt_id": hunt_id, "anchor_id": anchor_id,
+        "link_type": "login_session", "window_label": "anchor ±5 min",
+        "window_start": T - timedelta(minutes=5), "window_end": T + timedelta(minutes=5),
+        "strength": "observed", "key": {"process.session_id": 42}, "status": "complete",
+        "event_ids": [linked.id], "evidence_ids": [linked.id], "task_ids": [f"task-{suffix}"],
+        "coverage": [], "reasons": [], "duration_ms": 7, "query_spend": 1, "evaluated": 1,
+    })
+    return repo, {anchor_id, child_id, link_id}
+
+
+def test_canonical_manifest_rekeys_links_incidents_and_edges_by_content():
+    first_repo, first_scoped = _repo_with_observed_incident("hunt-one", "one")
+    second_repo, second_scoped = _repo_with_observed_incident("hunt-two", "two")
+
+    first = canonical_manifest(first_repo, "hunt-one", "test")
+    second = canonical_manifest(second_repo, "hunt-two", "test")
+
+    assert json.dumps(first, sort_keys=True, separators=(",", ":")) == json.dumps(
+        second, sort_keys=True, separators=(",", ":"),
+    )
+    encoded = json.dumps(first, sort_keys=True)
+    assert not any(scoped_id in encoded for scoped_id in first_scoped | second_scoped)
+    edge = first["incident_graph"]["edges"][0]
+    assert all(item.startswith("F-") for item in edge["pair"])
+    assert edge["link_key"].startswith("L-")
+    assert first["incident_graph"]["incidents"][0]["id"].startswith("I-")
+    assert set(first["incident_graph"]["links"][0]["window"]) == {
+        "label", "start_seconds", "end_seconds",
+    }
 
 
 def test_manifest_citations_resolve_and_renderers_agree():
