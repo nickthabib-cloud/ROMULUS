@@ -11,10 +11,12 @@ from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 
 
-def exec_event(i, argv, user="www-data", host="web01", uid=None):
+def exec_event(i, argv, user="www-data", host="web01", uid=None, cwd=None):
     fields = {"process.argv": argv, "process.user": user, "process.executable": argv[0], "process.pid": 100 + i}
     if uid is not None:
         fields["process.uid"] = uid
+    if cwd is not None:
+        fields["process.cwd"] = cwd
     return TypedEvent(id=f"e{i}", family="process_exec", ts=T0 + timedelta(seconds=i), host=host,
                       outcome=Outcome.success, fields={k: fv(v, f"e{i}:{k}") for k, v in fields.items()},
                       raw=[RawRef(target="idx", native_id=f"d{i}")], normalizer="test@1")
@@ -62,6 +64,28 @@ def test_packaged_helper_scripts_of_a_web_application_are_context():
 ])
 def test_web_service_scripts_outside_package_directories_stay_leads(argv):
     assert lanes(WebServiceSpawnsInterpreter(), [exec_event(0, argv)]) == ["lead"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["/usr/bin/ruby", "/usr/bin/rake"],
+    ["/usr/bin/php", "/usr/bin/composer", "install"],
+    ["/usr/bin/perl", "/usr/bin/prove", "t/"],
+    ["/usr/bin/python3", "/usr/bin/pytest"],
+    ["/usr/bin/python3", "/usr/bin/flask", "run"],
+    ["/usr/bin/python3", "/usr/bin/ansible-playbook", "x.yml"],
+])
+def test_tools_run_from_a_writable_working_directory_stay_leads(argv):
+    event = exec_event(0, argv, cwd="/var/www/html/uploads")
+    assert lanes(WebServiceSpawnsInterpreter(), [event]) == ["lead"]
+
+
+def test_relative_path_operands_are_placed_by_the_working_directory():
+    argv = ["/usr/bin/python3", "/usr/bin/apphelper", "../../var/www/html/up/x.py"]
+    assert lanes(WebServiceSpawnsInterpreter(), [exec_event(0, argv, cwd="/usr/share/app")]) == ["lead"]
+    assert lanes(WebServiceSpawnsInterpreter(), [exec_event(1, argv)]) == ["lead"]          # no cwd: unplaced
+    helper = ["/usr/bin/perl", "/usr/bin/appdaemon.pl", "startup"]
+    assert lanes(WebServiceSpawnsInterpreter(), [exec_event(2, helper, cwd="/")]) == ["context"]
+    assert lanes(WebServiceSpawnsInterpreter(), [exec_event(3, helper, cwd="/usr/share/app/www")]) == ["context"]
 
 
 def test_a_lead_hiding_behind_a_packaged_run_of_the_same_shape_stays_a_lead():
@@ -143,6 +167,22 @@ def test_a_probe_is_not_explained_by_the_response_it_caused():
     rule = PortScan()
     rule.consume(probes + responses + later)
     assert [m.proposed_lane for m in rule.finalize() if m.group_key == "10.0.0.77|10.0.0.9"] == ["lead"]
+
+
+def test_a_scan_run_twice_is_not_explained_by_the_responses_to_its_first_run():
+    from datetime import timedelta as td
+    def at(i, src, sport, dst, dport, seconds):
+        f = flow(i, src, sport, dst, dport)
+        return f.model_copy(update={"ts": T0 + td(seconds=seconds)})
+    events = []
+    for run, base in ((0, 0), (1, 600)):
+        for j, port in enumerate(range(2000, 2040)):
+            events.append(at(run * 1000 + j, "10.0.0.77", 53, "10.0.0.9", port, base + j))
+            events.append(at(run * 1000 + 500 + j, "10.0.0.9", port, "10.0.0.77", 53, base + j + 0.1))
+    rule = PortScan()
+    rule.consume(events)
+    [match] = [m for m in rule.finalize() if m.group_key == "10.0.0.77|10.0.0.9"]
+    assert match.proposed_lane == "lead" and "on 0 a flow" in match.claim
 
 
 def test_a_scan_split_between_low_and_ephemeral_source_ports_is_one_lead():

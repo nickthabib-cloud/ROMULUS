@@ -51,10 +51,11 @@ _FLAG_ONLY = {
 _URLISH = re.compile(r"://|^[\w.-]+@[\w.-]+(?::|$)|^(?:gh|lp):", re.ASCII)
 
 
-def _packaged_script(argv: list[str]) -> str | None:
+def _packaged_script(argv: list[str], cwd: str | None = None) -> str | None:
     """The system-directory script a web-service interpreter run executes, when the command line is exactly
-    `<interpreter> [flag-only options] <absolute script> [args]` and nothing in it fetches or names a remote;
-    None otherwise (the run then stays a lead)."""
+    `<interpreter> [flag-only options] <absolute script> [args]`, nothing in it fetches or names a remote, and
+    nothing points it at files the web account can write (its working directory, path operands); None
+    otherwise (the run then stays a lead)."""
     from romulus.detect.indicators import script_operand
     name = interpreter_name(argv[0]) if argv else ""
     if name in SHELLS:
@@ -76,16 +77,29 @@ def _packaged_script(argv: list[str]) -> str | None:
         return None
     if posixpath.basename(path) in DUAL_USE_SCRIPTS or any(_URLISH.search(a) for a in rest):
         return None
-    if any(_outside_system(a) for a in rest):          # the helper is pointed at a file the web account can write
+    # Build and task runners (rake, composer, pytest, flask) load code from the working directory.
+    if cwd and _normalize_posix_path(cwd) != "/" and _outside_system(cwd, cwd):
+        return None
+    if any(_outside_system(a, cwd) for a in rest):     # the helper is pointed at a file the web account can write
         return None
     return path
 
 
-def _outside_system(arg: str) -> bool:
-    """An absolute path operand (or an option's `=path` value) outside the system directories."""
+_FILE_LIKE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
+
+
+def _outside_system(arg: str, cwd: str | None) -> bool:
+    """A path operand (or an option's `=path` value) outside the system directories. A relative path is
+    resolved against the working directory; without one it cannot be placed, so it counts as outside."""
     value = arg.split("=", 1)[1] if arg.startswith("-") and "=" in arg else arg
-    if not value.startswith("/"):
+    if value.startswith("-") or not value:
         return False
+    if not value.startswith("/"):
+        if "/" not in value and not _FILE_LIKE.search(value):
+            return False                                  # a word (startup, install), not a path
+        value = _resolve_script_path(value, cwd or "")
+        if not value:
+            return True
     path = _normalize_posix_path(value)
     if path == "/dev/null" or path.startswith("/etc/"):     # root-owned configuration, the null device
         return False
@@ -247,7 +261,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     # argv/text-identified programs and actions: findings only, never a complete negative
     # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
-    version = "7"
+    version = "8"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -277,7 +291,7 @@ class WebServiceSpawnsInterpreter(Playbook):
             if indicators:
                 matches.append(self._event_match(e, user, argv, indicators, prefix_only=prefix_only))
                 continue
-            key = (e.host, user, command_shape(argv), _packaged_script(argv))
+            key = (e.host, user, command_shape(argv), _packaged_script(argv, e.get("process.cwd")))
             self.counts[key] += 1
             if len(self.shapes[key]) < 20:
                 self.shapes[key].append(e)

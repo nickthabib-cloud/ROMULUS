@@ -253,15 +253,15 @@ class PortScan(_Grouped):
     # answers go to ports there; a sweep of service ports lands mostly below it.
     EPHEMERAL_FLOOR = 32768
     MAX_REQUESTS = 500_000
-    version = "4"
+    version = "5"
 
     def __init__(self):
         super().__init__()
         # Requests to a service (client port >= 1024 to service port < 1024): the earliest start of each 4-tuple,
         # so an answer can be matched to a request that came before it.
         self.requests: dict[tuple, object] = {}
-        # Per (src, dst): destination port of a low-source-port flow -> (source port, start) samples.
-        self.replies: dict[tuple, dict[int, list]] = defaultdict(lambda: defaultdict(list))
+        # Per (src, dst): destination port of a low-source-port flow -> [earliest start, source ports seen].
+        self.replies: dict[tuple, dict[int, list]] = defaultdict(dict)
 
     def consume(self, events):
         for e in self.applicable(events):
@@ -280,9 +280,10 @@ class PortScan(_Grouped):
             if sport is not None and sport < 1024 <= dport:
                 # A service answering a client, or a probe sent from a fixed low source port (nmap -g 53) to
                 # slip past stateless filters. Judged in finalize against the requests seen.
-                samples = self.replies[key][dport]
-                if len(samples) < 4:
-                    samples.append((sport, e.ts))
+                seen = self.replies[key].setdefault(dport, [e.ts, set()])
+                seen[0] = min(seen[0], e.ts)
+                if len(seen[1]) < 8:
+                    seen[1].add(sport)
                 continue
             if len(self.extra[key]["ports"]) < 70000:
                 self.extra[key]["ports"].add(dport)
@@ -291,12 +292,14 @@ class PortScan(_Grouped):
                 self.requests[tuple_] = min(self.requests.get(tuple_, e.ts), e.ts)
         return []
 
-    def _answered(self, src, dst, port, samples) -> bool:
-        """A low-source-port flow is an answer when the client's request on the mirrored 4-tuple started
-        strictly earlier. A probe's own response starts after it, so a scan is never matched this way."""
-        for sport, ts in samples:
+    def _answered(self, src, dst, port, seen) -> bool:
+        """A port's low-source-port flows look like answers when a flow on the mirrored 4-tuple started strictly
+        before the earliest of them. A probe's own response starts after the probe, and so does every response
+        to an earlier run of the same scan, so a repeated scan is never matched this way."""
+        first, sports = seen
+        for sport in sports:
             start = self.requests.get((dst, port, src, sport))
-            if start is not None and start < ts:
+            if start is not None and start < first:
                 return True
         return False
 
@@ -309,7 +312,7 @@ class PortScan(_Grouped):
             ports = forward | set(replies)
             if len(ports) < self.MIN_PORTS:
                 continue
-            answered = {port for port, samples in replies.items() if self._answered(src, dst, port, samples)}
+            answered = {port for port, seen in replies.items() if self._answered(src, dst, port, seen)}
             unanswered = set(replies) - answered
             client_range = {port for port in unanswered if port >= self.EPHEMERAL_FLOOR}
             probed = forward | (unanswered - client_range)
@@ -317,11 +320,15 @@ class PortScan(_Grouped):
             claim = (f"{self.counts[key]} flow record(s) from {src} to {dst} covering {len(ports)} distinct destination "
                      f"ports ({self.span(key)}); e.g. {sample}.")
             if replies:
-                sports = sorted({sport for samples in replies.values() for sport, _ts in samples})
+                sports = sorted({sport for _first, seen_ports in replies.values() for sport in seen_ports})
                 claim += (f" {len(replies)} of the ports were reached from source port(s) {sports[:5]} below 1024: "
-                          f"{len(answered)} answer an earlier request from {dst}, {len(client_range)} go to client "
+                          f"on {len(answered)} a flow from {dst} in the opposite direction started earlier (the shape "
+                          f"of a request and its answer), {len(client_range)} go to client "
                           f"(ephemeral) ports with no recorded request, and {len(unanswered) - len(client_range)} "
                           f"have neither, the shape of a scan sent from a fixed low source port.")
+                if len(self.requests) >= self.MAX_REQUESTS:
+                    claim += (f" The index of earlier flows reached its limit of {self.MAX_REQUESTS}, so some answers "
+                              f"may be counted as probes.")
             if len(probed) >= self.MIN_PORTS:
                 lane, severity = self.lane, self.severity
             else:
