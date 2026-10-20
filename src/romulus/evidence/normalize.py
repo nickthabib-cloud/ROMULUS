@@ -144,6 +144,9 @@ def _syscall_process_fields(sid: str, rs: AuditRecord) -> dict:
 SOCKET_COMPANIONS = {"SYSCALL", "SOCKADDR", "PROCTITLE"}
 EINPROGRESS = "-115"
 AUDIT_LOGIN_TYPES = {"USER_LOGIN", "USER_START"}
+# What an auth record is: an authentication decision, a completed login, or a (PAM) session opening. One login
+# can appear as all three (journal sshd "Accepted", audit USER_LOGIN, audit USER_START); rules count logins.
+AUTH_PHASE = {"USER_LOGIN": "login", "USER_START": "session_open"}
 
 
 def normalize_audit_auth_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent:
@@ -158,6 +161,7 @@ def normalize_audit_auth_group(host: str, members: list[tuple[dict, AuditRecord]
     origin = f"{native_id}:event.original#auditd:{record.type}"
     fields = {
         "auth.method": fv(record.type.lower(), f"{origin}.type"),
+        "auth.phase": fv(AUTH_PHASE[record.type], f"{origin}.type"),
         **_audit_boot_field(members),
     }
     executable = record.fields.get("exe")
@@ -314,6 +318,7 @@ def normalize_journal(hit: dict) -> TypedEvent:
                 f = {**base,
                      "auth.service": fv("sshd", f"{nid}:event.original#journal:SYSLOG_IDENTIFIER"),
                      "auth.method": fv(g.get("method"), f"{nid}:event.original#journal:MESSAGE~sshd"),
+                     "auth.phase": fv("authentication", f"{nid}:event.original#journal:MESSAGE~sshd"),
                      "user.name": fv(g["user"], f"{nid}:event.original#journal:MESSAGE~sshd"),
                      "source.ip": fv(g["ip"], f"{nid}:event.original#journal:MESSAGE~sshd")}
                 if g.get("port"):
