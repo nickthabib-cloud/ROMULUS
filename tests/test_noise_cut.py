@@ -29,8 +29,9 @@ def lanes(rule, events):
 
 def test_packaged_helper_scripts_of_a_web_application_are_context():
     events = [exec_event(0, ["/usr/bin/perl", "-wT", "/usr/bin/appdaemon.pl", "startup"]),
-              exec_event(1, ["/usr/bin/perl", "-wT", "/usr/share/app/bin/telemetry.pl"])]
-    assert lanes(WebServiceSpawnsInterpreter(), events) == ["context", "context"]
+              exec_event(1, ["/usr/bin/perl", "-wT", "/usr/share/app/bin/telemetry.pl"]),
+              exec_event(2, ["/usr/bin/perl", "/usr/bin/appaudit.pl", "-c", "/etc/app/app.conf"])]
+    assert lanes(WebServiceSpawnsInterpreter(), events) == ["context", "context", "context"]
 
 
 @pytest.mark.parametrize("argv", [
@@ -47,16 +48,27 @@ def test_packaged_helper_scripts_of_a_web_application_are_context():
     ["/usr/bin/python3", "/usr/lib/python3.10/http/server.py", "8000"],
     ["/usr/bin/perl", "/usr/bin/lwp-download", "http://203.0.113.8/x"],
     ["/usr/bin/python3", "/usr/bin/apphelper", "--fetch", "https://203.0.113.8/p"],  # any URL operand
+    # interpreter standard libraries run other code, consoles and servers
+    ["/usr/bin/python3", "/usr/lib/python3.10/cProfile.py", "/var/www/html/up/x.py"],
+    ["/usr/bin/python3", "/usr/lib/python3.10/timeit.py", "-n1", "__import__('os').system('id')"],
+    ["/usr/bin/python3", "/usr/lib/python3.10/code.py"],
+    ["/usr/bin/python3", "/usr/lib/python3.10/tarfile.py", "-e", "/tmp/a.tar", "/var/www/html"],
+    ["/usr/bin/perl", "/usr/share/perl/5.34/CPAN.pm"],
+    ["/usr/bin/ruby", "/usr/bin/irb"],
+    ["/usr/bin/python3", "/usr/bin/pydoc3", "-p", "8080"],
+    # a system helper pointed at a file the web account can write
+    ["/usr/bin/perl", "/usr/bin/apphelper.pl", "/var/www/html/up/job.conf"],
+    ["/usr/bin/perl", "/usr/bin/apphelper.pl", "--config=/tmp/x.conf"],
 ])
 def test_web_service_scripts_outside_package_directories_stay_leads(argv):
     assert lanes(WebServiceSpawnsInterpreter(), [exec_event(0, argv)]) == ["lead"]
 
 
 def test_a_lead_hiding_behind_a_packaged_run_of_the_same_shape_stays_a_lead():
-    events = [exec_event(0, ["/usr/bin/python3", "-u", "-W", "ignore", "/usr/bin/pydoc3"]),
+    events = [exec_event(0, ["/usr/bin/python3", "-u", "-W", "ignore", "/usr/bin/apphelper"]),
               exec_event(1, ["/usr/bin/python3", "-u", "-W", "ignore", "/var/www/html/up/x.py"])]
     assert sorted(lanes(WebServiceSpawnsInterpreter(), events)) == ["lead", "lead"]
-    events = [exec_event(0, ["/usr/bin/python3", "-u", "/usr/bin/pydoc3"]),
+    events = [exec_event(0, ["/usr/bin/python3", "-u", "/usr/bin/apphelper"]),
               exec_event(1, ["/usr/bin/python3", "-u", "/var/www/html/up/x.py"])]
     assert sorted(lanes(WebServiceSpawnsInterpreter(), events)) == ["context", "lead"]
 
@@ -112,7 +124,31 @@ def test_a_service_answering_many_client_ports_is_context_not_a_lead():
     rule = PortScan()
     rule.consume(replies)
     [match] = rule.finalize()
-    assert match.proposed_lane == "context" and "client (ephemeral) range" in match.claim
+    assert match.proposed_lane == "context" and "client (ephemeral) ports" in match.claim
+
+
+def test_answers_to_recorded_requests_are_context_whatever_the_client_port():
+    # A resolver answering clients behind NAT or with randomised ports below the ephemeral range.
+    requests = [flow(i, "10.0.0.9", 10000 + i, "10.0.0.53", 53) for i in range(200)]
+    answers = [flow(1000 + i, "10.0.0.53", 53, "10.0.0.9", 10000 + i) for i in range(200)]
+    rule = PortScan()
+    rule.consume(requests + answers)
+    assert [m.proposed_lane for m in rule.finalize()] == ["context"]
+
+
+def test_a_probe_is_not_explained_by_the_response_it_caused():
+    probes = [flow(i, "10.0.0.77", 53, "10.0.0.9", 2000 + i) for i in range(30)]
+    responses = [flow(i, "10.0.0.9", 2000 + i, "10.0.0.77", 53) for i in range(30)]     # same second
+    later = [flow(100 + i, "10.0.0.9", 2000 + i, "10.0.0.77", 53) for i in range(30)]   # after the probe
+    rule = PortScan()
+    rule.consume(probes + responses + later)
+    assert [m.proposed_lane for m in rule.finalize() if m.group_key == "10.0.0.77|10.0.0.9"] == ["lead"]
+
+
+def test_a_scan_split_between_low_and_ephemeral_source_ports_is_one_lead():
+    low = [flow(i, "10.0.0.77", 53, "10.0.0.9", 1024 + i) for i in range(24)]
+    high = [flow(100 + i, "10.0.0.77", 40000 + i, "10.0.0.9", 1 + i) for i in range(24)]
+    assert lanes(PortScan(), low + high) == ["lead"]
 
 
 def test_a_real_scan_is_still_a_lead_even_from_a_spoofed_service_source_port():

@@ -410,3 +410,13 @@ def test_a_lookup_refused_for_budget_is_not_remembered_as_an_answer():
     host, reason = fetcher.resolve_host("F-net", "10.0.0.2", query_cap=0)
     assert host is None and reason.endswith("source query budget exhausted") and executor.source_queries == 0
     assert fetcher.resolve_host("F-net", "10.0.0.2", query_cap=5) == ("web1", None)
+
+
+def test_a_small_budget_releases_none_of_its_reserve():
+    # max 8: root budget 6, reserve 2. Releasing half would leave a discovered anchor one query, below the
+    # two-query floor of a fetch, so roots stop at 6.
+    repo = _many_network_roots(16)
+    executor = PredicateExecutor(repo, [], contracts(host_ip=True))
+    ExpansionEngine(repo, "h1", WINDOW, LinkFetcher(executor, WINDOW.start, WINDOW.end), max_depth=2,
+                    max_source_queries=8).run()
+    assert executor.source_queries <= 6

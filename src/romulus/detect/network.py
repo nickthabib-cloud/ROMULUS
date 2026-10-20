@@ -252,60 +252,85 @@ class PortScan(_Grouped):
     # Modern stacks pick client ports from 32768 and up (Linux 32768-60999, Windows 49152-65535), so a service's
     # answers go to ports there; a sweep of service ports lands mostly below it.
     EPHEMERAL_FLOOR = 32768
-    version = "3"
+    MAX_REQUESTS = 500_000
+    version = "4"
 
-    @staticmethod
-    def _reply_shaped(e) -> bool:
-        """A flow from a well-known port to an unprivileged port: a service answering a client, or a probe sent
-        from a fixed low source port (nmap -g 53) to slip past stateless filters. The shape alone cannot tell."""
-        try:
-            sport, dport = int(e.get("source.port")), int(e.get("destination.port"))
-        except (TypeError, ValueError):
-            return False
-        return sport < 1024 <= dport
+    def __init__(self):
+        super().__init__()
+        # Requests to a service (client port >= 1024 to service port < 1024): the earliest start of each 4-tuple,
+        # so an answer can be matched to a request that came before it.
+        self.requests: dict[tuple, object] = {}
+        # Per (src, dst): destination port of a low-source-port flow -> (source port, start) samples.
+        self.replies: dict[tuple, dict[int, list]] = defaultdict(lambda: defaultdict(list))
 
     def consume(self, events):
         for e in self.applicable(events):
-            reply = self._reply_shaped(e)
-            key = (e.get("source.ip"), e.get("destination.ip"), reply)
+            src, dst = e.get("source.ip"), e.get("destination.ip")
+            key = (src, dst)
             self.keep(key, e)
-            ports = self.extra[key]["ports"]
-            if len(ports) < 70000:
+            try:
+                sport, dport = int(e.get("source.port")), int(e.get("destination.port"))
+            except (TypeError, ValueError):
+                sport = None
                 try:
-                    ports.add(int(e.get("destination.port")))
+                    dport = int(e.get("destination.port"))
                 except (TypeError, ValueError):
                     self.missing_required += 1
-            if reply and len(self.extra[key]["sports"]) < 20:
-                self.extra[key]["sports"].add(int(e.get("source.port")))
+                    continue
+            if sport is not None and sport < 1024 <= dport:
+                # A service answering a client, or a probe sent from a fixed low source port (nmap -g 53) to
+                # slip past stateless filters. Judged in finalize against the requests seen.
+                samples = self.replies[key][dport]
+                if len(samples) < 4:
+                    samples.append((sport, e.ts))
+                continue
+            if len(self.extra[key]["ports"]) < 70000:
+                self.extra[key]["ports"].add(dport)
+            if sport is not None and sport >= 1024 > dport and len(self.requests) < self.MAX_REQUESTS:
+                tuple_ = (src, sport, dst, dport)
+                self.requests[tuple_] = min(self.requests.get(tuple_, e.ts), e.ts)
         return []
+
+    def _answered(self, src, dst, port, samples) -> bool:
+        """A low-source-port flow is an answer when the client's request on the mirrored 4-tuple started
+        strictly earlier. A probe's own response starts after it, so a scan is never matched this way."""
+        for sport, ts in samples:
+            start = self.requests.get((dst, port, src, sport))
+            if start is not None and start < ts:
+                return True
+        return False
 
     def finalize(self):
         out = []
         for key, evs in self.groups.items():
-            ports = self.extra[key]["ports"]
+            src, dst = key
+            forward = self.extra[key]["ports"]
+            replies = self.replies.get(key, {})
+            ports = forward | set(replies)
             if len(ports) < self.MIN_PORTS:
                 continue
-            src, dst, reply = key
+            answered = {port for port, samples in replies.items() if self._answered(src, dst, port, samples)}
+            unanswered = set(replies) - answered
+            client_range = {port for port in unanswered if port >= self.EPHEMERAL_FLOOR}
+            probed = forward | (unanswered - client_range)
             sample = sorted(ports)[:12]
-            lane, severity, group_key = self.lane, self.severity, f"{src}|{dst}"
             claim = (f"{self.counts[key]} flow record(s) from {src} to {dst} covering {len(ports)} distinct destination "
                      f"ports ({self.span(key)}); e.g. {sample}.")
-            if reply:
-                sports = sorted(self.extra[key]["sports"])
-                low = sum(1 for p in ports if p < self.EPHEMERAL_FLOOR)
-                group_key = f"{src}|{dst}|from-low-port"
-                claim += (f" Every record comes from source port(s) {sports[:5]} below 1024: the shape of a service "
-                          f"answering a client, and also of a scan sent from a fixed low source port.")
-                if low < self.MIN_PORTS:
-                    # Answers to client ports: kept visible, not a lead.
-                    lane, severity = "context", "low"
-                    claim += (f" {len(ports) - low} of the destination ports are in the client (ephemeral) range "
-                              f"(retained for context).")
-                else:
-                    claim += f" {low} of the destination ports are below the client (ephemeral) range."
+            if replies:
+                sports = sorted({sport for samples in replies.values() for sport, _ts in samples})
+                claim += (f" {len(replies)} of the ports were reached from source port(s) {sports[:5]} below 1024: "
+                          f"{len(answered)} answer an earlier request from {dst}, {len(client_range)} go to client "
+                          f"(ephemeral) ports with no recorded request, and {len(unanswered) - len(client_range)} "
+                          f"have neither, the shape of a scan sent from a fixed low source port.")
+            if len(probed) >= self.MIN_PORTS:
+                lane, severity = self.lane, self.severity
+            else:
+                # Mostly a service answering clients: kept visible, not a lead.
+                lane, severity = "context", "low"
+                claim += f" Only {len(probed)} port(s) look probed (retained for context)."
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
                                                                      pf(evs[0], "destination.ip")],
-                             evs[0].ts, severity, lane, "high", evs[0].entities(), group_key=group_key))
+                             evs[0].ts, severity, lane, "high", evs[0].entities(), group_key=f"{src}|{dst}"))
         return out
 
 

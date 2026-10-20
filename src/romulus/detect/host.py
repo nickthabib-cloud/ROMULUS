@@ -29,10 +29,17 @@ TEMP_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/")
 # script operand there is usually a helper the application ships (cgi-bin is excluded: it is where web code lives).
 PACKAGED_DIRS = ("/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/usr/share/", "/bin/", "/sbin/", "/usr/lib/")
 NOT_PACKAGED = ("/usr/lib/cgi-bin/",)
-# Packaged scripts that fetch, install or serve on request: dual-use from a web-service account, never context.
+# Interpreter standard libraries and tool trees: their scripts run other code, consoles or servers (cProfile,
+# pdb, timeit, code, http.server), so a run of one is never an application helper.
+INTERPRETER_LIBRARIES = re.compile(
+    r"^/usr/(?:local/)?lib(?:64)?/(?:python[\d.]*|pypy[\d.]*|ruby|php[\d.]*|lua)(?:/|$)"
+    r"|^/usr/(?:local/)?share/(?:perl[\d.]*|perl5|ruby[\w.-]*|php[\w.-]*|lua)(?:/|$)"
+    r"|^/usr/lib(?:64)?/(?:[\w.-]+/)?perl[\d.]*(?:/|$)")
+# Packaged scripts that fetch, install, serve or open a console: dual-use from a web-service account.
 DUAL_USE_SCRIPTS = {"ssh-import-id", "ssh-import-id-gh", "ssh-import-id-lp", "pip", "pip2", "pip3", "easy_install",
                     "lwp-download", "lwp-request", "lwp-mirror", "GET", "POST", "HEAD", "cpan", "gem", "npm",
-                    "server.py", "SimpleHTTPServer.py", "smtpd.py", "ftplib.py", "telnetlib.py"}
+                    "irb", "pry", "ri", "erb", "pydoc", "pydoc3", "pdb", "pdb3", "idle", "idle3", "ipython",
+                    "ipython3", "jupyter", "perldoc", "perlbug", "php-cgi", "lua5.1", "lua5.3", "luarocks"}
 # Flag-only options per interpreter (no argument, no inline code). Anything else ends the packaged check.
 _FLAG_ONLY = {
     "python": {"-u", "-B", "-b", "-bb", "-d", "-E", "-I", "-O", "-OO", "-q", "-s", "-S", "-v"},
@@ -65,11 +72,24 @@ def _packaged_script(argv: list[str]) -> str | None:
     if not script or not script.startswith("/"):
         return None
     path = _normalize_posix_path(script)
-    if not path.startswith(PACKAGED_DIRS) or path.startswith(NOT_PACKAGED):
+    if not path.startswith(PACKAGED_DIRS) or path.startswith(NOT_PACKAGED) or INTERPRETER_LIBRARIES.match(path):
         return None
     if posixpath.basename(path) in DUAL_USE_SCRIPTS or any(_URLISH.search(a) for a in rest):
         return None
+    if any(_outside_system(a) for a in rest):          # the helper is pointed at a file the web account can write
+        return None
     return path
+
+
+def _outside_system(arg: str) -> bool:
+    """An absolute path operand (or an option's `=path` value) outside the system directories."""
+    value = arg.split("=", 1)[1] if arg.startswith("-") and "=" in arg else arg
+    if not value.startswith("/"):
+        return False
+    path = _normalize_posix_path(value)
+    if path == "/dev/null" or path.startswith("/etc/"):     # root-owned configuration, the null device
+        return False
+    return not path.startswith(PACKAGED_DIRS) or path.startswith(NOT_PACKAGED)
 
 
 CRED_FILES = {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"}
@@ -227,7 +247,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     # argv/text-identified programs and actions: findings only, never a complete negative
     # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
-    version = "6"
+    version = "7"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
