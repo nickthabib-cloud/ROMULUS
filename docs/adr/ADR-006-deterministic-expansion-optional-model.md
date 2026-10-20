@@ -1,7 +1,5 @@
 # ADR-006: Deterministic expansion finds; an optional model explains and writes
 
-**Status:** Accepted 2026-10-19 (owner direction in chat; the design doc's open questions answered by the owner the same day). Supersedes ADR-005 decisions 2–5 and spec §11's model-driven investigation loop. ADR-005 decision 1 (no model bakeoff) stands.
-
 ## Context
 
 The v2 ablation (`docs/eval/results/2026-10-19-sl700_e_a-ablation-456.md`) ran the same e_a window in three agent modes:
