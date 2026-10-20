@@ -183,7 +183,7 @@ Ship the explanations if they are accurate. Ship the opinion label and sort togg
 | Complete negatives or `unresolved` | Context negatives are scoped to a link and only complete when its fetch was complete. Capped fetches keep exact uncovered ranges. |
 | Nothing lost | Incidents and narratives are in the manifest. Unexpanded anchors and removed narrative sentences are listed. |
 | Model output validated; telemetry untrusted | The model sees alias cards, not telemetry, and outputs cited sentences only. A checker removes unsupported ones. |
-| Read-only, no external transmission | Expansion uses the existing read-only adapters. The model endpoint must be a private or host-only address. |
+| Read-only, no external transmission | Expansion uses the existing read-only adapters. The model endpoint must be a private or host-only address (ADR-007 proposes a lab-only remote exception for public data). |
 
 ## 9. Measurement and acceptance
 

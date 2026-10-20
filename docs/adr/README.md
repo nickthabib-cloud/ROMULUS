@@ -10,3 +10,6 @@ Write one only for decisions that are hard to reverse. Keep each to a page: **Co
 | [004](ADR-004-negatives-only-from-kernel-records.md) | Negatives only from evidence that can prove them; argv/text rules positive-only | Accepted 2026-10-19 |
 | [005](ADR-005-small-model-investigator.md) | Keep qwen3:8b; menu-driven investigator | Accepted 2026-10-19; decisions 2–5 superseded by ADR-006 |
 | [006](ADR-006-deterministic-expansion-optional-model.md) | Deterministic expansion finds; an optional model explains leads and writes the narrative | Accepted 2026-10-19 |
+| [007](ADR-007-model-providers-and-lab-egress.md) | Any OpenAI-compatible model endpoint; remote endpoints only in a lab egress mode | Proposed 2026-10-20 |
+| [008](ADR-008-capable-model-agent-no-langgraph.md) | Capable-model agent behind a measured gate; native tool calling over SQLite; still no LangGraph | Proposed 2026-10-20 |
+| [009](ADR-009-settings-page-and-runtime-config.md) | Lead-only settings page writes a managed config file; secrets write-only; TLS first | Proposed 2026-10-20 |

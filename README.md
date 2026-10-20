@@ -2,7 +2,14 @@
 
 A defensive, AI-assisted threat-hunting tool.
 
-ROMULUS first runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. A local Ollama model then works the leads. It pivots on entities, follows hypotheses, and escalates findings with citations to the raw evidence. Outputs:
+ROMULUS runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. Deterministic expansion then follows typed links from the strongest findings (process lineage, login session, network flow), judges the linked records in context, and assembles incidents. Every claim cites the raw evidence. ROMULUS works fully without a language model ([ADR-006](docs/adr/ADR-006-deterministic-expansion-optional-model.md)). An optional model can explain leads and draft the narrative.
+
+*Planned (proposed 2026-10-20):*
+- **Any OpenAI-compatible model endpoint.** That includes a strong local server such as vLLM or llama.cpp, and, on public lab data only, a hosted API ([ADR-007](docs/adr/ADR-007-model-providers-and-lab-egress.md)).
+- **A capable-model investigating agent,** built only if it passes a measured gate ([ADR-008](docs/adr/ADR-008-capable-model-agent-no-langgraph.md)).
+- **A settings page** for credentials ([ADR-009](docs/adr/ADR-009-settings-page-and-runtime-config.md)).
+
+Outputs:
 
 - ranked findings
 - an attack path
@@ -10,7 +17,7 @@ ROMULUS first runs a deterministic sweep over host and network telemetry: Elasti
 - a technical Markdown/JSON report (an executive DOCX is planned)
 - a browser UI for analysts
 
-> **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 evaluation and deterministic expansion are in progress. This is lab software under active development and is not yet validated for production missions. See [`docs/project/STATUS.md`](docs/project/STATUS.md) for the current state and [`docs/project/MILESTONES.md`](docs/project/MILESTONES.md) for the roadmap.
+> **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 evaluation is closing and M3 (deterministic expansion) is in progress. Track A (model providers, settings page, capable-model agent) is proposed. This is lab software under active development and is not yet validated for production missions. See [`docs/project/STATUS.md`](docs/project/STATUS.md) for the current state and [`docs/project/MILESTONES.md`](docs/project/MILESTONES.md) for the roadmap.
 
 ## Detection scope
 
@@ -30,7 +37,7 @@ These are non-negotiable. The full text is §1 of [`ENGINEERING_MASTER_PROMPT.md
 - **Negatives must be complete, or they are `unresolved`.** Caps, timeouts, missing fields and partial responses never count as "no match". A rule may claim a complete negative only from evidence that proves absence ([ADR-004](docs/adr/ADR-004-negatives-only-from-kernel-records.md)).
 - **Nothing reportable is lost** to UI limits, model context or rendering. One immutable report manifest feeds every renderer, and every citation is checked.
 - **The model proposes typed actions only.** It never writes query DSL, Arkime expressions, TShark filters, shell commands or paths. All model output is validated, and telemetry is treated as untrusted data.
-- **Read-only toward telemetry.** Nothing is transmitted externally. Secrets never appear in the repo, logs, prompts or reports.
+- **Read-only toward telemetry.** Nothing is transmitted externally. Secrets never appear in the repo, logs, prompts or reports. ADR-007 proposes one exception: a hosted model, allowed only for public lab data. It needs an install-time switch that the web UI cannot set, puts a banner on every hunt and report that used it, and is never on in release builds.
 
 ## How it works
 
@@ -61,8 +68,8 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 - **Core:** Python 3.12, organized as a modular monolith (`src/romulus/`).
 - **State:** SQLite (WAL) is the single state authority; Alembic handles migrations.
 - **Web UI:** FastAPI + Jinja + server-sent events. It has argon2 logins, lead/analyst roles, CSRF protection and a strict CSP.
-- **Model:** optional local Ollama; investigator changes are measured with the frozen replay harness.
-- **No agent framework:** the investigator is an explicit controller ([ADR-001](docs/adr/ADR-001-no-langgraph.md)).
+- **Model:** optional local Ollama today. A provider port for any OpenAI-compatible endpoint is planned (ADR-007). Every model change is measured with the frozen replay harness.
+- **No agent framework:** the investigator is an explicit controller with SQLite as the only state ([ADR-001](docs/adr/ADR-001-no-langgraph.md)). This was re-examined for a capable model in [ADR-008](docs/adr/ADR-008-capable-model-agent-no-langgraph.md). That model would get a native tool-calling loop, still without LangGraph.
 
 ## Repository layout
 
@@ -73,7 +80,7 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 | `scripts/` | `deploy.ps1` (deploy to the lab VM), `web-restart.sh`, `archmap.py`, `smoke_live.py` |
 | `docs/adr/` | Architecture decision records |
 | `docs/project/` | Status, milestones, team process, lab environment |
-| `docs/design/` | Design notes (model investigator) |
+| `docs/design/` | Design notes (deterministic expansion, network correlation, investigator) |
 | `.env.example` | Configuration template. Copy it to `$ROMULUS_HOME/.env`, then `chmod 600` |
 
 ## Getting started
@@ -87,6 +94,8 @@ cp .env.example "$ROMULUS_HOME/.env"   # fill in sources, model endpoint and sec
 ```
 
 Use a **read-only** Elasticsearch account, never the `elastic` superuser. Keep `OLLAMA_NUM_CTX` explicit, because Ollama truncates prompts silently.
+
+Today every setting lives in `.env`. A lead-only **Settings** page is planned (ADR-009). It will write source credentials, model keys and hunt defaults to `$ROMULUS_HOME/config/settings.env`. Secrets will be write-only, and the page will require TLS. Bootstrap keys stay in `.env`: home, bind address, TLS, session key and the model egress switch.
 
 ### Run
 
