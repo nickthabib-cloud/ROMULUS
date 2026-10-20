@@ -1,7 +1,5 @@
 # Model investigator design
 
-**Status:** Approved 2026-10-18, including the review conditions recorded in `Claude-Codex.md`.
-
 ## Scope
 
 Implement the explicit, resumable controller from spec section 11. Each model call receives one compact brief and proposes one typed decision. SQLite is the only state authority. The model cannot change deterministic rule results, finding claims, lanes, hunt scope, coverage, or source access.
