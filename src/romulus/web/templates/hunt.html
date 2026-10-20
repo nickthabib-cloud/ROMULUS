@@ -20,6 +20,8 @@
     · {{ investigations.anchor_accounting.pending | length }} pending
     · {{ investigations.summary.links or 0 }} link(s)
     · {{ investigations.summary.partial_links or 0 }} incomplete link(s)</p>
+  <p class="help">The incident graph (which findings connect, by which links, and every open end) is in the
+    technical report until this page draws it.</p>
 </section>
 {% elif agent %}
 <section id="agent-summary">
