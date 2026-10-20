@@ -51,12 +51,12 @@ class ContextPlaybook(Playbook):
 ```
 
 - It only runs on records reached through an allowed link from an allowed anchor class. It never runs in the sweep, so it cannot add noise to the full window.
-- Its claim names the context: "`sudo -l` ran in login session 42 on videoserver, which began with the SSH login in F-7." It cites the record, the anchor finding and the link evidence (the session or lineage records).
+- Its claim names the context: "`sudo -l` ran in login session 42 on web01, which began with the SSH login in F-7." It cites the record, the anchor finding and the link evidence (the session or lineage records).
 - Lane comes from the rule and the link strength, capped by the table above. It uses the same `FindingDecision` admission as every other rule.
 - **Negatives are scoped to the link.** "No discovery commands in session 42" is complete only if that session's fetch was complete and every record had the required fields. Otherwise the cell is `unresolved`. Rules that read argv or script text stay positive-only (ADR-004).
 - Same fixture rule as other playbooks: a positive fixture and adversarial negatives, plus a case with the same events *without* the anchor, which must not fire.
 
-**Starter classes, chosen by ATT&CK behaviour and not by the e_a commands:**
+**Starter classes, chosen by ATT&CK behaviour and not by any dataset's commands:**
 
 | Class | Fires when, after an anchor |
 |---|---|
@@ -134,7 +134,7 @@ The narrative is drafted **after** the manifest revision is final, one incident 
 
 ## 6b. Lead explanations (optional model)
 
-Leads are where the rules can't decide, and where analyst time goes (41 of 97 surfaced items on e_a were benign). With a model, each lead can get:
+Leads are where the rules can't decide, and where analyst time goes (41 of 97 surfaced items on the dev set were benign). With a model, each lead can get:
 
 - a plain-English explanation of its command line, script or connection (what it does, decoded if obfuscated);
 - the model's opinion, `looks suspicious` or `looks routine`, with one sentence of reasoning.
@@ -149,7 +149,7 @@ Leads are where the rules can't decide, and where analyst time goes (41 of 97 su
 
 **Known failure mode.** Sneaky attacker activity is designed to look routine, so the model will call some of it routine. That is exactly why it can only label, never hide.
 
-**Gate before building.** Run a replay test on the 97 adjudicated e_a items first (eval-custodian). Report:
+**Gate before building.** Run a replay test on the 97 adjudicated dev-set items first (eval-custodian). Report:
 
 1. how many attacker items (Tier A hits and `true_unlisted`) the model calls `looks routine` (the "sneaky miss" count; this is the number that matters);
 2. whether sorting by its opinion puts attacker items higher than the deterministic order (P@10, P@20 over leads);
@@ -163,7 +163,7 @@ Ship the explanations if they are accurate. Ship the opinion label and sort togg
 
 ```
 [x] Use a language model to explain leads and draft the narrative
-    Model: qwen3:8b at 192.168.36.1 — reachable.
+    Model: <model> at <model host> — reachable.
     Without a model, leads have no explanations and ROMULUS writes a plain narrative from the findings.
     Detection, lanes and the attack-path timeline are the same either way.
 ```
@@ -174,7 +174,7 @@ Ship the explanations if they are accurate. Ship the opinion label and sort togg
 
 **CLI.** `hunt start --narrative model|template` (default from `NARRATIVE_MODE`, else `template` when `OLLAMA_URL` is empty). `report <hunt> --narrative model` redrafts. `--no-agent` and `--agent-mode` are retired. `--no-expand` is kept for evaluation ablations only and is hidden from `--help`.
 
-**Config and doctor.** `OLLAMA_URL` may be empty, and its default becomes empty. The lab address, hard-coded today in `config.py`, moves to the VM's `.env`. With no URL, doctor reports `ollama: not configured (narrative uses template)` as `info`, not `fail`. With a URL, the existing private-address, reachability, model and `num_ctx` checks stay.
+**Config and doctor.** `OLLAMA_URL` may be empty, and its default becomes empty. No address is hard-coded in `config.py`; each install sets its own in `.env`. With no URL, doctor reports `ollama: not configured (narrative uses template)` as `info`, not `fail`. With a URL, the existing private-address, reachability, model and `num_ctx` checks stay.
 
 ## 8. Invariants
 
@@ -189,7 +189,7 @@ Ship the explanations if they are accurate. Ship the opinion label and sort togg
 
 ## 9. Measurement and acceptance
 
-On e_a (dev) and, before any claim, on a holdout (f_a or a different storyline):
+On the dev set and, before any claim, on a holdout (f_a or a different storyline):
 
 - **Recall.** Target the 5 "evaluated, no rule matched" misses and the leads with an anchor in session (report the count reached, with intervals). Recall must not fall in any class.
 - **Noise.** False leads per hour must not rise above the owner's ceiling (pending, PROTOCOL §14). Every context finding is adjudicated.
@@ -198,7 +198,7 @@ On e_a (dev) and, before any claim, on a holdout (f_a or a different storyline):
 - **Timeline.** Every link in the manifest is drawn with the right style; no proven link rests on an inferred key; filtered counts add up to the manifest totals.
 - **Lead explanations.** The §6b replay gate, including the sneaky-miss count.
 - **Narrative.** 100% of published sentences cite valid aliases. Report the share of removed sentences and an analyst rating of a sample. The replay harness is repurposed to freeze incident cards and score drafts.
-- **Overfitting guard.** Context-rule fixtures are written from ATT&CK classes before looking at e_a misses per opportunity. The eval-custodian scores; nobody else reads ground truth.
+- **Overfitting guard.** Context-rule fixtures are written from ATT&CK classes before looking at dev-set misses per opportunity. The eval-custodian scores; nobody else reads ground truth.
 
 ## 10. Work split and order
 

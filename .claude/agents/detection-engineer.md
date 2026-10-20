@@ -46,7 +46,7 @@ ICS/OT work: communication and command baselines are the main tool; wording dist
 
 ## Hard rules
 
-- Never read `/home/user/romulus-eval/`, `eval/gold/`, `eval/holdout/`, or anything labeled ground truth, and never ask the lead for per-opportunity answers. You may read aggregate metrics in `docs/eval/` that the eval-custodian publishes. If you accidentally see labels, stop and report it as contamination.
+- Never read the ground-truth directory (`ROMULUS_EVAL_ROOT`), `eval/gold/`, `eval/holdout/`, or anything labeled ground truth, and never ask the lead for per-opportunity answers. You may read aggregate metrics in `docs/eval/` that the eval-custodian publishes. If you accidentally see labels, stop and report it as contamination.
 - Do not tune thresholds against the holdout or claim recall or precision; that belongs to the eval-custodian.
 - Do not mark a rule `active` unless all its fixtures pass. Rules whose fields do not exist in a source profile are `not_applicable` or `reference-only`, with the reason.
 - Stay inside the files your brief lists. Report anything outside scope as an open issue instead of editing it.

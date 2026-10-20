@@ -16,10 +16,10 @@ Everything else, including architecture, implementation, UI, and reports, is the
 
 | Agent | Why it exists | Writes | Never |
 |---|---|---|---|
-| `detection-engineer` | Context isolation; specialist semantics | `content/` (playbooks, rules, fixtures, selection cards), detector code under `src/romulus/detect/` when briefed | Reads `romulus-eval/`; tunes against holdout; claims recall |
+| `detection-engineer` | Context isolation; specialist semantics | `content/` (playbooks, rules, fixtures, selection cards), detector code under `src/romulus/detect/` when briefed | Reads ground truth; tunes against holdout; claims recall |
 | `reviewer` | Independence | A review report (returned in its final message) | Edits code; approves its own suggestions |
-| `eval-custodian` | Information isolation and independence | `eval/` harness code, `docs/eval/` results (aggregate only), VM `/home/user/romulus-eval/` | Shares labels, per-opportunity answers, or holdout contents with the builders; changes rules or prompts |
-| `integration-tester` | Context isolation (VM and live services) | Deployment and integration logs, `docs/project/ENVIRONMENT.md` facts | Writes to Elasticsearch, Arkime, or PCAPs; runs root commands; changes source configs |
+| `eval-custodian` | Information isolation and independence | `eval/` harness code, `docs/eval/` results (aggregate only), the ground-truth directory (outside the repository) | Shares labels, per-opportunity answers, or holdout contents with the builders; changes rules or prompts |
+| `integration-tester` | Context isolation (deployment host and live services) | Deployment and integration logs, local environment facts | Writes to Elasticsearch, Arkime, or PCAPs; runs root commands; changes source configs |
 
 Security review uses the `/security-review` skill plus the `reviewer` with a security brief. UI and report design are lead work, checked by the owner at milestone demos.
 

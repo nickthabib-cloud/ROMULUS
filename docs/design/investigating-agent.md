@@ -30,7 +30,7 @@ The agent is a phase of the hunt worker, recorded in the hunt state (`agent: pen
 | Key | Meaning |
 |---|---|
 | `AGENT_PROVIDER` | `openai_compatible` (default) or `ollama` |
-| `AGENT_BASE_URL`, `AGENT_API_KEY`, `AGENT_MODEL` | Endpoint, key and pinned model snapshot. The lab uses a hosted API; teams use their own server |
+| `AGENT_BASE_URL`, `AGENT_API_KEY`, `AGENT_MODEL` | Endpoint, key and pinned model snapshot. Teams use their own server; a hosted API only for evaluation on public data |
 | `ROMULUS_MODEL_EGRESS` | Must be `lab-public-data` for any non-local endpoint (bootstrap only) |
 | `MODEL_LOCAL_HOSTS` | Extra hosts treated as local, such as a team's model server on a routable enclave address |
 | `AGENT_MAX_CALLS`, `AGENT_MAX_TOKENS`, `AGENT_MAX_WALL_SECONDS`, `AGENT_MAX_COST_USD` | Per-hunt budgets (cost is optional and estimated from reported usage) |
@@ -135,7 +135,7 @@ The header reads "AI-generated hypothesis from the cited evidence. Not confirmed
 
 ## Measurement (eval-custodian)
 
-The eval-custodian scores agent on against off on e_a, and on a holdout before any claim. Results are reported per provider and model.
+The eval-custodian scores agent on against off on the dev set, and on a holdout before any claim. Results are reported per provider and model.
 
 - Incremental true positives from agent findings, and from pivoted records that detectors admitted.
 - False leads per hour added by agent findings.

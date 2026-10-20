@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Preserve spec section 1 invariants, detector semantics, decision policy, and the source write-method allowlist.
-- Never read `/home/user/romulus-eval/` or modify v1.
+- Never read the evaluation ground truth or modify v1.
 - Model output is untrusted; no raw DSL, shell, paths, invented evidence, lane changes, or claim changes.
 - Pivot subsets evaluate direct playbooks only; all work and omissions remain durable and reportable.
 - Use the manifest's immutable `agent_steps_total`, `agent_steps_per_case`, `max_cases`, and `wall_clock_minutes` budgets.
@@ -162,7 +162,7 @@
 **Files:**
 - Create: `tests/test_agent_acceptance.py`
 - Modify: `docs/architecture/MODULE_MAP.md` via generator
-- Modify: `docs/project/STATUS.md`
+- Modify: the local status log
 - Modify: `docs/project/MILESTONES.md`
 - Append: `Claude-Codex.md`
 

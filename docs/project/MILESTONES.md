@@ -12,18 +12,18 @@ Check an item only with **evidence**: a test, a results file, a commit or a demo
 - **Deterministic floor** (ADR-006). The sweep, correlation and expansion find things with no model, and their results never depend on one.
 - **An AI agent on top** (ADR-007, ADR-008). Teams run a powerful model on their own infrastructure, reached through any OpenAI-compatible endpoint. The lab uses a hosted API on public data only. The agent forms hypotheses from all the indicators, follows leads, finds more indicators, and writes the report's opening AI assessment. It adds cited, labelled findings and never removes or demotes any. Its wins become deterministic rules.
 - **Host and network together.** auditd, journal and web logs; Suricata; Arkime sessions; packets through Arkime and TShark.
-- **Breadth from research, not from the lab.** The ATT&CK v20 register, tool and LOTL catalogs and the backlog (`content/research/`) drive new detections. The e_a lab is a dev set only.
+- **Breadth from research, not from the lab.** The ATT&CK v20 register, tool and LOTL catalogs and the backlog (`content/research/`) drive new detections. Evaluation datasets are dev sets only.
 - **Trustworthy output stays non-negotiable.** Typed fields only, claims no stronger than their fields, honest negatives, every claim cited, read-only access.
 
 ## How we stay on track
 
 1. **One plan.** This file. STATUS.md is the daily state; ADRs record hard-to-reverse decisions.
-2. **Every detection change is scored.** The eval-custodian scores each change on e_a (recall, P@10, false leads per hour, per-rule precision) and reports class-level misses only.
+2. **Every detection change is scored.** The eval-custodian scores each change on the dev set (recall, P@10, false leads per hour, per-rule precision) and reports class-level misses only.
 3. **Every semantic, adapter or security change is reviewed** by `reviewer` before merge.
 4. **Overfitting guard.**
    - Rules are written from ATT&CK behaviour classes, with each threshold's rationale in its rule.
-   - No scenario-specific values: no addresses, hosts or filenames from e_a.
-   - e_a numbers are labelled "dev set, optimistic".
+   - No scenario-specific values: no addresses, hosts or filenames from an evaluation dataset.
+   - Dev-set numbers are labelled "dev set, optimistic".
    - Generalization claims need M6 evidence.
 5. **Work split.**
    - **Lead:** sources, network, web and reports.
@@ -35,7 +35,7 @@ Check an item only with **evidence**: a test, a results file, a commit or a demo
 
 ## Owner decisions log (2026-10-19)
 
-- **Models:** no multi-model bakeoff; qwen3:8b; agentic hunt is a checkbox, off by default.
+- **Models:** no multi-model bakeoff; the small local model stays as is; agentic hunt is a checkbox, off by default.
 - **ADR-006 answers:** expansion depth 3; shared budget; context findings capped at `high`; report-page narrative action later.
 - **Indicators:** a field-role indicator matcher instead of v1 substring search. v1 content is not kept as-is (15 ideas queued as `v1_ports`).
 - **Arkime:** read through its session indices (read-only grant done). The viewer API is used only for packets.
@@ -50,7 +50,7 @@ Check an item only with **evidence**: a test, a results file, a commit or a demo
 ## Owner decisions log (2026-10-20)
 
 - **AI agent: build it** (ADR-008). It develops hypotheses from every indicator, follows further leads, finds more indicators and paints the bigger picture. The report opens with its overall hypothesis. The owner does not expect it to be always right; it is labelled and cited.
-- **Model access** (ADR-007): one OpenAI-compatible adapter. Mission teams run their own powerful model, not public commercial APIs. The lab uses a hosted API (for example OpenAI) on the public SL700 data, behind the bootstrap egress switch.
+- **Model access** (ADR-007): one OpenAI-compatible adapter. Mission teams run their own powerful model, not public commercial APIs. Evaluation may use a hosted API on public data only, behind the bootstrap egress switch.
 - **How to run it:** the lead's recommendation, accepted. A native tool-calling loop in an explicit controller, with SQLite as the only state, and no LangGraph or other agent framework (`docs/design/investigating-agent.md`).
 - **Credentials page: deferred** (ADR-009). Configuration, including agent keys, stays in `.env` for now.
 
@@ -58,15 +58,15 @@ Check an item only with **evidence**: a test, a results file, a commit or a demo
 
 ## M1: thin end-to-end slice. Accepted 2026-10-19
 
-ES adapter, typed normalizers, 15 playbooks, decide/lanes, model investigator v1, web UI, report manifest, VM deployment. Reviewer gate concluded (ADR-004, option B). Open carry-over: a uv lockfile, generated on the VM.
+ES adapter, typed normalizers, 15 playbooks, decide/lanes, model investigator v1, web UI, report manifest, remote deployment. Reviewer gate concluded (ADR-004, option B). Open carry-over: a uv lockfile, generated on the VM.
 
 ## M2: evaluation and network foundation. Closing
 
-- [x] Gold inventory for e_a v1 (27 opportunities, 22 observable), `docs/eval/PROTOCOL.md`, and the scorer in `eval/`.
-- [x] Investigator replay evaluation (qwen3:8b 0.22, rising to 0.53 with the v2 menu). The bakeoff was dropped (ADR-005).
-- [x] Investigator v2 merged (`0bfd0d2`). Three-way ablation: off, deterministic and model are identical on findings (`2026-10-19-sl700_e_a-ablation-456.md`), which led to ADR-006.
+- [x] Gold inventory for the dev set (27 opportunities, 22 observable), the evaluation protocol, and the scorer in `eval/`.
+- [x] Investigator replay evaluation (small local model 0.22, rising to 0.53 with the v2 menu). The bakeoff was dropped (ADR-005).
+- [x] Investigator v2 merged (`0bfd0d2`). Three-way ablation: off, deterministic and model are identical on findings, which led to ADR-006.
 - [x] Host↔network correlation: the `net_socket` family, `host.interpreter_external_connection`, and `corr.process_network_link` (disk-staged, inferred links labelled). Reviewer passed.
-- [x] Arkime session indices as a hunt target: `net_session`, long connections, beaconing, rare fingerprints. Live on the lab.
+- [x] Arkime session indices as a hunt target: `net_session`, long connections, beaconing, rare fingerprints. Integration tested.
 - [x] Noise fix: grouping by program and port; kernel-lineage lane lowering; NTP verified by the parser goes to context.
 - [x] Field-role indicator matcher (`ioc.indicator_match`) with a seed tool-name list.
 - [x] Storage: a capped write-ahead log and `romulus db compact` (2.1 GB → 25 MB).
@@ -140,7 +140,7 @@ Goal: a hypothesis-driven agent that works every hunt after the deterministic la
   - hypotheses tab;
   - `hunt start --agent/--no-agent`.
 - [ ] **A7. Safety tests** (detection-engineer and Codex): spec scenario 13 extended to tool calls (injected close, benign or pivot instructions are ignored and flagged).
-- [ ] **A8. Scored** (eval-custodian), agent on against off, per model, on e_a and then a holdout:
+- [ ] **A8. Scored** (eval-custodian), agent on against off, per model, on the dev set and then a holdout:
   - incremental true positives;
   - added false leads per hour;
   - hypothesis and assessment accuracy at class level;
@@ -165,11 +165,11 @@ Goal: use what the packets and kernel records can prove.
 - [ ] **Kernel-record host rules that can prove negatives** (ADR-004): file writes and deletes (`PATH nametype=CREATE/DELETE`), watched credential reads, exec from deleted or memfd files.
 - [ ] **Lineage rules:** a shell started by a process holding an external connection (BL-02), and parent→child rarity (V1-03).
 - [ ] **Coverage truth:** a fault-injection suite (caps, timeouts, shard failures, truncated PCAP) proving no false complete negatives.
-- [ ] Scored per source: Arkime and PCAP recall on e_a, and false leads per hour.
+- [ ] Scored per source: Arkime and PCAP recall on the dev set, and false leads per hour.
 
 ## M5: detection breadth
 
-Goal: cover what CPTs meet, not what e_a contains.
+Goal: cover what CPTs meet, not what one dataset contains.
 
 - [ ] **Coverage matrix** generated from the vendored STIX plus the research register (`docs/detection/ATTACK_COVERAGE.md`), checked in CI.
 - [ ] **Backlog BL-01..BL-25 and lab-testable `v1_ports`** (V1-01..V1-07):

@@ -5,13 +5,13 @@ The hand-written part (this file) explains intent and boundaries. `MODULE_MAP.md
 ## Runtime topology
 
 ```
- Windows host (192.168.36.1)              Ubuntu VM (192.168.36.128)
+ Model server (optional)                  ROMULUS host (Linux)
  ┌──────────────────────┐                ┌───────────────────────────────────────────┐
- │ Ollama :11434 (GPU)  │◄── HTTP ───────│ romulus web (FastAPI/HTMX/SSE)            │◄── analyst browser
- └──────────────────────┘                │ romulus worker (hunt controller)          │
-                                         │   │ SQLite (WAL) — single state authority │
-                                         │   ├─► Elasticsearch :9200 (read-only)     │
-                                         │   ├─► Arkime viewer :8005 (read-only)     │
+ │ OpenAI-compatible or │◄── HTTP ───────│ romulus web (FastAPI/HTMX/SSE)            │◄── analyst browser
+ │ Ollama endpoint      │                │ romulus worker (hunt controller)          │
+ └──────────────────────┘                │   │ SQLite (WAL) — single state authority │
+                                         │   ├─► Elasticsearch/OpenSearch (read-only)│
+                                         │   ├─► Arkime viewer (read-only)           │
                                          │   └─► tshark on PCAPs (allowlisted dirs)  │
                                          └───────────────────────────────────────────┘
 ```
@@ -51,7 +51,7 @@ Coverage cells are written at every stage that can lose information (compile, ex
 | `evidence` | Raw references, normalizers per event family, entities | planned |
 | `detect` | Playbook/rule loader and evaluators, coverage ledger | planned |
 | `decide` | Admission gates, lanes, priority, triage, suppressions | planned |
-| `agent` | Case queue, brief builder, Ollama client, proposal validation, pivot tools | [M1 design](../design/model-investigator.md) |
+| `agent` | Case queue, brief builder, model client, proposal validation, pivot tools | [M1 design](../design/model-investigator.md) |
 | `correlate` | Entity graph, edges, attack path | planned |
 | `report` | Manifest, renderers, recommendations | planned |
 | `web` | FastAPI app, templates, static (vendored) assets, auth | planned |
@@ -65,7 +65,7 @@ Other top-level directories: `content/` (playbooks, rules, fixtures, vendored AT
 - `web` and `cli` may import anything below them, but nothing imports `web` or `cli`.
 - `detect`, `decide`, `correlate`, and `report` never import `sources` adapters directly. They work on stored typed data.
 - `agent` emits validated typed pivots without importing any module under `romulus.sources`. The hunt-layer executor described in
-  [ADR-003](../adr/ADR-003-agent-pivot-executor-boundary.md) converts them to `SearchIntent`s and owns source access.
+  ADR-003 converts them to `SearchIntent`s and owns source access.
 - `store` imports no domain logic packages.
 
 Update this section and `LAYER_RULES` in `scripts/archmap.py` together.

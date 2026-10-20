@@ -35,7 +35,7 @@ build/
 # local agent settings
 .claude/settings.local.json
 
-# written by scripts/deploy.ps1 on the VM
+# written by scripts/deploy.ps1 on the deployment host
 DEPLOYED_COMMIT
 
 # local Claude/Codex collaboration channel, never committed
