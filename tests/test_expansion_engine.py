@@ -251,7 +251,7 @@ def test_network_anchor_has_no_host_identity_and_never_uses_an_ip_or_the_sensor(
     ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo), max_source_queries=0).run()
 
     anchor_row = repo.expansion_anchors("h1")[0]
-    assert anchor_row["host"] is None                      # an address is not a host identity (review B-1)
+    assert anchor_row["host"] is None                      # an address is not a host identity
     assert ExpansionEngine._victim_ips([network_event]) == ["10.0.0.8"]
 
 
@@ -389,7 +389,7 @@ def test_inferred_link_keeps_a_direct_finding_lane_and_labels_only_the_relation_
         candidate for candidate in repo.candidates("h1")
         if candidate["rule_id"] == "host.credential_store_read"
     )
-    # strong indicators are reported on their own (review I-1): the inferred link never lowers the lane
+    # strong indicators are reported on their own: the inferred link never lowers the lane
     assert finding["lane"] in ("urgent", "high")
     assert "relation to f-anchor" in finding["claim"].lower() and "hypothesis" in finding["claim"].lower()
     assert any("relation to the anchor is a hypothesis" in note

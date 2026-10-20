@@ -86,7 +86,7 @@ def _private_host(host: str) -> bool:
 
 def check_ollama(s: Settings) -> list[Check]:
     if not s.ollama_url:
-        return [Check("ollama.endpoint", "ok", "no model endpoint configured: model features are off (ADR-006)")]
+        return [Check("ollama.endpoint", "ok", "no model endpoint configured: model features are off")]
     out = []
     base = s.ollama_url.rstrip("/")
     host = httpx.URL(base).host

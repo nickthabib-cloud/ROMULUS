@@ -259,7 +259,6 @@ class WebServiceSpawnsInterpreter(Playbook):
     id = "host.web_service_spawns_interpreter"
     anchor_class = "web_shell"
     # argv/text-identified programs and actions: findings only, never a complete negative
-    # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
     version = "8"
     title = "Web service account executed a shell or interpreter"
@@ -350,7 +349,6 @@ class DownloaderFeedsInterpreter(Playbook):
     same host within MAX_GAP seconds (the shape of `curl URL | sh` typed into a shell or a script)."""
     id = "host.downloader_feeds_interpreter"
     # argv/text-identified programs and actions: findings only, never a complete negative
-    # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
     version = "2"
     title = "Downloader and stdin interpreter launched together by the same parent"
@@ -483,7 +481,6 @@ class DownloadPipedToShell(Playbook):
 class PtyUpgrade(Playbook):
     id = "host.python_pty_spawn"
     # argv/text-identified programs and actions: findings only, never a complete negative
-    # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
     version = "2"
     title = "Python executed code that spawns a pseudo-terminal"
@@ -510,7 +507,6 @@ class PtyUpgrade(Playbook):
 class ExecFromTempDir(Playbook):
     id = "host.exec_from_temp_dir"
     # argv/text-identified programs and actions: findings only, never a complete negative
-    # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
     version = "2"
     title = "Program executed from a world-writable temporary directory"
@@ -612,7 +608,6 @@ class FirewallRuleChange(Playbook):
     other rule-change commands are grouped per host as routine context."""
     id = "host.firewall_rule_change_command"
     # argv/text-identified programs and actions: findings only, never a complete negative
-    # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
     version = "3"
     title = "Firewall command blocking or unblocking a specific address"
@@ -681,7 +676,6 @@ class CredentialStoreRead(Playbook):
     id = "host.credential_store_read"
     anchor_class = "credential_access"
     # argv/text-identified programs and actions: findings only, never a complete negative
-    # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
     version = "2"
     title = "Local password hash file read by a file-reading tool"
@@ -764,7 +758,6 @@ class SshLoginFromExternal(Playbook):
     id = "host.ssh_login_external_source"
     anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
-    # (owner decision 2026-10-19; kernel-record negatives are M3)
     assures_negative = False
     version = "3"
     title = "Successful SSH login from a non-private source address"

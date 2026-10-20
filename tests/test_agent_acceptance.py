@@ -1,4 +1,4 @@
-"""End-to-end acceptance coverage for the M1 investigator."""
+"""End-to-end acceptance coverage for the investigator."""
 import json
 from datetime import UTC, datetime, timedelta
 

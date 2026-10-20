@@ -195,7 +195,7 @@ class DnsSubdomainEnumeration(_Grouped):
 
 
 class ToolUserAgentHttp(_Grouped):
-    """Positive-only (ADR-004): the user agent is self-reported, attacker-controlled text, so its absence
+    """Positive-only: the user agent is self-reported, attacker-controlled text, so its absence
     proves nothing; the prefix list also cannot see tools whose agent string does not start with the name."""
     id = "net.tool_user_agent_http"
     version = "2"

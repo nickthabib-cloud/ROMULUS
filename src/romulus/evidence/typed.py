@@ -71,8 +71,8 @@ class TypedEvent(BaseModel):
 
 # A typed event is one normalization's view of raw records, and the store keeps one row per event id. The id
 # therefore carries the evidence version: a hunt run with improved normalization stores its own rows instead of
-# silently reusing an older hunt's (eval run 10: stale rows without process.session_id hid every login-session
-# link). Bump on any change to how raw records become typed events; tests/test_evidence_version.py enforces it.
+# silently reusing an older hunt's (stale rows missing a newly normalized field, such as process.session_id,
+# would hide every link that depends on it). Bump on any change to how raw records become typed events; tests/test_evidence_version.py enforces it.
 EVIDENCE_VERSION = 3
 
 

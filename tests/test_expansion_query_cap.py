@@ -1,4 +1,4 @@
-"""The per-fetch query cap is hard (review I-2): sampling a capped leaf never spends past it."""
+"""The per-fetch query cap is hard: sampling a capped leaf never spends past it."""
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 

@@ -173,7 +173,7 @@ class ExpansionEngine:
             if candidate["id"] in existing:
                 continue
             # A context finding is already the product of a link from an anchor; expanding it again would
-            # refetch the same session or lineage at depth + 1 and drain the reserve (review minor).
+            # refetch the same session or lineage at depth + 1 and drain the reserve.
             if rule_kind(candidate["rule_id"]) == "context":
                 continue
             parent = candidate.get("source_anchor_id")

@@ -1,4 +1,4 @@
-"""Network anchors and their victim host (review B-1): an address is never used as a host name, an endpoint is
+"""Network anchors and their victim host: an address is never used as a host name, an endpoint is
 resolved to one host from typed host records or the host-side links say why not, and the flow's host side is
 found by the endpoint itself when no host identity exists."""
 from datetime import UTC, datetime, timedelta
@@ -210,7 +210,7 @@ def test_without_a_host_ip_field_no_query_is_spent():
     assert host is None and "no host source has a searchable host.ip" in reason and executor.source_queries == 0
 
 
-# ---- review minors: flow strength by distance, honest forward windows, no context-anchor cascade,
+# ---- flow strength by distance, honest forward windows, no context-anchor cascade,
 #      partial anchors after an exception
 def _fetcher(repo, events=()):
     return LinkFetcher(PredicateExecutor(repo, list(events), contracts()), WINDOW.start, WINDOW.end)
@@ -290,7 +290,7 @@ def test_a_host_target_without_ip_fields_leaves_the_ip_link_unresolved_not_silen
     assert any("IP predicate unavailable" in reason for cell in result.coverage for reason in cell.reasons)
 
 
-# ---- review round 3: host resolution belongs to its hunt; transient lookups are retried; endpoints listed
+# ---- host resolution belongs to its hunt; transient lookups are retried; endpoints listed
 
 def _second_hunt(repo, hunt_id="h2"):
     repo.create_hunt(hunt_id, {"window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},

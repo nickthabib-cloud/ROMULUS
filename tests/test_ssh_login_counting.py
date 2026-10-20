@@ -1,4 +1,4 @@
-"""One SSH login is one login (eval run 9): the journal "Accepted" line, the audit USER_LOGIN record and the
+"""One SSH login is one login: the journal "Accepted" line, the audit USER_LOGIN record and the
 PAM USER_START session opening describe the same login; the rule reports logins, not records."""
 from datetime import UTC, datetime, timedelta
 

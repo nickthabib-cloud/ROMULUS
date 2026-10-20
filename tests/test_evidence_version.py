@@ -1,4 +1,4 @@
-"""Normalization changes must change the evidence version (eval run 10).
+"""Normalization changes must change the evidence version.
 
 Typed events are stored once per event id. When normalization improved without a version change, a new hunt
 silently reused an older hunt's rows (no `process.session_id`), and every login-session link went unsupported.
@@ -19,7 +19,7 @@ from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
 EVIDENCE_FILES = ("__init__.py", "auditd.py", "normalize.py", "typed.py")
-PINNED_EVIDENCE = {3: "9991c6349c7382264490fc13f937404d53a2048d718e890ee93c2d7479a01718"}
+PINNED_EVIDENCE = {3: "558886b23bb8bc1c311f676511a801253907f06ed3ffdff71f825d8a5767006c"}
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events.
 PACKET_FUNCTIONS = (packet_stage._body_event, packet_rules.analyze_body, packet_rules._text, packet_rules._shebang,
                     packet_sources.decode_hex_body)

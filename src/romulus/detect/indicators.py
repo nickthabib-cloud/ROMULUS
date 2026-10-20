@@ -1,4 +1,4 @@
-"""Indicator lists matched by field role (owner direction 2026-10-19).
+"""Indicator lists matched by field role.
 
 Names, addresses, domains and fingerprints are useful indicators only when they are matched in the field that
 gives them meaning. Each match is worded by its role:

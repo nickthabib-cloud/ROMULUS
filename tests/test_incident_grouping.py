@@ -1,4 +1,4 @@
-"""Grouping findings are leaves in the incident graph (review I-3): an aggregate that cites events of two
+"""Grouping findings are leaves in the incident graph: an aggregate that cites events of two
 unrelated processes must not merge the anchors that reached them."""
 from romulus.report.incidents import build_incident_graph
 

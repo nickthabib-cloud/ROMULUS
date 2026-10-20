@@ -470,7 +470,7 @@ class LinkFetcher:
             for group in intent.any_of for predicate in group
         )]
         # A planned intent without an IP predicate is refused, never run as a dataset scan; the dataset it
-        # would have covered is unresolved for this address, not silently absent (review minor).
+        # would have covered is unresolved for this address, not silently absent.
         planning_coverage = list(planning_coverage)
         covered = {(cell.target, cell.dataset) for cell in planning_coverage}
         for intent in all_intents:

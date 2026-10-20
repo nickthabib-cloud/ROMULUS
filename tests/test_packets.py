@@ -880,7 +880,7 @@ def test_the_sweep_pack_has_neither_packet_nor_context_rules():
 
 
 def test_packet_raw_copies_and_events_carry_the_packet_normalizer_version():
-    """A stored raw copy from an older packet format must never share an id with a new one (review A)."""
+    """A stored raw copy from an older packet format must never share an id with a new one."""
     row = _row(50000, T0.timestamp())
     sess = _session("241118-SESS00000000", 50000)
     ev, _raw = hp._body_event(row, hp._addresses(row), T0, sess, TARGET)

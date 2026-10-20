@@ -42,7 +42,7 @@ class Settings(BaseModel):
     web_tls_key: str = ""
     secret_key: SecretStr = SecretStr("")
 
-    # The model is optional (ADR-006): with no endpoint configured, model features are off.
+    # The model is optional: with no endpoint configured, model features are off.
     ollama_url: str = ""
     ollama_model_triage: str = ""
     ollama_model_synthesis: str = ""
@@ -72,7 +72,7 @@ class Settings(BaseModel):
     tshark_bin: str = "tshark"
     mission_timezone: str = "UTC"
     allow_privileged_source_account: bool = False
-    # deterministic search is the default (owner direction 2026-10-19, ADR-006); the model is opt-in per hunt
+    # deterministic search is the default; the model is opt-in per hunt
     agent_mode: Literal["model", "deterministic", "off"] = "off"
 
     @field_validator("es_index_patterns", "pcap_allowed_dirs", mode="before")

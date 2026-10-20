@@ -1,4 +1,4 @@
-"""SQLAlchemy Core table definitions for the M1 slice (versioned via Alembic)."""
+"""SQLAlchemy Core table definitions (versioned via Alembic)."""
 from __future__ import annotations
 
 from sqlalchemy import (

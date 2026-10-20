@@ -1,4 +1,4 @@
-"""Strict source-neutral argument schemas for the M1 investigator tools."""
+"""Strict source-neutral argument schemas for the investigator tools."""
 from __future__ import annotations
 
 from datetime import datetime

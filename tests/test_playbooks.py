@@ -1,4 +1,4 @@
-"""Positive and adversarial-negative fixtures for every M1 playbook. Addresses are documentation ranges."""
+"""Positive and adversarial-negative fixtures for every sweep playbook. Addresses are documentation ranges."""
 from datetime import UTC, datetime, timedelta
 
 import pytest

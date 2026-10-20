@@ -344,7 +344,7 @@ def normalize_journal(hit: dict) -> TypedEvent:
             return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
                               host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION)
         raise Skip("sudo message not a command record")
-    raise Skip(f"journal identifier {ident!r} not normalized in M1")
+    raise Skip(f"journal identifier {ident!r} is not normalized")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -398,7 +398,7 @@ def normalize_suricata(hit: dict) -> TypedEvent:
     family = {"alert": "net_alert", "flow": "net_flow", "netflow": "net_flow", "dns": "dns_query",
               "http": "http_tx", "fileinfo": "file_transfer", "tls": "tls_session", "ssh": "ssh_session"}.get(et)
     if family is None:
-        raise Skip(f"suricata event_type {et!r} not normalized in M1")
+        raise Skip(f"suricata event_type {et!r} is not normalized")
     if et == "alert":
         a = eve.get("alert", {})
         for k in ("signature", "signature_id", "category", "severity", "action"):
@@ -514,7 +514,7 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
             elif ds in SINGLE:
                 events.append(SINGLE[ds](h))
             else:
-                skips[f"dataset:{ds} not normalized in M1"] += 1
+                skips[f"dataset:{ds} is not normalized"] += 1
         except Skip as s:
             skips[s.reason] += 1
         except (ValueError, KeyError, TypeError, AttributeError) as e:   # malformed telemetry: an error, never a crash

