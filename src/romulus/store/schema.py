@@ -157,9 +157,54 @@ candidate = Table(
     Column("benign_alternatives", JSON, nullable=False),
     Column("next_checks", JSON, nullable=False),
     Column("source_case_id", String),
+    Column("source_anchor_id", String),
+    Column("source_link_id", String),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 Index("ix_candidate_hunt_lane", candidate.c.hunt_id, candidate.c.lane, candidate.c.priority)
+
+expansion_anchor = Table(
+    "expansion_anchor", metadata,
+    Column("id", String, primary_key=True),              # the anchored candidate id
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("candidate_id", String, ForeignKey("candidate.id"), nullable=False),
+    Column("depth", Integer, nullable=False),
+    Column("parent_anchor_id", String),
+    Column("host", String),
+    Column("lane", String, nullable=False),
+    Column("severity", String, nullable=False),
+    Column("ts", DateTime(timezone=True), nullable=False),
+    Column("status", String, nullable=False),            # pending | expanded_complete | expanded_partial | unexpanded
+    Column("reasons", JSON, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("hunt_id", "candidate_id", name="uq_expansion_anchor_candidate"),
+)
+Index("ix_expansion_anchor_hunt_status", expansion_anchor.c.hunt_id, expansion_anchor.c.status)
+
+expansion_link = Table(
+    "expansion_link", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("anchor_id", String, ForeignKey("expansion_anchor.id"), nullable=False),
+    Column("link_type", String, nullable=False),
+    Column("window_label", String, nullable=False),
+    Column("window_start", DateTime(timezone=True), nullable=False),
+    Column("window_end", DateTime(timezone=True), nullable=False),
+    Column("strength", String, nullable=False),
+    Column("key", JSON, nullable=False),
+    Column("status", String, nullable=False),
+    Column("event_ids", JSON, nullable=False),
+    Column("evidence_ids", JSON, nullable=False),
+    Column("task_ids", JSON, nullable=False),
+    Column("coverage", JSON, nullable=False),
+    Column("reasons", JSON, nullable=False),
+    Column("duration_ms", Integer, nullable=False),
+    Column("evaluated", Integer, nullable=False, default=0),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_expansion_link_anchor", expansion_link.c.anchor_id, expansion_link.c.link_type)
 
 disposition_event = Table(
     "disposition_event", metadata,

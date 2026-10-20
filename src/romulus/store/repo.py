@@ -126,7 +126,7 @@ class Repo:
             row = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             return dict(row)
 
-    FINISHED_STATES = {"completed_within_scope", "partial", "failed", "canceled"}
+    FINISHED_STATES: ClassVar[set[str]] = {"completed_within_scope", "partial", "failed", "canceled"}
 
     def delete_hunt(self, hunt_id: str, actor: str, now: datetime | None = None) -> dict[str, int]:
         """Permanently delete one hunt and everything only it owns. Evidence that another hunt still
@@ -211,6 +211,8 @@ class Repo:
             c.execute(t.raw_record.update().where(t.raw_record.c.first_task_id.in_(task_ids))
                       .values(first_task_id=None))
             c.execute(t.hunt.update().where(t.hunt.c.parent_hunt_id == hunt_id).values(parent_hunt_id=None))
+            rm("expansion_links", t.expansion_link.delete().where(t.expansion_link.c.hunt_id == hunt_id))
+            rm("expansion_anchors", t.expansion_anchor.delete().where(t.expansion_anchor.c.hunt_id == hunt_id))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
             rm("candidates", t.candidate.delete().where(t.candidate.c.hunt_id == hunt_id))
             rm("case_steps", t.case_step.delete().where(t.case_step.c.case_id.in_(case_ids)))
@@ -384,6 +386,78 @@ class Repo:
         with self.engine.connect() as c:
             r = c.execute(select(t.candidate).where(t.candidate.c.id == cid)).mappings().first()
             return dict(r) if r else None
+
+    # ---- deterministic expansion -----------------------------------------------------------
+    def save_expansion_anchor(self, row: dict, *, owner_token: str | None = None) -> bool:
+        now = utcnow()
+        values = {**row, "created_at": now, "updated_at": now}
+        with write_txn(self.engine) as c:
+            self._fence_lease(c, row["hunt_id"], owner_token)
+            result = c.execute(insert(t.expansion_anchor).values(values).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            return bool(result.rowcount)
+
+    def update_expansion_anchor(self, anchor_id: str, status: str, reasons: list[str],
+                                *, owner_token: str | None = None) -> None:
+        with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.expansion_anchor.c.hunt_id).where(
+                t.expansion_anchor.c.id == anchor_id,
+            )).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
+            c.execute(t.expansion_anchor.update().where(t.expansion_anchor.c.id == anchor_id).values(
+                status=status, reasons=reasons, updated_at=utcnow(),
+            ))
+
+    def expansion_anchors(self, hunt_id: str) -> list[dict]:
+        q = (select(t.expansion_anchor).where(t.expansion_anchor.c.hunt_id == hunt_id)
+             .order_by(t.expansion_anchor.c.depth, t.expansion_anchor.c.ts, t.expansion_anchor.c.id))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(q).mappings()]
+
+    def save_expansion_link(self, row: dict, *, owner_token: str | None = None) -> bool:
+        now = utcnow()
+        values = {**row, "created_at": now, "updated_at": now}
+        with write_txn(self.engine) as c:
+            self._fence_lease(c, row["hunt_id"], owner_token)
+            result = c.execute(insert(t.expansion_link).values(values).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            return bool(result.rowcount)
+
+    def mark_expansion_link_evaluated(self, link_id: str, *, owner_token: str | None = None) -> None:
+        with write_txn(self.engine) as c:
+            hunt_id = c.execute(select(t.expansion_link.c.hunt_id).where(
+                t.expansion_link.c.id == link_id,
+            )).scalar_one()
+            self._fence_lease(c, hunt_id, owner_token)
+            c.execute(t.expansion_link.update().where(t.expansion_link.c.id == link_id).values(
+                evaluated=1, updated_at=utcnow(),
+            ))
+
+    def expansion_link(self, link_id: str) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.expansion_link).where(t.expansion_link.c.id == link_id)).mappings().first()
+            return dict(row) if row else None
+
+    def expansion_link_for(self, anchor_id: str, link_type: str, label: str,
+                           start: datetime, end: datetime) -> dict | None:
+        q = select(t.expansion_link).where(
+            t.expansion_link.c.anchor_id == anchor_id,
+            t.expansion_link.c.link_type == link_type,
+            t.expansion_link.c.window_label == label,
+            t.expansion_link.c.window_start == start,
+            t.expansion_link.c.window_end == end,
+        )
+        with self.engine.connect() as c:
+            row = c.execute(q).mappings().first()
+            return dict(row) if row else None
+
+    def expansion_links(self, hunt_id: str) -> list[dict]:
+        q = (select(t.expansion_link).where(t.expansion_link.c.hunt_id == hunt_id)
+             .order_by(t.expansion_link.c.created_at, t.expansion_link.c.id))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(q).mappings()]
 
     def add_disposition(self, cid: str, actor: str, status: str, note: str | None):
         with write_txn(self.engine) as c:

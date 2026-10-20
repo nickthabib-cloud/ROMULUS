@@ -6,6 +6,8 @@ from datetime import datetime
 
 from romulus.agent.controller import Investigator
 from romulus.config import Settings
+from romulus.hunt.expansion import ExpansionEngine
+from romulus.hunt.links import LinkFetcher
 from romulus.hunt.manifest import build_manifest, new_hunt_id
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.stage import clear_stale_stages
@@ -13,7 +15,7 @@ from romulus.hunt.sweep import Sweep
 from romulus.sources.es import ElasticClient
 from romulus.sources.models import Window
 from romulus.sources.profile import build_profile
-from romulus.store.db import digest, make_engine, migrate
+from romulus.store.db import digest, make_engine, migrate, utcnow
 from romulus.store.repo import Repo
 
 log = logging.getLogger("romulus.hunt")
@@ -31,7 +33,7 @@ def open_repo(s: Settings) -> Repo:
 
 
 def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, style: str = "broad",
-                hypothesis: str = "", original_input: dict | None = None) -> str:
+                hypothesis: str = "", original_input: dict | None = None, expand: bool = True) -> str:
     repo = open_repo(s)
     window = Window(start=start, end=end)
     client = ElasticClient(s)
@@ -50,6 +52,7 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
             targets.append(target)
     manifest = build_manifest(s, window, original_input or {"start": start.isoformat(), "end": end.isoformat()},
                               style, targets, profiles, hypothesis)
+    manifest["expansion"] = {"enabled": expand, "max_depth": 3, "max_source_queries": 180}
     hid = new_hunt_id()
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
     for p in profiles.values():
@@ -83,12 +86,13 @@ def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
 
 def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
             *, stats: dict | None = None, partial_reasons: list[str] | None = None,
-            owner_token: str | None = None) -> dict:
+            expansion_summary: dict | None = None, owner_token: str | None = None) -> dict:
     partial_reasons = partial_reasons or list(sweep_summary.get("partial_reasons") or [])
     sweep_complete = bool(sweep_summary.get("complete"))
     missing_summary = not sweep_summary
     agent_status = agent_summary.get("status")
-    partial = missing_summary or not sweep_complete or agent_status == "unavailable"
+    partial = (missing_summary or not sweep_complete or agent_status == "unavailable"
+               or (expansion_summary or {}).get("status") == "partial")
     counts, result = _detection_result(repo, hunt_id)
     reasons = partial_reasons[:10]
     if missing_summary:
@@ -99,6 +103,8 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         reasons.append("sweep coverage partial")
     if agent_summary.get("stop_reason"):
         reasons.append(f"agent: {agent_summary['stop_reason']}")
+    if expansion_summary and expansion_summary.get("stop_reason"):
+        reasons.append(f"expansion: {expansion_summary['stop_reason']}")
     repo.audit(
         "system", "hunt.agent_summary", hunt_id, agent_summary, owner_token=owner_token,
     )
@@ -115,7 +121,37 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         "detection_result": result,
         "partial_reasons": partial_reasons,
         "agent": agent_summary,
+        "expansion": expansion_summary or {},
     }
+
+
+def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, contracts: dict,
+                   window: Window, owner_token: str) -> dict:
+    manifest = hunt["manifest"]
+    config = manifest.get("expansion") or {}
+    if config.get("enabled", True) is False:
+        summary = {"status": "disabled", "stop_reason": "disabled by --no-expand", "unexpanded": []}
+        repo.audit("system", "hunt.expansion_summary", hunt["id"], summary, owner_token=owner_token)
+        return summary
+
+    def heartbeat():
+        repo.heartbeat_hunt(hunt["id"], _lease_seconds(s), owner_token=owner_token)
+
+    executor = PivotExecutor(
+        repo, client, hunt["id"], contracts, heartbeat=heartbeat, owner_token=owner_token,
+    )
+    budget_seconds = float((manifest.get("budgets") or {}).get("wall_clock_minutes", 120)) * 60
+    started_at = hunt.get("started_at")
+    if started_at is not None:
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=utcnow().tzinfo)
+        budget_seconds = max(0.0, budget_seconds - (utcnow() - started_at).total_seconds())
+    return ExpansionEngine(
+        repo, hunt["id"], window, LinkFetcher(executor, window.start, window.end),
+        max_depth=int(config.get("max_depth", 3)),
+        max_source_queries=int(config.get("max_source_queries", 180)),
+        wall_clock_seconds=budget_seconds, owner_token=owner_token, heartbeat=heartbeat,
+    ).run()
 
 
 def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str,
@@ -135,11 +171,14 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
 
 
 def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=None,
-             agent_mode: str | None = None) -> dict:
+             agent_mode: str | None = None, expand: bool | None = None) -> dict:
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
         raise KeyError(hunt_id)
+    initial_manifest = hunt["manifest"]
+    if expand is not None and bool((initial_manifest.get("expansion") or {}).get("enabled", True)) != expand:
+        raise ValueError("expansion mode is immutable after hunt creation")
     claimed = repo.claim_hunt(hunt_id, _lease_seconds(s))
     owner_token = claimed["lease_owner"]
     h = repo.get_hunt(hunt_id)
@@ -190,6 +229,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     repo.audit(
         "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,
     )
+    expansion_summary = _run_expansion(s, repo, client, repo.get_hunt(hunt_id), contracts, window, owner_token)
     agent_summary = {
         "status": "disabled", "mode": "off", "partial": False,
         "stop_reason": "investigator disabled (agent mode off)",
@@ -209,7 +249,8 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
             }
     return _finish(
         repo, hunt_id, agent_summary, sweep_summary,
-        stats=sweep.stats, partial_reasons=sweep.partial_reasons, owner_token=owner_token,
+        stats=sweep.stats, partial_reasons=sweep.partial_reasons,
+        expansion_summary=expansion_summary, owner_token=owner_token,
     )
 
 
@@ -249,6 +290,7 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dic
             hunt_id, "failed", owner_token=owner_token, stop_reason=stop_reason,
         )
         raise
+    expansion_summary = _run_expansion(s, repo, client, hunt, contracts, window, owner_token)
     agent_summary = {
         "status": "disabled", "mode": "off", "partial": False,
         "stop_reason": "investigator disabled (agent mode off)",
@@ -267,5 +309,6 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dic
                 "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
             }
     return _finish(
-        repo, hunt_id, agent_summary, sweep_summary, owner_token=owner_token,
+        repo, hunt_id, agent_summary, sweep_summary,
+        expansion_summary=expansion_summary, owner_token=owner_token,
     )

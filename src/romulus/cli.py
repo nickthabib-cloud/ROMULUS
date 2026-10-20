@@ -59,7 +59,8 @@ def cmd_hunt(args) -> int:
         try:
             hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style,
                               hypothesis=args.hypothesis or "",
-                              original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone})
+                              original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone},
+                              expand=not args.no_expand)
         except ValueError as e:
             print(f"hunt not created: {e}", file=sys.stderr)
             return EXIT_FAIL
@@ -68,7 +69,7 @@ def cmd_hunt(args) -> int:
         def show(c):
             if c["lane"] in ("urgent", "high"):
                 print(f"  [{c['lane'].upper():6}] {c['rule_id']}: {c['claim'][:180]}", flush=True)
-        res = run_hunt(s, hid, agent_mode=agent_mode, on_candidate=show)
+        res = run_hunt(s, hid, agent_mode=agent_mode, on_candidate=show, expand=not args.no_expand)
         print(json.dumps(res, indent=2, default=str) if args.json else
               f"done: {res['execution_state']} {res['detection_result']} lanes={res['lanes']} "
               f"stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }")
@@ -239,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     hp.add_argument("--no-agent", action="store_true", help="deterministic sweep only (model-off)")
     hp.add_argument("--agent-mode", choices=["model", "deterministic", "off"],
                     help="investigator mode (default: AGENT_MODE or off)")
+    hp.add_argument("--no-expand", action="store_true", help=argparse.SUPPRESS)
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])
