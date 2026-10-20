@@ -195,15 +195,18 @@ def _units(sessions: list[dict]) -> list[tuple[bool, list[dict]]]:
     return out
 
 
-def _answered_by_arkime(segs: list[dict]) -> bool:
-    """Arkime's own record of a reply: a parsed HTTP status code, or bytes from the server, on any segment."""
+def _unanswered_per_arkime(segs: list[dict]) -> bool:
+    """True only when Arkime's own record shows nobody answered: on every segment, no parsed HTTP status code and
+    a server byte count that is present and zero. A missing field (another schema, older field names) is not
+    evidence of silence."""
+    if not segs:
+        return False
     for seg in segs:
         src = seg["_source"]
-        if (src.get("http") or {}).get("statuscode"):
-            return True
-        if ((src.get("server") or {}).get("bytes") or 0) > 0:
-            return True
-    return False
+        server_bytes = (src.get("server") or {}).get("bytes")
+        if (src.get("http") or {}).get("statuscode") or not isinstance(server_bytes, int) or server_bytes != 0:
+            return False
+    return True
 
 
 def _body_event(row: dict, addrs: tuple, ts: datetime, session: dict, index: str) -> tuple[TypedEvent, dict]:
@@ -290,7 +293,7 @@ class _Target:
             self._batch(n, docs, merged)
         silent = self.fetched - self.responded
         asked = silent & self.requested
-        unanswered = {k for k in asked if not _answered_by_arkime(self.docs.get(k, []))}
+        unanswered = {k for k in asked if _unanswered_per_arkime(self.docs.get(k, []))}
         self.c["fetched_sessions"] = len(self.fetched)
         self.c["sessions_with_responses"] = len(self.responded)
         self.c["sessions_request_only"] = len(unanswered)
@@ -325,12 +328,16 @@ class _Target:
         parts, total, capped = [], 0, False
         try:
             for i, seg in enumerate(batch):
-                fetched = self.packets.fetch([seg["_id"]], self.work / f"batch-{n}-seg{i}.pcap")
+                if total >= budget:                      # segments left unfetched: the session is cut short
+                    capped = True
+                    break
+                fetched = self.packets.fetch([seg["_id"]], self.work / f"batch-{n}-seg{i}.pcap",
+                                             max_bytes=budget - total)
                 if fetched.error or fetched.path is None:
                     return None, False, fetched.error or "no packets"
                 parts.append(fetched.path)
                 total += fetched.bytes
-                if fetched.capped or total >= budget:
+                if fetched.capped:
                     capped = True
                     break
             error = merge_captures(self.s, parts, pcap, [self.work])

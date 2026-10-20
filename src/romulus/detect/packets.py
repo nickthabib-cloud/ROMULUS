@@ -74,8 +74,8 @@ DOCUMENT_TYPE_PREFIXES = ("text/markdown", "text/html", "text/css", "text/csv", 
 MEDIA_TYPE_PREFIXES = ("application/pdf", "image/", "audio/", "video/")
 COMPRESSION_EXTENSIONS = {"gz", "tgz", "z", "zip", "bz2", "xz", "br", "zst"}
 COMPRESSION_ENCODINGS = {"gzip", "x-gzip", "deflate", "br", "compress", "x-compress", "zstd"}
-# What a pipe may hand text to and have it run.
-PIPE_RUNNERS = INTERPRETERS | {"exec", "eval", "source", "busybox", "xargs"}
+# What a pipe may hand text to and have it run (or installed, for crontab and at).
+PIPE_RUNNERS = INTERPRETERS | {"exec", "eval", "source", "busybox", "xargs", "crontab", "at", "batch"}
 # Commands that put a file in place to run; a bare path invoked after one of these is a dropper's last step.
 STAGING_COMMANDS = {"curl", "wget", "chmod", "certutil", "bitsadmin", "iwr", "invoke-webrequest", "base64", "xxd",
                     "cp", "mv", "tftp", "scp"}
@@ -175,14 +175,13 @@ def analyze_body(body: bytes) -> BodyInfo:
         elif not token:
             return BodyInfo("text")
         elif token.startswith(("./", "/")) and len(token) > 2:
-            # a bare path runs a program only in context: run from the working or a staging directory, with an
-            # option or backgrounded, or after a fetch, chmod or copy (a list of paths, `find` output or a path
-            # with a description is not a script)
+            # a bare path runs a program only in context: with an option or backgrounded, or after a fetch,
+            # chmod, copy or a write to a staging directory (a list of paths, `find` output, a list of temp files
+            # or a path with a description is not a script)
             commands.append(f"path:{name}")
             invoked.add(name)
             args = ln.split()[1:]
-            runs = (token.startswith("./") or token.startswith(STAGING_DIRS) or staged
-                    or any(a.startswith("-") or a == "&" for a in args))
+            runs = staged or any(a.startswith("-") or a == "&" for a in args)
             if runs and _suffix(name) not in DOCUMENT_EXTENSIONS:
                 executes = True
         elif name in KNOWN_COMMANDS:
@@ -195,7 +194,7 @@ def analyze_body(body: bytes) -> BodyInfo:
         for seg in _PIPE.split(bare)[1:]:
             t = _TOKEN.match(seg.strip())
             prog = basename(t.group(0)).lower() if t else ""
-            if prog in PIPE_RUNNERS or prog in EXECUTION_COMMANDS:     # e.g. `| sh`, `| exec ...`, `| crontab -`
+            if prog in PIPE_RUNNERS:                                 # e.g. `| sh`, `| exec ...`, `| crontab -`
                 piped.append(prog)
                 executes = True
         for target in _REDIRECT.findall(bare):
