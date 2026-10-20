@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
+from typing import Callable
 
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult, PivotTimeRange
 from romulus.agent.tools import (
@@ -41,6 +43,19 @@ _ISO_NANOS = re.compile(
     r"^(?P<base>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,9}))?"
     r"(?P<zone>Z|[+-]\d{2}:\d{2})$"
 )
+
+
+@dataclass
+class PivotEventBatch:
+    """Typed source results for a deterministic link fetch, before playbook evaluation."""
+
+    status: str
+    task_ids: list[str]
+    events: list[TypedEvent]
+    raw_sources: dict[str, dict]
+    coverage: list[PivotCoverage]
+    reasons: list[str]
+    duration_ms: int
 
 
 def _is_network(target: str, contract: FieldContract | None = None) -> bool:
@@ -413,6 +428,102 @@ class PivotExecutor:
                 )]
             leaves.append((current, outcome, covered_ranges, unresolved_ranges))
         return leaves
+
+    def fetch_intents(
+        self,
+        owner: str,
+        fetch_key: str,
+        intents: list[SearchIntent],
+        retain: Callable[[TypedEvent], bool],
+        *,
+        anchor_ts: datetime | None = None,
+    ) -> PivotEventBatch:
+        """Execute deterministic typed link intents without evaluating any playbook."""
+        started = perf_counter()
+        task_ids: list[str] = []
+        retained: dict[str, TypedEvent] = {}
+        raw_sources: dict[str, dict] = {}
+        coverage: list[PivotCoverage] = []
+        reasons: list[str] = []
+        successful = 0
+        incomplete = False
+        for intent in intents:
+            fingerprint = digest({"fetch_key": fetch_key, "intent": intent.model_dump(mode="json")})
+            task_id = "t-" + fingerprint[:20]
+            task_ids.append(task_id)
+            self.repo.upsert_task(
+                task_id, self.hunt_id, "expansion_link", owner,
+                intent.model_dump(mode="json"), fingerprint, owner_token=self.owner_token,
+            )
+            self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
+            task_coverage: list[PivotCoverage] = []
+            task_reasons: list[str] = []
+            task_error = None
+            task_successes = 0
+            for leaf_intent, outcome, covered_ranges, unresolved_ranges in self._execute_partitions(
+                    intent, self.contracts[intent.target], anchor_ts):
+                leaf_reasons = list(outcome.reasons)
+                selected: list[TypedEvent] = []
+                if outcome.completeness == Completeness.failed:
+                    task_error = task_error or outcome.error
+                    leaf_reasons.extend(outcome.reasons or [outcome.error or "source execution failed"])
+                    status = "failed"
+                else:
+                    successful += 1
+                    task_successes += 1
+                    events, _skips, errors = normalize_hits(outcome.records)
+                    if errors:
+                        leaf_reasons.append(f"normalization_errors:{len(errors)}")
+                        covered_ranges = []
+                        unresolved_ranges = [_range(
+                            leaf_intent.window.start, leaf_intent.window.end,
+                            f"normalization_errors:{len(errors)}",
+                        )]
+                    selected = [event for event in events if retain(event)]
+                    sources = {
+                        f"{record['_index']}/{record['_id']}": record["_source"]
+                        for record in outcome.records
+                    }
+                    raw_sources.update(sources)
+                    self.repo.save_evidence(
+                        self.hunt_id, selected, sources, task_id, owner_token=self.owner_token,
+                    )
+                    retained.update({event.id: event for event in selected})
+                    status = "complete" if outcome.completeness == Completeness.complete and not errors else "partial"
+                incomplete |= status != "complete"
+                reasons.extend(leaf_reasons)
+                task_reasons.extend(leaf_reasons)
+                task_coverage.append(PivotCoverage(
+                    target=intent.target, dataset=self._intent_dataset(intent),
+                    start=leaf_intent.window.start.astimezone(UTC),
+                    end=leaf_intent.window.end.astimezone(UTC), status=status,
+                    reasons=sorted(set(leaf_reasons)), returned=outcome.returned, total=outcome.total,
+                    covered_ranges=covered_ranges, unresolved_ranges=unresolved_ranges,
+                ))
+            task_coverage = _coalesce_coverage(task_coverage)
+            coverage.extend(task_coverage)
+            outcome_digest = {
+                "completeness": "failed" if task_successes == 0 else (
+                    "partial" if any(cell.status != "complete" for cell in task_coverage) else "complete"
+                ),
+                "reasons": sorted(set(task_reasons)),
+                "coverage": [cell.model_dump(mode="json") for cell in task_coverage],
+                "event_ids": sorted(event.id for event in retained.values()),
+            }
+            if task_successes == 0:
+                self.repo.update_task(
+                    task_id, "failed", outcome=outcome_digest, error=task_error,
+                    owner_token=self.owner_token,
+                )
+            else:
+                self.repo.update_task(task_id, "evaluated", outcome=outcome_digest, owner_token=self.owner_token)
+        status = "failed" if successful == 0 else "partial" if incomplete else "complete"
+        return PivotEventBatch(
+            status=status, task_ids=task_ids,
+            events=sorted(retained.values(), key=lambda event: (event.ts, event.id)),
+            raw_sources=raw_sources, coverage=_coalesce_coverage(coverage),
+            reasons=sorted(set(reasons)), duration_ms=int((perf_counter() - started) * 1000),
+        )
 
     def _sample_terminal(self, intent: SearchIntent, initial: SearchOutcome,
                          contract: FieldContract, anchor_ts: datetime | None):
