@@ -30,7 +30,7 @@ Check an item only with **evidence**: a test, a results file, a commit or a demo
    - **`detection-engineer`:** rules and fixtures.
    - **`eval-custodian`:** scoring and datasets.
    - **`reviewer`:** gates.
-6. **Owner demo at the end of each milestone.**
+6. **No mandatory demos.** Milestones close on evidence (tests, scores, review); the owner looks when useful.
 
 ## Owner decisions log (2026-10-19)
 
@@ -38,6 +38,7 @@ Check an item only with **evidence**: a test, a results file, a commit or a demo
 - **ADR-006 answers:** expansion depth 3; shared budget; context findings capped at `high`; report-page narrative action later.
 - **Indicators:** a field-role indicator matcher instead of v1 substring search. v1 content is not kept as-is (15 ideas queued as `v1_ports`).
 - **Arkime:** read through its session indices (read-only grant done). The viewer API is used only for packets.
+- **Process:** no mandatory milestone demos.
 - **Deferred:**
   - f_a holdout download;
   - a different-storyline dataset (later);
@@ -49,7 +50,7 @@ Check an item only with **evidence**: a test, a results file, a commit or a demo
 
 ## M1: thin end-to-end slice. Accepted 2026-10-19
 
-ES adapter, typed normalizers, 15 playbooks, decide/lanes, model investigator v1, web UI, report manifest, VM deployment. Reviewer gate concluded (ADR-004, option B); owner demo on `h20261019-093029-32dfef`. Open carry-over: a uv lockfile, generated on the VM.
+ES adapter, typed normalizers, 15 playbooks, decide/lanes, model investigator v1, web UI, report manifest, VM deployment. Reviewer gate concluded (ADR-004, option B). Open carry-over: a uv lockfile, generated on the VM.
 
 ## M2: evaluation and network foundation. Closing
 
@@ -62,7 +63,6 @@ ES adapter, typed normalizers, 15 playbooks, decide/lanes, model investigator v1
 - [x] Field-role indicator matcher (`ioc.indicator_match`) with a seed tool-name list.
 - [x] Storage: a capped write-ahead log and `romulus db compact` (2.1 GB → 25 MB).
 - [x] Scores (run 8): recall 12/22 reported and 17/22 surfaced (critical+high 12/13), P@10 0.90, 5.28 false leads per hour, 148/148 citations.
-- [ ] Owner demo of the network findings: the C2 connect, the Meterpreter sessions, the cron beacon and LinPEAS.
 - [ ] Push `m2/evaluation` to GitHub (owner; Claude's push is blocked).
 - ~~Simple "standard searches" baseline~~ dropped by the owner (fixing gaps beats building a straw man).
 
