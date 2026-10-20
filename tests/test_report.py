@@ -541,3 +541,29 @@ def test_observed_link_to_existing_finding_event_merges_incident():
     assert graph["edges"][0]["style"] == "observed"
     assert len(graph["incidents"]) == 1
     assert graph["incidents"][0]["finding_ids"] == [anchor_id, "existing-sweep-finding"]
+
+
+def test_canonical_manifest_orders_context_reaches_and_coverage_states_by_content():
+    """Live run 10: two identical hunts differed only in the order of a context finding's reaches (sorted by
+    hunt-scoped link ids) and of the unresolved states in a coverage claim (cell insertion order)."""
+    def build(hunt_id, alpha_id, beta_id, alpha_link, beta_link):
+        repo = _repo_with_reversed_scoped_expansion(hunt_id, alpha_id, beta_id, alpha_link, beta_link)
+        _copy_candidate(repo, alpha_id, f"{hunt_id}-ctx")
+        reaches = sorted([
+            {"anchor_id": alpha_id, "link_id": alpha_link, "link_type": "process_lineage", "strength": "observed"},
+            {"anchor_id": beta_id, "link_id": beta_link, "link_type": "process_lineage", "strength": "observed"},
+        ], key=lambda reach: (reach["anchor_id"], reach["link_id"]))
+        with repo.engine.begin() as connection:
+            from romulus.store import schema as tables
+            connection.execute(tables.candidate.update().where(tables.candidate.c.id == f"{hunt_id}-ctx").values(
+                rule_id="context.post_access_discovery", group_key="ctx", claim="Context finding",
+                gate_results={"_context_reaches": reaches}))
+        states = {alpha_link: "match_on_partial", beta_link: "positive_only_partial"}
+        for link in sorted(states):                             # cells land in hunt-scoped link order
+            repo.set_rule_cell(hunt_id, "context.post_access_discovery", "1", f"expansion:{link}", "w",
+                               states[link], 0, 1, {})
+        return json.dumps(canonical_manifest(repo, hunt_id, "test"), sort_keys=True, separators=(",", ":"))
+
+    first = build("hunt-one", "z-alpha", "a-beta", "z-alpha-link", "a-beta-link")
+    second = build("hunt-two", "a-alpha", "z-beta", "a-alpha-link", "z-beta-link")
+    assert first == second

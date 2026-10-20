@@ -146,7 +146,8 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
             reasons.append(f"no evaluation recorded for target(s) {missing}")
         bad = {s: n for s, n in states.items() if s in UNRESOLVED_STATES}
         if bad:
-            reasons.append("partial, failed or unexecuted partitions " + ", ".join(f"{s}={n}" for s, n in bad.items()))
+            reasons.append("partial, failed or unexecuted partitions "
+                           + ", ".join(f"{s}={n}" for s, n in sorted(bad.items())))
         if not states:
             reasons.append("never evaluated")
         matched = any(s.startswith("match") for s in states)
@@ -535,6 +536,13 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
         "link_type": edge["link_type"], "style": edge["style"],
     } for edge in manifest["incident_graph"]["edges"]]
     canonical["findings"].sort(key=lambda finding: finding["id"])
+    for finding in canonical["findings"]:
+        gates = finding.get("gates") or {}
+        if gates.get("_context_reaches"):        # stored sorted by hunt-scoped link ids; re-sort by content
+            gates["_context_reaches"] = sorted(
+                gates["_context_reaches"],
+                key=lambda reach: json.dumps(reach, sort_keys=True, separators=(",", ":"), default=str),
+            )
     observed_at = {finding["id"]: finding["observed_at"] for finding in canonical["findings"]}
     graph["nodes"].sort(key=lambda node: node["id"])
     for link in graph["links"]:
