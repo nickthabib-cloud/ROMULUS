@@ -22,7 +22,7 @@ Outputs:
 - a technical Markdown/JSON report (an executive DOCX is planned)
 - a browser UI for analysts
 
-> **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 evaluation is closing and M3 (deterministic expansion) is in progress. Track A (the AI investigating agent) is accepted and not yet built. This is software under active development and is not yet validated for production missions. See [`docs/project/MILESTONES.md`](docs/project/MILESTONES.md) for the roadmap.
+> **Status:** Milestone 1 (thin end-to-end slice) is **accepted**. M2 evaluation is closing and M3 (deterministic expansion) is in progress. Track A (the AI investigating agent) is accepted and not yet built. This is software under active development and is not yet validated for production missions.
 
 ## Detection scope
 
@@ -83,7 +83,6 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 | `src/romulus/` | `config`, `store`, `sources`, `evidence`, `detect`, `decide`, `hunt`, `agent`, `report`, `web`, `cli` |
 | `tests/` | Unit, acceptance, hostile-input and regression tests |
 | `scripts/` | `deploy.ps1` (deploy to a Linux host over SSH), `web-restart.sh`, `archmap.py`, `smoke_live.py` |
-| `docs/project/` | Milestones and team process |
 | `docs/design/` | Design notes (deterministic expansion, network correlation, the investigating agent) |
 | `.env.example` | Configuration template. Copy it to `$ROMULUS_HOME/.env`, then `chmod 600` |
 
@@ -131,7 +130,7 @@ Install the dev dependencies (`pytest`, `respx`, `ruff`) first.
 
 ## Evaluation
 
-Detection changes are scored against public datasets with labelled ground truth (the harness is in `eval/`). Ground truth is kept out of the runtime and is read only by the evaluation role (set `ROMULUS_EVAL_ROOT` so `doctor` checks that no source path overlaps it). Results are reported with the status words (`implemented`, `locally tested`, `integration tested`, `lab evaluated`, `holdout evaluated`, `production validated`), never as general effectiveness claims.
+Detection changes are scored against public datasets with labelled ground truth, using an evaluation harness kept outside this repository. Ground truth is kept out of the runtime and is read only by the evaluation role (set `ROMULUS_EVAL_ROOT` so `doctor` checks that no source path overlaps it). Results are reported with the status words (`implemented`, `locally tested`, `integration tested`, `lab evaluated`, `holdout evaluated`, `production validated`), never as general effectiveness claims.
 
 ## History
 

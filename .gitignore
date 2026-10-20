@@ -9,8 +9,6 @@
 *.sqlite*
 
 # evaluation ground truth never enters the repo
-eval/gold/
-eval/holdout/
 **/attackmate*.json
 
 # data
@@ -43,3 +41,13 @@ Claude-Codex.md
 
 # agent worktrees (Claude Code)
 .claude/worktrees/
+
+# kept locally, never uploaded: the owner's spec, decision records, project management
+# (status, milestones, team, lab environment), evaluation records, and site-specific Claude setup
+ENGINEERING_MASTER_PROMPT.md
+docs/adr/
+docs/project/
+docs/eval/
+eval/
+tests/test_eval_*.py
+CLAUDE.local.md

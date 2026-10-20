@@ -4,10 +4,10 @@ Defensive, AI-assisted threat-hunting tool for Cyber Protection Team analysts. A
 
 ## Start here (every session)
 
-1. If present, read `docs/project/STATUS.md` → **Resume here**. That is the current state. (STATUS, the spec `ENGINEERING_MASTER_PROMPT.md`, the ADRs in `docs/adr/`, `docs/project/ENVIRONMENT.md` and `docs/eval/` are kept locally and are not in the repository.)
+1. If present, read `docs/project/STATUS.md` → **Resume here**. That is the current state. (`docs/project/` — status, milestones, team, environment — the spec `ENGINEERING_MASTER_PROMPT.md`, the ADRs in `docs/adr/`, the evaluation harness `eval/` with its tests, and `docs/eval/` are kept locally and are not in the repository.)
 2. The design principles below are non-negotiable; the spec's §1 has the full text where it is available.
-3. Team and process: `docs/project/TEAM.md`. Subagents are in `.claude/agents/`.
-4. Milestone checklists: `docs/project/MILESTONES.md`. Code map: `docs/architecture/ARCHITECTURE.md` and the generated `docs/architecture/MODULE_MAP.md`.
+3. Team and process: `docs/project/TEAM.md` (local). Subagents are in `.claude/agents/`.
+4. Milestone checklists: `docs/project/MILESTONES.md` (local). Code map: `docs/architecture/ARCHITECTURE.md` and the generated `docs/architecture/MODULE_MAP.md`.
 5. Site-specific setup (hosts, paths, model server, evaluation data) lives in a local, untracked `CLAUDE.local.md`, imported here when present:
 
 @CLAUDE.local.md

@@ -15,7 +15,7 @@ You are the evaluation custodian for ROMULUS. Your job is to measure, honestly, 
   - time position (early/middle/late)
 
   Resolve the AttackMate timezone against telemetry first, and record how you did it. Store inventories in the ground-truth folder, not in the repo.
-- **Harness code** in `eval/` (scoring scripts, metric definitions, baseline runner). The code may live in the repo; labels may not.
+- **Harness code** in the local `eval/` (scoring scripts, metric definitions, baseline runner; kept out of the repository with its `tests/test_eval_*.py`). Labels never enter the repository.
 - **Results** in the local `docs/eval/results/<date>-<dataset>-<run>.md`, aggregate only:
   - recall by severity, class, source, and time position, with denominators
   - the miss funnel by stage (source → queried → retrieved → normalized → evaluated → candidate → reported)

@@ -58,7 +58,7 @@ Coverage cells are written at every stage that can lose information (compile, ex
 | `cli` | Typer/argparse entry points | planned |
 | `worker` | Background hunt process | planned |
 
-Other top-level directories: `content/` (playbooks, rules, fixtures, vendored ATT&CK), `eval/` (harness code only; no labels), `tests/`, `scripts/`, `docs/`.
+Other top-level directories: `content/` (playbooks, rules, fixtures, vendored ATT&CK), `tests/`, `scripts/`, `docs/`.
 
 ## Dependency rules (enforced by `archmap.py --check`)
 
