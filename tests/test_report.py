@@ -322,3 +322,41 @@ def test_incident_graph_records_inferred_link_without_merging_incidents():
     assert r"host\_after\_anchor" in markdown and "inferred" in markdown
     assert "**Anchor accounting**" in markdown
     assert "**Seed accounting**" not in markdown
+
+
+def test_observed_link_to_existing_finding_event_merges_incident():
+    repo, anchor_id = _repo_with_finding()
+    linked_event = TypedEvent(
+        id="ev2", family="process_exec", ts=T + timedelta(seconds=1), host="web01",
+        outcome=Outcome.success,
+        fields={"process.argv": fv(["id"], "raw2:event.original")},
+        raw=[RawRef(target="idx", native_id="raw2", digest="def")], normalizer="t",
+    )
+    repo.save_evidence("h1", [linked_event], {"idx/raw2": {"message": "id"}}, None)
+    _copy_candidate(repo, anchor_id, "existing-sweep-finding")
+    with repo.engine.begin() as conn:
+        from romulus.store import schema as tables
+        conn.execute(tables.raw_record.update().where(tables.raw_record.c.native_id == "raw2").values(digest="def"))
+        conn.execute(tables.candidate.update().where(
+            tables.candidate.c.id == "existing-sweep-finding",
+        ).values(event_ids=["ev2"], source_anchor_id=None, source_link_id=None))
+    repo.save_expansion_anchor({
+        "id": anchor_id, "hunt_id": "h1", "candidate_id": anchor_id, "depth": 0,
+        "parent_anchor_id": None, "host": "web01", "lane": "high", "severity": "high", "ts": T,
+        "status": "expanded_complete", "reasons": [],
+    })
+    repo.save_expansion_link({
+        "id": "link-session", "hunt_id": "h1", "anchor_id": anchor_id,
+        "link_type": "login_session", "window_label": "anchor ±5 min",
+        "window_start": T - timedelta(minutes=5), "window_end": T + timedelta(minutes=5),
+        "strength": "observed", "key": {"process.session_id": 42},
+        "status": "complete", "event_ids": ["ev2"], "evidence_ids": ["ev2"], "task_ids": [],
+        "coverage": [], "reasons": [], "duration_ms": 1, "evaluated": 1,
+    })
+
+    graph = publish_revision(repo, "h1", "test")["incident_graph"]
+
+    assert graph["links"][0]["target_finding_ids"] == ["existing-sweep-finding"]
+    assert graph["edges"][0]["style"] == "observed"
+    assert len(graph["incidents"]) == 1
+    assert graph["incidents"][0]["finding_ids"] == [anchor_id, "existing-sweep-finding"]

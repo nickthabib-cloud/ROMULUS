@@ -47,14 +47,23 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
     nodes.extend(entity_nodes[key] for key in sorted(entity_nodes))
 
     children: dict[str, list[str]] = defaultdict(list)
+    findings_by_event: dict[str, set[str]] = defaultdict(set)
     for finding in findings:
         if finding.get("source_link_id"):
             children[finding["source_link_id"]].append(finding["id"])
+        cited = set(finding.get("event_ids") or [])
+        cited.update(citation["event_id"] for citation in finding.get("citations") or [])
+        for event_id in cited:
+            findings_by_event[event_id].add(finding["id"])
     links = []
     edges = []
     for row in sorted(repo.expansion_links(hunt_id), key=lambda item: (
             item["anchor_id"], item["link_type"], item["window_start"], item["id"])):
-        targets = sorted(children.get(row["id"], []))
+        targets = set(children.get(row["id"], []))
+        for event_id in row["event_ids"]:
+            targets.update(findings_by_event.get(event_id, ()))
+        targets.discard(row["anchor_id"])
+        targets = sorted(targets)
         links.append({
             "id": row["id"], "anchor_finding_id": row["anchor_id"],
             "target_finding_ids": targets, "link_type": row["link_type"],
