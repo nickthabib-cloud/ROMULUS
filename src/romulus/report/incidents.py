@@ -34,6 +34,70 @@ _TACTICS = {
 }
 
 
+def _title(rule_id: str) -> str:
+    return getattr(_PLAYBOOKS.get(rule_id), "title", None) or rule_id
+
+
+def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: list[dict]) -> list[dict]:
+    """A deterministic account of one incident, built from typed fields only (ADR-006 template narrative).
+    Each sentence carries its citations and a kind: `observed` (what the cited findings record), `mapping`
+    (rule metadata such as ATT&CK tactics), `hypothesis` (inferred links) or `gap` (what is not known)."""
+    members = incident["timeline"]
+    first, last = finding_by_id[members[0]], finding_by_id[members[-1]]
+    where = ", ".join(incident["hosts"]) or "no recorded host"
+    who = f" involving account(s) {', '.join(incident['accounts'])}" if incident["accounts"] else ""
+    sentences = [{
+        "text": (f"{len(members)} finding(s) on {where}{who}, from {first['observed_at']} to "
+                 f"{last['observed_at']}."),
+        "cites": list(members), "kind": "observed",
+    }]
+    entry = finding_by_id[incident["entry_point"]]
+    sentences.append({
+        "text": f"It begins with {_title(entry['rule_id'])} ({entry['lane']}) at {entry['observed_at']}.",
+        "cites": [entry["id"]], "kind": "observed",
+    })
+    member_set = set(members)
+    observed_into: dict[str, dict] = {}
+    for edge in sorted(edges, key=lambda e: (e["from"], e["to"], e["link_id"])):
+        if edge["style"] == "observed" and edge["from"] in member_set and edge["to"] in member_set:
+            observed_into.setdefault(edge["to"], edge)
+    for item in members:
+        if item == entry["id"]:
+            continue
+        finding = finding_by_id[item]
+        edge = observed_into.get(item)
+        how = (f", reached from {edge['from']} by an observed {edge['link_type'].replace('_', ' ')} link"
+               if edge else "")
+        sentences.append({
+            "text": f"Then {_title(finding['rule_id'])} ({finding['lane']}) at {finding['observed_at']}{how}.",
+            "cites": [item] + ([edge["from"]] if edge else []), "kind": "observed",
+        })
+    if incident["attack_tactics"]:
+        sentences.append({
+            "text": f"Rule mappings place these steps in ATT&CK tactic(s): {', '.join(incident['attack_tactics'])}.",
+            "cites": list(members), "kind": "mapping",
+        })
+    inferred = sorted({(e["from"], e["to"], e["link_type"]) for e in edges
+                       if e["style"] == "inferred" and e["from"] in member_set})
+    if inferred:
+        listed = "; ".join(f"{a} to {b} ({t.replace('_', ' ')})" for a, b, t in inferred[:8])
+        more = f" and {len(inferred) - 8} more" if len(inferred) > 8 else ""
+        sentences.append({
+            "text": (f"{len(inferred)} inferred link(s) from this incident remain hypotheses, not shown to be the "
+                     f"same actor: {listed}{more}."),
+            "cites": sorted({x for a, b, _t in inferred for x in (a, b)}), "kind": "hypothesis",
+        })
+    ends = incident["open_ends"]
+    gaps = (len(ends["unexpanded_anchors"]) + len(ends["pending_anchors"]), len(ends["unresolved_links"]))
+    if any(gaps):
+        sentences.append({
+            "text": (f"This account may be incomplete: {gaps[0]} anchor(s) were not expanded and {gaps[1]} link(s) "
+                     f"were not fully resolved."),
+            "cites": [], "kind": "gap",
+        })
+    return sentences
+
+
 def _entity_id(kind: str, value: str) -> str:
     return "E-" + digest({"kind": kind, "value": value})[:16]
 
@@ -139,7 +203,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
                    and anchor_by_id[item]["status"] == "pending"]
         unresolved = [{"link_id": link["id"], "status": link["status"], "reasons": link["reasons"]}
                       for link in incident_links if link["status"] != "complete"]
-        incidents.append({
+        incident = {
             "id": "I-" + digest(finding_ids)[:12], "finding_ids": finding_ids,
             "entity_node_ids": entity_ids, "timeline": finding_ids, "entry_point": entry_point,
             "attack_techniques": techniques, "attack_tactics": tactics,
@@ -151,6 +215,8 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
                                   for edge in edges),
             "open_ends": {"unexpanded_anchors": unexpanded, "pending_anchors": pending,
                           "unresolved_links": unresolved},
-        })
+        }
+        incident["narrative"] = incident_narrative(incident, finding_by_id, edges)
+        incidents.append(incident)
     incidents.sort(key=lambda incident: (finding_by_id[incident["finding_ids"][0]]["observed_at"], incident["id"]))
     return {"nodes": nodes, "edges": edges, "links": links, "incidents": incidents}

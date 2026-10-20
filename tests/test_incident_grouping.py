@@ -65,3 +65,29 @@ def test_inferred_edges_never_merge():
     links = [_link("L1", "A1", ["e1"], strength="inferred")]
     findings = [_finding("A1", ["a1"], second=1), _finding("T1", ["e1"], second=2)]
     assert _incidents(links, findings) == [("A1",), ("T1",)]
+
+
+def test_incident_narrative_is_templated_cited_and_labels_hypotheses_and_gaps():
+    links = [_link("L1", "A1", ["e1"]), _link("L2", "A1", ["e9"], strength="inferred")]
+    findings = [_finding("A1", ["a1"], rule="host.web_service_spawns_interpreter", second=1),
+                _finding("T1", ["e1"], rule="host.credential_store_read", second=2),
+                _finding("X9", ["e9"], second=3)]
+    graph = build_incident_graph(_Repo(links), "h", findings)
+    incident = next(i for i in graph["incidents"] if i["finding_ids"] == ["A1", "T1"])
+    sentences = incident["narrative"]
+    assert sentences[0]["text"].startswith("2 finding(s) on ") and sentences[0]["cites"] == ["A1", "T1"]
+    assert sentences[1]["text"].startswith("It begins with ") and sentences[1]["cites"] == ["A1"]
+    then = next(s for s in sentences if s["text"].startswith("Then "))
+    assert "reached from A1 by an observed process lineage link" in then["text"] and then["cites"] == ["T1", "A1"]
+    hypo = next(s for s in sentences if s["kind"] == "hypothesis")
+    assert "remain hypotheses" in hypo["text"] and "X9" in hypo["cites"]
+    assert all(s["kind"] in ("observed", "mapping", "hypothesis", "gap") for s in sentences)
+
+
+def test_markdown_renders_narratives_for_multi_finding_incidents():
+    from romulus.report.manifest import publish_revision
+    from romulus.report.markdown import render
+    from tests.test_report import _repo_with_reversed_scoped_expansion
+    repo = _repo_with_reversed_scoped_expansion("hunt-md", "a-alpha", "z-beta", "a-link", "z-link")
+    text = render(publish_revision(repo, "hunt-md", "test"))
+    assert "**Incident narratives**" in text

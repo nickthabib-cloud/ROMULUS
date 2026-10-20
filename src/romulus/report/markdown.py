@@ -123,6 +123,18 @@ def render(m: dict, banner: str = BANNER) -> str:
         )
     if not graph["incidents"]:
         out.append("| none | none | 0 | none | none | none | 0 | 0 |")
+    multi = [incident for incident in graph["incidents"] if len(incident["finding_ids"]) > 1]
+    out += ["", "**Incident narratives**", "",
+            ("Template narratives built from typed fields only. Inferred links are hypotheses; gaps say what is "
+             "not known."), ""]
+    for incident in multi:
+        out.append(f"- `{esc(incident['id'])}`")
+        for sentence in incident.get("narrative", []):
+            cites = " ".join(f"[{esc(c)}](#f-{c})" for c in sentence["cites"][:12])
+            tag = "" if sentence["kind"] == "observed" else f"*{esc(sentence['kind'])}:* "
+            out.append(f"  - {tag}{esc(sentence['text'])}" + (f" ({cites})" if cites else ""))
+    if not multi:
+        out.append("- No incident has more than one finding.")
     out += ["", "**Attack-path timelines**", ""]
     for incident in graph["incidents"]:
         timeline = " → ".join(f"[{esc(item)}](#f-{item})" for item in incident["timeline"])
