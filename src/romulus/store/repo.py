@@ -152,7 +152,8 @@ class Repo:
             # Events this hunt stored that ANY other hunt still uses: keep them and reassign ownership.
             # Event IDs are global and the first hunt to store an event owns the row, so other hunts
             # can depend on it through (a) their findings' event_ids, (b) their investigation steps'
-            # pivot digests, and (c) their own entity links (written by save_evidence per hunt).
+            # pivot digests, (c) their own entity links (written by save_evidence per hunt), and (d) their
+            # expansion links.
             mine = {r.id for r in c.execute(select(t.typed_event.c.id).where(t.typed_event.c.hunt_id == hunt_id))}
             cited_by: dict[str, str] = {}
             for cid_hunt, eids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)
@@ -183,6 +184,13 @@ class Repo:
                     .where(t.entity.c.hunt_id != hunt_id)):
                 if ev_id in mine:
                     cited_by.setdefault(ev_id, ent_hunt)
+            # (d) other hunts' expansion links cite events they reached and the evidence they rest on
+            for link_hunt, link_events, link_evidence in c.execute(
+                    select(t.expansion_link.c.hunt_id, t.expansion_link.c.event_ids, t.expansion_link.c.evidence_ids)
+                    .where(t.expansion_link.c.hunt_id != hunt_id)):
+                for eid in [*(link_events or []), *(link_evidence or [])]:
+                    if eid in mine:
+                        cited_by.setdefault(eid, link_hunt)
             for eid, owner in cited_by.items():
                 c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(hunt_id=owner))
             drop_events = mine - set(cited_by)

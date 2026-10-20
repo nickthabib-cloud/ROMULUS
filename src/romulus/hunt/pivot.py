@@ -706,6 +706,8 @@ class PivotExecutor:
                 "reasons": sorted(set(task_reasons)),
                 "coverage": [cell.model_dump(mode="json") for cell in task_coverage],
                 "event_ids": sorted(event.id for event in retained.values()),
+                # records the source returned for this task, so evaluation can count expansion's retrieval cost
+                "returned": sum(cell.returned or 0 for cell in task_coverage),
             }
             if task_successes == 0:
                 self.repo.update_task(

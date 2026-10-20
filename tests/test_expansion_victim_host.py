@@ -348,3 +348,10 @@ def test_endpoints_beyond_the_cap_are_listed_not_dropped_silently():
     base = LinkAnchor(finding_id="F-net", ts=T0, events=events)
     variants, dropped = engine._victim_variants("F-net", [base], events)
     assert len(variants) == MAX_ANCHOR_KEYS and len(dropped) == 2
+
+
+def test_no_host_lookup_is_spent_once_the_budget_is_used():
+    repo = network_anchor_repo()
+    executor = PredicateExecutor(repo, [], contracts(host_ip=True))
+    ExpansionEngine(repo, "h1", WINDOW, LinkFetcher(executor, WINDOW.start, WINDOW.end), max_source_queries=0).run()
+    assert executor.source_queries == 0
