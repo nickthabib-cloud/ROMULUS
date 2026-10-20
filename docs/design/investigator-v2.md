@@ -61,7 +61,7 @@ Constrained decoding makes unknown options or evidence aliases unrepresentable. 
 
 ## Context
 
-The brief is built from cards and a menu, not raw summaries, so it should fit within 8192 without the current shrink cascade. The replay baseline at 8192 vs. 16384 (custodian, in progress) decides whether to raise `OLLAMA_NUM_CTX`. qwen3:8b used about 6.2 GB of VRAM at 8192.
+The brief is built from cards and a menu, not raw summaries, so it should fit within 8192 without the current shrink cascade. The replay baseline at 8192 vs. 16384 (custodian, in progress) decides whether to raise `OLLAMA_NUM_CTX`.
 
 ## Measurement
 
