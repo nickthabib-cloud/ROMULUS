@@ -8,7 +8,7 @@ from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
 
-PACK_VERSION = "m2-pack@1"
+PACK_VERSION = "m2-pack@2"
 ALL_PLAYBOOKS = HOST_PLAYBOOKS + NETWORK_PLAYBOOKS + SESSION_PLAYBOOKS + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS + PACKET_PLAYBOOKS
 
 

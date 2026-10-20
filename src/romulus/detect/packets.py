@@ -1,26 +1,39 @@
 """Packet-content rules over HTTP bodies reconstructed by TShark from specific Arkime sessions.
 
-These rules judge what a response body *is*, using its bytes: an executable header, a script's shebang, or text
-whose every command line starts with a known command. They compare that with what the server said the body was
-(URL file extension and declared Content-Type). A script or executable served under a document's name or type is
-a classic delivery disguise (ATT&CK T1036.008, T1105).
+These rules judge what a response body *is*, using its bytes, and compare that with what the server said it was
+(the URL's file name and the declared Content-Type). A script or executable served under a document's name or
+type is a classic delivery disguise (ATT&CK T1036.008, T1105).
 
-They are positive-only: content heuristics can show a disguised script, but a body that does not look like one
-proves nothing, and the stage only examines the sessions it selected. Claims state that the body was observed in
-the packets, not that any client executed it.
+What the bytes are, in decreasing strength:
+
+- `magic`: an executable header (ELF, PE with its `PE\\0\\0` signature, Mach-O). Byte-level fact.
+- `shebang`: an interpreter line (`#!` followed by an absolute path). Byte-level fact; noted when it sits
+  after a byte-order mark or leading whitespace, where a kernel would not honour it but an interpreter would.
+- `heuristic`: every non-comment line starts with a command name, and at least one of them fetches, runs,
+  decodes or persists something. A content heuristic: it suggests a script; it never shows one, and a
+  heuristic-only match is never above the lead lane.
+
+The rules are positive-only: a body that does not look like a script proves nothing, and the stage examines
+only the sessions it selected. Claims state that the body was observed in the packets, not that a client ran it.
 """
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import ClassVar
+from urllib.parse import unquote, urlsplit
 
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.evidence.typed import TypedEvent
 
 EXEC_MAGICS = ((b"\x7fELF", "ELF executable"), (b"MZ", "Windows PE executable"),
                (b"\xcf\xfa\xed\xfe", "Mach-O executable"), (b"\xfe\xed\xfa\xcf", "Mach-O executable"),
-               (b"\xca\xfe\xba\xbe", "Mach-O universal binary"))
+               (b"\xce\xfa\xed\xfe", "Mach-O executable"), (b"\xfe\xed\xfa\xce", "Mach-O executable"),
+               (b"\xca\xfe\xba\xbe", "Mach-O universal binary or Java class file"))
+UTF8_BOM = b"\xef\xbb\xbf"
+UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
+SHEBANG = re.compile(rb"#![ \t]*(/[^\s]+)(?:[ \t]+([^\s]+))?")
 KNOWN_COMMANDS = {
     "curl", "wget", "echo", "printf", "chmod", "chown", "chattr", "mkdir", "cd", "cp", "mv", "rm", "cat", "tee",
     "touch", "ln", "python", "python2", "python3", "perl", "php", "ruby", "bash", "sh", "dash", "zsh", "nc", "ncat",
@@ -29,24 +42,91 @@ KNOWN_COMMANDS = {
     "find", "tar", "unzip", "gzip", "gunzip", "xxd", "dd", "mkfifo", "exec", "eval", "source", "set", "unset",
     "history", "id", "whoami", "uname", "hostname", "ps", "env", "sleep", "while", "for", "if", "then", "fi", "do",
     "done", "nslookup", "dig", "ping", "apt", "apt-get", "yum", "dnf", "pip", "pip3", "git", "busybox", "setsid",
+    "powershell", "pwsh", "iex", "invoke-expression", "iwr", "invoke-webrequest", "certutil", "bitsadmin",
+    "mshta", "rundll32", "regsvr32", "cmd", "start-process", "schtasks", "wmic", "reg",
+}
+# Commands that fetch, run, decode or persist something. A command list with none of these (a cheat sheet,
+# a to-do list, build steps) is not called a script.
+EXECUTION_COMMANDS = {
+    "curl", "wget", "chmod", "python", "python2", "python3", "perl", "php", "ruby", "bash", "sh", "dash", "zsh",
+    "nc", "ncat", "netcat", "socat", "base64", "xxd", "crontab", "useradd", "nohup", "setsid", "mkfifo", "exec",
+    "eval", "source", "busybox", "powershell", "pwsh", "iex", "invoke-expression", "iwr", "invoke-webrequest",
+    "certutil", "bitsadmin", "mshta", "rundll32", "regsvr32", "start-process", "schtasks",
 }
 INTERPRETERS = {"sh", "bash", "dash", "zsh", "ksh", "python", "python2", "python3", "perl", "php", "ruby", "node",
-                "lua", "pwsh", "powershell"}
+                "lua", "pwsh", "powershell", "iex", "invoke-expression"}
 DOCUMENT_EXTENSIONS = {"md", "markdown", "txt", "text", "log", "csv", "tsv", "json", "xml", "html", "htm", "css",
                        "jpg", "jpeg", "png", "gif", "bmp", "ico", "svg", "webp", "pdf", "doc", "docx", "xls", "xlsx",
                        "ppt", "pptx", "rtf", "odt", "zip", "gz", "tar", "mp3", "mp4", "avi", "wav"}
-DOCUMENT_TYPE_PREFIXES = ("text/markdown", "text/plain", "text/html", "text/css", "text/csv", "text/xml",
-                          "application/json", "application/xml", "application/pdf", "image/", "audio/", "video/")
-_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
+MEDIA_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "bmp", "ico", "webp", "pdf", "doc", "docx", "xls", "xlsx", "ppt",
+                    "pptx", "rtf", "odt", "zip", "gz", "tar", "mp3", "mp4", "avi", "wav"}
+# A body under one of these names is what it says it is: no disguise, whatever the Content-Type.
+SCRIPT_OR_EXEC_EXTENSIONS = {"sh", "bash", "zsh", "ksh", "py", "pyw", "pl", "pm", "rb", "php", "ps1", "psm1", "bat",
+                             "cmd", "vbs", "js", "lua", "exe", "dll", "elf", "bin", "so", "msi", "jar", "class",
+                             "run", "out", "appimage"}
+# text/plain is what servers send for any script, so it is never evidence of a disguise on its own.
+DOCUMENT_TYPE_PREFIXES = ("text/markdown", "text/html", "text/css", "text/csv", "text/xml", "application/json",
+                          "application/xml", "application/pdf", "image/", "audio/", "video/")
+MEDIA_TYPE_PREFIXES = ("application/pdf", "image/", "audio/", "video/")
+# What a pipe may hand text to and have it run.
+PIPE_RUNNERS = INTERPRETERS | {"exec", "eval", "source", "busybox", "xargs"}
+_TOKEN = re.compile(r"[A-Za-z0-9_./+-]+")
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ESCAPED = re.compile(r"\\.")
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+_PIPE = re.compile(r"(?<!\|)\|(?!\|)")
+_REDIRECT = re.compile(r"(?<![<>&])\d?>>?\s*([^\s;&|<>()]+)")
 
 
 @dataclass
 class BodyInfo:
     kind: str                        # executable | script | text | binary | empty
+    basis: str | None = None         # magic | shebang | heuristic
     detail: str = ""
     interpreter: str | None = None
     commands: list[str] = field(default_factory=list)
     piped_to: list[str] = field(default_factory=list)
+    writes: list[str] = field(default_factory=list)
+
+
+def show(value, limit: int = 200) -> str:
+    """Telemetry text safe to put in a claim: control, format (bidi) and other invisible characters become
+    visible escapes, and long values are cut."""
+    text = str(value)
+    out = "".join(c if unicodedata.category(c)[0] != "C" else f"\\u{ord(c):04x}" for c in text)
+    return out if len(out) <= limit else out[:limit] + "…"
+
+
+def _text(body: bytes) -> str | None:
+    """The body as text, or None when it is binary (NUL bytes or many control bytes)."""
+    if body.startswith(UTF16_BOMS):
+        return body.decode("utf-16", "replace").lstrip("\ufeff")
+    body = body.removeprefix(UTF8_BOM)
+    sample = body[:65536]
+    if b"\x00" in sample or sum(b < 9 or 13 < b < 32 for b in sample) > len(sample) // 20:
+        return None
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body.decode("latin-1")
+
+
+def _shebang(body: bytes) -> BodyInfo | None:
+    lead = UTF8_BOM if body.startswith(UTF8_BOM) else b""
+    rest = body[len(lead):]
+    stripped = rest.lstrip(b" \t\r\n")
+    m = SHEBANG.match(stripped)
+    if not m:
+        return None
+    path = m.group(1).decode("latin-1")
+    arg = m.group(2).decode("latin-1") if m.group(2) else ""
+    prog = basename(arg) if basename(path) == "env" and arg else basename(path)
+    line = stripped.split(b"\n", 1)[0][:80].decode("latin-1").rstrip("\r")
+    note = ""
+    if lead or len(stripped) != len(rest):
+        note = (" after a byte-order mark or leading whitespace, where a kernel would not honour it but an "
+                "interpreter given the file would")
+    return BodyInfo("script", "shebang", f"interpreter line '{line}'{note}", interpreter=prog or None)
 
 
 def analyze_body(body: bytes) -> BodyInfo:
@@ -57,52 +137,93 @@ def analyze_body(body: bytes) -> BodyInfo:
         if body.startswith(magic):
             if magic == b"MZ" and b"PE\x00\x00" not in body[:4096]:
                 continue
-            return BodyInfo("executable", label)
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError:
+            return BodyInfo("executable", "magic", f"{label} header")
+    info = _shebang(body)
+    if info:
+        return info
+    text = _text(body)
+    if text is None:
         return BodyInfo("binary")
-    if text.startswith("#!"):
-        first = text.splitlines()[0][2:].strip().split()
-        prog = basename(first[1] if first and basename(first[0]) == "env" and len(first) > 1 else
-                        (first[0] if first else ""))
-        return BodyInfo("script", f"shebang '{text.splitlines()[0][:80]}'", interpreter=prog)
     lines = [ln.strip() for ln in text.splitlines()]
     lines = [ln for ln in lines if ln and not ln.startswith("#")]
     if not lines or len(lines) > 400:
         return BodyInfo("text")
-    commands, piped = [], []
+    commands, piped, writes, executes = [], [], [], False
     for ln in lines:
+        if _ASSIGNMENT.match(ln):
+            continue
         m = _TOKEN.match(ln)
-        if not m or basename(m.group(0)) not in KNOWN_COMMANDS:
+        if not m:
             return BodyInfo("text")
-        commands.append(basename(m.group(0)))
-        for seg in ln.split("|")[1:]:
+        token = m.group(0)
+        name = basename(token).lower()
+        if token.startswith(("./", "/")) and len(token) > 2:
+            commands.append(f"path:{name}")
+            executes = True
+        elif name in KNOWN_COMMANDS:
+            commands.append(name)
+            executes = executes or name in EXECUTION_COMMANDS
+        else:
+            return BodyInfo("text")
+        bare = _QUOTED.sub("''", _ESCAPED.sub("_", ln))          # pipes and redirects outside quotes only
+        for seg in _PIPE.split(bare)[1:]:
             t = _TOKEN.match(seg.strip())
-            if t and basename(t.group(0)) in INTERPRETERS:
-                piped.append(basename(t.group(0)))
-    return BodyInfo("script", f"{len(lines)} line(s), each starting with a known command", commands=commands[:20],
-                    piped_to=sorted(set(piped)))
+            prog = basename(t.group(0)).lower() if t else ""
+            if prog in PIPE_RUNNERS:
+                piped.append(prog)
+                executes = True
+        for target in _REDIRECT.findall(bare):
+            if target not in ("/dev/null", "/dev/stdout", "/dev/stderr"):
+                writes.append(target)
+                executes = True
+    if not commands or not executes:
+        return BodyInfo("text")
+    return BodyInfo("script", "heuristic",
+                    f"every one of {len(lines)} non-comment line(s) starts with a command name, and at least one "
+                    f"fetches, runs, decodes or writes something", commands=commands[:20],
+                    piped_to=sorted(set(piped)), writes=list(dict.fromkeys(writes))[:10])
+
+
+def _name(path: str | None) -> str:
+    raw = path or ""
+    parts = urlsplit(raw)
+    if parts.scheme and parts.netloc:
+        raw = parts.path
+    raw = raw.split("?", 1)[0].split("#", 1)[0]
+    return basename(unquote(raw)).lower()
+
+
+def _suffix(name: str) -> str | None:
+    suffixes = [s for s in name.split(".")[1:] if s and not s.isdigit()]
+    return suffixes[-1] if suffixes else None
 
 
 def declared_document(path: str | None, content_type: str | None) -> list[str]:
-    """Why the server presented this body as a document (extension and/or declared type); empty if it did not."""
+    """Why the server presented this body as a document (file name and/or declared type); empty if it did not,
+    or if the name says it is a script or program (then it is not disguised)."""
+    name = _name(path)
+    suffix = _suffix(name)
+    if suffix in SCRIPT_OR_EXEC_EXTENSIONS:
+        return []
     reasons = []
-    name = basename((path or "").split("?", 1)[0]).lower()
-    suffixes = [s for s in name.split(".")[1:] if s and not s.isdigit()]
-    doc = [s for s in suffixes if s in DOCUMENT_EXTENSIONS]
-    if doc:
-        reasons.append(f"file name '{name}' (extension .{doc[-1]})")
+    if suffix in DOCUMENT_EXTENSIONS:
+        reasons.append(f"file name '{show(name, 120)}' (extension .{suffix})")
     ctype = (content_type or "").split(";", 1)[0].strip().lower()
     if ctype.startswith(DOCUMENT_TYPE_PREFIXES):
-        reasons.append(f"declared Content-Type {ctype}")
+        reasons.append(f"declared Content-Type {show(ctype, 80)}")
     return reasons
+
+
+def declared_media(path: str | None, content_type: str | None) -> bool:
+    """Declared as an image, media, office or archive file: no reading of a script makes that name honest."""
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    return _suffix(_name(path)) in MEDIA_EXTENSIONS or ctype.startswith(MEDIA_TYPE_PREFIXES)
 
 
 class DisguisedScriptOrExecutable(Playbook):
     """Positive-only content rule over packet-reconstructed HTTP bodies."""
     id = "pcap.disguised_script_or_executable"
-    version = "1"
+    version = "2"
     title = "HTTP response body is a script or executable served as a document"
     kind: ClassVar[str] = "packet"            # runs only in the packet stage, never in the sweep
     families = ("http_body",)
@@ -111,7 +232,8 @@ class DisguisedScriptOrExecutable(Playbook):
     assures_negative = False
     severity, lane = "high", "lead"
     attack = ("T1036.008", "T1105", "T1059")
-    benign = ("installers or setup scripts deliberately served as text", "documentation pages that only list commands")
+    benign = ("installers or setup scripts deliberately served as text or Markdown",
+              "documentation that consists only of commands", "a misconfigured server's file names or types")
     next_checks = ("the client host's processes at the same time (did a downloader pipe it into an interpreter?)",
                    "other responses from the same server", "the body's hash on other hosts")
 
@@ -135,31 +257,49 @@ class DisguisedScriptOrExecutable(Playbook):
                 group.append(e)
         return []
 
+    def _what(self, e: TypedEvent) -> str:
+        basis, detail = e.get("http.body.basis"), show(e.get("http.body.detail") or "", 160)
+        piped = e.get("http.body.piped_to") or []
+        if basis == "magic":
+            return f"whose body begins with an executable header ({detail})"
+        if basis == "shebang":
+            return f"whose body is a script by its {detail}"
+        commands = ", ".join(dict.fromkeys(e.get("http.body.commands") or []))
+        writes = ", ".join(e.get("http.body.writes") or [])
+        return (f"whose body reads like a shell or command script: {detail} (commands: {show(commands, 120)}"
+                + (f"; it pipes into {', '.join(piped)}" if piped else "")
+                + (f"; it redirects output to {show(writes, 160)}" if writes else "")
+                + "). This is a content heuristic; it suggests a script and does not show one")
+
     def finalize(self) -> list[Match]:
         out = []
         for key in sorted(self.groups, key=str):
             evs = sorted(self.groups[key], key=lambda x: (x.ts, x.id))
             e, n = evs[0], self.counts[key]
-            kind = e.get("http.body.kind")
+            basis = e.get("http.body.basis")
             reasons = declared_document(e.get("url.original"), e.get("http.content_type"))
-            what = e.get("http.body.detail") or kind
-            piped = e.get("http.body.piped_to") or []
-            lane = "high" if kind == "executable" or piped else self.lane
+            media = declared_media(e.get("url.original"), e.get("http.content_type"))
+            lane = "high" if basis == "magic" or (basis == "shebang" and media) else self.lane
             clients = sorted(self.clients[key])
-            claim = (f"Packets of {n} Arkime session(s) show HTTP {e.get('http.response.status_code')} responses from "
-                     f"{e.get('source.ip')} to {', '.join(clients[:5])}{' and more' if len(clients) > 5 else ''} for "
-                     f"'{e.get('url.original')}' ({evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}), served as a "
-                     f"document ({'; '.join(reasons)}), whose body is a {kind} ({what}"
-                     + (f"; it pipes into {', '.join(piped)}" if piped else "")
-                     + f"; {e.get('file.size')} bytes, SHA-256 {e.get('file.sha256')}). The body is observed in the "
-                     f"packets; whether a client executed it is not established by these records.")
+            size = e.get("file.size")
+            claim = (f"Packets show {n} HTTP {e.get('http.response.status_code')} response(s) from "
+                     f"{e.get('source.ip')} to {', '.join(clients[:5])}{' and more' if len(clients) > 5 else ''} "
+                     f"for '{show(e.get('url.original'))}' ({evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}), "
+                     f"served as a document ({'; '.join(reasons)}), {self._what(e)}. The body is {size} bytes, "
+                     f"SHA-256 {e.get('file.sha256')}. It is observed in the packets; whether a client executed it "
+                     f"is not established by these records.")
             preds = [pf(e, "http.body.kind"), pf(e, "url.original")]
+            if e.has("http.body.basis"):
+                preds.append(pf(e, "http.body.basis"))
             if e.has("http.content_type"):
                 preds.append(pf(e, "http.content_type"))
             m = Match(self.id, claim, self.claim_type, evs, preds, e.ts, self.severity, lane, "high",
                       e.entities(), group_key="|".join(map(str, key)))
             if n > len(evs):
                 m.notes.append(f"{n} matching responses; {len(evs)} are cited")
+            if e.has("http.body.analysis_limit"):
+                m.notes.append(f"content judged from the first {e.get('http.body.analysis_limit')} bytes; "
+                               "the size and SHA-256 cover the whole body")
             out.append(m)
         return out
 

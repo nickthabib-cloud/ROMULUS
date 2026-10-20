@@ -5,12 +5,19 @@ Read-only and bounded by construction:
 - Arkime: only `GET /api/sessions/pcap?ids=...` for validated session ids, at most 20 per request, streamed to a
   private file with a byte cap. Never an expression export, never a free-text query.
 - TShark: an argv list (no shell), a path that must resolve inside an allowed directory, a display filter and
-  field list chosen from fixed tables in this module (never from telemetry, users or a model), a timeout that
-  kills the process, and no `-c`: `-c` limits packets read *before* the display filter and would silently drop
-  later matches. A capture that ends mid-packet is reported as truncated, so its results are partial.
+  field list chosen from fixed tables in this module (never from telemetry, users or a model), reassembly
+  preferences pinned so a site's TShark profile cannot change what is seen, a timeout that kills the process,
+  memory and CPU limits, and no `-c`: `-c` limits packets read *before* the display filter and would silently
+  drop later matches. The only per-run input is a list of TCP ports to decode as HTTP, and each must be an
+  integer 1-65535 (Arkime saw HTTP there; TShark only dissects HTTP on its default ports otherwise).
+  A capture that ends mid-packet is reported as truncated, so its results are partial.
+- Output is TShark JSON (`-T json -e ...`): every occurrence of every field, JSON-escaped, so field values can
+  never break the row format and nothing is silently reduced to its first occurrence.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -25,15 +32,23 @@ from romulus.config import Settings
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@:_-]{8,127}$")
 PCAP_MAGICS = (b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4", b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d", b"\x0a\x0d\x0d\x0a")
 MAX_IDS_PER_REQUEST = 20
+MAX_DECODE_PORTS = 32
 TRUNCATION_MARKERS = ("cut short in the middle of a packet", "appears to have been cut short", "truncated")
+TSHARK_MEMORY_BYTES = 4 * 1024 ** 3
+
+# Reassembly and decoding are pinned: a different default profile on a mission system must not change what
+# the stage sees (an undesegmented body would look like no response at all).
+PINNED_PREFS = ("tcp.desegment_tcp_streams:TRUE", "ip.defragment:TRUE", "ipv6.defragment:TRUE",
+                "http.desegment_headers:TRUE", "http.desegment_body:TRUE", "http.dechunk_body:TRUE",
+                "http.decompress_body:TRUE")
 
 # The only TShark queries this module runs: (display filter, fields). Adding one is a code change and a review.
 QUERIES = {
     "http_responses": (
         "http.response",
-        ["frame.number", "frame.time_epoch", "tcp.stream", "ip.src", "tcp.srcport", "ip.dst", "tcp.dstport",
-         "ipv6.src", "ipv6.dst", "http.response.code", "http.content_type", "http.content_length",
-         "http.response_for.uri", "http.file_data"],
+        ["frame.number", "frame.time_epoch", "frame.protocols", "tcp.stream", "ip.src", "ip.dst", "ipv6.src",
+         "ipv6.dst", "tcp.srcport", "tcp.dstport", "http.response.code", "http.content_type",
+         "http.content_length", "http.response_for.uri", "http.file_data"],
     ),
 }
 
@@ -53,9 +68,17 @@ class PacketFetch:
 
 @dataclass
 class TsharkResult:
-    rows: list[dict] = field(default_factory=list)
+    rows: list[dict[str, list[str]]] = field(default_factory=list)   # field -> every occurrence, in order
     truncated: bool = False
     error: str | None = None
+
+
+@dataclass
+class Body:
+    head: bytes            # at most the analysis limit
+    size: int              # full decoded length
+    sha256: str            # over the full body
+    cut: bool              # head is shorter than the body
 
 
 class ArkimePackets:
@@ -64,7 +87,17 @@ class ArkimePackets:
     def __init__(self, s: Settings, transport: httpx.BaseTransport | None = None, max_bytes: int = 32 * 1024 * 1024):
         self.max_bytes = max_bytes
         self.http = httpx.Client(base_url=s.arkime_url.rstrip("/"), timeout=120, transport=transport,
+                                 verify=s.arkime_verify_tls,
                                  auth=httpx.DigestAuth(s.arkime_username, s.arkime_password.get_secret_value()))
+
+    def close(self) -> None:
+        self.http.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def fetch(self, session_ids: list[str], dest: Path) -> PacketFetch:
         ids = list(dict.fromkeys(session_ids))
@@ -89,6 +122,7 @@ class ArkimePackets:
                         out.write(chunk)
                         total += len(chunk)
         except httpx.HTTPError as exc:
+            dest.unlink(missing_ok=True)
             return PacketFetch(None, ids, error=f"Arkime packet download failed: {type(exc).__name__}")
         with dest.open("rb") as f:
             magic = f.read(4)
@@ -107,42 +141,88 @@ def _allowed(path: Path, allowed_dirs: list[Path]) -> Path:
     return resolved
 
 
-def run_tshark(s: Settings, pcap: Path, query: str, allowed_dirs: list[Path], timeout: int = 180) -> TsharkResult:
-    """Run one fixed query over a capture. Each output row is a dict of the query's fields."""
+def _ports(ports) -> list[int]:
+    out = set()
+    for p in ports or ():
+        if isinstance(p, bool) or not isinstance(p, int) or not 1 <= p <= 65535:
+            raise PacketError(f"refusing decode-as port {p!r}: not an integer 1-65535")
+        out.add(p)
+    if len(out) > MAX_DECODE_PORTS:
+        raise PacketError(f"refusing more than {MAX_DECODE_PORTS} decode-as ports")
+    return sorted(out)
+
+
+def _limits(timeout: int):
+    if os.name != "posix":
+        return None
+
+    def apply():                          # runs in the child before exec
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, (TSHARK_MEMORY_BYTES, TSHARK_MEMORY_BYTES))
+        resource.setrlimit(resource.RLIMIT_CPU, (timeout + 5, timeout + 10))
+    return apply
+
+
+def tshark_command(s: Settings, path: Path, query: str, http_ports=()) -> list[str]:
     display_filter, fields = QUERIES[query]
-    path = _allowed(pcap, allowed_dirs)
     exe = shutil.which(s.tshark_bin) or s.tshark_bin
-    cmd = [exe, "-n", "-r", str(path), "-Y", display_filter, "-T", "fields", "-E", "separator=\t",
-           "-E", "occurrence=f"]
+    cmd = [exe, "-n", "-r", str(path)]
+    for pref in PINNED_PREFS:
+        cmd += ["-o", pref]
+    for port in _ports(http_ports):
+        cmd += ["-d", f"tcp.port=={port},http"]
+    cmd += ["-Y", display_filter, "-T", "json"]
     for name in fields:
         cmd += ["-e", name]
     if os.name == "posix" and shutil.which("nice"):
         cmd = ["nice", "-n", "10", *cmd]
+    return cmd
+
+
+def run_tshark(s: Settings, pcap: Path, query: str, allowed_dirs: list[Path], timeout: int = 180,
+               http_ports=()) -> TsharkResult:
+    """Run one fixed query over a capture. Each row maps every query field to all its occurrences."""
+    _, fields = QUERIES[query]
+    path = _allowed(pcap, allowed_dirs)
+    cmd = tshark_command(s, path, query, http_ports)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False,
+                              preexec_fn=_limits(timeout))
     except subprocess.TimeoutExpired:
         return TsharkResult(error=f"TShark exceeded {timeout} s")
     except OSError as exc:
         return TsharkResult(error=f"TShark could not start: {type(exc).__name__}")
-    stderr = proc.stderr[:2000].lower()
+    stderr = proc.stderr[:2000].decode("utf-8", "replace").lower()
     truncated = any(marker in stderr for marker in TRUNCATION_MARKERS)
     if proc.returncode not in (0, 2) or (proc.returncode == 2 and not truncated):
         return TsharkResult(truncated=truncated, error=f"TShark failed (exit {proc.returncode})")
+    try:
+        packets = json.loads(proc.stdout.decode("utf-8", "replace") or "[]")
+    except json.JSONDecodeError:
+        return TsharkResult(truncated=truncated, error="TShark output is not valid JSON")
     rows = []
-    for line in proc.stdout.splitlines():
-        values = line.split("\t")
-        rows.append({name: (values[i] if i < len(values) and values[i] != "" else None)
-                     for i, name in enumerate(fields)})
+    for pkt in packets if isinstance(packets, list) else []:
+        layers = ((pkt or {}).get("_source") or {}).get("layers") or {}
+        rows.append({name: [str(v) for v in (layers.get(name) or [])] for name in fields})
     return TsharkResult(rows=rows, truncated=truncated)
 
 
-def decode_hex_body(value: str | None, limit: int) -> tuple[bytes, bool]:
-    """TShark prints http.file_data as hex. Decode at most `limit` bytes; report whether it was cut."""
+def decode_hex_body(value: str | None, limit: int) -> Body:
+    """TShark prints http.file_data as hex. Hash the whole body (incrementally, so a large body is never held
+    twice) and keep at most `limit` bytes for analysis."""
     if not value:
-        return b"", False
+        return Body(b"", 0, hashlib.sha256(b"").hexdigest(), False)
     clean = value.replace(":", "")
-    cut = len(clean) > limit * 2
+    if len(clean) % 2:
+        raise PacketError("TShark body field is not hex")
+    sha, head, size, step = hashlib.sha256(), bytearray(), 0, 2 * 1024 * 1024
     try:
-        return bytes.fromhex(clean[: limit * 2]), cut
+        for i in range(0, len(clean), step):
+            chunk = bytes.fromhex(clean[i:i + step])
+            sha.update(chunk)
+            size += len(chunk)
+            if len(head) < limit:
+                head += chunk[: limit - len(head)]
     except ValueError as exc:
         raise PacketError("TShark body field is not hex") from exc
+    return Body(bytes(head), size, sha.hexdigest(), size > len(head))
