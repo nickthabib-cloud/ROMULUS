@@ -166,6 +166,24 @@ class ContextPlaybook(Playbook):
     ) -> list[Match]:
         return []
 
+    def eligible(
+        self, events: list[TypedEvent], required_by_family: dict[str, tuple[str, ...]],
+    ) -> list[TypedEvent]:
+        """Events of a wanted family that carry that family's required typed fields. A wanted event missing a
+        required field is counted (missing_required), so the coverage cell is partial, never a clean no-match;
+        an event of an unwanted family is ignored (it is not evidence for or against this rule)."""
+        out = []
+        for event in events:
+            required = required_by_family.get(event.family)
+            if required is None:
+                continue
+            if any(event.get(name) in (None, "", [], {}) for name in required):
+                self.missing_required += 1
+                continue
+            self.evaluated += 1
+            out.append(event)
+        return out
+
 
 def outcome_phrase(e: TypedEvent) -> str:
     if e.outcome == Outcome.success:
