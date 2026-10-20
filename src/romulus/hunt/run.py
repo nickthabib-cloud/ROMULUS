@@ -9,6 +9,7 @@ from romulus.config import Settings
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkFetcher
 from romulus.hunt.manifest import build_manifest, new_hunt_id
+from romulus.hunt.packets import run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.stage import clear_stale_stages
 from romulus.hunt.sweep import Sweep
@@ -86,12 +87,17 @@ def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
 
 def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
             *, stats: dict | None = None, partial_reasons: list[str] | None = None,
-            expansion_summary: dict | None = None, owner_token: str | None = None) -> dict:
-    partial_reasons = partial_reasons or list(sweep_summary.get("partial_reasons") or [])
+            expansion_summary: dict | None = None, packet_summary: dict | None = None,
+            owner_token: str | None = None) -> dict:
+    partial_reasons = list(partial_reasons or sweep_summary.get("partial_reasons") or [])
     sweep_complete = bool(sweep_summary.get("complete"))
     missing_summary = not sweep_summary
     agent_status = agent_summary.get("status")
-    partial = (missing_summary or not sweep_complete or agent_status == "unavailable"
+    packet_status = (packet_summary or {}).get("status")
+    packets_incomplete = packet_status in ("partial", "failed")
+    if packets_incomplete:
+        partial_reasons.append(f"packet_stage:{packet_status}")
+    partial = (missing_summary or not sweep_complete or agent_status == "unavailable" or packets_incomplete
                or (expansion_summary or {}).get("status") in {"partial", "failed"})
     counts, result = _detection_result(repo, hunt_id)
     reasons = partial_reasons[:10]
@@ -101,6 +107,9 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         reasons.append("frontier complete")
     else:
         reasons.append("sweep coverage partial")
+    if packets_incomplete:
+        detail = (packet_summary.get("partial_reasons") or [packet_summary.get("error") or ""])[0]
+        reasons.append(f"packet stage {packet_status}: {detail}"[:200])
     if agent_summary.get("stop_reason"):
         reasons.append(f"agent: {agent_summary['stop_reason']}")
     if expansion_summary and expansion_summary.get("stop_reason"):
@@ -187,6 +196,20 @@ def _run_expansion_safely(
         return summary
 
 
+def _packet_stage(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
+                  contracts: dict, heartbeat, owner_token: str | None) -> dict:
+    """Run the packet stage and record its summary. `finished` marks a stage that ran to its end (complete or
+    partial); a resume re-runs a stage that has no finished summary."""
+    try:
+        summary = run_packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat,
+                                   owner_token=owner_token)
+    except Exception as exc:          # packet evidence enriches; it must never sink the hunt
+        log.exception("packet stage failed")
+        summary = {"status": "failed", "finished": False, "error": str(exc)[:300]}
+    repo.audit("system", "hunt.packet_summary", hunt_id, summary, owner_token=owner_token)
+    return summary
+
+
 def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str,
                       contracts: dict, window: Window, owner_token: str,
                       agent_mode: str) -> dict:
@@ -267,6 +290,8 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     repo.audit(
         "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,
     )
+    # packet findings first, so they can anchor expansion like any sweep finding
+    packet_summary = _packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat, owner_token)
     expansion_summary = _run_expansion_safely(
         s, repo, client, repo.get_hunt(hunt_id), contracts, window, owner_token,
     )
@@ -290,7 +315,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     return _finish(
         repo, hunt_id, agent_summary, sweep_summary,
         stats=sweep.stats, partial_reasons=sweep.partial_reasons,
-        expansion_summary=expansion_summary, owner_token=owner_token,
+        expansion_summary=expansion_summary, packet_summary=packet_summary, owner_token=owner_token,
     )
 
 
@@ -330,6 +355,14 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dic
             hunt_id, "failed", owner_token=owner_token, stop_reason=stop_reason,
         )
         raise
+    packet_audit = repo.latest_audit(hunt_id, "hunt.packet_summary")
+    packet_summary = dict(packet_audit["detail"]) if packet_audit else {}
+    if not packet_summary.get("finished"):
+
+        def heartbeat():
+            repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
+
+        packet_summary = _packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat, owner_token)
     expansion_summary = _run_expansion_safely(
         s, repo, client, hunt, contracts, window, owner_token,
     )
@@ -352,5 +385,5 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dic
             }
     return _finish(
         repo, hunt_id, agent_summary, sweep_summary,
-        expansion_summary=expansion_summary, owner_token=owner_token,
+        expansion_summary=expansion_summary, packet_summary=packet_summary, owner_token=owner_token,
     )

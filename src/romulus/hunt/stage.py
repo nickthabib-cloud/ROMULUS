@@ -22,6 +22,7 @@ from pathlib import Path
 from romulus.evidence.typed import TypedEvent
 
 PREFIX = "romulus-stage-"
+PCAP_PREFIX = "romulus-pcap-"            # the packet stage's capture directory
 STALE_SECONDS = 6 * 3600
 
 
@@ -32,7 +33,7 @@ def clear_stale_stages(directory: str | Path, older_than: float = STALE_SECONDS)
     if not root.is_dir():
         return 0
     removed, cutoff = 0, time.time() - older_than
-    for child in root.glob(f"{PREFIX}*"):
+    for child in [*root.glob(f"{PREFIX}*"), *root.glob(f"{PCAP_PREFIX}*")]:
         if child.is_dir() and child.stat().st_mtime < cutoff:
             shutil.rmtree(child, ignore_errors=True)
             removed += 1
