@@ -92,7 +92,7 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
     missing_summary = not sweep_summary
     agent_status = agent_summary.get("status")
     partial = (missing_summary or not sweep_complete or agent_status == "unavailable"
-               or (expansion_summary or {}).get("status") == "partial")
+               or (expansion_summary or {}).get("status") in {"partial", "failed"})
     counts, result = _detection_result(repo, hunt_id)
     reasons = partial_reasons[:10]
     if missing_summary:
@@ -158,6 +158,33 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
         max_source_queries=max_source_queries,
         wall_clock_seconds=budget_seconds, owner_token=owner_token, heartbeat=heartbeat,
     ).run()
+
+
+def _run_expansion_safely(
+    s: Settings, repo: Repo, client: ElasticClient, hunt: dict, contracts: dict,
+    window: Window, owner_token: str,
+) -> dict:
+    try:
+        return _run_expansion(s, repo, client, hunt, contracts, window, owner_token)
+    except Exception as exc:
+        log.exception("expansion failed")
+        for anchor in repo.expansion_anchors(hunt["id"]):
+            if anchor["status"] == "pending":
+                repo.update_expansion_anchor(
+                    anchor["id"], "unexpanded", ["expansion error"], owner_token=owner_token,
+                )
+        summary = {
+            "status": "failed", "stop_reason": f"expansion error: {exc}",
+            "error": str(exc),
+            "unexpanded": [
+                anchor["id"] for anchor in repo.expansion_anchors(hunt["id"])
+                if anchor["status"] == "unexpanded"
+            ],
+        }
+        repo.audit(
+            "system", "hunt.expansion_summary", hunt["id"], summary, owner_token=owner_token,
+        )
+        return summary
 
 
 def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str,
@@ -240,7 +267,9 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     repo.audit(
         "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,
     )
-    expansion_summary = _run_expansion(s, repo, client, repo.get_hunt(hunt_id), contracts, window, owner_token)
+    expansion_summary = _run_expansion_safely(
+        s, repo, client, repo.get_hunt(hunt_id), contracts, window, owner_token,
+    )
     agent_summary = {
         "status": "disabled", "mode": "off", "partial": False,
         "stop_reason": "investigator disabled (agent mode off)",
@@ -301,7 +330,9 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dic
             hunt_id, "failed", owner_token=owner_token, stop_reason=stop_reason,
         )
         raise
-    expansion_summary = _run_expansion(s, repo, client, hunt, contracts, window, owner_token)
+    expansion_summary = _run_expansion_safely(
+        s, repo, client, hunt, contracts, window, owner_token,
+    )
     agent_summary = {
         "status": "disabled", "mode": "off", "partial": False,
         "stop_reason": "investigator disabled (agent mode off)",

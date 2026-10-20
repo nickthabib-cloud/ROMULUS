@@ -76,6 +76,7 @@ class LinkResult(BaseModel):
     coverage: list[PivotCoverage] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
     duration_ms: int = 0
+    query_spend: int = 0
 
 
 def _value(anchor: LinkAnchor, field: str):
@@ -131,6 +132,7 @@ class LinkFetcher:
             )
             self._cache[fetch_key] = result
             return result
+        query_start = getattr(self.executor, "source_queries", 0)
         batch = self.executor.fetch_intents(
             anchor.finding_id, fetch_key, intents, retain, anchor_ts=anchor.ts, query_cap=query_cap,
         )
@@ -146,6 +148,7 @@ class LinkFetcher:
             evidence_ids=sorted(set(anchor.event_ids + [event.id for event in linked])),
             task_ids=batch.task_ids, coverage=batch.coverage, reasons=batch.reasons,
             duration_ms=batch.duration_ms,
+            query_spend=getattr(self.executor, "source_queries", query_start) - query_start,
         )
         self._cache[fetch_key] = result
         return result

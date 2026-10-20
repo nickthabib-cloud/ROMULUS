@@ -200,6 +200,7 @@ expansion_link = Table(
     Column("coverage", JSON, nullable=False),
     Column("reasons", JSON, nullable=False),
     Column("duration_ms", Integer, nullable=False),
+    Column("query_spend", Integer, nullable=False, default=0),
     Column("evaluated", Integer, nullable=False, default=0),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),

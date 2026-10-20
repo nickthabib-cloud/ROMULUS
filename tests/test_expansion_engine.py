@@ -75,6 +75,7 @@ class ScriptedFetcher:
                 target="host-x", dataset="linux.audit", start=window.start, end=window.end,
                 status="complete", returned=len(event_ids), total=len(event_ids),
             )],
+            query_spend=1,
         )
 
 
@@ -87,7 +88,9 @@ class BudgetedFetcher(ScriptedFetcher):
     def fetch(self, anchor, link_type, window, *, query_cap=None):
         self.query_caps.append(query_cap)
         self.executor.source_queries += query_cap or 0
-        return super().fetch(anchor, link_type, window, query_cap=query_cap)
+        result = super().fetch(anchor, link_type, window, query_cap=query_cap)
+        result.query_spend = query_cap or 0
+        return result
 
 
 def add_anchor(repo, candidate_id, host, *, ts=T0):
@@ -127,6 +130,23 @@ class KeyRecordingFetcher(ScriptedFetcher):
         pid = anchor.events[0].get("process.pid") if anchor.events else None
         result.id = self.result_id(anchor, link_type, window)
         result.key = {"host": anchor.host, "pid": pid}
+        return result
+
+
+class DurableBudgetFetcher(ScriptedFetcher):
+    def __init__(self, repo, budget=180):
+        super().__init__(repo)
+        self.executor = type("Counter", (), {"source_queries": 0, "source_query_budget": budget})()
+
+    def result_id(self, anchor, link_type, window):
+        return f"L-{anchor.finding_id}-{link_type}-{window.label}"
+
+    def fetch(self, anchor, link_type, window, *, query_cap=None):
+        remaining = self.executor.source_query_budget - self.executor.source_queries
+        spent = min(query_cap or 0, max(0, remaining))
+        self.executor.source_queries += spent
+        result = super().fetch(anchor, link_type, window, query_cap=query_cap)
+        result.query_spend = spent
         return result
 
 
@@ -280,6 +300,36 @@ def test_resume_continues_after_crash_without_repeating_evaluated_links():
     assert result["stop_reason"] == "fixpoint"
     assert first_key not in resumed_fetcher.calls
     assert repo.expansion_anchors("h1")[0]["status"] == "expanded_complete"
+
+
+def test_resume_seeds_budget_from_persisted_query_spend_and_uses_only_remainder():
+    repo = repo_with_anchor()
+    first = DurableBudgetFetcher(repo)
+    engine = ExpansionEngine(repo, "h1", WINDOW, first, max_source_queries=180)
+    engine._seed_anchors()
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.expansion_anchor.update().where(
+            tables.expansion_anchor.c.id == "F-anchor",
+        ).values(depth=1))
+    repo.save_expansion_link({
+        "id": "L-crash-checkpoint", "hunt_id": "h1", "anchor_id": "F-anchor",
+        "link_type": "login_session", "window_label": "crash checkpoint",
+        "window_start": WINDOW.start, "window_end": WINDOW.end,
+        "strength": "observed", "key": {"checkpoint": True}, "status": "partial",
+        "event_ids": [], "evidence_ids": [], "task_ids": ["T-crash"], "coverage": [],
+        "reasons": ["simulated crash after query 170"], "duration_ms": 1,
+        "query_spend": 170, "evaluated": 1,
+    })
+    resumed = DurableBudgetFetcher(repo)
+
+    result = ExpansionEngine(
+        repo, "h1", WINDOW, resumed, max_source_queries=180,
+    ).run()
+
+    assert resumed.executor.source_queries == 180
+    assert result["source_queries"] == 180
+    assert sum(row["query_spend"] for row in repo.expansion_links("h1")) == 180
 
 
 def test_inferred_link_context_candidate_is_lead_and_keeps_provenance():

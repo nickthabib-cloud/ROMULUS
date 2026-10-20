@@ -223,6 +223,40 @@ def test_unexpected_agent_failure_marks_hunt_failed_instead_of_partial(tmp_path,
     assert hunt_run.open_repo(settings).get_hunt("h1")["execution_state"] == "failed"
 
 
+def test_expansion_exception_is_audited_and_finishes_hunt_partial(tmp_path, monkeypatch):
+    settings = Settings(agent_mode="off", home=tmp_path)
+    repo = _new_hunt(settings)
+    repo.save_candidate({
+        "id": "F-anchor", "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1",
+        "claim": "test anchor", "claim_type": "observed_action", "event_ids": [],
+        "predicate_fields": [], "entities": [["host", "web1", "host"]], "ts": START,
+        "severity": "high", "confidence": "high", "lane": "high", "priority": 1.0,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+    })
+    repo.save_expansion_anchor({
+        "id": "F-anchor", "hunt_id": "h1", "candidate_id": "F-anchor", "depth": 0,
+        "parent_anchor_id": None, "host": "web1", "lane": "high", "severity": "high",
+        "ts": START, "status": "pending", "reasons": [],
+    })
+    monkeypatch.setattr(hunt_run, "Sweep", FakeSweep)
+    monkeypatch.setattr(
+        hunt_run, "_run_expansion",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("expansion exploded")),
+    )
+
+    result = hunt_run.run_hunt(settings, "h1")
+
+    stored = hunt_run.open_repo(settings)
+    assert result["execution_state"] == "partial"
+    assert result["expansion"]["status"] == "failed"
+    assert stored.expansion_anchors("h1")[0]["status"] == "unexpanded"
+    assert stored.expansion_anchors("h1")[0]["reasons"] == ["expansion error"]
+    audit = stored.latest_audit("h1", "hunt.expansion_summary")["detail"]
+    assert audit["status"] == "failed"
+    assert audit["error"] == "expansion exploded"
+
+
 def test_cli_status_shows_completed_hunt_and_agent_partial_pivots(monkeypatch, capsys, tmp_path):
     settings = Settings(agent_mode="model", home=tmp_path)
     repo = _new_hunt(settings)

@@ -192,6 +192,7 @@ class ExpansionEngine:
             evidence_ids=row["evidence_ids"], task_ids=row["task_ids"],
             coverage=[PivotCoverage.model_validate(item) for item in row["coverage"]],
             reasons=row["reasons"], duration_ms=row["duration_ms"],
+            query_spend=row["query_spend"],
         )
 
     def _persist_link(self, result: LinkResult) -> None:
@@ -203,7 +204,8 @@ class ExpansionEngine:
             "event_ids": result.event_ids, "evidence_ids": result.evidence_ids,
             "task_ids": result.task_ids,
             "coverage": [item.model_dump(mode="json") for item in result.coverage],
-            "reasons": result.reasons, "duration_ms": result.duration_ms, "evaluated": 0,
+            "reasons": result.reasons, "duration_ms": result.duration_ms,
+            "query_spend": result.query_spend, "evaluated": 0,
         }, owner_token=self.owner_token)
 
     def _evaluate(self, candidate: dict, anchor_events: list[TypedEvent], result: LinkResult) -> None:
@@ -245,7 +247,10 @@ class ExpansionEngine:
     def run(self) -> dict:
         self._seed_anchors()
         existing_links = self.repo.expansion_links(self.hunt_id)
-        query_count = len({task for row in existing_links for task in row["task_ids"]})
+        query_count = sum(row["query_spend"] for row in existing_links)
+        executor = getattr(self.fetcher, "executor", None)
+        if executor is not None and hasattr(executor, "source_queries"):
+            executor.source_queries = query_count
         anchor_reasons: dict[str, list[str]] = defaultdict(list)
         blocked_anchors: set[str] = set()
         root_budget = self.max_source_queries - max(1, (self.max_source_queries + 4) // 5)
@@ -332,7 +337,7 @@ class ExpansionEngine:
                         self._persist_link(result)
                         actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
                         query_count = (actual_queries if actual_queries is not None
-                                       else query_count + len(set(result.task_ids)))
+                                       else query_count + result.query_spend)
                     self._evaluate(candidate, anchor_events, result)
                     made_progress = True
                     if result.status != "complete":
