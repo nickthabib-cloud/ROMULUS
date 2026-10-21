@@ -6,6 +6,7 @@ from __future__ import annotations
 import posixpath
 import re
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 from romulus.detect.base import basename
 from romulus.evidence.typed import TypedEvent
@@ -592,9 +593,15 @@ def _destination_spec(name: str, args: list[str]) -> tuple[list[str], str | None
     return operands, target_dir, no_target_dir, flags
 
 
+def names_directory(operand: str) -> bool:
+    """True when an operand can only name a directory: a trailing '/', or '.' / '..' as its last component."""
+    return operand.endswith("/") or posixpath.basename(operand) in {".", ".."}
+
+
 def _destination_files(name: str, args: list[str]) -> list[tuple[str, str, bool]]:
     """(destination, how it was derived, assumed) for a copy, move, install or link command. A destination
-    operand may be a directory; the path inside it is offered too, marked assumed unless the operand ends in '/'."""
+    operand may be a directory; the path inside it is offered too, marked assumed unless the operand can only
+    name a directory (see names_directory)."""
     operands, target_dir, no_target_dir, flags = _destination_spec(name, args)
     if name == "install" and "d" in flags:
         return []                                   # install -d creates directories only
@@ -612,7 +619,7 @@ def _destination_files(name: str, args: list[str]) -> list[tuple[str, str, bool]
     if len(operands) < 2:
         return []
     destination, sources = operands[-1], operands[:-1]
-    is_dir = destination.endswith("/")
+    is_dir = names_directory(destination)
     if not is_dir:
         out.append((destination, "destination operand", False))
     if not no_target_dir:
@@ -650,8 +657,10 @@ _CURL_VALUE_LETTERS = set("oHduxXAebcTFwKrmEYyzCUQtPD")
 _WGET_VALUE_LETTERS = set("OoaPUeitTwQlARDIXB")
 
 
-def _output_file(args: list[str], letter: str, long_names: set[str], value_letters: set[str]) -> list[str]:
-    """The value of a downloader's output-file option (`-o F`, `-oF`, grouped `-so F`, `--output=F`)."""
+def _output_file(args: list[str], letter: str, long_names: set[str], value_letters: set[str],
+                 keep_stdout: bool = False) -> list[str]:
+    """The value of a downloader's output-file option (`-o F`, `-oF`, grouped `-so F`, `--output=F`); `-` (stdout)
+    is dropped unless keep_stdout."""
     out: list[str] = []
     index = 0
     while index < len(args):
@@ -675,7 +684,75 @@ def _output_file(args: list[str], letter: str, long_names: set[str], value_lette
                         out.append(rest)
                     break
         index += 1
-    return [item for item in out if item != "-"]
+    return [item for item in out if keep_stdout or item != "-"]
+
+
+_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def _url_operands(args: list[str], value_letters: set[str]) -> list[str]:
+    """URL operands of a downloader, skipping the values of its short value options."""
+    out: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+            letters = arg[1:]
+            for position, letter in enumerate(letters):
+                if letter in value_letters:
+                    if position == len(letters) - 1:
+                        index += 1                  # the value is the next argument
+                    break
+        elif _URL.match(arg):
+            out.append(arg)
+        index += 1
+    return out
+
+
+def _url_leaf(url: str) -> str:
+    try:
+        return posixpath.basename(urlsplit(url).path)
+    except ValueError:
+        return ""
+
+
+def _expand_long(args: list[str], full: str, shortest: int) -> list[str]:
+    """Rewrite abbreviations of one long option (at least `shortest` characters) to its full name."""
+    out = []
+    for arg in args:
+        key = arg.split("=", 1)[0]
+        out.append(full + arg[len(key):] if len(key) >= shortest and full.startswith(key) else arg)
+    return out
+
+
+def _curl_remote_name(args: list[str]) -> tuple[bool, bool, str | None]:
+    """(remote-name download requested, file name taken from the server's header, --output-dir value)."""
+    remote = header_name = False
+    out_dir: str | None = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        key, has_value, inline = arg.partition("=")
+        if key in {"--remote-name", "--remote-name-all"}:
+            remote = True
+        elif key == "--remote-header-name":
+            header_name = True
+        elif key == "--output-dir":
+            out_dir = inline if has_value else (args[index + 1] if index + 1 < len(args) else None)
+            index += 0 if has_value else 1
+        elif arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+            letters = arg[1:]
+            for position, letter in enumerate(letters):
+                if letter == "O":
+                    remote = True
+                elif letter == "J":
+                    header_name = True
+                elif letter in _CURL_VALUE_LETTERS:
+                    if position == len(letters) - 1:
+                        index += 1
+                    break
+        index += 1
+    return remote, header_name, out_dir
 
 
 def write_targets(name: str, args: list[str], cwd: str | None = None,
@@ -710,22 +787,47 @@ def write_targets(name: str, args: list[str], cwd: str | None = None,
     elif name == "curl":
         raw = [(item, "'curl' was given it as the output file")
                for item in _output_file(args, "o", {"--output"}, _CURL_VALUE_LETTERS)]
+        remote, header_name, out_dir = _curl_remote_name(args)
+        if remote:
+            # -O saves each URL under its own file name, in --output-dir or the working directory
+            for url in _url_operands(args, _CURL_VALUE_LETTERS):
+                leaf = _url_leaf(url)
+                if leaf:
+                    if header_name:
+                        assumed.add(len(raw))
+                    raw.append((posixpath.join(out_dir, leaf) if out_dir else leaf,
+                                "'curl -O' was run to save a download under the URL's file name"))
     elif name == "wget":
-        expanded = [("--output-document" + arg[len(arg.split("=", 1)[0]):])
-                    if len(arg.split("=", 1)[0]) >= len("--output-d")
-                    and "--output-document".startswith(arg.split("=", 1)[0]) else arg for arg in args]
-        raw = [(item, "'wget' was given it as the output document")
-               for item in _output_file(expanded, "O", {"--output-document"}, _WGET_VALUE_LETTERS)]
+        expanded = _expand_long(args, "--output-document", len("--output-d"))
+        expanded = _expand_long(expanded, "--directory-prefix", len("--directory-"))
+        documents = _output_file(expanded, "O", {"--output-document"}, _WGET_VALUE_LETTERS, keep_stdout=True)
+        raw = [(item, "'wget' was given it as the output document") for item in documents if item != "-"]
+        if not documents:
+            # without -O wget saves each URL under its file name in --directory-prefix or the working directory
+            # (as NAME.1 when NAME already exists); recursive or host-directory layouts are not modelled
+            prefixes = _output_file(expanded, "P", {"--directory-prefix"}, _WGET_VALUE_LETTERS)
+            layout = any(arg in {"-r", "--recursive", "-x", "--force-directories", "-m", "--mirror"}
+                         for arg in expanded)
+            for url in _url_operands(expanded, _WGET_VALUE_LETTERS):
+                leaf = _url_leaf(url) or "index.html"
+                if layout:
+                    assumed.add(len(raw))
+                raw.append((posixpath.join(prefixes[-1], leaf) if prefixes else leaf,
+                            "'wget' was run to save a download under the URL's file name"))
     elif name in {"scp", "rsync"}:
         operands = client_operands(name, args)
         if len(operands) >= 2 and remote_endpoint(operands[-1]) is None:
             destination = operands[-1]
-            raw.append((destination, f"'{name}' was given it as the local destination"))
+            is_dir = names_directory(destination)
+            if not is_dir:
+                raw.append((destination, f"'{name}' was given it as the local destination"))
             for source in operands[:-1]:
                 leaf = posixpath.basename(source.split(":", 1)[-1].rstrip("/"))
                 if leaf:
-                    assumed.add(len(raw))
+                    if not is_dir:
+                        assumed.add(len(raw))
                     raw.append((posixpath.join(destination, leaf),
+                                f"'{name}' local destination directory plus the source name" if is_dir else
                                 f"'{name}' local destination read as a directory, plus the source name"))
     targets: list[WriteTarget] = []
     unresolved = False

@@ -34,6 +34,7 @@ lack it the "changed" upgrade is not applicable and claims say the change is not
 from __future__ import annotations
 
 import bisect
+import posixpath
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -75,6 +76,10 @@ ROOT_SCHEDULE_DIRS = (
     ("/usr/local/lib/systemd/system", "a system unit directory (services and timers)", "T1053.006"),
     ("/usr/lib/systemd/system", "a system unit directory (services and timers)", "T1053.006"),
 )
+# Directories whose every entry is root scheduling configuration (or, for the spool, a per-account crontab named
+# after the account). A file copied, linked or downloaded into one is a write to it, whatever the operand looked like.
+SCHEDULE_DIRECTORIES = frozenset({prefix for prefix, _d, _t in ROOT_SCHEDULE_DIRS}
+                                 | {"/var/spool/cron", "/var/spool/cron/crontabs", "/var/spool/cron/tabs"})
 # Elevation helpers inside command text: what they run does not run as the shell's account.
 _ELEVATION = {"sudo", "su", "doas", "pkexec", "run0"}
 # Merged-/usr aliases, folded for joining only (claims show the recorded paths).
@@ -171,7 +176,7 @@ class _Write:
     form: str
     account: str
     uid: str | None
-    auid: str | None
+    session: tuple | None   # (boot id, audit session id) of the writing process, when recorded
     web: bool
     assumed: bool           # the path was derived by reading a destination operand as a directory
 
@@ -197,7 +202,7 @@ class _Series:
 
 class NonRootWriteRootExecutedFile(Playbook):
     id = "host.nonroot_write_root_executed_file"
-    version = "1"
+    version = "2"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -250,6 +255,7 @@ class NonRootWriteRootExecutedFile(Playbook):
         self.load = lambda ids: []
         self.writes: dict[tuple[str, str], list[_Write]] = defaultdict(list)
         self.write_counts: dict[tuple[str, str, str], int] = defaultdict(int)
+        self.write_ok: dict[tuple[str, str, str], int] = defaultdict(int)     # writer execs that did not fail
         self.runs: dict[tuple[str, str], dict[tuple, _Series]] = defaultdict(dict)
         self.sessions: dict[tuple, list[tuple[float, str, str]]] = defaultdict(list)
         self.session_pids: dict[tuple, list[tuple[float, str, str]]] = defaultdict(list)
@@ -361,18 +367,23 @@ class NonRootWriteRootExecutedFile(Playbook):
         for path, form, assumed in found:
             by_key.setdefault(path_key(path), []).append((path, form, assumed))
         account = _account(event)
+        session = event.get("process.session_id")
+        own_session = (event.get("host.boot.id"), session) if session is not None else None
         for pkey, items in by_key.items():
             key = (event.host or "", pkey)
             count_key = (key[0], pkey, account)
             self.write_counts[count_key] += 1
+            if event.outcome != Outcome.failure:
+                self.write_ok[count_key] += 1
             if self.write_counts[count_key] > WRITE_CITE:
                 continue
             self._stage(event)
             forms = list(dict.fromkeys(form for _path, form, _assumed in items))
+            # A leaf derived inside a known schedule directory is certain: the command writes into that directory.
+            assumed = all(flag and posixpath.dirname(path) not in SCHEDULE_DIRECTORIES for path, _f, flag in items)
             self.writes[key].append(_Write(event.ts.timestamp(), event.id, items[0][0], " and ".join(forms),
-                                           account, _uid(event), _auid(event),
-                                           event.get("process.user") in WEB_SERVICE_USERS,
-                                           all(assumed for _path, _form, assumed in items)))
+                                           account, _uid(event), own_session,
+                                           event.get("process.user") in WEB_SERVICE_USERS, assumed))
 
     @staticmethod
     def _text_writes(script: str, cwd: str | None) -> tuple[list[tuple[str, str, bool]], bool]:
@@ -514,7 +525,9 @@ class NonRootWriteRootExecutedFile(Playbook):
             return (("daemon", None, None),
                     ("outside any login session (no audit login uid), launched by a process whose exec is not in "
                      "the retrieved records, such as a scheduler or daemon"), None)
-        return (("login", None, auid), f"in a login session of audit login uid {auid}", None)
+        tag = (event.get("host.boot.id"), session) if session is not None else None
+        where = f" (audit session {session})" if session is not None else ""
+        return (("login", tag, auid), f"in a login session{where} of audit login uid {auid}", None)
 
     @staticmethod
     def _latest(entries, ts: float):
@@ -560,10 +573,8 @@ class NonRootWriteRootExecutedFile(Playbook):
         return out
 
     def _finding(self, host: str, pkey: str, account: str, writes: list[_Write]) -> Match | None:
-        # A root run in the writer's own login (the writer elevating their own file) is not this behaviour.
-        principals = {w.auid for w in writes if w.auid} | {w.uid for w in writes if w.uid}
         series = sorted(((executor, s) for executor, s in self.runs.get((host, pkey), {}).items()
-                         if executor[2] is None or executor[2] not in principals), key=lambda item: str(item[0]))
+                         if not _own_elevation(executor, writes)), key=lambda item: str(item[0]))
         # A path derived by assuming a destination is a directory can join a root run, but on its own it is not
         # evidence of a write to root's schedule.
         config = schedule_config(pkey) if any(not w.assumed for w in writes) else None
@@ -644,9 +655,9 @@ class NonRootWriteRootExecutedFile(Playbook):
         else:
             lane = "high" if run_after_change else "lead"
         notes = []
-        if not changes and lane in ("urgent", "high") and all(e.outcome == Outcome.failure for e in writer_events):
+        if not changes and lane in ("urgent", "high") and not self.write_ok[(host, pkey, account)]:
             lane = "lead"
-            notes.append("lane lowered: every cited exec of the write-capable command failed")
+            notes.append("lane lowered: every recorded exec of the write-capable command failed")
         if series and not runs_after:
             notes.append("no root run of the file began after the write in this window; the next run is the risk")
         confidence = "high" if (changes or runs_after) else "medium"
@@ -655,6 +666,23 @@ class NonRootWriteRootExecutedFile(Playbook):
                       group_key=f"{host}|{account}|{pkey}")
         match.notes = notes + sorted(techniques)
         return match
+
+
+def _own_elevation(executor: tuple, writes: list[_Write]) -> bool:
+    """True when a root run is the writer elevating their own file, which is not this behaviour: the run is in the
+    writer's own audit session, or its login uid is the writer's own uid (a sudo from another of the writer's
+    logins, or a job in the writer's own crontab). The writer's login uid is never used: a daemon inherits that of
+    whoever started it. A web-service writer is never excluded: it has no business elevating at all."""
+    if any(w.web for w in writes):
+        return False
+    kind, tag, auid = executor
+    own_uids = {w.uid for w in writes if w.uid}
+    if kind == "scheduler":
+        return auid is not None and auid in own_uids
+    if kind == "login":
+        own_sessions = {w.session for w in writes if w.session is not None}
+        return (tag is not None and tag in own_sessions) or auid in own_uids
+    return False
 
 
 def _listed(items: list[str], limit: int = 6) -> str:
