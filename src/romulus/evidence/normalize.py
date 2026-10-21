@@ -514,7 +514,10 @@ def normalize_file_group(host: str, members: list[tuple[dict, AuditRecord]], cal
                            ts=datetime.fromtimestamp(rs.ts, UTC), host=host or None, outcome=outcome, fields=fields,
                            raw=refs, normalizer=NORMALIZER_VERSION, caveats=[*caveats, f"file path unknown: {why}"])]
     cwd = by_type.get("CWD")
-    parents = [items[i] for i in sorted(items) if items[i][1].fields.get("nametype") == "PARENT"]
+    # a PARENT record places a bare name only when every PATH record of the call is present: with one missing,
+    # the PARENT seen may belong to another of the call's names
+    complete = not (expected.isdigit() and int(expected) != len(items))
+    parents = [items[i] for i in sorted(items) if items[i][1].fields.get("nametype") == "PARENT"] if complete else []
     events = []
     for (ph, pr), change, slot in targets:
         fields = dict(base)

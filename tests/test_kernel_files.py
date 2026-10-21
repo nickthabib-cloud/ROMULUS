@@ -112,24 +112,49 @@ def test_effective_root_counts_as_root():
     assert len(out) == 1
 
 
-def test_owner_running_their_own_file_through_sudo_is_excluded():
-    # alice's file, run as root under alice's login uid: the owner elevating their own file
-    _pb, out = run_root([root_exec(owner="1000", auid="1000", ses=7)])
-    assert out == []
-    # another account's root login running it is reported
+OWN = "The owner ran their own writable file as root"
+
+
+def test_owner_running_their_own_file_through_sudo_is_a_grouped_lead_not_hidden():
+    # alice's file, run as root under alice's login uid (a sudo rule naming a file alice can edit is T1548.003)
+    _pb, out = run_root([root_exec(path="/home/alice/backup.sh", owner="1000", auid="1000", ses=7),
+                         root_exec(path="/home/alice/sync.sh", owner="1000", auid="1000", ses=7,
+                                   ts=T0 + timedelta(minutes=1))])
+    assert len(out) == 1
+    m = out[0]
+    assert m.proposed_lane == "lead" and OWN in m.claim and m.group_key == "app01|own:1000"
+    assert "/home/alice/backup.sh" in m.claim and "/home/alice/sync.sh" in m.claim and len(m.events) == 2
+    assert "T1548.003" in m.notes and any("session id" in n for n in m.notes)
+    # another account's root login running it is reported on its own
     _pb, out = run_root([root_exec(owner="1000", auid="1001", ses=8)])
-    assert len(out) == 1 and "audit login uid(s) 1001" in out[0].claim
+    assert len(out) == 1 and "audit login uid(s) 1001" in out[0].claim and OWN not in out[0].claim
 
 
-def test_owner_session_exclusion_follows_the_write_run_rule():
+def test_owner_session_runs_follow_the_write_run_rule_and_are_never_dropped():
     # bob's session 9: alice's account was used in it (su), then root ran alice's file there
     _pb, out = run_root([user_exec("1000", ses=9), root_exec(owner="1000", auid="1001", ses=9,
                                                              ts=T0 + timedelta(minutes=1))])
-    assert out == []
+    assert [m.group_key for m in out] == ["app01|own:1000"]
     # order does not matter: the owner's activity in the session is known at finalize
     _pb, out = run_root([root_exec(owner="1000", auid="1001", ses=9)], [user_exec("1000", ses=9,
                                                                                   ts=T0 + timedelta(minutes=1))])
-    assert out == []
+    assert [m.group_key for m in out] == ["app01|own:1000"]
+    # own and other runs of one file: the other runs keep their own finding, the own runs their lead
+    _pb, out = run_root([root_exec(owner="1000", auid="1000", ses=7),
+                         root_exec(owner="1000", ts=T0 + timedelta(minutes=2))])
+    assert sorted(m.group_key for m in out) == ["app01|1000|/srv/tasks/rotate.sh", "app01|own:1000"]
+
+
+def test_predicate_fields_come_from_each_cited_events_own_prefix():
+    as_program = root_exec(path="/opt/venv/bin/python3", owner="1002", role="executable")
+    as_interp = root_exec(owner="0", mode="0100755", interp=("/opt/venv/bin/python3", "1002", "0100755"),
+                          ts=T0 + timedelta(minutes=1))
+    for order in ([as_program, as_interp], [as_interp, as_program]):
+        _pb, out = run_root(order)
+        m = out[0]
+        fields = {p.field for p in m.predicate}
+        assert fields >= {"process.exec_file.owner.id", "process.interpreter_file.owner.id"}
+        assert not [p for p in m.predicate if p.field == "process.exec_file.owner.id" and p.value == "0"]
 
 
 def test_web_owner_and_world_writable_files_are_never_excluded():
@@ -244,17 +269,17 @@ def test_web_account_creating_a_cron_file_is_high():
     assert "account 'www-data' (uid 33), a web-service account," in m.claim
     assert "a file in a system cron table directory (/etc/cron.d)" in m.claim
     assert "/etc/cron.d/job: created it" in m.claim and "not the content written" in m.claim
-    assert "T1053.003" in m.notes and m.group_key == "app01|33|/etc/cron.d"
+    assert "T1053.003" in m.notes and m.group_key == "app01|33|/etc/cron.d/job"
     assert [e.id for e in m.events] == [record.id] and all(p.origin for p in m.predicate)
 
 
-def test_root_editor_in_an_interactive_login_is_one_grouped_lead():
+def test_root_editor_in_an_interactive_login_is_a_lead_per_file():
     kw = {"uid": "0", "exe": "/usr/bin/vim.basic", "auid": "1001", "tty": "pts0"}
     records = [change("/etc/pam.d/.sshd.swp", change_="create", **kw),
                change("/etc/pam.d/sshd", ts=T0 + timedelta(seconds=40), change_="rename_target", **kw)]
     _pb, out = run_persist(records)
-    assert len(out) == 1
-    m = out[0]
+    assert [m.group_key for m in out] == ["app01|0|/etc/pam.d/.sshd.swp", "app01|0|/etc/pam.d/sshd"]
+    m = out[1]
     assert m.proposed_lane == "lead" and "root (uid 0)" in m.claim
     assert "in an interactive login session (audit login uid 1001 on terminal pts0)" in m.claim
     assert "T1556.003" in m.notes
@@ -292,12 +317,12 @@ def test_package_lineage_needs_the_parent_exec_at_or_before_the_write():
     later = [pexec("/usr/bin/dpkg", 100, 90, ts=T0 + timedelta(microseconds=1)),
              change("/etc/init.d/x", ts=T0, uid="0", exe="/usr/bin/cp", pid=102, ppid=100)]
     _pb, out = run_persist(later)
-    assert out[0].group_key == "app01|0|/etc/init.d"
+    assert out[0].group_key == "app01|0|/etc/init.d/x"
 
 
 def test_a_package_manager_name_outside_system_directories_is_not_package_activity():
     _pb, out = run_persist([change("/etc/cron.d/x", uid="0", exe="/tmp/dpkg", pid=7, ppid=1)])
-    assert out[0].group_key == "app01|0|/etc/cron.d" and "package activity" not in out[0].claim
+    assert out[0].group_key == "app01|0|/etc/cron.d/x" and "package activity" not in out[0].claim
 
 
 def test_non_root_changes_mixed_with_package_activity_stay_separate_and_high():
@@ -307,7 +332,7 @@ def test_non_root_changes_mixed_with_package_activity_stay_separate_and_high():
                      exe="/usr/bin/tee")]
     _pb, out = run_persist(writes)
     assert sorted((m.group_key, m.proposed_lane) for m in out) == [
-        ("app01|1002|/etc/profile.d", "high"), ("app01|package:dpkg|/etc/profile.d", "lead")]
+        ("app01|1002|/etc/profile.d/b.sh", "high"), ("app01|package:dpkg|/etc/profile.d", "lead")]
 
 
 def test_failed_attempts_only_are_a_lead_and_any_success_keeps_high():
@@ -315,7 +340,7 @@ def test_failed_attempts_only_are_a_lead_and_any_success_keeps_high():
     assert out[0].proposed_lane == "lead" and "these are attempts" in out[0].claim
     assert "every recorded call failed" in out[0].notes[0]
     _pb, out = run_persist([change("/etc/cron.d/job", outcome=Outcome.failure),
-                            change("/etc/cron.d/job2", ts=T0 + timedelta(seconds=1))])
+                            change("/etc/cron.d/job", ts=T0 + timedelta(seconds=1))])
     assert out[0].proposed_lane == "high"
 
 
@@ -331,10 +356,20 @@ def test_an_accounts_own_per_account_files_are_a_lead_and_anothers_are_high():
     assert out[0].proposed_lane == "high" and "T1098.004" in out[0].notes
 
 
-def test_setuid_root_helpers_writing_for_an_account_are_a_lead():
+def test_setuid_root_helpers_writing_an_accounts_spool_are_a_hypothesis_worded_lead():
     _pb, out = run_persist([change("/var/spool/cron/alice", uid="1000", owner="0", process__euid="0",
                                    exe="/usr/bin/crontab")])
-    assert out[0].proposed_lane == "lead" and "setuid-root program" in out[0].claim
+    m = out[0]
+    assert m.proposed_lane == "lead" and "setuid-root program" in m.claim
+    assert "an exploited setuid program does too" in m.claim and "decides what it writes" not in m.claim
+
+
+@pytest.mark.parametrize("path", ["/etc/ld.so.preload", "/etc/cron.d/x", "/etc/sudoers.d/x"])
+def test_setuid_root_writers_to_system_locations_stay_high_and_are_not_read_as_acting_for_the_account(path):
+    _pb, out = run_persist([change(path, uid="1000", owner="0", process__euid="0", exe="/usr/bin/x")])
+    m = out[0]
+    assert m.proposed_lane == "high" and "on the account's behalf" not in m.claim and "crontab" not in m.claim
+    assert "effective uid 0" in m.claim
     _pb, out = run_persist([change("/var/spool/cron/atjobs/a0001", uid="1000", change_="create")])
     assert out[0].proposed_lane == "lead"                                  # the account's own at job
 
@@ -381,11 +416,23 @@ def test_missing_path_uid_or_change_are_counted_missing():
 
 
 def test_many_changes_cite_ten_with_exact_totals():
-    records = [change(f"/etc/cron.d/j{i:02d}", ts=T0 + timedelta(seconds=i)) for i in range(14)]
+    records = [change("/etc/cron.d/job", ts=T0 + timedelta(seconds=i), change_="content") for i in range(14)]
     _pb, out = run_persist(records)
     m = out[0]
     assert len(m.events) == 10 and "14 kernel file-change record(s)" in m.claim
-    assert "The earliest 10 records are cited" in m.claim and "and 4 more" in m.claim
+    assert "The earliest 10 records are cited" in m.claim and "(14 records)" in m.claim
+
+
+def test_an_attackers_file_among_many_routine_changes_has_its_own_finding():
+    routine = [change(f"/etc/cron.d/agent{i:02d}", ts=T0 + timedelta(seconds=i), uid="0",
+                      exe="/usr/bin/python3.11") for i in range(12)]
+    evil = change("/etc/cron.d/zevil", ts=T0 + timedelta(minutes=5), uid="0", exe="/usr/bin/bash", auid="1001",
+                  tty="pts3")
+    _pb, out = run_persist(routine + [evil])
+    assert len(out) == 13
+    m = next(m for m in out if m.group_key == "app01|0|/etc/cron.d/zevil")
+    assert "/etc/cron.d/zevil" in m.claim and [e.id for e in m.events] == [evil.id]
+    assert "interactive login session" in m.claim and m.proposed_lane == "lead"
 
 
 def test_persistence_output_is_deterministic_across_partition_order_and_rereads():
@@ -533,13 +580,14 @@ def test_kernel_change_to_root_schedule_without_a_run_is_left_to_the_persistence
     assert out == []
 
 
-def test_kernel_writer_elevating_its_own_file_in_its_own_session_is_not_matched():
+def test_kernel_writer_elevating_its_own_file_in_its_own_session_is_a_lead_not_hidden():
     own = kchange(uid="1000", process__session_id=7)
     run = ev("process_exec", T0 + timedelta(minutes=1), process__argv=["/bin/bash", JOB],
              process__executable="/usr/bin/bash", process__uid="0", process__auid="1000", process__session_id=7,
              process__pid=900, process__ppid=899)
     _pb, out = run_hijack([own, run])
-    assert out == []
+    assert len(out) == 1 and out[0].proposed_lane == "lead"
+    assert "the writer's own elevation" in out[0].claim and "T1548.003" in out[0].notes
 
 
 # =============================================================================================================

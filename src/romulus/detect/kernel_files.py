@@ -81,6 +81,7 @@ class _ModifiableFile:
     prefix: str
     sessions: dict[tuple | None, _Runs] = field(default_factory=dict)
     auids: dict[tuple | None, str | None] = field(default_factory=dict)
+    prefixes: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))   # cited event -> field prefix
 
     def merge(self, other: _ModifiableFile) -> None:
         self.paths |= other.paths
@@ -111,8 +112,8 @@ class RootExecNonRootModifiableFile(Playbook):
     attack = ("T1574", "T1053", "T1543.002")
     benign = ("vendor software installed under a service account's ownership that a root unit or job runs",
               "a deployment account that owns scripts root's scheduler runs (still a privilege boundary weakness)",
-              ("an administrator running their own file through sudo from another login (excluded when the run is "
-              "in the owner's own audit session or under the owner's login uid)"))
+              ("an administrator running their own file through sudo (runs in the owner's own audit session or "
+              "under the owner's login uid are one separate lead per host and owner)"))
     next_checks = ("the file's current owner, mode and content, and its package ownership",
                    "the file's change history: kernel file-change records, package and deploy logs",
                    "what the root runs started or connected to, and who can log in as the owning account")
@@ -185,6 +186,7 @@ class RootExecNonRootModifiableFile(Playbook):
             runs.first = min(runs.first, event.ts.timestamp())
             if len(runs.cited) < CITE:
                 runs.cited.append(event)
+            entry.prefixes[event.id].add(candidate.prefix)
 
     def _modifiable(self, event: TypedEvent, prefix: str, role: str | None) -> _ModifiableFile | None:
         owner = _str(event.get(f"{prefix}.owner.id"))
@@ -222,16 +224,32 @@ class RootExecNonRootModifiableFile(Playbook):
 
     def finalize(self):
         out = []
+        own: dict[tuple[str, str], list[tuple[_ModifiableFile, list[_Runs]]]] = defaultdict(list)
         for key in sorted(self.files):
-            match = self._finding(key, self.files[key])
-            if match is not None:
-                out.append(match)
+            f = self.files[key]
+            runs = sorted(f.sessions.items(), key=lambda item: str(item[0]))
+            mine = [r for tag, r in runs if self._own(key[0], f, tag)]
+            others = [(tag, r) for tag, r in runs if not self._own(key[0], f, tag)]
+            if others:
+                out.append(self._finding(key, f, others))
+            if mine:
+                own[(key[0], f.owner)].append((f, mine))
+        out += [self._own_finding(host, owner, own[(host, owner)]) for host, owner in sorted(own)]
         return out
 
-    def _excluded(self, host: str, f: _ModifiableFile, tag: tuple | None) -> bool:
-        """The owner running their own file as root: the same exclusion the write/run rule applies to a writer.
-        It applies only when non-root ownership is the whole reason; a file other accounts can write is never
-        excluded, whoever runs it."""
+    def _predicate(self, cited: list[TypedEvent], files: list[_ModifiableFile]) -> list:
+        """Predicate fields of each cited event, from the field prefix (program or interpreter) it matched on."""
+        out = []
+        for event in cited:
+            prefixes = sorted(set().union(*(f.prefixes.get(event.id, set()) for f in files)))
+            names = ["process.uid", "process.euid"] + [f"{p}.{n}" for p in prefixes for n in ("owner.id", "mode", "path")]
+            out += [pf(event, name) for name in names if event.has(name)]
+        return out
+
+    def _own(self, host: str, f: _ModifiableFile, tag: tuple | None) -> bool:
+        """The owner running their own file as root, by the write/run rule's own-elevation test. Such runs are
+        reported as their own lead, never dropped. The test applies only when non-root ownership is the whole
+        reason; a file other accounts can write is never the owner's own matter."""
         auid = f.auids.get(tag)
         if auid is None or f.owner == "0" or f.others_can_write:
             return False                         # outside any login session: a daemon, unit or scheduler run
@@ -240,12 +258,8 @@ class RootExecNonRootModifiableFile(Playbook):
                   for session in sorted(sessions, key=str)]
         return _own_elevation(("login", tag, auid), owners)
 
-    def _finding(self, key: tuple[str, str, str], f: _ModifiableFile) -> Match | None:
+    def _finding(self, key: tuple[str, str, str], f: _ModifiableFile, kept: list) -> Match:
         host = key[0]
-        kept = [(tag, runs) for tag, runs in sorted(f.sessions.items(), key=lambda item: str(item[0]))
-                if not self._excluded(host, f, tag)]
-        if not kept:
-            return None
         total = sum(runs.count for _tag, runs in kept)
         failed = sum(runs.failed for _tag, runs in kept)
         first = min(runs.first for _tag, runs in kept)
@@ -278,15 +292,34 @@ class RootExecNonRootModifiableFile(Playbook):
         if failed == total:
             lane = "lead"
             notes.append("lane lowered: every recorded exec of the file failed")
-        predicate = []
-        for event in cited:
-            for name in ("process.uid", "process.euid", f"{f.prefix}.owner.id", f"{f.prefix}.mode",
-                         f"{f.prefix}.path"):
-                if event.has(name):
-                    predicate.append(pf(event, name))
-        match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, lane, "high",
-                      cited[0].entities(), group_key=f"{host}|{f.owner}|{key[1]}")
+        match = Match(self.id, claim, self.claim_type, cited, self._predicate(cited, [f]), cited[0].ts,
+                      self.severity, lane, "high", cited[0].entities(), group_key=f"{host}|{f.owner}|{key[1]}")
         match.notes = notes + ["T1574"]
+        return match
+
+    def _own_finding(self, host: str, owner: str, files: list[tuple[_ModifiableFile, list[_Runs]]]) -> Match:
+        """One lead per (host, owner) for root runs of the owner's files in the owner's own session or login."""
+        runs = [r for _f, rs in files for r in rs]
+        total = sum(r.count for r in runs)
+        first, last = min(r.first for r in runs), max(r.last for r in runs)
+        cited = sorted({e.id: e for r in runs for e in r.cited}.values(), key=lambda e: (e.ts, e.id))[:CITE]
+        name = next((f.owner_name for f, _rs in files if f.owner_name), None)
+        who = f"uid {owner}" + (f" ('{name}')" if name else "")
+        listed = "; ".join(f"{' or '.join(sorted(f.paths))} ({sum(r.count for r in rs)} run(s), mode "
+                           f"{', '.join(sorted(f.modes)) or 'not recorded'})" for f, rs in files)
+        claim = (f"On {host}, root ran file(s) owned by {who} {total} time(s) {_span(first, last)} in the owner's own "
+                 f"audit session or under the owner's own login uid: {listed}. The owner ran their own writable file "
+                 f"as root. An administrator running their own script through sudo looks like this; so does a sudo "
+                 f"or su rule that runs a file its owner can edit, which gives that account root whenever it edits "
+                 f"the file.")
+        if total > len(cited):
+            claim += f" {len(cited)} of these runs are cited."
+        claim += f" The {_tally(cited, 'exec calls')}."
+        match = Match(self.id, claim, self.claim_type, cited, self._predicate(cited, [f for f, _rs in files]),
+                      cited[0].ts, self.severity, "lead", "high", cited[0].entities(), group_key=f"{host}|own:{owner}")
+        match.notes = ["T1548.003", "T1574",
+                       ("own sessions are matched by audit session id and boot id; where the boot id is not recorded, "
+                       "a session id reused after a reboot can match a different login")]
         return match
 
 
@@ -413,6 +446,7 @@ class _Change:
     uid: str
     account: str
     web: bool
+    per_account: bool       # a per-account location (an account's own crontab, at jobs, keys, startup files)
     own: bool               # a per-account location, in a file the actor's own uid owns
     setuid: bool            # a non-root account through a setuid-root program (effective uid 0)
     exe: str
@@ -537,7 +571,7 @@ class PersistencePathChange(Playbook):
             ts=event.ts.timestamp(), event_id=event.id, host=event.host or "", path=str(path), change=str(change),
             location=location[0], description=location[1], technique=location[2], uid=uid,
             account=str(user or f"uid {uid}"), web=user in WEB_SERVICE_USERS,
-            own=location[3] and _str(event.get("file.owner.id")) == uid,
+            per_account=location[3], own=location[3] and _str(event.get("file.owner.id")) == uid,
             setuid=uid != "0" and _str(event.get("process.euid")) == "0",
             exe=str(event.get("process.executable") or ""), pid=event.get("process.pid"),
             ppid=event.get("process.ppid"), auid=_str(event.get("process.auid")), tty=_str(event.get("process.tty")),
@@ -570,8 +604,10 @@ class PersistencePathChange(Playbook):
         groups: dict[tuple, list[_Change]] = defaultdict(list)
         for change in self.changes:
             manager = self._manager(change) if change.uid == "0" else None
+            # package activity is batched per location; anything else is one finding per file and account, so
+            # no file is ever merged away among other changes in the same location
             key = (("package", change.host, manager, change.location) if manager
-                   else ("account", change.host, change.location, change.uid))
+                   else ("account", change.host, change.path, change.uid))
             groups[key].append(change)
         out = []
         for key in sorted(groups, key=lambda k: tuple(str(part) for part in k)):
@@ -597,7 +633,7 @@ class PersistencePathChange(Playbook):
         return text + (f"; and {len(parts) - CITE} more" if len(parts) > CITE else "")
 
     def _finding(self, key: tuple, items: list[_Change]) -> Match:
-        _kind, host, location, uid = key
+        _kind, host, path, uid = key
         first = items[0]
         cited, predicate = self._cite(items)
         root = uid == "0"
@@ -618,19 +654,25 @@ class PersistencePathChange(Playbook):
         if not ok:
             claim += " Every recorded call failed: these are attempts; no change was made by them."
         own_only = not root and all(c.own and not c.web for c in items)
-        setuid_only = not root and all(c.setuid and not c.web for c in items)
+        # only an account's own spool or startup entry can be read as a helper acting for the account
+        setuid_only = not root and all(c.setuid and c.per_account and not c.web for c in items)
+        setuid = sum(1 for c in items if c.setuid)
         if own_only:
-            claim += (" Each file is the account's own (a per-account location, owned by the account's uid), as "
+            claim += (" The file is the account's own (a per-account location, owned by the account's uid), as "
                       "when an account manages its own crontab, keys or shell startup files.")
         elif setuid_only:
-            claim += (" Every call ran with effective uid 0 through a setuid-root program, which decides what it "
-                      "writes on the account's behalf (as crontab, at or chsh do).")
+            claim += (" Every call ran with effective uid 0 through a setuid-root program on the account's own "
+                      "per-account entry: crontab, at and chsh do this for an account, and an exploited setuid "
+                      "program does too.")
+        elif setuid:
+            claim += f" {setuid} of the calls ran with effective uid 0 (a setuid-root program)."
         claim += (" The records show the system call on the file, not the content written; the files here are "
                   "read or run by the system (scheduler, init, the login path or the loader).")
         if len(items) > len(cited):
             claim += f" The earliest {len(cited)} records are cited."
         # A non-root account changing what the system or another account acts on is high; a web-service account
-        # always is. An account changing its own per-account files is a lead: that is also routine use.
+        # always is. An account changing its own per-account files, or a setuid-root helper writing the account's
+        # own spool entry, is a lead: that is also routine use.
         lane = "high" if (not root and ok and not own_only and not setuid_only) else "lead"
         notes = sorted({c.technique for c in items})
         if not root and not ok:
@@ -638,10 +680,10 @@ class PersistencePathChange(Playbook):
         elif own_only:
             notes.insert(0, "lead: the account acted only on its own per-account files")
         elif setuid_only:
-            notes.insert(0, "lead: every call was made through a setuid-root program")
+            notes.insert(0, "lead: every call was a setuid-root program on the account's own per-account entry")
         confidence = "high" if ok and all(c.outcome == Outcome.success for c in ok) else "medium"
         match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, lane,
-                      confidence, cited[0].entities(), group_key=f"{host}|{uid}|{location}")
+                      confidence, cited[0].entities(), group_key=f"{host}|{uid}|{path}")
         match.notes = notes
         return match
 

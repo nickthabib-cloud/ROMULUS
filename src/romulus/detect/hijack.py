@@ -16,7 +16,8 @@ What the evidence shows, and what it does not:
   joined by audit session id or parent pid), a process started by the service manager (pid 1) outside any login
   session, a root process outside any login session whose launcher is not in the records, or a root process in
   another account's login session. A root process in the writer's own login session (the writer elevating their
-  own file) is not this behaviour and is not matched.
+  own file) is set apart: when it is the only root run, the finding is a lead that says so, because a sudo rule
+  running a file its user can edit is the same shape.
 - A non-root write-capable command on a root scheduling configuration path (system crontabs, cron directories,
   root's spool crontab, system unit directories) matches on its own: those files are what root's scheduler runs.
 
@@ -598,13 +599,19 @@ class NonRootWriteRootExecutedFile(Playbook):
                  kernel: list[_Write] = ()) -> Match | None:
         """`writes` are write-capable commands; `kernel` are kernel file-change records by the same account. With
         no command, the kernel records are the writes, and a finding needs a root run of the file."""
-        series = sorted(((executor, s) for executor, s in self.runs.get((host, pkey), {}).items()
-                         if not _own_elevation(executor, [*writes, *kernel])), key=lambda item: str(item[0]))
+        every = sorted(self.runs.get((host, pkey), {}).items(), key=lambda item: str(item[0]))
+        series = [(executor, s) for executor, s in every if not _own_elevation(executor, [*writes, *kernel])]
         # A path derived by assuming a destination is a directory can join a root run, but on its own it is not
         # evidence of a write to root's schedule.
         config = schedule_config(pkey) if any(not w.assumed for w in writes) else None
+        own_only = False
         if not series and config is None:
-            return None
+            # Only the writer's own elevation ran the file. That is never dropped: a sudo rule that runs a file its
+            # user can edit is the same shape (T1548.003). It is reported as a lead.
+            series = [(executor, s) for executor, s in every if _own_elevation(executor, [*writes, *kernel])]
+            if not series:
+                return None
+            own_only = True
         actors = writes or list(kernel)
         first, web = actors[0], any(w.web for w in (*writes, *kernel))
         since = "the first write-capable command" if writes else "the first kernel file-change record"
@@ -670,6 +677,11 @@ class NonRootWriteRootExecutedFile(Playbook):
         claim += "".join(f" {line[0].upper()}{line[1:]}." for line in exec_lines)
         if config is not None:
             claim += f" {first.path} is {config[0]}, which root's scheduler or service manager reads."
+        if own_only:
+            claim += (" Every root run is the writer's own elevation (in the writer's own audit session or under its "
+                      "own login uid): the writer ran its own writable file as root. An administrator running their "
+                      "own script through sudo looks like this; so does a sudo or su rule that runs a file its user "
+                      "can edit, which gives that account root whenever it edits the file.")
         if changes:
             claim += (f" A kernel file-change record shows this account {CHANGE_WORDS.get(changes[0][3], changes[0][3])}"
                       f" at {_iso(changes[0][0])}.")
@@ -681,13 +693,20 @@ class NonRootWriteRootExecutedFile(Playbook):
                       "changed is not established (the retrieved telemetry carries no kernel file-change records).")
 
         # Lanes. A web-service account has no business writing what root runs: high on the command alone, urgent
-        # once a kernel record proves a content change and root ran the file after it. Another non-root account is a
-        # lead (deployment accounts own such files) until that same proof raises it to high.
+        # once a kernel file-change record of a content kind (opened for writing, created, renamed onto, linked; an
+        # open for writing shows write intent, not the bytes written) is followed by a non-failed root run. Another
+        # non-root account is a lead (deployment accounts own such files) until that same record raises it to high.
+        # A writer that only elevated its own file is a lead.
         if web:
             lane = "urgent" if run_after_change else "high"
         else:
             lane = "high" if run_after_change else "lead"
         notes = []
+        if own_only:
+            lane = "lead"
+            techniques.add("T1548.003")
+            notes.append("own elevation is matched by audit session id and boot id, or by login uid; where the boot "
+                         "id is not recorded, a session id reused after a reboot can match a different login")
         if not changes and lane in ("urgent", "high") and not self.write_ok[(host, pkey, account)]:
             lane = "lead"
             notes.append("lane lowered: every recorded exec of the write-capable command failed")

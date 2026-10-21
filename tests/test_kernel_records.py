@@ -177,6 +177,13 @@ def test_bare_name_without_cwd_is_placed_under_an_absolute_parent():
     assert events[0].fields["file.path"].origin.endswith("+PATH(PARENT).name")
 
 
+def test_parent_fallback_needs_every_path_record_of_the_call():
+    events, _, _ = normalize_hits(group(syscall(24, 87, "unlink", items=3), path(24, 0, "/etc/cron.d", "PARENT"),
+                                        path(24, 1, "job", "DELETE")))
+    assert not events[0].has("file.path")
+    assert any("2 of the 3 PATH records" in c for c in events[0].caveats)
+
+
 def test_relative_name_without_cwd_or_parent_is_unresolved():
     events, _, _ = normalize_hits(group(syscall(23, 87, "unlink"), path(23, 0, "sub/job", "DELETE")))
     assert not events[0].has("file.path") and events[0].get("file.change") == "delete"
