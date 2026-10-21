@@ -9,6 +9,7 @@ never any evaluation dataset's commands, hosts or addresses.
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import func, select
 
 from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import decide
@@ -21,13 +22,12 @@ from romulus.detect.context import (
     PrivilegeProbing,
     StagingAndTransfer,
 )
-from romulus.detect.registry import fresh_context_pack
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
-from romulus.hunt.context import evaluate_context
+from romulus.hunt.context import evaluate_context, finalize_context
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkResult
-from romulus.hunt.publish import publish_match, refute_context_candidates
 from romulus.sources.models import Window
+from romulus.store import schema as _schema
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -480,28 +480,39 @@ def test_expansion_engine_publishes_high_lateral_finding():
 # Root processes with an unknown parent, and rebuild-on-merge / refutation across windows.
 # ------------------------------------------------------------------------------------------------
 
-def _anchor(anchor_id, anchor_class="execution"):
-    return ContextAnchor(id=anchor_id, anchor_class=anchor_class, lane="urgent", claim="a foothold",
-                         events=[exec_event(f"{anchor_id}-ev", ["/bin/sh"], process__pid=9)])
+def _seed_anchor(repo, hunt_id, anchor_id, rule_id, events, *, host="web1"):
+    repo.save_evidence(hunt_id, events, {}, None)
+    repo.save_candidate({
+        "id": anchor_id, "hunt_id": hunt_id, "rule_id": rule_id, "rule_version": "1", "claim": "a foothold",
+        "claim_type": "observed_action", "event_ids": [e.id for e in events], "predicate_fields": [],
+        "entities": [["host", host, "host"]], "ts": T0, "severity": "critical", "confidence": "high",
+        "lane": "urgent", "priority": 100.0, "priority_reasons": [], "gate_results": {},
+        "benign_alternatives": [], "next_checks": [], "group_key": anchor_id, "source_case_id": None,
+        "source_anchor_id": None, "source_link_id": None})
+    repo.save_expansion_anchor({
+        "id": anchor_id, "hunt_id": hunt_id, "candidate_id": anchor_id, "depth": 0, "parent_anchor_id": None,
+        "host": host, "lane": "urgent", "severity": "critical", "ts": T0, "status": "pending", "reasons": []})
 
 
-def _link(link_id, strength="observed", link_type="login_session"):
-    return ContextLink(id=link_id, link_type=link_type, strength=strength,
-                       key={"process.session_id": 42}, evidence_events=[], status="complete")
+def _seed_link(repo, hunt_id, link_id, anchor_id, link_events, *, link_type="process_lineage",
+               strength="observed", status="complete"):
+    repo.save_evidence(hunt_id, link_events, {}, None)
+    repo.save_expansion_link({
+        "id": link_id, "hunt_id": hunt_id, "anchor_id": anchor_id, "link_type": link_type,
+        "window_label": "anchor ±5 min", "window_start": T0 - timedelta(minutes=5),
+        "window_end": T0 + timedelta(minutes=5), "strength": strength, "key": {"process.session_id": 42},
+        "status": status, "event_ids": [e.id for e in link_events], "evidence_ids": [], "task_ids": [],
+        "coverage": [], "reasons": [], "duration_ms": 0, "query_spend": 0, "evaluated": 1})
 
 
-def _evaluate_window(repo, hunt_id, anchor_obj, link_obj, events):
-    """Mirror ExpansionEngine._evaluate for one window: publish context matches, then refute untouched keys."""
-    produced = set()
-    for ev in evaluate_context(repo, hunt_id, anchor_obj, link_obj, events):
-        produced.add((ev.playbook.id, ev.match.group_key))
-        publish_match(repo, hunt_id, ev.playbook, ev.match, None, {},
-                      source_anchor_id=anchor_obj.id, source_link_id=link_obj.id,
-                      context_reach={"anchor_id": anchor_obj.id, "anchor_class": anchor_obj.anchor_class,
-                                     "link_id": link_obj.id, "link_type": link_obj.link_type,
-                                     "strength": link_obj.strength})
-    refute_context_candidates(repo, hunt_id, events, produced,
-                              {p.id: p for p in fresh_context_pack()})
+def _audit_count(repo, action):
+    with repo.engine.connect() as c:
+        return c.execute(select(func.count()).select_from(_schema.audit_event)
+                         .where(_schema.audit_event.c.action == action)).scalar()
+
+
+def _discovery(rule_cands):
+    return [c for c in rule_cands if c["rule_id"] == "context.post_access_discovery"]
 
 
 def test_root_with_unknown_parent_is_a_single_aggregated_lead_never_high():
@@ -514,45 +525,110 @@ def test_root_with_unknown_parent_is_a_single_aggregated_lead_never_high():
     assert "parent exec is not in the linked records" in out[0].claim and "3 record(s)" in out[0].claim
 
 
-def test_two_anchors_union_forms_a_discovery_burst_high():
+def test_two_anchors_one_session_form_a_discovery_burst_high():
     repo = _repo()
-    _evaluate_window(repo, "h1", _anchor("F-A"), _link("L-A"),
-                     [exec_event("id", ["id"], executable="/usr/bin/id"),
-                      exec_event("uname", ["uname", "-a"], executable="/usr/bin/uname")])
-    mid = [c for c in repo.candidates("h1") if c["rule_id"] == "context.post_access_discovery"]
-    assert len(mid) == 1 and mid[0]["lane"] == "lead"
-    _evaluate_window(repo, "h1", _anchor("F-B"), _link("L-B"),
-                     [exec_event("ps", ["ps", "aux"], executable="/usr/bin/ps"),
-                      exec_event("ss", ["ss", "-tunap"], executable="/usr/bin/ss")])
-    final = [c for c in repo.candidates("h1") if c["rule_id"] == "context.post_access_discovery"]
+    _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
+    _seed_anchor(repo, "h1", "F-B", "host.web_shell", [exec_event("fb", ["/bin/sh"], process__pid=8)])
+    _seed_link(repo, "h1", "L-A", "F-A", [exec_event("id", ["id"], executable="/usr/bin/id"),
+                                          exec_event("uname", ["uname", "-a"], executable="/usr/bin/uname")])
+    _seed_link(repo, "h1", "L-B", "F-B", [exec_event("ps", ["ps", "aux"], executable="/usr/bin/ps"),
+                                          exec_event("ss", ["ss", "-tunap"], executable="/usr/bin/ss")])
+    finalize_context(repo, "h1")
+    final = _discovery(repo.candidates("h1"))
     assert len(final) == 1 and final[0]["lane"] == "high"
     assert "4 command(s)" in final[0]["claim"] and "4 distinct" in final[0]["claim"]
 
 
-def test_merge_result_is_independent_of_window_order():
+def test_finalize_is_independent_of_link_seed_order():
     def run(order):
         repo = _repo()
-        windows = {
-            "A": (_anchor("F-A"), _link("L-A"), [exec_event("id", ["id"], executable="/usr/bin/id"),
-                                                 exec_event("uname", ["uname"], executable="/usr/bin/uname")]),
-            "B": (_anchor("F-B"), _link("L-B"), [exec_event("ps", ["ps"], executable="/usr/bin/ps"),
-                                                 exec_event("ss", ["ss"], executable="/usr/bin/ss")]),
+        _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
+        _seed_anchor(repo, "h1", "F-B", "host.web_shell", [exec_event("fb", ["/bin/sh"], process__pid=8)])
+        links = {
+            "A": ("L-A", "F-A", [exec_event("id", ["id"], executable="/usr/bin/id"),
+                                 exec_event("uname", ["uname"], executable="/usr/bin/uname")]),
+            "B": ("L-B", "F-B", [exec_event("ps", ["ps"], executable="/usr/bin/ps"),
+                                 exec_event("ss", ["ss"], executable="/usr/bin/ss")]),
         }
         for key in order:
-            _evaluate_window(repo, "h1", *windows[key])
-        row = next(c for c in repo.candidates("h1") if c["rule_id"] == "context.post_access_discovery")
-        return row["lane"], "4 command(s)" in row["claim"], tuple(sorted(row["event_ids"]))
+            _seed_link(repo, "h1", *links[key])
+        finalize_context(repo, "h1")
+        row = _discovery(repo.candidates("h1"))[0]
+        return (row["lane"], row["claim"], tuple(sorted(row["event_ids"])), row["source_link_id"],
+                tuple(tuple(sorted(r.items())) for r in row["gate_results"]["_context_reaches"]))
     assert run(["A", "B"]) == run(["B", "A"])
 
 
-def test_narrow_then_wider_same_pid_has_no_stale_high():
+def test_host_after_records_never_join_a_lineage_discovery_group():
     repo = _repo()
+    _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
+    _seed_link(repo, "h1", "L-lin", "F-A", [exec_event("id", ["id"], executable="/usr/bin/id")],
+               link_type="process_lineage")
+    _seed_link(repo, "h1", "L-ha", "F-A",
+               [exec_event("df", ["df"], executable="/usr/bin/df"),
+                exec_event("ps", ["ps"], executable="/usr/bin/ps"),
+                exec_event("ss", ["ss"], executable="/usr/bin/ss")], link_type="host_after_anchor")
+    finalize_context(repo, "h1")
+    disc = _discovery(repo.candidates("h1"))
+    assert len(disc) == 1 and disc[0]["lane"] == "lead" and "1 distinct" in disc[0]["claim"]
+
+
+def test_anchor_exec_is_never_counted_one_link_or_the_same_twice():
+    def run(count):
+        repo = _repo()
+        _seed_anchor(repo, "h1", "F-A", "host.web_shell",
+                     [exec_event("wa", ["whoami"], executable="/usr/bin/whoami")])
+        shared = [exec_event("un", ["uname", "-a"], executable="/usr/bin/uname"),
+                  exec_event("ps", ["ps"], executable="/usr/bin/ps")]
+        for i in range(count):
+            _seed_link(repo, "h1", f"L{i}", "F-A", shared, link_type="process_lineage")
+        finalize_context(repo, "h1")
+        row = _discovery(repo.candidates("h1"))[0]
+        return row["lane"], row["claim"], tuple(sorted(row["event_ids"]))
+    result = run(1)
+    assert result == run(2) and result[0] == "lead" and "2 distinct" in result[1]
+
+
+def test_scenario_a_internal_login_in_another_session_does_not_withdraw_external_entry():
+    repo = _repo()
+    _seed_anchor(repo, "h1", "F-A", "host.ssh_login_external_source",
+                 [exec_event("fa", ["/bin/sh"], process__session_id=42)])
+    _seed_link(repo, "h1", "L-ext", "F-A", [auth_event("ext", source="203.0.113.8", phase="login", session=42)],
+               link_type="login_session")
+    _seed_link(repo, "h1", "L-int", "F-A", [auth_event("int2", source="10.0.0.8", phase="login", session=99)],
+               link_type="login_session")
+    finalize_context(repo, "h1")
+    entry = [c for c in repo.candidates("h1") if c["rule_id"] == "context.entry_point_promotion"]
+    assert any(c["lane"] == "high" and c["group_key"].endswith("|42") for c in entry)
+    assert not any(c["group_key"].endswith("|99") for c in entry)
+
+
+def test_entry_point_internal_source_in_its_own_session_is_not_promoted():
+    repo = _repo()
+    _seed_anchor(repo, "h1", "F-A", "host.ssh_login_external_source",
+                 [exec_event("fa", ["/bin/sh"], process__session_id=42)])
+    _seed_link(repo, "h1", "L-ext", "F-A", [auth_event("ext", source="203.0.113.8", phase="login", session=42)],
+               link_type="login_session")
+    finalize_context(repo, "h1")
+    entry = next(c for c in repo.candidates("h1") if c["rule_id"] == "context.entry_point_promotion")
+    assert entry["lane"] == "high"
+    # a wider reach of the SAME session shows an internal source: withdraw to context, audited once.
+    _seed_link(repo, "h1", "L-int", "F-A",
+               [auth_event("ext", source="203.0.113.8", phase="login", session=42),
+                auth_event("int", source="10.0.0.8", phase="session_open", session=42)],
+               link_type="login_session")
+    finalize_context(repo, "h1")
+    entry = next(c for c in repo.candidates("h1") if c["rule_id"] == "context.entry_point_promotion")
+    assert entry["lane"] == "context" and "withdrawn" in entry["claim"]
+    assert _audit_count(repo, "context.finalize") >= 1
+
+
+def test_root_known_transition_wins_over_unknown_parent_across_reaches():
+    repo = _repo()
+    _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
     root = exec_event("r", ["cat", "/root/x"], executable="/usr/bin/cat", process__uid="0", process__euid="0",
                       process__auid="1000", process__pid=200, process__ppid=500, ts=T0 + timedelta(minutes=1))
-    _evaluate_window(repo, "h1", _anchor("F-A"), _link("L-A"), [root])      # parent 500 unclipped -> unknown
-    narrow = [c for c in repo.candidates("h1") if c["rule_id"] == "context.privilege_probing"]
-    assert narrow and all(c["lane"] != "high" for c in narrow)
-    # wider window reveals the root shell (pid 500) and its sudo broker (pid 150)
+    _seed_link(repo, "h1", "L-narrow", "F-A", [root], link_type="process_lineage")
     shell = exec_event("sh", ["bash"], executable="/bin/bash", process__uid="1000", process__euid="1000",
                        process__auid="1000", process__pid=100, process__ppid=50, ts=T0 - timedelta(minutes=20))
     sudo = exec_event("su", ["sudo", "-i"], executable="/usr/bin/sudo", process__uid="1000", process__euid="0",
@@ -560,24 +636,56 @@ def test_narrow_then_wider_same_pid_has_no_stale_high():
     root_shell = exec_event("rs", ["bash"], executable="/bin/bash", process__uid="0", process__euid="0",
                             process__auid="1000", process__pid=500, process__ppid=150,
                             ts=T0 - timedelta(minutes=19))
-    _evaluate_window(repo, "h1", _anchor("F-A"), _link("L-A"), [root, shell, sudo, root_shell])
-    final = [c for c in repo.candidates("h1") if c["rule_id"] == "context.privilege_probing"]
-    assert all(c["lane"] != "high" for c in final)                         # no stale high anywhere
-    assert any("euid0unknown" in c["group_key"] and c["lane"] == "context" for c in final)  # withdrawn
-    assert any(c["group_key"].startswith("euid0|") and c["lane"] == "lead" for c in final)  # brokered lead
+    _seed_link(repo, "h1", "L-wide", "F-A", [root, shell, sudo, root_shell], link_type="process_lineage")
+    finalize_context(repo, "h1")
+    priv = [c for c in repo.candidates("h1") if c["rule_id"] == "context.privilege_probing"]
+    assert all(c["lane"] != "high" for c in priv)                          # the broker makes it a lead
+    assert not any("euid0unknown" in c["group_key"] and c["lane"] != "context" for c in priv)
+    assert any(c["group_key"].startswith("euid0|") and c["lane"] == "lead" for c in priv)
 
 
-def test_entry_point_withdrawn_when_wider_window_shows_internal_source():
+def test_finalize_resume_is_idempotent():
     repo = _repo()
-    sourceless = auth_event("so", source=None, phase="session_open")
-    _evaluate_window(repo, "h1", _anchor("F-A", "remote_login"), _link("L-A"), [sourceless])
-    lead = next(c for c in repo.candidates("h1") if c["rule_id"] == "context.entry_point_promotion")
-    assert lead["lane"] == "lead"
-    internal = auth_event("in", source="10.0.0.8", phase="login")
-    _evaluate_window(repo, "h1", _anchor("F-A", "remote_login"), _link("L-A"), [sourceless, internal])
-    final = next(c for c in repo.candidates("h1") if c["rule_id"] == "context.entry_point_promotion")
-    assert final["lane"] == "context" and "withdrawn" in final["claim"]
-    assert repo.latest_audit("h1", "context.rebuild") is not None
+    _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
+    _seed_link(repo, "h1", "L-A", "F-A", [exec_event("id", ["id"], executable="/usr/bin/id")])
+    finalize_context(repo, "h1")
+    before = _discovery(repo.candidates("h1"))[0]
+    audits = _audit_count(repo, "context.finalize")
+    finalize_context(repo, "h1")
+    after = _discovery(repo.candidates("h1"))[0]
+    assert before == after and _audit_count(repo, "context.finalize") == audits
+
+
+def test_resumed_run_that_adds_a_link_writes_one_audited_update():
+    repo = _repo()
+    _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
+    _seed_link(repo, "h1", "L-A", "F-A", [exec_event("id", ["id"], executable="/usr/bin/id")])
+    finalize_context(repo, "h1")
+    assert _discovery(repo.candidates("h1"))[0]["lane"] == "lead"
+    audits = _audit_count(repo, "context.finalize")
+    _seed_link(repo, "h1", "L-B", "F-A", [exec_event("uname", ["uname"], executable="/usr/bin/uname"),
+                                          exec_event("ss", ["ss"], executable="/usr/bin/ss")])
+    finalize_context(repo, "h1")
+    final = _discovery(repo.candidates("h1"))[0]
+    assert final["lane"] == "high" and _audit_count(repo, "context.finalize") == audits + 1
+
+
+def test_withdrawal_and_its_audit_are_written_together():
+    repo = _repo()
+    _seed_anchor(repo, "h1", "F-A", "host.ssh_login_external_source",
+                 [exec_event("fa", ["/bin/sh"], process__session_id=42)])
+    _seed_link(repo, "h1", "L-ext", "F-A", [auth_event("ext", source="203.0.113.8", phase="login", session=42)],
+               link_type="login_session")
+    finalize_context(repo, "h1")
+    audits = _audit_count(repo, "context.finalize")
+    _seed_link(repo, "h1", "L-int", "F-A",
+               [auth_event("ext", source="203.0.113.8", phase="login", session=42),
+                auth_event("int", source="10.0.0.8", phase="session_open", session=42)],
+               link_type="login_session")
+    finalize_context(repo, "h1")
+    entry = next(c for c in repo.candidates("h1") if c["rule_id"] == "context.entry_point_promotion")
+    # the candidate reached the context lane and exactly one audit row accompanied the change.
+    assert entry["lane"] == "context" and _audit_count(repo, "context.finalize") == audits + 1
 
 
 # ------------------------------------------------------------------------------------------------
@@ -591,26 +699,6 @@ def test_discovery_cites_every_record_and_claim_total_matches():
     cited = [e for e in match.events if e.id.startswith("d")]
     assert len(cited) == 15 and "15 command(s)" in match.claim
     assert len([p for p in match.predicate if p.field == "process.executable"]) == 15
-
-
-def test_merge_from_wider_window_rebuilds_claim_to_the_union():
-    repo = _repo()
-    narrow = [exec_event(f"n{i}", ["ss", "-tunap"], executable="/usr/bin/ss", ts=T0 + timedelta(seconds=i))
-              for i in range(3)]
-    wide = narrow + [exec_event(f"w{i}", ["ss", "-tunap"], executable="/usr/bin/ss",
-                                ts=T0 + timedelta(seconds=10 + i)) for i in range(12)]
-    first = PostAccessDiscovery().consume_linked(anchor(), link(), narrow)[0]
-    publish_match(repo, "h1", PostAccessDiscovery(), first, None, {}, source_anchor_id="F-anchor",
-                  source_link_id="L1", context_reach={"anchor_id": "F-anchor", "link_id": "L1",
-                                                      "link_type": "process_lineage", "strength": "observed"})
-    wider = PostAccessDiscovery().consume_linked(anchor(), link(), wide)[0]
-    publish_match(repo, "h1", PostAccessDiscovery(), wider, None, {}, source_anchor_id="F-anchor",
-                  source_link_id="L2", context_reach={"anchor_id": "F-anchor", "link_id": "L2",
-                                                      "link_type": "process_lineage", "strength": "observed"})
-    candidates = [c for c in repo.candidates("h1") if c["rule_id"] == "context.post_access_discovery"]
-    assert len(candidates) == 1
-    assert "15 command(s)" in candidates[0]["claim"]
-    assert len([e for e in candidates[0]["event_ids"] if e.startswith(("n", "w"))]) == 15
 
 
 def test_unparseable_shell_c_script_counts_as_partial():

@@ -10,16 +10,10 @@ from datetime import UTC, datetime, timedelta
 
 from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import LANE_ORDER
-from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.host import is_internal
-from romulus.detect.registry import (
-    anchor_class_for_rule,
-    fresh_context_pack,
-    fresh_direct_pack,
-    rule_kind,
-)
+from romulus.detect.registry import fresh_direct_pack, rule_kind
 from romulus.evidence.typed import TypedEvent
-from romulus.hunt.context import evaluate_context
+from romulus.hunt.context import finalize_context
 from romulus.hunt.links import (
     HOST_SIDE_LINKS,
     LinkAnchor,
@@ -29,7 +23,7 @@ from romulus.hunt.links import (
     LinkWindow,
     usable_key,
 )
-from romulus.hunt.publish import publish_match, refute_context_candidates
+from romulus.hunt.publish import publish_match
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
@@ -240,7 +234,8 @@ class ExpansionEngine:
         }, owner_token=self.owner_token)
 
     def _evaluate(self, candidate: dict, anchor_events: list[TypedEvent], result: LinkResult) -> None:
-        # Every coverage cell evaluates every event. Publication owns cross-window deduplication.
+        # Per link, only the direct (sweep) pack runs: a strong indicator among the linked records is published
+        # immediately. Context rules are judged once, after expansion ends, by finalize_context.
         events = self._events(result.event_ids)
         for playbook in fresh_direct_pack():
             for match in playbook.consume(events):
@@ -255,34 +250,6 @@ class ExpansionEngine:
                     self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                     source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
                 )
-        context_anchor = ContextAnchor(
-            id=candidate["id"], anchor_class=anchor_class_for_rule(candidate["rule_id"]), lane=candidate["lane"],
-            claim=candidate["claim"], events=anchor_events,
-        )
-        context_link = ContextLink(
-            id=result.id, link_type=result.link_type, strength=result.strength, key=result.key,
-            evidence_events=self._events(result.evidence_ids), status=result.status, reasons=result.reasons,
-        )
-        produced: set = set()
-        for evaluated in evaluate_context(
-            self.repo, self.hunt_id, context_anchor, context_link, events,
-            owner_token=self.owner_token,
-        ):
-            produced.add((evaluated.playbook.id, evaluated.match.group_key))
-            publish_match(
-                self.repo, self.hunt_id, evaluated.playbook, evaluated.match,
-                result.task_ids[0] if result.task_ids else None, {},
-                source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
-                context_reach={
-                    "anchor_id": candidate["id"], "anchor_class": context_anchor.anchor_class,
-                    "link_id": result.id, "link_type": result.link_type, "strength": result.strength,
-                },
-            )
-        # Re-judge context candidates this window touched but did not produce (a wider view may refute them).
-        refute_context_candidates(
-            self.repo, self.hunt_id, events, produced,
-            {playbook.id: playbook for playbook in fresh_context_pack()}, owner_token=self.owner_token,
-        )
         self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
 
     def _budget_reason(self, query_count: int) -> str | None:
@@ -459,6 +426,9 @@ class ExpansionEngine:
             else:
                 status = "expanded_partial" if reasons else "expanded_complete"
             self.repo.update_expansion_anchor(row["id"], status, reasons, owner_token=self.owner_token)
+        # One deterministic context pass over every evaluated link, whatever the stop reason, and again on a
+        # resumed run (this call re-runs it over all links, which is idempotent).
+        finalize_context(self.repo, self.hunt_id, owner_token=self.owner_token)
         anchors = self.repo.expansion_anchors(self.hunt_id)
         if source_failed and stop_reason != "source_failure":
             stop_reason = f"{stop_reason}; source_failure"

@@ -321,6 +321,7 @@ class PostAccessDiscovery(_HostContextRule):
     title = "Discovery commands in an anchored session or process lineage"
     anchor_class = "execution"
     families = ("process_exec",)
+    required_by_family = EXEC_REQUIRED
     positive_only_reason = ("discovery commands are identified from the executable and argv tokens and are only "
                             "evaluated on records reached through an anchor link; absence outside that linked "
                             "scope, or in records with no exec, proves nothing")
@@ -334,7 +335,7 @@ class PostAccessDiscovery(_HostContextRule):
 
     def match_linked(self, anchor, link, events):
         groups: dict[tuple, list[tuple[str, str, TypedEvent]]] = defaultdict(list)
-        for event in self.eligible(events, EXEC_REQUIRED):
+        for event in self.eligible_records(events):
             prog = program(event)
             if prog is None:
                 continue
@@ -442,6 +443,7 @@ class PrivilegeProbing(_HostContextRule):
     version = "3"
     title = "Privilege probing or escalation in an anchored session or lineage"
     families = ("process_exec",)
+    required_by_family = EXEC_REQUIRED
     positive_only_reason = ("the probing commands and the setuid/sudo/capability operands are identified from "
                             "argv, and a root process is visible only when its exec was recorded; absence proves "
                             "neither that privileges were not probed nor that none were gained")
@@ -455,7 +457,7 @@ class PrivilegeProbing(_HostContextRule):
                    "commands the root-privileged process ran next")
 
     def match_linked(self, anchor, link, events):
-        eligible = self.eligible(events, EXEC_REQUIRED)
+        eligible = self.eligible_records(events)
         # The anchor's own exec records are not among the link events on a lineage link, so add them to the
         # index: a root record's parent may be the anchor's own shell. They are lookups only, not candidates.
         index = _exec_index(eligible + list(anchor.events))
@@ -658,6 +660,7 @@ class CredentialAccessInContext(_HostContextRule):
     title = "Credential-store read in an anchored session or lineage"
     anchor_class = "credential_access"
     families = ("process_exec",)
+    required_by_family = EXEC_REQUIRED
     positive_only_reason = ("the reader and the credential file are identified from argv, not from a file-access "
                             "record, and a credential store can be opened in ways argv does not show; absence "
                             "proves nothing")
@@ -671,7 +674,7 @@ class CredentialAccessInContext(_HostContextRule):
 
     def match_linked(self, anchor, link, events):
         groups: dict[tuple, list[tuple[str, TypedEvent]]] = defaultdict(list)
-        for event in self.eligible(events, EXEC_REQUIRED):
+        for event in self.eligible_records(events):
             prog = program(event)
             if prog is None:
                 continue
@@ -915,6 +918,7 @@ class StagingAndTransfer(_HostContextRule):
     version = "2"
     title = "Data staging or transfer in an anchored session or lineage"
     families = ("process_exec",)
+    required_by_family = EXEC_REQUIRED
     positive_only_reason = ("the archiver, encoder or transfer tool and its operands are identified from argv "
                             "and shell script text; the command line shows intent and direction but not that "
                             "bytes were staged or moved, so absence proves nothing")
@@ -930,7 +934,7 @@ class StagingAndTransfer(_HostContextRule):
     def match_linked(self, anchor, link, events):
         groups: dict[tuple, dict] = defaultdict(
             lambda: {"stage": [], "transfer": [], "ingress": [], "tech": set()})
-        for event in self.eligible(events, EXEC_REQUIRED):
+        for event in self.eligible_records(events):
             prog = program(event)
             if prog is None:
                 continue
@@ -1021,6 +1025,8 @@ class LateralMovement(_HostContextRule):
     anchor_class = "lateral_movement"
     families = ("process_exec", "net_socket")
     required_fields = ()
+    required_by_family: ClassVar[dict] = {"process_exec": ("process.executable", "process.argv"),
+                                          "net_socket": ("destination.ip", "destination.port")}
     positive_only_reason = ("the remote-service client and its target are identified from argv, and the socket "
                             "connect path depends on the audit rule set recording that syscall; a session can "
                             "move laterally in ways these records do not show, so absence proves nothing")
@@ -1033,10 +1039,7 @@ class LateralMovement(_HostContextRule):
                    "whether a network sensor also recorded the flow")
 
     def match_linked(self, anchor, link, events):
-        eligible = self.eligible(
-            events, {"process_exec": ("process.executable", "process.argv"),
-                     "net_socket": ("destination.ip", "destination.port")},
-        )
+        eligible = self.eligible_records(events)
         index = _exec_index(eligible)
         clients: dict[tuple, list[_Client]] = defaultdict(list)
         exec_groups: dict[tuple, dict] = defaultdict(lambda: {"exec": [], "tech": set()})
@@ -1173,6 +1176,7 @@ class EntryPointPromotion(ContextPlaybook):
     link_types = ("login_session",)
     families = ("auth",)
     required_fields = ("auth.service",)
+    required_by_family: ClassVar[dict] = {"auth": ("auth.service",)}
     assures_negative = False
     positive_only_reason = ("the entry point is recognised from the linked session's audit login records "
                             "(USER_LOGIN/USER_START) and sshd authentication records, only within that session; "
@@ -1187,48 +1191,57 @@ class EntryPointPromotion(ContextPlaybook):
     _PHASE_RANK: ClassVar[dict[str, int]] = {"login": 0, "authentication": 0, "session_open": 2}
 
     def match_linked(self, anchor, link, events):
-        candidates = []
-        has_internal_source = False
-        external_source = None
-        for event in self.eligible(events, {"auth": ("auth.service",)}):
+        # Group the session's own sshd success records by (host, boot, session id). The external-vs-internal
+        # test uses only a session's own records, so another session can never affect it.
+        sessions: dict[tuple, list[TypedEvent]] = defaultdict(list)
+        for event in self.eligible_records(events):
             if event.get("auth.service") != "sshd" or event.outcome != Outcome.success:
                 continue
             source = event.get("source.ip")
             if source is not None:
                 try:
-                    address = ipaddress.ip_address(str(source))
+                    ipaddress.ip_address(str(source))
                 except ValueError:
                     self.missing_required += 1       # a present-but-unparseable source is not a clean field
                     continue
-                if is_internal(address):
-                    has_internal_source = True
-                else:
-                    external_source = str(address)
-            candidates.append(event)
-        # If any record of this session has an internal source, this is not an external entry point.
-        if not candidates or has_internal_source:
-            return []
+            key = (event.host, event.get("host.boot.id"),
+                   event.get("process.session_id") or link.key.get("process.session_id"))
+            sessions[key].append(event)
 
-        chosen = min(candidates, key=lambda event: (
+        out = []
+        for (host, boot, session), records in sessions.items():
+            match = self._promote(anchor, link, host, boot, session, records)
+            if match is not None:
+                out.append(match)
+        return out
+
+    def _promote(self, anchor, link, host, boot, session, records):
+        external_source = None
+        for event in records:
+            source = event.get("source.ip")
+            if source is None:
+                continue
+            if is_internal(ipaddress.ip_address(str(source))):
+                return None                          # this session's own source is internal: not an entry point
+            external_source = str(source)
+        chosen = min(records, key=lambda event: (
             self._PHASE_RANK.get(event.get("auth.phase"), 1),
             0 if event.get("source.ip") is not None else 1,
             event.ts, event.id,
         ))
-        session = chosen.get("process.session_id") or link.key.get("process.session_id")
-        boot = chosen.get("host.boot.id")
-        group_key = f"entry|{chosen.host}|{boot}|{session}"
+        group_key = f"entry|{host}|{boot}|{session}"
         is_session_open = self._PHASE_RANK.get(chosen.get("auth.phase"), 1) >= 2
         if external_source is not None:
             lane, confidence = "high", "high"
             if is_session_open:
-                lead = f"The session-open record of a remote SSH login from {external_source} on {chosen.host}"
+                lead = f"The session-open record of a remote SSH login from {external_source} on {host}"
             else:
-                lead = f"A successful remote login from {external_source} on {chosen.host}"
+                lead = f"A successful remote login from {external_source} on {host}"
         else:
             lane, confidence = "lead", "medium"
             descriptor = ("The session-open record of a remote SSH login" if is_session_open
                           else "A successful remote SSH login")
-            lead = f"{descriptor} on {chosen.host} (its source address was not recorded; not confirmed external)"
+            lead = f"{descriptor} on {host} (its source address was not recorded; not confirmed external)"
         claim = (f"{lead} began the observed login session that later performed {anchor.id}. "
                  f"{_context_suffix(anchor, link)}")
         predicate = [pf(chosen, "auth.service")]
@@ -1239,7 +1252,7 @@ class EntryPointPromotion(ContextPlaybook):
                       "high" if lane == "high" else "medium", lane, confidence, chosen.entities(),
                       group_key=group_key)
         match.notes.append("T1078")
-        return [match]
+        return match
 
 
 CONTEXT_PLAYBOOKS = [

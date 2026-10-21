@@ -1,5 +1,5 @@
 """Context-only playbooks: anchor-gated behavior, lane caps, citations and coverage."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -8,12 +8,36 @@ from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.context import EntryPointPromotion, PostAccessDiscovery
 from romulus.detect.registry import anchor_class_for_rule, fresh_context_pack, fresh_pack, pack_manifest
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
-from romulus.hunt.context import evaluate_context
-from romulus.hunt.publish import publish_match
+from romulus.hunt.context import evaluate_context, finalize_context
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
+
+
+def _seed_anchor(repo, hunt_id, anchor_id, rule_id, events):
+    repo.save_evidence(hunt_id, events, {}, None)
+    repo.save_candidate({
+        "id": anchor_id, "hunt_id": hunt_id, "rule_id": rule_id, "rule_version": "1", "claim": "a foothold",
+        "claim_type": "observed_action", "event_ids": [e.id for e in events], "predicate_fields": [],
+        "entities": [["host", "web1", "host"]], "ts": T0, "severity": "critical", "confidence": "high",
+        "lane": "urgent", "priority": 100.0, "priority_reasons": [], "gate_results": {},
+        "benign_alternatives": [], "next_checks": [], "group_key": anchor_id, "source_case_id": None,
+        "source_anchor_id": None, "source_link_id": None})
+    repo.save_expansion_anchor({
+        "id": anchor_id, "hunt_id": hunt_id, "candidate_id": anchor_id, "depth": 0, "parent_anchor_id": None,
+        "host": "web1", "lane": "urgent", "severity": "critical", "ts": T0, "status": "pending", "reasons": []})
+
+
+def _seed_link(repo, hunt_id, link_id, anchor_id, link_events, *, link_type="process_lineage",
+               strength="observed", status="complete"):
+    repo.save_evidence(hunt_id, link_events, {}, None)
+    repo.save_expansion_link({
+        "id": link_id, "hunt_id": hunt_id, "anchor_id": anchor_id, "link_type": link_type,
+        "window_label": "anchor ±5 min", "window_start": T0 - timedelta(minutes=5),
+        "window_end": T0 + timedelta(minutes=5), "strength": strength, "key": {}, "status": status,
+        "event_ids": [e.id for e in link_events], "evidence_ids": [], "task_ids": [], "coverage": [],
+        "reasons": [], "duration_ms": 0, "query_spend": 0, "evaluated": 1})
 
 
 def event(event_id, family="process_exec", *, outcome=Outcome.success, **fields):
@@ -120,50 +144,30 @@ def test_host_after_link_does_not_turn_routine_discovery_into_context_findings()
     ) == []
 
 
-def test_context_candidate_dedupes_by_rule_event_and_keeps_every_reach():
+def test_finalize_aggregates_every_reach_into_one_candidate():
     engine = make_engine(":memory:")
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"targets": []}, "digest", "test")
-    # a discovery burst (three distinct classes) in one session: a high through an observed link, capped to
-    # lead through the inferred one. All reach the same (host, session) finding.
-    observed = [
+    # a discovery burst (three distinct classes) in one session, reached three ways: high through the observed
+    # links, capped to lead would apply only if every reach were inferred. The representative is the observed
+    # link with the lowest id.
+    burst = [
         event("whoami", process__executable="/usr/bin/whoami", process__argv=["whoami"], process__session_id=42),
         event("uname", process__executable="/usr/bin/uname", process__argv=["uname", "-a"],
               process__session_id=42),
         event("ss", process__executable="/usr/bin/ss", process__argv=["ss", "-tunap"], process__session_id=42),
     ]
-    playbook = PostAccessDiscovery()
-    inferred_link = link(strength="inferred", link_type="process_lineage")
-    inferred_link.id = "L-inferred"
-    observed_link = link(strength="observed", link_type="login_session")
-    observed_link.id = "L-observed"
-    third_link = link(strength="observed", link_type="process_lineage")
-    third_link.id = "L-third"
+    _seed_anchor(repo, "h1", "F-anchor", "host.web_shell",
+                 [event("anchor-event", process__executable="/bin/sh", process__argv=["/bin/sh"],
+                        process__session_id=42)])
+    _seed_link(repo, "h1", "L-inferred", "F-anchor", burst, link_type="process_lineage", strength="inferred")
+    _seed_link(repo, "h1", "L-observed", "F-anchor", burst, link_type="login_session", strength="observed")
+    _seed_link(repo, "h1", "L-third", "F-anchor", burst, link_type="process_lineage", strength="observed")
 
-    first = playbook.consume_linked(anchor(), inferred_link, observed)[0]
-    second = PostAccessDiscovery().consume_linked(anchor(), observed_link, observed)[0]
-    publish_match(
-        repo, "h1", playbook, first, None, {}, source_anchor_id="F-anchor",
-        source_link_id=inferred_link.id,
-        context_reach={"anchor_id": "F-anchor", "link_id": inferred_link.id,
-                       "link_type": inferred_link.link_type, "strength": inferred_link.strength},
-    )
-    publish_match(
-        repo, "h1", PostAccessDiscovery(), second, None, {}, source_anchor_id="F-anchor",
-        source_link_id=observed_link.id,
-        context_reach={"anchor_id": "F-anchor", "link_id": observed_link.id,
-                       "link_type": observed_link.link_type, "strength": observed_link.strength},
-    )
-    third = PostAccessDiscovery().consume_linked(anchor(), third_link, observed)[0]
-    publish_match(
-        repo, "h1", PostAccessDiscovery(), third, None, {}, source_anchor_id="F-anchor",
-        source_link_id=third_link.id,
-        context_reach={"anchor_id": "F-anchor", "link_id": third_link.id,
-                       "link_type": third_link.link_type, "strength": third_link.strength},
-    )
+    finalize_context(repo, "h1")
 
-    candidates = repo.candidates("h1")
+    candidates = [c for c in repo.candidates("h1") if c["rule_id"] == "context.post_access_discovery"]
     assert len(candidates) == 1
     assert candidates[0]["lane"] == "high"
     assert candidates[0]["source_link_id"] == "L-observed"

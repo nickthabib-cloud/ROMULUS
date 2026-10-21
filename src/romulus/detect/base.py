@@ -135,19 +135,25 @@ class ContextPlaybook(Playbook):
     kind: ClassVar[str] = "context"
     anchor_classes: ClassVar[tuple[str, ...]] = ("*",)
     link_types: ClassVar[tuple[str, ...]] = ()
+    # Typed fields a record of each family must carry to be evaluated (missing ones are counted, never a clean
+    # no-match). The finalize pass reads it to pick the records a rule would see for a link.
+    required_by_family: ClassVar[dict[str, tuple[str, ...]]] = {}
 
     def consume(self, events: list[TypedEvent]) -> list[Match]:
         return []
+
+    def accepts(self, anchor: ContextAnchor | None, link: ContextLink) -> bool:
+        """Whether this rule may read records that arrived through this anchor class and link type. A rule only
+        ever sees records from a link type it lists, so out-of-scope links never reach it."""
+        return (anchor is not None
+                and ("*" in self.anchor_classes or anchor.anchor_class in self.anchor_classes)
+                and link.link_type in self.link_types)
 
     def consume_linked(
         self, anchor: ContextAnchor | None, link: ContextLink,
         events: list[TypedEvent],
     ) -> list[Match]:
-        if anchor is None:
-            return []
-        if "*" not in self.anchor_classes and anchor.anchor_class not in self.anchor_classes:
-            return []
-        if link.link_type not in self.link_types:
+        if not self.accepts(anchor, link):
             return []
         matches = self.match_linked(anchor, link, events)
         for match in matches:
@@ -165,6 +171,10 @@ class ContextPlaybook(Playbook):
         self, anchor: ContextAnchor, link: ContextLink, events: list[TypedEvent],
     ) -> list[Match]:
         return []
+
+    def eligible_records(self, events: list[TypedEvent]) -> list[TypedEvent]:
+        """Eligible records using this rule's declared `required_by_family` (counts evaluated/missing)."""
+        return self.eligible(events, self.required_by_family)
 
     def eligible(
         self, events: list[TypedEvent], required_by_family: dict[str, tuple[str, ...]],

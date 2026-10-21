@@ -448,6 +448,47 @@ class Repo:
             self._fence_lease(c, hunt_id, owner_token)
             c.execute(t.candidate.update().where(t.candidate.c.id == candidate_id).values(**values))
 
+    # Fields a finalize pass owns on a context candidate. `digest` is the idempotence key.
+    _FINALIZE_FIELDS = (
+        "claim", "claim_type", "event_ids", "predicate_fields", "entities", "ts", "severity",
+        "confidence", "lane", "priority", "priority_reasons", "gate_results",
+        "source_anchor_id", "source_link_id",
+    )
+
+    def finalize_context_candidate(self, row: dict, digest: str, audit_detail: dict,
+                                   *, owner_token: str | None = None) -> bool:
+        """Upsert one context candidate and, when it changed, write its audit row in the SAME transaction.
+        Idempotent: a candidate whose stored finalize digest already equals `digest` is left untouched and no
+        audit row is written. Returns True when a write happened."""
+        with write_txn(self.engine) as c:
+            self._fence_lease(c, row["hunt_id"], owner_token)
+            existing = c.execute(select(t.candidate).where(t.candidate.c.id == row["id"])).mappings().first()
+            if existing is not None and existing["gate_results"].get("_finalize_digest") == digest:
+                return False
+            audit_detail = {**audit_detail,
+                            "old_lane": existing["lane"] if existing else None,
+                            "old_claim_digest": existing["gate_results"].get("_finalize_digest", "")
+                            if existing else ""}
+            if existing is None:
+                c.execute(t.candidate.insert().values(**row, created_at=utcnow()))
+                c.execute(t.disposition_event.insert().values(
+                    candidate_id=row["id"], actor="romulus", at=utcnow(), status="new", note="machine decision"))
+            else:
+                c.execute(t.candidate.update().where(t.candidate.c.id == row["id"]).values(
+                    **{field: row[field] for field in self._FINALIZE_FIELDS}))
+            c.execute(t.audit_event.insert().values(
+                at=utcnow(), actor="system", action="context.finalize", hunt_id=row["hunt_id"],
+                detail=audit_detail))
+            return True
+
+    def context_candidate_ids(self, hunt_id: str, rule_ids: set[str]) -> list[dict]:
+        """Minimal rows for the context candidates of the given rules, to find ones a finalize pass dropped."""
+        q = select(t.candidate.c.id, t.candidate.c.rule_id, t.candidate.c.lane, t.candidate.c.group_key,
+                   t.candidate.c.event_ids, t.candidate.c.gate_results).where(
+            t.candidate.c.hunt_id == hunt_id, t.candidate.c.rule_id.in_(rule_ids))
+        with self.engine.connect() as c:
+            return [dict(r) for r in c.execute(q).mappings()]
+
     # ---- deterministic expansion -----------------------------------------------------------
     def save_expansion_anchor(self, row: dict, *, owner_token: str | None = None) -> bool:
         now = utcnow()
