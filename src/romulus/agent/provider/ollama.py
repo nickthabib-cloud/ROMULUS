@@ -19,6 +19,7 @@ from romulus.agent.provider.base import (
     parse_tool_arguments,
 )
 from romulus.agent.provider.openai_compatible import PROBE_MAX_OUTPUT, PROBE_TOOL, usage_checks
+from romulus.config import redact_text
 
 
 def _ollama_messages(messages: list[dict]) -> list[dict]:
@@ -55,8 +56,10 @@ class OllamaProvider(ChatProvider):
         options: dict = {"num_ctx": self.context_tokens(), "num_predict": max_out, "seed": 7}
         if request.temperature is not None:
             options["temperature"] = request.temperature
+        # truncate=false: Ollama otherwise drops earlier messages that do not fit num_ctx, without saying so
         body: dict = {"model": self.model, "stream": False, "messages": _ollama_messages(messages),
-                      "think": self.s.ollama_think, "keep_alive": self.s.ollama_keep_alive, "options": options}
+                      "think": self.s.ollama_think, "keep_alive": self.s.ollama_keep_alive, "options": options,
+                      "truncate": False}
         if request.tools:
             body["tools"] = [{"type": "function", "function": {
                 "name": t.name, "description": t.description, "parameters": t.parameters,
@@ -64,19 +67,24 @@ class OllamaProvider(ChatProvider):
         if request.response_schema is not None:
             body["format"] = request.response_schema
         response, ms, attempts = self._post("/api/chat", body)
+        if response.status_code == 400 and "exceed" in response.text and "context" in response.text:
+            failed = self._http_error(response, est, ms, attempts)
+            failed.status = "too_large"
+            return failed
         if response.status_code != 200:
             return self._http_error(response, est, ms, attempts)
         try:
             data = response.json()
             message = data.get("message") or {}
-        except (ValueError, AttributeError):
+            calls: list[ToolCall] = []
+            for n, call in enumerate(message.get("tool_calls") or []):
+                function = call.get("function") or {}
+                calls.append(parse_tool_arguments(f"call_{n}", str(function.get("name") or ""),
+                                                  function.get("arguments", {})))
+        except (ValueError, TypeError, AttributeError):
             return ChatResult("error", "", "", None, [], Usage(), est, self.model, "", ms,
-                              response.text[:2000], "response is not an Ollama chat reply", attempts)
-        calls: list[ToolCall] = []
-        for n, call in enumerate(message.get("tool_calls") or []):
-            function = (call or {}).get("function") or {}
-            calls.append(parse_tool_arguments(f"call_{n}", str(function.get("name") or ""),
-                                              function.get("arguments", {})))
+                              redact_text(response.text[:2000], self.s), "response is not an Ollama chat reply",
+                              attempts)
         prompt, completion = data.get("prompt_eval_count"), data.get("eval_count")
         # prompt_eval_count counts only non-cached tokens, so a low value is normal; a value at the
         # context ceiling means the prompt was cut. The shared check compares it with num_ctx.

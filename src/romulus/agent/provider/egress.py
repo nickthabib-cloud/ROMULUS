@@ -1,8 +1,9 @@
 """Classify a model endpoint as local or remote, and decide whether telemetry excerpts may be sent to it.
 
 An endpoint is local when its host is loopback, RFC 1918 or IPv6 unique-local, or is listed in
-MODEL_LOCAL_HOSTS (a hostname, an address, or a CIDR network). A hostname counts as local only when every
-address it resolves to is local; a name that does not resolve is remote. Every other endpoint is remote and
+MODEL_LOCAL_HOSTS (a hostname, an address, or a CIDR network no wider than /8, or /16 for IPv6). A hostname
+counts as local only when every address it resolves to is local; a name that does not resolve is remote. The
+name classified is the ASCII form the client connects to. Every other endpoint is remote and
 is refused unless the bootstrap configuration sets ROMULUS_MODEL_EGRESS=lab-public-data.
 """
 from __future__ import annotations
@@ -72,6 +73,9 @@ def _address(text: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     return address
 
 
+MIN_LISTED_PREFIX = {4: 8, 6: 16}     # a wider MODEL_LOCAL_HOSTS network would make public space "local"
+
+
 def _listed(local_hosts: list[str]) -> tuple[set[str], list[ipaddress.IPv4Network | ipaddress.IPv6Network]]:
     names: set[str] = set()
     networks = []
@@ -80,43 +84,60 @@ def _listed(local_hosts: list[str]) -> tuple[set[str], list[ipaddress.IPv4Networ
         if not entry:
             continue
         try:
-            networks.append(ipaddress.ip_network(entry, strict=False))
+            network = ipaddress.ip_network(entry, strict=False)
         except ValueError:
             names.add(entry)
+            continue
+        if network.prefixlen < MIN_LISTED_PREFIX[network.version]:
+            raise EndpointError(f"MODEL_LOCAL_HOSTS entry {entry} is too wide: list your model servers' own "
+                                f"networks (at most /{MIN_LISTED_PREFIX[network.version]})")
+        networks.append(network)
     return names, networks
 
 
 def classify(base_url: str, local_hosts: list[str], egress_switch: str,
              resolver: Resolver = system_resolver) -> EgressDecision:
     url = parse_endpoint(base_url)
-    host = url.host.lower().rstrip(".")
+    # classify exactly the name the client will connect to (its ASCII/IDNA form)
+    host = url.raw_host.decode("ascii").lower()
+    if host.endswith("."):
+        raise EndpointError("AGENT_BASE_URL host must not end with a dot")
     names, listed_networks = _listed(local_hosts)
-    networks = (*LOCAL_NETWORKS, *listed_networks)
 
-    def local_address(address) -> bool:
-        return any(address.version == net.version and address in net for net in networks)
+    def where(address) -> str | None:
+        if any(address.version == net.version and address in net for net in listed_networks):
+            return "listed"
+        if any(address.version == net.version and address in net for net in LOCAL_NETWORKS):
+            return "private"
+        return None
 
     if host in names:
-        egress, basis, addresses = "local", "listed in MODEL_LOCAL_HOSTS", ()
+        egress, basis, addresses = "local", "the name is listed in MODEL_LOCAL_HOSTS", ()
     elif host == "localhost":
         egress, basis, addresses = "local", "localhost", ()
     else:
         literal = _address(host)
         if literal is not None:
             addresses = (str(literal),)
-            egress = "local" if local_address(literal) else "remote"
-            basis = ("address is loopback, private or listed" if egress == "local"
-                     else "address is not loopback, private or listed")
+            kind = where(literal)
+            egress = "local" if kind else "remote"
+            basis = {"listed": "the address is in MODEL_LOCAL_HOSTS",
+                     "private": "the address is loopback or private"}.get(kind or "",
+                                                                             "the address is not loopback, private or listed")
         else:
             basis = "name resolved to no address; treated as remote"
             try:
                 resolved = resolver(host)
             except OSError as exc:
                 resolved, basis = [], f"name did not resolve ({exc.__class__.__name__}); treated as remote"
+            except ValueError as exc:      # includes UnicodeError: a label the resolver cannot encode
+                raise EndpointError(f"AGENT_BASE_URL host {host!r} is not a valid name: {exc}") from None
             addresses = tuple(resolved)
-            parsed = [_address(a) for a in resolved]
-            if resolved and all(a is not None and local_address(a) for a in parsed):
-                egress, basis = "local", "every resolved address is loopback, private or listed"
+            kinds = [where(a) if a is not None else None for a in (_address(r) for r in resolved)]
+            if resolved and all(kinds):
+                egress = "local"
+                basis = ("every resolved address is loopback or private" if set(kinds) == {"private"}
+                         else "every resolved address is loopback, private or in MODEL_LOCAL_HOSTS")
             else:
                 egress = "remote"
                 if resolved:

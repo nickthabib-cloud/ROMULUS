@@ -37,8 +37,12 @@ def open_repo(s: Settings) -> Repo:
 
 def ai_agent_entry(s: Settings, requested: bool | None = None) -> dict:
     """The manifest's record of the AI agent: whether this hunt asked for it, and its provider readiness."""
-    readiness = agent_readiness(s)
     wanted = (s.agent_default == "on") if requested is None else requested
+    try:
+        readiness = agent_readiness(s)
+    except Exception as exc:      # the agent's configuration must never stop a deterministic hunt
+        log.exception("agent readiness failed")
+        return {"requested": wanted, "state": "blocked", "reason": f"readiness check failed: {exc}"[:300]}
     return {"requested": wanted, **readiness.provenance(s)}
 
 
@@ -93,7 +97,13 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
     execution state: with the agent absent, refused or failing, the deterministic findings stand as they are."""
     entry = manifest.get("ai_agent") or {}
     wanted = entry.get("requested", False) if requested is None else requested
-    readiness = agent_readiness(s)
+    try:
+        readiness = agent_readiness(s)
+    except Exception as exc:      # never leave a finished deterministic hunt unfinished
+        log.exception("agent readiness failed")
+        summary = {"status": "blocked", "reason": f"agent readiness check failed: {exc}"[:300], "model_calls": 0}
+        repo.audit("system", "hunt.ai_agent_summary", hunt_id, summary, owner_token=owner_token)
+        return summary
     base = {"provider": readiness.provider, "model": readiness.model,
             "endpoint_host": readiness.decision.host if readiness.decision else None,
             "egress": readiness.decision.egress if readiness.decision else None, "model_calls": 0}

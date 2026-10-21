@@ -133,7 +133,7 @@ def test_the_api_key_is_a_secret_and_never_printed():
 
 @pytest.mark.parametrize("url", [
     "http://localhost:8000/v1", "http://127.0.0.1:8000/v1", "http://10.1.2.3/v1", "http://172.16.0.9/v1",
-    "http://172.31.255.1/v1", "http://192.168.36.1:11434", "http://[::1]:8000/v1", "http://[fd00::5]/v1",
+    "http://172.31.255.1/v1", "http://192.168.77.1:11434", "http://[::1]:8000/v1", "http://[fd00::5]/v1",
     "http://[::ffff:10.0.0.1]/v1",
 ])
 def test_loopback_and_private_endpoints_are_local(url):
@@ -165,7 +165,7 @@ def test_a_name_that_does_not_resolve_is_remote():
 
 def test_model_local_hosts_accepts_names_addresses_and_networks():
     resolve = resolver_for({"gpu.enclave.example": ["100.64.3.4"]})
-    assert classify("https://LLM.Enclave.Example./v1", ["llm.enclave.example"], "", resolve).egress == "local"
+    assert classify("https://LLM.Enclave.Example/v1", ["llm.enclave.example."], "", resolve).egress == "local"
     assert classify("https://gpu.enclave.example/v1", ["100.64.0.0/10"], "", resolve).egress == "local"
     assert classify("https://100.64.9.9/v1", ["100.64.9.9"], "", resolve).egress == "local"
     assert classify("https://gpu.enclave.example/v1", ["100.65.0.0/16"], "", resolve).egress == "remote"
@@ -688,3 +688,126 @@ def test_cli_no_agent_turns_the_ai_agent_off_for_the_hunt(monkeypatch, capsys, t
                      "--no-agent"]) == 0
     assert seen["ai_agent"] is False
     assert "AI agent: disabled" in capsys.readouterr().out
+
+
+# ---- regressions from review ----------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("url", ["http://model..lan:8000/v1", "http://" + "a" * 70 + ".lan/v1"])
+def test_a_name_the_resolver_cannot_encode_blocks_the_agent_and_never_the_hunt(url, tmp_path):
+    from romulus.hunt import run as hunt_run
+
+    s = Settings(home=tmp_path, agent_base_url=url, agent_model="m")
+    with pytest.raises(EndpointError):
+        classify(url, [], "", lambda host: host.encode("idna") and [])
+    import socket
+    with pytest.raises(EndpointError):
+        classify(url, [], "", lambda host: socket.getaddrinfo(host, None))
+    assert agent_readiness(s, lambda host: socket.getaddrinfo(host, None)).state == "blocked"
+    checks = check_agent(s, resolver=lambda host: socket.getaddrinfo(host, None))
+    assert [c.status for c in checks] == ["fail"]
+    entry = hunt_run.ai_agent_entry(s, False)
+    assert entry["state"] == "blocked" and entry["requested"] is False
+
+
+def test_readiness_errors_never_stop_a_finished_hunt(tmp_path, monkeypatch):
+    from romulus.hunt import run as hunt_run
+
+    def boom(*_a, **_k):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(hunt_run, "agent_readiness", boom)
+    s = Settings(home=tmp_path)
+    repo = hunt_run.open_repo(s)
+    repo.create_hunt("h1", {"window": {}, "targets": []}, "d", "test")
+    assert hunt_run.ai_agent_entry(s)["state"] == "blocked"
+    summary = hunt_run._ai_agent_phase(s, repo, "h1", {"ai_agent": {"requested": True}}, None)
+    assert summary["status"] == "blocked" and "unexpected" in summary["reason"]
+
+
+def test_environment_proxies_are_never_used(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.corp.example:3128")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:3128")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.corp.example:3128")
+    p = build_provider(local_settings(), resolver=resolver_for({}))
+    assert p.http._trust_env is False
+    assert not p.http._mounts
+    transport = p.http._transport_for_url(httpx.URL(LOCAL + "/chat/completions"))
+    assert getattr(transport, "_proxy_url", None) is None
+
+
+def test_trailing_dot_hosts_and_over_wide_local_networks_are_rejected():
+    with pytest.raises(EndpointError):
+        classify("http://localhost./v1", [], "", resolver_for({}))
+    with pytest.raises(EndpointError):
+        classify("http://127.0.0.1./v1", [], "", resolver_for({}))
+    for wide in ("0.0.0.0/0", "::/0", "8.0.0.0/7"):
+        with pytest.raises(EndpointError):
+            classify("https://198.51.100.7/v1", [wide], "", resolver_for({}))
+    assert "MODEL_LOCAL_HOSTS" in classify("https://100.64.9.9/v1", ["100.64.0.0/10"], "", resolver_for({})).basis
+    assert "private" in classify("http://10.0.0.1/v1", [], "", resolver_for({})).basis
+
+
+def test_the_classified_name_is_the_ascii_name_the_client_connects_to():
+    seen = []
+    classify("https://straße.example/v1", [], "", lambda host: seen.append(host) or ["198.51.100.1"])
+    assert seen == ["xn--strae-oqa.example"]
+
+
+@pytest.mark.parametrize("payload", [
+    {"choices": ["not an object"]},
+    {"choices": [{"message": "text", "finish_reason": "stop"}]},
+    {"choices": [{"message": {"tool_calls": ["x"]}, "finish_reason": "tool_calls"}]},
+    {"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}], "usage": "lots"},
+    {"choices": []},
+    ["not", "a", "dict"],
+])
+def test_malformed_replies_are_errors_not_crashes(payload):
+    p, _ = provider(remote_settings(), Recorder(httpx.Response(200, json=payload)))
+    assert p.chat(ask()).status == "error"
+
+
+def test_non_completion_bodies_are_redacted():
+    p, _ = provider(remote_settings(), Recorder(httpx.Response(200, text=f"<html>{KEY}</html>")))
+    result = p.chat(ask())
+    assert result.status == "error" and KEY not in result.raw
+
+
+@pytest.mark.parametrize("payload", [{"message": "x", "done": True}, {"message": {"tool_calls": [1]}, "done": True},
+                                     ["x"]])
+def test_ollama_malformed_replies_are_errors(payload):
+    p, _ = provider(ollama_settings(), Recorder(httpx.Response(200, json=payload)), resolver_for({}))
+    assert p.chat(ask(max_output_tokens=64)).status == "error"
+
+
+def test_ollama_is_told_not_to_drop_messages_and_its_refusal_is_too_large():
+    rec = Recorder(httpx.Response(400, json={"error": {"code": 400, "message": "request (2434 tokens) exceeds the "
+                                                       "available context size (2048 tokens), try increasing it",
+                                                       "type": "exceed_context_size_error"}}))
+    p, sleeps = provider(ollama_settings(), rec, resolver_for({}))
+    result = p.chat(ask(max_output_tokens=64))
+    assert rec.body()["truncate"] is False
+    assert result.status == "too_large" and sleeps == []
+
+
+def test_doctor_warns_when_a_local_compatible_server_has_no_context_window():
+    s = local_settings(agent_model="model-2026-01-01")
+    checks = {c.name: c for c in check_agent(s, transport=_probe_endpoint(), resolver=resolver_for({}))}
+    assert checks["agent.context"].status == "warn"
+    s = local_settings(agent_model="model-2026-01-01", agent_context_tokens=32768)
+    assert "agent.context" not in {c.name for c in check_agent(s, transport=_probe_endpoint(),
+                                                               resolver=resolver_for({}))}
+
+
+def test_doctor_survives_a_probe_that_crashes(monkeypatch):
+    from romulus.agent.provider.openai_compatible import OpenAICompatibleProvider
+
+    def boom(self):
+        raise KeyError("weird")
+    monkeypatch.setattr(OpenAICompatibleProvider, "probe", boom)
+    checks = check_agent(local_settings(), resolver=resolver_for({}))
+    assert checks[-1].status == "fail" and "probe failed" in checks[-1].detail
+
+
+def test_cli_wording_never_calls_a_partial_hunt_complete():
+    from romulus import cli
+    line = cli._ai_agent_line({"ai_agent": {"status": "not_configured", "reason": "x"}})
+    assert "complete" not in line and "do not depend on it" in line

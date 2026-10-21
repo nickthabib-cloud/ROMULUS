@@ -114,7 +114,10 @@ def check_ollama(s: Settings) -> list[Check]:
 def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
                 resolver: Resolver = system_resolver) -> list[Check]:
     """The AI agent's provider: configuration, egress class, reachability, model, tool calls, schema, usage."""
-    readiness = agent_readiness(s, resolver)
+    try:
+        readiness = agent_readiness(s, resolver)
+    except Exception as exc:
+        return [Check("agent.provider", "fail", redact_text(f"agent readiness check failed: {exc}", s))]
     if readiness.state == "not_configured":
         return [Check("agent.provider", "ok", f"{readiness.message()}; hunts run without the AI agent")]
     if readiness.state == "blocked":
@@ -129,8 +132,15 @@ def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
         out.append(Check("agent.egress", "warn" if s.model_egress else "ok",
                          f"local endpoint ({d.basis})" + ("; ROMULUS_MODEL_EGRESS is set but not needed: unset it"
                                                           if s.model_egress else "")))
+    if readiness.provider == "openai_compatible" and not s.agent_context_tokens and d.egress == "local":
+        out.append(Check("agent.context", "warn", "AGENT_CONTEXT_TOKENS is 0: a local server that silently cuts "
+                                                  "long prompts cannot be detected; set it to the model's context window"))
     provider = build_provider(s, transport=transport, resolver=resolver, readiness=readiness)
-    for name, status, detail in provider.probe():
+    try:
+        probes = provider.probe()
+    except Exception as exc:      # a broken or hostile endpoint must not take the other checks down
+        probes = [("agent.reachable", "fail", f"probe failed: {exc.__class__.__name__}: {exc}"[:300])]
+    for name, status, detail in probes:
         out.append(Check(name, status, redact_text(detail, s)))
     return out
 

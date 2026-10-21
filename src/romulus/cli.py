@@ -40,7 +40,7 @@ def _ai_agent_line(result: dict) -> str:
     if ai.get("reason"):
         line += f" ({ai['reason']})"
     if ai.get("status") != "completed":
-        line += "; the deterministic results are complete without it"
+        line += "; the deterministic results do not depend on it"
     return line
 
 
@@ -56,7 +56,7 @@ def _parse_time(value: str, tz: str):
 def cmd_hunt(args) -> int:
     import logging
 
-    from romulus.hunt.run import create_hunt, open_repo, resume_hunt, run_hunt
+    from romulus.hunt.run import ai_agent_entry, create_hunt, open_repo, resume_hunt, run_hunt
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     logging.getLogger("alembic").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -75,6 +75,9 @@ def cmd_hunt(args) -> int:
             print(f"hunt not created: {e}", file=sys.stderr)
             return EXIT_FAIL
         print(f"hunt {hid} created [{start.isoformat()}, {end.isoformat()})")
+        ai = ai_agent_entry(s, False if args.no_agent else None)
+        if ai.get("state") == "blocked" and ai.get("requested"):
+            print(f"AI agent blocked: {ai.get('reason')}; the hunt runs without it", file=sys.stderr)
 
         def show(c):
             if c["lane"] in ("urgent", "high"):

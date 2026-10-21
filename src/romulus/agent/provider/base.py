@@ -152,7 +152,9 @@ class ChatProvider:
         self.sleep = sleep
         self.http = httpx.Client(base_url=settings.agent_base_url.strip().rstrip("/"),
                                  timeout=settings.agent_timeout_seconds, transport=transport,
-                                 headers=self._headers(), follow_redirects=False)
+                                 headers=self._headers(), follow_redirects=False,
+                                 # never through an environment proxy: its host was not classified for egress
+                                 trust_env=False)
 
     # ---- adapter hooks --------------------------------------------------------------------------------
     def _headers(self) -> dict[str, str]:

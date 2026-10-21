@@ -17,6 +17,7 @@ from romulus.agent.provider.base import (
     Usage,
     parse_tool_arguments,
 )
+from romulus.config import redact_text
 
 PROBE_TOOL = Tool("report_status", "Report that the check succeeded.", {
     "type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
@@ -72,15 +73,17 @@ class OpenAICompatibleProvider(ChatProvider):
             data = response.json()
             choice = data["choices"][0]
             message = choice.get("message") or {}
-        except (ValueError, KeyError, IndexError, TypeError):
+            calls: list[ToolCall] = []
+            for n, call in enumerate(message.get("tool_calls") or []):
+                function = call.get("function") or {}
+                calls.append(parse_tool_arguments(str(call.get("id") or f"call_{n}"),
+                                                  str(function.get("name") or ""), function.get("arguments", "")))
+            usage = data.get("usage") or {}
+            usage.get("prompt_tokens")
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             return ChatResult("error", "", "", None, [], Usage(), est, self.model, "", ms,
-                              response.text[:2000], "response is not a chat completion", attempts)
-        calls: list[ToolCall] = []
-        for n, call in enumerate(message.get("tool_calls") or []):
-            function = (call or {}).get("function") or {}
-            calls.append(parse_tool_arguments(str(call.get("id") or f"call_{n}"), str(function.get("name") or ""),
-                                              function.get("arguments", "")))
-        usage = data.get("usage") or {}
+                              redact_text(response.text[:2000], self.s), "response is not a chat completion",
+                              attempts)
         content = message.get("content")
         return self._finish(
             finish_reason=choice.get("finish_reason"), content=content if isinstance(content, str) else "",
