@@ -1064,7 +1064,11 @@ class PivotExecutor:
             (entity.kind, entity.value, entity.role): entity
             for event in unique_events.values() for entity in _event_entities(event)
         }
-        if successful_outcomes == 0:
+        budget_limited = any(reason.startswith("expansion_source_query_budget:") for reason in reasons)
+        if successful_outcomes == 0 and budget_limited:
+            # The agent's source cap is an intentional bounded stop, not a source outage.
+            status = "partial"
+        elif successful_outcomes == 0:
             status = "failed"
         elif incomplete:
             status = "partial"
@@ -1075,6 +1079,7 @@ class PivotExecutor:
             status=status,
             task_ids=task_ids,
             event_ids=[event.id for event in sampled_events],
+            reach_event_ids=sorted(unique_events),
             candidate_ids=candidate_ids,
             entities=list(unique_entities.values()),
             event_summaries=[_summary(event) for event in sampled_events],

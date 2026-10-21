@@ -85,6 +85,23 @@ def test_executor_counts_and_stops_actual_source_queries(monkeypatch):
     assert outcomes[2].reasons == ["expansion_source_query_budget:2"]
 
 
+def test_agent_source_query_cap_is_a_partial_bounded_stop():
+    contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
+        "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+    })}
+    request = ProcessTreeRequest(tool="process_tree", arguments=ProcessTreeArgs(
+        host="video", process_id=123, start=START, end=END,
+    ))
+
+    result = PivotExecutor(
+        _repo(), FakeClient(), "h1", contracts, source_query_budget=0,
+    ).run("case-1", request)
+
+    assert result.status == "partial"
+    assert result.reasons == ["expansion_source_query_budget:0"]
+    assert result.coverage[0].status == "failed"
+
+
 def test_fetch_query_cap_leaves_unattempted_ranges_unresolved(monkeypatch):
     calls = []
 

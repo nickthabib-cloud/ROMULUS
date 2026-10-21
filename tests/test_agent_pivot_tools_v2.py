@@ -1,0 +1,240 @@
+"""Alias-only pivot tools and the hunt-layer executor boundary."""
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from romulus.agent.aliases import AliasBook
+from romulus.agent.models import PivotCoverage, PivotResult
+from romulus.agent.toolbox import Toolbox
+from romulus.config import Settings, load_settings
+from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
+from romulus.hunt.agent_tools import HuntToolExecutor, build_agent_toolbox
+from romulus.hunt.links import LinkResult
+from romulus.store.db import make_engine, migrate
+from romulus.store.repo import Repo
+
+T = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
+END = T + timedelta(hours=1)
+
+
+def _event(event_id: str, *, argv=None, pid=7, source_ip="198.51.100.7") -> TypedEvent:
+    fields = {
+        "process.argv": fv(argv or ["/bin/true"], f"{event_id}:argv"),
+        "source.ip": fv(source_ip, f"{event_id}:source.ip"),
+    }
+    if pid is not None:
+        fields["process.pid"] = fv(pid, f"{event_id}:pid")
+        fields["process.ppid"] = fv(1, f"{event_id}:ppid")
+    return TypedEvent(
+        id=event_id, family="process_exec", ts=T + timedelta(minutes=10), host="web01",
+        outcome=Outcome.success, fields=fields,
+        raw=[RawRef(target="host-index", native_id=event_id, digest="digest")], normalizer="test@1",
+    )
+
+
+def _repo(*, linked_attack: bool = False) -> Repo:
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {
+        "window": {"start": T.isoformat(), "end": END.isoformat()},
+        "targets": ["host-index", "network-index"], "pack": {"playbooks": []},
+    }, "digest", "test")
+    anchor = _event("anchor")
+    no_pid = _event("no-pid", pid=None)
+    events = [anchor, no_pid]
+    if linked_attack:
+        events.append(_event("attack", argv=["cat", "/etc/shadow"], pid=8))
+    repo.save_evidence("h1", events, {
+        f"host-index/{event.id}": {"message": event.id} for event in events
+    }, None)
+    repo.save_candidate({
+        "id": "anchor-finding", "hunt_id": "h1", "rule_id": "host.web_shell",
+        "rule_version": "1", "claim": "anchor", "claim_type": "observed_action",
+        "event_ids": [anchor.id], "predicate_fields": [],
+        "entities": [["host", "web01", "host"], ["ip", "198.51.100.7", "src"]],
+        "ts": anchor.ts, "severity": "high", "confidence": "high", "lane": "high", "priority": 90.0,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "group_key": "", "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+    })
+    return repo
+
+
+class FakeToolExecutor:
+    def __init__(self, result: PivotResult):
+        self.result = result
+        self.calls = []
+
+    def run(self, session_id, anchor_id, request, *, anchor_ts):
+        self.calls.append((session_id, anchor_id, request, anchor_ts))
+        return self.result
+
+    def follow_link(self, session_id, anchor_id, link_type, window_label):
+        self.calls.append((session_id, anchor_id, link_type, window_label))
+        return self.result
+
+
+def _args(repo: Repo, **overrides):
+    aliases = AliasBook(repo, "h1")
+    values = {
+        "anchor": aliases.alias_for("F", "anchor-finding"),
+        "entity": aliases.alias_for("N", "h1:ip:198.51.100.7"),
+        "start": None, "end": None,
+    }
+    values.update(overrides)
+    return values
+
+
+def _result(status: str, reason: str = "") -> PivotResult:
+    coverage = [] if status == "unsupported" else [PivotCoverage(
+        target="network-index", dataset="suricata.eve.alert", start=T, end=END,
+        status="complete" if status == "complete" else "failed" if status == "failed" else "partial",
+        reasons=[reason] if reason else [], returned=1 if status == "complete" else 0,
+    )]
+    return PivotResult(
+        status=status, event_ids=["anchor"] if status == "complete" else [],
+        candidate_ids=["anchor-finding"] if status == "complete" else [],
+        matched_event_count=1 if status == "complete" else 0,
+        coverage=coverage, reasons=[reason] if reason else [],
+    )
+
+
+def test_pivot_status_and_exact_coverage_are_preserved_for_every_outcome():
+    cases = [
+        ("complete", ""),
+        ("partial", "agent source query budget exhausted at 200"),
+        ("partial", "missing required source field source.ip"),
+        ("unsupported", "no compatible source contract"),
+        ("failed", "source request failed"),
+    ]
+    for status, reason in cases:
+        repo = _repo()
+        fake = FakeToolExecutor(_result(status, reason))
+        response = Toolbox(repo, "h1", executor=fake, session_id="session-1").execute(
+            "entity_timeline", _args(repo),
+        )
+        assert response["status"] == status
+        assert response["data"]["result"]["reasons"] == ([reason] if reason else [])
+        if status != "unsupported":
+            assert response["coverage"]["cells"][0]["reasons"] == ([reason] if reason else [])
+
+
+def test_pivot_alias_kinds_typed_fields_and_windows_are_refused_before_execution():
+    repo = _repo()
+    fake = FakeToolExecutor(_result("complete"))
+    toolbox = Toolbox(repo, "h1", executor=fake, session_id="session-1")
+    aliases = AliasBook(repo, "h1")
+    no_pid = aliases.alias_for("E", "no-pid")
+
+    outside = toolbox.execute("entity_timeline", _args(
+        repo, start=END + timedelta(minutes=1), end=END + timedelta(minutes=2),
+    ))
+    missing = toolbox.execute("process_tree", {
+        "anchor": "F1", "process": no_pid, "start": None, "end": None,
+    })
+    wrong_kind = toolbox.execute("ids_alerts", _args(repo, entity="N1"))  # N1 is the host
+
+    assert outside["status"] == missing["status"] == wrong_kind["status"] == "refused"
+    assert outside["data"]["error"]["code"] == "outside_hunt_window"
+    assert missing["data"]["error"]["code"] == "missing_typed_field"
+    assert wrong_kind["data"]["error"]["code"] == "entity_kind"
+    assert fake.calls == []
+
+
+def test_ip_entity_timeline_reaches_executor_with_clamped_hunt_window():
+    repo = _repo()
+    fake = FakeToolExecutor(_result("complete"))
+    response = Toolbox(repo, "h1", executor=fake, session_id="session-1").execute(
+        "entity_timeline", _args(
+            repo, start=T - timedelta(hours=2), end=END + timedelta(hours=2),
+        ),
+    )
+
+    request = fake.calls[0][2]
+    assert response["status"] == "complete"
+    assert request.arguments.entity.kind == "ip"
+    assert request.arguments.start == T
+    assert request.arguments.end == END
+
+
+class FakeFetcher:
+    def __init__(self, event_id: str):
+        self.event_id = event_id
+        self.executor = type("QueryCounter", (), {"source_queries": 0, "source_query_budget": 200})()
+
+    def fetch(self, anchor, link_type, window, *, query_cap=None):
+        self.executor.source_queries += 1
+        return LinkResult(
+            id="agent-link", anchor_id=anchor.finding_id, link_type=link_type, window=window,
+            strength="observed", key={"process.pid": 7}, status="complete",
+            event_ids=[self.event_id], evidence_ids=sorted(anchor.event_ids + [self.event_id]),
+            task_ids=["task-1"], coverage=[PivotCoverage(
+                target="host-index", dataset="linux.audit", start=window.start, end=window.end,
+                status="complete", returned=1, total=1,
+            )], query_spend=1,
+        )
+
+
+class FakePivot:
+    def __init__(self, event_id="attack"):
+        self.event_id = event_id
+        self.source_queries = 0
+        self.source_query_budget = 200
+
+    def run(self, session_id, request, *, anchor_ts=None):
+        return PivotResult(
+            status="complete", event_ids=[self.event_id], reach_event_ids=[self.event_id],
+            matched_event_count=1,
+            coverage=[PivotCoverage(target="host-index", dataset="linux.audit",
+                                    start=request.arguments.start, end=request.arguments.end,
+                                    status="complete", returned=1, total=1)],
+        )
+
+
+def test_hunt_executor_persists_reach_reruns_context_and_direct_findings_keep_lane_and_session():
+    repo = _repo(linked_attack=True)
+    pivot = FakePivot()
+    fetcher = FakeFetcher("attack")
+    executor = HuntToolExecutor(repo, "h1", pivot, fetcher, T, END)
+    toolbox = Toolbox(repo, "h1", executor=executor, session_id="session-7")
+
+    pivot_response = toolbox.execute("entity_timeline", _args(repo))
+    link_response = toolbox.execute("follow_link", {
+        "anchor": "F1", "link_type": "process_lineage", "window": "anchor ±5 min",
+    })
+
+    assert pivot_response["status"] == link_response["status"] == "complete"
+    direct = next(row for row in repo.candidates("h1") if row["rule_id"] == "host.credential_store_read")
+    assert direct["lane"] == "high"
+    assert direct["source_case_id"] == "session-7"
+    assert direct["source_anchor_id"] == "anchor-finding"
+    assert all(row["lane"] != "context" for row in repo.candidates("h1")
+               if row["rule_id"] == "host.credential_store_read")
+    assert repo.expansion_links("h1")
+    assert all(row["evaluated"] for row in repo.expansion_links("h1"))
+
+
+def test_twin_hunt_executors_publish_identical_candidate_content():
+    outputs = []
+    for _ in range(2):
+        repo = _repo(linked_attack=True)
+        executor = HuntToolExecutor(repo, "h1", FakePivot(), FakeFetcher("attack"), T, END)
+        Toolbox(repo, "h1", executor=executor, session_id="session-7").execute("follow_link", {
+            "anchor": "F1", "link_type": "process_lineage", "window": "anchor ±5 min",
+        })
+        outputs.append(sorted((row["rule_id"], row["claim"], row["lane"], row["event_ids"],
+                               row["source_case_id"]) for row in repo.candidates("h1")))
+    assert outputs[0] == outputs[1]
+
+
+def test_agent_source_query_setting_is_loaded_and_injected():
+    settings = load_settings(environ={"AGENT_MAX_SOURCE_QUERIES": "17"})
+    repo = _repo()
+    toolbox = build_agent_toolbox(
+        settings, repo, "h1", client=object(), contracts={}, session_id="session-1",
+    )
+
+    assert Settings().agent_max_source_queries == 200
+    assert settings.agent_max_source_queries == 17
+    assert toolbox.executor.pivot.source_query_budget == 17
+    assert "AGENT_MAX_SOURCE_QUERIES=200" in Path(".env.example").read_text(encoding="utf-8")

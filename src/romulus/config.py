@@ -91,6 +91,7 @@ class Settings(BaseModel):
     agent_price_input_per_mtok: float = Field(default=0.0, ge=0.0)         # USD per million prompt tokens
     agent_price_output_per_mtok: float = Field(default=0.0, ge=0.0)        # USD per million completion tokens
     agent_max_tool_calls_per_session: int = Field(default=25, ge=1, le=500)
+    agent_max_source_queries: int = Field(default=200, ge=1, le=100_000)
     agent_concurrency: int = Field(default=2, ge=1, le=16)
     # Bootstrap-only switch: the one value that lets telemetry excerpts reach a non-local model endpoint.
     model_egress: Literal["", "lab-public-data"] = ""
@@ -180,6 +181,7 @@ ENV_MAP = {
     "AGENT_PRICE_INPUT_PER_MTOK": "agent_price_input_per_mtok",
     "AGENT_PRICE_OUTPUT_PER_MTOK": "agent_price_output_per_mtok",
     "AGENT_MAX_TOOL_CALLS_PER_SESSION": "agent_max_tool_calls_per_session",
+    "AGENT_MAX_SOURCE_QUERIES": "agent_max_source_queries",
     "AGENT_CONCURRENCY": "agent_concurrency",
     "ROMULUS_MODEL_EGRESS": "model_egress", "MODEL_LOCAL_HOSTS": "model_local_hosts",
 }

@@ -79,7 +79,10 @@ def test_registry_exports_a1_tools_with_strict_round_trip_schemas():
     toolbox = Toolbox(_repo(2), "h1")
     tools = {tool.name: tool for tool in toolbox.provider_tools()}
 
-    assert set(tools) == {"list_findings", "get_finding", "get_evidence", "get_incident", "entity_profile"}
+    assert set(tools) == {
+        "list_findings", "get_finding", "get_evidence", "get_incident", "entity_profile",
+        "entity_timeline", "auth_activity", "process_tree", "ids_alerts", "follow_link",
+    }
     for tool in tools.values():
         _assert_strict_objects(tool.parameters)
     lane_schema = tools["list_findings"].parameters["properties"]["lane"]
