@@ -1,8 +1,9 @@
-"""Network-session playbooks over Arkime SPI records (net_session).
+"""Network-session playbooks over Arkime SPI records (net_session) and Suricata handshake records.
 
 Arkime writes a long-lived connection as several session records, one per save interval, sharing the
 5-tuple and community ID. These rules stitch records by community ID so a connection is judged as a
-whole. Every value comes from typed session fields; nothing is matched in text.
+whole. The fingerprint rarity rule also reads Suricata tls/ssh records through the same typed handshake
+fields. Every value comes from typed fields; nothing is matched in text.
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import itertools
 import statistics
 from collections import defaultdict
 from datetime import UTC, datetime
+from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.correlation import StageMissing, canon_ip, external
@@ -36,10 +38,6 @@ def _epoch(value) -> float | None:
 
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, UTC).isoformat()
-
-
-def _first(value):
-    return value[0] if isinstance(value, list) and value else value
 
 
 class _Stitched(Playbook):
@@ -189,50 +187,173 @@ class Beaconing(_Stitched):
 
 
 class RareClientFingerprint(_Stitched):
-    """A TLS (JA3) or SSH (HASSH) client fingerprint used by only one internal address in the window, toward
-    public endpoints. Rarity in one window is context, not a verdict."""
+    """A handshake fingerprint or SSH client software string used by only one internal address in the window,
+    toward public endpoints. Reads Arkime sessions and Suricata tls/ssh records through the shared typed contract
+    (every value of a list-valued fingerprint field counts). Rarity in one window, with no baseline, is context,
+    not a verdict: the lane stays context."""
     id = "net.rare_client_fingerprint"
-    title = "TLS or SSH client fingerprint seen from only one internal address"
+    version = "2"
+    title = "TLS or SSH handshake fingerprint, or SSH client software, seen from only one internal address"
+    families = ("net_session", "tls_session", "ssh_session")
+    required_fields = ("source.ip", "destination.ip")
     severity, lane = "low", "context"
     attack = ("T1071.001", "T1573", "T1021.004")
-    benign = ("uncommon but legitimate clients, new software versions, a short hunt window",)
+    benign = ("uncommon but legitimate clients, new software versions, a short hunt window",
+              "automation clients (configuration management, backup jobs) used from one host")
     next_checks = ("process connections on the internal host for these sessions",
                    "the same fingerprint across a longer window or other sites")
     MAX_CONNECTIONS = 5
+    # kind label, typed field, how the claim names it. JA3S is the server's reply to this client's offer; the SSH
+    # software string is what the client announced (self-reported text, so it groups but never proves a tool).
+    KINDS = (("JA3", "tls.ja3", "JA3 client fingerprint"), ("JA4", "tls.ja4", "JA4 client fingerprint"),
+             ("JA3S", "tls.ja3s", "JA3S server fingerprint"), ("HASSH", "ssh.hassh", "HASSH client fingerprint"),
+             ("SSH client software", "ssh.client.software", "SSH client software string"))
+    card: ClassVar[dict] = {
+        "behavior": "a JA3, JA4, JA3S or HASSH value, or an SSH client software string, appears only on "
+                    "connections from one internal address to public endpoints in the window",
+        "telemetry": "Arkime 6.x tls.ja3/ja4/ja3s and ssh.hassh (arrays) as net_session; Suricata EVE tls.ja3.hash, "
+                     "ja3s.hash, ja4 as tls_session and ssh.client.software_version/hassh as ssh_session. Present in "
+                     "the lab profile (Suricata hassh disabled; Arkime SSH banners are not attributed to a side, so "
+                     "client software comes from Suricata only)",
+        "fidelity": "deviation only: typed handshake values grouped by distinct internal sources; client strings "
+                    "are self-reported",
+        "benign_and_cost": "rare but legitimate clients and versions; one context item per value",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "the internal process behind the sessions, and the value across a longer window",
+        "adds": "extends the JA3/HASSH rarity to JA4, JA3S and SSH client software, across both sensors",
+        "research_basis": "backlog BL-13 and BL-14; JA3/JA3S (Salesforce), JA4 (FoxIO) and HASSH (Salesforce) "
+                          "fingerprint definitions as the sensors compute them",
+        "retrieval": "the sweep retrieves every record of the network targets in each partition, a superset",
+    }
 
     def __init__(self):
         super().__init__()
         self.prints: dict[tuple[str, str], dict] = {}
 
+    def consume(self, events):
+        for e in self.applicable([e for e in events if e.id not in self._seen]):
+            self._seen.add(e.id)               # re-reading a partition must not count a record twice
+            malformed = e.get("parse.malformed") or []
+            if any(p in ("tls", "ssh") or p.startswith(("tls.ja", "ssh.hassh", "ssh.client")) for p in malformed):
+                # a fingerprint was present but unreadable: this record's values are unknown
+                self.evaluated -= 1
+                self.missing_required += 1
+            self.observe(e, None)
+        return []
+
     def observe(self, e, conn):
-        if not _public(e.get("destination.ip")) or _public(e.get("source.ip")):
+        if not _public(e.get("destination.ip")) or _public(e.get("source.ip")) or canon_ip(e.get("source.ip")) is None:
             return
-        for kind, field in (("JA3", "tls.ja3"), ("HASSH", "ssh.hassh")):
-            value = _first(e.get(field))
-            if not value:
-                continue
-            p = self.prints.setdefault((kind, str(value)), {"sources": set(), "conns": set(), "events": [],
-                                                            "field": field})
-            p["sources"].add(e.get("source.ip"))
-            p["conns"].add(self._conn_key(e))
-            if len(p["events"]) < EXAMPLE_LIMIT and e.id not in p["events"]:
-                p["events"].append(e.id)
-                self._pending.append(e)          # the stage ignores events it already holds
+        for kind, field, _label in self.KINDS:
+            value = e.get(field)
+            for item in value if isinstance(value, list) else [value]:
+                if not isinstance(item, str) or not item:
+                    continue
+                p = self.prints.setdefault((kind, item), {"sources": set(), "conns": set(), "events": [],
+                                                          "field": field})
+                p["sources"].add(canon_ip(e.get("source.ip")))
+                p["conns"].add(self._conn_key(e))
+                if len(p["events"]) < EXAMPLE_LIMIT and e.id not in p["events"]:
+                    p["events"].append(e.id)
+                    self._pending.append(e)          # the stage ignores events it already holds
 
     def finalize(self):
         out = []
+        labels = {kind: label for kind, _field, label in self.KINDS}
         for (kind, value), p in self.prints.items():
             if len(p["sources"]) != 1 or len(p["conns"]) > self.MAX_CONNECTIONS:
                 continue
             evs = self._events(p["events"])
             src = next(iter(p["sources"]))
             dsts = sorted({str(e.get("destination.ip")) for e in evs})
-            claim = (f"{kind} client fingerprint {value} appears on {len(p['conns'])} connection(s) in this window, all "
+            shown = value if kind != "SSH client software" else f"'{value}'"
+            claim = (f"{labels[kind]} {shown} appears on {len(p['conns'])} connection(s) in this window, all "
                      f"from {src}, to {', '.join(dsts[:5])}. No other internal address used it in the window.")
-            out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], p["field"]), pf(evs[0], "source.ip")],
+            cited = next(e for e in evs if e.has(p["field"]))
+            out.append(Match(self.id, claim, self.claim_type, evs, [pf(cited, p["field"]), pf(cited, "source.ip")],
                              evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
                              group_key=f"{kind}|{value}"))
         return out
 
 
-SESSION_PLAYBOOKS = [LongExternalConnection, Beaconing, RareClientFingerprint]
+class ArkimeSshReverseShellTag(Playbook):
+    """Arkime's own SSH heuristic tagged the session `ssh-reverse-shell`. Arkime decides this from the traffic
+    shape of the encrypted session; ROMULUS does not reproduce or verify the heuristic. It is reported like an
+    IDS alert: a vendor detection with its own false-positive rate, a lead to check, never proof."""
+    id = "net.arkime_ssh_reverse_shell_tag"
+    title = "Arkime's heuristic tagged an SSH session as a possible reverse shell"
+    kind = "aggregate"
+    anchor_class = "network_observation"
+    claim_type = "network_observation"
+    families = ("net_session",)
+    required_fields = ("source.ip", "destination.ip")
+    severity, lane = "high", "lead"
+    attack = ("T1021.004", "T1572", "T1059.004")
+    assures_negative = False
+    positive_only_reason = (
+        "the rule reports a tag that Arkime's heuristic applies; sessions the heuristic does not recognise, and "
+        "sensors where it is not enabled, carry no tag, so absence proves nothing")
+    TAG = "ssh-reverse-shell"
+    benign = (("interactive SSH sessions whose traffic shape resembles the heuristic's pattern (port forwarding, "
+               "tools that open a channel back to the client)"), "the heuristic's own false positives")
+    next_checks = ("the SSH login and the commands run on both ends around the session (host audit records)",
+                   "which process owns the connection on each internal end", "other sessions between the same hosts")
+    card: ClassVar[dict] = {
+        "behavior": "Arkime's capture tagged an SSH session 'ssh-reverse-shell'",
+        "telemetry": "Arkime 6.x session tags (arkime.tags) as net_session; present in the lab profile",
+        "fidelity": "vendor heuristic over encrypted-traffic shape; neither the shell nor its direction is observed",
+        "benign_and_cost": "the heuristic's false positives; one finding per (client, server, server port)",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "host audit records of the SSH login and the processes on both ends",
+        "adds": "no other rule reads Arkime's tags; the session rules see only duration, timing and fingerprints",
+        "research_basis": "Arkime's built-in SSH tagging; treated like an IDS alert (spec section 7, IDS alerts as "
+                          "leads with their own false-positive rate)",
+        "retrieval": "the sweep retrieves every Arkime session record in each partition, a superset",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self._seen: set[str] = set()
+        self.groups: dict[tuple, list[TypedEvent]] = defaultdict(list)
+        self.info: dict[tuple, dict] = {}
+
+    def consume(self, events):
+        for e in self.applicable([e for e in events if e.id not in self._seen]):
+            self._seen.add(e.id)
+            if "tags" in (e.get("parse.malformed") or []):          # native path of arkime.tags
+                self.evaluated -= 1
+                self.missing_required += 1
+                continue
+            tags = e.get("arkime.tags")
+            if self.TAG not in (tags if isinstance(tags, list) else [tags]):
+                continue
+            key = (str(e.get("source.ip")), str(e.get("destination.ip")), str(e.get("destination.port")))
+            g = self.info.setdefault(key, {"records": 0, "conns": set(), "first": e.ts, "last": e.ts})
+            g["records"] += 1
+            g["conns"].add(self._conn_key(e))
+            g["first"], g["last"] = min(g["first"], e.ts), max(g["last"], e.ts)
+            if len(self.groups[key]) < EXAMPLE_LIMIT:
+                self.groups[key].append(e)
+        return []
+
+    @staticmethod
+    def _conn_key(e: TypedEvent) -> str:
+        return str(e.get("network.community_id") or e.id)
+
+    def finalize(self):
+        out = []
+        for key, evs in self.groups.items():
+            g = self.info[key]
+            src, dst, port = key
+            claim = (f"Arkime's heuristic tagged {g['records']} session record(s) of {len(g['conns'])} connection(s) "
+                     f"from {src} to {dst} port {port} '{self.TAG}' ({g['first'].isoformat()} – "
+                     f"{g['last'].isoformat()}). This is Arkime's own detection from the traffic shape, like an IDS "
+                     f"alert; it does not show that a shell ran.")
+            out.append(Match(self.id, claim, self.claim_type, evs,
+                             [pf(evs[0], "arkime.tags"), pf(evs[0], "source.ip"), pf(evs[0], "destination.ip")],
+                             evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
+                             group_key="|".join(key)))
+        return out
+
+
+SESSION_PLAYBOOKS = [LongExternalConnection, Beaconing, RareClientFingerprint, ArkimeSshReverseShellTag]
