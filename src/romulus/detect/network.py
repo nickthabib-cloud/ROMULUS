@@ -3,6 +3,7 @@ accumulated across every partition, so bursts spanning partition boundaries are 
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.evidence.typed import TypedEvent
@@ -149,7 +150,12 @@ class WebScanBurst(_Grouped):
 
 
 class DnsSubdomainEnumeration(_Grouped):
+    """Forward names only. Names in the reverse-lookup trees (in-addr.arpa, ip6.arpa) are evaluated and left to
+    the reverse-lookup sweep rule, which reports any client with this rule's distinct-name count of reverse names at
+    this rule's lane, with a host-discovery claim and the swept address range. Question records are `query`
+    (`request` in newer sensor output) or carry no role; answers (`answer`, `response`) are not evaluated."""
     id = "net.dns_subdomain_enumeration"
+    version = "3"
     title = "Many distinct subdomains of one domain queried by one source"
     families = ("dns_query",)
     required_fields = ("source.ip", "dns.question.name")
@@ -158,10 +164,25 @@ class DnsSubdomainEnumeration(_Grouped):
     benign = ("resolvers forwarding for many clients, CDN-heavy browsing, mail servers",)
     next_checks = ("ip_sessions for the source", "web.scan_burst or ids_alerts from the same source")
     MIN_DISTINCT = 100
+    REVERSE_TREES = ("in-addr.arpa", "ip6.arpa")
+    card: ClassVar[dict] = {
+        "behavior": "one source queried many distinct names under one forward registered domain (last two labels)",
+        "telemetry": "dns_query question records: source.ip, dns.question.name, dns.type (Suricata EVE dns: "
+                     "present in the lab profile)",
+        "fidelity": "direct observation of the questions; a query does not show which names exist",
+        "benign_and_cost": "resolvers forwarding for many clients, CDN-heavy browsing, mail servers; one grouped "
+                           "finding per (source, domain)",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "connections from the source to names that resolved",
+        "adds": "wordlist brute force of a domain's names; reverse-tree names are the reverse-lookup sweep rule's",
+        "research_basis": "ATT&CK Enterprise 20.0 T1590.002 (DNS)",
+        "retrieval": "the sweep retrieves every record of a network target in each partition with no field "
+                     "filter, a superset of what this evaluator reads",
+    }
 
     def consume(self, events):
         for e in self.applicable(events):
-            if e.get("dns.type") not in (None, "query"):
+            if e.get("dns.type") is not None and str(e.get("dns.type")).lower() not in ("query", "request"):
                 # answers/other record types are not evaluated by this rule: they must not count toward a
                 # complete negative (an answer-only capture still carries the enumeration)
                 self.evaluated -= 1
@@ -172,6 +193,8 @@ class DnsSubdomainEnumeration(_Grouped):
                 self.missing_required += 1
                 continue
             key = (e.get("source.ip"), _registered(e.get("dns.question.name")))
+            if key[1] in self.REVERSE_TREES:
+                continue
             self.keep(key, e)
             names = self.extra[key]["names"]
             if len(names) <= self.MIN_DISTINCT * 50:
