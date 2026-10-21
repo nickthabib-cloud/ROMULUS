@@ -204,7 +204,7 @@ def test_kernel_file_change_proof_and_root_run_after_it_is_urgent_for_a_web_acco
     _pb, out = run([web(*VI), change, *cron_runs(T0 + timedelta(minutes=10))])
     m = out[0]
     assert m.proposed_lane == "urgent"
-    assert "A kernel file-change record shows this account changed the file (content)" in m.claim
+    assert "A kernel file-change record shows this account opened it for writing" in m.claim
     assert change.id in {e.id for e in m.events}
 
 
