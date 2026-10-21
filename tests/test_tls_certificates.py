@@ -187,6 +187,40 @@ def test_same_certificate_to_many_sources_is_one_group_per_server():
     assert len(m) == 1 and "3 outbound TLS connection(s) from 172.17.100.10, 172.17.100.11, 172.17.100.12" in m[0].claim
 
 
+@pytest.mark.parametrize("bad", [{"subjectCN": 7}, {"issuerCN": [3]}, {"issuerON": {"x": 1}}, {"notBefore": "x"}])
+@pytest.mark.parametrize("rule_cls", [SelfSignedCertificateOutbound, ShortLivedOrNewCertificateOutbound])
+def test_malformed_certificate_field_makes_the_record_missing_not_a_negative(rule_cls, bad):
+    rule = rule_cls()
+    assert run(rule, events(arkime(cert=[{**LEAF, **bad}, INTERMEDIATE]))) == []
+    assert (rule.evaluated, rule.missing_required) == (0, 1)
+
+
+def test_malformed_field_still_lets_a_positive_through_but_marks_the_record_missing():
+    rule = SelfSignedCertificateOutbound()
+    m = run(rule, events(arkime(cert=[{**SELF_SIGNED, "alt": [5]}])))
+    assert len(m) == 1 and (rule.evaluated, rule.missing_required) == (0, 1)
+
+
+def test_malformed_suricata_tls_field_makes_the_record_missing():
+    rule = SelfSignedCertificateOutbound()
+    assert run(rule, events(suri_tls(issuer="CN=R3", notafter="never"))) == []
+    assert rule.missing_required == 1
+
+
+def test_tls_record_with_a_non_ip_endpoint_is_missing():
+    rule = SelfSignedCertificateOutbound()
+    assert run(rule, events(suri_tls(dst="not-an-ip"))) == []
+    assert (rule.evaluated, rule.missing_required) == (0, 1)
+
+
+def test_certificate_seen_by_both_sensors_is_described_the_same_whatever_the_order():
+    ark = arkime(cert=[{**SELF_SIGNED, "hash": "fp:t1"}], network={"community_id": "1:t1="})
+    a = run(SelfSignedCertificateOutbound(), events(ark, suri_tls()))
+    b = run(SelfSignedCertificateOutbound(), events(suri_tls(), ark))
+    assert a[0].claim == b[0].claim and "'CN=c2.example, O=Acme'" in a[0].claim
+    assert a[0].confidence == b[0].confidence
+
+
 # ---- through the sweep -----------------------------------------------------------------------------------------
 
 class _Client:

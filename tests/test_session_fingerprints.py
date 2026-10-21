@@ -81,6 +81,12 @@ def test_malformed_fingerprint_is_counted_missing():
     assert rule.missing_required == 1
 
 
+def test_fingerprint_on_a_record_with_a_non_ip_endpoint_is_missing():
+    rule = RareClientFingerprint()
+    assert run(rule, events(suri("t6", "tls", {"ja3": {"hash": "abc"}}, dst="sensor-name"))) == []
+    assert (rule.evaluated, rule.missing_required) == (0, 1)
+
+
 def test_many_connections_with_one_value_are_not_rare():
     hits = [arkime(_id=f"m{i}", tls={"ja3": ["abc"]}, network={"community_id": f"1:m{i}="}) for i in range(6)]
     assert run(RareClientFingerprint(), events(*hits)) == []

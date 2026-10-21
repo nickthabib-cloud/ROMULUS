@@ -182,7 +182,8 @@ def test_arkime_dns_with_several_questions_never_picks_one():
     assert e.get("dns.question.names") == ["a.example", "b.example"]
     assert e.get("dns.question.name") is None and e.get("dns.question.type") is None
     assert e.get("dns.question.types") == ["A", "AAAA"] and e.get("dns.response_codes") == ["NOERROR", "NXDOMAIN"]
-    assert not [x for x in e.entities() if x[0] == "domain"]
+    assert [x for x in e.entities() if x[0] == "domain"] == [("domain", "a.example", "subject"),
+                                                              ("domain", "b.example", "subject")]
 
 
 def test_arkime_pre_object_dns_shape_still_reads():

@@ -221,8 +221,8 @@ class RareClientFingerprint(_Stitched):
         "query_cost": "none beyond the sweep",
         "next_pivot": "the internal process behind the sessions, and the value across a longer window",
         "adds": "extends the JA3/HASSH rarity to JA4, JA3S and SSH client software, across both sensors",
-        "research_basis": "backlog BL-13 and BL-14; JA3/JA3S (Salesforce), JA4 (FoxIO) and HASSH (Salesforce) "
-                          "fingerprint definitions as the sensors compute them",
+        "research_basis": "JA3/JA3S (Salesforce), JA4 (FoxIO) and HASSH (Salesforce) fingerprint definitions as "
+                          "the sensors compute them",
         "retrieval": "the sweep retrieves every record of the network targets in each partition, a superset",
     }
 
@@ -234,8 +234,12 @@ class RareClientFingerprint(_Stitched):
         for e in self.applicable([e for e in events if e.id not in self._seen]):
             self._seen.add(e.id)               # re-reading a partition must not count a record twice
             malformed = e.get("parse.malformed") or []
-            if any(p in ("tls", "ssh") or p.startswith(("tls.ja", "ssh.hassh", "ssh.client")) for p in malformed):
-                # a fingerprint was present but unreadable: this record's values are unknown
+            unreadable = any(p in ("tls", "ssh") or p.startswith(("tls.ja", "ssh.hassh", "ssh.client"))
+                             for p in malformed)
+            carries = any(e.has(field) for _kind, field, _label in self.KINDS)
+            no_address = canon_ip(e.get("source.ip")) is None or canon_ip(e.get("destination.ip")) is None
+            if unreadable or (carries and no_address):
+                # a fingerprint present but unreadable, or one whose session direction is unknown
                 self.evaluated -= 1
                 self.missing_required += 1
             self.observe(e, None)

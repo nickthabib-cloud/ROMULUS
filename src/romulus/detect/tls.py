@@ -68,6 +68,13 @@ def _identity(cert: dict) -> str:
                        cert.get("issuer_cn"), cert.get("issuer_on"), cert.get("not_before"), cert.get("not_after")])
 
 
+def _preference(cert: dict) -> tuple:
+    """Which copy of one certificate (same SHA-1, seen by two sensors) a finding describes: the one with
+    distinguished names (Suricata), then a fixed order, so the result does not depend on reading order."""
+    has_dn = bool(cert.get("subject_dn") and cert.get("issuer_dn"))
+    return (not has_dn, json.dumps(cert, sort_keys=True))
+
+
 def describe(cert: dict) -> str:
     def name(side: str) -> str:
         if cert.get(f"{side}_dn"):
@@ -105,10 +112,16 @@ class _CertificateRule(Playbook):
     def consume(self, events):
         for e in self.applicable([e for e in events if e.id not in self._seen]):
             self._seen.add(e.id)               # a record read twice (split partitions) is judged once
-            if not is_tls_record(e) or outbound(e) is not True:
-                continue                        # judged: not an outbound TLS session, nothing to see
-            if e.get("arkime.continuation") is True:
-                continue                        # the first record of this Arkime session holds the handshake
+            if not is_tls_record(e):
+                continue                        # judged: not a TLS session, nothing to see
+            direction = outbound(e)
+            if direction is None:
+                # an endpoint that is not an address: whether the session is outbound is unknown
+                self.evaluated -= 1
+                self.missing_required += 1
+                continue
+            if not direction or e.get("arkime.continuation") is True:
+                continue                        # not outbound; or a later Arkime record (the first holds the handshake)
             certs = e.get("tls.server.certificates")
             candidates = [c for c in certs if not c.get("issues_other")] if isinstance(certs, list) else []
             if not candidates:
@@ -116,7 +129,9 @@ class _CertificateRule(Playbook):
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
-            unknown = False
+            # A certificate value that was present but unreadable (a name, a bound) can change which certificate
+            # is the server's own and how it is judged: positives still stand, but the record is not a negative.
+            unknown = any(p == "cert" or p.startswith(("cert[", "tls.")) for p in e.get("parse.malformed") or [])
             for cert in candidates:
                 reasons = self.judge(e, cert)
                 if reasons is None:
@@ -131,6 +146,8 @@ class _CertificateRule(Playbook):
     def _keep(self, e: TypedEvent, cert: dict, reasons: list[str]) -> None:
         key = (_identity(cert), str(e.get("destination.ip")))
         g = self.info.get(key)
+        if g is not None and _preference(cert) < _preference(g["cert"]):
+            g["cert"] = cert                    # the same certificate from another sensor: keep a fixed choice
         if g is None:
             g = self.info[key] = {"cert": cert, "records": 0, "sources": set(), "ports": set(), "conns": set(),
                                   "reasons": set(), "first": e.ts, "last": e.ts}
@@ -185,7 +202,7 @@ class SelfSignedCertificateOutbound(_CertificateRule):
                       "internal hosts",
         "adds": "no other rule reads server certificates; the indicator rule matches only listed fingerprints",
         "research_basis": "ATT&CK Enterprise 20.0 T1587.003 and T1608.003 (adversary-generated and installed "
-                          "certificates), T1573.002; backlog BL-13. Reimplemented from the behavior; no rule "
+                          "certificates), T1573.002. Reimplemented from the behavior; no rule "
                           "content copied",
         "retrieval": "the sweep retrieves every record of the network targets in each partition (dataset filter "
                      "only), a superset of what this evaluator reads",
@@ -245,7 +262,7 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
         "next_pivot": "the internal process that opened the connection; the server's other names and prevalence",
         "adds": "no other rule reads certificate validity",
         "research_basis": "ATT&CK Enterprise 20.0 T1588.004 and T1608.003; CA/Browser Forum ballot SC-081 "
-                          "validity schedule for the public-CA floor; backlog BL-13. Thresholds are starting "
+                          "validity schedule for the public-CA floor. Thresholds are starting "
                           "values for evaluation, not tuned on lab data",
         "retrieval": "the sweep retrieves every record of the network targets in each partition, a superset of "
                      "what this evaluator reads",

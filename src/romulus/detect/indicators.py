@@ -7,7 +7,10 @@ gives them meaning. Each match is worded by its role:
 - program_name, interpreter script: the script operand an interpreter was started with  -> "interpreter started with X"
 - program_name, argument          : any other argv token whose basename equals X         -> "an argument names X" (context)
 - ip / cidr                       : typed source/destination address fields              -> "a record shows contact"
-- domain                          : DNS question, HTTP host and URL domain, at a label boundary
+- domain                          : DNS question names, HTTP host and URL domain, at a label boundary
+- domain, DNS answer              : an answer's owner name, or its target when the answer type holds a name
+                                    (CNAME, DNAME, NS, PTR, MX)                         -> "a DNS answer names X"
+- domain, TLS SNI                 : the server name the TLS client asked for            -> "the TLS SNI names X"
 - ja3 / ja4 / hassh               : the typed client fingerprint fields of a session
 
 Matching is exact (case-insensitive for names and domains), never a substring of free text, and every rule
@@ -39,7 +42,11 @@ from romulus.evidence.typed import TypedEvent
 KINDS = {"program_name", "ip", "cidr", "domain", "ja3", "ja4", "hassh"}
 EXAMPLE_LIMIT = 20
 ADDRESS_FIELDS = (("source.ip", "source"), ("destination.ip", "destination"))
-DOMAIN_FIELDS = ("dns.question.name", "http.hostname", "url.domain")
+DOMAIN_FIELDS = ("dns.question.name", "dns.question.names", "http.hostname", "url.domain")
+SNI_FIELD = "tls.client.server_name"
+ANSWER_FIELD = "dns.answers"
+# DNS answer types whose data is itself a domain name (a CNAME target, a name server, a mail exchanger)
+NAME_DATA_TYPES = {"CNAME", "DNAME", "NS", "PTR", "MX"}
 FINGERPRINT_FIELDS = {"ja3": "tls.ja3", "ja4": "tls.ja4", "hassh": "ssh.hassh"}
 
 
@@ -145,7 +152,7 @@ _SET = load_indicators()
 class IndicatorMatch(Playbook):
     id = "ioc.indicator_match"
     anchor_class = "indicator"
-    version = f"2+{_SET.digest}"
+    version = f"3+{_SET.digest}"
     title = "Indicator list match in the field that gives it meaning"
     kind = "aggregate"
     claim_type = "observed_action"
@@ -224,16 +231,38 @@ class IndicatorMatch(Playbook):
             if ind is not None:
                 self._keep((ind.id, f"address:{side}", e.host, str(ip)), e, {"ind": ind, "field": fname})
 
+    def _listed_domain(self, value: str) -> tuple[str, Indicator] | None:
+        name = value.lower().rstrip(".")
+        labels = name.split(".")
+        for i in range(len(labels)):
+            ind = self.domains.get(".".join(labels[i:]))
+            if ind is not None:
+                return name, ind
+        return None
+
     def _domains(self, e: TypedEvent) -> None:
+        candidates: list[tuple[str, str, str]] = []          # (role, field, value)
         for fname in DOMAIN_FIELDS:
-            for value in _as_list(e.get(fname)):
-                name = value.lower().rstrip(".")
-                labels = name.split(".")
-                for i in range(len(labels)):
-                    ind = self.domains.get(".".join(labels[i:]))
-                    if ind is not None:
-                        self._keep((ind.id, "domain", e.host, name), e, {"ind": ind, "field": fname})
-                        break
+            candidates += [("domain", fname, v) for v in _as_list(e.get(fname))]
+        candidates += [("sni", SNI_FIELD, v) for v in _as_list(e.get(SNI_FIELD))]
+        answers = e.get(ANSWER_FIELD)
+        for answer in answers if isinstance(answers, list) else []:
+            if not isinstance(answer, dict):
+                continue
+            if isinstance(answer.get("name"), str):
+                candidates.append(("dns_answer", ANSWER_FIELD, answer["name"]))
+            if answer.get("type") in NAME_DATA_TYPES and isinstance(answer.get("data"), str):
+                candidates.append(("dns_answer", ANSWER_FIELD, answer["data"]))
+        seen = set()            # one record counts once per (indicator, role, name), whichever fields carry it
+        for role, fname, value in candidates:
+            hit = self._listed_domain(value)
+            if hit is None:
+                continue
+            name, ind = hit
+            key = (ind.id, role, e.host, name)
+            if key not in seen:
+                seen.add(key)
+                self._keep(key, e, {"ind": ind, "field": fname})
 
     def _fingerprints(self, e: TypedEvent) -> None:
         for kind, fname in FINGERPRINT_FIELDS.items():
@@ -296,6 +325,17 @@ class IndicatorMatch(Playbook):
             elif role == "domain":
                 claim = (f"{n} {e0.family} record(s) observed by {host} name '{value}', which matches {listed} at a "
                          f"label boundary ({span}).")
+                lane, claim_type = ind.lane, "network_observation"
+            elif role == "dns_answer":
+                claim = (f"In {n} {e0.family} record(s) observed by {host}, a DNS answer names '{value}' (as the "
+                         f"answer's owner name or as a name it points to), which matches {listed} at a label "
+                         f"boundary ({span}). The name was in a response; whether a client then connected to it is "
+                         f"not established.")
+                lane, claim_type = ind.lane, "network_observation"
+            elif role == "sni":
+                claim = (f"In {n} {e0.family} record(s) observed by {host}, the TLS SNI names '{value}', which "
+                         f"matches {listed} at a label boundary ({span}). The SNI is the name the client asked "
+                         f"for; the certificate the server returned is a separate check.")
                 lane, claim_type = ind.lane, "network_observation"
             else:
                 claim = (f"{n} session record(s) observed by {host} carry {role.upper()} client fingerprint {value}, "

@@ -66,6 +66,12 @@ class TypedEvent(BaseModel):
             v = self.get(name)
             if v:
                 out.append((kind, str(v).lower() if kind == "domain" else str(v), role))
+        # every DNS question name of a record that asked several (one when the scalar above already holds it)
+        names = self.get("dns.question.names")
+        for v in names if isinstance(names, list) else []:
+            entity = ("domain", str(v).lower(), "subject")
+            if v and entity not in out:
+                out.append(entity)
         return out
 
 
