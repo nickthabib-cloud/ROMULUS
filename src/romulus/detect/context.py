@@ -23,6 +23,7 @@ from romulus.detect.base import (
     ContextLink,
     ContextPlaybook,
     Match,
+    argv_incomplete,
     basename,
     outcome_phrase,
     pf,
@@ -254,6 +255,11 @@ def _find_is_suid_search(args: list[str]) -> bool:
                for i in range(len(args)))
 
 
+# Programs classified as discovery because a token is absent (no change verb, no command, no -perm): with an
+# incomplete argv the absence cannot be decided.
+_DISCOVERY_BY_ABSENCE = {"env", "hostname", "ifconfig", "route", "arp", "ip", "find"}
+
+
 def _operands_unplaced(prog, event: TypedEvent) -> bool:
     """True when a file a reader or `ls` was given is a relative operand with no usable working directory, so
     the record cannot be fully evaluated (it is counted as missing a required field, never as a no-match)."""
@@ -332,6 +338,7 @@ def classify_discovery(name: str, args: list[str], cwd: str | None) -> tuple[str
 
 class PostAccessDiscovery(_HostContextRule):
     id = "context.post_access_discovery"
+    argv_prefix_safe = True
     version = "5"
     title = "Discovery commands in an anchored session or process lineage"
     anchor_class = "execution"
@@ -354,6 +361,8 @@ class PostAccessDiscovery(_HostContextRule):
             prog = program(event)
             if prog is None:
                 continue
+            if argv_incomplete(event) and prog.name in _DISCOVERY_BY_ABSENCE:
+                continue                       # counted as missing: a lost argument may be a change verb
             found = classify_discovery(prog.name, prog.args, event.get("process.cwd"))
             if found is not None:
                 groups[_session_key(event, anchor)].append((found[0], found[1], event))
@@ -457,6 +466,7 @@ def _classify_probe(prog, event: TypedEvent) -> tuple[str, str] | None:
 
 class PrivilegeProbing(_HostContextRule):
     id = "context.privilege_probing"
+    argv_prefix_safe = True
     version = "4"
     title = "Privilege probing or escalation in an anchored session or lineage"
     families = ("process_exec",)
@@ -491,7 +501,8 @@ class PrivilegeProbing(_HostContextRule):
             key = _session_key(event, anchor)
             if prog.name in ELEVATION_HELPERS and key not in helper_first:
                 helper_first[key] = event.ts
-            found = _classify_probe(prog, event)
+            # sudo's own options end at its command; with an incomplete argv where they end is not known
+            found = None if (argv_incomplete(event) and prog.name == "sudo") else _classify_probe(prog, event)
             if found is not None:
                 probes[key].append((found[0], found[1], event))
             elif read_operand_paths(prog.name, prog.args, event.get("process.cwd"))[1]:
@@ -675,6 +686,7 @@ def classify_credential(path: str) -> tuple[str, str, str] | None:
 
 class CredentialAccessInContext(_HostContextRule):
     id = "context.credential_access"
+    argv_prefix_safe = True
     version = "3"
     title = "Credential-store read in an anchored session or lineage"
     anchor_class = "credential_access"
@@ -729,6 +741,9 @@ class CredentialAccessInContext(_HostContextRule):
 
 _COMPRESSORS = {"gzip", "bzip2", "xz", "zstd", "pigz", "lz4", "compress"}
 _ENCODERS = {"base64", "base32", "xxd", "uuencode"}
+# Programs whose staging or transfer class depends on an absent token (no decode or delete flag, no listen flag)
+# or on which operand is last (the destination): undecidable on an incomplete argv.
+_STAGING_BY_ABSENCE = _COMPRESSORS | _ENCODERS | {"zip", "7z", "7za", "scp", "sftp", "rsync", "nc"}
 _DECOMPRESS_NAMES = {"gunzip", "bunzip2", "unxz", "unzstd", "zcat", "lzcat", "bzcat", "xzcat", "uncompress",
                      "lz4cat"}
 _DECODE_BY_TOOL = {
@@ -952,6 +967,7 @@ def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
 
 class StagingAndTransfer(_HostContextRule):
     id = "context.staging_and_transfer"
+    argv_prefix_safe = True
     version = "3"
     title = "Data staging or transfer in an anchored session or lineage"
     families = ("process_exec",)
@@ -975,6 +991,8 @@ class StagingAndTransfer(_HostContextRule):
             prog = program(event)
             if prog is None:
                 continue
+            if argv_incomplete(event) and prog.name in _STAGING_BY_ABSENCE:
+                continue                       # counted as missing: a lost argument may be -d, -l or the destination
             found = classify_staging(prog, event)
             if found is None:
                 continue
@@ -1057,6 +1075,7 @@ class _Client:
 
 class LateralMovement(_HostContextRule):
     id = "context.lateral_movement"
+    argv_prefix_safe = True
     version = "3"
     title = "Lateral remote-service use from an anchored session or lineage"
     anchor_class = "lateral_movement"

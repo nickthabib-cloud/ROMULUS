@@ -8,7 +8,7 @@ import posixpath
 import re
 from collections import defaultdict
 
-from romulus.detect.base import Match, Playbook, basename, outcome_phrase, pf
+from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
 from romulus.detect.linux_argv import read_operand_paths
 from romulus.evidence.shellparse import (
     SHELLS,
@@ -267,6 +267,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     """Stack-counted: routine shapes collapse into one context item; rare shapes become leads and
     are escalated only when typed argv indicators are present (rarity alone is not suspicion)."""
     id = "host.web_service_spawns_interpreter"
+    argv_prefix_safe = True
     anchor_class = "web_shell"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
@@ -305,7 +306,9 @@ class WebServiceSpawnsInterpreter(Playbook):
             if indicators:
                 matches.append(self._event_match(e, user, argv, indicators, prefix_only=prefix_only))
                 continue
-            key = (e.host, user, command_shape(argv), _packaged_script(argv, e.get("process.cwd")))
+            # a packaged-script run is judged on the whole command line; an incomplete one is never routine
+            packaged = None if argv_incomplete(e) else _packaged_script(argv, e.get("process.cwd"))
+            key = (e.host, user, command_shape(argv), packaged)
             self.counts[key] += 1
             self.hours[key][e.ts.replace(minute=0, second=0, microsecond=0)] += 1
             if len(self.shapes[key]) < 20:
@@ -468,6 +471,7 @@ class DownloadPipedToShell(Playbook):
     Positive-only: whether the pipeline ran is shown by process-level evidence
     (host.downloader_feeds_interpreter), never inferred from text."""
     id = "host.download_piped_to_shell"
+    argv_prefix_safe = True
     version = "3"
     title = "Shell started with a script that pipes a download into an interpreter"
     claim_type = "script_content"
@@ -509,6 +513,7 @@ class DownloadPipedToShell(Playbook):
 
 class PtyUpgrade(Playbook):
     id = "host.python_pty_spawn"
+    argv_prefix_safe = True
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
     version = "2"
@@ -535,6 +540,7 @@ class PtyUpgrade(Playbook):
 
 class ExecFromTempDir(Playbook):
     id = "host.exec_from_temp_dir"
+    argv_prefix_safe = True
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
     version = "2"
@@ -569,6 +575,7 @@ _DEBCONF_ACTIONS = {"configure", "reconfigure"}
 class ScriptFromTempDir(Playbook):
     """Positive-only argv indicator: an interpreter was given a temp-directory script operand."""
     id = "host.script_from_temp_dir"
+    argv_prefix_safe = True
     version = "3"
     title = "Interpreter started with a script operand in a temporary directory"
     claim_type = "script_content"
@@ -814,6 +821,7 @@ def _firewall_weakening(name: str, args: list[str], chain: str | None, target: s
 
 class CredentialStoreRead(Playbook):
     id = "host.credential_store_read"
+    argv_prefix_safe = True
     anchor_class = "credential_access"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
@@ -834,14 +842,24 @@ class CredentialStoreRead(Playbook):
         args = argv[1:]
         if name not in FILE_READERS:      # sudo wrappers are not counted; the child exec is the action
             return []
-        hits = [a for a in args if a in CRED_FILES]
-        if read_operand_paths(name, args, e.get("process.cwd"))[1]:
+        paths, unplaced = read_operand_paths(name, args, e.get("process.cwd"))
+        if unplaced:
             self.missing_required += 1      # a relative operand with no working directory: it may name the file
-        if not hits:
+        hits = [a for a in args if a in CRED_FILES]
+        # a file operand that names a hash file only once resolved (shadow from /etc, /etc/../etc/shadow)
+        resolved = [p for p in paths if p in CRED_FILES and p not in hits]
+        if not hits and not resolved:
             return []
-        claim = (f"A process execution event on {e.host} records '{name}' invoked with {hits[0]} as a file "
+        fields = [pf(e, "process.argv")]
+        if hits:
+            shown = hits[0]
+        else:
+            shown = f"a file operand that resolves to {resolved[0]}"
+            if e.get("process.cwd"):
+                fields.append(pf(e, "process.cwd"))
+        claim = (f"A process execution event on {e.host} records '{name}' invoked with {shown} as a file "
                  f"argument; {outcome_phrase(e)}.")
-        return [Match(self.id, claim, self.claim_type, [e], [pf(e, "process.argv")], e.ts, self.severity, self.lane,
+        return [Match(self.id, claim, self.claim_type, [e], fields, e.ts, self.severity, self.lane,
                       "high" if e.outcome == Outcome.success else "medium", _exec_entities(e))]
 
 
@@ -850,6 +868,7 @@ class AuthorizedKeysWrite(Playbook):
     or a shell script containing a redirect into it (script content). Positive-only: shell-builtin
     redirects create no process, so absence can only be assured by file-access telemetry."""
     id = "host.ssh_authorized_keys_write"
+    argv_prefix_safe = True
     anchor_class = "persistence"
     version = "3"
     title = "Command or script writing to an SSH authorized_keys file"
@@ -879,7 +898,8 @@ class AuthorizedKeysWrite(Playbook):
                         targets.append(c.argv[-1])
             else:
                 self.missing_required += 1
-        elif argv and basename(argv[0]) in ("tee", "cp", "mv", "install") and argv[-1].endswith("authorized_keys"):
+        elif (argv and basename(argv[0]) in ("tee", "cp", "mv", "install") and argv[-1].endswith("authorized_keys")
+              and not argv_incomplete(e)):       # the last operand is the destination only in a complete argv
             targets.append(argv[-1])
         if not targets:
             return []

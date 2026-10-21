@@ -89,6 +89,18 @@ def test_credential_store_read_placed_operands_are_fully_evaluated(argv, cwd):
     assert missing == 0
 
 
+@pytest.mark.parametrize("argv,cwd", [
+    (["cat", "shadow"], "/etc"),
+    (["cat", "./shadow"], "/etc"),
+    (["cat", "/etc/../etc/shadow"], None),
+    (["head", "-n", "3", "../etc/gshadow"], "/root"),
+])
+def test_credential_store_read_matches_the_resolved_path(argv, cwd):
+    matches, missing = _consume(CredentialStoreRead(), exec_event(argv, cwd=cwd))
+    assert len(matches) == 1 and missing == 0
+    assert "resolves to /etc/" in matches[0].claim
+
+
 def test_credential_store_read_still_matches_beside_an_unplaced_operand():
     matches, missing = _consume(CredentialStoreRead(), exec_event(["cat", "notes", "/etc/shadow"]))
     assert len(matches) == 1 and missing == 1
