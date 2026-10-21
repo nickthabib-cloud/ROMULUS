@@ -31,7 +31,7 @@ def hit(_id, dataset, original, ts="2024-11-18T17:17:30.320Z", host="videoserver
 
 
 def test_execve_hex_argument_decodes():
-    argv = execve_argv(parse_record(EXECVE_HEX))
+    argv = execve_argv(parse_record(EXECVE_HEX)).args
     assert argv[:2] == ["sh", "-c"]
     assert argv[2].startswith("/usr/bin/env -i PATH=") and argv[2].endswith("> /run/motd.dynamic.new")
 
@@ -41,7 +41,7 @@ def test_numeric_fields_are_never_hex_decoded():
     rec = parse_record('type=EXECVE msg=audit(1.0:7): argc=13 a0="x" a1="1" a2="2" a3="3" a4="4" a5="5" '
                        'a6="6" a7="7" a8="8" a9="9" a10="10" a11="11" a12=4142')
     assert rec.fields["argc"] == "13"
-    argv = execve_argv(rec)
+    argv = execve_argv(rec).args
     assert len(argv) == 13 and argv[12] == "AB"
     sc = parse_record('type=SYSCALL msg=audit(1.0:7): pid=10 ppid=20 comm=6162 exe="/bin/x"')
     assert sc.fields["pid"] == "10" and sc.fields["comm"] == "ab"
@@ -49,9 +49,9 @@ def test_numeric_fields_are_never_hex_decoded():
 
 def test_execve_split_long_argument_reassembles():
     long = "A" * 10
-    rec = parse_record('type=EXECVE msg=audit(1.0:5): argc=2 a0="cat" a1_len=10 a1[0]=' + long[:6].encode().hex()
+    rec = parse_record('type=EXECVE msg=audit(1.0:5): argc=2 a0="cat" a1_len=20 a1[0]=' + long[:6].encode().hex()
                        + ' a1[1]=' + long[6:].encode().hex())
-    assert execve_argv(rec) == ["cat", long]
+    assert execve_argv(rec) == (["cat", long], None)   # a1_len counts hex characters
 
 
 def test_exec_group_joins_syscall_and_keeps_unknowns_explicit():

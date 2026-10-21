@@ -873,7 +873,7 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
                 repo.set_rule_cell(hunt_id, pb.id, pb.version, f"{PCAP_TARGET}:{target}", window.key(), state,
                                    len(matches), pb.evaluated,
                                    {**run.c, "selection": selection, "http_sessions_without_body_type": unclassified,
-                                    "reasons": run.partial[:20], "notes": run.notes,
+                                    "reasons": list(run.partial), "notes": run.notes,
                                     "unexamined_sessions": run.unexamined})
             for k in COUNTERS:
                 summary[k] += run.c[k]

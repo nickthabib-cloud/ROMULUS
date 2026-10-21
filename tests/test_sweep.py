@@ -357,7 +357,8 @@ def test_script_text_rules_never_claim_a_complete_negative(monkeypatch):
     rows = {r["rule_id"]: r for r in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]}
     for rid in ("host.download_piped_to_shell", "host.ssh_authorized_keys_write"):
         assert rows[rid]["negative_claim"].startswith("not assessable by design"), rows[rid]
-    assert "path records are planned" in rows["host.download_piped_to_shell"]["negative_claim"]   # no false pointer to another positive-only rule
+    # no false pointer to another positive-only rule
+    assert "typed inventory of what the host's audit rules record" in rows["host.download_piped_to_shell"]["negative_claim"]
     assert "can prove absence" in rows["host.ssh_authorized_keys_write"]["negative_claim"]
     # no argv/text-identified host rule may claim a complete negative
     from romulus.detect.host import HOST_PLAYBOOKS

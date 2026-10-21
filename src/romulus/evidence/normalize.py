@@ -3,22 +3,35 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
 
 from romulus.evidence.auditd import (
+    AT_FDCWD,
+    O_ACCMODE,
+    O_CREAT,
+    O_RDWR,
+    O_TMPFILE_BIT,
+    O_TRUNC,
+    O_WRONLY,
     SOCKET_SYSCALLS,
     AuditParseError,
     AuditRecord,
+    FileCall,
     execve_argv,
+    file_syscall,
     parse_record,
     parse_sockaddr,
     socket_syscall,
+    syscall_arg,
 )
 from romulus.evidence.typed import EVIDENCE_VERSION, Outcome, RawRef, TypedEvent, event_id, fv
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
+# Caveat on a process_exec event whose EXECVE arguments did not all arrive (its process.argv_complete is false).
+INCOMPLETE_ARGV_CAVEAT = "command line incomplete"
 
 
 class Skip(Exception):
@@ -93,13 +106,14 @@ def group_audit(hits: list[dict]) -> tuple[dict[tuple[str, float, int], list[tup
 def merge_execve(execs: list[tuple[dict, AuditRecord]]) -> tuple[dict, AuditRecord]:
     """auditd splits an exec with a very long argv across several EXECVE records: the first carries
     argc, continuations carry later aN fields. Merge them. Two records both carrying argc, or the same
-    argument field with different values, are ambiguous and raise (never silently pick one)."""
+    argument field with different values, are ambiguous and raise (never silently pick one). When the record
+    carrying argc was lost the continuations are still merged; execve_argv reports the command line incomplete."""
     if len(execs) == 1:
         return execs[0]
     heads = [(h, r) for h, r in execs if "argc" in r.raw_fields]
-    if len(heads) != 1:
+    if len(heads) > 1:
         raise AuditParseError(f"ambiguous exec event: {len(heads)} EXECVE records carry argc")
-    h_head, r_head = heads[0]
+    h_head, r_head = heads[0] if heads else execs[0]
     raw, fields = dict(r_head.raw_fields), dict(r_head.fields)
     for _h, r in execs:
         if r is r_head:
@@ -253,7 +267,7 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
         raise Skip("no EXECVE record in group")
     h_exec, r_exec = merge_execve(execs)
     by_type["EXECVE"] = (h_exec, r_exec)
-    argv = execve_argv(r_exec)
+    argv, argv_problem = execve_argv(r_exec)
     refs = [_ref(h) for h, r in members if r.type in EXEC_COMPANIONS]
     nid = h_exec["_id"]
     f = {
@@ -263,6 +277,10 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
         **_audit_boot_field(members),
     }
     caveats = []
+    if argv_problem:
+        # what arrived is kept as evidence; rules see the flag and say the command line is incomplete
+        f["process.argv_complete"] = fv(False, f"{nid}:event.original#auditd:EXECVE.a*")
+        caveats.append(f"{INCOMPLETE_ARGV_CAVEAT}: {argv_problem}")
     outcome = Outcome.unknown
     if "SYSCALL" in by_type:
         hs, rs = by_type["SYSCALL"]
@@ -274,9 +292,259 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
     if "CWD" in by_type:
         hc, rc = by_type["CWD"]
         f["process.cwd"] = fv(rc.fields.get("cwd"), f"{hc['_id']}:event.original#auditd:CWD.cwd")
+    used, exec_caveats = _exec_file_fields(f, members, argv, by_type.get("CWD"))
+    refs += [_ref(h) for h in used]
+    caveats += exec_caveats
     return TypedEvent(id=event_id("process_exec", refs), family="process_exec", ts=_ts(h_exec["_source"]["@timestamp"]),
                       host=host or None, outcome=outcome, fields=f, raw=refs, normalizer=NORMALIZER_VERSION,
                       caveats=caveats)
+
+
+# PATH records: one per name a system call looked up, numbered by `item` in lookup order. `nametype` says what
+# the call did with it (NORMAL: used an existing file; CREATE/DELETE: added or removed a directory entry; PARENT:
+# the directory holding a created or deleted entry; UNKNOWN: the lookup failed).
+_NO_NAME = {"", "(null)", "(none)"}
+
+
+def _path_items(members: list[tuple[dict, AuditRecord]]) -> dict[int, tuple[dict, AuditRecord]]:
+    items: dict[int, tuple[dict, AuditRecord]] = {}
+    for hit, record in members:
+        if record.type != "PATH":
+            continue
+        number = record.fields.get("item", "")
+        if not number.isdigit():
+            raise AuditParseError("PATH record without an item number")
+        if int(number) in items:
+            raise AuditParseError(f"ambiguous event group, duplicate PATH item {number}")
+        items[int(number)] = (hit, record)
+    return items
+
+
+def _lexical(path: str) -> str:
+    normalized = posixpath.normpath(path)
+    return "/" + normalized.lstrip("/")
+
+
+def _resolve(name: str | None, dirfd: int | None, syscall: AuditRecord, cwd: tuple[dict, AuditRecord] | None,
+             parents: list[tuple[dict, AuditRecord]]) -> tuple[str | None, list[dict], str, str]:
+    """(absolute path, records used to place it, origin suffix, why it could not be placed) for a PATH name.
+
+    A relative name is relative to the working directory unless the call passed a directory descriptor other than
+    the working directory's; that descriptor's path is not recorded, so such a name is never guessed. Without a
+    CWD record, a bare name is placed under its PARENT record when that is absolute (for a bare name the kernel
+    writes the working directory there)."""
+    if name is None or name in _NO_NAME:
+        return None, [], "", "the kernel recorded no name for the file"
+    if name.startswith("/"):
+        return _lexical(name), [], "", ""
+    if dirfd is not None and syscall.fields.get(f"a{dirfd}", "").lower() not in AT_FDCWD:
+        return None, [], "", ("the relative name is resolved against a directory descriptor whose path is not "
+                              "recorded")
+    if cwd is not None and cwd[1].fields.get("cwd", "").startswith("/"):
+        return _lexical(posixpath.join(cwd[1].fields["cwd"], name)), [cwd[0]], "+CWD.cwd", ""
+    if "/" not in name:
+        dirs = {(record.fields.get("name") or ""): hit for hit, record in parents
+                if (record.fields.get("name") or "").startswith("/")}
+        if len(dirs) == 1:
+            directory, hit = next(iter(dirs.items()))
+            return _lexical(posixpath.join(directory, name)), [hit], "+PATH(PARENT).name", ""
+    return None, [], "", "the relative name has no recorded working directory"
+
+
+def _owner_fields(prefix: str, hit: dict, record: AuditRecord) -> dict:
+    """Inode identity, mode and ownership of a PATH item as the kernel recorded them at the call."""
+    origin = f"{hit['_id']}:event.original#auditd:PATH"
+    out = {}
+    for name, key in (("inode", "inode"), ("device", "dev"), ("mode", "mode"), ("owner.id", "ouid"),
+                      ("group.id", "ogid")):
+        value = record.fields.get(key)
+        if value not in (None, ""):
+            out[f"{prefix}.{name}"] = fv(int(value) if key == "inode" and value.isdigit() else value,
+                                         f"{origin}.{key}")
+    for name, key in (("owner.name", "OUID"), ("group.name", "OGID")):
+        if record.enriched.get(key):
+            out[f"{prefix}.{name}"] = fv(record.enriched[key], f"{origin}:enriched.{key}")
+    return out
+
+
+def _exec_file_fields(f: dict, members: list[tuple[dict, AuditRecord]], argv: list[str],
+                      cwd: tuple[dict, AuditRecord] | None) -> tuple[list[dict], list[str]]:
+    """Add the executed file's inode, mode and ownership from the exec's PATH records.
+
+    PATH item 0 is the file the exec call named: the program, or a `#!` script. For a script the kernel rewrites
+    argv to `<interpreter> [arg] <script> ...` and looks the interpreter up as a later item, so item 0 is the
+    script when its name is argv[1] or argv[2] and a later item's name is argv[0]; that later item is the
+    interpreter. Returns the PATH records used and caveats."""
+    try:
+        items = _path_items(members)
+    except AuditParseError as e:
+        return [], [f"exec PATH records not used: {e}"]
+    if 0 not in items:
+        return [], ["PATH record of the executed file not retrieved: its owner and mode are unknown"]
+    hit, record = items[0]
+    used = [hit]
+    name = record.fields.get("name")
+    f.update(_owner_fields("process.exec_file", hit, record))
+    path, extra, suffix, _why = _resolve(name, None, record, cwd, [])
+    if path:
+        f["process.exec_file.path"] = fv(path, f"{hit['_id']}:event.original#auditd:PATH.name{suffix}")
+        used += extra
+    interpreter = None
+    if argv and name and name != argv[0] and name in argv[1:3]:
+        interpreter = next(((h, r) for i, (h, r) in sorted(items.items())
+                            if i > 0 and r.fields.get("name") == argv[0]), None)
+    role_origin = f"{hit['_id']}:event.original#auditd:PATH.item+EXECVE.a0"
+    f["process.exec_file.role"] = fv("script" if interpreter else "executable", role_origin)
+    if interpreter is not None:
+        ih, ir = interpreter
+        used.append(ih)
+        f.update(_owner_fields("process.interpreter_file", ih, ir))
+        ipath, iextra, isuffix, _ = _resolve(ir.fields.get("name"), None, ir, cwd, [])
+        if ipath:
+            f["process.interpreter_file.path"] = fv(ipath, f"{ih['_id']}:event.original#auditd:PATH.name{isuffix}")
+            used += iextra
+    return list({h["_id"]: h for h in used}.values()), []
+
+
+# What a call did to each named file, by kind: the PATH nametypes that name a changed file.
+_CHANGE_NAMETYPES = {"truncate": ("NORMAL",), "attributes": ("NORMAL",), "delete": ("DELETE",),
+                     "create": ("CREATE",), "link": ("CREATE",)}
+_KIND_CHANGE = {"truncate": "content", "attributes": "attributes", "delete": "delete", "create": "create",
+                "link": "link"}
+
+
+def _open_intent(call: FileCall, rs: AuditRecord) -> tuple[int | None, str | None]:
+    """(open flags, the register they were read from); flags None when the call does not record them."""
+    if call.name == "creat":
+        return O_CREAT | O_WRONLY | O_TRUNC, None
+    if call.flags is None:
+        return None, None
+    return syscall_arg(rs, call.flags), f"a{call.flags}"
+
+
+def _file_targets(call: FileCall, items: dict[int, tuple[dict, AuditRecord]], failed: bool,
+                  flags: int | None) -> list[tuple[tuple[dict, AuditRecord], str | None, int]]:
+    """(PATH item, change, name slot) for each file the call changed. The name slot is 0 for the call's only or
+    old name and 1 for its new name (it picks the directory-descriptor argument). A change of None means the
+    records do not say what changed."""
+    children = [items[i] for i in sorted(items) if items[i][1].fields.get("nametype") != "PARENT"]
+
+    def nametype(item):
+        return item[1].fields.get("nametype")
+
+    # a failed lookup is recorded as UNKNOWN: it names the file the call tried to change
+    attempted = [c for c in children if failed and nametype(c) == "UNKNOWN"]
+    if call.kind == "open":
+        creates = [c for c in children if nametype(c) == "CREATE"]
+        if creates:
+            return [(c, "create", 0) for c in creates]
+        if flags is None:
+            return [(c, None, 0) for c in children]
+        if (flags & O_ACCMODE) in (O_WRONLY, O_RDWR) or flags & O_TRUNC:
+            return ([(c, "content", 0) for c in children if nametype(c) == "NORMAL"]
+                    + [(c, "create" if flags & O_CREAT else "content", 0) for c in attempted])
+        return []
+    if call.kind == "rename":
+        creates = [c for c in children if nametype(c) == "CREATE"]
+        deletes = [c for c in children if nametype(c) == "DELETE"]
+        if creates:
+            new_names = {c[1].fields.get("name") for c in creates}
+            # a DELETE item under the new name is the file the rename replaced; its path is the target's
+            return ([(c, "rename_target", 1) for c in creates]
+                    + [(d, "rename_source", 0) for d in deletes if d[1].fields.get("name") not in new_names])
+        if len(children) == 2:
+            # rename looks the old name up before the new one, so the items are in that order
+            return [(children[0], "rename_source", 0), (children[1], "rename_target", 1)]
+        return [(c, None, 0) for c in children]
+    wanted = _CHANGE_NAMETYPES[call.kind]
+    slot = 1 if call.kind == "link" else 0
+    return ([(c, _KIND_CHANGE[call.kind], slot) for c in children if nametype(c) in wanted]
+            + [(c, _KIND_CHANGE[call.kind], slot) for c in attempted])
+
+
+def normalize_file_group(host: str, members: list[tuple[dict, AuditRecord]], call: FileCall) -> list[TypedEvent]:
+    """file_change events from a SYSCALL record of a file-changing call and its PATH records: one per changed file.
+
+    An open is a change only with write intent (write access, O_TRUNC) or when it created the file; a read-only
+    open raises Skip. What cannot be decided stays absent, never defaulted: a file whose name cannot be placed has
+    no `file.path`, and a call whose records do not say what changed has no `file.change`; rules count both as
+    missing fields. A failed call is kept with outcome failure: it is an attempt."""
+    by_type = {r.type: (h, r) for h, r in members if r.type in ("SYSCALL", "CWD", "PROCTITLE")}
+    hs, rs = by_type["SYSCALL"]
+    sid = hs["_id"]
+    origin = f"{sid}:event.original#auditd:SYSCALL"
+    items = _path_items(members)
+    succ = rs.fields.get("success")
+    outcome = Outcome.success if succ == "yes" else Outcome.failure if succ == "no" else Outcome.unknown
+    base = {"file.syscall": fv(call.name, f"{origin}.arch+syscall"),
+            "audit.serial": fv(rs.serial, f"{sid}:event.original#auditd:msg.serial"),
+            **_audit_boot_field(members), **_syscall_process_fields(sid, rs)}
+    if rs.fields.get("key") not in (None, "(null)"):
+        base["audit.key"] = fv(rs.fields["key"], f"{origin}.key")
+    if rs.fields.get("exit"):
+        base["file.exit"] = fv(rs.fields["exit"], f"{origin}.exit")
+    caveats = []
+    expected = rs.fields.get("items", "")
+    if expected.isdigit() and int(expected) != len(items):
+        caveats.append(f"{len(items)} of the {expected} PATH records of this call were retrieved")
+    flags = None
+    if call.kind == "open":
+        flags, register = _open_intent(call, rs)
+        if flags is not None and register:
+            base["file.open_flags"] = fv(rs.fields[register], f"{origin}.{register}")
+        if flags is not None and flags & O_TMPFILE_BIT:
+            raise Skip("audit open of an unnamed temporary file (O_TMPFILE)")
+        if flags is None:
+            caveats.append(f"{call.name} does not record its open flags: whether the file was opened for writing "
+                           "is unknown")
+    if call.mode is not None and (mode := syscall_arg(rs, call.mode)) is not None:
+        base["file.new_mode"] = fv(f"{mode & 0o7777:04o}", f"{origin}.a{call.mode}")
+    if call.owner is not None:
+        for name, index in (("file.new_owner.id", call.owner[0]), ("file.new_group.id", call.owner[1])):
+            value = syscall_arg(rs, index)
+            if value is not None and value not in (0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):    # -1 leaves it unchanged
+                base[name] = fv(str(value), f"{origin}.a{index}")
+    targets = [] if call.by_fd else _file_targets(call, items, outcome == Outcome.failure, flags)
+    write = flags is not None and ((flags & O_ACCMODE) in (O_WRONLY, O_RDWR) or bool(flags & O_TRUNC))
+    if call.kind == "open" and flags is not None and not write and not targets:
+        raise Skip("audit open without write intent")
+    extra = [_ref(by_type["PROCTITLE"][0])] if "PROCTITLE" in by_type else []
+    if not targets:
+        why = ("the call acts on an open file descriptor, so the kernel records no path for the file" if call.by_fd
+               else "no PATH record names the changed file")
+        fields = dict(base)
+        change = ("content" if write else None) if call.kind == "open" else _KIND_CHANGE.get(call.kind)
+        if change:
+            fields["file.change"] = fv(change, f"{origin}.syscall")
+        refs = [_ref(hs), *extra]
+        return [TypedEvent(id=event_id("file_change", refs), family="file_change",
+                           ts=datetime.fromtimestamp(rs.ts, UTC), host=host or None, outcome=outcome, fields=fields,
+                           raw=refs, normalizer=NORMALIZER_VERSION, caveats=[*caveats, f"file path unknown: {why}"])]
+    cwd = by_type.get("CWD")
+    # a PARENT record places a bare name only when every PATH record of the call is present: with one missing,
+    # the PARENT seen may belong to another of the call's names
+    complete = not (expected.isdigit() and int(expected) != len(items))
+    parents = [items[i] for i in sorted(items) if items[i][1].fields.get("nametype") == "PARENT"] if complete else []
+    events = []
+    for (ph, pr), change, slot in targets:
+        fields = dict(base)
+        event_caveats = list(caveats)
+        porigin = f"{ph['_id']}:event.original#auditd:PATH"
+        path, used, suffix, why = _resolve(pr.fields.get("name"), call.dirfd[slot], rs, cwd, parents)
+        if path:
+            fields["file.path"] = fv(path, f"{porigin}.name{suffix}")
+        else:
+            event_caveats.append(f"file path unknown: {why}")
+        if change:
+            fields["file.change"] = fv(change, f"{origin}.syscall+{porigin}.nametype")
+        if pr.fields.get("nametype"):
+            fields["file.nametype"] = fv(pr.fields["nametype"], f"{porigin}.nametype")
+        fields.update(_owner_fields("file", ph, pr))
+        refs = list({r.key: r for r in [_ref(hs), _ref(ph), *[_ref(h) for h in used], *extra]}.values())
+        events.append(TypedEvent(id=event_id("file_change", refs), family="file_change",
+                                 ts=datetime.fromtimestamp(rs.ts, UTC), host=host or None, outcome=outcome,
+                                 fields=fields, raw=refs, normalizer=NORMALIZER_VERSION, caveats=event_caveats))
+    return events
 
 
 # ---------------------------------------------------------------------------------------------
@@ -925,9 +1193,20 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
         if "EXECVE" not in types:
             sys_rec = next((r for _, r in members if r.type == "SYSCALL"), None)
             syscall = socket_syscall(sys_rec) if sys_rec is not None else None
+            file_call = file_syscall(sys_rec) if sys_rec is not None and syscall is None else None
+            if file_call is not None:
+                try:
+                    events.extend(normalize_file_group(host, members, file_call))
+                except Skip as s:
+                    skips[s.reason] += 1
+                except (AuditParseError, ValueError, KeyError) as e:
+                    # tagged by family so the sweep marks only file-change rules partial
+                    errors.append((members[0][0]["_id"], f"linux.audit.file: {e}"))
+                continue
             if syscall is None:
                 arch = sys_rec.fields.get("arch", "") if sys_rec is not None else ""
-                skips["audit group without EXECVE or socket syscall" if not arch or arch in SOCKET_SYSCALLS
+                skips["audit group without EXECVE, socket or file-change syscall"
+                      if not arch or arch in SOCKET_SYSCALLS
                       else f"audit syscall on an arch whose socket calls are not decoded ({arch})"] += 1
                 continue
             try:
@@ -939,7 +1218,11 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
                 errors.append((members[0][0]["_id"], f"linux.audit.socket: {e}"))
             continue
         try:
-            events.append(normalize_exec_group(host, members))
+            event = normalize_exec_group(host, members)
+            events.append(event)
+            # the event is kept, but its command line is incomplete: the partition cannot assure a negative
+            errors += [(members[0][0]["_id"], f"linux.audit: {c}") for c in event.caveats
+                       if c.startswith(INCOMPLETE_ARGV_CAVEAT)]
         except Skip as s:
             skips[s.reason] += 1
         except (AuditParseError, ValueError, KeyError) as e:
