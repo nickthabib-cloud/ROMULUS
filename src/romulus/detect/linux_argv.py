@@ -842,3 +842,65 @@ def write_targets(name: str, args: list[str], cwd: str | None = None,
             continue
         targets.append(WriteTarget(path, form, position in assumed))
     return list(dict.fromkeys(targets)), unresolved
+
+
+# ------------------------------------------------------------------------------------------------
+# GNU getopt_long, for tools whose options decide what a command line asks for.
+# ------------------------------------------------------------------------------------------------
+
+class Getopt(NamedTuple):
+    options: list[tuple[str, str | None]]   # (short letter, or long name without an alias; value or None)
+    operands: list[str]
+    uncertain: bool                          # an unknown option was met: the operand split may be wrong
+
+
+def getopt_long(args: list[str], short_values: str, short_flags: str,
+                long_options: dict[str, tuple[str, bool]]) -> Getopt:
+    """Parse argv the way GNU getopt_long does. Short options group (`-aG sudo` is `-a` then `-G sudo`); a
+    value-taking short option takes the rest of its group or the next argument (`-u0`, `-u 0`); a long option
+    takes `--name=value` or the next argument and may be any unambiguous prefix (`--gro`); operands may sit
+    between options; `--` ends options. `long_options` maps a long name to (key, takes_value): the key is the short
+    letter it aliases, or the long name itself. An option the grammar does not know is kept (value None) and marks
+    the parse uncertain, because it may have taken the next argument as its value."""
+    options: list[tuple[str, str | None]] = []
+    operands: list[str] = []
+    uncertain = False
+    names = tuple(long_options)
+    index, ended = 0, False
+    while index < len(args):
+        arg = args[index]
+        if ended or arg == "-" or not arg.startswith("-"):
+            operands.append(arg)
+        elif arg == "--":
+            ended = True
+        elif arg.startswith("--"):
+            raw, has_value, inline = arg.partition("=")
+            name = gnu_long(raw, names)
+            if name is None:
+                options.append((raw, inline if has_value else None))
+                uncertain = True
+            else:
+                key, takes_value = long_options[name]
+                value = None
+                if takes_value:
+                    if has_value:
+                        value = inline
+                    elif index + 1 < len(args):
+                        index += 1
+                        value = args[index]
+                options.append((key, value))
+        else:
+            letters = arg[1:]
+            for position, letter in enumerate(letters):
+                if letter in short_values:
+                    value = letters[position + 1:]
+                    if not value and index + 1 < len(args):
+                        index += 1
+                        value = args[index]
+                    options.append((letter, value or None))
+                    break
+                options.append((letter, None))
+                if letter not in short_flags:
+                    uncertain = True
+        index += 1
+    return Getopt(options, operands, uncertain)

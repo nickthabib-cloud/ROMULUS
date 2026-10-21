@@ -24,9 +24,11 @@ PARTITION_MAX_DOCS = 120_000
 HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
-DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth"}, "linux.audit.socket": {"net_socket"},
+_AUDIT_ADMIN = {"account_change", "service_change", "audit_config", "system_state"}
+DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth"} | _AUDIT_ADMIN,
+                    "linux.audit.socket": {"net_socket"}, "linux.audit.admin": _AUDIT_ADMIN,
                     "arkime.session": {"net_session"},
-                    "systemd.journal": {"auth", "privilege_use"},
+                    "systemd.journal": {"auth", "privilege_use", "service_change"},
                     "apache.access": {"http_access"}, "apache.error": {"web_error"},
                     **{f"suricata.eve.{t}": NET_FAMILIES for t in ("alert", "flow", "netflow", "dns", "http",
                                                                   "fileinfo", "tls", "ssh")}}
