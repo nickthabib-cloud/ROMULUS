@@ -237,4 +237,5 @@ def test_agent_source_query_setting_is_loaded_and_injected():
     assert Settings().agent_max_source_queries == 200
     assert settings.agent_max_source_queries == 17
     assert toolbox.executor.pivot.source_query_budget == 17
+    assert toolbox.executor.pivot.source_query_scope == "agent"
     assert "AGENT_MAX_SOURCE_QUERIES=200" in Path(".env.example").read_text(encoding="utf-8")

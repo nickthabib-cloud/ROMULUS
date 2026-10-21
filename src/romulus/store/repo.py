@@ -265,6 +265,19 @@ class Repo:
             row = c.execute(query).mappings().first()
             return dict(row) if row else None
 
+    def save_agent_dossier_page_plan(self, hunt_id: str, pages: list[list[str]]) -> None:
+        """Persist the alias boundaries named by dossier continuation instructions."""
+        self.audit("system", "agent.dossier_page_plan", hunt_id, {"pages": pages})
+
+    def agent_dossier_page_plan(self, hunt_id: str) -> list[list[str]] | None:
+        row = self.latest_audit(hunt_id, "agent.dossier_page_plan")
+        pages = ((row or {}).get("detail") or {}).get("pages")
+        if not isinstance(pages, list) or not all(
+                isinstance(page, list) and all(isinstance(alias, str) for alias in page)
+                for page in pages):
+            return None
+        return pages
+
     VALID: ClassVar = {
         "planned": {"running", "canceled"},
         "running": {"paused", "completed_within_scope", "partial", "failed", "canceled"},
@@ -350,6 +363,35 @@ class Repo:
             return int(c.execute(select(t.task.c.source_queries).where(
                 t.task.c.id == task_id,
             )).scalar_one())
+
+    def agent_source_queries(self, hunt_id: str) -> int:
+        """Durable source-call spend reserved by the AI agent across every session and resume."""
+        with self.engine.connect() as c:
+            return int(c.execute(select(func.count()).select_from(t.audit_event).where(
+                t.audit_event.c.hunt_id == hunt_id,
+                t.audit_event.c.action == "agent.source_query",
+            )).scalar_one())
+
+    def reserve_agent_source_query(self, hunt_id: str, limit: int, task_id: str | None,
+                                   *, owner_token: str | None = None) -> int | None:
+        """Atomically reserve one query under the per-hunt AI-agent cap; return new spend or None."""
+        with write_txn(self.engine) as c:
+            self._fence_lease(c, hunt_id, owner_token)
+            used = int(c.execute(select(func.count()).select_from(t.audit_event).where(
+                t.audit_event.c.hunt_id == hunt_id,
+                t.audit_event.c.action == "agent.source_query",
+            )).scalar_one())
+            if used >= limit:
+                return None
+            if task_id is not None:
+                c.execute(t.task.update().where(
+                    t.task.c.id == task_id, t.task.c.hunt_id == hunt_id,
+                ).values(source_queries=t.task.c.source_queries + 1, updated_at=utcnow()))
+            c.execute(t.audit_event.insert().values(
+                at=utcnow(), actor="system", action="agent.source_query", hunt_id=hunt_id,
+                detail={"task_id": task_id, "ordinal": used + 1, "limit": limit},
+            ))
+            return used + 1
 
     def expansion_source_queries(self, hunt_id: str) -> int:
         """Durable physical-query spend for expansion, including an interrupted link."""

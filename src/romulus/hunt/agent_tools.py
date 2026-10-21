@@ -192,8 +192,10 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
     }
     pivot = PivotExecutor(
         repo, client, hunt_id, contracts, owner_token=owner_token,
-        source_query_budget=settings.agent_max_source_queries, dataset_inventory=inventory,
+        source_query_budget=settings.agent_max_source_queries, source_query_scope="agent",
+        dataset_inventory=inventory,
     )
+    pivot.source_queries = repo.agent_source_queries(hunt_id)
     fetcher = LinkFetcher(pivot, start, end)
     executor = HuntToolExecutor(repo, hunt_id, pivot, fetcher, start, end, owner_token=owner_token)
     return Toolbox(repo, hunt_id, executor=executor, session_id=session_id)

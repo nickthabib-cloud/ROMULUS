@@ -5,6 +5,8 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from romulus.agent.dossier import CLAIM_LIMIT, build_dossier
+from romulus.agent.provider.base import estimate_tokens
+from romulus.agent.toolbox import Toolbox
 from romulus.evidence.typed import Outcome, TypedEvent, fv
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -84,6 +86,21 @@ def test_dossier_pages_every_reportable_finding_exactly_once_and_keeps_counts():
     }
     assert all(len(finding["claim"]) <= CLAIM_LIMIT + 80 for page in pages for finding in page["findings"])
     assert any("…[+37 chars: get_finding " in finding["claim"] for page in pages for finding in page["findings"])
+
+
+def test_dossier_page_budget_and_list_findings_continuation_are_aligned():
+    repo = _repo()
+    dossier = build_dossier(repo, "h1", token_budget=700)
+
+    assert all(estimate_tokens(json.dumps(page, sort_keys=True, separators=(",", ":"))) <= 700
+               for page in dossier.pages)
+    toolbox = Toolbox(repo, "h1")
+    for number, dossier_page in enumerate(dossier.pages, 1):
+        result = toolbox.execute("list_findings", {"page": number})
+        assert [item["alias"] for item in result["data"]["findings"]] == [
+            item["alias"] for item in dossier_page["findings"]
+        ]
+        assert result["more"] is (number < len(dossier.pages))
 
 
 def test_dossier_includes_exact_coverage_gaps_context_counts_and_remaining_budget():

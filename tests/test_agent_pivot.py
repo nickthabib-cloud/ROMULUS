@@ -102,6 +102,50 @@ def test_agent_source_query_cap_is_a_partial_bounded_stop():
     assert result.coverage[0].status == "failed"
 
 
+def test_agent_source_query_cap_is_atomic_and_survives_new_executors(monkeypatch):
+    repo = _repo()
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+    for task_id in ("task-1", "task-2"):
+        repo.upsert_task(task_id, "h1", "pivot", "session", {}, task_id)
+
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+    ))
+    first = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=1, source_query_scope="agent",
+    )
+    second = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=1, source_query_scope="agent",
+    )
+
+    allowed = first._execute(intent, contract, spend_task_id="task-1")
+    refused = second._execute(intent, contract, spend_task_id="task-2")
+
+    assert allowed.completeness == Completeness.complete
+    assert refused.completeness == Completeness.failed
+    assert refused.reasons == ["agent_source_query_budget:1"]
+    assert repo.agent_source_queries("h1") == 1
+
+
+def test_agent_source_query_cap_makes_link_fetch_partial_not_failed():
+    repo = _repo()
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+    executor = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=0, source_query_scope="agent",
+    )
+
+    batch = executor.fetch_intents("anchor", "fetch-key", [intent], lambda _event: True)
+
+    assert batch.status == "partial"
+    assert batch.reasons == ["agent_source_query_budget:0"]
+
+
 def test_fetch_query_cap_leaves_unattempted_ranges_unresolved(monkeypatch):
     calls = []
 

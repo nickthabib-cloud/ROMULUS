@@ -13,7 +13,6 @@ from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.expansion import TIER_PLAN
 from romulus.report.incidents import build_incident_graph
-from romulus.report.manifest import coverage_for_hunt
 from romulus.store.repo import Repo
 
 DOSSIER_SCHEMA = "agent-dossier@1"
@@ -118,7 +117,6 @@ def _coverage(repo: Repo, hunt_id: str, manifest: dict) -> dict:
             "partial_cells": sum(gap["status"] == "partial" for gap in gaps),
             "unassessed_cells": sum(gap["status"] == "unassessed" for gap in gaps),
         },
-        "negative_claims": _jsonable(coverage_for_hunt(repo, hunt_id)),
         "gaps": gaps,
     }
 
@@ -171,8 +169,12 @@ def _incidents(repo: Repo, hunt_id: str, candidates: list[dict], aliases: AliasB
                 "anchor": aliases.alias_for("F", link["anchor_finding_id"]),
                 "targets": [aliases.alias_for("F", target) for target in link["target_finding_ids"]],
             })
-        out.append({"alias": aliases.alias_for("I", incident["id"]), "members": members,
-                    "links": incident_links})
+        # A singleton with no link adds no investigative hypothesis beyond the
+        # findings index. Keep only correlated incidents so the bounded dossier
+        # spends its prompt budget on actual relationships.
+        if len(members) > 1 or incident_links:
+            out.append({"alias": aliases.alias_for("I", incident["id"]), "members": members,
+                        "links": incident_links})
     return out
 
 
@@ -233,20 +235,33 @@ def _paginate(base: dict, findings: list[dict], token_budget: int) -> tuple[dict
     one = _page_payload(base, findings, 1, 1)
     if estimate_tokens(_canonical(one)) <= token_budget:
         return (one,)
+    continuation = {"schema": base["schema"], "header": base["header"]}
     chunks: list[list[dict]] = []
-    current: list[dict] = []
-    for finding in findings:
-        trial = current + [finding]
-        # Six digits reserves more header room than any realistic page count.
-        if current and estimate_tokens(_canonical(_page_payload(base, trial, 999999, 999999))) > token_budget:
-            chunks.append(current)
-            current = [finding]
-        else:
-            current = trial
-    if current or not chunks:
+    remaining = list(findings)
+    while remaining or not chunks:
+        page_base = base if not chunks else continuation
+        current: list[dict] = []
+        while remaining:
+            trial = current + [remaining[0]]
+            # Six digits reserves more header room than any realistic page count.
+            if estimate_tokens(_canonical(_page_payload(
+                    page_base, trial, 999999, 999999))) > token_budget:
+                break
+            current.append(remaining.pop(0))
+        if not current and remaining:
+            if chunks:
+                raise ValueError("token_budget is too small for one dossier finding")
+            # The context envelope can consume a small budget by itself. Emit it
+            # once, then use compact continuation pages for the findings index.
+            if estimate_tokens(_canonical(_page_payload(
+                    page_base, [], 999999, 999999))) > token_budget:
+                raise ValueError("token_budget is too small for the dossier context")
         chunks.append(current)
+        if not remaining:
+            break
     total = len(chunks)
-    return tuple(_page_payload(base, chunk, index, total) for index, chunk in enumerate(chunks, 1))
+    return tuple(_page_payload(base if index == 1 else continuation, chunk, index, total)
+                 for index, chunk in enumerate(chunks, 1))
 
 
 def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
@@ -293,4 +308,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
         "expansion": base["expansion"],
     })}
     pages = _paginate(base, finding_rows, token_budget)
+    repo.save_agent_dossier_page_plan(
+        hunt_id, [[finding["alias"] for finding in page["findings"]] for page in pages],
+    )
     return Dossier(payload=pages[0], pages=pages)

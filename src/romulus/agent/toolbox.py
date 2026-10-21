@@ -327,6 +327,7 @@ class Toolbox:
 
     def _list_findings(self, args: ListFindingsArgs) -> dict:
         candidates = sorted(self.repo.candidates(self.hunt_id), key=_candidate_key)
+        unfiltered = args.lane is None and args.rule is None and args.entity is None
         if args.lane is not None:
             candidates = [row for row in candidates if row["lane"] == args.lane]
         if args.rule is not None:
@@ -337,8 +338,20 @@ class Toolbox:
             if entity is None or entity["hunt_id"] != self.hunt_id:
                 raise UnknownAlias(f"unknown entity alias {args.entity!r} in hunt {self.hunt_id}")
             candidates = [row for row in candidates if self._matches_entity(row, entity)]
-        start = (args.page - 1) * READ_PAGE_SIZE
-        page = candidates[start:start + READ_PAGE_SIZE]
+        plan = self.repo.agent_dossier_page_plan(self.hunt_id) if unfiltered else None
+        if plan is not None:
+            aliases = plan[args.page - 1] if args.page <= len(plan) else []
+            by_id = {row["id"]: row for row in candidates}
+            page = [by_id[target] for alias in aliases
+                    if (target := self.aliases.resolve(alias, {"F"})) in by_id]
+            start = sum(len(item) for item in plan[:args.page - 1])
+            total = sum(len(item) for item in plan)
+            more = args.page < len(plan)
+        else:
+            start = (args.page - 1) * READ_PAGE_SIZE
+            page = candidates[start:start + READ_PAGE_SIZE]
+            total = len(candidates)
+            more = start + len(page) < len(candidates)
         rule_ids = {args.rule} if args.rule is not None else {
             str(item["id"]) for item in ((self.repo.get_hunt(self.hunt_id) or {}).get("manifest") or {})
             .get("pack", {}).get("playbooks", []) if isinstance(item, dict) and item.get("id")
@@ -346,9 +359,9 @@ class Toolbox:
         coverage = self._coverage(rule_ids)
         return _result(
             coverage["status"], coverage=coverage,
-            counts={"returned": len(page), "total": len(candidates)},
+            counts={"returned": len(page), "total": total},
             data={"findings": [self._finding_summary(row) for row in page], "page": args.page},
-            more=start + len(page) < len(candidates),
+            more=more,
         )
 
     def _get_finding(self, args: GetFindingArgs) -> dict:

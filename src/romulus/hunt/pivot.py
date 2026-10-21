@@ -273,6 +273,7 @@ class PivotExecutor:
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str,
                  contracts: dict[str, FieldContract], heartbeat=None, owner_token: str | None = None,
                  source_query_budget: int | None = None,
+                 source_query_scope: str | None = None,
                  dataset_inventory: dict[str, set[str] | list[str] | tuple[str, ...]] | None = None):
         self.repo = repo
         self.client = client
@@ -281,6 +282,7 @@ class PivotExecutor:
         self.heartbeat = heartbeat or (lambda: None)
         self.owner_token = owner_token
         self.source_query_budget = source_query_budget
+        self.source_query_scope = source_query_scope
         self.source_queries = 0
         self.dataset_inventory = {
             target: tuple(sorted(datasets)) for target, datasets in (dataset_inventory or {}).items()
@@ -290,17 +292,30 @@ class PivotExecutor:
         self, intent: SearchIntent, contract: FieldContract, *, pit=None,
         spend_task_id: str | None = None,
     ) -> SearchOutcome:
-        if self.source_query_budget is not None and self.source_queries >= self.source_query_budget:
+        def budget_outcome() -> SearchOutcome:
             now = datetime.now(UTC)
-            reason = f"expansion_source_query_budget:{self.source_query_budget}"
+            prefix = self.source_query_scope or "expansion"
+            reason = f"{prefix}_source_query_budget:{self.source_query_budget}"
             return SearchOutcome(
                 target=intent.target, fingerprint=digest(intent.model_dump(mode="json")),
                 started_at=now, ended_at=now, completeness=Completeness.failed,
                 reasons=[reason], error=reason,
             )
-        if spend_task_id is not None:
+        if self.source_query_budget is not None and self.source_queries >= self.source_query_budget:
+            return budget_outcome()
+        if self.source_query_scope == "agent" and self.source_query_budget is not None:
+            reserved = self.repo.reserve_agent_source_query(
+                self.hunt_id, self.source_query_budget, spend_task_id, owner_token=self.owner_token,
+            )
+            if reserved is None:
+                self.source_queries = self.source_query_budget
+                return budget_outcome()
+            self.source_queries = reserved
+        elif spend_task_id is not None:
             self.repo.record_task_source_query(spend_task_id, owner_token=self.owner_token)
-        self.source_queries += 1
+            self.source_queries += 1
+        else:
+            self.source_queries += 1
         self.heartbeat()
         outcome = (execute(self.client, intent, contract) if pit is None
                    else execute(self.client, intent, contract, pit=pit))
@@ -723,7 +738,11 @@ class PivotExecutor:
                 )
             else:
                 self.repo.update_task(task_id, "evaluated", outcome=outcome_digest, owner_token=self.owner_token)
-        status = "failed" if successful == 0 else "partial" if incomplete else "complete"
+        budget_limited = (self.source_query_scope == "agent" and self.source_query_budget is not None
+                          and any(reason == f"agent_source_query_budget:{self.source_query_budget}"
+                                  for reason in reasons))
+        status = ("partial" if successful == 0 and budget_limited else
+                  "failed" if successful == 0 else "partial" if incomplete else "complete")
         return PivotEventBatch(
             status=status, task_ids=task_ids,
             events=sorted(retained.values(), key=lambda event: (event.ts, event.id)),
@@ -1064,7 +1083,8 @@ class PivotExecutor:
             (entity.kind, entity.value, entity.role): entity
             for event in unique_events.values() for entity in _event_entities(event)
         }
-        budget_limited = any(reason.startswith("expansion_source_query_budget:") for reason in reasons)
+        budget_limited = any(reason.endswith(f"_source_query_budget:{self.source_query_budget}")
+                             for reason in reasons)
         if successful_outcomes == 0 and budget_limited:
             # The agent's source cap is an intentional bounded stop, not a source outage.
             status = "partial"
