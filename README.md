@@ -1,45 +1,38 @@
 # ROMULUS
 
-> **Early proof of concept, under active daily development.** It works end to end on lab data, but it is not validated for real missions. Interfaces and output formats will change. I'm actively brainstorming changes and improvements. I just threw it together and I'm not married to anything - I appreciate any reccomendations!
+> **Early proof of concept, under active daily development.** I'm actively brainstorming changes and improvements. I just threw it together and I'm not married to anything - I appreciate any reccomendations!
 
 **ROMULUS is a defensive threat-hunting tool.** It searches host and network telemetry for signs of compromise and reports what it finds as ranked, cited findings, incidents and an attack-path timeline.
 
-It is built for cyber defense teams (Cyber Protection Teams, SOC and incident-response analysts) who are dropped onto a network with logs in Elasticsearch or OpenSearch, sessions in Arkime and packet captures on disk, and need to find out quickly whether, and how, an attacker got in.
+It is built for cyber defense teams (Cyber Protection Teams, SOC and incident-response analysts) who are dropped onto a network with logs in Elasticsearch or OpenSearch, sessions in Arkime and packet captures on disk.
 
-ROMULUS works **with or without an AI model**. Initial finding comes from deterministic, typed detection rules. The AI investigating agent works on top of those results, and furthers investigations.
+ROMULUS works **with or without an AI model**. Initial finding comes from deterministic, typed detection rules. The AI investigating agent works on top of those results, correlating and furthering investigations with custom queries and follow ups. operating without the model just presents analysts with rules/signature based query results for analysis.
 
 ---
 
 ## What it does today
 
-1. **Sweeps** the hunt window across your sources with a catalog of typed detection rules: web shells, reverse shells, credential-file reads, downloads piped to a shell, firewall tampering, privilege-escalation tooling, port scans, beaconing, suspicious IDS alert stacks, indicator matches and more.
-2. **Reads packets** for the sessions that matter: it fetches them from Arkime by session ID and decodes them with TShark (for example, a file whose content does not match its claimed type).
-3. **Expands** from the strongest findings along typed links (the same process tree, the same login session, the same network flow) and judges the linked activity in that context: discovery commands, privilege probing, credential access, data staging and lateral movement that would be too weak on their own.
-4. **Assembles incidents**: findings joined by observed links, with a cited, time-ordered narrative. Inferred links are shown, but always labelled as hypotheses.
-5. **Reports**: an immutable report revision (JSON and Markdown) and a browser UI with findings, incidents and an attack-path timeline.
+1. **Sweeps** the hunt window across your sources with a catalog of typed detection rules: web shells, reverse shells, credential-file reads, downloads piped to a shell, firewall tampering, privilege-escalation tooling, port scans, beaconing, suspicious IDS alert stacks, indicator matches and much more. The goal is to find any malicious activity the telemetry can show, on any mission network. The detection catalog is built from systematic research:
+  - MITRE ATT&CK Enterprise and ICS techniques;
+  - Public detection corpora (Sigma, CAR, Atomic Red Team, LOLBAS/GTFOBins, ET Open and others);
+  - Any telemetry family a hunt may meet: Windows, AD, Linux, macOS, identity and cloud logs, network devices, Zeek, Suricata, PCAP and ICS protocols.
+3. **Reads packets** for the sessions that matter: it fetches them from Arkime by session ID and decodes them with TShark (for example, a file whose content does not match its claimed type).
+4. **Expands** from the strongest findings along typed links (the same process tree, the same login session, the same network flow) and judges the linked activity in that context: discovery commands, privilege probing, credential access, data staging and lateral movement that would be too weak on their own.
+5. **Assembles incidents**: findings joined by observed links, with a cited, time-ordered narrative. Inferred links are shown, but always labelled as hypotheses.
+6. **Reports**: an immutable report revision (JSON and Markdown) and a browser UI with findings, incidents and an attack-path timeline.
 
-Every claim cites the raw records it rests on. A negative ("this did not happen") is only stated when the evidence could have shown it; otherwise the report says what was not assessed.
 
-### Example finding
 
-```
-[URGENT] host.web_service_spawns_interpreter
-A process execution event on web01 records account 'www-data' executing 'bash' (argv: bash); the exec call succeeded.
-  cites: audit EXECVE/SYSCALL records (raw ids in the report), lane urgent, ATT&CK T1505.003, T1059.004
-```
-
-*(Placeholder: replace with a real, sanitized excerpt and a timeline screenshot.)*
-
-## Supported data
+## Current Supported data
 
 | Source | Today | Planned |
 |---|---|---|
-| Linux auditd (exec, connect/accept, login records) | ✓ | |
-| Linux journal (sshd and other services) | ✓ | |
+| Linux auditd | ✓ | |
+| Linux journal | ✓ | |
 | Apache access and error logs | ✓ | other web servers |
 | Suricata alerts and flows | ✓ | |
 | Arkime sessions (via its Elasticsearch indices) | ✓ | |
-| PCAP via Arkime and TShark | ✓ (HTTP content) | more protocols |
+| PCAP via Arkime and TShark | ✓ | more protocols |
 | Windows / Active Directory, Zeek, cloud and identity logs, ICS protocols | | ✓ |
 
 Sources are read through Elasticsearch or OpenSearch with **read-only** credentials. ROMULUS never writes to your telemetry.
@@ -57,11 +50,11 @@ Nothing that might be attacker activity is dropped: noise is handled by grouping
 
 ## Requirements
 
-- A Linux host for ROMULUS (it is developed on Ubuntu)
+- Currently A Linux host for ROMULUS (it is developed on Ubuntu)
 - Python 3.12+
 - Elasticsearch or OpenSearch holding the telemetry, and an account with read access to the indices only
-- Optional: Arkime (sessions and PCAP), TShark, PCAP files in an allow-listed directory
-- Optional: a model server (see [AI investigating agent](#ai-investigating-agent-in-progress))
+- Arkime (sessions and PCAP), TShark, PCAP files in an allow-listed directory
+- A model server (see [AI investigating agent](#ai-investigating-agent-in-progress))
 
 ## Quick start
 
@@ -126,17 +119,9 @@ Full design: [`docs/architecture/ai-investigating-agent.md`](docs/architecture/a
 ## Design principles
 
 - **Strong indicators are reported on their own, immediately.** Correlation and attack paths come second.
-- **A mention is not an action.** Rules match typed fields (the executable, a script operand, an address), never text that merely contains a word.
-- **Honest negatives.** Caps, timeouts, missing fields and partial responses are reported as "not assessed", never as "nothing found".
 - **Nothing reportable is lost** to UI limits, model context or rendering. One report manifest feeds every output.
 - **Read-only and on-site.** ROMULUS never writes to your telemetry and sends nothing off the host it runs on (except the optional, labelled test-model exception above). Secrets never appear in logs, prompts or reports.
 - **Models propose, code decides.** Any model output is a typed proposal that is validated; it never writes queries, filters, shell commands or paths.
-
-## How well does it work?
-
-Development is measured against a public, labelled attack dataset (AInception, on Zenodo), loaded into Elasticsearch and Arkime. On that development set, the latest deterministic run reported 16 of 22 observable attack steps and surfaced 20 of 22, with 9 of its top 10 findings correct and about 2.9 false leads per modelled hour of analyst review.
-
-These are **development-set numbers and optimistic by design**: the rules were tuned while looking at this data. They are not a claim about performance on other networks. Testing on unseen data is planned.
 
 ## Architecture
 
@@ -177,6 +162,4 @@ Repository layout:
 - **Next:** the AI investigating agent; deeper network and packet analysis; host rules that can prove negatives from kernel file records.
 - **Then:** detection breadth (Windows/AD, Zeek, Sigma import, ATT&CK coverage matrix), testing on unseen datasets, the executive DOCX report and hardening.
 
-## License
 
-*(To be decided by the owner.)*
