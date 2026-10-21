@@ -23,7 +23,7 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 
 
 
-## Supported data
+## Current Supported data
 
 | Source | Today | Planned |
 |---|---|---|
