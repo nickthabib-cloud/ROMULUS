@@ -6,7 +6,7 @@
 
 It is built for cyber defense teams (Cyber Protection Teams, SOC and incident-response analysts) who are dropped onto a network with logs in Elasticsearch or OpenSearch, sessions in Arkime and packet captures on disk.
 
-ROMULUS works **with or without an AI model**. Initial finding comes from deterministic, typed detection rules. The AI investigating agent works on top of those results, correlating and furthering investigations with custom queries and follow ups.
+ROMULUS works **with or without an AI model**. Initial finding comes from deterministic, typed detection rules. The AI investigating agent works on top of those results, correlating and furthering investigations with custom queries and follow ups. operating without the model just presents analysts with rules/signature based query results for analysis.
 
 ---
 
