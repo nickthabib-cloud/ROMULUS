@@ -612,10 +612,20 @@ def _dns_name_fields(names: set[str], types: set[str], codes: set[str], origin: 
 
 
 def _suricata_dns(d: dict, o: str, bad: list[str]) -> dict:
+    """EVE DNS in its three layouts. Query records (every version) and v2 answer records carry the question in
+    the top-level rrname/rrtype; v3 records carry it in `queries`. A v1 answer record (no `version`) is one
+    resource record of the response: its rrname/rrtype/ttl/rdata describe that answer (a CNAME target, say), so
+    they are typed as an answer and never as the question."""
     f = {"dns.type": fv(d.get("type"), f"{o}.dns.type")}
     names, types = set(), set()
-    rrname = _scalar_str(d.get("rrname"), "dns.rrname", bad)
-    rrtype = _scalar_str(d.get("rrtype"), "dns.rrtype", bad)
+    if d.get("type") == "answer" and d.get("version") is None:
+        answer = _dns_record(d, "dns", bad)
+        if any(v is not None for v in answer.values()):
+            f["dns.answers"] = fv([answer], f"{o}.dns.rrname+rrtype+ttl+rdata")
+        rrname = rrtype = None
+    else:
+        rrname = _scalar_str(d.get("rrname"), "dns.rrname", bad)
+        rrtype = _scalar_str(d.get("rrtype"), "dns.rrtype", bad)
     names.update([rrname] if rrname else [])
     types.update([rrtype] if rrtype else [])
     queries = _objects(d.get("queries"), "dns.queries", bad) or []
@@ -627,7 +637,7 @@ def _suricata_dns(d: dict, o: str, bad: list[str]) -> dict:
     f.update(_dns_name_fields(names, types, {code} if code else set(), f"{o}.dns.rrname+rrtype+queries+rcode"))
     for typed, key in (("dns.answers", "answers"), ("dns.authorities", "authorities")):
         items = _objects(d.get(key), f"dns.{key}", bad)
-        if items:
+        if items and typed not in f:
             f[typed] = fv([_dns_record(item, f"dns.{key}[{i}]", bad) for i, item in enumerate(items)],
                           f"{o}.dns.{key}")
     grouped = d.get("grouped")

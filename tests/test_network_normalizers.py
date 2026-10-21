@@ -169,6 +169,8 @@ def test_arkime_dns_list_with_one_question_sets_the_scalar_names():
     e = one(arkime(protocol=["udp", "dns"], dns=[dns_obj(["update.example"], answers=ans)]))
     assert e.get("dns.question.name") == "update.example" and e.get("dns.question.names") == ["update.example"]
     assert e.get("dns.question.type") == "A" and e.get("dns.response_code") == "NOERROR"
+    # a whole transaction: no dns.type, and the client is the session's source (Arkime's initiator)
+    assert e.get("dns.type") is None and e.get("source.ip") == "172.17.100.121"
     assert e.get("dns.answers") == [
         {"name": "update.example", "type": "A", "ttl": 300, "data": "198.51.100.7"},
         {"name": "update.example", "type": "CNAME", "ttl": 60, "data": "cdn.example"}]
@@ -286,10 +288,28 @@ def test_suricata_dns_v2_answer_keeps_answers_and_authorities():
 
 
 def test_suricata_dns_grouped_answers_are_read():
-    e = one(eve("d2", {"event_type": "dns", "dns": {"type": "answer", "rrname": "g.example", "rrtype": "A",
+    e = one(eve("d2", {"event_type": "dns", "dns": {"version": 2, "type": "answer", "rrname": "g.example", "rrtype": "A",
                                                     "grouped": {"A": ["192.0.2.1", "192.0.2.2"]}}}))
     assert e.get("dns.answers") == [{"name": None, "type": "A", "ttl": None, "data": "192.0.2.1"},
                                     {"name": None, "type": "A", "ttl": None, "data": "192.0.2.2"}]
+
+
+def test_suricata_dns_v1_answer_record_is_an_answer_never_the_question():
+    """EVE v1 logs each answer resource record on its own; a CNAME target must not read as a question name."""
+    e = one(eve("v1", {"event_type": "dns", "dns": {"type": "answer", "id": 7, "rrname": "cdn.example",
+                                                    "rrtype": "A", "ttl": 20, "rdata": "203.0.113.5",
+                                                    "rcode": "NOERROR"}}))
+    assert e.get("dns.type") == "answer"
+    assert e.get("dns.question.name") is None and e.get("dns.question.names") is None
+    assert e.get("dns.question.type") is None and e.get("dns.response_code") == "NOERROR"
+    assert e.get("dns.answers") == [{"name": "cdn.example", "type": "A", "ttl": 20, "data": "203.0.113.5"}]
+    assert not [x for x in e.entities() if x[0] == "domain"]
+
+
+def test_suricata_dns_v1_answer_without_rdata_still_names_no_question():
+    e = one(eve("v1n", {"event_type": "dns", "dns": {"type": "answer", "rrname": "gone.example",
+                                                     "rcode": "NXDOMAIN"}}))
+    assert e.get("dns.question.name") is None and e.get("dns.response_code") == "NXDOMAIN"
 
 
 def test_suricata_dns_v3_queries_list():
