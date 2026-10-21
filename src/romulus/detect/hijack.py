@@ -47,6 +47,7 @@ from romulus.detect.linux_argv import canonical, is_under, normalize_path, progr
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
+    classify_redirect,
     parse_script,
     shell_script_file_of,
     shell_script_of,
@@ -86,7 +87,6 @@ _ELEVATION = {"sudo", "su", "doas", "pkexec", "run0"}
 _USR_ALIASES = (("/bin/", "/usr/bin/"), ("/sbin/", "/usr/sbin/"), ("/lib/", "/usr/lib/"),
                 ("/lib64/", "/usr/lib64/"), ("/lib32/", "/usr/lib32/"))
 _PSEUDO_FS = ("/dev", "/proc", "/sys")
-_REDIRECT_WRITE = {">", ">>", "2>", "2>>"}
 _FAMILY_ORDER = {"auth": 0, "file_change": 1, "process_exec": 2}
 WRITE_CITE = 10                 # writer records cited per (host, account, file); the claim gives exact totals
 EXEC_FIRST = 2                  # earliest root runs cited per (host, file, executor)
@@ -202,7 +202,7 @@ class _Series:
 
 class NonRootWriteRootExecutedFile(Playbook):
     id = "host.nonroot_write_root_executed_file"
-    version = "2"
+    version = "3"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -391,9 +391,10 @@ class NonRootWriteRootExecutedFile(Playbook):
         found: list[tuple[str, str, bool]] = []
         for command, current in commands:
             for op, target in command.redirects:
-                if op not in _REDIRECT_WRITE:
+                written = classify_redirect(op, target).writes_file
+                if written is None:                 # a read, duplication or close writes no file
                     continue
-                path = normalize_path(target, current)
+                path = normalize_path(written, current)
                 if not path:
                     incomplete = True
                 elif not is_under(path, _PSEUDO_FS):

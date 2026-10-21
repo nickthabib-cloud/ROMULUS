@@ -154,27 +154,39 @@ def _lex(script: str) -> list[_Token]:
                 fail("here-string syntax is not modelled")
             if script.startswith("<<", index):
                 fail("heredoc syntax is not modelled")
-            if script.startswith((">&", "<&", ">|"), index):
-                fail("redirect form is not modelled")
 
-            size = 2 if char == ">" and script.startswith(">>", index) else 1
-            op = script[index:index + size]
-            if char == ">" and word_started and word_plain and "".join(word).isdigit():
-                descriptor = "".join(word)
-                if descriptor != "2":
-                    fail("file-descriptor redirect is not modelled")
+            # Operator core, longest match first: duplications (">&"/"<&"), clobber (">|") and
+            # read-write ("<>") are two characters; plain redirects are one. The following word (if
+            # any) is the target, read by the parser: an fd digit, "-" (close) or a path.
+            two = script[index:index + 2]
+            if char == ">":
+                core = two if two in (">>", ">|", ">&") else ">"
+            else:
+                core = two if two in ("<>", "<&") else "<"
+
+            # An unquoted digit run written directly against the operator is the file descriptor it
+            # redirects (e.g. "2>&1", "0<&1"), not a separate word.
+            if word_started and word_plain and "".join(word).isdigit():
+                tokens.append(_Token("redirect", "".join(word) + core))
                 word = []
                 word_started = False
                 word_plain = True
-                tokens.append(_Token("redirect", descriptor + op))
             else:
-                emit("redirect", op)
-            index += size
+                emit("redirect", core)
+            index += len(core)
             continue
 
         if char == "&":
-            if index + 1 < len(script) and script[index + 1] == ">":
-                fail("redirect form is not modelled")
+            # bash: `&>WORD` / `&>>WORD` send both stdout and stderr to WORD. A descriptor digit
+            # cannot prefix these, so an immediately preceding word stays a word (flushed by emit).
+            if script.startswith("&>>", index):
+                emit("redirect", "&>>")
+                index += 3
+                continue
+            if script.startswith("&>", index):
+                emit("redirect", "&>")
+                index += 2
+                continue
             if script.startswith("&&", index):
                 emit("operator", "&&")
                 index += 2
@@ -318,6 +330,107 @@ def parse_script(script: str) -> ParsedScript:
     if lex_error:
         return ParsedScript(pipelines=pipelines, ok=False, error=lex_error, partial=bool(pipelines))
     return ParsedScript(pipelines=pipelines)
+
+
+# ------------------------------------------------------------------------------------------------
+# Typed redirection model
+#
+# `Command.redirects` stays a list of raw ``(op, target)`` tuples, so existing consumers keep
+# unpacking them unchanged. `classify_redirect` turns one such tuple into typed semantics without
+# reading the rest of the script, so a consumer can ask "which file does this write?" or "is a
+# descriptor duplicated?" instead of testing operator substrings. It never infers that the
+# redirection actually ran — that is a claim only process- or file-level evidence can make.
+# ------------------------------------------------------------------------------------------------
+
+_PLAIN_REDIRECT_ACTIONS = {">": "write", ">>": "append", ">|": "clobber", "<": "read", "<>": "readwrite"}
+
+
+@dataclass(frozen=True)
+class Redirect:
+    """The POSIX/bash meaning of one parsed ``(op, target)`` redirection.
+
+    - ``fd``: the descriptor the redirection affects, with its default resolved (1 for output
+      operators, 0 for input). ``-1`` marks a token this model does not recognise.
+    - ``action``: ``write`` (``>``), ``append`` (``>>``), ``clobber`` (``>|``), ``read`` (``<``),
+      ``readwrite`` (``<>``), ``dup`` (``N>&M`` / ``N<&M``), or ``close`` (``N>&-``).
+    - ``target``: a path, the source-descriptor digits of a duplication, or ``""`` for a close.
+    - ``target_is_fd``: the target names a descriptor (a duplication), not a path.
+    - ``affects_stderr``: the bash shorthands ``>&WORD`` / ``&>WORD`` / ``&>>WORD`` that also send
+      fd 2 to the same target.
+    """
+
+    fd: int
+    action: str
+    target: str
+    target_is_fd: bool
+    affects_stderr: bool
+
+    @property
+    def writes_file(self) -> str | None:
+        """The path this redirection opens for writing (stdout/stderr → file), else None."""
+        if self.target_is_fd or not self.target:
+            return None
+        return self.target if self.action in ("write", "append", "clobber", "readwrite") else None
+
+    @property
+    def reads_file(self) -> str | None:
+        """The path this redirection opens for reading (stdin ← file), else None."""
+        if self.target_is_fd or not self.target:
+            return None
+        return self.target if self.action in ("read", "readwrite") else None
+
+
+def classify_redirect(op: str, target: str) -> Redirect:
+    """Resolve one parsed redirection token and its target word into typed semantics."""
+    # bash "both streams" shorthands: &>WORD / &>>WORD send stdout and stderr to WORD.
+    if op in ("&>", "&>>"):
+        return Redirect(fd=1, action="append" if op == "&>>" else "write", target=target,
+                        target_is_fd=False, affects_stderr=True)
+    prefix = ""
+    rest = op
+    while rest and rest[0].isdigit():
+        prefix += rest[0]
+        rest = rest[1:]
+    if rest in ("<&", ">&"):
+        reading = rest == "<&"
+        fd = int(prefix) if prefix else (0 if reading else 1)
+        if target == "-":                                   # N>&- / N<&- : close the descriptor
+            return Redirect(fd=fd, action="close", target="", target_is_fd=False, affects_stderr=False)
+        if target.isdigit():                                # N>&M / N<&M : duplicate descriptor M
+            return Redirect(fd=fd, action="dup", target=target, target_is_fd=True, affects_stderr=False)
+        # A non-digit word. ">&FILE" without an explicit descriptor sends both stdout and stderr to
+        # the file; a descriptor-prefixed ">&FILE" sends only that descriptor. "<&FILE" is a bash
+        # error, so it is read (the safe, non-overclaiming interpretation), never a write.
+        if reading:
+            return Redirect(fd=fd, action="read", target=target, target_is_fd=False, affects_stderr=False)
+        return Redirect(fd=fd, action="write", target=target, target_is_fd=False,
+                        affects_stderr=prefix == "")
+    action = _PLAIN_REDIRECT_ACTIONS.get(rest)
+    if action is None:                                      # an unmodelled token: recognise nothing
+        return Redirect(fd=-1, action="unknown", target=target, target_is_fd=False, affects_stderr=False)
+    fd = int(prefix) if prefix else (0 if action in ("read", "readwrite") else 1)
+    return Redirect(fd=fd, action=action, target=target, target_is_fd=False, affects_stderr=False)
+
+
+NETWORK_PSEUDO_PATHS = ("/dev/tcp/", "/dev/udp/")
+
+
+def network_redirects(parsed: ParsedScript) -> tuple[list[str], list[str]]:
+    """``(outbound, inbound)`` network pseudo-paths among the script's redirections: the ``/dev/tcp``
+    or ``/dev/udp`` targets written to (stdout/stderr) or read from (stdin). A sound reading of the
+    parsed redirects; it never claims the redirection ran. Targets keep first-seen order."""
+    outbound: list[str] = []
+    inbound: list[str] = []
+    for command in parsed.commands():
+        for op, target in command.redirects:
+            redirect = classify_redirect(op, target)
+            written = redirect.writes_file
+            if written and written.startswith(NETWORK_PSEUDO_PATHS):
+                outbound.append(written)
+            read = redirect.reads_file
+            if read and read.startswith(NETWORK_PSEUDO_PATHS):
+                inbound.append(read)
+    return outbound, inbound
 
 
 POSIX_SHELLS = {"sh", "bash", "dash", "ash", "busybox"}

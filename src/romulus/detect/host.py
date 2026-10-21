@@ -12,6 +12,7 @@ from romulus.detect.base import Match, Playbook, basename, outcome_phrase, pf
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
+    classify_redirect,
     parse_script,
     shell_script_file_of,
     shell_script_of,
@@ -848,7 +849,7 @@ class AuthorizedKeysWrite(Playbook):
     redirects create no process, so absence can only be assured by file-access telemetry."""
     id = "host.ssh_authorized_keys_write"
     anchor_class = "persistence"
-    version = "3"
+    version = "4"
     title = "Command or script writing to an SSH authorized_keys file"
     assures_negative = False
     families = ("process_exec",)
@@ -870,8 +871,10 @@ class AuthorizedKeysWrite(Playbook):
             if parsed.ok:
                 for c in parsed.commands():
                     from_script = True
-                    targets += [t for op, t in c.redirects if op in (">", ">>", ">|", "1>", "1>>")
-                                and t.endswith("authorized_keys")]
+                    for op, t in c.redirects:
+                        written = classify_redirect(op, t).writes_file
+                        if written and written.endswith("authorized_keys"):
+                            targets.append(written)
                     if c.name in ("tee", "cp", "mv", "install") and c.argv and c.argv[-1].endswith("authorized_keys"):
                         targets.append(c.argv[-1])
             else:
