@@ -1,6 +1,6 @@
 # ROMULUS
 
-> **Early proof of concept, under active daily development.** It works end to end on lab data, but it is not validated for real missions. Interfaces and output formats will change. I'm actively brainstorming changes and improvements. I just threw it together and I'm not married to anything - I appreciate any reccomendations!
+> **Early proof of concept, under active daily development.** I'm actively brainstorming changes and improvements. I just threw it together and I'm not married to anything - I appreciate any reccomendations!
 
 **ROMULUS is a defensive threat-hunting tool.** It searches host and network telemetry for signs of compromise and reports what it finds as ranked, cited findings, incidents and an attack-path timeline.
 
