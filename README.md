@@ -23,15 +23,6 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 
 Every claim cites the raw records it rests on. A negative ("this did not happen") is only stated when the evidence could have shown it; otherwise the report says what was not assessed.
 
-### Example finding
-
-```
-[URGENT] host.web_service_spawns_interpreter
-A process execution event on web01 records account 'www-data' executing 'bash' (argv: bash); the exec call succeeded.
-  cites: audit EXECVE/SYSCALL records (raw ids in the report), lane urgent, ATT&CK T1505.003, T1059.004
-```
-
-*(Placeholder: replace with a real, sanitized excerpt and a timeline screenshot.)*
 
 ## Supported data
 
