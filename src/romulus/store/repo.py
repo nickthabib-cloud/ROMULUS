@@ -457,7 +457,19 @@ class Repo:
         if table is None:
             return []
         with self.engine.connect() as c:
-            return list(c.execute(select(table.c.hunt_id).where(table.c.id == target_id)).scalars())
+            owners = set(c.execute(select(table.c.hunt_id).where(table.c.id == target_id)).scalars())
+            # Typed events can be retained once and cited by more than one hunt. Those citing hunts
+            # own an E alias even when the physical row remains attributed to its first hunt.
+            if kind == "E":
+                for hunt_id, event_ids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)):
+                    if target_id in (event_ids or []):
+                        owners.add(hunt_id)
+                for hunt_id, event_ids, evidence_ids in c.execute(select(
+                        t.expansion_link.c.hunt_id, t.expansion_link.c.event_ids,
+                        t.expansion_link.c.evidence_ids)):
+                    if target_id in [*(event_ids or []), *(evidence_ids or [])]:
+                        owners.add(hunt_id)
+            return sorted(owners)
 
     def get_or_create_agent_alias(self, hunt_id: str, kind: str, target_id: str) -> dict:
         """Allocate the next alias inside the serialized repository writer."""
@@ -483,6 +495,27 @@ class Repo:
     def entities(self, hunt_id: str) -> list[dict]:
         query = (select(t.entity).where(t.entity.c.hunt_id == hunt_id)
                  .order_by(t.entity.c.kind, t.entity.c.value, t.entity.c.id))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(query).mappings()]
+
+    def entity(self, entity_id: str) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.entity).where(t.entity.c.id == entity_id)).mappings().first()
+            return dict(row) if row else None
+
+    def entity_for(self, hunt_id: str, kind: str, value: str) -> dict | None:
+        query = select(t.entity).where(
+            t.entity.c.hunt_id == hunt_id, t.entity.c.kind == kind, t.entity.c.value == value,
+        )
+        with self.engine.connect() as c:
+            row = c.execute(query).mappings().first()
+            return dict(row) if row else None
+
+    def events_for_entity(self, entity_id: str) -> list[dict]:
+        query = (select(t.typed_event)
+                 .join(t.event_entity, t.event_entity.c.event_id == t.typed_event.c.id)
+                 .where(t.event_entity.c.entity_id == entity_id)
+                 .order_by(t.typed_event.c.ts, t.typed_event.c.id))
         with self.engine.connect() as c:
             return [dict(row) for row in c.execute(query).mappings()]
 
