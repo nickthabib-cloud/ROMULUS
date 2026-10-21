@@ -206,6 +206,34 @@ def test_record_outside_the_join_window_is_its_own_finding():
     assert len(run([cmd, rec_in])[1]) == 1
 
 
+@pytest.mark.parametrize("argv,exe,lane,text", [
+    (["bash", "-c", "echo 'evil:x:0:0::/root:/bin/bash' >> /etc/passwd"], "/usr/bin/bash", "high",
+     "write /etc/passwd with a shell redirect ('>>')"),
+    (["bash", "-c", "echo 'svc:x:999:999::/srv:/usr/sbin/nologin' >> /etc/passwd"], "/usr/bin/bash", "lead",
+     "write /etc/passwd with a shell redirect"),
+    (["bash", "-c", "printf 'sudo:x:27:alice,evil\\n' > /etc/group"], "/usr/bin/bash", "high",
+     "membership of privileged group sudo"),
+    (["sed", "-i", "s/^bob:x:1001:/bob:x:0:/", "/etc/passwd"], "/usr/bin/sed", "lead", "write /etc/passwd directly"),
+    (["cp", "/tmp/passwd.new", "/etc/passwd"], "/usr/bin/cp", "lead", "write /etc/passwd directly"),
+    (["tee", "-a", "/etc/group"], "/usr/bin/tee", "lead", "write /etc/group directly"),
+    (["vi", "/etc/shadow"], "/usr/bin/vim.basic", "lead", "write /etc/shadow directly"),
+])
+def test_direct_writes_to_account_files(argv, exe, lane, text):
+    out = run([ex(argv, exe=exe)])[1]
+    assert len(out) == 1 and out[0].proposed_lane == lane and text in out[0].claim
+    assert "whether the account database changed is not established" in out[0].claim
+
+
+@pytest.mark.parametrize("argv,exe", [
+    (["cat", "/etc/passwd"], "/usr/bin/cat"), (["grep", "root", "/etc/shadow"], "/usr/bin/grep"),
+    (["cp", "/etc/passwd", "/tmp/p"], "/usr/bin/cp"), (["bash", "-c", "getent passwd > /tmp/users"], "/usr/bin/bash"),
+    (["bash", "-c", "echo x >> /etc/passwd.bak"], "/usr/bin/bash"), (["chmod", "644", "/etc/passwd"], "/usr/bin/chmod"),
+    (["bash", "-c", "echo 'echo x >> /etc/passwd'"], "/usr/bin/bash"),
+])
+def test_reads_copies_out_and_mentions_of_account_files_are_not_writes(argv, exe):
+    assert run([ex(argv, exe=exe)])[1] == []
+
+
 def test_registered_with_card_and_valid_attack_ids():
     import gzip
     import json

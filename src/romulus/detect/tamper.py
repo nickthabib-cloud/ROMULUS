@@ -26,7 +26,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import ClassVar, NamedTuple
+from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.host import Lineage, ProcessLineage, _argv_summary, _outcome_tally, lineage_phrase
@@ -38,12 +38,11 @@ from romulus.detect.linux_argv import (
     normalize_path,
     operands_after_options,
     program,
+    shell_segments,
     write_targets,
 )
 from romulus.evidence.normalize import service_name
-from romulus.evidence.shellparse import SHELLS, UnknownShellScript, shell_script_of
-from romulus.evidence.shellparse import _lex as _shell_tokens  # the parser's own lexer, reused read-only
-from romulus.evidence.shellparse import _Unmodelled as _ShellUnmodelled
+from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome, TypedEvent
 
 SHUTDOWN_WINDOW = 900.0          # seconds either side of a stop in which a shutdown marker explains it
@@ -106,57 +105,6 @@ def _identity(e: TypedEvent) -> tuple[str, list[str], bool] | None:
     if prog is not None:
         return prog.name, prog.args, True
     return canonical(basename(str(argv[0]))), [str(a) for a in argv[1:]], False
-
-
-class Segment(NamedTuple):
-    assignments: list[str]       # NAME=VALUE words before the command name
-    argv: list[str]
-    redirects: list[tuple[str, str]]
-
-
-_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
-
-def shell_segments(name: str, args: list[str]) -> tuple[list[Segment], bool]:
-    """Simple commands of a shell started with -c, and whether the text was only partly modelled. Read with the
-    shell parser's own lexer, so quoting is honoured; unlike the parser, assignment prefixes (`HISTFILE=/dev/null`)
-    are kept as assignments, because they are what this module looks for. Nothing a construct the lexer does not
-    model (expansions, substitutions, here-documents) would run is read."""
-    if name not in SHELLS:
-        return [], False
-    script = shell_script_of([name, *args])
-    if isinstance(script, UnknownShellScript):
-        return [], True
-    if not script:
-        return [], False
-    incomplete = False
-    try:
-        tokens = _shell_tokens(script)
-    except _ShellUnmodelled as error:
-        tokens, incomplete = error.tokens, True
-    segments: list[Segment] = []
-    current = Segment([], [], [])
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token.kind in {"operator", "pipe"}:
-            if current.argv or current.assignments or current.redirects:
-                segments.append(current)
-            current = Segment([], [], [])
-        elif token.kind == "redirect":
-            if index + 1 < len(tokens) and tokens[index + 1].kind == "word":
-                current.redirects.append((token.value, tokens[index + 1].value))
-                index += 1
-            else:
-                incomplete = True
-        elif not current.argv and _ASSIGNMENT.match(token.value):
-            current.assignments.append(token.value)
-        else:
-            current.argv.append(token.value)
-        index += 1
-    if current.argv or current.assignments or current.redirects:
-        segments.append(current)
-    return segments, incomplete
 
 
 @dataclass

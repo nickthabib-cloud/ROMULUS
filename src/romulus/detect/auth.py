@@ -13,9 +13,10 @@ SSH rules read the journal sshd records the normalizer types (family `auth`, `au
   and sshd writes them for key probes inside connections that then succeed.
 The rules are positive-only: sshd's message grammar is text, and lines it words differently are not typed.
 
-The account rule reads root exec records of the account and group tools (argv parsed with each tool's option
-grammar) and the audit records those tools write (family `account_change`). An exec record shows a command was
-run; only the tool's own audit record (joined by process id) or a kernel file-change record shows the change.
+The account rule reads exec records of the account and group tools (argv parsed with each tool's option grammar),
+commands and shell text that write the account files directly, and the audit records the tools write (family
+`account_change`). An exec record shows a command was run; only the tool's own audit record (joined by process
+id) or a kernel file-change record shows the change.
 """
 from __future__ import annotations
 
@@ -33,7 +34,14 @@ from romulus.detect.host import (
     _outcome_tally,
     lineage_phrase,
 )
-from romulus.detect.linux_argv import canonical, getopt_long, program
+from romulus.detect.linux_argv import (
+    canonical,
+    getopt_long,
+    normalize_path,
+    program,
+    shell_segments,
+    write_targets,
+)
 from romulus.evidence.typed import Outcome, TypedEvent
 
 SSHD_ATTEMPT_PHASES = {"authentication", "user_lookup", "preauth_disconnect", "max_attempts"}
@@ -818,6 +826,52 @@ def account_command(name: str, args: list[str], busybox: bool = False,
     return forms, uncertain
 
 
+# The account databases the tools edit. Writing them directly creates or changes accounts without the tools (and
+# without the tools' audit records).
+ACCOUNT_FILES = frozenset({"/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow"})
+_TEXT_WRITERS = {"echo", "printf"}
+
+
+def _written_line_privilege(path: str, words: list[str]) -> str:
+    """Privilege a passwd or group line printed into an account file grants (user id 0, or a privileged group
+    with members). The words are the printing command's arguments, so this reads intent, not the file."""
+    for word in words:
+        for line in word.replace("\\n", "\n").splitlines():
+            fields = line.split(":")
+            if path == "/etc/passwd" and len(fields) >= 7 and _is_zero(fields[2]):
+                return "user id 0 (root's) in the written passwd line"
+            if path == "/etc/group" and len(fields) >= 4 and fields[0] in PRIVILEGED_GROUPS and fields[3]:
+                return f"membership of privileged group {fields[0]} in the written group line"
+    return ""
+
+
+def account_file_writes(name: str, args: list[str], cwd: str | None) -> tuple[list[AccountForm], bool]:
+    """Direct writes to the account databases by a write-capable program (an editor, sed -i, tee, cp/mv/install,
+    dd), or by shell command text that redirects into them; and whether a write target could not be placed.
+    Permission and owner changes are not writes."""
+    if name in {"chmod", "chown", "chgrp"}:
+        return [], False
+    forms: list[AccountForm] = []
+    targets, uncertain = write_targets(name, args, cwd)
+    for target in targets:
+        if target.path in ACCOUNT_FILES and not target.assumed:
+            forms.append(AccountForm("account_db_edit", (), (), f"write {target.path} directly ({target.form})", ""))
+    segments, incomplete = shell_segments(name, args)
+    for segment in segments:
+        command = canonical(basename(segment.argv[0])) if segment.argv else ""
+        for op, target_text in segment.redirects:
+            path = normalize_path(target_text, cwd)
+            if op in {">", ">>", "1>", "1>>"} and path in ACCOUNT_FILES:
+                privileged = (_written_line_privilege(path, segment.argv[1:]) if command in _TEXT_WRITERS else "")
+                forms.append(AccountForm("account_db_edit", (), (), f"write {path} with a shell redirect ('{op}')",
+                                         privileged))
+        if command and command not in ACCOUNT_TOOLS:
+            text_forms, text_uncertain = account_file_writes(command, segment.argv[1:], cwd)
+            forms += [f._replace(detail=f"{f.detail} in shell command text") for f in text_forms]
+            uncertain = uncertain or text_uncertain
+    return forms, uncertain or incomplete
+
+
 def _traits(items: list[str]) -> str:
     present = [item for item in items if item]
     return f" ({', '.join(present)})" if present else ""
@@ -885,7 +939,8 @@ class AccountOrGroupChange(Playbook):
     JOIN_SECONDS = 10.0
     card: ClassVar[dict] = {
         "behavior": "an account or group tool was run to create, delete or modify an account, group membership, "
-                    "password or expiry; or the tool's audit record reports such a change",
+                    "password or expiry; a command or shell text wrote /etc/passwd, /etc/shadow, /etc/group or "
+                    "/etc/gshadow directly; or a tool's audit record reports such a change",
         "telemetry": "auditd EXECVE+SYSCALL as process_exec (process.executable, process.argv, process.pid, "
                      "process.ppid, process.user): present (root execs captured); audit ADD_USER/DEL_USER/ADD_GROUP/"
                      "DEL_GROUP/USER_MGMT/GRP_MGMT/USER_CHAUTHTOK/GRP_CHAUTHTOK/ACCT_LOCK/ACCT_UNLOCK as "
@@ -939,9 +994,10 @@ class AccountOrGroupChange(Playbook):
         else:
             name, args, busybox = prog.name, prog.args, prog.name_from_argv0
         self.evaluated += 1
-        if name not in ACCOUNT_TOOLS:
-            return
-        forms, uncertain = account_command(name, args, busybox, e.get("process.user"))
+        if name in ACCOUNT_TOOLS:
+            forms, uncertain = account_command(name, args, busybox, e.get("process.user"))
+        else:
+            forms, uncertain = account_file_writes(name, args, e.get("process.cwd"))
         if uncertain:
             self.missing_required += 1
         if not forms:

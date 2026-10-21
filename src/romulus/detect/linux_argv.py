@@ -9,6 +9,9 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from romulus.detect.base import basename
+from romulus.evidence.shellparse import SHELLS, UnknownShellScript, shell_script_of
+from romulus.evidence.shellparse import _lex as _shell_tokens  # the parser's own lexer, reused read-only
+from romulus.evidence.shellparse import _Unmodelled as _ShellUnmodelled
 from romulus.evidence.typed import TypedEvent
 
 # Applet multiplexers: the kernel records the multiplexer; argv[0] (or argv[1]) selects the applet.
@@ -904,3 +907,58 @@ def getopt_long(args: list[str], short_values: str, short_flags: str,
                     uncertain = True
         index += 1
     return Getopt(options, operands, uncertain)
+
+
+# ------------------------------------------------------------------------------------------------
+# Shell command text: simple commands with their assignment prefixes and redirects.
+# ------------------------------------------------------------------------------------------------
+
+class Segment(NamedTuple):
+    assignments: list[str]       # NAME=VALUE words before the command name
+    argv: list[str]
+    redirects: list[tuple[str, str]]
+
+
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def shell_segments(name: str, args: list[str]) -> tuple[list[Segment], bool]:
+    """Simple commands of a shell started with -c, and whether the text was only partly modelled. Read with the
+    shell parser's own lexer, so quoting is honoured; unlike the parser, assignment prefixes (`HISTFILE=/dev/null`)
+    are kept as assignments, because they are what this module looks for. Nothing a construct the lexer does not
+    model (expansions, substitutions, here-documents) would run is read."""
+    if name not in SHELLS:
+        return [], False
+    script = shell_script_of([name, *args])
+    if isinstance(script, UnknownShellScript):
+        return [], True
+    if not script:
+        return [], False
+    incomplete = False
+    try:
+        tokens = _shell_tokens(script)
+    except _ShellUnmodelled as error:
+        tokens, incomplete = error.tokens, True
+    segments: list[Segment] = []
+    current = Segment([], [], [])
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.kind in {"operator", "pipe"}:
+            if current.argv or current.assignments or current.redirects:
+                segments.append(current)
+            current = Segment([], [], [])
+        elif token.kind == "redirect":
+            if index + 1 < len(tokens) and tokens[index + 1].kind == "word":
+                current.redirects.append((token.value, tokens[index + 1].value))
+                index += 1
+            else:
+                incomplete = True
+        elif not current.argv and _ASSIGNMENT.match(token.value):
+            current.assignments.append(token.value)
+        else:
+            current.argv.append(token.value)
+        index += 1
+    if current.argv or current.assignments or current.redirects:
+        segments.append(current)
+    return segments, incomplete
