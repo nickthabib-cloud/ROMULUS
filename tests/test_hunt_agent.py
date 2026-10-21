@@ -371,7 +371,7 @@ def test_cli_status_shows_expansion_and_packet_accounting_when_the_agent_is_off(
 
 
 def test_default_and_no_expand_hunts_have_identical_sweep_findings(tmp_path, monkeypatch):
-    """Expansion adds findings; it never changes, adds to or removes what the sweep found (review minor)."""
+    """Expansion adds findings; it never changes, adds to or removes what the sweep found."""
     from romulus.evidence.typed import RawRef, TypedEvent, fv
     from romulus.hunt.pivot import PivotEventBatch, PivotExecutor
     from romulus.sources.profile import contract_from_types

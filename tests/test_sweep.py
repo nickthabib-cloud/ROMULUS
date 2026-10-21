@@ -104,7 +104,7 @@ def test_partition_heartbeats_before_and_after_source_execution(monkeypatch):
     assert calls == ["heartbeat", "execute", "heartbeat"]
 
 
-# ---------------------------------------------------------------- M1 gate regressions (B2, B3, B5)
+# ---------------------------------------------------------------- regressions
 def _complete(intent, records):
     now = datetime.now(UTC)
     return SearchOutcome(target=intent.target, fingerprint="f", started_at=now, ended_at=now,
@@ -351,15 +351,15 @@ def test_aggregate_consume_time_match_is_never_a_complete_negative(monkeypatch):
 
 
 def test_script_text_rules_never_claim_a_complete_negative(monkeypatch):
-    # option 2 (owner decision 2026-10-18): even a fully parsed, clean script cannot prove absence
+    # even a fully parsed, clean script cannot prove absence
     repo = _run_shell_partition(monkeypatch, script="echo hello; ls /tmp")
     from romulus.report.manifest import _coverage
     rows = {r["rule_id"]: r for r in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]}
     for rid in ("host.download_piped_to_shell", "host.ssh_authorized_keys_write"):
         assert rows[rid]["negative_claim"].startswith("not assessable by design"), rows[rid]
-    assert "planned (M3)" in rows["host.download_piped_to_shell"]["negative_claim"]   # no false pointer to another positive-only rule
+    assert "path records are planned" in rows["host.download_piped_to_shell"]["negative_claim"]   # no false pointer to another positive-only rule
     assert "can prove absence" in rows["host.ssh_authorized_keys_write"]["negative_claim"]
-    # option B (owner decision 2026-10-19): no argv/text-identified host rule may claim a complete negative
+    # no argv/text-identified host rule may claim a complete negative
     from romulus.detect.host import HOST_PLAYBOOKS
     for cls in HOST_PLAYBOOKS:
         assert not rows[cls.id]["negative_claim"].startswith("complete"), (cls.id, rows[cls.id])
@@ -428,7 +428,7 @@ def test_positive_only_aggregate_with_a_match_reports_matched(monkeypatch):
 def test_cells_stored_before_a_rule_became_positive_only_never_render_complete():
     from romulus.report.manifest import _coverage
     cells = [{"rule_id": "host.credential_store_read", "target": "idx", "partition": "p",
-              "state": "no_match_complete", "evaluated": 5}]          # stored under pack m1-pack@1
+              "state": "no_match_complete", "evaluated": 5}]          # stored under an older pack
     claim = _coverage(cells, targets=["idx"])["rules"][0]["negative_claim"]
     assert claim.startswith("not assessable by design"), claim
 

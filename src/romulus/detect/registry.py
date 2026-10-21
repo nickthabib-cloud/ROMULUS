@@ -10,7 +10,7 @@ from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
 
-PACK_VERSION = "m3-pack@3"
+PACK_VERSION = "pack@4"
 ALL_PLAYBOOKS = (HOST_PLAYBOOKS + NETWORK_PLAYBOOKS + SESSION_PLAYBOOKS + CORRELATION_PLAYBOOKS
                  + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}

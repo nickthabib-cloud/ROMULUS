@@ -49,7 +49,7 @@ UNRESOLVED_STATES = (
     "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
 )
 _NO_ASSURANCE = ("no rule in this pack can prove absence for this behavior yet; negatives from kernel file and "
-                 "path records are planned (M3)")
+                 "path records are planned")
 
 
 def _po(what: str) -> str:
