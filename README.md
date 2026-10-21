@@ -21,7 +21,6 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 5. **Assembles incidents**: findings joined by observed links, with a cited, time-ordered narrative. Inferred links are shown, but always labelled as hypotheses.
 6. **Reports**: an immutable report revision (JSON and Markdown) and a browser UI with findings, incidents and an attack-path timeline.
 
-Every claim cites the raw records it rests on. A negative ("this did not happen") is only stated when the evidence could have shown it; otherwise the report says what was not assessed.
 
 
 ## Supported data
