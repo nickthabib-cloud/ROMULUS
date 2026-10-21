@@ -43,11 +43,13 @@ _UNIDIRECTIONAL = ("flow.bytes", "flow.pkts")
 # closes an idle TCP session after a few minutes and starts a new record if traffic resumes; 15 minutes keeps an
 # idle-but-open connection together while separating a port reused much later.
 STITCH_GAP = 900.0
-# Suricata counts whole frames. Application bytes in one direction are estimated as the byte count minus
-# HEADER_BYTES per packet (Ethernet 14 + IPv4 20 + TCP 20 with 12 bytes of timestamp options), an upper bound for
-# common TCP headers, so the estimate errs low. A direction carried application data when the estimate reaches
-# MIN_PAYLOAD_BYTES: handshakes, acknowledgements and keepalives alone stay at or below zero.
-HEADER_BYTES = 66
+# Suricata counts whole frames. Application bytes in one direction are estimated as the byte count minus a header
+# size per packet: for TCP, Ethernet 14 + IPv4 20 + TCP 20 with 12 bytes of timestamp options; for UDP, Ethernet 14 +
+# IPv4 20 + UDP 8. These are upper bounds for common IPv4 headers, so the estimate errs low. A direction carried
+# application data when the estimate reaches MIN_PAYLOAD_BYTES: handshakes, acknowledgements and keepalives alone
+# stay at or below zero.
+HEADER_BYTES = {"tcp": 66, "udp": 42}
+DEFAULT_HEADER_BYTES = 66
 MIN_PAYLOAD_BYTES = 64
 # Modern stacks pick client ports from 32768 upwards (Linux 32768-60999, Windows 49152-65535).
 EPHEMERAL_FLOOR = 32768
@@ -258,13 +260,14 @@ class FlowView:
         return f"{self.transport}/{self.dport}" if self.dport is not None else self.transport
 
 
-def _framed_payload(c2s_bytes, c2s_packets, s2c_bytes, s2c_packets) -> bool | None:
+def _framed_payload(transport, c2s_bytes, c2s_packets, s2c_bytes, s2c_packets) -> bool | None:
     """Whether both directions carried application data, estimated from whole-frame bytes and packet counts;
     None when a counter is absent."""
     if None in (c2s_bytes, c2s_packets, s2c_bytes, s2c_packets):
         return None
-    return (c2s_bytes - HEADER_BYTES * c2s_packets >= MIN_PAYLOAD_BYTES
-            and s2c_bytes - HEADER_BYTES * s2c_packets >= MIN_PAYLOAD_BYTES)
+    header = HEADER_BYTES.get(transport, DEFAULT_HEADER_BYTES)
+    return (c2s_bytes - header * c2s_packets >= MIN_PAYLOAD_BYTES
+            and s2c_bytes - header * s2c_packets >= MIN_PAYLOAD_BYTES)
 
 
 def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
@@ -291,7 +294,7 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         if data_c is not None and data_s is not None:
             payload = data_c > 0 and data_s > 0
         else:
-            payload = _framed_payload(c2s, _int(event.get("source.packets")), s2c, s2c_packets)
+            payload = _framed_payload(transport, c2s, _int(event.get("source.packets")), s2c, s2c_packets)
         listed = event.get("network.protocols")
         if listed is None:
             protocols, failed = None, False
@@ -302,7 +305,7 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         sensor = SURICATA
         c2s, s2c = _int(event.get("flow.bytes_toserver")), _int(event.get("flow.bytes_toclient"))
         s2c_packets = _int(event.get("flow.pkts_toclient"))
-        payload = _framed_payload(c2s, _int(event.get("flow.pkts_toserver")), s2c, s2c_packets)
+        payload = _framed_payload(transport, c2s, _int(event.get("flow.pkts_toserver")), s2c, s2c_packets)
         # Suricata writes app_proto only once detection concluded; its absence is the record's own statement that
         # no protocol was identified, and 'failed' says detection gave up.
         app = event.get("network.app_proto")
@@ -721,6 +724,7 @@ class _Unidentified:
     first: float
     last: float
     event_id: str                   # the connection's first candidate record, kept on the stage for citation
+    on_source: bool = False         # the registered port is the initiator's source port
     records: Counter = field(default_factory=Counter)
     failed: int = 0
 
@@ -738,12 +742,16 @@ class _Mismatch:
 SOURCE_LIST_LIMIT = 30
 
 
-def _sources_phrase(counts: dict[str, int]) -> str:
-    """'from 2 sources (10.0.0.5: 3, 10.0.0.6: 2)' with every source up to the list limit."""
+def _address_list(counts: dict[str, int], noun: str) -> str:
+    """'2 sources (10.0.0.5: 3, 10.0.0.6: 2)' with every address up to the list limit."""
     ordered = sorted(counts, key=ip_sort_key)
     listed = ", ".join(f"{ip}: {counts[ip]}" for ip in ordered[:SOURCE_LIST_LIMIT])
     more = f" and {len(ordered) - SOURCE_LIST_LIMIT} more" if len(ordered) > SOURCE_LIST_LIMIT else ""
-    return f"from {_plural(len(ordered), 'source')} ({listed}{more})"
+    return f"{_plural(len(ordered), noun)} ({listed}{more})"
+
+
+def _sources_phrase(counts: dict[str, int]) -> str:
+    return "from " + _address_list(counts, "source")
 
 
 class ProtocolPortMismatch(_FlowRule):
@@ -751,7 +759,7 @@ class ProtocolPortMismatch(_FlowRule):
     data-carrying connection to a registered port had no protocol identified although the sensor can parse the
     protocol registered there."""
     id = "net.protocol_port_mismatch"
-    version = "2"
+    version = "3"
     title = "Application protocol and port disagree on a connection"
     severity, lane = "medium", "lead"
     attack = ("T1571", "T1572", "T1095")
@@ -771,7 +779,10 @@ class ProtocolPortMismatch(_FlowRule):
         "behavior": "(a) an identified application protocol on a connection where neither port is registered for "
                     "it, including a registered port carrying a different identified protocol (ssh on tcp/443); "
                     "(b) a connection to a registered port that carried data both ways with no protocol identified "
-                    "by a sensor that parses the protocol registered there",
+                    "by a sensor that parses the protocol registered there; a record whose initiator is on a "
+                    "registered port and whose other end is a client port (a reversed or mid-stream view, or a "
+                    "program bound to the service port) is judged against its source port, and cleared when a "
+                    "forward record of the same connection had its protocol identified",
         "telemetry": "Suricata EVE flow records (network.app_proto, ports, transport, flow.bytes_* and flow.pkts_* "
                      "per direction) and Arkime sessions (network.protocols, ports, transport, client.bytes/"
                      "server.bytes, or source/destination bytes and packets): present in the lab profile, app_proto "
@@ -836,8 +847,16 @@ class ProtocolPortMismatch(_FlowRule):
                     self._stage(event)
             return True
         capable = expected & PARSERS[view.sensor]
+        on_source = False
         if not capable:
-            return True
+            # A record whose initiator sits on a registered port and whose other end is a client port is either a
+            # reversed or mid-stream view of a connection to that service, or a client bound to the service port.
+            # It is judged against the source port when the sensor can parse that port's protocol; a forward record
+            # of the same connection with an identified protocol clears it.
+            source_capable = expected_protocols(view.transport, view.sport) & PARSERS[view.sensor]
+            if expected or not source_capable or view.dport < EPHEMERAL_FLOOR:
+                return True
+            on_source = True
         if view.payload is None:
             return False
         if not view.payload:
@@ -847,7 +866,8 @@ class ProtocolPortMismatch(_FlowRule):
             # every candidate connection keeps its first record on the stage, so whichever connections stay
             # unidentified after the other sensor's records are in can be cited
             entry = self.unidentified[view.key] = _Unidentified(view.src, view.sport, view.dst, view.dport,
-                                                                 view.transport, view.start, view.end, event.id)
+                                                                 view.transport, view.start, view.end, event.id,
+                                                                 on_source)
             self._stage(event)
         entry.first, entry.last = min(entry.first, view.start), max(entry.last, view.end)
         entry.records[view.sensor] += 1
@@ -861,7 +881,10 @@ class ProtocolPortMismatch(_FlowRule):
         for key, entry in self.unidentified.items():
             if key in self.identified:
                 continue                # another record of the same connection had its protocol identified
-            groups[(entry.dst, entry.dport, entry.transport)].append(entry)
+            if entry.on_source:
+                groups[(entry.src, entry.sport, entry.transport, "source")].append(entry)
+            else:
+                groups[(entry.dst, entry.dport, entry.transport, "destination")].append(entry)
         for key in sorted(groups, key=lambda k: (ip_sort_key(k[0]),) + k[1:]):
             out.append(self._unidentified(key, groups[key]))
         return out
@@ -903,7 +926,7 @@ class ProtocolPortMismatch(_FlowRule):
         return match
 
     def _unidentified(self, key, entries: list[_Unidentified]) -> Match:
-        dst, port, transport = key
+        server, port, transport, side = key
         expected = expected_protocols(transport, port)
         records: Counter = Counter()
         failed = 0
@@ -925,25 +948,33 @@ class ProtocolPortMismatch(_FlowRule):
         capable = sorted({SENSOR_NAMES[s] for s in records if expected & PARSERS[s]})
         parsable = sorted(expected & set().union(*(PARSERS[s] for s in records)))
         denominators = []
-        for sensor, tally in sorted(self.pairs.get(key, {}).items()):
+        tallies = self.pairs.get((server, port, transport), {}) if side == "destination" else {}
+        for sensor, tally in sorted(tallies.items()):
             identified = ", ".join(f"{p} {n}" for p, n in sorted(tally.items()) if p != "records")
             kind = "flow record" if sensor == SURICATA else "session record"
-            denominators.append(f"{SENSOR_NAMES[sensor]} wrote {_plural(tally['records'], kind)} to {dst} on "
+            denominators.append(f"{SENSOR_NAMES[sensor]} wrote {_plural(tally['records'], kind)} to {server} on "
                                 f"this port" + (f", identified as {identified}" if identified else
                                                 ", none with an identified protocol"))
-        sources = _sources_phrase(Counter(entry.src for entry in entries))
-        claim = (f"{_plural(len(entries), 'connection')} to {dst} on {transport}/{port} {sources} "
-                 f"({_iso(first)} – {_iso(last)}) carried data in both directions with no application protocol "
-                 f"identified: {'; '.join(how)}. {transport}/{port} is registered here for "
-                 f"{', '.join(sorted(expected))}, which {' and '.join(capable)} can parse ({', '.join(parsable)}). "
-                 f"{'; '.join(denominators)}. A parser that does not recognise traffic is not proof that a "
-                 f"different protocol was used.")
+        if side == "source":
+            peers = _address_list(Counter(entry.dst for entry in entries), "peer")
+            subject = (f"{_plural(len(entries), 'connection')} from {server} port {transport}/{port} to {peers}; "
+                       f"the registered port is the initiator's source port (a reversed or mid-stream view of a "
+                       f"connection to that service, or a program bound to the service port to make outgoing "
+                       f"connections)")
+        else:
+            sources = _sources_phrase(Counter(entry.src for entry in entries))
+            subject = f"{_plural(len(entries), 'connection')} to {server} on {transport}/{port} {sources}"
+        registered = f"{transport}/{port} is registered here for {', '.join(sorted(expected))}"
+        claim = (f"{subject} ({_iso(first)} – {_iso(last)}) carried data in both directions with no application "
+                 f"protocol identified: {'; '.join(how)}. {registered}, which {' and '.join(capable)} can parse "
+                 f"({', '.join(parsable)}). " + (f"{'; '.join(denominators)}. " if denominators else "")
+                 + "A parser that does not recognise traffic is not proof that a different protocol was used.")
         evs = self._events([e.event_id for e in sorted(entries, key=lambda e: (e.first, e.event_id))][:EXAMPLE_LIMIT])
         match = Match(self.id, claim, "network_observation", evs,
-                      _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "network.app_proto",
-                                           "network.protocols")),
+                      _predicates(evs[0], ("source.ip", "source.port", "destination.ip", "destination.port",
+                                           "network.app_proto", "network.protocols")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs),
-                      group_key=f"{dst}|{transport}/{port}|unidentified")
+                      group_key=f"{server}|{transport}/{port}|unidentified|{side}")
         match.notes.append("ATT&CK context: T1571 Non-Standard Port / T1095 Non-Application Layer Protocol")
         return match
 
@@ -972,7 +1003,7 @@ class LongUnidentifiedSession(_FlowRule):
     """A long connection that carried data both ways while no sensor identified its application protocol, on a
     port that is unregistered or registered only for protocols the recording sensor cannot parse."""
     id = "net.long_unidentified_session"
-    version = "2"
+    version = "3"
     title = "Long data-carrying connection with no identified protocol on a port its sensor cannot judge"
     severity, lane = "medium", "lead"
     attack = ("T1095", "T1571", "T1573")
@@ -1000,8 +1031,9 @@ class LongUnidentifiedSession(_FlowRule):
         "fidelity": "duration and data volume are typed counters; 'data both ways' is Arkime application payload "
                     "bytes, or for Suricata whole-frame bytes minus 66 header bytes per packet of at least 64 in "
                     "each direction; 'no protocol identified' is the parsers' judgement. Positive-only",
-        "benign_and_cost": "custom application protocols, brokers and replication, VPNs. One item per (source, "
-                           "destination, port)",
+        "benign_and_cost": "custom application protocols, brokers, database pools and replication, VPNs. One item "
+                           "per (destination, port, transport), listing every source with its long-connection count",
+
         "query_cost": "none beyond the sweep",
         "next_pivot": "the owning processes, and the first packets of a cited connection",
         "adds": "net.long_external_connection reports each long Arkime TCP connection across the internal/external "
@@ -1027,10 +1059,10 @@ class LongUnidentifiedSession(_FlowRule):
         expected = expected_protocols(view.transport, view.dport)
         if expected and all(expected & parsers for parsers in PARSERS.values()):
             return True                 # every sensor can parse the registered protocol: the mismatch rule judges it
-        source_expected = expected_protocols(view.transport, view.sport)
-        if source_expected and view.dport >= EPHEMERAL_FLOOR and not source_expected & PARSERS[view.sensor]:
-            # a registered service's side seen as the initiator, by a sensor that cannot parse that service: its
-            # silence says nothing. A sensor that can parse it and still identified nothing is judged.
+        if expected_protocols(view.transport, view.sport) and view.dport >= EPHEMERAL_FLOOR:
+            # A registered service's side seen as the initiator. When the sensor can parse the service, the
+            # protocol/port rule judges the record against the source port (and clears it when a forward record of
+            # the same connection was identified); when it cannot, its silence says nothing.
             return True
         if view.protocols is None or not view.timed:
             return False
@@ -1070,9 +1102,9 @@ class LongUnidentifiedSession(_FlowRule):
             if any(p.identified or p.capable for p in pieces) or not any(p.payload for p in pieces):
                 continue                # identified, owned by the protocol/port rule, or never carried data
             first = pieces[0]
-            groups[(first.src, first.dst, first.dport, first.transport)].append(pieces)
+            groups[(first.dst, first.dport, first.transport)].append(pieces)
         out = []
-        for key in sorted(groups):
+        for key in sorted(groups, key=lambda k: (ip_sort_key(k[0]),) + k[1:]):
             connections = groups[key]
             spans = [(max(p.end for p in c) - c[0].start, c) for c in connections]
             long = [(span, c) for span, c in spans if span >= self.MIN_SECONDS]
@@ -1081,7 +1113,7 @@ class LongUnidentifiedSession(_FlowRule):
         return out
 
     def _match(self, key, connections, long) -> Match:
-        src, dst, port, transport = key
+        dst, port, transport = key
         longest, longest_conn = max(long, key=lambda item: (item[0], -item[1][0].start))
         records: Counter = Counter(p.sensor for c in connections for p in c)
         failed = sum(p.failed for c in connections for p in c)
@@ -1089,11 +1121,12 @@ class LongUnidentifiedSession(_FlowRule):
         expected = expected_protocols(transport, port)
         registration = (f"{transport}/{port} is registered here for {', '.join(sorted(expected))}, which {sensors} "
                         f"cannot parse" if expected else f"{transport}/{port} is registered here for no protocol")
-        claim = (f"{_plural(len(long), 'connection')} from {src} to {dst} on {transport}/{port} lasted at least "
+        sources = _sources_phrase(Counter(c[0].src for _span, c in long))
+        claim = (f"{_plural(len(long), 'connection')} to {dst} on {transport}/{port} {sources} lasted at least "
                  f"{self.MIN_SECONDS // 60} minutes with data in both directions and no application protocol "
                  f"identified by {sensors}; the longest ran {longest / 60:.0f} minutes ({_iso(longest_conn[0].start)} "
-                 f"– {_iso(max(p.end for p in longest_conn))}). "
-                 f"{_plural(len(connections), 'unidentified data-carrying connection')} between them on this port "
+                 f"– {_iso(max(p.end for p in longest_conn))}, from {longest_conn[0].src}). "
+                 f"{_plural(len(connections), 'unidentified data-carrying connection')} to it on this port "
                  f"in total ({_sensor_counts(records)}"
                  + (f"; Suricata reported protocol detection 'failed' on {failed}" if failed else "") + "). "
                  f"{registration}. Times are as the sensors recorded them.")
@@ -1105,11 +1138,12 @@ class LongUnidentifiedSession(_FlowRule):
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "flow.start",
                                            "flow.end")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs),
-                      group_key=f"{src}|{dst}|{transport}/{port}")
-        if transport == "tcp" and external(src) != external(dst):
+                      group_key=f"{dst}|{transport}/{port}")
+        if transport == "tcp" and any(external(c[0].src) != external(dst) for _span, c in long):
             match.notes.append("net.long_external_connection reports each long TCP connection across the "
                                "internal/external boundary on its own (duration); this item adds that no sensor "
-                               "identified an application protocol, and counts the pair's shorter connections")
+                               "identified an application protocol, groups every client of the port, and counts "
+                               "the shorter connections")
         match.notes.append("ATT&CK context: T1095 Non-Application Layer Protocol / T1571 Non-Standard Port")
         return match
 
