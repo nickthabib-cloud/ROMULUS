@@ -25,6 +25,7 @@ PINNED_EVIDENCE = {3: "558886b23bb8bc1c311f676511a801253907f06ed3ffdff71f825d8a5
 PACKET_FUNCTIONS = (packet_stage._body_event, packet_rules.analyze_body, packet_rules._text, packet_rules._shebang,
                     packet_sources.decode_hex_body, packet_stage._stream_event, packet_sources.addresses,
                     packet_sources._endpoint, packet_sources.reassemble_tcp, packet_sources.TcpStreams,
+                    packet_sources._flag, packet_stage._StreamTarget._judge,
                     packet_rules.analyze_stream, packet_rules._Side, packet_rules._clean, packet_rules._lines,
                     packet_rules._bursts, packet_rules._texty, packet_rules._tokens, packet_rules._args_fit,
                     packet_rules._command_name, packet_rules.ShellIndicator)
@@ -34,8 +35,10 @@ PACKET_TABLES = (packet_sources.STREAM_PREFS, packet_sources.QUERIES["tcp_payloa
                                       packet_rules.PASSWORD_PROMPT, packet_rules._IAC, packet_rules._ANSI,
                                       packet_rules._LINE_END)],
                  packet_rules.OUTPUT_SIGNATURES, sorted(packet_rules.WINDOWS_COMMANDS), packet_rules.OPENING_BYTES,
-                 packet_rules.OUTPUT_WINDOW_BYTES, packet_rules.MAX_COMMAND_CHARS)
-PINNED_PACKETS = {"tshark-packets@5": "5287bbac86625a00ff35f2c026a1a470a07d7692b6d7282202bfbe059ad97a0b"}
+                 packet_rules.OUTPUT_WINDOW_BYTES, packet_rules.MAX_COMMAND_CHARS, packet_rules.MAX_COMMANDS,
+                 packet_rules.PROMPT_SCAN_BYTES, packet_rules.MIN_INDICATORS, sorted(packet_rules.TYPED_TEXT_KINDS),
+                 packet_sources.MAX_ADDRESS_CHARS, packet_stage.STREAM_DIRECTION_BYTES)
+PINNED_PACKETS = {"tshark-packets@5": "b8415ab9d1147ab78d332352521332d84b1fba9a1f45a5719677d966054a6e91"}
 
 
 def _files_digest() -> str:

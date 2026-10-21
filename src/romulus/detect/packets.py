@@ -383,7 +383,7 @@ DIRECTIONS = ("c2s", "s2c")
 _LINE_END = re.compile(rb"\r\n|\r\x00|\n|\r")
 # Telnet negotiation: subnegotiation, WILL/WONT/DO/DONT with their option byte, other commands; IAC IAC is a
 # literal 0xff data byte.
-_IAC = re.compile(rb"\xff\xfa.*?\xff\xf0|\xff[\xfb-\xfe].|\xff[\xf0-\xfa]|\xff\xff", re.DOTALL)
+_IAC = re.compile(rb"\xff\xfa.{0,256}?\xff\xf0|\xff[\xfb-\xfe].|\xff[\xf0-\xfa]|\xff\xff", re.DOTALL)
 # Terminal escapes a PTY shell prints around a coloured prompt (CSI, OSC titles, charset and mode selects).
 _ANSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]{0,512}(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|"
                    rb"\x1b[=>78DEHMc]")
@@ -440,6 +440,7 @@ MAX_COMMAND_CHARS = 512
 MAX_COMMANDS = 2000                  # command lines paired with output per direction (more is a stated limit)
 PROMPT_SCAN_BYTES = 512              # a prompt is the tail of the shell side's last line; longer lines are not prompts
 MIN_INDICATORS = 2
+TYPED_TEXT_KINDS = {"shell_error"}   # matched bytes repeat what the operator typed: no digest is kept
 
 
 class StreamChunk(Protocol):
@@ -459,21 +460,20 @@ class ShellIndicator:
     offset: int                      # offset in that direction's rebuilt stream
     seq: int | None                  # relative TCP sequence number of that byte
     length: int
-    sha256: str                      # of the matched bytes; the bytes themselves are never kept
+    sha256: str | None               # of the matched bytes (None when they repeat typed text); bytes never kept
     time: float
     count: int = 1
     command_offset: int | None = None        # the command line, in the other direction
     command_seq: int | None = None
     command_length: int | None = None
-    command_sha256: str | None = None
 
     def as_dict(self) -> dict:
         out = {"kind": self.kind, "direction": self.direction, "offset": self.offset, "seq": self.seq,
                "length": self.length, "sha256": self.sha256, "count": self.count,
                "time": datetime.fromtimestamp(self.time, UTC).isoformat()}
-        if self.command_sha256:
+        if self.command_offset is not None:
             out.update(command_offset=self.command_offset, command_seq=self.command_seq,
-                       command_length=self.command_length, command_sha256=self.command_sha256)
+                       command_length=self.command_length)
         return out
 
 
@@ -619,14 +619,16 @@ class _Side:
         return c.seq + (offset - c.offset)
 
     def indicator(self, kind: str, start: int, end: int, count: int = 1, command: _Line | None = None):
+        """An indicator cited by position. The matched bytes get a digest only when they are the shell's own
+        fixed-form output: a command line, or an error line that repeats what was typed, can hold a secret (a
+        password typed at a prompt), and a digest of a short secret is a dictionary lookup away from it."""
         data = self.data[self.out][start:end]
-        ind = ShellIndicator(kind, self.out, start, self._seq(self.out, start), end - start,
-                             hashlib.sha256(data).hexdigest(), self._chunk(self.out, max(start, end - 1)).time,
-                             count)
+        digest = hashlib.sha256(data).hexdigest() if kind not in TYPED_TEXT_KINDS else None
+        ind = ShellIndicator(kind, self.out, start, self._seq(self.out, start), end - start, digest,
+                             self._chunk(self.out, max(start, end - 1)).time, count)
         if command is not None:
-            raw = self.data[self.inp][command.start:command.end]
             ind.command_offset, ind.command_seq = command.start, self._seq(self.inp, command.start)
-            ind.command_length, ind.command_sha256 = len(raw), hashlib.sha256(raw).hexdigest()
+            ind.command_length = command.end - command.start
         return ind
 
     def _pending(self, i: int) -> list[tuple[int, int, str]]:
@@ -692,7 +694,7 @@ class _Side:
         ends = [b.end for _i, b in ins]
         out = []
         for line in _lines(data, 0, len(data), self.breaks[self.inp]):
-            if not line.terminated or line.end == line.start:
+            if not line.terminated or line.end == line.start or line.end - line.start > 4 * MAX_COMMAND_CHARS:
                 continue
             text = _clean(data[line.start:line.end])
             if not text or not text.strip() or len(text) > MAX_COMMAND_CHARS:
@@ -791,7 +793,8 @@ def _label(ind: dict) -> str:
     else:
         what = "an unrecognised indicator"
     sha = str(ind.get("sha256") or "")[:16]
-    return f"{what} [{ind.get('direction')} relative seq {ind.get('seq')}, {ind.get('length')} bytes, SHA-256 {sha}…]"
+    return (f"{what} [{ind.get('direction')} relative seq {ind.get('seq')}, {ind.get('length')} bytes"
+            + (f", SHA-256 {sha}…]" if sha else "]"))
 
 
 def _ip(value):
@@ -830,11 +833,11 @@ class CleartextInteractiveShell(Playbook):
                     "commands the other side sent",
         "telemetry": "Arkime SPI session documents (protocol, protocolCnt, source/destination ip, port and packets, "
                      "client.bytes, server.bytes, firstPacket, lastPacket) to select connections, and the session's "
-                     "packets through Arkime's pcap API, read by TShark (tcp.seq, tcp.len, tcp.payload). Present in "
+                     "packets through Arkime's pcap API, read by TShark (tcp.seq, tcp.len, tcp.payload, and the opening SYN's tcp.flags). Present in "
                      "the lab profile (packets retrievable for every session); protocolCnt is to be confirmed live",
         "fidelity": "a content observation of what crossed the wire; it does not show which program produced it "
                     "or that commands succeeded on the host. Two different indicators are required, each tied to "
-                    "turn-taking",
+                    "turn-taking. Which side opened the connection is stated only from a captured SYN",
         "benign_and_cost": "administrators on telnet or netcat consoles, training ranges, honeypots. One finding "
                            "per connection",
         "query_cost": "one SPI query per Arkime target; then per selected connection one pcap download (byte "
@@ -871,11 +874,12 @@ class CleartextInteractiveShell(Playbook):
         shell_ip = _ip(shell)
         shell_internal = shell_ip is not None and is_internal(shell_ip)
         operator_external = _ip(operator) is not None and external(str(_ip(operator)))
-        if shell_internal and side == "client":
-            return "high", "an internal host is the shell side and opened the connection"
+        if shell_internal and e.get("stream.opened_by") == side:
+            return "high", "an internal host is the shell side and its SYN shows it opened the connection"
         if shell_internal and operator_external:
             return "high", "an internal host is the shell side and the operator side is external"
-        return "lead", "the shell side is not an internal host that opened the connection or faced an external peer"
+        return "lead", ("the shell side is not an internal host whose SYN shows it opened the connection, nor one "
+                        "facing an external peer")
 
     def finalize(self) -> list[Match]:
         out = []
@@ -890,8 +894,15 @@ class CleartextInteractiveShell(Playbook):
             shell_ep, op_ep = (client, server) if side == "client" else (server, client)
             times = sorted(str(i.get("time")) for i in inds if i.get("time"))
             lane, why = self._lane(e)
-            opened = ("The shell side opened the connection, as a reverse shell does." if side == "client" else
-                      "The shell side accepted the connection, as a bind shell or a remote-login service does.")
+            opener = e.get("stream.opened_by")
+            if opener == side:
+                opened = "The shell side's SYN shows it opened the connection, as a reverse shell does."
+            elif opener in ("client", "server"):
+                opened = ("The operator side's SYN shows it opened the connection, as it does to a bind shell or a "
+                          "remote-login service.")
+            else:
+                opened = ("The connection's opening SYN was not captured, so which side opened it is not "
+                          "established.")
             claim = (f"Packet content in Arkime session {show(e.get('arkime.session_id'), 80)} between "
                      f"{show(client, 60)} (client) and {show(server, 60)} (server), with indicators from "
                      f"{times[0] if times else '?'} to {times[-1] if times else '?'}, is consistent with an "
@@ -907,6 +918,8 @@ class CleartextInteractiveShell(Playbook):
             m.notes.append(f"lane {lane}: {why}")
             for limit in e.get("stream.limits") or []:
                 m.notes.append(f"content incomplete: {limit}")
+            for note in e.get("stream.notes") or []:
+                m.notes.append(note)
             out.append(m)
         return out
 

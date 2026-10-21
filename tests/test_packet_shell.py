@@ -31,10 +31,18 @@ OPERATOR, WEB = ("10.0.0.5", 51000), ("10.0.0.9", 31337)                   # two
 KEY = pk.stream_key(VICTIM[0], VICTIM[1], ATTACKER[0], ATTACKER[1])
 
 
-def conversation(turns, *, client=VICTIM, server=ATTACKER, t0=T0, step=0.5, mss=None, start_seq=1):
-    """TShark stream-query rows for a conversation: [(direction, bytes)], one segment per turn (or per mss)."""
+def conversation(turns, *, client=VICTIM, server=ATTACKER, t0=T0, step=0.5, mss=None, start_seq=1, syn=None):
+    """TShark stream-query rows for a conversation: [(direction, bytes)], one segment per turn (or per mss),
+    after an opening SYN from `syn` ("client" or "server") when given."""
     seq = {"c2s": start_seq, "s2c": start_seq}
     rows, frame, t = [], 0, t0.timestamp()
+    if syn:
+        src, dst = (client, server) if syn == "client" else (server, client)
+        frame += 1
+        rows.append({"frame.number": ["1"], "frame.time_epoch": [f"{t:.6f}"],
+                     "frame.protocols": ["eth:ethertype:ip:tcp"], "ip.src": [src[0]], "ip.dst": [dst[0]],
+                     "tcp.srcport": [str(src[1])], "tcp.dstport": [str(dst[1])], "tcp.seq": ["0"], "tcp.len": ["0"],
+                     "tcp.payload": [], "tcp.flags.syn": ["1"], "tcp.flags.ack": ["0"]})
     for d, data in turns:
         pieces = [data[i:i + mss] for i in range(0, len(data), mss)] if mss else [data]
         for piece in pieces:
@@ -298,11 +306,12 @@ def test_ipv6_and_tunnelled_rows_use_the_innermost_layer():
 # ---- the stream query and filter injection ------------------------------------------------------------
 
 def test_stream_filter_is_built_from_parsed_addresses_and_ports_only():
-    assert pk.stream_filter(KEY) == ("tcp.len > 0 && ip.addr == 172.17.100.121 && ip.addr == 198.51.100.7 && "
+    assert pk.stream_filter(KEY) == ("(tcp.len > 0 || (tcp.flags.syn == 1 && tcp.flags.ack == 0)) && "
+                                     "ip.addr == 172.17.100.121 && ip.addr == 198.51.100.7 && "
                                      "tcp.port == 50412 && tcp.port == 4444")
     v6 = pk.stream_key("2001:DB8:0::5", 51000, "2001:db8::9", 23)
-    assert pk.stream_filter(v6) == ("tcp.len > 0 && ipv6.addr == 2001:db8::5 && ipv6.addr == 2001:db8::9 && "
-                                    "tcp.port == 51000 && tcp.port == 23")
+    assert pk.stream_filter(v6).endswith("ipv6.addr == 2001:db8::5 && ipv6.addr == 2001:db8::9 && "
+                                         "tcp.port == 51000 && tcp.port == 23")
     mapped = pk.stream_key("::ffff:10.0.0.5", 1, "10.0.0.9", 2)
     assert mapped.client_ip == "10.0.0.5"
 
@@ -367,9 +376,10 @@ def test_queries_refuse_inputs_they_do_not_take(tmp_path):
 
 # ---- the rule ----------------------------------------------------------------------------------------
 
-def stream_event(analysis, *, client=VICTIM, server=ATTACKER, sid="241118-STREAM000001", limits=None, ts=T0):
+def stream_event(analysis, *, client=VICTIM, server=ATTACKER, sid="241118-STREAM000001", limits=None, ts=T0,
+                 opened_by=None):
     fields = {"source.ip": client[0], "source.port": client[1], "destination.ip": server[0],
-              "destination.port": server[1], "arkime.session_id": sid,
+              "destination.port": server[1], "arkime.session_id": sid, "stream.opened_by": opened_by,
               "stream.shell.side": analysis.side, "stream.shell.kinds": analysis.kinds or None,
               "stream.shell.indicators": [i.as_dict() for i in analysis.indicators] or None,
               "stream.limits": limits}
@@ -388,27 +398,32 @@ def _analysis(turns, client, server):
     return analyze(conversation(turns, client=client, server=server), pk.stream_key(*client, *server))
 
 
-@pytest.mark.parametrize("turns, client, server, lane", [
-    (REVERSE, VICTIM, ATTACKER, "high"),                        # internal shell side opened the connection
-    (REVERSE, OPERATOR, WEB, "high"),                           # reverse shell between two internal hosts
-    (BIND, OPERATOR, WEB, "lead"),                              # internal bind shell, internal operator
-    (BIND, ATTACKER, WEB, "high"),                              # internal bind shell, external operator
-    (REVERSE, ATTACKER, ("203.0.113.9", 4444), "lead"),         # both ends external (transit traffic)
-    (BIND, VICTIM, ATTACKER, "lead"),                           # an internal host operating an external shell
+@pytest.mark.parametrize("turns, client, server, opened_by, lane", [
+    (REVERSE, VICTIM, ATTACKER, "client", "high"),              # internal shell side's SYN opened the connection
+    (REVERSE, VICTIM, ATTACKER, None, "high"),                  # no SYN, but the operator side is external
+    (REVERSE, OPERATOR, WEB, "client", "high"),                 # reverse shell between two internal hosts
+    (REVERSE, OPERATOR, WEB, None, "lead"),                     # same, opener not captured: not claimed
+    (REVERSE, OPERATOR, WEB, "server", "lead"),                 # Arkime's client did not open it
+    (BIND, OPERATOR, WEB, "client", "lead"),                    # internal bind shell, internal operator
+    (BIND, ATTACKER, WEB, "client", "high"),                    # internal bind shell, external operator
+    (REVERSE, ATTACKER, ("203.0.113.9", 4444), "client", "lead"),   # both ends external (transit traffic)
+    (BIND, VICTIM, ATTACKER, "client", "lead"),                 # an internal host operating an external shell
 ])
-def test_lanes_follow_the_shell_side_and_who_connected(turns, client, server, lane):
+def test_lanes_follow_the_shell_side_and_who_connected(turns, client, server, opened_by, lane):
     a = _analysis(turns, client, server)
-    m = rule(stream_event(a, client=client, server=server))
+    m = rule(stream_event(a, client=client, server=server, opened_by=opened_by))
     assert len(m) == 1 and m[0].proposed_lane == lane and m[0].proposed_lane != "context"
     assert m[0].severity == "high" and any(n.startswith(f"lane {lane}:") for n in m[0].notes)
 
 
 def test_claim_says_what_was_observed_and_carries_no_payload():
     a = _analysis(REVERSE, VICTIM, ATTACKER)
-    m = rule(stream_event(a))[0]
+    m = rule(stream_event(a, opened_by="client"))[0]
     assert "is consistent with an interactive command shell over a cleartext channel" in m.claim
     assert "the client (172.17.100.121:50412) sent what reads as shell output" in m.claim
-    assert "as a reverse shell does" in m.claim and "not established by these records" in m.claim
+    assert "SYN shows it opened the connection, as a reverse shell does" in m.claim
+    assert "not established by these records" in m.claim
+    assert "opening SYN was not captured" in rule(stream_event(a))[0].claim
     assert "after a 'id' command, the other side returned a uid=…(…) gid=…(…) identity line" in m.claim
     for text in ("www-data", "uid=33", "web01", "5.15.0", "drwx"):
         assert text not in m.claim                              # payload never enters the claim
@@ -539,7 +554,7 @@ def _found(repo):
 
 
 REV_DOC = sdoc("241118-REVERSE00001", VICTIM, ATTACKER)
-REV_ROWS = {KEY: conversation(REVERSE)}
+REV_ROWS = {KEY: conversation(REVERSE, syn="client")}
 BIND_KEY = pk.stream_key(*OPERATOR, *WEB)
 
 
@@ -771,3 +786,81 @@ def test_segments_of_one_connection_are_fetched_in_order_and_judged_once(tmp_pat
     assert summary["streams"][TARGET]["connections"] == 1 and len(_found(repo)) == 1
     event = TypedEvent.model_validate(repo.events_by_ids(_found(repo)[0]["event_ids"])[0]["event"])
     assert event.get("arkime.session_ids") == [early["_id"], late["_id"]]
+
+
+# ---- review follow-ups: window start, typed secrets, hostile negotiation, opener, single indicators -------------
+
+def test_a_shell_first_seen_before_the_window_and_active_inside_it_is_reported(tmp_path, monkeypatch):
+    more = [("s2c", b"id\n"), ("c2s", b"uid=33(www-data) gid=33(www-data)\n")] * 40
+    rows = {KEY: conversation(REVERSE + more, syn="client")}
+    indicators_end = T0 + timedelta(seconds=0.5 * 7)
+    window = Window(start=indicators_end + timedelta(seconds=1), end=T0 + timedelta(hours=1))
+    repo, summary = _stage(tmp_path, monkeypatch, [REV_DOC], rows, window=window)
+    found = _found(repo)
+    assert len(found) == 1 and summary["streams"][TARGET]["outside_window"] == 0
+    event = TypedEvent.model_validate(repo.events_by_ids(found[0]["event_ids"])[0]["event"])
+    assert window.start <= event.ts < window.end
+    assert "first seen before the hunt window" in " ".join(event.get("stream.notes"))
+
+
+def test_a_password_typed_at_a_prompt_leaves_no_digest_anywhere():
+    secret = b"Hunter2!"
+    turns = [("s2c", b"bob@web01:~$ "), ("c2s", b"su -\n"),
+             ("s2c", b"Password: su: Authentication failure\nbob@web01:~$ "),
+             ("c2s", secret + b"\n"), ("s2c", secret + b": command not found\nbob@web01:~$ "), ("c2s", b"exit\n")]
+    a = analyze(conversation(turns, client=OPERATOR, server=WEB), pk.stream_key(*OPERATOR, *WEB))
+    assert "shell_error" in a.kinds and "prompt" in a.kinds
+    claim = rule(stream_event(a, client=OPERATOR, server=WEB))[0].claim
+    stored = json.dumps([i.as_dict() for i in a.indicators]) + claim
+    for leaked in (hashlib.sha256(secret).hexdigest(), hashlib.sha256(secret + b": command not found").hexdigest()):
+        assert leaked not in stored and leaked[:16] not in stored
+    assert "command_sha256" not in stored
+
+
+def test_hostile_telnet_negotiation_cannot_stall_the_analysis():
+    import time
+    hostile = b"\xff\xfa" * 60000 + b"\n"
+    turns = [("c2s", hostile), ("s2c", hostile), ("c2s", b"\xff\xfa" * 60000)]
+    started = time.monotonic()
+    a = analyze(conversation(turns, client=OPERATOR, server=WEB), pk.stream_key(*OPERATOR, *WEB))
+    assert a.kinds == [] and time.monotonic() - started < 5
+
+
+def test_the_opener_comes_from_a_captured_syn_only():
+    key = pk.stream_key(*OPERATOR, *WEB)
+    syn = pk.reassemble_tcp(conversation(BIND, client=OPERATOR, server=WEB, syn="client"), key, 10 ** 6)
+    assert syn.opened_by == "client"
+    assert pk.reassemble_tcp(conversation(BIND, client=OPERATOR, server=WEB), key, 10 ** 6).opened_by is None
+    newer = conversation(BIND, client=OPERATOR, server=WEB, syn="server")
+    newer[0]["tcp.flags.syn"], newer[0]["tcp.flags.ack"] = ["True"], ["False"]       # newer TShark booleans
+    assert pk.reassemble_tcp(newer, key, 10 ** 6).opened_by == "server"
+
+
+def test_without_a_captured_syn_an_internal_reverse_shell_is_a_lead(tmp_path, monkeypatch):
+    doc = sdoc("241118-INTREV000001", OPERATOR, WEB)
+    rows = {BIND_KEY: conversation(REVERSE, client=OPERATOR, server=WEB)}
+    repo, _summary = _stage(tmp_path, monkeypatch, [doc], rows)
+    assert [c["lane"] for c in _found(repo)] == ["lead"]
+
+
+def test_single_indicator_connections_are_named_not_published(tmp_path, monkeypatch):
+    rows = {KEY: conversation(HARD_NEGATIVES["single_id"], syn="client")}
+    repo, summary = _stage(tmp_path, monkeypatch, [REV_DOC], rows)
+    assert _found(repo) == [] and summary["status"] == "complete"
+    assert _cell(repo)["detail"]["single_indicator_sessions"] == [REV_DOC["_id"]]
+
+
+def test_a_keepalive_byte_is_not_a_conflicting_retransmission():
+    rows = conversation([("c2s", b"id\n")], client=OPERATOR, server=WEB)
+    keepalive = json.loads(json.dumps(rows[0]))
+    keepalive.update({"frame.number": ["5"], "tcp.seq": ["3"], "tcp.len": ["1"], "tcp.payload": ["00"]})
+    streams = pk.reassemble_tcp(rows + [keepalive], pk.stream_key(*OPERATOR, *WEB), 10 ** 6)
+    assert streams.conflicts["c2s"] == 0 and streams.data["c2s"] == b"id\n"
+
+
+def test_rows_with_unreadable_addresses_make_the_connection_partial(tmp_path, monkeypatch):
+    rows = conversation(REVERSE, syn="client")
+    stray = json.loads(json.dumps(rows[1]))
+    stray["ip.src"] = ["not-an-address"]
+    repo, summary = _stage(tmp_path, monkeypatch, [REV_DOC], {KEY: [*rows, stray]})
+    _partial(repo, summary, "with holes")

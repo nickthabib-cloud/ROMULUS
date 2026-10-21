@@ -70,7 +70,7 @@ QUERIES = {
     "tcp_payload": (
         None,
         ["frame.number", "frame.time_epoch", "frame.protocols", "ip.src", "ip.dst", "ipv6.src", "ipv6.dst",
-         "tcp.srcport", "tcp.dstport", "tcp.seq", "tcp.len", "tcp.payload"],
+         "tcp.srcport", "tcp.dstport", "tcp.seq", "tcp.len", "tcp.payload", "tcp.flags.syn", "tcp.flags.ack"],
     ),
 }
 QUERY_PREFS = {"http_messages": PINNED_PREFS, "tcp_payload": STREAM_PREFS}
@@ -136,7 +136,8 @@ class TcpStreams:
     cut: dict[str, bool]                       # the per-direction byte cap was reached
     conflicts: dict[str, int]                  # retransmissions whose bytes differ from the first copy
     unreadable: int = 0                        # data segments whose payload TShark did not print in full
-    foreign: int = 0                           # rows of another connection (ignored)
+    foreign: int = 0                           # rows of another connection, or with unparseable addresses
+    opened_by: str | None = None               # "client" | "server": who sent a SYN without ACK, if captured
 
     def limits(self) -> list[str]:
         """Why the rebuilt content is incomplete, if it is."""
@@ -150,6 +151,8 @@ class TcpStreams:
                 out.append(f"{d}: {self.conflicts[d]} retransmission(s) with different bytes (first copy kept)")
         if self.unreadable:
             out.append(f"{self.unreadable} data segment(s) without their full payload")
+        if self.foreign:
+            out.append(f"{self.foreign} row(s) of another connection or with unreadable addresses (not used)")
         return out
 
 
@@ -254,14 +257,14 @@ def stream_key(client_ip, client_port, server_ip, server_port) -> StreamKey:
 
 
 def stream_filter(key: StreamKey) -> str:
-    """The stream query's display filter: one connection's data segments. Every value is re-validated and
+    """The stream query's display filter: one connection's data segments and its opening SYN. Every value is re-validated and
     printed from its parsed form, so nothing but an address or a port number can reach the filter."""
     if not isinstance(key, StreamKey):
         raise PacketError("the stream query needs a StreamKey")
     k = stream_key(key.client_ip, key.client_port, key.server_ip, key.server_port)
     layer = "ip" if ipaddress.ip_address(k.client_ip).version == 4 else "ipv6"
-    return (f"tcp.len > 0 && {layer}.addr == {k.client_ip} && {layer}.addr == {k.server_ip} && "
-            f"tcp.port == {k.client_port} && tcp.port == {k.server_port}")
+    return (f"(tcp.len > 0 || (tcp.flags.syn == 1 && tcp.flags.ack == 0)) && {layer}.addr == {k.client_ip} && "
+            f"{layer}.addr == {k.server_ip} && tcp.port == {k.client_port} && tcp.port == {k.server_port}")
 
 
 def tshark_command(s: Settings, path: Path, query: str, http_ports=(), stream: StreamKey | None = None) -> list[str]:
@@ -400,6 +403,7 @@ def reassemble_tcp(rows: list[dict[str, list[str]]], key: StreamKey, cap: int) -
     client, server = (key.client_ip, key.client_port), (key.server_ip, key.server_port)
     segments: dict[str, list[tuple[int, int, float, bytes]]] = {"c2s": [], "s2c": []}
     unreadable = foreign = 0
+    opened_by = None
     for row in rows:
         src_ip, sport, dst_ip, dport = addresses(row)
         src, dst = _endpoint(src_ip, sport), _endpoint(dst_ip, dport)
@@ -417,6 +421,8 @@ def reassemble_tcp(rows: list[dict[str, list[str]]], key: StreamKey, cap: int) -
         except (TypeError, ValueError):
             unreadable += 1
             continue
+        if _flag(row.get("tcp.flags.syn")) and _flag(row.get("tcp.flags.ack")) is False and opened_by is None:
+            opened_by = "client" if direction == "c2s" else "server"
         if length <= 0:
             continue
         if len(payload) < length:                      # snap length or a dissector that printed less
@@ -443,7 +449,8 @@ def reassemble_tcp(rows: list[dict[str, list[str]]], key: StreamKey, cap: int) -
             if start > 0:
                 overlap = min(start, len(payload))
                 pos = len(buf) - start
-                if pos >= gap_at and bytes(buf[pos:pos + overlap]) != payload[:overlap]:
+                keepalive = len(payload) == 1 and start == 1          # one already-acknowledged byte, by design
+                if pos >= gap_at and not keepalive and bytes(buf[pos:pos + overlap]) != payload[:overlap]:
                     conflicts[direction] += 1
             new = payload[start:] if start > 0 else payload
             if not new:
@@ -462,4 +469,10 @@ def reassemble_tcp(rows: list[dict[str, list[str]]], key: StreamKey, cap: int) -
                 break
         data[direction] = bytes(buf)
     chunks.sort(key=lambda c: (c.time, c.frame, c.direction, c.offset))
-    return TcpStreams(data, chunks, gaps, gap_bytes, cut, conflicts, unreadable, foreign)
+    return TcpStreams(data, chunks, gaps, gap_bytes, cut, conflicts, unreadable, foreign, opened_by)
+
+
+def _flag(values) -> bool | None:
+    """A TShark boolean field ("1"/"0", or "True"/"False" in newer versions); None when absent."""
+    value = str(_last(values) or "").strip().lower()
+    return True if value in ("1", "true") else False if value in ("0", "false") else None

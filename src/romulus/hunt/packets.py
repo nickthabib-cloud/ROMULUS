@@ -35,7 +35,7 @@ Cleartext streams, per Arkime target, after the HTTP pass:
    those with an interactive shape across all their documents (payload both ways; packet, duration and
    mean-payload bounds). Protocols Arkime cannot parse (a message bus, say) are not excluded by port: the
    content rule simply does not match them.
-2. Judge at most a fixed number of connections per target, external endpoints first, within a per-hunt packet
+2. Judge at most a fixed number of connections per target, external endpoints first, within a per-target packet
    byte budget. Each is fetched (segments merged as above, byte capped), read by TShark's fixed stream query
    with a filter built only from the connection's validated addresses and ports, rebuilt per direction up to a
    byte cap, and analysed for signs of an interactive shell.
@@ -128,7 +128,7 @@ STREAM_FIELDS = {"protocol": ("eq", "in"), "client.bytes": ("gte",), "server.byt
                  "source.packets": ("gte",), "destination.packets": ("gte",)}
 STREAM_COUNTERS = ("candidates", "connections", "shaped", "not_shaped", "shape_unknown", "judged",
                    "unjudged_over_cap", "failed", "capture_incomplete", "analysis_cut", "stream_incomplete",
-                   "no_payload_rebuilt", "with_indicators", "outside_window", "missing_required", "fetched_bytes",
+                   "no_payload_rebuilt", "with_indicators", "single_indicator", "outside_window", "missing_required", "fetched_bytes",
                    "matched")
 # Why a connection was not judged, or was judged on incomplete content: counter -> what to say.
 STREAM_LOSSES = {
@@ -138,8 +138,8 @@ STREAM_LOSSES = {
     "capture_incomplete": "connection(s) judged on a capped download or a capture cut short",
     "analysis_cut": ("connection(s) judged on the first bytes of a direction only, or on the first command lines "
                      "only (analysis caps)"),
-    "stream_incomplete": ("connection(s) with holes, retransmissions that disagree, or segments without their "
-                          "payload"),
+    "stream_incomplete": ("connection(s) with holes, retransmissions that disagree, segments without their "
+                          "payload, or rows with unreadable addresses"),
     "no_payload_rebuilt": "connection(s) where no payload was rebuilt although Arkime counted some",
 }
 
@@ -624,7 +624,7 @@ def _canon(value) -> str | None:
 
 
 def _stream_event(key: StreamKey, streams: TcpStreams, analysis: ShellAnalysis, segs: list[dict], index: str,
-                  ts: datetime, capture_cut: bool) -> tuple[TypedEvent, dict]:
+                  ts: datetime, capture_cut: bool, notes: list[str] | None = None) -> tuple[TypedEvent, dict]:
     """One connection's rebuilt content as a typed `tcp_stream` event. The raw copy holds sizes, digests,
     offsets and the indicators, never payload bytes. The event has no host: the Arkime node observed the
     connection (kept as observer.name); it did not take part in it."""
@@ -642,7 +642,8 @@ def _stream_event(key: StreamKey, streams: TcpStreams, analysis: ShellAnalysis, 
            "first_packet_ms": src_doc.get("firstPacket"),
            "last_packet_ms": max((seg["_source"].get("lastPacket") or 0) for seg in segs),
            **directions, "turns": analysis.turns, "unreadable_segments": streams.unreadable,
-           "shell_side": analysis.side, "indicators": indicators, "limits": limits}
+           "opened_by": streams.opened_by, "shell_side": analysis.side, "indicators": indicators,
+           "limits": limits}
     ref = RawRef(target=f"{PCAP_TARGET}:{index}", native_id=native, digest=digest(raw))
     o = f"{native}:tshark.tcp.payload"
     protocols = src_doc.get("protocol")
@@ -663,6 +664,8 @@ def _stream_event(key: StreamKey, streams: TcpStreams, analysis: ShellAnalysis, 
         "stream.s2c.sha256": fv(directions["s2c"]["sha256"], f"{o}#reassembled"),
         "stream.turns": fv(analysis.turns, f"{o}#turns"),
         "stream.limits": fv(limits or None, f"{o}#reassembled"),
+        "stream.opened_by": fv(streams.opened_by, f"{o}.tcp.flags.syn"),
+        "stream.notes": fv(notes or None, f"{o}#window"),
         "stream.shell.side": fv(analysis.side, f"{o}#shell-analysis"),
         "stream.shell.kinds": fv(analysis.kinds or None, f"{o}#shell-analysis"),
         "stream.shell.indicators": fv(indicators or None, f"{o}#shell-analysis"),
@@ -685,6 +688,7 @@ class _StreamTarget:
         self.pack = [cls() for cls in PACKET_PLAYBOOKS if "tcp_stream" in cls.families]
         self.raw_sources: dict[str, dict] = {}
         self.budget = STREAM_BUDGET_BYTES
+        self.single: list[str] = []                # session ids with one indicator kind (below the rule's bar)
 
     def _lose(self, label: str, segs: list[dict]) -> None:
         self.c[label] += 1
@@ -754,25 +758,37 @@ class _StreamTarget:
         streams = reassemble_tcp(result.rows, key, STREAM_DIRECTION_BYTES)
         if capped or result.truncated:
             self._lose("capture_incomplete", segs)
-        if any(streams.gaps.values()) or any(streams.conflicts.values()) or streams.unreadable:
+        if any(streams.gaps.values()) or any(streams.conflicts.values()) or streams.unreadable or streams.foreign:
             self._lose("stream_incomplete", segs)
         if not streams.chunks:
             self._lose("no_payload_rebuilt", segs)       # the shape test required payload both ways
         analysis = analyze_stream(streams.data, streams.chunks)
         if any(streams.cut.values()) or analysis.limits:
             self._lose("analysis_cut", segs)
+        notes: list[str] = []
         if analysis.indicators:
             self.c["with_indicators"] += 1
-            inside = sorted(i.time for i in analysis.indicators
-                            if self.window.start.timestamp() <= i.time < self.window.end.timestamp())
-            if not inside:
+            if len(analysis.kinds) == 1:              # below the rule's bar: named so a reviewer can follow it
+                self.c["single_indicator"] += 1
+                self.single.extend(seg["_id"] for seg in segs)
+            lo, hi = self.window.start.timestamp(), self.window.end.timestamp()
+            inside = sorted(i.time for i in analysis.indicators if lo <= i.time < hi)
+            # Indicators carry their first occurrence. A shell first seen before the window that is still
+            # exchanging bytes inside it belongs to this hunt too.
+            later = sorted(c.time for c in streams.chunks if lo <= c.time < hi)
+            if inside:
+                ts = datetime.fromtimestamp(inside[0], UTC)
+            elif later and min(i.time for i in analysis.indicators) < lo:
+                ts = datetime.fromtimestamp(later[0], UTC)
+                notes.append("the indicators were first seen before the hunt window; the connection was still "
+                             f"exchanging data inside it (first in-window byte at {ts.isoformat()})")
+            else:
                 self.c["outside_window"] += 1
                 return
-            ts = datetime.fromtimestamp(inside[0], UTC)
         else:
             first = streams.chunks[0].time if streams.chunks else _epoch(src.get("firstPacket")) or 0.0
             ts = datetime.fromtimestamp(first, UTC)
-        event, raw = _stream_event(key, streams, analysis, segs, self.name, ts, capped or result.truncated)
+        event, raw = _stream_event(key, streams, analysis, segs, self.name, ts, capped or result.truncated, notes)
         for pb in self.pack:
             pb.consume([event])
         keep = {e.raw[0].key for pb in self.pack for e in pb.retained_events()}
@@ -813,9 +829,11 @@ def _run_streams(s: Settings, repo, client, hunt_id: str, window: Window, target
             ("positive_only_partial" if run.partial else "positive_only")
         repo.set_rule_cell(hunt_id, pb.id, pb.version, cell_target, window.key(), state, len(matches), pb.evaluated,
                            {**run.c, "selection": selection, "reasons": run.partial[:20],
-                            "unexamined_sessions": run.unexamined()})
+                            "unexamined_sessions": run.unexamined(),
+                            "single_indicator_sessions": sorted(run.single)[:MAX_LISTED_IDS]})
     return {"status": "partial" if run.partial else "complete", **run.c, "selection": selection,
-            "unexamined_sessions": run.unexamined(), "partial_reasons": run.partial}
+            "unexamined_sessions": run.unexamined(), "single_indicator_sessions": sorted(run.single)[:MAX_LISTED_IDS],
+            "partial_reasons": run.partial}
 
 
 def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, contracts: dict,
