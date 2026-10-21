@@ -9,6 +9,7 @@ _HEADER = re.compile(r"^(?:node=\S+\s+)?type=(?P<type>[A-Z_]+)\s+msg=audit\((?P<
                      r"(?P<body>.*)$", re.DOTALL)
 _HEX = re.compile(r"^[0-9A-Fa-f]+$")
 _ARG = re.compile(r"^a(\d+)(?:\[(\d+)\])?$")
+_ARG_LEN = re.compile(r"^a(\d+)_len$")
 # auditd hex-encodes only "untrusted string" fields; numeric fields (argc, pid, a0 of SYSCALL...) never.
 _ENCODABLE = {"proctitle", "name", "cwd", "comm", "exe", "path", "cmd", "data", "acct", "old", "new", "key",
               "watch", "hostname", "addr", "terminal", "exe_path"}
@@ -130,13 +131,25 @@ def parse_sockaddr(saddr: str) -> SockAddr:
 
 
 def execve_argv(rec: AuditRecord) -> list[str]:
-    """Reassemble argv, including split long args (a2_len=..., a2[0]=..., a2[1]=...)."""
+    """Reassemble argv, including split long args (a2_len=..., a2[0]=..., a2[1]=...).
+
+    The kernel logs a long argument as its byte length `aN_len` and chunks `aN[0]`, `aN[1]`, ... (possibly in
+    several EXECVE records of one event, merged before this). Anything short of every argument, whole or with
+    every chunk and the stated length, raises: a lost record must never read as a shorter command line."""
     if rec.type != "EXECVE":
         raise AuditParseError("not an EXECVE record")
-    argc = int(rec.fields.get("argc", "0"))
+    argc_text = rec.fields.get("argc")
+    if argc_text is None or not argc_text.isdigit():
+        raise AuditParseError(f"EXECVE argc missing or not a number: {argc_text!r}")
+    argc = int(argc_text)
     parts: dict[int, dict[int, str]] = {}
     whole: dict[int, str] = {}
+    lengths: dict[int, str] = {}
     for key, (value, quoted) in rec.raw_fields.items():
+        m = _ARG_LEN.match(key)
+        if m:
+            lengths[int(m.group(1))] = value
+            continue
         m = _ARG.match(key)
         if not m:
             continue
@@ -146,12 +159,25 @@ def execve_argv(rec: AuditRecord) -> list[str]:
         else:
             # chunks are hex-encoded pieces of one arg; concatenate the hex, then decode
             parts.setdefault(idx, {})[int(m.group(2))] = value if not quoted else value.encode().hex()
+    beyond = sorted(i for i in set(whole) | set(parts) | set(lengths) if i >= argc)
+    if beyond:
+        raise AuditParseError(f"EXECVE carries a{beyond[0]} beyond argc={argc}")
     argv = []
     for i in range(argc):
         if i in whole:
+            if i in parts or i in lengths:
+                raise AuditParseError(f"EXECVE a{i} is both whole and split")
             argv.append(whole[i])
         elif i in parts:
-            hexstr = "".join(parts[i][k] for k in sorted(parts[i]))
+            chunks = parts[i]
+            if sorted(chunks) != list(range(len(chunks))):
+                raise AuditParseError(f"EXECVE a{i} is missing a chunk (have {sorted(chunks)})")
+            hexstr = "".join(chunks[k] for k in range(len(chunks)))
+            if len(hexstr) % 2 or not _HEX.match(hexstr):
+                raise AuditParseError(f"EXECVE a{i} chunks are not hex")
+            stated = lengths.get(i, "")
+            if not stated.isdigit() or int(stated) != len(hexstr) // 2:
+                raise AuditParseError(f"EXECVE a{i} chunks hold {len(hexstr) // 2} bytes, a{i}_len={stated!r}")
             argv.append(decode_value(hexstr, False))
         else:
             raise AuditParseError(f"EXECVE missing a{i} (argc={argc})")
