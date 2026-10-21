@@ -116,7 +116,7 @@ def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
     """The AI agent's provider: configuration, egress class, reachability, model, tool calls, schema, usage."""
     try:
         readiness = agent_readiness(s, resolver)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - a readiness error is a failed check
         return [Check("agent.provider", "fail", redact_text(f"agent readiness check failed: {exc}", s))]
     if readiness.state == "not_configured":
         return [Check("agent.provider", "ok", f"{readiness.message()}; hunts run without the AI agent")]
@@ -138,7 +138,7 @@ def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
     provider = build_provider(s, transport=transport, resolver=resolver, readiness=readiness)
     try:
         probes = provider.probe()
-    except Exception as exc:      # a broken or hostile endpoint must not take the other checks down
+    except Exception as exc:  # noqa: BLE001 - a broken or hostile endpoint must not take the other checks down
         probes = [("agent.reachable", "fail", f"probe failed: {exc.__class__.__name__}: {exc}"[:300])]
     for name, status, detail in probes:
         out.append(Check(name, status, redact_text(detail, s)))
