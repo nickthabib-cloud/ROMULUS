@@ -9,6 +9,7 @@ import re
 from collections import defaultdict
 
 from romulus.detect.base import Match, Playbook, basename, outcome_phrase, pf
+from romulus.detect.linux_argv import read_operand_paths
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
@@ -816,7 +817,7 @@ class CredentialStoreRead(Playbook):
     anchor_class = "credential_access"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "2"
+    version = "3"
     title = "Local password hash file read by a file-reading tool"
     families = ("process_exec",)
     required_fields = ("process.argv",)
@@ -834,6 +835,8 @@ class CredentialStoreRead(Playbook):
         if name not in FILE_READERS:      # sudo wrappers are not counted; the child exec is the action
             return []
         hits = [a for a in args if a in CRED_FILES]
+        if read_operand_paths(name, args, e.get("process.cwd"))[1]:
+            self.missing_required += 1      # a relative operand with no working directory: it may name the file
         if not hits:
             return []
         claim = (f"A process execution event on {e.host} records '{name}' invoked with {hits[0]} as a file "

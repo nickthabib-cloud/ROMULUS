@@ -35,6 +35,7 @@ from romulus.detect.linux_argv import (
     nc_destination,
     normalize_path,
     program,
+    read_operand_paths,
     read_operands,
     remote_endpoint,
     scp_remote_host,
@@ -253,6 +254,15 @@ def _find_is_suid_search(args: list[str]) -> bool:
                for i in range(len(args)))
 
 
+def _operands_unplaced(prog, event: TypedEvent) -> bool:
+    """True when a file a reader or `ls` was given is a relative operand with no usable working directory, so
+    the record cannot be fully evaluated (it is counted as missing a required field, never as a no-match)."""
+    cwd = event.get("process.cwd")
+    if prog.name in {"ls", "dir"}:
+        return any(not normalize_path(operand, cwd) for operand in split_flags(prog.args)[1] if operand)
+    return read_operand_paths(prog.name, prog.args, cwd)[1]
+
+
 def _ls_is_sensitive(args: list[str], cwd: str | None) -> bool:
     _flags, operands = split_flags(args)
     for operand in operands:
@@ -322,7 +332,7 @@ def classify_discovery(name: str, args: list[str], cwd: str | None) -> tuple[str
 
 class PostAccessDiscovery(_HostContextRule):
     id = "context.post_access_discovery"
-    version = "4"
+    version = "5"
     title = "Discovery commands in an anchored session or process lineage"
     anchor_class = "execution"
     families = ("process_exec",)
@@ -347,6 +357,8 @@ class PostAccessDiscovery(_HostContextRule):
             found = classify_discovery(prog.name, prog.args, event.get("process.cwd"))
             if found is not None:
                 groups[_session_key(event, anchor)].append((found[0], found[1], event))
+            elif _operands_unplaced(prog, event):
+                self.missing_required += 1
 
         out = []
         for key, hits in groups.items():
@@ -445,7 +457,7 @@ def _classify_probe(prog, event: TypedEvent) -> tuple[str, str] | None:
 
 class PrivilegeProbing(_HostContextRule):
     id = "context.privilege_probing"
-    version = "3"
+    version = "4"
     title = "Privilege probing or escalation in an anchored session or lineage"
     families = ("process_exec",)
     required_by_family = EXEC_REQUIRED
@@ -482,6 +494,8 @@ class PrivilegeProbing(_HostContextRule):
             found = _classify_probe(prog, event)
             if found is not None:
                 probes[key].append((found[0], found[1], event))
+            elif read_operand_paths(prog.name, prog.args, event.get("process.cwd"))[1]:
+                self.missing_required += 1     # an unplaced relative operand may be the sudoers file
             if not _login_user_is_nonroot(event):
                 continue
             if _is_real_root(event):
@@ -661,7 +675,7 @@ def classify_credential(path: str) -> tuple[str, str, str] | None:
 
 class CredentialAccessInContext(_HostContextRule):
     id = "context.credential_access"
-    version = "2"
+    version = "3"
     title = "Credential-store read in an anchored session or lineage"
     anchor_class = "credential_access"
     families = ("process_exec",)
@@ -683,7 +697,10 @@ class CredentialAccessInContext(_HostContextRule):
             prog = program(event)
             if prog is None:
                 continue
-            for path in read_operands(prog.name, prog.args, event.get("process.cwd")):
+            paths, unplaced = read_operand_paths(prog.name, prog.args, event.get("process.cwd"))
+            if unplaced:
+                self.missing_required += 1     # a relative operand with no working directory: it may name a store
+            for path in paths:
                 found = classify_credential(path)
                 if found is not None:
                     technique, lane, desc = found
@@ -720,6 +737,11 @@ _DECODE_BY_TOOL = {
     "lz4": {"-d", "--decompress"}, "compress": {"-d", "--uncompress"}, "pigz": {"-d", "--decompress"},
     "base64": {"-d", "--decode"}, "base32": {"-d", "--decode"}, "xxd": {"-r"},
 }
+
+
+def _unplaced(inputs: list[str], base: str | None) -> bool:
+    """True when an input is a relative path with no usable working directory: it may be a sensitive path."""
+    return any(item not in ("", "-") and not normalize_path(item, base) for item in inputs)
 
 
 def _sensitive_input(inputs: list[str], base: str | None) -> str | None:
@@ -864,7 +886,8 @@ def _client_transfer(name: str, args: list[str]) -> tuple[str, str, str] | None:
 
 def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
     """(technique, kind, description); kind is 'stage', 'transfer', 'ingress' or 'unknown'. 'stage' needs a
-    sensitive input; 'unknown' means a shell -c script that could not be parsed (counted as partial)."""
+    sensitive input; 'unknown' means a shell -c script that could not be parsed, or an input that is a relative
+    path with no working directory (both counted as partial)."""
     name, args = prog.name, prog.args
     cwd = event.get("process.cwd")
     if name == "tar":
@@ -873,6 +896,8 @@ def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
         sensitive = _sensitive_input(inputs, base) if staging else None
         if sensitive:
             return ("T1560.001", "stage", f"a tar archive over the sensitive path {sensitive}")
+        if staging and _unplaced(inputs, base):
+            return ("T1560.001", "unknown", "a tar archive over a relative path with no working directory")
         return None
     if name in _COMPRESSORS:
         if name in _DECOMPRESS_NAMES or _is_decode(name, args):
@@ -881,12 +906,16 @@ def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
         sensitive = _sensitive_input(operands, cwd)
         if sensitive:
             return ("T1560.001", "stage", f"a '{name}' compression over the sensitive path {sensitive}")
+        if _unplaced(operands, cwd):
+            return ("T1560.001", "unknown", f"a '{name}' compression of a relative path with no working directory")
         return None
     if name in {"zip", "7z", "7za"}:
         inputs = _archive_inputs(name, args)
         sensitive = _sensitive_input(inputs, cwd) if inputs else None
         if sensitive:
             return ("T1560.001", "stage", f"a '{name}' archive over the sensitive path {sensitive}")
+        if inputs and _unplaced(inputs, cwd):
+            return ("T1560.001", "unknown", f"a '{name}' archive over a relative path with no working directory")
         return None
     if name in _ENCODERS:
         if _is_decode(name, args):
@@ -895,6 +924,9 @@ def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
         sensitive = _sensitive_input(operands, cwd)
         if sensitive:
             return ("T1027.013", "stage", f"an encoding command ('{name}') over the sensitive path {sensitive}")
+        if read_operand_paths(name, args, cwd)[1]:
+            return ("T1027.013", "unknown",
+                    f"an encoding command ('{name}') over a relative path with no working directory")
         return None
     if name in {"scp", "sftp", "rsync"}:
         return _client_transfer(name, args)
@@ -920,7 +952,7 @@ def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
 
 class StagingAndTransfer(_HostContextRule):
     id = "context.staging_and_transfer"
-    version = "2"
+    version = "3"
     title = "Data staging or transfer in an anchored session or lineage"
     families = ("process_exec",)
     required_by_family = EXEC_REQUIRED
