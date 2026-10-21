@@ -379,6 +379,288 @@ def normalize_apache_error(hit: dict) -> TypedEvent:
 # ---------------------------------------------------------------------------------------------
 # suricata EVE (authoritative JSON in event.original)
 # ---------------------------------------------------------------------------------------------
+#
+# Handshake and DNS fields shared by the Suricata and Arkime paths, so rules read one contract:
+# - tls.ja3, tls.ja3s, tls.ja4, ssh.hassh, ssh.hassh_server: list[str], sorted and distinct, every value the record
+#   carries (Arkime stores them as arrays; Suricata logs one per transaction). JA3, JA3S and HASSH are hex
+#   digests and are lowercased; JA4 is kept as recorded.
+# - tls.version: list[str] spelled as Arkime does ("TLSv1.2"). tls.client.server_name: str (Suricata SNI).
+#   tls.resumed: bool (Suricata: the handshake resumed a session, so no certificate was sent).
+# - tls.server.certificates: list[dict], one per distinct presented certificate, sorted by (sha1, subject,
+#   not_before) because Arkime's array is not in chain order. Keys: subject_cn, subject_on, issuer_cn, issuer_on,
+#   alt_names (list[str]); subject_dn, issuer_dn (str or None, Suricata only); not_before, not_after (ISO-8601
+#   UTC or None); valid_days (int or None, as Arkime reported it); sha1, serial (lowercase hex or None);
+#   names_compared ("distinguished name" or "CN and O"); self_issued (bool, or None when either name is empty:
+#   the subject name equals the issuer name); issues_other (bool: its subject name is the issuer name of another
+#   certificate in the same record, so it is a CA in the presented chain, not the server's own certificate).
+# - tls.server.subject_cn, tls.server.issuer_cn (list[str]), tls.server.not_before, tls.server.not_after (ISO),
+#   tls.server.hash_sha1 (str): the server's own certificate, set only when exactly one presented certificate
+#   issues no other (Suricata logs only the server's certificate). Never a pick among several.
+# - ssh.client.software, ssh.client.proto_version, ssh.server.software, ssh.server.proto_version: str (Suricata,
+#   attributed by direction). ssh.version (Arkime): list[str] of SSH banners, not attributed to either side.
+# - dns.question.names, dns.question.types, dns.response_codes: sorted distinct list[str]. dns.question.name,
+#   dns.question.type, dns.response_code: str, only when the record holds exactly one distinct value.
+#   dns.answers, dns.authorities: list of {"name", "type", "ttl", "data"} in record order.
+# - parse.malformed: sorted native paths that were present but not of the documented type. Such a value is
+#   dropped, never guessed or stringified; a rule that needs it counts the record as missing that field.
+
+_HEX_DIGESTS = {"tls.ja3", "tls.ja3s", "ssh.hassh", "ssh.hassh_server"}
+# Suricata writes RFC 4514-style one-line names ("C=US, O=Example, CN=host"); a comma followed by an attribute
+# type and "=" starts the next attribute, so a comma inside a value ("O=Acme, Inc.") does not split.
+_RDN_SPLIT = re.compile(r",\s*(?=[A-Za-z][A-Za-z0-9.-]*=)")
+_SURICATA_TLS_VERSION = re.compile(r"^TLS (\d\.\d)$")
+
+
+def _absent(value) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _strings(value, path: str, bad: list[str], *, lower: bool = False) -> list[str] | None:
+    """A string-or-array-of-strings field as a sorted distinct list (Elasticsearch stores `x` and `[x]` alike).
+    None when absent; any non-string element makes the whole field malformed."""
+    if _absent(value):
+        return None
+    items = value if isinstance(value, list) else [value]
+    if not all(isinstance(item, str) for item in items):
+        bad.append(path)
+        return None
+    out = sorted({item.lower() if lower else item for item in items if item})
+    return out or None
+
+
+def _scalar_str(value, path: str, bad: list[str]) -> str | None:
+    if _absent(value):
+        return None
+    if not isinstance(value, str):
+        bad.append(path)
+        return None
+    return value
+
+
+def _objects(value, path: str, bad: list[str]) -> list[dict] | None:
+    """An object-or-array-of-objects block as a list. None when absent; a non-object element is malformed."""
+    if _absent(value):
+        return None
+    items = value if isinstance(value, list) else [value]
+    if not all(isinstance(item, dict) for item in items):
+        bad.append(path)
+        return None
+    return items
+
+
+def _count(value, path: str, bad: list[str]) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        bad.append(path)
+        return None
+    return value
+
+
+def _cert_time(value, path: str, bad: list[str]) -> str | None:
+    """A certificate validity bound as ISO-8601 UTC. Arkime stores epoch milliseconds; Suricata writes ISO time
+    without a zone, in UTC."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            return datetime.fromtimestamp(value / 1000, UTC).isoformat()
+        if isinstance(value, str):
+            parsed = datetime.fromisoformat(value)
+            return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).astimezone(UTC).isoformat()
+    except (ValueError, OverflowError, OSError):
+        pass
+    bad.append(path)
+    return None
+
+
+def _hex_id(value, path: str, bad: list[str]) -> str | None:
+    """A certificate hash or serial as lowercase hex; separators are kept for hashes, removed for serials."""
+    text = _scalar_str(value, path, bad)
+    return None if text is None else text.lower()
+
+
+def _dn_parts(dn: str) -> list[tuple[str, str]]:
+    parts = []
+    for rdn in _RDN_SPLIT.split(dn.strip()):
+        key, sep, val = rdn.partition("=")
+        if sep and key.strip():
+            parts.append((key.strip().upper(), val.strip()))
+    return parts
+
+
+def _name_key(cert: dict, side: str):
+    """Comparable identity of a certificate's subject or issuer name: the whole distinguished name when the
+    source recorded it, otherwise its CN and O values. None when nothing is recorded."""
+    dn = cert.get(f"{side}_dn")
+    if dn:
+        parts = _dn_parts(dn)
+        if parts:
+            return ("dn", tuple((key, val.casefold()) for key, val in parts))
+    cn = tuple(sorted({v.casefold() for v in cert[f"{side}_cn"]}))
+    on = tuple(sorted({v.casefold() for v in cert[f"{side}_on"]}))
+    return ("cn_on", cn, on) if (cn or on) else None
+
+
+def _certificate_fields(certs: list[dict], origin: str, caveats: list[str]) -> dict:
+    """Typed fields for the certificates one record presented: dedupe, sort, mark self-issued certificates and
+    the ones that issued another presented certificate, and set the server-certificate fields only when that
+    certificate is unambiguous."""
+    distinct = {json.dumps(c, sort_keys=True): c for c in certs}
+    certs = sorted(distinct.values(), key=lambda c: (c["sha1"] or "", json.dumps(c["subject_cn"]),
+                                                     c["subject_dn"] or "", c["not_before"] or ""))
+    for cert in certs:
+        subject, issuer = _name_key(cert, "subject"), _name_key(cert, "issuer")
+        cert["names_compared"] = "distinguished name" if cert["subject_dn"] and cert["issuer_dn"] else "CN and O"
+        cert["self_issued"] = None if subject is None or issuer is None else subject == issuer
+        cert["issues_other"] = subject is not None and any(
+            other is not cert and _name_key(other, "issuer") == subject for other in certs)
+    f = {"tls.server.certificates": fv(certs, origin)}
+    leaves = [c for c in certs if not c["issues_other"]]
+    if len(leaves) == 1:
+        leaf, derived = leaves[0], f"{origin}#derived:server-certificate"
+        for typed, key in (("tls.server.subject_cn", "subject_cn"), ("tls.server.issuer_cn", "issuer_cn"),
+                           ("tls.server.not_before", "not_before"), ("tls.server.not_after", "not_after"),
+                           ("tls.server.hash_sha1", "sha1")):
+            if not _absent(leaf[key]):
+                f[typed] = fv(leaf[key], derived)
+    else:
+        caveats.append(f"{len(leaves)} presented certificates issue no other presented certificate: the server's "
+                       f"own certificate is ambiguous; per-certificate values are in tls.server.certificates")
+    return f
+
+
+def _suricata_tls(t: dict, o: str, bad: list[str], caveats: list[str]) -> dict:
+    f = {}
+    sni = _scalar_str(t.get("sni"), "tls.sni", bad)
+    if sni is not None:
+        f["tls.client.server_name"] = fv(sni, f"{o}.tls.sni")
+    version = _scalar_str(t.get("version"), "tls.version", bad)
+    if version is not None:
+        m = _SURICATA_TLS_VERSION.match(version)
+        f["tls.version"] = fv([f"TLSv{m.group(1)}" if m else version], f"{o}.tls.version")
+    for typed, key in (("tls.ja3", "ja3"), ("tls.ja3s", "ja3s")):
+        value, path = t.get(key), f"tls.{key}"
+        if isinstance(value, dict):                     # {"hash": ..., "string": ...}
+            value, path = value.get("hash"), f"tls.{key}.hash"
+        hashes = _strings(value, path, bad, lower=True)
+        if hashes:
+            f[typed] = fv(hashes, f"{o}.{path}")
+    ja4 = _strings(t.get("ja4"), "tls.ja4", bad)
+    if ja4:
+        f["tls.ja4"] = fv(ja4, f"{o}.tls.ja4")
+    if isinstance(t.get("session_resumed"), bool):
+        f["tls.resumed"] = fv(t["session_resumed"], f"{o}.tls.session_resumed")
+    cert_keys = ("subject", "issuerdn", "notbefore", "notafter", "fingerprint", "serial")
+    if any(not _absent(t.get(k)) for k in cert_keys):
+        subject = _scalar_str(t.get("subject"), "tls.subject", bad)
+        issuer = _scalar_str(t.get("issuerdn"), "tls.issuerdn", bad)
+        sparts, iparts = _dn_parts(subject or ""), _dn_parts(issuer or "")
+        serial = _hex_id(t.get("serial"), "tls.serial", bad)
+        cert = {"subject_cn": [v for k, v in sparts if k == "CN"], "subject_on": [v for k, v in sparts if k == "O"],
+                "issuer_cn": [v for k, v in iparts if k == "CN"], "issuer_on": [v for k, v in iparts if k == "O"],
+                "subject_dn": subject, "issuer_dn": issuer,
+                "not_before": _cert_time(t.get("notbefore"), "tls.notbefore", bad),
+                "not_after": _cert_time(t.get("notafter"), "tls.notafter", bad), "valid_days": None,
+                "alt_names": _strings(t.get("subjectaltname"), "tls.subjectaltname", bad) or [],
+                "sha1": _hex_id(t.get("fingerprint"), "tls.fingerprint", bad),
+                "serial": serial.replace(":", "") if serial else None}
+        f.update(_certificate_fields([cert], f"{o}.tls.{'+'.join(cert_keys)}", caveats))
+    return f
+
+
+def _suricata_ssh(s: dict, o: str, bad: list[str]) -> dict:
+    f = {}
+    for side, typed_hassh in (("client", "ssh.hassh"), ("server", "ssh.hassh_server")):
+        block = s.get(side)
+        if _absent(block):
+            continue
+        if not isinstance(block, dict):
+            bad.append(f"ssh.{side}")
+            continue
+        for typed, key in (("software", "software_version"), ("proto_version", "proto_version")):
+            value = _scalar_str(block.get(key), f"ssh.{side}.{key}", bad)
+            if value is not None:
+                f[f"ssh.{side}.{typed}"] = fv(value, f"{o}.ssh.{side}.{key}")
+        hassh = block.get("hassh")
+        value, path = (hassh.get("hash"), f"ssh.{side}.hassh.hash") if isinstance(hassh, dict) \
+            else (hassh, f"ssh.{side}.hassh")
+        hashes = _strings(value, path, bad, lower=True)
+        if hashes:
+            f[typed_hassh] = fv(hashes, f"{o}.{path}")
+    return f
+
+
+def _dns_record(item: dict, path: str, bad: list[str]) -> dict:
+    ttl = _count(item.get("ttl"), f"{path}.ttl", bad)
+    return {"name": _scalar_str(item.get("rrname"), f"{path}.rrname", bad),
+            "type": _scalar_str(item.get("rrtype"), f"{path}.rrtype", bad), "ttl": ttl,
+            "data": item["rdata"] if isinstance(item.get("rdata"), str) else None}
+
+
+def _dns_name_fields(names: set[str], types: set[str], codes: set[str], origin: str) -> dict:
+    """List fields always; the scalar only when exactly one distinct value exists."""
+    f = {}
+    for values, plural, single in ((names, "dns.question.names", "dns.question.name"),
+                                   (types, "dns.question.types", "dns.question.type"),
+                                   (codes, "dns.response_codes", "dns.response_code")):
+        if values:
+            f[plural] = fv(sorted(values), origin)
+            if len(values) == 1:
+                f[single] = fv(next(iter(values)), origin)
+    return f
+
+
+def _suricata_dns(d: dict, o: str, bad: list[str]) -> dict:
+    """EVE DNS in its three layouts. Query records (every version) and v2 answer records carry the question in
+    the top-level rrname/rrtype; v3 records carry it in `queries`. A v1 answer record (no `version`) is one
+    resource record of the response: its rrname/rrtype/ttl/rdata describe that answer (a CNAME target, say), so
+    they are typed as an answer and never as the question."""
+    f = {"dns.type": fv(d.get("type"), f"{o}.dns.type")}
+    names, types = set(), set()
+    if d.get("type") == "answer" and d.get("version") is None:
+        answer = _dns_record(d, "dns", bad)
+        if any(v is not None for v in answer.values()):
+            f["dns.answers"] = fv([answer], f"{o}.dns.rrname+rrtype+ttl+rdata")
+        rrname = rrtype = None
+    else:
+        rrname = _scalar_str(d.get("rrname"), "dns.rrname", bad)
+        rrtype = _scalar_str(d.get("rrtype"), "dns.rrtype", bad)
+    names.update([rrname] if rrname else [])
+    types.update([rrtype] if rrtype else [])
+    queries = _objects(d.get("queries"), "dns.queries", bad) or []
+    for i, query in enumerate(queries):
+        q = _dns_record(query, f"dns.queries[{i}]", bad)
+        names.update([q["name"]] if q["name"] else [])
+        types.update([q["type"]] if q["type"] else [])
+    code = _scalar_str(d.get("rcode"), "dns.rcode", bad)
+    f.update(_dns_name_fields(names, types, {code} if code else set(), f"{o}.dns.rrname+rrtype+queries+rcode"))
+    for typed, key in (("dns.answers", "answers"), ("dns.authorities", "authorities")):
+        items = _objects(d.get(key), f"dns.{key}", bad)
+        if items and typed not in f:
+            f[typed] = fv([_dns_record(item, f"dns.{key}[{i}]", bad) for i, item in enumerate(items)],
+                          f"{o}.dns.{key}")
+    grouped = d.get("grouped")
+    if "dns.answers" not in f and not _absent(grouped):
+        if not isinstance(grouped, dict) or not all(isinstance(v, list) for v in grouped.values()):
+            bad.append("dns.grouped")
+        else:
+            f["dns.answers"] = fv([{"name": None, "type": rtype, "ttl": None,
+                                    "data": value if isinstance(value, str) else None}
+                                   for rtype, values in sorted(grouped.items()) for value in values],
+                                  f"{o}.dns.grouped")
+    return f
+
+
+def _app_block(eve: dict, key: str) -> dict | None:
+    """An app-layer block of a Suricata record; a block of the wrong type makes the record unreadable."""
+    if key not in eve:
+        return None
+    block = eve[key]
+    if not isinstance(block, dict):
+        raise TypeError(f"suricata {key} block is {type(block).__name__}, not an object")
+    return block
+
 
 def normalize_suricata(hit: dict) -> TypedEvent:
     src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
@@ -411,12 +693,19 @@ def normalize_suricata(hit: dict) -> TypedEvent:
               "state"):
         if k in flow:
             f[f"flow.{k}"] = fv(flow[k], f"{o}.flow.{k}")
-    if "dns" in eve:
-        d = eve["dns"]
-        f["dns.type"] = fv(d.get("type"), f"{o}.dns.type")
-        f["dns.question.name"] = fv(d.get("rrname"), f"{o}.dns.rrname")
-        f["dns.question.type"] = fv(d.get("rrtype"), f"{o}.dns.rrtype")
-        f["dns.response_code"] = fv(d.get("rcode"), f"{o}.dns.rcode")
+    bad: list[str] = []
+    caveats: list[str] = []
+    d = _app_block(eve, "dns")
+    if d is not None:
+        f.update(_suricata_dns(d, o, bad))
+    t = _app_block(eve, "tls")
+    if t is not None:
+        f.update(_suricata_tls(t, o, bad, caveats))
+    s = _app_block(eve, "ssh")
+    if s is not None:
+        f.update(_suricata_ssh(s, o, bad))
+    if bad:
+        f["parse.malformed"] = fv(sorted(set(bad)), f"{o}#malformed")
     if "http" in eve:
         h = eve["http"]
         for typed, k in (("http.hostname", "hostname"), ("url.original", "url"),
@@ -432,29 +721,39 @@ def normalize_suricata(hit: dict) -> TypedEvent:
     ts = _ts(eve["timestamp"]) if eve.get("timestamp") else _ts(src["@timestamp"])
     return TypedEvent(id=event_id(family, [ref]), family=family, ts=ts, host=_get(src, "host.name"),
                       fields={k: v for k, v in f.items() if v.value is not None}, raw=[ref],
-                      normalizer=NORMALIZER_VERSION)
+                      normalizer=NORMALIZER_VERSION, caveats=caveats)
 
 
 # ---------------------------------------------------------------------------------------------
 # Arkime SPI session records (read from the session indices)
 # ---------------------------------------------------------------------------------------------
+# Arkime 6.x stores `cert` and `dns` as arrays of objects, and its string fields (ja3, hassh, versions, tags) as
+# arrays. Each is read with the shared contract above; a block of an undocumented type is dropped and listed in
+# parse.malformed, and the rest of the session record is kept.
 
 IP_PROTOCOLS = {1: "icmp", 6: "tcp", 17: "udp", 58: "ipv6-icmp", 132: "sctp"}
 ARKIME_FIELDS = (
-    # typed name, native path
+    # typed name, native path: values passed through as stored
     ("source.ip", "source.ip"), ("source.port", "source.port"), ("destination.ip", "destination.ip"),
     ("destination.port", "destination.port"), ("network.community_id", "network.community_id"),
     ("source.bytes", "source.bytes"), ("source.packets", "source.packets"),
     ("destination.bytes", "destination.bytes"), ("destination.packets", "destination.packets"),
     ("client.bytes", "client.bytes"), ("server.bytes", "server.bytes"),
-    ("tls.ja3", "tls.ja3"), ("tls.ja3s", "tls.ja3s"), ("tls.ja4", "tls.ja4"), ("tls.version", "tls.version"),
-    ("ssh.hassh", "ssh.hassh"), ("ssh.hassh_server", "ssh.hasshServer"), ("ssh.version", "ssh.version"),
     ("http.hostname", "http.host"), ("url.path", "http.uri"), ("user_agent.original", "http.useragent"),
     ("http.request.method", "http.method"), ("http.response.status_code", "http.statuscode"),
-    ("dns.question.name", "dns.host"), ("tls.server.subject_cn", "cert.subjectCN"),
-    ("tls.server.issuer_cn", "cert.issuerCN"), ("tls.server.not_after", "cert.notAfter"),
-    ("network.protocols", "protocol"), ("arkime.tags", "tags"),
+    ("network.protocols", "protocol"),
 )
+# typed name, native path: string-or-array fields read as sorted distinct string lists (see the contract above)
+ARKIME_STRING_LISTS = (
+    ("tls.ja3", "tls.ja3"), ("tls.ja3s", "tls.ja3s"), ("tls.ja4", "tls.ja4"), ("tls.version", "tls.version"),
+    ("ssh.hassh", "ssh.hassh"), ("ssh.hassh_server", "ssh.hasshServer"), ("ssh.version", "ssh.version"),
+    ("http.body_magic", "http.bodyMagic"), ("arkime.tags", "tags"),
+)
+# Arkime's per-session TCP flag counters: typed suffix, native key
+ARKIME_TCP_FLAGS = (("syn", "syn"), ("syn_ack", "syn-ack"), ("ack", "ack"), ("psh", "psh"), ("fin", "fin"),
+                    ("rst", "rst"), ("urg", "urg"))
+# keys of an Arkime DNS answer object that describe the answer rather than carry its data
+_ARKIME_ANSWER_META = {"type", "class", "ttl", "name", "priority"}
 
 
 def is_arkime_session(src: dict) -> bool:
@@ -467,17 +766,105 @@ def _epoch_ms(value) -> datetime:
     return datetime.fromtimestamp(value / 1000, UTC)
 
 
+def _arkime_path(src: dict, path: str, bad: list[str]):
+    """A nested value; a non-object on the way is malformed, not merely absent."""
+    cur = src
+    parts = path.split(".")
+    for i, part in enumerate(parts):
+        if cur is None:
+            return None
+        if not isinstance(cur, dict):
+            bad.append(".".join(parts[:i]))
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def _arkime_certificates(src: dict, nid: str, bad: list[str], caveats: list[str]) -> dict:
+    objs = _objects(src.get("cert"), "cert", bad)
+    if not objs:
+        return {}
+    certs = []
+    for i, obj in enumerate(objs):
+        p = f"cert[{i}]"
+        names = {key: _strings(obj.get(native), f"{p}.{native}", bad) or []
+                 for key, native in (("subject_cn", "subjectCN"), ("subject_on", "subjectON"),
+                                     ("issuer_cn", "issuerCN"), ("issuer_on", "issuerON"), ("alt_names", "alt"))}
+        serial = _hex_id(obj.get("serial"), f"{p}.serial", bad)
+        certs.append({**names, "subject_dn": None, "issuer_dn": None,
+                      "not_before": _cert_time(obj.get("notBefore"), f"{p}.notBefore", bad),
+                      "not_after": _cert_time(obj.get("notAfter"), f"{p}.notAfter", bad),
+                      "valid_days": _count(obj.get("validDays"), f"{p}.validDays", bad),
+                      "sha1": _hex_id(obj.get("hash"), f"{p}.hash", bad),
+                      "serial": serial.replace(":", "") if serial else None})
+    return _certificate_fields(certs, f"{nid}:cert", caveats)
+
+
+def _arkime_answer(obj: dict, path: str, bad: list[str]) -> dict:
+    """One Arkime DNS answer. Its data is the one string held under a non-descriptive key (ip, cname, nameserver,
+    mx, txt, ...); with none, or several, the data is unknown (None), never a pick."""
+    held = [v for k, v in obj.items() if k not in _ARKIME_ANSWER_META and not k.endswith("Cnt")]
+    values = [v for v in held if isinstance(v, str)] + [x for v in held if isinstance(v, list) for x in v
+                                                        if isinstance(x, str)]
+    return {"name": _scalar_str(obj.get("name"), f"{path}.name", bad),
+            "type": _scalar_str(obj.get("type"), f"{path}.type", bad),
+            "ttl": _count(obj.get("ttl"), f"{path}.ttl", bad),
+            "data": values[0] if len(values) == 1 else None}
+
+
+def _arkime_dns(src: dict, nid: str, bad: list[str]) -> dict:
+    objs = _objects(src.get("dns"), "dns", bad)
+    if not objs:
+        return {}
+    names, types, codes, answers = set(), set(), set(), []
+    for i, obj in enumerate(objs):
+        p = f"dns[{i}]"
+        names.update(_strings(obj.get("host"), f"{p}.host", bad) or [])
+        types.update(_strings(obj.get("qt"), f"{p}.qt", bad) or [])
+        codes.update(_strings(obj.get("status"), f"{p}.status", bad) or [])
+        for j, ans in enumerate(_objects(obj.get("answers"), f"{p}.answers", bad) or []):
+            answers.append(_arkime_answer(ans, f"{p}.answers[{j}]", bad))
+    f = _dns_name_fields(names, types, codes, f"{nid}:dns")
+    if answers:
+        f["dns.answers"] = fv(answers, f"{nid}:dns.answers")
+    return f
+
+
 def normalize_arkime_session(hit: dict) -> TypedEvent:
     """One net_session per Arkime SPI record. Arkime saves long sessions in several records (one per
     save interval) sharing the 5-tuple and community ID; each record is one event, and rules that need
-    the whole connection stitch them by community ID."""
+    the whole connection stitch them by community ID. Handshake fields (tls, ssh, cert) are on the first
+    record only; every record of a split session carries rootId naming the first, and a record whose
+    rootId is not its own id is marked arkime.continuation."""
     src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
     first, last = _epoch_ms(src.get("firstPacket")), _epoch_ms(src.get("lastPacket"))
     f = {}
+    bad: list[str] = []
+    caveats: list[str] = []
     for typed, native in ARKIME_FIELDS:
         v = _get(src, native)
         if v not in (None, [], ""):
             f[typed] = fv(v, f"{nid}:{native}")
+    for typed, native in ARKIME_STRING_LISTS:
+        values = _strings(_arkime_path(src, native, bad), native, bad, lower=typed in _HEX_DIGESTS)
+        if values:
+            f[typed] = fv(values, f"{nid}:{native}")
+    flags = src.get("tcpflags")
+    if isinstance(flags, dict):
+        for typed, native in ARKIME_TCP_FLAGS:
+            count = _count(flags.get(native), f"tcpflags.{native}", bad)
+            if count is not None:
+                f[f"tcp.flags.{typed}"] = fv(count, f"{nid}:tcpflags.{native}")
+    elif not _absent(flags):
+        bad.append("tcpflags")
+    root = _scalar_str(src.get("rootId"), "rootId", bad)
+    if root is not None:
+        f["arkime.root_id"] = fv(root, f"{nid}:rootId")
+        f["arkime.continuation"] = fv(root != nid, f"{nid}:rootId#derived:differs-from-own-id")
+    f.update(_arkime_certificates(src, nid, bad, caveats))
+    f.update(_arkime_dns(src, nid, bad))
+    if bad:
+        f["parse.malformed"] = fv(sorted(set(bad)), f"{nid}:#malformed")
     proto = src.get("ipProtocol")
     if proto is not None:
         f["network.transport"] = fv(IP_PROTOCOLS.get(proto, str(proto)), f"{nid}:ipProtocol")
@@ -487,7 +874,7 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
     f["arkime.node"] = fv(src.get("node"), f"{nid}:node")
     return TypedEvent(id=event_id("net_session", [ref]), family="net_session", ts=first, host=src.get("node"),
                       fields={k: v for k, v in f.items() if v.value is not None}, raw=[ref],
-                      normalizer=NORMALIZER_VERSION)
+                      normalizer=NORMALIZER_VERSION, caveats=caveats)
 
 
 SINGLE = {
