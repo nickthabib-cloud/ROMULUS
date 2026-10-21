@@ -129,6 +129,22 @@ def test_fetch_tools_resolve_aliases_and_keep_telemetry_under_data():
     assert "tool_calls" not in str(outside_data)
 
 
+def test_entity_profile_has_retrievable_deterministic_continuation_pages():
+    repo = _repo(52)
+    toolbox = Toolbox(repo, "h1")
+    entity = toolbox.execute("get_finding", {"finding": "F1"})["data"]["finding"]["entities"][0]["alias"]
+
+    first = toolbox.execute("entity_profile", {"entity": entity, "page": 1})
+    second = toolbox.execute("entity_profile", {"entity": entity, "page": 2})
+
+    assert first["counts"] == {"returned": 50, "total": 52}
+    assert first["more"] is True
+    assert second["counts"] == {"returned": 2, "total": 52}
+    assert second["more"] is False
+    assert not ({item["alias"] for item in first["data"]["entity"]["events"]}
+                & {item["alias"] for item in second["data"]["entity"]["events"]})
+
+
 def test_wrong_kind_unknown_alias_extra_arguments_and_handler_failures_are_structured(monkeypatch):
     repo = _repo(2)
     toolbox = Toolbox(repo, "h1")

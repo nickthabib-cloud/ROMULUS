@@ -29,6 +29,7 @@ from romulus.decide.policy import LANE_ORDER
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.typed import TypedEvent
 from romulus.report.incidents import build_incident_graph
+from romulus.store.db import digest
 from romulus.store.repo import Repo
 
 READ_PAGE_SIZE = 25
@@ -50,6 +51,7 @@ class ListFindingsArgs(_Args):
     rule: str | None = None
     entity: AliasArg | None = None
     page: int = Field(default=1, ge=1)
+    cursor: str | None = Field(default=None, pattern=r"^D[0-9a-f]{16}$")
 
     @field_validator("rule")
     @classmethod
@@ -73,12 +75,15 @@ class GetIncidentArgs(_Args):
 
 class EntityProfileArgs(_Args):
     entity: AliasArg
+    page: int = Field(default=1, ge=1)
 
 
 class _WindowedArgs(_Args):
     anchor: AliasArg
     start: datetime | None = None
     end: datetime | None = None
+    page: int = Field(default=1, ge=1)
+    cursor: str | None = Field(default=None, pattern=r"^P[0-9a-f]{20}$")
 
     @field_validator("start", "end")
     @classmethod
@@ -117,6 +122,8 @@ class FollowLinkArgs(_Args):
         "source_ip", "account", "host_after_anchor",
     ]
     window: Literal["anchor ±5 min", "anchor ±30 min", "anchor ±2 h"] | None = None
+    page: int = Field(default=1, ge=1)
+    cursor: str | None = Field(default=None, pattern=r"^P[0-9a-f]{20}$")
 
 
 class InvestigationExecutor(Protocol):
@@ -338,7 +345,13 @@ class Toolbox:
             if entity is None or entity["hunt_id"] != self.hunt_id:
                 raise UnknownAlias(f"unknown entity alias {args.entity!r} in hunt {self.hunt_id}")
             candidates = [row for row in candidates if self._matches_entity(row, entity)]
-        plan = self.repo.agent_dossier_page_plan(self.hunt_id) if unfiltered else None
+        if args.cursor is not None and not unfiltered:
+            return self._semantic_refusal(
+                "cursor_with_filters", "a dossier cursor cannot be combined with listing filters",
+            )
+        plan = self.repo.agent_dossier_page_plan(self.hunt_id, args.cursor) if args.cursor else None
+        if args.cursor is not None and plan is None:
+            return self._semantic_refusal("unknown_cursor", "the dossier cursor is not valid for this hunt")
         if plan is not None:
             aliases = plan[args.page - 1] if args.page <= len(plan) else []
             by_id = {row["id"]: row for row in candidates}
@@ -457,11 +470,13 @@ class Toolbox:
         if entity is None or entity["hunt_id"] != self.hunt_id:
             raise UnknownAlias(f"unknown entity alias {args.entity!r} in hunt {self.hunt_id}")
         events = self.repo.events_for_entity(entity_id)
-        exemplars = events[:ENTITY_EVENT_LIMIT]
+        start = (args.page - 1) * ENTITY_EVENT_LIMIT
+        exemplars = events[start:start + ENTITY_EVENT_LIMIT]
         data = {
             "alias": args.entity, "kind": entity["kind"], "value": entity["value"],
             "first_seen": str(entity["first_seen"]) if entity["first_seen"] is not None else None,
             "last_seen": str(entity["last_seen"]) if entity["last_seen"] is not None else None,
+            "page": args.page,
             "families": dict(sorted(Counter(row["family"] for row in events).items())),
             "events": [{
                 "alias": self.aliases.alias_for("E", row["id"]), "family": row["family"],
@@ -474,7 +489,7 @@ class Toolbox:
         coverage = self._coverage(rules)
         return _result(coverage["status"], coverage=coverage,
                        counts={"returned": len(exemplars), "total": len(events)}, data={"entity": data},
-                       more=len(events) > len(exemplars))
+                       more=start + len(exemplars) < len(events))
 
     @staticmethod
     def _utc(value: datetime) -> datetime:
@@ -510,16 +525,61 @@ class Toolbox:
     def _semantic_refusal(code: str, message: str) -> dict:
         return _result("refused", data={"error": {"code": code, "message": message}})
 
-    def _run_pivot(self, anchor: dict, request) -> dict:
+    def _run_pivot(self, anchor: dict, request, *, page: int, cursor: str | None) -> dict:
+        if cursor is not None:
+            stored = self.repo.agent_tool_page_plan(self.hunt_id, cursor)
+            if stored is None:
+                return self._semantic_refusal("unknown_cursor", "the tool cursor is not valid for this hunt")
+            return self._pivot_result(PivotResult.model_validate(stored), page=page, cursor=cursor,
+                                      persist=False)
+        if page != 1:
+            return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
         if self.executor is None or self.session_id is None:
             return _result("unsupported", data={"error": {
                 "code": "pivot_unavailable", "message": "the hunt layer did not provide a pivot executor",
             }})
         anchor_ts = self._utc(anchor["ts"])
         result = self.executor.run(self.session_id, anchor["id"], request, anchor_ts=anchor_ts)
-        return self._pivot_result(result)
+        return self._pivot_result(result, page=1)
 
-    def _pivot_result(self, result: PivotResult) -> dict:
+    @staticmethod
+    def _stored_pivot_result(result: PivotResult, event_ids: list[str]) -> dict:
+        return {
+            "status": result.status, "task_ids": list(result.task_ids),
+            "event_ids": event_ids, "reach_event_ids": event_ids,
+            "candidate_ids": list(result.candidate_ids),
+            "entities": [item.model_dump(mode="json") for item in result.entities],
+            "event_summaries": list(result.event_summaries),
+            "anchor_event_ids": list(result.anchor_event_ids),
+            "matched_event_count": result.matched_event_count,
+            "coverage": [item.model_dump(mode="json") for item in result.coverage],
+            "reasons": list(result.reasons), "duration_ms": result.duration_ms,
+        }
+
+    @staticmethod
+    def _persisted_event_summary(row: dict) -> dict:
+        event = TypedEvent.model_validate(row["event"])
+        return {
+            "id": event.id, "family": event.family, "ts": event.ts.isoformat(), "host": event.host,
+            "outcome": str(event.outcome),
+            "fields": {name: field.value for name, field in sorted(event.fields.items())[:16]},
+            "caveats": event.caveats[:5],
+        }
+
+    def _pivot_result(self, result: PivotResult, *, page: int, cursor: str | None = None,
+                      persist: bool = True) -> dict:
+        event_ids = list(dict.fromkeys(result.reach_event_ids or result.event_ids))
+        if cursor is None:
+            cursor = "P" + digest({
+                "hunt_id": self.hunt_id, "session_id": self.session_id,
+                "result": self._stored_pivot_result(result, event_ids),
+            })[:20]
+        if persist:
+            self.repo.save_agent_tool_page_plan(
+                self.hunt_id, cursor, self._stored_pivot_result(result, event_ids),
+            )
+        start = (page - 1) * ENTITY_EVENT_LIMIT
+        page_ids = event_ids[start:start + ENTITY_EVENT_LIMIT]
         cells = [item.model_dump(mode="json") for item in result.coverage]
         gaps = [cell for cell in cells if cell["status"] != "complete"]
         if not cells and result.status != "complete" and result.reasons:
@@ -528,7 +588,7 @@ class Toolbox:
                     "cells": cells, "gaps": gaps}
         evidence = []
         event_aliases = {}
-        for event_id in result.event_ids:
+        for event_id in page_ids:
             alias = self.aliases.alias_for("E", event_id)
             evidence.append(alias)
             event_aliases[event_id] = alias
@@ -540,8 +600,14 @@ class Toolbox:
                 "alias": self.aliases.alias_for("N", entity["id"]) if entity is not None else None,
                 "kind": item.kind, "value": item.value, "role": item.role,
             })
+        known_summaries = {str(item.get("id")): item for item in result.event_summaries if item.get("id")}
+        persisted = {row["id"]: self._persisted_event_summary(row)
+                     for row in self.repo.events_by_ids(page_ids)}
         summaries = []
-        for summary in result.event_summaries:
+        for event_id in page_ids:
+            summary = known_summaries.get(event_id) or persisted.get(event_id)
+            if summary is None:
+                continue
             item = _jsonable(summary)
             if item.get("id") in event_aliases:
                 item["alias"] = event_aliases[item.pop("id")]
@@ -551,12 +617,14 @@ class Toolbox:
                 "evidence": evidence, "candidates": candidates, "entities": entities,
                 "event_summaries": summaries, "task_count": len(result.task_ids),
                 "reasons": list(result.reasons), "duration_ms": result.duration_ms,
+                "page": page, "cursor": cursor,
             }
         }
+        total = max(result.matched_event_count, len(event_ids))
         return _result(
             result.status, coverage=coverage,
-            counts={"returned": len(evidence), "total": result.matched_event_count}, data=data,
-            more=result.matched_event_count > len(evidence),
+            counts={"returned": len(evidence), "total": total}, data=data,
+            more=start + len(page_ids) < len(event_ids),
         )
 
     def _entity_timeline(self, args: EntityTimelineToolArgs) -> dict:
@@ -570,7 +638,7 @@ class Toolbox:
         request = pivot_tools.EntityTimelineRequest(tool="entity_timeline", arguments=pivot_tools.EntityTimelineArgs(
             entity=entity, start=window[0], end=window[1],
         ))
-        return self._run_pivot(anchor, request)
+        return self._run_pivot(anchor, request, page=args.page, cursor=args.cursor)
 
     def _auth_activity(self, args: AuthActivityToolArgs) -> dict:
         anchor = self._anchor(args.anchor)
@@ -583,7 +651,7 @@ class Toolbox:
         request = pivot_tools.AuthActivityRequest(tool="auth_activity", arguments=pivot_tools.AuthActivityArgs(
             entity=entity, start=window[0], end=window[1],
         ))
-        return self._run_pivot(anchor, request)
+        return self._run_pivot(anchor, request, page=args.page, cursor=args.cursor)
 
     def _process_tree(self, args: ProcessTreeToolArgs) -> dict:
         anchor = self._anchor(args.anchor)
@@ -603,7 +671,7 @@ class Toolbox:
         request = pivot_tools.ProcessTreeRequest(tool="process_tree", arguments=pivot_tools.ProcessTreeArgs(
             host=event.host, process_id=pid, start=window[0], end=window[1],
         ))
-        return self._run_pivot(anchor, request)
+        return self._run_pivot(anchor, request, page=args.page, cursor=args.cursor)
 
     def _ids_alerts(self, args: IdsAlertsToolArgs) -> dict:
         anchor = self._anchor(args.anchor)
@@ -616,10 +684,18 @@ class Toolbox:
         request = pivot_tools.IdsAlertsRequest(tool="ids_alerts", arguments=pivot_tools.IdsAlertsArgs(
             entity=entity, start=window[0], end=window[1],
         ))
-        return self._run_pivot(anchor, request)
+        return self._run_pivot(anchor, request, page=args.page, cursor=args.cursor)
 
     def _follow_link(self, args: FollowLinkArgs) -> dict:
         anchor = self._anchor(args.anchor)
+        if args.cursor is not None:
+            stored = self.repo.agent_tool_page_plan(self.hunt_id, args.cursor)
+            if stored is None:
+                return self._semantic_refusal("unknown_cursor", "the tool cursor is not valid for this hunt")
+            return self._pivot_result(PivotResult.model_validate(stored), page=args.page,
+                                      cursor=args.cursor, persist=False)
+        if args.page != 1:
+            return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
         if self.executor is None or self.session_id is None:
             return _result("unsupported", data={"error": {
                 "code": "pivot_unavailable", "message": "the hunt layer did not provide a link fetcher",
@@ -627,4 +703,4 @@ class Toolbox:
         result = self.executor.follow_link(
             self.session_id, anchor["id"], args.link_type, args.window,
         )
-        return self._pivot_result(result)
+        return self._pivot_result(result, page=1)

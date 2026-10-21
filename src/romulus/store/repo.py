@@ -265,18 +265,27 @@ class Repo:
             row = c.execute(query).mappings().first()
             return dict(row) if row else None
 
-    def save_agent_dossier_page_plan(self, hunt_id: str, pages: list[list[str]]) -> None:
+    def save_agent_dossier_page_plan(self, hunt_id: str, cursor: str, pages: list[list[str]]) -> None:
         """Persist the alias boundaries named by dossier continuation instructions."""
-        self.audit("system", "agent.dossier_page_plan", hunt_id, {"pages": pages})
+        self.audit("system", f"agent.dossier_page_plan.{cursor}", hunt_id, {"pages": pages})
 
-    def agent_dossier_page_plan(self, hunt_id: str) -> list[list[str]] | None:
-        row = self.latest_audit(hunt_id, "agent.dossier_page_plan")
+    def agent_dossier_page_plan(self, hunt_id: str, cursor: str) -> list[list[str]] | None:
+        row = self.latest_audit(hunt_id, f"agent.dossier_page_plan.{cursor}")
         pages = ((row or {}).get("detail") or {}).get("pages")
         if not isinstance(pages, list) or not all(
                 isinstance(page, list) and all(isinstance(alias, str) for alias in page)
                 for page in pages):
             return None
         return pages
+
+    def save_agent_tool_page_plan(self, hunt_id: str, cursor: str, result: dict) -> None:
+        """Persist one immutable tool result so continuation pages never repeat source I/O."""
+        self.audit("system", f"agent.tool_page_plan.{cursor}", hunt_id, {"result": result})
+
+    def agent_tool_page_plan(self, hunt_id: str, cursor: str) -> dict | None:
+        row = self.latest_audit(hunt_id, f"agent.tool_page_plan.{cursor}")
+        result = ((row or {}).get("detail") or {}).get("result")
+        return result if isinstance(result, dict) else None
 
     VALID: ClassVar = {
         "planned": {"running", "canceled"},
@@ -503,6 +512,11 @@ class Repo:
             # Typed events can be retained once and cited by more than one hunt. Those citing hunts
             # own an E alias even when the physical row remains attributed to its first hunt.
             if kind == "E":
+                owners.update(c.execute(
+                    select(t.entity.c.hunt_id)
+                    .join(t.event_entity, t.event_entity.c.entity_id == t.entity.c.id)
+                    .where(t.event_entity.c.event_id == target_id)
+                ).scalars())
                 for hunt_id, event_ids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)):
                     if target_id in (event_ids or []):
                         owners.add(hunt_id)

@@ -119,6 +119,29 @@ def test_pivot_status_and_exact_coverage_are_preserved_for_every_outcome():
             assert response["coverage"]["cells"][0]["reasons"] == ([reason] if reason else [])
 
 
+def test_pivot_result_continuation_is_persisted_and_does_not_repeat_source_call():
+    repo = _repo()
+    events = [_event(f"page-event-{index:02d}", pid=100 + index) for index in range(52)]
+    repo.save_evidence("h1", events, {}, None)
+    result = PivotResult(
+        status="complete", event_ids=[event.id for event in events[:50]],
+        reach_event_ids=[event.id for event in events], matched_event_count=len(events),
+    )
+    fake = FakeToolExecutor(result)
+    toolbox = Toolbox(repo, "h1", executor=fake, session_id="session-1")
+
+    first = toolbox.execute("entity_timeline", {**_args(repo), "page": 1, "cursor": None})
+    cursor = first["data"]["result"]["cursor"]
+    second = toolbox.execute("entity_timeline", {**_args(repo), "page": 2, "cursor": cursor})
+
+    assert first["counts"] == {"returned": 50, "total": 52}
+    assert first["more"] is True
+    assert second["counts"] == {"returned": 2, "total": 52}
+    assert second["more"] is False
+    assert len(fake.calls) == 1
+    assert len(second["data"]["result"]["evidence"]) == 2
+
+
 def test_pivot_alias_kinds_typed_fields_and_windows_are_refused_before_execution():
     repo = _repo()
     fake = FakeToolExecutor(_result("complete"))

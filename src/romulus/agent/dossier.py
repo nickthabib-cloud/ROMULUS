@@ -13,6 +13,7 @@ from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.expansion import TIER_PLAN
 from romulus.report.incidents import build_incident_graph
+from romulus.store.db import digest
 from romulus.store.repo import Repo
 
 DOSSIER_SCHEMA = "agent-dossier@1"
@@ -220,19 +221,20 @@ def _entity_refs(repo: Repo, candidates: list[dict], aliases: AliasBook) -> list
     } for row in repo.entities(aliases.hunt_id) if (row["kind"], row["value"]) in wanted]
 
 
-def _page_payload(base: dict, findings: list[dict], page: int, pages: int) -> dict:
+def _page_payload(base: dict, findings: list[dict], page: int, pages: int, cursor: str) -> dict:
     if page < pages:
-        message = f"index page {page} of {pages}; call list_findings(page={page + 1}) for the rest"
+        message = (f"index page {page} of {pages}; call list_findings(page={page + 1},"
+                   f"cursor={cursor}) for the rest")
     else:
         message = f"index page {page} of {pages}; all findings in the index have been included"
     payload = {**base, "header": {**base["header"], "index": {
-        "page": page, "pages": pages, "message": message,
+        "page": page, "pages": pages, "cursor": cursor, "message": message,
     }}, "findings": findings}
     return _jsonable(payload)
 
 
-def _paginate(base: dict, findings: list[dict], token_budget: int) -> tuple[dict, ...]:
-    one = _page_payload(base, findings, 1, 1)
+def _paginate(base: dict, findings: list[dict], token_budget: int, cursor: str) -> tuple[dict, ...]:
+    one = _page_payload(base, findings, 1, 1, cursor)
     if estimate_tokens(_canonical(one)) <= token_budget:
         return (one,)
     continuation = {"schema": base["schema"], "header": base["header"]}
@@ -245,7 +247,7 @@ def _paginate(base: dict, findings: list[dict], token_budget: int) -> tuple[dict
             trial = current + [remaining[0]]
             # Six digits reserves more header room than any realistic page count.
             if estimate_tokens(_canonical(_page_payload(
-                    page_base, trial, 999999, 999999))) > token_budget:
+                    page_base, trial, 999999, 999999, cursor))) > token_budget:
                 break
             current.append(remaining.pop(0))
         if not current and remaining:
@@ -254,13 +256,13 @@ def _paginate(base: dict, findings: list[dict], token_budget: int) -> tuple[dict
             # The context envelope can consume a small budget by itself. Emit it
             # once, then use compact continuation pages for the findings index.
             if estimate_tokens(_canonical(_page_payload(
-                    page_base, [], 999999, 999999))) > token_budget:
+                    page_base, [], 999999, 999999, cursor))) > token_budget:
                 raise ValueError("token_budget is too small for the dossier context")
         chunks.append(current)
         if not remaining:
             break
     total = len(chunks)
-    return tuple(_page_payload(base if index == 1 else continuation, chunk, index, total)
+    return tuple(_page_payload(base if index == 1 else continuation, chunk, index, total, cursor)
                  for index, chunk in enumerate(chunks, 1))
 
 
@@ -307,8 +309,12 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
         "incidents": base["incidents"],
         "expansion": base["expansion"],
     })}
-    pages = _paginate(base, finding_rows, token_budget)
+    cursor = "D" + digest({
+        "hunt_id": hunt_id, "token_budget": token_budget, "context": base,
+        "findings": finding_rows,
+    })[:16]
+    pages = _paginate(base, finding_rows, token_budget, cursor)
     repo.save_agent_dossier_page_plan(
-        hunt_id, [[finding["alias"] for finding in page["findings"]] for page in pages],
+        hunt_id, cursor, [[finding["alias"] for finding in page["findings"]] for page in pages],
     )
     return Dossier(payload=pages[0], pages=pages)

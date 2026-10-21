@@ -115,3 +115,16 @@ def test_twin_databases_assign_identical_content_aliases():
     left = [(row["alias"], row["kind"], row["target_id"]) for row in first.agent_aliases("h1")]
     right = [(row["alias"], row["kind"], row["target_id"]) for row in second.agent_aliases("h1")]
     assert left == right
+
+
+def test_shared_event_is_owned_by_each_hunt_with_an_event_entity_association():
+    repo = _repo()
+    event = TypedEvent(
+        id="shared-event", family="process_exec", ts=T, host="web01", outcome=Outcome.success,
+        fields={"process.argv": fv(["id"], "fixture")}, raw=[], normalizer="test@1",
+    )
+    repo.save_evidence("h1", [event], {}, None)
+    repo.create_hunt("h2", {"window": {}}, "digest-2", "test")
+    repo.save_evidence("h2", [event], {}, None)
+
+    assert AliasBook(repo, "h2").alias_for("E", "shared-event") == "E1"

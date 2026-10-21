@@ -80,10 +80,10 @@ def test_dossier_pages_every_reportable_finding_exactly_once_and_keeps_counts():
     assert pages[0]["header"]["finding_counts"] == {
         "urgent": 1, "high": 3, "lead": 3, "total": 7,
     }
-    assert pages[0]["header"]["index"] == {
-        "page": 1, "pages": len(pages),
-        "message": f"index page 1 of {len(pages)}; call list_findings(page=2) for the rest",
-    }
+    assert pages[0]["header"]["index"]["page"] == 1
+    assert pages[0]["header"]["index"]["pages"] == len(pages)
+    assert "call list_findings(page=2" in pages[0]["header"]["index"]["message"]
+    assert pages[0]["header"]["index"]["cursor"]
     assert all(len(finding["claim"]) <= CLAIM_LIMIT + 80 for page in pages for finding in page["findings"])
     assert any("…[+37 chars: get_finding " in finding["claim"] for page in pages for finding in page["findings"])
 
@@ -95,12 +95,41 @@ def test_dossier_page_budget_and_list_findings_continuation_are_aligned():
     assert all(estimate_tokens(json.dumps(page, sort_keys=True, separators=(",", ":"))) <= 700
                for page in dossier.pages)
     toolbox = Toolbox(repo, "h1")
+    cursor = dossier.payload["header"]["index"]["cursor"]
     for number, dossier_page in enumerate(dossier.pages, 1):
-        result = toolbox.execute("list_findings", {"page": number})
+        result = toolbox.execute("list_findings", {"page": number, "cursor": cursor})
         assert [item["alias"] for item in result["data"]["findings"]] == [
             item["alias"] for item in dossier_page["findings"]
         ]
         assert result["more"] is (number < len(dossier.pages))
+
+
+def test_dossier_cursor_is_immutable_but_default_listing_never_hides_new_findings():
+    repo = _repo()
+    dossier = build_dossier(repo, "h1", token_budget=700)
+    cursor = dossier.payload["header"]["index"]["cursor"]
+    repo.save_candidate({
+        "id": "finding-after-dossier", "hunt_id": "h1", "rule_id": "host.test",
+        "rule_version": "1", "claim": "new pivot finding", "claim_type": "observed_action",
+        "event_ids": ["event-0"], "predicate_fields": [], "entities": [["host", "web01", "host"]],
+        "ts": T, "severity": "critical", "confidence": "high", "lane": "urgent",
+        "priority": 999.0, "priority_reasons": [], "gate_results": {},
+        "benign_alternatives": [], "next_checks": [], "group_key": "", "source_case_id": "s1",
+        "source_anchor_id": "finding-0", "source_link_id": "link-new",
+    })
+    toolbox = Toolbox(repo, "h1")
+
+    snapshot = [item["alias"] for number in range(1, len(dossier.pages) + 1)
+                for item in toolbox.execute("list_findings", {
+                    "page": number, "cursor": cursor,
+                })["data"]["findings"]]
+    live = toolbox.execute("list_findings", {"page": 1})
+
+    assert snapshot == [item["alias"] for page in dossier.pages for item in page["findings"]]
+    assert live["counts"]["total"] == 9  # eight reportable findings plus the context item
+    assert toolbox.aliases.alias_for("F", "finding-after-dossier") in {
+        item["alias"] for item in live["data"]["findings"]
+    }
 
 
 def test_dossier_includes_exact_coverage_gaps_context_counts_and_remaining_budget():
