@@ -295,7 +295,7 @@ def test_ssh_on_the_tls_port_is_a_mismatch_lead():
     hit = eve("x", src="10.0.0.5", dst=ATTACKER, dport=443, app_proto="ssh", c2s=4000, s2c=9000, pkts_s=12)
     [m] = run(ProtocolPortMismatch(), events(hit))
     assert m.proposed_lane == "lead" and m.claim_type == "network_observation"
-    assert f"Suricata identified ssh on 1 connection from 10.0.0.5 to {ATTACKER} on tcp/443" in m.claim
+    assert f"Suricata identified ssh on 1 connection to {ATTACKER} on tcp/443 from 1 source (10.0.0.5: 1)" in m.claim
     assert "tcp/443 is registered here for tls; ssh is registered on tcp 22" in m.claim
     assert "parser's judgement" in m.claim
 
@@ -334,10 +334,10 @@ def test_data_carrying_flow_to_a_registered_port_with_no_protocol_is_a_lead():
                 start=T0 + timedelta(minutes=i)) for i in range(3)]
     hits.append(eve("ok", sport=50100, dst=ATTACKER, dport=80, app_proto="http", c2s=900, s2c=5000))
     [m] = run(ProtocolPortMismatch(), events(*hits))
-    assert f"3 connections from 10.0.0.5 to {ATTACKER} on tcp/80" in m.claim
+    assert f"3 connections to {ATTACKER} on tcp/80 from 1 source (10.0.0.5: 3)" in m.claim
     assert "Suricata recorded no app_proto on 3 flow records" in m.claim
     assert "registered here for http, which Suricata can parse" in m.claim
-    assert "Suricata wrote 4 flow records between them on this port, identified as http 1" in m.claim
+    assert f"Suricata wrote 4 flow records to {ATTACKER} on this port, identified as http 1" in m.claim
     assert "not proof that a different protocol was used" in m.claim and len(m.events) == 3
 
 
@@ -355,7 +355,7 @@ def test_other_sensor_identifying_the_same_connection_clears_the_unidentified_vi
 
 
 def test_handshake_only_connections_to_registered_ports_are_not_unidentified_traffic():
-    hit = eve("h", dst=ATTACKER, dport=80, c2s=280, s2c=200, pkts_s=2, state="closed")
+    hit = eve("h", dst=ATTACKER, dport=80, c2s=280, s2c=200, pkts_c=4, pkts_s=3, state="closed")
     rule = ProtocolPortMismatch()
     assert run(rule, events(hit)) == [] and rule.evaluated == 1
 
@@ -368,8 +368,8 @@ def test_kafka_without_a_suricata_parser_is_silent_and_partial_arkime_recognitio
     arkime = [ark(f"a{i}", sport=51000 + i, dst="10.0.3.9", dport=9092, protocols=["kafka"] if i < 2 else None,
                   c2s=5000, s2c=9000, data_c=3000, data_s=7000) for i in range(30)]
     [m] = run(ProtocolPortMismatch(), events(*arkime))
-    assert "28 connections from 10.0.0.5 to 10.0.3.9 on tcp/9092" in m.claim
-    assert "Arkime wrote 30 session records between them on this port, identified as kafka 2" in m.claim
+    assert "28 connections to 10.0.3.9 on tcp/9092 from 1 source (10.0.0.5: 28)" in m.claim
+    assert "Arkime wrote 30 session records to 10.0.3.9 on this port, identified as kafka 2" in m.claim
     assert m.proposed_lane == "lead"
 
 
@@ -402,6 +402,7 @@ def test_long_unidentified_connection_is_stitched_and_references_the_long_connec
     [m] = run(rule, events(*chunks(4)))
     assert m.proposed_lane == "lead" and m.severity == "medium"
     assert f"1 connection from 10.0.0.5 to {ATTACKER} on tcp/4444 lasted at least 30 minutes" in m.claim
+    assert "tcp/4444 is registered here for no protocol" in m.claim and "hunt window is counted" not in m.claim
     assert "the longest ran 48 minutes" in m.claim and "(4 Arkime session records)" in m.claim
     assert any("net.long_external_connection" in note for note in m.notes)
     assert len(m.events) == 4
@@ -514,3 +515,148 @@ def test_missing_byte_counters_are_partial_and_netflow_is_not_read():
 def test_upload_boundary_at_exactly_the_volume_and_ratio():
     [m] = run(OutboundVolumeAsymmetry(), events(upload("u", out=50 * MIB, back=5 * MIB)))
     assert "10.0:1" in m.claim
+
+
+# ---- review fixes: sweep citations, high-lane window, transports, external silence -------------------------
+
+def _silent_sweep(n, *, start, prefix="10.0.", proto="TCP", dport=445, first_id=0, src="10.0.0.5"):
+    return [eve(f"w{first_id + i}", proto=proto, src=src, sport=None if proto == "ICMP" else 30000 + i,
+                dst=f"{prefix}{100 + i // 200}.{i % 200 + 1}", dport=None if proto == "ICMP" else dport,
+                start=start + timedelta(seconds=i)) for i in range(n)]
+
+
+def test_high_sweep_after_heavy_polling_cites_the_sweep_records():
+    # 30 answered hosts polled every 10 minutes for 3 hours: 540 records, each one a new 5-minute run
+    polling = [eve(f"p{r}_{h}", sport=20000 + r * 40 + h, dst=f"10.0.9.{h + 1}", start=T0 + timedelta(minutes=10 * r),
+                   pkts_s=3, s2c=400) for r in range(18) for h in range(30)]
+    sweep = _silent_sweep(100, start=T0 + timedelta(hours=4))
+    [m] = run(HorizontalSweep(), events(*polling, *sweep))
+    assert m.proposed_lane == "high"
+    swept = {f"10.0.100.{i + 1}" for i in range(100)}
+    cited = [e.get("destination.ip") for e in m.events]
+    assert len(cited) == 20 and set(cited) <= swept
+
+
+def test_a_silent_sweep_in_a_quieter_hour_is_high_although_a_busier_hour_answered():
+    answered = [eve(f"a{i}", sport=20000 + i, dst=f"10.0.{50 + i // 200}.{i % 200 + 1}",
+                    start=T0 + timedelta(seconds=i), pkts_s=3, s2c=400) for i in range(120)]
+    silent = _silent_sweep(70, start=T0 + timedelta(hours=3))
+    [m] = run(HorizontalSweep(), events(*answered, *silent))
+    assert m.proposed_lane == "high"
+    assert "70 of 70 never answered" in m.claim
+    assert "lane window" in m.claim and "2024-11-18T17:00:00+00:00" in m.claim
+
+
+@pytest.mark.parametrize("proto,dport", [("UDP", 161), ("ICMP", None)])
+def test_silent_udp_or_untyped_icmp_sweeps_stay_leads(proto, dport):
+    [m] = run(HorizontalSweep(), events(*_silent_sweep(100, start=T0, proto=proto, dport=dport)))
+    assert m.proposed_lane == "lead"
+
+
+def test_external_fan_out_that_is_answered_is_browsing_not_a_sweep():
+    browsing = [eve(f"b{i}", sport=20000 + i, dst=f"198.51.100.{i + 1}", dport=443, start=T0 + timedelta(seconds=i),
+                    pkts_s=10, s2c=9000) for i in range(120)]
+    assert run(HorizontalSweep(), events(*browsing)) == []
+    silent = _silent_sweep(60, start=T0, prefix="198.51.", dport=445)
+    [m] = run(HorizontalSweep(), events(*silent))
+    assert m.proposed_lane == "lead" and "60 distinct external addresses on tcp/445" in m.claim
+
+
+# ---- review fixes: long rule on registered ports a sensor cannot parse, reversed views, payload estimate ------
+
+def test_three_hour_unidentified_flow_on_tcp_2222_is_a_long_lead():
+    hit = eve("e", sport=51000, dst=ATTACKER, dport=2222, seconds=3 * 3600, c2s=90000, s2c=400000, pkts_c=600,
+              pkts_s=900)
+    [m] = run(LongUnidentifiedSession(), events(hit))
+    assert "on tcp/2222" in m.claim and "registered here for no protocol" in m.claim
+
+
+def test_long_unidentified_on_a_registered_port_the_sensor_cannot_parse_is_judged():
+    hit = eve("k", sport=51000, dst="10.0.3.9", dport=9092, seconds=3 * 3600, c2s=90000, s2c=400000, pkts_c=600,
+              pkts_s=900)
+    [m] = run(LongUnidentifiedSession(), events(hit))
+    assert "tcp/9092 is registered here for kafka, which Suricata cannot parse" in m.claim
+
+
+def test_long_unidentified_on_a_registered_port_a_sensor_parses_belongs_to_the_mismatch_rule():
+    flow = eve("k", sport=51000, dst="10.0.3.9", dport=9092, seconds=3 * 3600, c2s=90000, s2c=400000, pkts_c=600,
+               pkts_s=900)
+    session = ark("a", sport=51000, dst="10.0.3.9", dport=9092, seconds=3 * 3600, c2s=90000, s2c=400000,
+                  data_c=50000, data_s=300000)
+    assert run(LongUnidentifiedSession(), events(flow, session)) == []
+
+
+def test_implant_on_source_port_443_to_a_high_port_is_judged():
+    hit = eve("i", sport=443, dst=ATTACKER, dport=45000, seconds=3 * 3600, c2s=90000, s2c=400000, pkts_c=600,
+              pkts_s=900)
+    [m] = run(LongUnidentifiedSession(), events(hit))
+    assert "on tcp/45000" in m.claim
+
+
+def test_reversed_view_from_a_port_the_sensor_cannot_parse_is_skipped():
+    # Suricata has no Kafka parser: a broker's side seen first says nothing about the protocol
+    hit = eve("r", src="10.0.3.9", sport=9092, dst="10.0.0.5", dport=45000, seconds=3 * 3600, c2s=90000,
+              s2c=400000, pkts_c=600, pkts_s=900)
+    rule = LongUnidentifiedSession()
+    assert run(rule, events(hit)) == [] and rule.evaluated == 1
+
+
+def test_keepalive_only_suricata_flows_are_not_data_carrying():
+    # every packet is header-sized: 66 bytes each
+    keepalive = eve("k", sport=51000, dst=ATTACKER, dport=4444, seconds=3 * 3600, c2s=200 * 66, s2c=200 * 66,
+                    pkts_c=200, pkts_s=200)
+    assert run(LongUnidentifiedSession(), events(keepalive)) == []
+    web = eve("w", dst=ATTACKER, dport=80, c2s=40 * 66, s2c=40 * 66, pkts_c=40, pkts_s=40)
+    assert run(ProtocolPortMismatch(), events(web)) == []
+
+
+def test_enip_is_registered_on_udp_2222_not_tcp_2222():
+    from romulus.detect.flows import expected_protocols
+    assert expected_protocols("udp", 2222) == {"enip"} and expected_protocols("tcp", 2222) == frozenset()
+    assert "enip" in expected_protocols("tcp", 44818) and "tls" in expected_protocols("tcp", 6514)
+
+
+# ---- review fixes: mismatch grouping per destination, dynamic protocols -----------------------------------
+
+def test_unidentified_traffic_to_one_destination_port_is_one_item_listing_every_source():
+    hits = [eve(f"u{i}", src=f"10.0.0.{5 + i % 2}", sport=50000 + i, dst=ATTACKER, dport=80, c2s=3000, s2c=8000,
+                pkts_s=8) for i in range(5)]
+    [m] = run(ProtocolPortMismatch(), events(*hits))
+    assert f"5 connections to {ATTACKER} on tcp/80 from 2 sources (10.0.0.5: 3, 10.0.0.6: 2)" in m.claim
+
+
+def test_mismatch_from_many_sources_is_one_item_per_destination_port_and_protocol():
+    hits = [eve(f"h{i}", src=f"10.0.0.{5 + i}", dst=ATTACKER, dport=4444, app_proto="http", c2s=4000, s2c=9000,
+                pkts_s=12) for i in range(3)]
+    [m] = run(ProtocolPortMismatch(), events(*hits))
+    assert "from 3 sources (10.0.0.5: 1, 10.0.0.6: 1, 10.0.0.7: 1)" in m.claim
+
+
+def test_dynamic_protocols_are_exempt_on_any_port():
+    hit = eve("rpc", dport=8080, app_proto="dcerpc", c2s=900, s2c=5000)
+    assert run(ProtocolPortMismatch(), events(hit)) == []
+
+
+# ---- order independence of the other rules ----------------------------------------------------------------
+
+def _claims(rule_cls, evs):
+    return [(m.claim, m.proposed_lane, [e.id for e in m.events]) for m in run(rule_cls(), evs)]
+
+
+@pytest.mark.parametrize("rule_cls,hits", [
+    (ProtocolPortMismatch, [eve(f"u{i}", src=f"10.0.0.{5 + i % 3}", sport=50000 + i, dst=ATTACKER, dport=80,
+                                c2s=3000, s2c=8000, pkts_s=8, start=T0 + timedelta(seconds=i)) for i in range(12)]
+     + [eve(f"h{i}", src=f"10.0.0.{5 + i}", dst=ATTACKER, dport=4444, app_proto="http", c2s=4000, s2c=9000,
+            pkts_s=12) for i in range(3)]),
+    (LongUnidentifiedSession, chunks(4) + chunks(1, prefix="s", sport=52000, start=T0 + timedelta(hours=2))
+     + chunks(5, prefix="u", proto=17, dst="10.0.4.4", dport=31337)),
+    (OutboundVolumeAsymmetry, [upload(f"u{i}", out=20 * MIB, back=MIB // 2, sport=50000 + i,
+                                      start=T0 + timedelta(minutes=i)) for i in range(4)]
+     + [upload("v0", sensor="arkime", out=19 * MIB, back=MIB // 2, sport=50000), upload("o", dst="198.51.100.7")]),
+])
+def test_flow_rule_output_is_independent_of_record_order(rule_cls, hits):
+    evs = events(*hits)
+    shuffled = list(evs)
+    random.Random(11).shuffle(shuffled)
+    first = _claims(rule_cls, evs)
+    assert first and first == _claims(rule_cls, shuffled)
