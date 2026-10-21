@@ -2,6 +2,7 @@
 reach of a session or lineage into one candidate per (rule, group key)."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from romulus.decide.policy import Decision, decide
@@ -76,12 +77,22 @@ def _session_of(event: TypedEvent, anchor: ContextAnchor, link: ContextLink) -> 
     return (event.host, event.get("host.boot.id"), session if session is not None else f"lin:{anchor.id}")
 
 
+def _content_key(pair: tuple) -> tuple:
+    # Anchor and link ids are derived from hunt-specific candidate ids, so ordering by them would pick a
+    # different reach in an identical hunt. Typed event ids are content-derived and stable across hunts.
+    anchor, link = pair
+    return (0 if link.strength == "observed" else 1,
+            tuple(sorted(event.id for event in anchor.events)),
+            link.link_type,
+            json.dumps(link.key, sort_keys=True, default=str),
+            tuple(sorted(event.id for event in link.evidence_events)))
+
+
 def _representative(pairs: list[tuple]) -> tuple[ContextAnchor, ContextLink]:
-    """The deterministic representative reach: an observed link beats inferred, then the lowest (anchor, link)
-    id. The merged claim's wording and the candidate's source anchor/link come from it."""
-    anchor, link = min(pairs, key=lambda pair: (0 if pair[1].strength == "observed" else 1,
-                                                pair[0].id, pair[1].id))
-    return anchor, link
+    """The deterministic representative reach: an observed link beats inferred, then content order (the
+    anchor's records, link type, link key). The merged claim's wording and the candidate's source anchor/link
+    come from it, so it must not depend on hunt-specific ids."""
+    return min(pairs, key=_content_key)
 
 
 def _reach_descriptors(pairs: list[tuple]) -> list[dict]:
@@ -100,8 +111,12 @@ def _publish_context(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
     event_ids = sorted({event.id for event in match.events})
     predicate = [{"field": p.field, "value": p.value, "origin": p.origin} for p in match.predicate]
     entities = [list(entity) for entity in match.entities]
-    salient = {"claim": match.claim, "lane": decision.lane, "severity": decision.severity,
-               "event_ids": event_ids, "predicate": predicate, "entities": entities, "reaches": reaches}
+    # The claim names the representative anchor and link by hunt-specific ids; the digest uses placeholders.
+    claim_shape = match.claim.replace(rep_link.id, "<link>").replace(rep_anchor.id, "<anchor>")
+    salient = {"claim": claim_shape, "lane": decision.lane, "severity": decision.severity,
+               "event_ids": event_ids, "predicate": predicate, "entities": entities,
+               # reaches by content, not by hunt-specific ids, so an identical hunt yields the same digest
+               "reaches": sorted(json.dumps(_content_key(pair), default=str) for pair in pairs)}
     finalize_digest = digest(salient)
     gate_results = {**decision.gates, "_notes": decision.notes, "_context_reaches": reaches,
                     "_finalize_digest": finalize_digest}

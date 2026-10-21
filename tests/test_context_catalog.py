@@ -794,3 +794,20 @@ def test_entry_point_internal_source_not_promoted():
     link_ = ContextLink(id="L", link_type="login_session", strength="observed",
                         key={"process.session_id": 42}, evidence_events=[], status="complete")
     assert EntryPointPromotion().consume_linked(anchor("credential_access"), link_, [internal, sourceless]) == []
+
+
+def test_the_representative_reach_does_not_depend_on_hunt_specific_ids():
+    # One anchor reaches the same session through two links; an identical hunt names them differently.
+    def run(lineage_id, session_id):
+        repo = _repo()
+        _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
+        _seed_link(repo, "h1", lineage_id, "F-A", [exec_event("id", ["id"], executable="/usr/bin/id"),
+                                                    exec_event("uname", ["uname", "-a"], executable="/usr/bin/uname")])
+        _seed_link(repo, "h1", session_id, "F-A", [exec_event("ps", ["ps", "aux"], executable="/usr/bin/ps")],
+                   link_type="login_session")
+        finalize_context(repo, "h1")
+        # the report compares hunts with ids mapped to content keys, so the link id itself is masked here
+        return [(c["rule_id"], c["lane"], c["claim"].replace(lineage_id, "<L>").replace(session_id, "<L>"),
+                 sorted(c["event_ids"]), c["gate_results"]["_finalize_digest"])
+                for c in sorted(_discovery(repo.candidates("h1")), key=lambda c: c["claim"])]
+    assert run("L-1", "L-2") == run("L-2", "L-1")
