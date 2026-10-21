@@ -186,7 +186,7 @@ class _HostContextRule(ContextPlaybook):
 
 # ================================================================================================
 # Post-access discovery (T1033, T1082, T1016, T1049, T1057, T1083, T1087, T1069, T1007, T1518,
-# T1135, T1201, T1680).
+# T1135, T1201, T1680, T1120).
 # ================================================================================================
 
 _NAME_DISCOVERY = {
@@ -206,6 +206,10 @@ _NAME_DISCOVERY = {
     "lsblk": ("T1680", "local-storage discovery"), "blkid": ("T1680", "local-storage discovery"),
     "tree": ("T1083", "file-and-directory discovery"), "locate": ("T1083", "file-and-directory discovery"),
     "showmount": ("T1135", "network-share discovery"),
+    "lsusb": ("T1120", "peripheral-device discovery"), "lspci": ("T1120", "peripheral-device discovery"),
+    "lsscsi": ("T1120", "peripheral-device discovery"), "hwinfo": ("T1120", "peripheral-device discovery"),
+    "usb-devices": ("T1120", "peripheral-device discovery"), "lsdev": ("T1120", "peripheral-device discovery"),
+    "lspcmcia": ("T1120", "peripheral-device discovery"), "lsinput": ("T1120", "peripheral-device discovery"),
 }
 _DISCOVERY_FILES = {
     "/etc/passwd": ("T1087", "local-account enumeration"),
@@ -318,7 +322,7 @@ def classify_discovery(name: str, args: list[str], cwd: str | None) -> tuple[str
 
 class PostAccessDiscovery(_HostContextRule):
     id = "context.post_access_discovery"
-    version = "3"
+    version = "4"
     title = "Discovery commands in an anchored session or process lineage"
     anchor_class = "execution"
     families = ("process_exec",)
@@ -328,7 +332,7 @@ class PostAccessDiscovery(_HostContextRule):
                             "scope, or in records with no exec, proves nothing")
     severity, lane = "medium", "lead"
     attack = ("T1033", "T1082", "T1016", "T1049", "T1057", "T1083", "T1087", "T1069",
-              "T1007", "T1518", "T1135", "T1201", "T1680")
+              "T1007", "T1518", "T1135", "T1201", "T1680", "T1120")
     benign = ("administrator troubleshooting after an approved login",
               "inventory, monitoring and compliance scripts", "package-manager list queries")
     next_checks = ("privilege probing or credential-file reads by the same session",
