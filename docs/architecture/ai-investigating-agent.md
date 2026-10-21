@@ -77,7 +77,7 @@ Every argument is typed and validated. Every result carries evidence aliases, co
 | Output | `propose_finding`, `propose_link`, `add_note`, `request_rule` |
 | Control | `finish_session` |
 
-There is no free-form query, file or shell tool, and the model never writes query DSL, Arkime expressions, TShark filters, shell commands or paths. Records a pivot pulls in go through normalization and **every** deterministic detector and context rule; findings those rules produce keep their deterministic provenance and lane.
+Everything from the LLM is input validated. There is no free-form query, file or shell tool, shell commands or paths, and the model never writes query DSL, Arkime expressions, TShark filters directly. Records a pivot pulls in go through normalization and **every** deterministic detector and context rule; findings those rules produce keep their deterministic provenance and lane.
 
 ## Hypotheses
 
