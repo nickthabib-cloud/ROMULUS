@@ -142,6 +142,23 @@ def test_pivot_result_continuation_is_persisted_and_does_not_repeat_source_call(
     assert len(second["data"]["result"]["evidence"]) == 2
 
 
+def test_pivot_cursor_is_bound_to_its_originating_request():
+    repo = _repo()
+    result = PivotResult(status="complete", event_ids=["anchor"], reach_event_ids=["anchor"],
+                         matched_event_count=1)
+    fake = FakeToolExecutor(result)
+    toolbox = Toolbox(repo, "h1", executor=fake, session_id="session-1")
+    first = toolbox.execute("entity_timeline", {**_args(repo), "page": 1, "cursor": None})
+
+    replay = toolbox.execute("ids_alerts", {
+        **_args(repo), "page": 2, "cursor": first["data"]["result"]["cursor"],
+    })
+
+    assert replay["status"] == "refused"
+    assert replay["data"]["error"]["code"] == "cursor_request_mismatch"
+    assert len(fake.calls) == 1
+
+
 def test_pivot_alias_kinds_typed_fields_and_windows_are_refused_before_execution():
     repo = _repo()
     fake = FakeToolExecutor(_result("complete"))

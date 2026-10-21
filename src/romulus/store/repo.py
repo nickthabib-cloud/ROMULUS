@@ -278,14 +278,18 @@ class Repo:
             return None
         return pages
 
-    def save_agent_tool_page_plan(self, hunt_id: str, cursor: str, result: dict) -> None:
+    def save_agent_tool_page_plan(self, hunt_id: str, cursor: str, identity: dict, result: dict) -> None:
         """Persist one immutable tool result so continuation pages never repeat source I/O."""
-        self.audit("system", f"agent.tool_page_plan.{cursor}", hunt_id, {"result": result})
+        self.audit("system", f"agent.tool_page_plan.{cursor}", hunt_id, {
+            "identity": identity, "result": result,
+        })
 
     def agent_tool_page_plan(self, hunt_id: str, cursor: str) -> dict | None:
         row = self.latest_audit(hunt_id, f"agent.tool_page_plan.{cursor}")
-        result = ((row or {}).get("detail") or {}).get("result")
-        return result if isinstance(result, dict) else None
+        detail = (row or {}).get("detail") or {}
+        if not isinstance(detail.get("identity"), dict) or not isinstance(detail.get("result"), dict):
+            return None
+        return {"identity": detail["identity"], "result": detail["result"]}
 
     VALID: ClassVar = {
         "planned": {"running", "canceled"},

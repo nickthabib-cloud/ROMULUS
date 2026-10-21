@@ -526,12 +526,20 @@ class Toolbox:
         return _result("refused", data={"error": {"code": code, "message": message}})
 
     def _run_pivot(self, anchor: dict, request, *, page: int, cursor: str | None) -> dict:
+        identity = _jsonable({
+            "kind": "pivot", "session_id": self.session_id, "anchor": anchor["id"],
+            "request": request.model_dump(mode="json"),
+        })
         if cursor is not None:
-            stored = self.repo.agent_tool_page_plan(self.hunt_id, cursor)
-            if stored is None:
+            plan = self.repo.agent_tool_page_plan(self.hunt_id, cursor)
+            if plan is None:
                 return self._semantic_refusal("unknown_cursor", "the tool cursor is not valid for this hunt")
-            return self._pivot_result(PivotResult.model_validate(stored), page=page, cursor=cursor,
-                                      persist=False)
+            if plan["identity"] != identity:
+                return self._semantic_refusal(
+                    "cursor_request_mismatch", "the cursor belongs to a different tool request",
+                )
+            return self._pivot_result(PivotResult.model_validate(plan["result"]), page=page,
+                                      cursor=cursor, identity=identity, persist=False)
         if page != 1:
             return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
         if self.executor is None or self.session_id is None:
@@ -540,7 +548,7 @@ class Toolbox:
             }})
         anchor_ts = self._utc(anchor["ts"])
         result = self.executor.run(self.session_id, anchor["id"], request, anchor_ts=anchor_ts)
-        return self._pivot_result(result, page=1)
+        return self._pivot_result(result, page=1, identity=identity)
 
     @staticmethod
     def _stored_pivot_result(result: PivotResult, event_ids: list[str]) -> dict:
@@ -566,17 +574,18 @@ class Toolbox:
             "caveats": event.caveats[:5],
         }
 
-    def _pivot_result(self, result: PivotResult, *, page: int, cursor: str | None = None,
-                      persist: bool = True) -> dict:
+    def _pivot_result(self, result: PivotResult, *, page: int, identity: dict,
+                      cursor: str | None = None, persist: bool = True) -> dict:
         event_ids = list(dict.fromkeys(result.reach_event_ids or result.event_ids))
         if cursor is None:
             cursor = "P" + digest({
                 "hunt_id": self.hunt_id, "session_id": self.session_id,
+                "identity": identity,
                 "result": self._stored_pivot_result(result, event_ids),
             })[:20]
         if persist:
             self.repo.save_agent_tool_page_plan(
-                self.hunt_id, cursor, self._stored_pivot_result(result, event_ids),
+                self.hunt_id, cursor, identity, self._stored_pivot_result(result, event_ids),
             )
         start = (page - 1) * ENTITY_EVENT_LIMIT
         page_ids = event_ids[start:start + ENTITY_EVENT_LIMIT]
@@ -688,12 +697,20 @@ class Toolbox:
 
     def _follow_link(self, args: FollowLinkArgs) -> dict:
         anchor = self._anchor(args.anchor)
+        identity = _jsonable({
+            "kind": "follow_link", "session_id": self.session_id, "anchor": anchor["id"],
+            "link_type": args.link_type, "window": args.window,
+        })
         if args.cursor is not None:
-            stored = self.repo.agent_tool_page_plan(self.hunt_id, args.cursor)
-            if stored is None:
+            plan = self.repo.agent_tool_page_plan(self.hunt_id, args.cursor)
+            if plan is None:
                 return self._semantic_refusal("unknown_cursor", "the tool cursor is not valid for this hunt")
-            return self._pivot_result(PivotResult.model_validate(stored), page=args.page,
-                                      cursor=args.cursor, persist=False)
+            if plan["identity"] != identity:
+                return self._semantic_refusal(
+                    "cursor_request_mismatch", "the cursor belongs to a different tool request",
+                )
+            return self._pivot_result(PivotResult.model_validate(plan["result"]), page=args.page,
+                                      cursor=args.cursor, identity=identity, persist=False)
         if args.page != 1:
             return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
         if self.executor is None or self.session_id is None:
@@ -703,4 +720,4 @@ class Toolbox:
         result = self.executor.follow_link(
             self.session_id, anchor["id"], args.link_type, args.window,
         )
-        return self._pivot_result(result, page=1)
+        return self._pivot_result(result, page=1, identity=identity)
