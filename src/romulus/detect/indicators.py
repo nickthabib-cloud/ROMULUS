@@ -245,11 +245,16 @@ class IndicatorMatch(Playbook):
         for fname in DOMAIN_FIELDS:
             candidates += [("domain", fname, v) for v in _as_list(e.get(fname))]
         candidates += [("sni", SNI_FIELD, v) for v in _as_list(e.get(SNI_FIELD))]
+        # an answer whose owner name is the question it answers adds nothing: that name is already matched as the
+        # question. Owner names elsewhere in a response (a CNAME chain), and v1 answer records, which carry no
+        # question, are still answer matches.
+        questions = {v.lower().rstrip(".") for f in ("dns.question.name", "dns.question.names")
+                     for v in _as_list(e.get(f))}
         answers = e.get(ANSWER_FIELD)
         for answer in answers if isinstance(answers, list) else []:
             if not isinstance(answer, dict):
                 continue
-            if isinstance(answer.get("name"), str):
+            if isinstance(answer.get("name"), str) and answer["name"].lower().rstrip(".") not in questions:
                 candidates.append(("dns_answer", ANSWER_FIELD, answer["name"]))
             if answer.get("type") in NAME_DATA_TYPES and isinstance(answer.get("data"), str):
                 candidates.append(("dns_answer", ANSWER_FIELD, answer["data"]))

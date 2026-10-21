@@ -71,6 +71,28 @@ def test_txt_answer_text_is_not_read_as_a_name(rule):
     assert run(rule, events(hit)) == []
 
 
+def test_plain_lookup_with_an_a_answer_is_one_finding(rule):
+    ark = arkime(dns=[dns_obj(["evil.example"], answers=[{"type": "A", "class": "IN", "ttl": 30,
+                                                          "name": "evil.example", "ip": "192.0.2.9"}])])
+    suri = eve("v2a", {"event_type": "dns", "dns": {"version": 2, "type": "answer", "rrname": "evil.example",
+                                                    "rrtype": "A",
+                                                    "answers": [{"rrname": "evil.example", "rrtype": "A",
+                                                                 "rdata": "192.0.2.9"}]}})
+    for hit in (ark, suri):
+        r = IndicatorMatch(rule.set)
+        m = run(r, events(hit))
+        assert [x.group_key.split("|")[1] for x in m] == ["domain"]
+
+
+def test_cname_target_beside_the_question_is_still_an_answer_match(rule):
+    hit = eve("v2c", {"event_type": "dns", "dns": {"version": 2, "type": "answer", "rrname": "www.shop.example",
+                                                   "rrtype": "A",
+                                                   "answers": [{"rrname": "www.shop.example", "rrtype": "CNAME",
+                                                                "rdata": "edge.evil.example"}]}})
+    m = run(rule, events(hit))
+    assert len(m) == 1 and "a DNS answer names 'edge.evil.example'" in m[0].claim
+
+
 def test_sni_matches_with_its_own_wording(rule):
     hit = eve("s1", {"event_type": "tls", "tls": {"sni": "login.evil.example", "version": "TLS 1.3"}})
     m = run(rule, events(hit))
