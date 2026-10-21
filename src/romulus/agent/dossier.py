@@ -9,6 +9,7 @@ from typing import Any
 from romulus.agent.aliases import AliasBook
 from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.provider.budget import AgentBudget, BudgetLimits
+from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.expansion import TIER_PLAN
 from romulus.report.incidents import build_incident_graph
@@ -284,5 +285,12 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
         "expansion": _expansion(repo, hunt_id, aliases),
         "agent_budget": _budget(repo, hunt_id, manifest),
     }
+    base["safety"] = {"flags": injection_flags({
+        "findings": finding_rows,
+        "scope": base["scope"],
+        "entities": base["entities"],
+        "incidents": base["incidents"],
+        "expansion": base["expansion"],
+    })}
     pages = _paginate(base, finding_rows, token_budget)
     return Dossier(payload=pages[0], pages=pages)

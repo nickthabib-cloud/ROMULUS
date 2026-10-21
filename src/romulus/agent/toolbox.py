@@ -24,6 +24,7 @@ from romulus.agent.aliases import (
 )
 from romulus.agent.models import EntityRef, PivotResult
 from romulus.agent.provider.base import Tool
+from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.typed import TypedEvent
@@ -169,11 +170,15 @@ def _result(status: str, *, coverage: dict | None = None, counts: dict | None = 
             data: dict | None = None, more: bool = False) -> dict:
     if status not in {"complete", "partial", "unsupported", "failed", "refused"}:
         raise ValueError(f"invalid tool result status {status}")
+    result_data = data or {}
+    flags = injection_flags(result_data, "$.data")
+    if flags:
+        result_data = {**result_data, "safety_flags": flags}
     return {
         "status": status,
         "coverage": coverage or {"status": "complete", "gaps": []},
         "counts": counts or {"returned": 0, "total": 0},
-        "data": data or {},
+        "data": result_data,
         "more": bool(more),
     }
 
