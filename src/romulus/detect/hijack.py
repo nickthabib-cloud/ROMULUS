@@ -594,8 +594,8 @@ class NonRootWriteRootExecutedFile(Playbook):
                 if run.auth_id:
                     cited_ids.append(run.auth_id)
             forms = sorted({run.form for run in cited_runs})
-            line = (f"{len(s.ok_ts) + s.failed} root exec record(s) in the window run {s.first[0].path} "
-                    f"({s.detail}; {'; '.join(forms)})")
+            line = (f"{len(s.ok_ts) + s.failed} root exec record(s) in the window execute {s.first[0].path} or name "
+                    f"it as a command in a root shell's command text ({s.detail}; cited forms: {'; '.join(forms)})")
             if n_after:
                 line += (f"; {n_after} of them began after the first write-capable command, the first at "
                          f"{_iso(after.ts)}" if after is not None else

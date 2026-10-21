@@ -445,6 +445,36 @@ def _editor_files(name: str, args: list[str], argv0: str) -> list[str]:
     return [item for item in files if item != "-"]
 
 
+# GNU long options, used to resolve the abbreviations getopt_long accepts (`--in-pl` is `--in-place`).
+_SED_LONG = ("--expression", "--file", "--follow-symlinks", "--in-place", "--line-length", "--null-data",
+             "--zero-terminated", "--posix", "--quiet", "--silent", "--regexp-extended", "--separate", "--sandbox",
+             "--unbuffered", "--debug", "--binary", "--help", "--version")
+_DEST_LONG = {
+    "cp": ("--archive", "--attributes-only", "--backup", "--copy-contents", "--dereference", "--force",
+           "--interactive", "--link", "--no-dereference", "--no-clobber", "--preserve", "--no-preserve", "--parents",
+           "--recursive", "--reflink", "--remove-destination", "--sparse", "--strip-trailing-slashes",
+           "--symbolic-link", "--suffix", "--target-directory", "--no-target-directory", "--update", "--verbose",
+           "--one-file-system", "--context", "--debug", "--keep-directory-symlink", "--help", "--version"),
+    "mv": ("--backup", "--force", "--interactive", "--no-clobber", "--strip-trailing-slashes", "--suffix",
+           "--target-directory", "--no-target-directory", "--update", "--verbose", "--context", "--exchange",
+           "--no-copy", "--debug", "--help", "--version"),
+    "install": ("--backup", "--compare", "--directory", "--group", "--mode", "--owner", "--preserve-timestamps",
+                "--strip", "--strip-program", "--suffix", "--target-directory", "--no-target-directory", "--verbose",
+                "--preserve-context", "--context", "--debug", "--help", "--version"),
+    "ln": ("--backup", "--directory", "--force", "--interactive", "--logical", "--no-dereference", "--physical",
+           "--relative", "--symbolic", "--suffix", "--target-directory", "--no-target-directory", "--verbose",
+           "--help", "--version"),
+}
+
+
+def gnu_long(key: str, options: tuple[str, ...]) -> str | None:
+    """The long option a `--key` names: an exact match, or an unambiguous prefix as getopt_long accepts."""
+    if key in options:
+        return key
+    hits = [option for option in options if option.startswith(key)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _sed_in_place(args: list[str]) -> list[str]:
     """Files GNU sed edits in place (`-i[SUFFIX]`, a grouped `-ni`, `--in-place[=SUFFIX]`); [] when sed only
     writes to stdout. Without -e/-f the first operand is the script, not a file."""
@@ -458,7 +488,7 @@ def _sed_in_place(args: list[str]) -> list[str]:
         elif arg == "--":
             ended = True
         elif arg.startswith("--"):
-            key = arg.split("=", 1)[0]
+            key = gnu_long(arg.split("=", 1)[0], _SED_LONG)
             if key == "--in-place":
                 in_place = True
             elif key in {"--expression", "--file", "--line-length"}:
@@ -532,7 +562,8 @@ def _destination_spec(name: str, args: list[str]) -> tuple[list[str], str | None
         elif arg == "--":
             ended = True
         elif arg.startswith("--"):
-            key, has_value, inline = arg.partition("=")
+            raw_key, has_value, inline = arg.partition("=")
+            key = gnu_long(raw_key, _DEST_LONG[name])
             if key == "--no-target-directory":
                 no_target_dir = True
             elif key == "--directory":
@@ -680,8 +711,11 @@ def write_targets(name: str, args: list[str], cwd: str | None = None,
         raw = [(item, "'curl' was given it as the output file")
                for item in _output_file(args, "o", {"--output"}, _CURL_VALUE_LETTERS)]
     elif name == "wget":
+        expanded = [("--output-document" + arg[len(arg.split("=", 1)[0]):])
+                    if len(arg.split("=", 1)[0]) >= len("--output-d")
+                    and "--output-document".startswith(arg.split("=", 1)[0]) else arg for arg in args]
         raw = [(item, "'wget' was given it as the output document")
-               for item in _output_file(args, "O", {"--output-document"}, _WGET_VALUE_LETTERS)]
+               for item in _output_file(expanded, "O", {"--output-document"}, _WGET_VALUE_LETTERS)]
     elif name in {"scp", "rsync"}:
         operands = client_operands(name, args)
         if len(operands) >= 2 and remote_endpoint(operands[-1]) is None:
