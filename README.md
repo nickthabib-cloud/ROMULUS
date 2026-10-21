@@ -13,6 +13,7 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 ## What it does today
 
 1. **Sweeps** the hunt window across your sources with a catalog of typed detection rules: web shells, reverse shells, credential-file reads, downloads piped to a shell, firewall tampering, privilege-escalation tooling, port scans, beaconing, suspicious IDS alert stacks, indicator matches and much more.
+   
   The goal is to find any malicious activity the telemetry can show, on any mission network. The detection catalog is built from systematic research:
   - MITRE ATT&CK Enterprise and ICS techniques;
   - Public detection corpora (Sigma, CAR, Atomic Red Team, LOLBAS/GTFOBins, ET Open and others);
