@@ -162,6 +162,4 @@ Repository layout:
 - **Next:** the AI investigating agent; deeper network and packet analysis; host rules that can prove negatives from kernel file records.
 - **Then:** detection breadth (Windows/AD, Zeek, Sigma import, ATT&CK coverage matrix), testing on unseen datasets, the executive DOCX report and hardening.
 
-## License
 
-*(To be decided by the owner.)*
