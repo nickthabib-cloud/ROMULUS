@@ -188,6 +188,7 @@ def _assert_gap_listed(manifest: dict, text: str, fault: str, target: str) -> No
     reason = FAULT_REASON[fault]
     gaps = [gap for gap in manifest["coverage"]["gaps"] if gap["target"] == target]
     assert gaps and all(gap["reasons"] for gap in gaps), manifest["coverage"]["gaps"]
+    assert not [r for gap in manifest["coverage"]["gaps"] for r in gap["reasons"] if "no reason recorded" in r]
     assert any(reason in r for gap in gaps for r in gap["reasons"]), gaps
     assert markdown.esc(reason) in text.split("## Coverage", 1)[1]
 

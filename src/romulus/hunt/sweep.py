@@ -34,6 +34,8 @@ DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth"}, "linu
                     **{f"suricata.eve.{t}": NET_FAMILIES for t in ("alert", "flow", "netflow", "dns", "http",
                                                                   "fileinfo", "tls", "ssh")}}
 ALL_FAMILIES = frozenset({"*"})
+WINDOW_ROLLUP_PARTIAL = ("whole-window result over partitions of which one or more were partial, failed or "
+                         "unexecuted (listed separately)")
 
 
 BUCKET_SECONDS = 300
@@ -304,8 +306,10 @@ class Sweep:
                 state = "not_applicable_no_events"
             else:
                 state = "no_match_complete"
+            reasons = (["no source partition of this rule was evaluated"] if not cells else
+                       [WINDOW_ROLLUP_PARTIAL] if any_partial else [])
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
-                                    len(ms) + consumed_matches, evaluated)
+                                    len(ms) + consumed_matches, evaluated, {"reasons": reasons})
         self.close_stage()
 
     def close_stage(self) -> None:
