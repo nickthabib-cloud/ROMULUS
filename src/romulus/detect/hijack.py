@@ -16,20 +16,25 @@ What the evidence shows, and what it does not:
   joined by audit session id or parent pid), a process started by the service manager (pid 1) outside any login
   session, a root process outside any login session whose launcher is not in the records, or a root process in
   another account's login session. A root process in the writer's own login session (the writer elevating their
-  own file) is not this behaviour and is not matched.
+  own file) is set apart: when it is the only root run, the finding is a lead that says so, because a sudo rule
+  running a file its user can edit is the same shape.
 - A non-root write-capable command on a root scheduling configuration path (system crontabs, cron directories,
   root's spool crontab, system unit directories) matches on its own: those files are what root's scheduler runs.
 
 Findings are grouped per (host, writer account, file). The rule reads argv and command text, so it is
 positive-only: it never claims a complete negative.
 
-Kernel file-change contract (family `file_change`). No normalizer in this package produces it yet; on sources that
-lack it the "changed" upgrade is not applicable and claims say the change is not established.
+Kernel file-change contract (family `file_change`, from Linux audit SYSCALL+PATH records). On sources that lack it
+the "changed" upgrade is not applicable and claims say the change is not established.
 - `file.path`: absolute path of the changed file as the kernel recorded it (resolved against the record's CWD).
 - `file.change`: what changed: `content` (opened for writing or truncated), `create`, `rename_target`
-  (another file was renamed onto this path) or `attributes` (mode or owner).
+  (another file was renamed onto this path), `link` (a link was created at this path), `attributes` (mode, owner,
+  extended attributes or times), `delete` or `rename_source` (the file left this path; not a write of it).
 - `process.uid`, `process.user`, `process.auid`, `process.pid`, `process.executable`: the actor, as for exec.
 - outcome: success when the system call succeeded.
+A non-root account's kernel-recorded change of a file a root process runs is a write in its own right: it is
+reported with the root runs even when no write-capable command was recorded (an interactive shell's redirect
+starts no process).
 """
 from __future__ import annotations
 
@@ -40,7 +45,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import ClassVar
 
-from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.base import Match, Playbook, argv_incomplete, pf
 from romulus.detect.correlation import StageMissing
 from romulus.detect.host import _FLAG_ONLY, SCRIPT_FILE_INTERPRETERS, WEB_SERVICE_USERS
 from romulus.detect.linux_argv import canonical, is_under, normalize_path, program, write_targets
@@ -89,6 +94,9 @@ _USR_ALIASES = (("/bin/", "/usr/bin/"), ("/sbin/", "/usr/sbin/"), ("/lib/", "/us
                 ("/lib64/", "/usr/lib64/"), ("/lib32/", "/usr/lib32/"))
 _PSEUDO_FS = ("/dev", "/proc", "/sys")
 _FAMILY_ORDER = {"auth": 0, "file_change": 1, "process_exec": 2}
+# What a kernel file-change record shows was done to the file, in claim wording.
+CHANGE_WORDS = {"content": "opened it for writing", "create": "created it", "rename_target": "renamed a file onto it",
+                "link": "created a link at its path", "attributes": "changed its mode, owner or attributes"}
 WRITE_CITE = 10                 # writer records cited per (host, account, file); the claim gives exact totals
 EXEC_FIRST = 2                  # earliest root runs cited per (host, file, executor)
 AUTH_MEMORY = 1024              # scheduler session records kept per host for citation
@@ -180,6 +188,7 @@ class _Write:
     session: tuple | None   # (boot id, audit session id) of the writing process, when recorded
     web: bool
     assumed: bool           # the path was derived by reading a destination operand as a directory
+    kernel: bool = False    # a kernel file-change record, not a write-capable command
 
 
 @dataclass
@@ -203,7 +212,7 @@ class _Series:
 
 class NonRootWriteRootExecutedFile(Playbook):
     id = "host.nonroot_write_root_executed_file"
-    version = "3"
+    version = "4"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -232,9 +241,9 @@ class NonRootWriteRootExecutedFile(Playbook):
         "telemetry": "Linux auditd EXECVE+SYSCALL+CWD as process_exec (process.executable, process.argv, "
                      "process.uid, process.euid, process.auid, process.session_id, process.pid, process.ppid, "
                      "process.cwd, process.user) and audit USER_START as auth (auth.service, auth.phase, "
-                     "process.session_id, process.pid): present in the lab profile. The file_change family (kernel "
-                     "PATH/write records) is produced by no normalizer yet: the 'changed' upgrade is not applicable "
-                     "on current sources",
+                     "process.session_id, process.pid): present in the lab profile. file_change (audit SYSCALL+PATH "
+                     "records: file.path, file.change, process.uid) proves a change where the audit rules watch the "
+                     "file; the lab watches only some directories, so the 'changed' upgrade applies there only",
         "fidelity": "direct action for 'a write-capable command was started on the file' and 'root ran the file'; "
                     "the file's change is established only by a file_change record; exec outcomes are stated",
         "benign_and_cost": "deployment accounts owning root-run scripts; admins opening root's crontab without "
@@ -263,6 +272,7 @@ class NonRootWriteRootExecutedFile(Playbook):
         self.recent_auth: dict[str, OrderedDict[str, TypedEvent]] = defaultdict(OrderedDict)
         self.daemons: dict[tuple, list[tuple[float, int | None]]] = defaultdict(list)
         self.changes: dict[tuple[str, str], list[tuple[float, str, str, str]]] = defaultdict(list)
+        self.kernel_writes: dict[tuple[str, str], list[_Write]] = defaultdict(list)
         self.file_change_records = 0
 
     # ---------------------------------------------------------------- staging
@@ -315,12 +325,19 @@ class NonRootWriteRootExecutedFile(Playbook):
     def _file_change(self, event: TypedEvent) -> None:
         path = event.get("file.path")
         root = _is_root(event)
-        if not path or not str(path).startswith("/") or root is None:
+        change = event.get("file.change")
+        if change in ("delete", "rename_source"):
+            self.evaluated += 1                 # the file left this path: not a write of it, whatever the path
+            self.file_change_records += 1
+            return
+        if not path or not str(path).startswith("/") or root is None or not change:
             self.missing_required += 1
             return
         self.evaluated += 1
         self.file_change_records += 1
-        if root or event.outcome == Outcome.failure:
+        # root, a setuid-root writer (it writes as root) and a failed call change nothing a non-root account
+        # controls
+        if root or event.outcome == Outcome.failure or str(event.get("process.euid", "")) == "0":
             return
         key = (event.host or "", path_key(normalize_path(str(path))))
         account = _account(event)
@@ -328,7 +345,12 @@ class NonRootWriteRootExecutedFile(Playbook):
         if sum(1 for item in entries if item[2] == account) >= WRITE_CITE:
             return
         self._stage(event)
-        entries.append((event.ts.timestamp(), event.id, account, str(event.get("file.change") or "change")))
+        entries.append((event.ts.timestamp(), event.id, account, str(change)))
+        session = event.get("process.session_id")
+        self.kernel_writes[key].append(_Write(
+            event.ts.timestamp(), event.id, normalize_path(str(path)), f"a kernel file-change record ({change})",
+            account, _uid(event), (event.get("host.boot.id"), session) if session is not None else None,
+            event.get("process.user") in WEB_SERVICE_USERS, False, kernel=True))
 
     def _exec(self, event: TypedEvent) -> None:
         argv = event.get("process.argv")
@@ -341,12 +363,17 @@ class NonRootWriteRootExecutedFile(Playbook):
             self.missing_required += 1          # neither a writer nor a root executor can be decided
             return
         self.evaluated += 1
+        incomplete = argv_incomplete(event)
+        if incomplete:
+            self.missing_required += 1          # some arguments were lost: never a clean evaluation
         if root:
             if _auid(event) is None and isinstance(event.get("process.pid"), int):
                 self.daemons[(event.host, event.get("process.pid"))].append(
                     (event.ts.timestamp(), event.get("process.ppid")))
             self._root_run(event, prog)
-        elif str(event.get("process.euid", "")) != "0":    # a setuid-root program writes as root
+        elif str(event.get("process.euid", "")) != "0" and not incomplete:
+            # a setuid-root program writes as root; a write target is often the last operand, which an incomplete
+            # argv cannot show
             self._writer(event, prog, argv)
 
     # ---------------------------------------------------------------- writer side
@@ -461,7 +488,7 @@ class NonRootWriteRootExecutedFile(Playbook):
                 series.failed += 1
             else:
                 bisect.insort(series.ok_ts, run.ts)
-                for write in self.writes.get(key, ()):
+                for write in (*self.writes.get(key, ()), *self.kernel_writes.get(key, ())):
                     if write.ts < run.ts and write.event_id not in series.after:
                         series.after[write.event_id] = run
                         cite = True
@@ -566,26 +593,38 @@ class NonRootWriteRootExecutedFile(Playbook):
 
     def finalize(self):
         out = []
-        for key in sorted(self.writes):
+        for key in sorted(set(self.writes) | set(self.kernel_writes)):
             by_account: dict[str, list[_Write]] = defaultdict(list)
-            for write in self.writes[key]:
+            for write in (*self.writes.get(key, ()), *self.kernel_writes.get(key, ())):
                 by_account[write.account].append(write)
             for account in sorted(by_account):
-                writes = sorted(by_account[account], key=lambda w: (w.ts, w.event_id))
-                match = self._finding(key[0], key[1], account, writes)
+                actors = sorted(by_account[account], key=lambda w: (w.ts, w.event_id))
+                match = self._finding(key[0], key[1], account, [w for w in actors if not w.kernel],
+                                      [w for w in actors if w.kernel])
                 if match is not None:
                     out.append(match)
         return out
 
-    def _finding(self, host: str, pkey: str, account: str, writes: list[_Write]) -> Match | None:
-        series = sorted(((executor, s) for executor, s in self.runs.get((host, pkey), {}).items()
-                         if not _own_elevation(executor, writes)), key=lambda item: str(item[0]))
+    def _finding(self, host: str, pkey: str, account: str, writes: list[_Write],
+                 kernel: list[_Write] = ()) -> Match | None:
+        """`writes` are write-capable commands; `kernel` are kernel file-change records by the same account. With
+        no command, the kernel records are the writes, and a finding needs a root run of the file."""
+        every = sorted(self.runs.get((host, pkey), {}).items(), key=lambda item: str(item[0]))
+        series = [(executor, s) for executor, s in every if not _own_elevation(executor, [*writes, *kernel])]
         # A path derived by assuming a destination is a directory can join a root run, but on its own it is not
         # evidence of a write to root's schedule.
         config = schedule_config(pkey) if any(not w.assumed for w in writes) else None
+        own_only = False
         if not series and config is None:
-            return None
-        first, web = writes[0], any(w.web for w in writes)
+            # Only the writer's own elevation ran the file. That is never dropped: a sudo rule that runs a file its
+            # user can edit is the same shape (T1548.003). It is reported as a lead.
+            series = [(executor, s) for executor, s in every if _own_elevation(executor, [*writes, *kernel])]
+            if not series:
+                return None
+            own_only = True
+        actors = writes or list(kernel)
+        first, web = actors[0], any(w.web for w in (*writes, *kernel))
+        since = "the first write-capable command" if writes else "the first kernel file-change record"
         changes = sorted(c for c in self.changes.get((host, pkey), ()) if c[2] == account)
         content_changes = [c for c in changes if c[3] != "attributes"]
         total_writes = self.write_counts[(host, pkey, account)]
@@ -613,12 +652,12 @@ class NonRootWriteRootExecutedFile(Playbook):
             line = (f"{len(s.ok_ts) + s.failed} root exec record(s) in the window execute {s.first[0].path} or name "
                     f"it as a command in a root shell's command text ({s.detail}; cited forms: {'; '.join(forms)})")
             if n_after:
-                line += (f"; {n_after} of them began after the first write-capable command, the first at "
+                line += (f"; {n_after} of them began after {since}, the first at "
                          f"{_iso(after.ts)}" if after is not None else
-                         f"; {n_after} of them began after the first write-capable command (the record of the "
+                         f"; {n_after} of them began after {since} (the record of the "
                          f"first of them is not among the citations)")
             else:
-                line += ("; none whose exec did not fail began after the first write-capable command (they are "
+                line += (f"; none whose exec did not fail began after {since} (they are "
                          "earlier, or at the same recorded time)")
             if s.failed:
                 line += f"; {s.failed} of them recorded a failed exec"
@@ -626,25 +665,36 @@ class NonRootWriteRootExecutedFile(Playbook):
 
         events = self._events(cited_ids)
         cited = sorted(events.values(), key=lambda e: (e.ts, e.id))
-        writer_events = [events[w.event_id] for w in writes]
-        uids = sorted({w.uid for w in writes if w.uid})
+        writer_events = [events[w.event_id] for w in actors]
+        uids = sorted({w.uid for w in actors if w.uid})
         who = f"account '{account}'" + (f" (uid {', '.join(uids)})" if uids and not account.startswith("uid ")
                                          else "")
         if web:
             who += ", a web-service account,"
         count = "a write-capable command" if total_writes == 1 else f"{total_writes} write-capable commands"
-        when = (f"at {_iso(first.ts)}" if writes[-1].ts == first.ts
-                else f"from {_iso(first.ts)} to {_iso(writes[-1].ts)}")
-        claim = (f"On {host}, {who} ran {count} on {first.path} {when}: "
-                 f"{_listed(sorted({w.form for w in writes}))}; {_tally(writer_events)}.")
-        if total_writes > len(writes):
+        when = (f"at {_iso(first.ts)}" if actors[-1].ts == first.ts
+                else f"from {_iso(first.ts)} to {_iso(actors[-1].ts)}")
+        if writes:
+            claim = (f"On {host}, {who} ran {count} on {first.path} {when}: "
+                     f"{_listed(sorted({w.form for w in writes}))}; {_tally(writer_events)}.")
+        else:
+            claim = (f"On {host}, kernel file-change records show {who} acting on {first.path} {when}: "
+                     f"{_listed(sorted({CHANGE_WORDS.get(c[3], c[3]) for c in changes}))}; no write-capable command "
+                     f"on the file was recorded (an interactive shell's redirect or a program's own file writes start "
+                     f"no process).")
+        if writes and total_writes > len(writes):
             claim += f" The earliest {len(writes)} of these records are cited."
         claim += "".join(f" {line[0].upper()}{line[1:]}." for line in exec_lines)
         if config is not None:
             claim += f" {first.path} is {config[0]}, which root's scheduler or service manager reads."
+        if own_only:
+            claim += (" Every root run is the writer's own elevation (in the writer's own audit session or under its "
+                      "own login uid): the writer ran its own writable file as root. An administrator running their "
+                      "own script through sudo looks like this; so does a sudo or su rule that runs a file its user "
+                      "can edit, which gives that account root whenever it edits the file.")
         if changes:
-            claim += (f" A kernel file-change record shows this account changed the file ({changes[0][3]}) at "
-                      f"{_iso(changes[0][0])}.")
+            claim += (f" A kernel file-change record shows this account {CHANGE_WORDS.get(changes[0][3], changes[0][3])}"
+                      f" at {_iso(changes[0][0])}.")
         elif self.file_change_records:
             claim += (" No kernel file-change record for this file and account was retrieved, so whether the "
                       "file's content changed is not established.")
@@ -653,13 +703,20 @@ class NonRootWriteRootExecutedFile(Playbook):
                       "changed is not established (the retrieved telemetry carries no kernel file-change records).")
 
         # Lanes. A web-service account has no business writing what root runs: high on the command alone, urgent
-        # once a kernel record proves a content change and root ran the file after it. Another non-root account is a
-        # lead (deployment accounts own such files) until that same proof raises it to high.
+        # once a kernel file-change record of a content kind (opened for writing, created, renamed onto, linked; an
+        # open for writing shows write intent, not the bytes written) is followed by a non-failed root run. Another
+        # non-root account is a lead (deployment accounts own such files) until that same record raises it to high.
+        # A writer that only elevated its own file is a lead.
         if web:
             lane = "urgent" if run_after_change else "high"
         else:
             lane = "high" if run_after_change else "lead"
         notes = []
+        if own_only:
+            lane = "lead"
+            techniques.add("T1548.003")
+            notes.append("own elevation is matched by audit session id and boot id, or by login uid; where the boot "
+                         "id is not recorded, a session id reused after a reboot can match a different login")
         if not changes and lane in ("urgent", "high") and not self.write_ok[(host, pkey, account)]:
             lane = "lead"
             notes.append("lane lowered: every recorded exec of the write-capable command failed")

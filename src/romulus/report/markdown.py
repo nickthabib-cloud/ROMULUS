@@ -43,6 +43,9 @@ def outcome_sentence(m: dict) -> str:
              "that the environment is clean.")
     if partial:
         s += f" The hunt is {m['execution_state']}: some sources, windows or tasks were not fully assessed."
+    unresolved = {rule for gap in (m.get("coverage") or {}).get("gaps") or [] for rule in gap["rules"]}
+    if unresolved:
+        s += f" {len(unresolved)} rule(s) have unresolved negatives; see Coverage gaps."
     return s
 
 
@@ -326,6 +329,29 @@ def render(m: dict, banner: str = BANNER) -> str:
     for r in m["coverage"]["rules"]:
         out.append(f"| {esc(r['rule_id'])} | {r['records_evaluated']} | {esc(r['negative_claim'])} | "
                    f"{esc(json.dumps(r['states'], sort_keys=True))} |")
+    gaps = m["coverage"].get("gaps") or []
+    out += ["", "### Coverage gaps", "",
+            ("Every source partition or link where at least one rule was left unresolved, and why. No negative "
+             "statement covers these."), "",
+            "| Target | Partition | Rules left unresolved | Reasons |", "|---|---|---|---|"]
+    for gap in gaps:
+        rules = gap["rules"]
+        named = (f"every rule evaluated there ({len(rules)})" if gap.get("every_rule_there")
+                 else ", ".join(f"{rule} ({state})" for rule, state in rules.items()))
+        out.append(f"| {cell(gap['target'])} | {cell(gap['partition'])} | {cell(named)} | "
+                   f"{cell('; '.join(gap['reasons']))} |")
+    if not gaps:
+        out.append("| none | none | none | none |")
+    unassessed = m["coverage"].get("not_assessed") or []
+    out += ["", "### Data not assessed", "",
+            "Data in scope that no rule evaluated. It is not counted as evaluated and no negative covers it.", "",
+            "| Target | Dataset | Records | Count scope | Reason |", "|---|---|---|---|---|"]
+    for item in unassessed:
+        records = "unknown" if item.get("records") is None else item["records"]
+        out.append(f"| {cell(item['target'])} | {cell(item.get('dataset') or 'any')} | {cell(records)} | "
+                   f"{cell(item['count_scope'])} | {cell(item['reason'])} |")
+    if not unassessed:
+        out.append("| none | none | 0 | none | none |")
     out += ["", (f"Context-only items (not listed above): {m['context_items']}. They remain in the JSON manifest "
                  "and the database."), "",
             "## Versions", "", fence(json.dumps(m["versions"], indent=2, sort_keys=True), "json"), "", banner, ""]

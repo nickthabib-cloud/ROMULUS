@@ -36,6 +36,20 @@ class Match:
     notes: list[str] = field(default_factory=list)
     group_key: str = ""              # stable dedupe identity for aggregates
 
+    def __post_init__(self) -> None:
+        # A positive stays valid on a command line some of whose arguments were lost; the claim says so.
+        if any(argv_incomplete(event) for event in self.events) and INCOMPLETE_ARGV_NOTE not in self.claim:
+            self.claim = f"{self.claim} {INCOMPLETE_ARGV_NOTE}"
+
+
+INCOMPLETE_ARGV_NOTE = ("The recorded command line is incomplete (an audit record of it was lost); arguments after "
+                        "the gap are unknown.")
+
+
+def argv_incomplete(event: TypedEvent) -> bool:
+    """True when some of the exec's arguments did not arrive (`process.argv` holds only those before the gap)."""
+    return event.get("process.argv_complete") is False
+
 
 @dataclass
 class ContextAnchor:
@@ -92,6 +106,10 @@ class Playbook:
     # A positive-only rule carries its own explicit, non-rule-naming reason for assuring no negative (spec
     # §7 catalog detail, §9). The report may also hold a copy; this is the rule's own source of truth.
     positive_only_reason: ClassVar[str] = ""
+    # True when the rule's positive predicate only tests for argv tokens being present, so the arguments that
+    # arrived before a gap still support it. Otherwise an exec with an incomplete argv is counted as missing a
+    # required field and not evaluated: a test for an absent token, or for a last operand, cannot be decided.
+    argv_prefix_safe: ClassVar[bool] = False
 
     def __init__(self) -> None:
         self.evaluated = 0
@@ -107,6 +125,10 @@ class Playbook:
             if any(e.get(f) in (None, "", [], {}) for f in self.required_fields):
                 self.missing_required += 1
                 continue
+            if argv_incomplete(e):
+                self.missing_required += 1          # never a clean evaluation, even when the prefix is used
+                if not self.argv_prefix_safe:
+                    continue
             out.append(e)
         self.evaluated += len(out)
         return out
@@ -201,6 +223,10 @@ class ContextPlaybook(Playbook):
             if any(event.get(name) in (None, "", [], {}) for name in required):
                 self.missing_required += 1
                 continue
+            if argv_incomplete(event):
+                self.missing_required += 1          # never a clean evaluation, even when the prefix is used
+                if not self.argv_prefix_safe:
+                    continue
             self.evaluated += 1
             out.append(event)
         return out

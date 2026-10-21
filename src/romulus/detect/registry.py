@@ -8,15 +8,16 @@ from romulus.detect.dns import DNS_PLAYBOOKS
 from romulus.detect.hijack import HIJACK_PLAYBOOKS
 from romulus.detect.host import HOST_PLAYBOOKS
 from romulus.detect.indicators import INDICATOR_PLAYBOOKS
+from romulus.detect.kernel_files import KERNEL_FILE_PLAYBOOKS
 from romulus.detect.lineage import LINEAGE_PLAYBOOKS
 from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
 from romulus.detect.tls import TLS_PLAYBOOKS
 
-PACK_VERSION = "pack@8"
-ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + LINEAGE_PLAYBOOKS + NETWORK_PLAYBOOKS + DNS_PLAYBOOKS
-                 + SESSION_PLAYBOOKS + TLS_PLAYBOOKS
+PACK_VERSION = "pack@9"
+ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LINEAGE_PLAYBOOKS + NETWORK_PLAYBOOKS
+                 + DNS_PLAYBOOKS + SESSION_PLAYBOOKS + TLS_PLAYBOOKS
                  + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
