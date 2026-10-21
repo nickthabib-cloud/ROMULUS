@@ -34,6 +34,16 @@ def cmd_doctor(args) -> int:
     return EXIT_FAIL if any(c.status == "fail" for c in checks) else EXIT_OK
 
 
+def _ai_agent_line(result: dict) -> str:
+    ai = result.get("ai_agent") or {}
+    line = f"AI agent: {ai.get('status', 'unknown')}"
+    if ai.get("reason"):
+        line += f" ({ai['reason']})"
+    if ai.get("status") != "completed":
+        line += "; the deterministic results are complete without it"
+    return line
+
+
 def _parse_time(value: str, tz: str):
     from datetime import UTC, datetime
     from zoneinfo import ZoneInfo
@@ -60,7 +70,7 @@ def cmd_hunt(args) -> int:
             hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style,
                               hypothesis=args.hypothesis or "",
                               original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone},
-                              expand=not args.no_expand)
+                              expand=not args.no_expand, ai_agent=False if args.no_agent else None)
         except ValueError as e:
             print(f"hunt not created: {e}", file=sys.stderr)
             return EXIT_FAIL
@@ -72,18 +82,21 @@ def cmd_hunt(args) -> int:
         res = run_hunt(s, hid, agent_mode=agent_mode, on_candidate=show, expand=not args.no_expand)
         print(json.dumps(res, indent=2, default=str) if args.json else
               f"done: {res['execution_state']} {res['detection_result']} lanes={res['lanes']} "
-              f"stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }")
+              f"stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }\n" + _ai_agent_line(res))
         return EXIT_OK
     if args.action == "resume":
         agent_mode = "off" if args.no_agent else args.agent_mode
-        result = resume_hunt(s, args.hunt_id, agent_mode=agent_mode) if agent_mode else resume_hunt(s, args.hunt_id)
+        kwargs = {"agent_mode": agent_mode} if agent_mode else {}
+        if args.no_agent:
+            kwargs["ai_agent"] = False
+        result = resume_hunt(s, args.hunt_id, **kwargs)
         if args.json:
             print(json.dumps(result, indent=2, default=str))
         else:
             agent = result["agent"]
             print(f"resumed: {result['execution_state']} agent={agent['status']} "
                   f"unworked={agent.get('unworked_count', 0)} "
-                  f"analyst_flags={len(agent.get('analyst_flags') or [])}")
+                  f"analyst_flags={len(agent.get('analyst_flags') or [])}\n" + _ai_agent_line(result))
         return EXIT_OK
     if args.action == "status":
         from romulus.report.manifest import investigations_for_hunt

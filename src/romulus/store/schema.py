@@ -269,6 +269,13 @@ model_call = Table(
     Column("validation", JSON),                         # {ok, errors[]}
     Column("status", String, nullable=False),           # ok | invalid | truncated | error
     Column("at", DateTime(timezone=True), nullable=False),
+    # provider-port calls only (the AI agent): where the call went and what the server reported
+    Column("provider", String),
+    Column("endpoint_host", String),
+    Column("egress", String),                           # local | remote
+    Column("model_reported", String),
+    Column("finish_reason", String),
+    Column("cost_usd_est", Float),
 )
 
 case_step = Table(

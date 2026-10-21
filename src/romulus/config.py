@@ -75,7 +75,29 @@ class Settings(BaseModel):
     # deterministic search is the default; the model is opt-in per hunt
     agent_mode: Literal["model", "deterministic", "off"] = "off"
 
-    @field_validator("es_index_patterns", "pcap_allowed_dirs", mode="before")
+    # AI investigating agent: any OpenAI-compatible endpoint, or Ollama's native API. Unset means not configured.
+    agent_provider: Literal["openai_compatible", "ollama"] = "openai_compatible"
+    agent_base_url: str = ""
+    agent_api_key: SecretStr = SecretStr("")
+    agent_model: str = ""
+    agent_default: Literal["on", "off"] = "on"
+    agent_context_tokens: int = Field(default=0, ge=0, le=10_000_000)    # 0: the server enforces its own limit
+    agent_max_output_tokens: int = Field(default=4096, ge=64, le=200_000)
+    agent_timeout_seconds: int = Field(default=180, ge=5, le=3600)
+    agent_max_calls: int = Field(default=200, ge=1, le=100_000)
+    agent_max_tokens: int = Field(default=2_000_000, ge=1000, le=10_000_000_000)
+    agent_max_wall_seconds: int = Field(default=3600, ge=60, le=7 * 24 * 3600)
+    agent_max_cost_usd: float = Field(default=0.0, ge=0.0)                 # 0: no cost budget
+    agent_price_input_per_mtok: float = Field(default=0.0, ge=0.0)         # USD per million prompt tokens
+    agent_price_output_per_mtok: float = Field(default=0.0, ge=0.0)        # USD per million completion tokens
+    agent_max_tool_calls_per_session: int = Field(default=25, ge=1, le=500)
+    agent_concurrency: int = Field(default=2, ge=1, le=16)
+    # Bootstrap-only switch: the one value that lets telemetry excerpts reach a non-local model endpoint.
+    model_egress: Literal["", "lab-public-data"] = ""
+    # Extra hosts, addresses or CIDR networks treated as local (e.g. a team's model server on an enclave address).
+    model_local_hosts: list[str] = []
+
+    @field_validator("es_index_patterns", "pcap_allowed_dirs", "model_local_hosts", mode="before")
     @classmethod
     def _split(cls, v):
         if isinstance(v, str):
@@ -94,6 +116,14 @@ class Settings(BaseModel):
     def _agent_mode(cls, v: str) -> str:
         if v not in ("model", "deterministic", "off"):
             raise ValueError("AGENT_MODE must be model, deterministic, or off")
+        return v
+
+    @field_validator("model_egress", mode="before")
+    @classmethod
+    def _egress(cls, v: str) -> str:
+        # a misspelled switch must fail loudly, never silently keep or open egress
+        if v not in ("", "lab-public-data"):
+            raise ValueError("ROMULUS_MODEL_EGRESS must be empty or lab-public-data")
         return v
 
     @property
@@ -142,6 +172,16 @@ ENV_MAP = {
     "PCAP_ALLOWED_DIRS": "pcap_allowed_dirs", "TSHARK_BIN": "tshark_bin", "MISSION_TIMEZONE": "mission_timezone",
     "ROMULUS_ALLOW_PRIVILEGED_SOURCE_ACCOUNT": "allow_privileged_source_account",
     "AGENT_MODE": "agent_mode",
+    "AGENT_PROVIDER": "agent_provider", "AGENT_BASE_URL": "agent_base_url", "AGENT_API_KEY": "agent_api_key",
+    "AGENT_MODEL": "agent_model", "AGENT_DEFAULT": "agent_default", "AGENT_CONTEXT_TOKENS": "agent_context_tokens",
+    "AGENT_MAX_OUTPUT_TOKENS": "agent_max_output_tokens", "AGENT_TIMEOUT_SECONDS": "agent_timeout_seconds",
+    "AGENT_MAX_CALLS": "agent_max_calls", "AGENT_MAX_TOKENS": "agent_max_tokens",
+    "AGENT_MAX_WALL_SECONDS": "agent_max_wall_seconds", "AGENT_MAX_COST_USD": "agent_max_cost_usd",
+    "AGENT_PRICE_INPUT_PER_MTOK": "agent_price_input_per_mtok",
+    "AGENT_PRICE_OUTPUT_PER_MTOK": "agent_price_output_per_mtok",
+    "AGENT_MAX_TOOL_CALLS_PER_SESSION": "agent_max_tool_calls_per_session",
+    "AGENT_CONCURRENCY": "agent_concurrency",
+    "ROMULUS_MODEL_EGRESS": "model_egress", "MODEL_LOCAL_HOSTS": "model_local_hosts",
 }
 
 

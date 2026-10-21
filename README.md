@@ -57,7 +57,7 @@ The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHI
 - **Core:** Python 3.12, organized as a modular monolith (`src/romulus/`).
 - **State:** SQLite (WAL) is the single state authority; Alembic handles migrations.
 - **Web UI:** FastAPI + Jinja + server-sent events. It has argon2 logins, lead/analyst roles, CSRF protection and a strict CSP.
-- **Model:** optional local Ollama today. Planned: any OpenAI-compatible endpoint for the agent. The agent is scored on and off by the evaluation harness.
+- **Model:** optional. The agent's model connection takes any OpenAI-compatible endpoint (or Ollama), keeps telemetry on site unless a bootstrap switch allows a public-data test endpoint, and is checked by `romulus doctor`; the agent's investigation loop is still being built. The agent is scored on and off by the evaluation harness.
 - **The Agent:** Uses native tool calling through the investigator, an explicit controller with SQLite as the only state.
 
 ## Repository layout
