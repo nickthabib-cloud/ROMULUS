@@ -253,7 +253,7 @@ def test_write_and_run_in_different_partitions_and_resumed_rereads_count_once():
     _pb, out = run([writer], [writer], runs, runs)
     assert len(out) == 1
     assert "ran a write-capable command on" in out[0].claim
-    assert "2 root exec record(s) in the window run /srv/tasks/rotate.sh" in out[0].claim
+    assert "2 root exec record(s) in the window execute /srv/tasks/rotate.sh" in out[0].claim
 
 
 def test_out_of_order_partitions_still_count_the_later_run_and_say_its_record_is_not_cited():
@@ -337,6 +337,10 @@ def test_same_basename_in_another_directory_is_not_matched():
     (["wget", "-O", "-", "http://example.invalid/x"], "/usr/bin/wget"),
     (["tee", "/dev/null"], "/usr/bin/tee"),
     (["sh", "-c", f"sudo tee {JOB}"], "/usr/bin/dash"),
+    (["ls", "/usr/share/vim/vim91/"], "/usr/bin/ls"),                               # tool name in a path
+    (["sed-wrapper", "-i", JOB], "/usr/local/bin/sed-wrapper"),                    # not sed by kernel identity
+    (["vi"], "/usr/bin/vim.basic"),                                                 # editor with no file
+    (["sh", "-c", f"vi {JOB} 2>&1 | true"], "/usr/bin/dash"),                      # unmodelled: partial, no match
 ])
 def test_reads_mentions_and_lookalikes_are_not_writes(argv, exe):
     assert run([web(argv, exe), *cron_runs(T0 + timedelta(minutes=10))])[1] == []
@@ -414,6 +418,15 @@ def test_file_change_without_actor_is_missing():
     ("chmod", ["--reference=/etc/x", "/a/b"], None, ["/a/b"]),
     ("truncate", ["--size=0", "/a/b"], None, ["/a/b"]),
     ("rsync", ["-a", "/tmp/x", "example.invalid:/a/b"], None, []),  # remote destination: not a local write
+    # GNU long-option abbreviations (getopt_long accepts unambiguous prefixes)
+    ("sed", ["--in-pl=.b", "1d", "/a/b"], None, ["/a/b"]),
+    ("sed", ["--expr=1d", "--in", "/a/b"], None, ["/a/b"]),
+    ("sed", ["--quiet", "1p", "/a/b"], None, []),
+    ("cp", ["--target=/a", "/tmp/b"], None, ["/a/b"]),
+    ("cp", ["--no-target", "/tmp/x", "/a/b"], None, ["/a/b"]),
+    ("install", ["--mo", "755", "/tmp/x", "/a/b"], None, ["/a/b"]),
+    ("wget", ["--output-doc=/a/b", "http://example.invalid/x"], None, ["/a/b"]),
+    ("wget", ["--output-file=/a/log", "http://example.invalid/x"], None, []),   # the log file, not the download
 ])
 def test_write_target_grammar(name, args, cwd, expected):
     targets, _unresolved = write_targets(name, args, cwd)
