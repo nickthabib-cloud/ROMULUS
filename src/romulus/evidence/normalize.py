@@ -19,6 +19,8 @@ from romulus.evidence.auditd import (
 from romulus.evidence.typed import EVIDENCE_VERSION, Outcome, RawRef, TypedEvent, event_id, fv
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
+# Caveat on a process_exec event whose EXECVE arguments did not all arrive (its process.argv_complete is false).
+INCOMPLETE_ARGV_CAVEAT = "command line incomplete"
 
 
 class Skip(Exception):
@@ -93,13 +95,14 @@ def group_audit(hits: list[dict]) -> tuple[dict[tuple[str, float, int], list[tup
 def merge_execve(execs: list[tuple[dict, AuditRecord]]) -> tuple[dict, AuditRecord]:
     """auditd splits an exec with a very long argv across several EXECVE records: the first carries
     argc, continuations carry later aN fields. Merge them. Two records both carrying argc, or the same
-    argument field with different values, are ambiguous and raise (never silently pick one)."""
+    argument field with different values, are ambiguous and raise (never silently pick one). When the record
+    carrying argc was lost the continuations are still merged; execve_argv reports the command line incomplete."""
     if len(execs) == 1:
         return execs[0]
     heads = [(h, r) for h, r in execs if "argc" in r.raw_fields]
-    if len(heads) != 1:
+    if len(heads) > 1:
         raise AuditParseError(f"ambiguous exec event: {len(heads)} EXECVE records carry argc")
-    h_head, r_head = heads[0]
+    h_head, r_head = heads[0] if heads else execs[0]
     raw, fields = dict(r_head.raw_fields), dict(r_head.fields)
     for _h, r in execs:
         if r is r_head:
@@ -253,7 +256,7 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
         raise Skip("no EXECVE record in group")
     h_exec, r_exec = merge_execve(execs)
     by_type["EXECVE"] = (h_exec, r_exec)
-    argv = execve_argv(r_exec)
+    argv, argv_problem = execve_argv(r_exec)
     refs = [_ref(h) for h, r in members if r.type in EXEC_COMPANIONS]
     nid = h_exec["_id"]
     f = {
@@ -263,6 +266,10 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
         **_audit_boot_field(members),
     }
     caveats = []
+    if argv_problem:
+        # what arrived is kept as evidence; rules see the flag and say the command line is incomplete
+        f["process.argv_complete"] = fv(False, f"{nid}:event.original#auditd:EXECVE.a*")
+        caveats.append(f"{INCOMPLETE_ARGV_CAVEAT}: {argv_problem}")
     outcome = Outcome.unknown
     if "SYSCALL" in by_type:
         hs, rs = by_type["SYSCALL"]
@@ -939,7 +946,11 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
                 errors.append((members[0][0]["_id"], f"linux.audit.socket: {e}"))
             continue
         try:
-            events.append(normalize_exec_group(host, members))
+            event = normalize_exec_group(host, members)
+            events.append(event)
+            # the event is kept, but its command line is incomplete: the partition cannot assure a negative
+            errors += [(members[0][0]["_id"], f"linux.audit: {c}") for c in event.caveats
+                       if c.startswith(INCOMPLETE_ARGV_CAVEAT)]
         except Skip as s:
             skips[s.reason] += 1
         except (AuditParseError, ValueError, KeyError) as e:
