@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import ClassVar
 
-from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.base import Match, Playbook, argv_incomplete, pf
 from romulus.detect.correlation import StageMissing
 from romulus.detect.host import _FLAG_ONLY, SCRIPT_FILE_INTERPRETERS, WEB_SERVICE_USERS
 from romulus.detect.linux_argv import canonical, is_under, normalize_path, program, write_targets
@@ -340,12 +340,17 @@ class NonRootWriteRootExecutedFile(Playbook):
             self.missing_required += 1          # neither a writer nor a root executor can be decided
             return
         self.evaluated += 1
+        incomplete = argv_incomplete(event)
+        if incomplete:
+            self.missing_required += 1          # some arguments were lost: never a clean evaluation
         if root:
             if _auid(event) is None and isinstance(event.get("process.pid"), int):
                 self.daemons[(event.host, event.get("process.pid"))].append(
                     (event.ts.timestamp(), event.get("process.ppid")))
             self._root_run(event, prog)
-        elif str(event.get("process.euid", "")) != "0":    # a setuid-root program writes as root
+        elif str(event.get("process.euid", "")) != "0" and not incomplete:
+            # a setuid-root program writes as root; a write target is often the last operand, which an incomplete
+            # argv cannot show
             self._writer(event, prog, argv)
 
     # ---------------------------------------------------------------- writer side

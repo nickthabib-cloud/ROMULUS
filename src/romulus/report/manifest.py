@@ -121,12 +121,83 @@ def _scope(cell: dict) -> list[str]:
     return out
 
 
+def _gap_reasons(cell: dict) -> list[str]:
+    """Why a cell is unresolved, from what the stage that wrote it recorded."""
+    detail = cell.get("detail") if isinstance(cell.get("detail"), dict) else {}
+    reasons = [str(r) for r in detail.get("reasons") or [] if r]
+    if detail.get("error"):
+        reasons.append(f"error: {detail['error']}")
+    missing = detail.get("missing_required")
+    if isinstance(missing, int) and missing and not any(r.startswith("missing_required") for r in reasons):
+        reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
+    if cell["state"] == "planned":
+        reasons.append("planned but never executed")
+    return reasons or [f"{cell['state']}: no reason recorded"]
+
+
+def _gaps(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None) -> list[dict]:
+    """Every (target, partition) with an unresolved cell, the rules it leaves unresolved and why, plus every
+    hunt target with no cell at all. Nothing is capped: each gap is listed, whatever their number."""
+    rules_at: dict[tuple, set] = defaultdict(set)
+    gaps: dict[tuple, dict] = {}
+    covered = {c["target"].removeprefix(PCAP_CELL_PREFIX) for c in cells}
+    every_rule = sorted(set(rule_ids or []) | {c["rule_id"] for c in cells})
+    for target in sorted(set(targets or []) - covered):
+        gaps[(target, "")] = {"target": target, "partition": "whole hunt window",
+                              "rules": dict.fromkeys(every_rule, "not evaluated"),
+                              "reasons": ["no coverage was recorded for this target"]}
+        rules_at[(target, "")] = set(every_rule)
+    for c in cells:
+        key = (c["target"], c["partition"])
+        rules_at[key].add(c["rule_id"])
+        if c["state"] not in UNRESOLVED_STATES:
+            continue
+        gap = gaps.setdefault(key, {"target": c["target"], "partition": c["partition"], "rules": {},
+                                    "reasons": []})
+        gap["rules"][c["rule_id"]] = c["state"]
+        gap["reasons"] += [r for r in _gap_reasons(c) if r not in gap["reasons"]]
+    out = []
+    for key in sorted(gaps):
+        gap = gaps[key]
+        gap["rules"] = dict(sorted(gap["rules"].items()))
+        gap["reasons"] = sorted(gap["reasons"])
+        gap["every_rule_there"] = set(gap["rules"]) == rules_at[key]
+        out.append(gap)
+    return out
+
+
+def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
+    """Data in scope that no rule evaluated: datasets the sweep did not retrieve, and retrieved records that
+    no normalizer turned into a typed event. Listed with counts where known, never counted as evaluated."""
+    stats = sweep_detail.get("stats") or {}
+    profiles = hunt_manifest.get("source_profiles") or {}
+    out = []
+    for target, retrieved in sorted((stats.get("dataset_filter") or {}).items()):
+        inventory = (profiles.get(target) or {}).get("datasets")
+        if not isinstance(inventory, dict):
+            out.append({"target": target, "dataset": f"any dataset other than {', '.join(retrieved)}",
+                        "records": None, "count_scope": "unknown: the hunt manifest has no dataset inventory",
+                        "reason": "not retrieved by the sweep"})
+            continue
+        for dataset, count in sorted(inventory.items()):
+            if dataset not in retrieved:
+                out.append({"target": target, "dataset": dataset, "records": count,
+                            "count_scope": "whole index at source preflight, not only the hunt window",
+                            "reason": "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
+                                      "evaluates it"})
+    for reason, count in sorted((stats.get("skips") or {}).items()):
+        out.append({"target": "all sweep targets", "dataset": None, "records": count,
+                    "count_scope": "records retrieved in the hunt window",
+                    "reason": f"retrieved but not turned into a typed event: {reason}"})
+    return out
+
+
 def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None,
               sweep_finished: bool = True) -> dict:
     """Per-rule negative claim. 'complete' requires: the sweep finished, every manifest target has
     cells for the rule, no cell is planned/failed/partial, and at least one complete no-match.
     Anything less is 'unresolved' with the reason; absence of data is 'not applicable', never a
-    negative."""
+    negative. Every unresolved (target, partition) is also listed as a gap with its reasons."""
     cells = [c for c in cells if c["state"] != "split"]          # superseded by their children
     by_rule: dict[str, Counter] = defaultdict(Counter)
     evaluated: Counter = Counter()
@@ -175,7 +246,7 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
             claim = "not applicable to the data in scope"
         rows.append({"rule_id": rule, "states": dict(states), "records_evaluated": evaluated[rule],
                      "negative_claim": claim})
-    return {"rules": rows}
+    return {"rules": rows, "gaps": _gaps(cells, targets, rule_ids)}
 
 
 def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
@@ -183,10 +254,13 @@ def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
     h = repo.get_hunt(hunt_id) or {}
     hm = h.get("manifest") or {}
     sweep = repo.latest_audit(hunt_id, "hunt.sweep_summary")
-    finished = bool(sweep and (sweep.get("detail") or {}).get("finished", (sweep.get("detail") or {}).get("complete")))
-    return _coverage(repo.rule_cells(hunt_id), targets=hm.get("targets"),
-                     rule_ids=[p["id"] for p in (hm.get("pack") or {}).get("playbooks", [])],
-                     sweep_finished=finished)
+    detail = (sweep or {}).get("detail") or {}
+    finished = bool(sweep and detail.get("finished", detail.get("complete")))
+    coverage = _coverage(repo.rule_cells(hunt_id), targets=hm.get("targets"),
+                         rule_ids=[p["id"] for p in (hm.get("pack") or {}).get("playbooks", [])],
+                         sweep_finished=finished)
+    coverage["not_assessed"] = _not_assessed(hm, detail)
+    return coverage
 
 
 def _case_conclusion(summary: str | None) -> dict | None:
@@ -556,6 +630,8 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
         "link_key": link_keys[edge["link_id"]],
         "link_type": edge["link_type"], "style": edge["style"],
     } for edge in manifest["incident_graph"]["edges"]]
+    # gaps are listed by hunt-scoped target and partition (link ids); order them by content
+    canonical["coverage"]["gaps"].sort(key=lambda gap: json.dumps(gap, sort_keys=True, separators=(",", ":")))
     canonical["findings"].sort(key=lambda finding: finding["id"])
     for finding in canonical["findings"]:
         gates = finding.get("gates") or {}
