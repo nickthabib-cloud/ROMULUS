@@ -38,7 +38,7 @@ PACKET_TABLES = (packet_sources.STREAM_PREFS, packet_sources.QUERIES["tcp_payloa
                  packet_rules.OUTPUT_WINDOW_BYTES, packet_rules.MAX_COMMAND_CHARS, packet_rules.MAX_COMMANDS,
                  packet_rules.PROMPT_SCAN_BYTES, packet_rules.MIN_INDICATORS, sorted(packet_rules.TYPED_TEXT_KINDS),
                  packet_sources.MAX_ADDRESS_CHARS, packet_stage.STREAM_DIRECTION_BYTES)
-PINNED_PACKETS = {"tshark-packets@5": "b8415ab9d1147ab78d332352521332d84b1fba9a1f45a5719677d966054a6e91"}
+PINNED_PACKETS = {"tshark-packets@5": "96fbd11d06a2364e8a2a14e70dcebdd5d45511aba3b15672355cc194c5dbf15c"}
 
 
 def _files_digest() -> str:

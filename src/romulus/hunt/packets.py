@@ -49,7 +49,6 @@ Any failure here is recorded and the hunt continues: packet evidence enriches th
 """
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import logging
 import shutil
@@ -60,7 +59,7 @@ from pathlib import Path
 
 from romulus.config import Settings
 from romulus.detect.correlation import external
-from romulus.detect.packets import PACKET_PLAYBOOKS, ShellAnalysis, analyze_body, analyze_stream
+from romulus.detect.packets import PACKET_PLAYBOOKS, ShellAnalysis, analyze_body, analyze_stream, publishable
 from romulus.evidence.typed import RawRef, TypedEvent, event_id, fv
 from romulus.hunt.publish import publish_match
 from romulus.hunt.stage import PCAP_PREFIX
@@ -634,7 +633,9 @@ def _stream_event(key: StreamKey, streams: TcpStreams, analysis: ShellAnalysis, 
     limits = (streams.limits() + analysis.limits
               + (["the download was capped or the capture ends mid-packet"] if capture_cut else []))
     indicators = [i.as_dict() for i in analysis.indicators]
-    directions = {d: {"bytes": len(streams.data[d]), "sha256": hashlib.sha256(streams.data[d]).hexdigest(),
+    # No digest of a whole direction: a predictable stream (a telnet login) plus its length would let a reader
+    # of the store test guesses for the credentials typed into it.
+    directions = {d: {"bytes": len(streams.data[d]),
                       "cut": streams.cut[d], "gaps": streams.gaps[d], "gap_bytes": streams.gap_bytes[d],
                       "conflicts": streams.conflicts[d]} for d in ("c2s", "s2c")}
     raw = {"arkime_session_ids": ids, "node": src_doc.get("node"), "index": index,
@@ -660,8 +661,6 @@ def _stream_event(key: StreamKey, streams: TcpStreams, analysis: ShellAnalysis, 
         "observer.name": fv(src_doc.get("node"), f"{sid}:node"),
         "stream.c2s.bytes": fv(directions["c2s"]["bytes"], f"{o}#reassembled"),
         "stream.s2c.bytes": fv(directions["s2c"]["bytes"], f"{o}#reassembled"),
-        "stream.c2s.sha256": fv(directions["c2s"]["sha256"], f"{o}#reassembled"),
-        "stream.s2c.sha256": fv(directions["s2c"]["sha256"], f"{o}#reassembled"),
         "stream.turns": fv(analysis.turns, f"{o}#turns"),
         "stream.limits": fv(limits or None, f"{o}#reassembled"),
         "stream.opened_by": fv(streams.opened_by, f"{o}.tcp.flags.syn"),
@@ -688,7 +687,7 @@ class _StreamTarget:
         self.pack = [cls() for cls in PACKET_PLAYBOOKS if "tcp_stream" in cls.families]
         self.raw_sources: dict[str, dict] = {}
         self.budget = STREAM_BUDGET_BYTES
-        self.single: list[str] = []                # session ids with one indicator kind (below the rule's bar)
+        self.single: list[str] = []                # in-window session ids with indicators below the rule's bar
 
     def _lose(self, label: str, segs: list[dict]) -> None:
         self.c[label] += 1
@@ -768,9 +767,6 @@ class _StreamTarget:
         notes: list[str] = []
         if analysis.indicators:
             self.c["with_indicators"] += 1
-            if len(analysis.kinds) == 1:              # below the rule's bar: named so a reviewer can follow it
-                self.c["single_indicator"] += 1
-                self.single.extend(seg["_id"] for seg in segs)
             lo, hi = self.window.start.timestamp(), self.window.end.timestamp()
             inside = sorted(i.time for i in analysis.indicators if lo <= i.time < hi)
             # Indicators carry their first occurrence. A shell first seen before the window that is still
@@ -785,6 +781,9 @@ class _StreamTarget:
             else:
                 self.c["outside_window"] += 1
                 return
+            if publishable(analysis.kinds, analysis.turns) is None:   # below the rule's bar: named, not published
+                self.c["single_indicator"] += 1
+                self.single.extend(seg["_id"] for seg in segs)
         else:
             first = streams.chunks[0].time if streams.chunks else _epoch(src.get("firstPacket")) or 0.0
             ts = datetime.fromtimestamp(first, UTC)

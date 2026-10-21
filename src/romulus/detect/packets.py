@@ -439,7 +439,11 @@ OUTPUT_WINDOW_BYTES = 65536          # output examined after one command
 MAX_COMMAND_CHARS = 512
 MAX_COMMANDS = 2000                  # command lines paired with output per direction (more is a stated limit)
 PROMPT_SCAN_BYTES = 512              # a prompt is the tail of the shell side's last line; longer lines are not prompts
-MIN_INDICATORS = 2
+MIN_INDICATORS = 2                   # independent kinds for the full claim and its lanes
+# One of these alone still stands as a lead: each is the shell's own output in answer to the other side (a banner
+# counts only when the other side then typed). A prompt or a login dialogue alone does not.
+STRONG_KINDS = ("banner", "shell_error", "output:")
+SINGLE_MIN_TURNS = 4                 # a lone indicator needs a conversation, not one question and one answer
 TYPED_TEXT_KINDS = {"shell_error"}   # matched bytes repeat what the operator typed: no digest is kept
 
 
@@ -684,7 +688,10 @@ class _Side:
             if text is None:
                 return []                         # something unprintable came first: not a shell's opening
             if any(p.fullmatch(text.strip()) for p in BANNERS):
-                return [self.indicator("banner", line.start, line.end)]
+                answered = any(b.direction == self.inp and i > 0 and self.after[i - 1][self.out] >= line.end
+                               and _texty(self.data[self.inp][b.start:b.end])
+                               for i, b in enumerate(self.bursts))
+                return [self.indicator("banner", line.start, line.end)] if answered else []
         return []
 
     def commands(self) -> list[tuple[int, _Line, str, list[str]]]:
@@ -777,6 +784,17 @@ def analyze_stream(data: dict[str, bytes], chunks: list[StreamChunk]) -> ShellAn
                          sorted(best[2], key=lambda i: (i.offset, i.kind)), turns, limits)
 
 
+def publishable(kinds, turns: int) -> str | None:
+    """'multi' for two or more independent indicator kinds, 'single' for one strong kind in a real conversation,
+    else None (a lone prompt or login dialogue, or one exchange)."""
+    kinds = sorted(set(kinds))
+    if len(kinds) >= MIN_INDICATORS:
+        return "multi"
+    if len(kinds) == 1 and kinds[0].startswith(STRONG_KINDS) and turns >= SINGLE_MIN_TURNS:
+        return "single"
+    return None
+
+
 def _label(ind: dict) -> str:
     kind, count = ind.get("kind"), ind.get("count") or 1
     if kind == "prompt":
@@ -837,7 +855,9 @@ class CleartextInteractiveShell(Playbook):
                      "the lab profile (packets retrievable for every session); protocolCnt is to be confirmed live",
         "fidelity": "a content observation of what crossed the wire; it does not show which program produced it "
                     "or that commands succeeded on the host. Two different indicators are required, each tied to "
-                    "turn-taking. Which side opened the connection is stated only from a captured SYN",
+                    "turn-taking for the full claim; one banner, command output or shell error in a conversation "
+                    "of at least four turns stands alone as a lead with low or medium confidence. Which side "
+                    "opened the connection is stated only from a captured SYN",
         "benign_and_cost": "administrators on telnet or netcat consoles, training ranges, honeypots. One finding "
                            "per connection",
         "query_cost": "one SPI query per Arkime target; then per selected connection one pcap download (byte "
@@ -858,8 +878,7 @@ class CleartextInteractiveShell(Playbook):
 
     def consume(self, events):
         for e in self.applicable(events):
-            kinds = set(e.get("stream.shell.kinds") or [])
-            if len(kinds) < MIN_INDICATORS:
+            if publishable(e.get("stream.shell.kinds") or [], e.get("stream.turns") or 0) is None:
                 continue
             if e.get("stream.shell.side") not in ("client", "server") or not e.get("stream.shell.indicators"):
                 self.missing_required += 1
@@ -903,18 +922,28 @@ class CleartextInteractiveShell(Playbook):
             else:
                 opened = ("The connection's opening SYN was not captured, so which side opened it is not "
                           "established.")
+            single = publishable(kinds, e.get("stream.turns") or 0) == "single"
+            if single:
+                lane, why = "lead", "a single indicator: a lead whatever the endpoints"
+            evidence = (f"a single indicator was seen: {_label(inds[0])}" if single else
+                        f"{len(kinds)} independent indicator(s): " + "; ".join(_label(i) for i in inds[:8]))
             claim = (f"Packet content in Arkime session {show(e.get('arkime.session_id'), 80)} between "
                      f"{show(client, 60)} (client) and {show(server, 60)} (server), with indicators from "
-                     f"{times[0] if times else '?'} to {times[-1] if times else '?'}, is consistent with an "
-                     f"interactive command shell over a cleartext channel: the {side} ({show(shell_ep, 60)}) sent "
-                     f"what reads as shell output and the {other} ({show(op_ep, 60)}) sent what reads as commands. "
-                     f"{len(kinds)} independent indicator(s): " + "; ".join(_label(i) for i in inds[:8])
+                     f"{times[0] if times else '?'} to {times[-1] if times else '?'}, is "
+                     + ("in one respect " if single else "")
+                     + f"consistent with an interactive command shell over a cleartext channel: the {side} "
+                     f"({show(shell_ep, 60)}) sent what reads as shell output and the {other} ({show(op_ep, 60)}) "
+                     f"sent what reads as commands. " + evidence
                      + f". {opened} The bytes are cited by offset and digest; which program produced them, and "
                        "what the commands did on the host, is not established by these records.")
             preds = [pf(e, f) for f in ("stream.shell.kinds", "stream.shell.side", "stream.shell.indicators",
                                         "source.ip", "destination.ip") if e.has(f)]
-            m = Match(self.id, claim, self.claim_type, [e], preds, e.ts, self.severity, lane,
-                      "high" if len(kinds) >= 3 else "medium", e.entities(), group_key=key)
+            if single:
+                confidence = "low" if kinds == ["banner"] else "medium"
+            else:
+                confidence = "high" if len(kinds) >= 3 else "medium"
+            m = Match(self.id, claim, self.claim_type, [e], preds, e.ts, self.severity, lane, confidence,
+                      e.entities(), group_key=key)
             m.notes.append(f"lane {lane}: {why}")
             for limit in e.get("stream.limits") or []:
                 m.notes.append(f"content incomplete: {limit}")
