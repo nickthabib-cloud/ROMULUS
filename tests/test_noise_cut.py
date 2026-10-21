@@ -58,6 +58,10 @@ def test_packaged_helper_scripts_of_a_web_application_are_context():
     ["/usr/bin/perl", "/usr/share/perl/5.34/CPAN.pm"],
     ["/usr/bin/ruby", "/usr/bin/irb"],
     ["/usr/bin/python3", "/usr/bin/pydoc3", "-p", "8080"],
+    # lookup and discovery helpers are an exploit's reconnaissance (which python3, which nc)
+    ["/bin/sh", "/usr/bin/which", "python3"],
+    ["/bin/sh", "/usr/bin/which", "nc"],
+    ["/usr/bin/sh", "/usr/bin/lsb_release", "-a"],
     # a system helper pointed at a file the web account can write
     ["/usr/bin/perl", "/usr/bin/apphelper.pl", "/var/www/html/up/job.conf"],
     ["/usr/bin/perl", "/usr/bin/apphelper.pl", "--config=/tmp/x.conf"],

@@ -40,6 +40,10 @@ DUAL_USE_SCRIPTS = {"ssh-import-id", "ssh-import-id-gh", "ssh-import-id-lp", "pi
                     "lwp-download", "lwp-request", "lwp-mirror", "GET", "POST", "HEAD", "cpan", "gem", "npm",
                     "irb", "pry", "ri", "erb", "pydoc", "pydoc3", "pdb", "pdb3", "idle", "idle3", "ipython",
                     "ipython3", "jupyter", "perldoc", "perlbug", "php-cgi", "lua5.1", "lua5.3", "luarocks"}
+# Packaged scripts that look up programs, users or the system: from a web-service account they are the
+# reconnaissance an exploit runs before choosing its payload (which python3, which nc), so never context.
+DISCOVERY_SCRIPTS = {"which", "whereis", "lsb_release", "hostnamectl", "lsof", "ldd", "getent", "groups", "id",
+                     "whoami", "uname", "lscpu", "lsusb", "lspci", "lsblk", "dmidecode", "env", "printenv"}
 # Flag-only options per interpreter (no argument, no inline code). Anything else ends the packaged check.
 _FLAG_ONLY = {
     "python": {"-u", "-B", "-b", "-bb", "-d", "-E", "-I", "-O", "-OO", "-q", "-s", "-S", "-v"},
@@ -75,7 +79,7 @@ def _packaged_script(argv: list[str], cwd: str | None = None) -> str | None:
     path = _normalize_posix_path(script)
     if not path.startswith(PACKAGED_DIRS) or path.startswith(NOT_PACKAGED) or INTERPRETER_LIBRARIES.match(path):
         return None
-    if posixpath.basename(path) in DUAL_USE_SCRIPTS or any(_URLISH.search(a) for a in rest):
+    if posixpath.basename(path) in DUAL_USE_SCRIPTS | DISCOVERY_SCRIPTS or any(_URLISH.search(a) for a in rest):
         return None
     # Build and task runners (rake, composer, pytest, flask) load code from the working directory.
     if cwd and _normalize_posix_path(cwd) != "/" and _outside_system(cwd, cwd):
@@ -260,7 +264,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     anchor_class = "web_shell"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "8"
+    version = "9"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
