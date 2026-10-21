@@ -42,7 +42,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from romulus.detect.base import Match, Playbook, basename, pf
+from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
 from romulus.detect.correlation import PidTable, StageMissing, canon_ip, external
 from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS, _py_pty_spawn, interpreter_name
 from romulus.evidence.shellparse import (
@@ -163,7 +163,7 @@ class _Hit:
 class ReverseShellByLineage(Playbook):
     id = "host.shell_spawned_by_connected_process"
     anchor_class = "execution"
-    version = "2"
+    version = "3"
     title = "Shell or interpreter executed by a process holding an external connection (reverse shell by lineage)"
     kind = "aggregate"
     staged = True
@@ -262,10 +262,16 @@ class ReverseShellByLineage(Playbook):
             return
         self.evaluated += 1
         argv = event.get("process.argv")
+        if argv_incomplete(event):
+            # Arguments after a gap are unknown: "no -c script" cannot be established and a redirect may be
+            # missing, so neither argv feature is read. The lineage join itself does not depend on argv.
+            self.missing_required += 1
+            devtcp = shaped = False
+        else:
+            devtcp, shaped = _devtcp_redirect(argv, exe), _reverse_shell_shaped(argv, exe)
         self.shells.append(_Shell(
             ts=event.ts.timestamp(), host=event.host or "", boot=event.get("host.boot.id"), pid=pid,
-            ppid=event.get("process.ppid"), exe=str(exe), event_id=event.id,
-            devtcp=_devtcp_redirect(argv, exe), shaped=_reverse_shell_shaped(argv, exe)))
+            ppid=event.get("process.ppid"), exe=str(exe), event_id=event.id, devtcp=devtcp, shaped=shaped))
         self._stage(event)
 
     def _consider_socket(self, event: TypedEvent) -> None:
@@ -326,7 +332,11 @@ class ReverseShellByLineage(Playbook):
                                 key=lambda s: (s.ts, s.event_id))
                 if not window:
                     continue
-                latest = window[-1]
+                # The headline socket is the latest one that could be a channel: a DNS or port-0 call made
+                # after the real connection must not hide its peer. Only DNS or probes left: the latest call.
+                channels = [s for s in window
+                            if s.syscall in ACCEPT_SYSCALLS or _port(s.peer_port) not in NOT_A_CHANNEL]
+                latest = channels[-1] if channels else window[-1]
                 if latest.syscall in ACCEPT_SYSCALLS and latest.exe in SSHD_PATHS:
                     continue                            # the system sshd's accepted login: auth rules cover it
                 key = (shell.host, shell.boot, owner_pid, latest.peer_ip)
@@ -368,7 +378,8 @@ class ReverseShellByLineage(Playbook):
             claim += " At least one shell was run with a command that redirects to or from a /dev/tcp pseudo-path."
 
         cited_ids = sorted({s.event_id for h in hits[:CITE_PER_GROUP] for s in h.window[-CITE_PER_GROUP:]}
-                           | {s.event_id for s in shells[:CITE_PER_GROUP]})
+                           | {s.event_id for s in shells[:CITE_PER_GROUP]}
+                           | {lead_hit.socket.event_id, lead_hit.shell.event_id})   # the hit the lane rests on
         events = self._events(cited_ids)
         cited = sorted(events.values(), key=lambda e: (e.ts, e.id))
         sock_event = events[lead_hit.socket.event_id]

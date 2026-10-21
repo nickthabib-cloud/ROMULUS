@@ -26,9 +26,11 @@ def _ev(family, ts, outcome=Outcome.success, host="app01", **fields):
                       raw=[RawRef(target="fx", native_id=f"r{_n}")], normalizer="fixture")
 
 
-def exc(exe, pid, ts, *, ppid=None, argv=None, user=None, outcome=Outcome.success, host="app01", boot=None):
+def exc(exe, pid, ts, *, ppid=None, argv=None, user=None, outcome=Outcome.success, host="app01", boot=None,
+        argv_complete=None):
     return _ev("process_exec", ts, outcome=outcome, host=host, process__executable=exe, process__pid=pid,
-               process__ppid=ppid, process__argv=argv or [exe], process__user=user, host__boot__id=boot)
+               process__ppid=ppid, process__argv=argv or [exe], process__user=user, host__boot__id=boot,
+               process__argv_complete=argv_complete)
 
 
 def sock(syscall, pid, ts, *, ip=EXT, port=4444, exe="/usr/bin/python3", user=None,
@@ -354,3 +356,40 @@ def test_a_binary_named_sshd_outside_the_system_path_is_reported():
 def test_socket_user_is_in_the_predicate():
     _pb, out = run(_interp_owner(["sh", "-i"]))
     assert any(p.field == "process.user" and p.value == "deploy" for p in out[0].predicate)
+
+
+# ---------------------------------------------------------------- re-review fixes
+def test_high_hit_after_more_than_the_cited_number_of_lead_hits_is_cited():
+    events = [exc("/usr/bin/python3", 500, T0, ppid=1),
+              sock("connect", 500, T0 + timedelta(seconds=1))]
+    events += [exc("/bin/sh", 600 + i, T0 + timedelta(seconds=1, milliseconds=100 * (i + 1)), ppid=500,
+                   argv=["sh", "-c", "id"]) for i in range(13)]
+    late = exc("/bin/sh", 700, T0 + timedelta(seconds=3), ppid=500, argv=["sh"])
+    _pb, out = run(events + [late])
+    assert len(out) == 1 and out[0].proposed_lane == "high"
+    cited = {e.id for e in out[0].events}
+    assert late.id in cited and all(p.origin.split(":")[0] for p in out[0].predicate)
+
+
+def test_a_dns_call_after_the_channel_does_not_hide_the_peer():
+    events = [
+        exc("/usr/bin/python3", 500, T0, ppid=1),
+        sock("connect", 500, T0 + timedelta(seconds=1), ip="198.51.100.66", port=4444),
+        sock("connect", 500, T0 + timedelta(seconds=2), ip="8.8.8.8", port=53),
+        exc("/bin/sh", 501, T0 + timedelta(seconds=3), ppid=500, argv=["sh"]),
+    ]
+    _pb, out = run(events)
+    assert len(out) == 1 and out[0].proposed_lane == "high"
+    assert "external address 198.51.100.66:4444" in out[0].claim
+    assert out[0].group_key.endswith("|198.51.100.66")
+
+
+def test_incomplete_argv_is_never_read_as_a_stdin_shell():
+    events = [
+        exc("/usr/bin/python3", 500, T0, ppid=1),
+        sock("connect", 500, T0 + timedelta(seconds=1)),
+        exc("/bin/sh", 501, T0 + timedelta(seconds=2), ppid=500, argv=["sh"], argv_complete=False),
+    ]
+    pb, out = run(events)
+    assert len(out) == 1 and out[0].proposed_lane == "lead"
+    assert pb.missing_required >= 1
