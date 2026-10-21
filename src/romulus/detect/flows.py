@@ -1,6 +1,8 @@
 """Flow-shape playbooks over bidirectional connection records (Suricata flow records, Arkime sessions).
 
-The families are net_flow (Suricata EVE) and net_session (Arkime SPI). Record kinds. Suricata writes two record types into net_flow:
+The families are net_flow (Suricata EVE) and net_session (Arkime SPI).
+
+Record kinds. Suricata writes two record types into net_flow:
 - `flow` records are bidirectional: the initiator is the source, and they carry per-direction counters
   (`flow.bytes_toserver`, `flow.bytes_toclient`, `flow.pkts_toserver`, `flow.pkts_toclient`) and `flow.state`.
 - `netflow` records are unidirectional: each direction is its own record, so a service's answer appears as a record
@@ -41,9 +43,12 @@ _UNIDIRECTIONAL = ("flow.bytes", "flow.pkts")
 # closes an idle TCP session after a few minutes and starts a new record if traffic resumes; 15 minutes keeps an
 # idle-but-open connection together while separating a port reused much later.
 STITCH_GAP = 900.0
-# Header-inclusive bytes each way above which a Suricata flow record carried application data. A TCP handshake and
-# teardown with no payload stays under about 300 bytes per direction.
-MIN_FRAME_BYTES = 512
+# Suricata counts whole frames. Application bytes in one direction are estimated as the byte count minus
+# HEADER_BYTES per packet (Ethernet 14 + IPv4 20 + TCP 20 with 12 bytes of timestamp options), an upper bound for
+# common TCP headers, so the estimate errs low. A direction carried application data when the estimate reaches
+# MIN_PAYLOAD_BYTES: handshakes, acknowledgements and keepalives alone stay at or below zero.
+HEADER_BYTES = 66
+MIN_PAYLOAD_BYTES = 64
 # Modern stacks pick client ports from 32768 upwards (Linux 32768-60999, Windows 49152-65535).
 EPHEMERAL_FLOOR = 32768
 
@@ -69,7 +74,7 @@ _TCP, _UDP, _BOTH = ("tcp",), ("udp",), ("tcp", "udp")
 _PROTOCOL_TABLE: tuple[tuple[str, tuple[str, ...], frozenset[int]], ...] = (
     ("http", _TCP, _ports(80, 591, 3128, 5985, 8000, 8008, 8080, 8081, 8088, 8888)),
     ("tls", _TCP, _ports(443, 465, 563, 636, 853, 989, 990, 992, 993, 994, 995, 3269, 3389, 4443, 5061, 5671, 5986,
-                         6443, 6697, 8443, 8883, 9443)),
+                         6443, 6514, 6697, 8443, 8883, 9443)),
     ("quic", _UDP, _ports(443)),
     ("dtls", _UDP, _ports(443, 853, 3391, 4433, 5684)),
     ("ssh", _TCP, _ports(22)),
@@ -110,7 +115,8 @@ _PROTOCOL_TABLE: tuple[tuple[str, tuple[str, ...], frozenset[int]], ...] = (
     ("socks", _TCP, _ports(1080)),
     ("modbus", _TCP, _ports(502)),
     ("dnp3", _BOTH, _ports(20000)),
-    ("enip", _BOTH, _ports(44818, 2222)),
+    ("enip", _TCP, _ports(44818)),
+    ("enip", _UDP, _ports(44818, 2222)),
     ("s7comm", _TCP, _ports(102)),
     ("iec104", _TCP, _ports(2404)),
     ("opcua", _TCP, _ports(4840)),
@@ -252,6 +258,15 @@ class FlowView:
         return f"{self.transport}/{self.dport}" if self.dport is not None else self.transport
 
 
+def _framed_payload(c2s_bytes, c2s_packets, s2c_bytes, s2c_packets) -> bool | None:
+    """Whether both directions carried application data, estimated from whole-frame bytes and packet counts;
+    None when a counter is absent."""
+    if None in (c2s_bytes, c2s_packets, s2c_bytes, s2c_packets):
+        return None
+    return (c2s_bytes - HEADER_BYTES * c2s_packets >= MIN_PAYLOAD_BYTES
+            and s2c_bytes - HEADER_BYTES * s2c_packets >= MIN_PAYLOAD_BYTES)
+
+
 def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
     """The typed view of a flow or session record, or None when an identity field is missing or malformed."""
     src, dst = canon_ip(event.get("source.ip")), canon_ip(event.get("destination.ip"))
@@ -275,10 +290,8 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         data_c, data_s = _int(event.get("client.bytes")), _int(event.get("server.bytes"))
         if data_c is not None and data_s is not None:
             payload = data_c > 0 and data_s > 0
-        elif c2s is not None and s2c is not None:
-            payload = c2s >= MIN_FRAME_BYTES and s2c >= MIN_FRAME_BYTES
         else:
-            payload = None
+            payload = _framed_payload(c2s, _int(event.get("source.packets")), s2c, s2c_packets)
         listed = event.get("network.protocols")
         if listed is None:
             protocols, failed = None, False
@@ -289,7 +302,7 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         sensor = SURICATA
         c2s, s2c = _int(event.get("flow.bytes_toserver")), _int(event.get("flow.bytes_toclient"))
         s2c_packets = _int(event.get("flow.pkts_toclient"))
-        payload = None if c2s is None or s2c is None else (c2s >= MIN_FRAME_BYTES and s2c >= MIN_FRAME_BYTES)
+        payload = _framed_payload(c2s, _int(event.get("flow.pkts_toserver")), s2c, s2c_packets)
         # Suricata writes app_proto only once detection concluded; its absence is the record's own statement that
         # no protocol was identified, and 'failed' says detection gave up.
         app = event.get("network.app_proto")
@@ -445,6 +458,12 @@ class _Destination:
     connections: set = field(default_factory=set)
     records: int = 0
 
+    @property
+    def state(self) -> str:
+        if self.answered:
+            return "answered"
+        return "no reply" if self.silent else "reply unknown"
+
 
 @dataclass
 class _SweepGroup:
@@ -453,44 +472,74 @@ class _SweepGroup:
     first: float = float("inf")
     last: float = float("-inf")
     staged: list[tuple[float, str, str]] = field(default_factory=list)   # (start, event id, destination)
+    hour_budget: Counter = field(default_factory=Counter)                # staged re-contact records per hour
 
 
-def busiest_window(destinations: dict[str, _Destination], width: int) -> tuple[int, float | None, list[str]]:
-    """The largest number of distinct destinations reached within any half-open window [t, t + width), the
-    earliest such t, and those destinations. A destination reached at time s is inside [t, t + width) exactly when
-    s - width < t <= s, so each run [lo, hi] covers the window starts (lo - width, hi]; the count is largest at
-    some run's end."""
-    opens, closes = [], []
+@dataclass(frozen=True)
+class _Window:
+    """One half-open window [start, start + width) and the destinations reached inside it."""
+    width: int
+    start: float
+    members: tuple[str, ...]
+    silent: int                     # members that never sent a packet back on any recorded connection
+
+    @property
+    def size(self) -> int:
+        return len(self.members)
+
+
+def _window_counts(destinations: dict[str, _Destination], width: int):
+    """(window start, destinations inside, silent destinations inside) at every point where the counts can change.
+    A destination reached at time s is inside [t, t + width) exactly when s - width < t <= s, so each run [lo, hi]
+    covers the window starts (lo - width, hi]; counts are constant between consecutive run edges."""
+    opens, closes, silent_opens, silent_closes = [], [], [], []
     for destination in destinations.values():
         runs = destination.runs[width]
-        opens.extend(lo - width for lo in runs.los)
-        closes.extend(runs.his)
-    opens.sort()
-    closes.sort()
-    best, at = 0, None
-    for t in closes:
-        count = bisect.bisect_left(opens, t) - bisect.bisect_left(closes, t)
-        if count > best:
-            best, at = count, t
-    if at is None:
-        return 0, None, []
-    members = [ip for ip, destination in destinations.items()
-               if any(lo - width < at <= hi for lo, hi in zip(destination.runs[width].los,
-                                                                destination.runs[width].his, strict=True))]
-    return best, at, sorted(members, key=ip_sort_key)
+        silent = destination.state == "no reply"
+        for lo, hi in zip(runs.los, runs.his, strict=True):
+            opens.append(lo - width)
+            closes.append(hi)
+            if silent:
+                silent_opens.append(lo - width)
+                silent_closes.append(hi)
+    for values in (opens, closes, silent_opens, silent_closes):
+        values.sort()
+    for t in sorted(set(opens) | set(closes)):
+        total = bisect.bisect_left(opens, t) - bisect.bisect_left(closes, t)
+        silent = bisect.bisect_left(silent_opens, t) - bisect.bisect_left(silent_closes, t)
+        yield t, total, silent
+
+
+def _window_at(destinations: dict[str, _Destination], width: int, t: float) -> _Window:
+    members = sorted((ip for ip, destination in destinations.items()
+                      if any(lo - width < t <= hi for lo, hi in zip(destination.runs[width].los,
+                                                                     destination.runs[width].his, strict=True))),
+                     key=ip_sort_key)
+    return _Window(width, t, tuple(members), sum(1 for ip in members if destinations[ip].state == "no reply"))
+
+
+def busiest_window(destinations: dict[str, _Destination], width: int, *, min_size: int = 1,
+                   min_silent_share: float = 0.0) -> _Window | None:
+    """The window of this width holding the most distinct destinations (the earliest such), among windows with at
+    least min_size destinations of which at least min_silent_share never answered; None when no window qualifies."""
+    best = None
+    for t, total, silent in _window_counts(destinations, width):
+        if total >= min_size and silent >= min_silent_share * total and (best is None or total > best[1]):
+            best = (t, total)
+    return None if best is None else _window_at(destinations, width, best[0])
 
 
 class HorizontalSweep(_FlowRule):
     """One source reaching many distinct addresses on the same transport and port (or by ICMP) within a short
     window: the shape of host discovery and service sweeps, and of worm-style propagation."""
     id = "net.horizontal_sweep"
-    version = "1"
+    version = "2"
     title = "One source contacted many distinct addresses on the same port within minutes"
     severity, lane = "medium", "lead"
     attack = ("T1046", "T1018", "T1595.001")
     benign = ("authorized vulnerability scanners and asset-discovery tools",
               "monitoring, backup and management servers polling many hosts",
-              "DNS resolvers, mail relays and proxies that legitimately reach many external servers on one port")
+              "DNS resolvers, mail relays and proxies that reach many external servers on one port")
     next_checks = ("which destinations answered and what the source did with them next (sessions on other ports)",
                    "whether the source is an authorized scanner or management host",
                    "the process on the source host that opened the connections")
@@ -498,16 +547,23 @@ class HorizontalSweep(_FlowRule):
     # Distinct destinations per (source, transport, port) needed in each window. A client normally reaches a
     # handful of internal servers on one port (domain controllers, file and print servers); 20 inside five minutes
     # is well above that and well below even a /27 sweep, and 40 in an hour catches a sweep paced to stay under the
-    # short window. External fan-out on one port is routine for resolvers, relays and proxies, so it needs more.
+    # short window. External fan-out on one port is routine for resolvers, relays and proxies, so it needs more, and
+    # at least half of the destinations in the window must never have answered: browsing reaches many web servers
+    # and they all answer.
     THRESHOLDS: ClassVar[dict[str, dict[int, int]]] = {"internal": {300: 20, 3600: 40},
                                                         "external": {300: 50, 3600: 100}}
-    # An internal source reaching this many internal addresses in an hour, at least half of which never sent a
-    # packet back on any recorded connection, is the shape of address-space discovery rather than of a service
-    # polling the hosts it manages (those answer).
+    EXTERNAL_MIN_SILENT_SHARE = 0.5
+    # High: an internal source reaching this many internal addresses over TCP within one hour, at least half of which
+    # never sent a packet back on any recorded connection. That is the shape of address-space discovery, not of a
+    # service polling the hosts it manages (those answer). TCP only: a TCP connection attempt to a live host draws a
+    # SYN-ACK or a reset, so silence means no host or a dropping filter, while UDP and ICMP silence is normal
+    # (services that do not answer, one-way announcements, ICMP that is not an echo request).
     HIGH_MIN_DESTINATIONS = 64
     HIGH_MIN_SILENT_SHARE = 0.5
     CONNECTIONS_PER_DESTINATION = 64      # distinct connections counted per destination; beyond it, "at least"
-    STAGE_PER_GROUP = 256
+    # The first record of every destination is always staged. A destination reached again after a quiet spell is
+    # staged within a per-hour budget, so long-running polling cannot use up the citations a later sweep needs.
+    RECONTACT_STAGE_PER_HOUR = 16
     LIST_LIMIT = 30
     card: ClassVar[dict] = {
         "behavior": "one source address reached N distinct destination addresses on the same transport and "
@@ -520,9 +576,9 @@ class HorizontalSweep(_FlowRule):
         "fidelity": "aggregate observation over typed connection records; 'answered' means the responder sent at "
                     "least one packet on a recorded connection (a TCP reset counts as an answer), 'no reply' means "
                     "every recorded connection shows zero packets from it",
-        "benign_and_cost": "authorized scanners, monitoring and management servers, resolvers, mail relays and "
-                           "proxies. One grouped item per (source, transport, port, internal or external "
-                           "destinations), so a busy server costs one lead",
+        "benign_and_cost": "authorized scanners, monitoring and management servers polling internal hosts; external "
+                           "fan-out from resolvers or relays only when most destinations stay silent. One grouped "
+                           "item per (source, transport, port, internal or external destinations)",
         "query_cost": "none beyond the sweep: it reads the flow and session partitions every network rule reads",
         "next_pivot": "the answering destinations and the source's later sessions to them; the source host's "
                       "process for the connections",
@@ -535,8 +591,10 @@ class HorizontalSweep(_FlowRule):
                           "ports, this rule counts per port on every port)",
         "retrieval": "the sweep retrieves every record of the network flow datasets and the Arkime session index in "
                      "each partition (dataset filter only), a superset of what this evaluator reads",
-        "lanes": "lead by default; high only for an internal source reaching at least 64 internal addresses in an "
-                 "hour with at least half never answering. Severity medium: discovery precedes, but is not, impact",
+        "lanes": "lead by default; high only over TCP for an internal source with some one-hour window holding at "
+                 "least 64 internal addresses of which at least half never answered. External destinations need "
+                 "at least half silent to be reported at all. Severity medium: discovery precedes, but is not, "
+                 "impact",
     }
 
     def __init__(self):
@@ -556,7 +614,6 @@ class HorizontalSweep(_FlowRule):
         if new:
             destination = group.destinations[view.dst] = _Destination(runs={w: _Clusters() for w in self.WINDOWS})
         started = {width: destination.runs[width].add(view.start, width) for width in self.WINDOWS}
-        new_run = started[self.WINDOWS[0]]
         if view.s2c_packets is not None:
             if view.s2c_packets > 0:
                 destination.answered = True
@@ -567,65 +624,73 @@ class HorizontalSweep(_FlowRule):
         destination.records += 1
         group.records[view.sensor] += 1
         group.first, group.last = min(group.first, view.start), max(group.last, view.start)
-        if (new or new_run) and len(group.staged) < self.STAGE_PER_GROUP:
+        hour = int(view.start // 3600)
+        if new or (started[self.WINDOWS[0]] and group.hour_budget[hour] < self.RECONTACT_STAGE_PER_HOUR):
+            if not new:
+                group.hour_budget[hour] += 1
             group.staged.append((view.start, event.id, view.dst))
             self._stage(event)
         return True
 
-    @staticmethod
-    def _state(destination: _Destination) -> str:
-        if destination.answered:
-            return "answered"
-        return "no reply" if destination.silent else "reply unknown"
-
     def finalize(self):
         out = []
         for key in sorted(self.sweeps, key=lambda k: (k[0], k[1], -1 if k[2] is None else k[2], k[3])):
-            scope = key[3]
+            src, transport, _port, scope = key
             group = self.sweeps[key]
             limits = self.THRESHOLDS[scope]
             if len(group.destinations) < min(limits.values()):
                 continue
-            windows = {width: busiest_window(group.destinations, width) for width in self.WINDOWS}
-            if not any(windows[width][0] >= limits[width] for width in self.WINDOWS):
+            share = self.EXTERNAL_MIN_SILENT_SHARE if scope == "external" else 0.0
+            qualifying = [busiest_window(group.destinations, width, min_size=limits[width], min_silent_share=share)
+                          for width in self.WINDOWS]
+            qualifying = [window for window in qualifying if window is not None]
+            if not qualifying:
                 continue
-            out.append(self._match(key, group, windows))
+            high = None
+            if scope == "internal" and transport == "tcp" and internal_address(src):
+                high = busiest_window(group.destinations, 3600, min_size=self.HIGH_MIN_DESTINATIONS,
+                                      min_silent_share=self.HIGH_MIN_SILENT_SHARE)
+            # the window that decided the lane: the high window, else the widest qualifying window
+            deciding = high or max(qualifying, key=lambda window: (window.width, window.size))
+            out.append(self._match(key, group, deciding, high is not None))
         return out
 
-    def _match(self, key, group: _SweepGroup, windows) -> Match:
+    def _match(self, key, group: _SweepGroup, deciding: _Window, high: bool) -> Match:
         src, transport, port, scope = key
         service = f"{transport}/{port}" if port is not None else transport
-        short_n, short_at, _short = windows[300]
-        long_n, long_at, members = windows[3600]
+        short = busiest_window(group.destinations, 300)
+        long = busiest_window(group.destinations, 3600)
         dests = group.destinations
-        states = Counter(self._state(d) for d in dests.values())
-        member_silent = sum(1 for ip in members if self._state(dests[ip]) == "no reply")
+        states = Counter(d.state for d in dests.values())
         connections = sum(len(d.connections) for d in dests.values())
         capped = any(len(d.connections) >= self.CONNECTIONS_PER_DESTINATION for d in dests.values())
         src_scope = "internal" if internal_address(src) else "external" if external(src) else "non-routable"
-        lane = self.lane
-        if (scope == "internal" and src_scope == "internal" and long_n >= self.HIGH_MIN_DESTINATIONS
-                and member_silent >= self.HIGH_MIN_SILENT_SHARE * long_n):
-            lane = "high"
-        listed = ", ".join(f"{ip} ({_plural(len(dests[ip].connections), 'connection')}, {self._state(dests[ip])})"
-                           for ip in members[:self.LIST_LIMIT])
-        more = f" and {len(members) - self.LIST_LIMIT} more" if len(members) > self.LIST_LIMIT else ""
+        label = {True: "lane window", False: "deciding window"}[high]
+        span = "5 minutes" if deciding.width == 300 else "hour"
+        listed = ", ".join(f"{ip} ({_plural(len(dests[ip].connections), 'connection')}, {dests[ip].state})"
+                           for ip in deciding.members[:self.LIST_LIMIT])
+        more = (f" and {deciding.size - self.LIST_LIMIT} more" if deciding.size > self.LIST_LIMIT else "")
         claim = (f"{src} ({src_scope} address) contacted {len(dests)} distinct {scope} addresses on {service} in the "
-                 f"hunt window ({_iso(group.first)} – {_iso(group.last)}): up to {short_n} within 5 minutes (from "
-                 f"{_iso(short_at)}) and up to {long_n} within 60 minutes (from {_iso(long_at)}). "
+                 f"hunt window ({_iso(group.first)} – {_iso(group.last)}): up to {short.size} within 5 minutes (from "
+                 f"{_iso(short.start)}) and up to {long.size} within 60 minutes (from {_iso(long.start)}). "
                  f"{'At least ' if capped else ''}{connections} distinct connection(s), each counted once across "
                  f"sensors ({_sensor_counts(group.records)}). Of the {len(dests)} addresses, "
                  f"{states['no reply']} never sent a packet back on any recorded connection, {states['answered']} "
                  f"answered and {states['reply unknown']} have no typed packet count; in the busiest hour "
-                 f"{member_silent} of {long_n} never answered. Addresses in the busiest hour: {listed}{more}.")
-        in_window = [(ts, eid) for ts, eid, ip in group.staged if long_at <= ts < long_at + 3600]
-        others = [(ts, eid) for ts, eid, _ip in group.staged if not long_at <= ts < long_at + 3600]
-        ids = [eid for _ts, eid in sorted(in_window) + sorted(others)][:EXAMPLE_LIMIT]
-        evs = self._events(ids)
+                 f"{long.silent} of {long.size} never answered. The {label} is the {span} from "
+                 f"{_iso(deciding.start)}: {deciding.size} addresses, {deciding.silent} of {deciding.size} never "
+                 f"answered. Addresses in the {label}: {listed}{more}.")
+        members = set(deciding.members)
+        end = deciding.start + deciding.width
+        inside = [(dests[ip].state != "no reply", ts, eid) for ts, eid, ip in group.staged
+                  if ip in members and deciding.start <= ts < end]
+        rest = [(ts, eid) for ts, eid, ip in group.staged if not (ip in members and deciding.start <= ts < end)]
+        ids = [eid for _answered, _ts, eid in sorted(inside)] + [eid for _ts, eid in sorted(rest)]
+        evs = self._events(ids[:EXAMPLE_LIMIT])
         cited = next((e for e in evs if e.has("destination.port")), evs[0])
         match = Match(self.id, claim, self.claim_type, evs,
                       _predicates(cited, ("source.ip", "destination.ip", "destination.port", "network.transport")),
-                      evs[0].ts, self.severity, lane, "high", _entities(evs),
+                      evs[0].ts, self.severity, "high" if high else self.lane, "high", _entities(evs),
                       group_key=f"{src}|{transport}|{port}|{scope}")
         if scope == "internal" and src_scope == "internal":
             match.notes.append("ATT&CK context: T1046 Network Service Discovery / T1018 Remote System Discovery")
@@ -634,9 +699,9 @@ class HorizontalSweep(_FlowRule):
                                "addresses)")
         else:
             match.notes.append("ATT&CK context: T1046 Network Service Discovery (fan-out to external addresses)")
-        if lane == "high":
-            match.notes.append(f"lane high: {long_n} internal addresses in one hour from an internal source, "
-                               f"{member_silent} of them never answered")
+        if high:
+            match.notes.append(f"lane high: {deciding.size} internal addresses over TCP within one hour from an "
+                               f"internal source, {deciding.silent} of them never answered")
         return match
 
 
@@ -663,10 +728,22 @@ class _Unidentified:
 @dataclass
 class _Mismatch:
     connections: set = field(default_factory=set)
+    sources: dict[str, set] = field(default_factory=dict)     # source address -> its connections
     records: Counter = field(default_factory=Counter)
     first: float = float("inf")
     last: float = float("-inf")
     cited: list[str] = field(default_factory=list)
+
+
+SOURCE_LIST_LIMIT = 30
+
+
+def _sources_phrase(counts: dict[str, int]) -> str:
+    """'from 2 sources (10.0.0.5: 3, 10.0.0.6: 2)' with every source up to the list limit."""
+    ordered = sorted(counts, key=ip_sort_key)
+    listed = ", ".join(f"{ip}: {counts[ip]}" for ip in ordered[:SOURCE_LIST_LIMIT])
+    more = f" and {len(ordered) - SOURCE_LIST_LIMIT} more" if len(ordered) > SOURCE_LIST_LIMIT else ""
+    return f"from {_plural(len(ordered), 'source')} ({listed}{more})"
 
 
 class ProtocolPortMismatch(_FlowRule):
@@ -674,7 +751,7 @@ class ProtocolPortMismatch(_FlowRule):
     data-carrying connection to a registered port had no protocol identified although the sensor can parse the
     protocol registered there."""
     id = "net.protocol_port_mismatch"
-    version = "1"
+    version = "2"
     title = "Application protocol and port disagree on a connection"
     severity, lane = "medium", "lead"
     attack = ("T1571", "T1572", "T1095")
@@ -695,17 +772,19 @@ class ProtocolPortMismatch(_FlowRule):
                     "it, including a registered port carrying a different identified protocol (ssh on tcp/443); "
                     "(b) a connection to a registered port that carried data both ways with no protocol identified "
                     "by a sensor that parses the protocol registered there",
-        "telemetry": "Suricata EVE flow records (network.app_proto, ports, transport, flow.bytes_toserver/"
-                     "toclient) and Arkime sessions (network.protocols, ports, transport, client.bytes/server.bytes "
-                     "or source.bytes/destination.bytes): present in the lab profile, app_proto on about 92% of "
-                     "flow records",
+        "telemetry": "Suricata EVE flow records (network.app_proto, ports, transport, flow.bytes_* and flow.pkts_* "
+                     "per direction) and Arkime sessions (network.protocols, ports, transport, client.bytes/"
+                     "server.bytes, or source/destination bytes and packets): present in the lab profile, app_proto "
+                     "on about 92% of flow records. 'Data both ways' for Suricata is whole-frame bytes minus 66 "
+                     "header bytes per packet of at least 64 in each direction",
         "fidelity": "the sensors' protocol identification is typed but is a parser's judgement, not proof; a port "
                     "is checked in both directions, so answers from a registered port (NTP replies to ephemeral "
                     "ports) are consistent. Positive-only",
         "benign_and_cost": "custom service ports, proxies, mid-stream pickups and sensor parser gaps (Kafka without "
                            "a Suricata parser is excluded by the parser table; partial Arkime Kafka recognition "
-                           "stays visible as a grouped lead with the pair's identified share). One item per "
-                           "(source, destination, port, protocol)",
+                           "stays visible as a grouped lead with the destination's identified share). One item "
+                           "per (destination, port, protocol), or per (destination, port) for unidentified traffic, "
+                           "listing every source with its connection count",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the owning processes, and the first packets of a cited connection",
         "adds": "net.long_external_connection and net.beaconing judge timing only; nothing else compares protocol "
@@ -733,21 +812,23 @@ class ProtocolPortMismatch(_FlowRule):
         expected = expected_protocols(view.transport, view.dport)
         registered = bool(expected) or bool(expected_protocols(view.transport, view.sport))
         if expected:
-            counts = self.pairs.setdefault((view.src, view.dst, view.dport, view.transport), {})
+            counts = self.pairs.setdefault((view.dst, view.dport, view.transport), {})
             tally = counts.setdefault(view.sensor, Counter())
             tally["records"] += 1
             for protocol in view.protocols:
                 tally[protocol] += 1
         if view.protocols:
-            consistent = any(standard_on(p, view.transport, port) for p in view.protocols
-                             for port in (view.sport, view.dport))
+            # a protocol that negotiates its ports at run time is consistent with any port
+            consistent = any(p in DYNAMIC_PROTOCOLS or standard_on(p, view.transport, port)
+                             for p in view.protocols for port in (view.sport, view.dport))
             judged = expected or any(p in PROTOCOL_PORTS for p in view.protocols)
             if registered or (not consistent and judged):
                 self.identified.setdefault(view.key, {}).setdefault(view.sensor, set()).update(view.protocols)
             if not consistent and judged:
-                group_key = (view.src, view.dst, view.dport, view.transport, tuple(sorted(view.protocols)))
+                group_key = (view.dst, view.dport, view.transport, tuple(sorted(view.protocols)))
                 group = self.mismatches.setdefault(group_key, _Mismatch())
                 group.connections.add(view.key)
+                group.sources.setdefault(view.src, set()).add(view.key)
                 group.records[view.sensor] += 1
                 group.first, group.last = min(group.first, view.start), max(group.last, view.end)
                 if len(group.cited) < self.STAGE_PER_GROUP:
@@ -775,18 +856,18 @@ class ProtocolPortMismatch(_FlowRule):
 
     def finalize(self):
         out = [self._mismatch(key, group) for key, group in sorted(
-            self.mismatches.items(), key=lambda item: (item[0][0], item[0][1], item[0][2], item[0][3], item[0][4]))]
+            self.mismatches.items(), key=lambda item: (ip_sort_key(item[0][0]),) + item[0][1:])]
         groups: dict[tuple, list[_Unidentified]] = defaultdict(list)
         for key, entry in self.unidentified.items():
             if key in self.identified:
                 continue                # another record of the same connection had its protocol identified
-            groups[(entry.src, entry.dst, entry.dport, entry.transport)].append(entry)
-        for key in sorted(groups):
+            groups[(entry.dst, entry.dport, entry.transport)].append(entry)
+        for key in sorted(groups, key=lambda k: (ip_sort_key(k[0]),) + k[1:]):
             out.append(self._unidentified(key, groups[key]))
         return out
 
     def _mismatch(self, key, group: _Mismatch) -> Match:
-        src, dst, port, transport, protocols = key
+        dst, port, transport, protocols = key
         expected = expected_protocols(transport, port)
         sensors = " and ".join(SENSOR_NAMES[s] for s in sorted(group.records))
         names = ", ".join(protocols)
@@ -803,8 +884,9 @@ class ProtocolPortMismatch(_FlowRule):
                 extra = seen - set(protocols)
                 if extra:
                     others[sensor].update(extra)
-        claim = (f"{sensors} identified {names} on {_plural(len(group.connections), 'connection')} from {src} to "
-                 f"{dst} on {transport}/{port} ({_iso(group.first)} – {_iso(group.last)}; "
+        sources = _sources_phrase({src: len(keys) for src, keys in group.sources.items()})
+        claim = (f"{sensors} identified {names} on {_plural(len(group.connections), 'connection')} to {dst} on "
+                 f"{transport}/{port} {sources} ({_iso(group.first)} – {_iso(group.last)}; "
                  f"{_sensor_counts(group.records)}). {port_phrase}; {'; '.join(protocol_phrases)}.")
         if others:
             claim += " On the same connection(s) " + "; ".join(
@@ -815,13 +897,13 @@ class ProtocolPortMismatch(_FlowRule):
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "network.app_proto",
                                            "network.protocols")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs),
-                      group_key=f"{src}|{dst}|{transport}/{port}|{names}")
+                      group_key=f"{dst}|{transport}/{port}|{names}")
         match.notes.append("ATT&CK context: T1571 Non-Standard Port; T1572 Protocol Tunneling when a registered port "
                            "carries a different protocol")
         return match
 
     def _unidentified(self, key, entries: list[_Unidentified]) -> Match:
-        src, dst, port, transport = key
+        dst, port, transport = key
         expected = expected_protocols(transport, port)
         records: Counter = Counter()
         failed = 0
@@ -846,10 +928,11 @@ class ProtocolPortMismatch(_FlowRule):
         for sensor, tally in sorted(self.pairs.get(key, {}).items()):
             identified = ", ".join(f"{p} {n}" for p, n in sorted(tally.items()) if p != "records")
             kind = "flow record" if sensor == SURICATA else "session record"
-            denominators.append(f"{SENSOR_NAMES[sensor]} wrote {_plural(tally['records'], kind)} between them on "
+            denominators.append(f"{SENSOR_NAMES[sensor]} wrote {_plural(tally['records'], kind)} to {dst} on "
                                 f"this port" + (f", identified as {identified}" if identified else
                                                 ", none with an identified protocol"))
-        claim = (f"{_plural(len(entries), 'connection')} from {src} to {dst} on {transport}/{port} "
+        sources = _sources_phrase(Counter(entry.src for entry in entries))
+        claim = (f"{_plural(len(entries), 'connection')} to {dst} on {transport}/{port} {sources} "
                  f"({_iso(first)} – {_iso(last)}) carried data in both directions with no application protocol "
                  f"identified: {'; '.join(how)}. {transport}/{port} is registered here for "
                  f"{', '.join(sorted(expected))}, which {' and '.join(capable)} can parse ({', '.join(parsable)}). "
@@ -860,7 +943,7 @@ class ProtocolPortMismatch(_FlowRule):
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "network.app_proto",
                                            "network.protocols")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs),
-                      group_key=f"{src}|{dst}|{transport}/{port}|unidentified")
+                      group_key=f"{dst}|{transport}/{port}|unidentified")
         match.notes.append("ATT&CK context: T1571 Non-Standard Port / T1095 Non-Application Layer Protocol")
         return match
 
@@ -877,6 +960,7 @@ class _Piece:
     identified: bool
     payload: bool
     failed: bool
+    capable: bool                   # the sensor parses a protocol registered on the destination port
     event_id: str
     src: str
     dst: str
@@ -885,11 +969,11 @@ class _Piece:
 
 
 class LongUnidentifiedSession(_FlowRule):
-    """A long connection on an unregistered port that carried data both ways while no sensor identified its
-    application protocol."""
+    """A long connection that carried data both ways while no sensor identified its application protocol, on a
+    port that is unregistered or registered only for protocols the recording sensor cannot parse."""
     id = "net.long_unidentified_session"
-    version = "1"
-    title = "Long data-carrying connection on an unregistered port with no identified protocol"
+    version = "2"
+    title = "Long data-carrying connection with no identified protocol on a port its sensor cannot judge"
     severity, lane = "medium", "lead"
     attack = ("T1095", "T1571", "T1573")
     assures_negative = False
@@ -905,14 +989,17 @@ class LongUnidentifiedSession(_FlowRule):
     MIN_SECONDS = 1800
     STAGE_PER_CONNECTION = 6
     card: ClassVar[dict] = {
-        "behavior": "a connection to a port registered for no protocol in the table lasted at least 30 minutes "
-                    "(records stitched across sensors and Arkime save intervals) and carried data both ways, and "
-                    "no sensor identified an application protocol on any of its records",
+        "behavior": "a connection lasted at least 30 minutes (records stitched across sensors and Arkime save "
+                    "intervals) and carried data both ways, no sensor identified an application protocol on any of "
+                    "its records, and its destination port is registered for no protocol in the table or only for "
+                    "protocols no sensor that recorded it can parse (a sensor that can parse the registered protocol "
+                    "hands the connection to the protocol/port rule)",
         "telemetry": "Suricata EVE flow records (network.app_proto, flow.start, flow.end, flow.bytes_toserver/"
                      "toclient) and Arkime sessions (network.protocols, flow.start, flow.end, client.bytes/"
                      "server.bytes): present in the lab profile",
-        "fidelity": "duration and data volume are typed counters; 'no protocol identified' is the parsers' "
-                    "judgement. Positive-only",
+        "fidelity": "duration and data volume are typed counters; 'data both ways' is Arkime application payload "
+                    "bytes, or for Suricata whole-frame bytes minus 66 header bytes per packet of at least 64 in "
+                    "each direction; 'no protocol identified' is the parsers' judgement. Positive-only",
         "benign_and_cost": "custom application protocols, brokers and replication, VPNs. One item per (source, "
                            "destination, port)",
         "query_cost": "none beyond the sweep",
@@ -937,18 +1024,23 @@ class LongUnidentifiedSession(_FlowRule):
     def take(self, view: FlowView, event: TypedEvent) -> bool:
         if view.transport not in ("tcp", "udp"):
             return True
-        if expected_protocols(view.transport, view.dport):
-            return True                 # a registered port: the mismatch rule judges it
-        if expected_protocols(view.transport, view.sport) and view.dport >= EPHEMERAL_FLOOR:
-            return True                 # a registered service answering a client's ephemeral port
+        expected = expected_protocols(view.transport, view.dport)
+        if expected and all(expected & parsers for parsers in PARSERS.values()):
+            return True                 # every sensor can parse the registered protocol: the mismatch rule judges it
+        source_expected = expected_protocols(view.transport, view.sport)
+        if source_expected and view.dport >= EPHEMERAL_FLOOR and not source_expected & PARSERS[view.sensor]:
+            # a registered service's side seen as the initiator, by a sensor that cannot parse that service: its
+            # silence says nothing. A sensor that can parse it and still identified nothing is judged.
+            return True
         if view.protocols is None or not view.timed:
             return False
         if view.payload is None:
             return False
-        piece = _Piece(view.start, view.end, view.sensor, bool(view.protocols), view.payload, view.failed, event.id,
-                       view.src, view.dst, view.dport, view.transport)
+        capable = bool(expected & PARSERS[view.sensor])
+        piece = _Piece(view.start, view.end, view.sensor, bool(view.protocols), view.payload, view.failed, capable,
+                       event.id, view.src, view.dst, view.dport, view.transport)
         self.pieces[view.key].append(piece)
-        if not piece.identified and piece.payload:
+        if not piece.identified and piece.payload and not capable:
             # the first few candidate records of an identity, and the first of any later connection that reuses it
             last = self.last_staged.get(view.key)
             if self.staged_per_key[view.key] < self.STAGE_PER_CONNECTION or abs(view.start - last) > STITCH_GAP:
@@ -975,8 +1067,8 @@ class LongUnidentifiedSession(_FlowRule):
     def finalize(self):
         groups: dict[tuple, list[list[_Piece]]] = defaultdict(list)
         for pieces in self._connections():
-            if any(p.identified for p in pieces) or not any(p.payload for p in pieces):
-                continue
+            if any(p.identified or p.capable for p in pieces) or not any(p.payload for p in pieces):
+                continue                # identified, owned by the protocol/port rule, or never carried data
             first = pieces[0]
             groups[(first.src, first.dst, first.dport, first.transport)].append(pieces)
         out = []
@@ -994,6 +1086,9 @@ class LongUnidentifiedSession(_FlowRule):
         records: Counter = Counter(p.sensor for c in connections for p in c)
         failed = sum(p.failed for c in connections for p in c)
         sensors = " or ".join(SENSOR_NAMES[s] for s in sorted(records))
+        expected = expected_protocols(transport, port)
+        registration = (f"{transport}/{port} is registered here for {', '.join(sorted(expected))}, which {sensors} "
+                        f"cannot parse" if expected else f"{transport}/{port} is registered here for no protocol")
         claim = (f"{_plural(len(long), 'connection')} from {src} to {dst} on {transport}/{port} lasted at least "
                  f"{self.MIN_SECONDS // 60} minutes with data in both directions and no application protocol "
                  f"identified by {sensors}; the longest ran {longest / 60:.0f} minutes ({_iso(longest_conn[0].start)} "
@@ -1001,8 +1096,7 @@ class LongUnidentifiedSession(_FlowRule):
                  f"{_plural(len(connections), 'unidentified data-carrying connection')} between them on this port "
                  f"in total ({_sensor_counts(records)}"
                  + (f"; Suricata reported protocol detection 'failed' on {failed}" if failed else "") + "). "
-                 f"{transport}/{port} is registered here for no protocol. Only the part of each connection inside "
-                 f"the hunt window is counted.")
+                 f"{registration}. Times are as the sensors recorded them.")
         ids = [p.event_id for _span, c in sorted(long, key=lambda item: (-item[0], item[1][0].start))
                for p in c if not p.identified and p.payload and p.event_id in self._staged]
         ids += [p.event_id for c in connections for p in c if p.event_id in self._staged]

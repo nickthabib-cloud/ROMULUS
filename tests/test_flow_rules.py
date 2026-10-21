@@ -425,7 +425,8 @@ def test_short_unidentified_connections_are_counted_only_beside_a_long_one():
 @pytest.mark.parametrize("hits", [
     chunks(4, protocols=["ssh"]),                       # identified: judged by the mismatch rule instead
     chunks(4, dport=9092),                              # a registered port
-    chunks(4, dport=40000, sport=80),                   # a web server's answer to a client's ephemeral port
+    # a Modbus server's side seen as the initiator by Arkime, which has no Modbus parser
+    chunks(4, src="10.0.6.6", sport=502, dst="10.0.0.5", dport=40000),
 ])
 def test_identified_registered_or_reversed_long_sessions_are_not_matched(hits):
     rule = LongUnidentifiedSession()
@@ -591,6 +592,12 @@ def test_implant_on_source_port_443_to_a_high_port_is_judged():
               pkts_s=900)
     [m] = run(LongUnidentifiedSession(), events(hit))
     assert "on tcp/45000" in m.claim
+
+
+def test_reversed_view_from_a_port_the_sensor_can_parse_is_judged():
+    # Arkime parses HTTP; a long session from source port 80 that it could not identify is not excused as an answer
+    [m] = run(LongUnidentifiedSession(), events(*chunks(4, dport=40000, sport=80)))
+    assert "on tcp/40000" in m.claim
 
 
 def test_reversed_view_from_a_port_the_sensor_cannot_parse_is_skipped():
