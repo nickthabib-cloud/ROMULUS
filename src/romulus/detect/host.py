@@ -638,7 +638,7 @@ class FirewallRuleChange(Playbook):
     id = "host.firewall_rule_change_command"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "5"
+    version = "6"
     title = "Firewall command blocking, unblocking or weakening"
     kind = "aggregate"
     families = ("process_exec",)
@@ -724,24 +724,34 @@ class FirewallRuleChange(Playbook):
             n = self.weak_n[key]
             what = "weakens the host firewall" if weakens else "changes firewall state"
             claim = (f"{n} '{name}' command(s) on {host_} in a form that {what}: {reason} (e.g. "
-                     f"{_argv_summary(evs[0].get('process.argv'), 100)}); for the earliest, {outcome_phrase(evs[0])}."
+                     f"{_argv_summary(evs[0].get('process.argv'), 100)}); {_outcome_tally(evs)}."
                      + ("" if weakens else " Whether this weakens protection is not established by the command line.")
                      + (f" The earliest {len(evs)} are cited." if len(evs) < n else ""))
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(x, "process.argv") for x in evs], evs[0].ts,
                              "medium", "lead", "high", _exec_entities(evs[0]),
                              group_key=f"weak|{host_}|{name}|{reason}"))
         for (host_, name), evs in self.routine.items():
-            claim = (f"{self.routine_n[(host_, name)]} other '{name}' rule-change command(s) on {host_} not "
-                     f"recognised as a specific-address block or a weakening form (e.g. "
-                     f"{_argv_summary(evs[0].get('process.argv'), 100)}); retained for context.")
-            out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
-                             evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
+            # Unclassified changes may open the firewall in a form not modelled here, so they are kept visible.
+            evs = sorted(evs, key=lambda e: (e.ts, e.id))
+            n = self.routine_n[(host_, name)]
+            claim = (f"{n} other '{name}' rule-change command(s) on {host_} not recognised as a specific-address "
+                     f"block or a known weakening form (e.g. {_argv_summary(evs[0].get('process.argv'), 100)}); "
+                     f"whether they weaken protection is not established; {_outcome_tally(evs)}."
+                     + (f" The earliest {len(evs)} are cited." if len(evs) < n else ""))
+            out.append(Match(self.id, claim, "aggregate_observation", evs, [pf(x, "process.argv") for x in evs],
+                             evs[0].ts, "low", "lead", "high", _exec_entities(evs[0]),
                              group_key=f"routine|{host_}|{name}"))
         return out
 
 
 _IPT_FLUSH = {"-F", "--flush", "-X", "--delete-chain"}
 _OPEN_TARGETS = {"ACCEPT", "RETURN"}
+
+
+def _outcome_tally(events: list[TypedEvent]) -> str:
+    counts = {outcome: sum(1 for e in events if e.outcome == outcome) for outcome in Outcome}
+    return (f"recorded exec outcomes of the cited runs: {counts[Outcome.success]} succeeded, "
+            f"{counts[Outcome.failure]} failed, {counts[Outcome.unknown]} unknown")
 
 
 def _flushed_chain(args: list[str]) -> str | None:
@@ -781,8 +791,12 @@ def _firewall_weakening(name: str, args: list[str], chain: str | None, target: s
         return None
     flushed = _flushed_chain(args)
     if flushed is not None:
-        if flushed == "" or flushed in BUILTIN_CHAINS:
-            return ("all rules or a built-in chain are flushed or deleted", True)
+        if flushed in BUILTIN_CHAINS:
+            return (f"built-in chain {flushed} is flushed", True)
+        if flushed == "":
+            if any(a in ("-F", "--flush") for a in args):
+                return ("all rules of the table are flushed", True)
+            return ("empty user-defined chains are deleted", False)
         return (f"user-defined chain {flushed} is flushed or deleted", False)
     policy = _flag_value(args, "-P", "--policy")
     if policy:

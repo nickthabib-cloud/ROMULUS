@@ -542,10 +542,11 @@ def test_firewall_block_found_and_sudo_wrapper_not_double_counted():
     assert "took effect is not" in m[0].claim and m[0].proposed_lane == "high"
 
 
-def test_firewall_routine_chain_management_is_one_context_item():
+def test_unclassified_firewall_changes_are_one_aggregated_lead_never_context():
     evs = [exec_ev(["/sbin/iptables", "-w", "-A", "fooX1998", "-p", "tcp", "-j", "ACCEPT"]) for _ in range(30)]
     m = run(host.FirewallRuleChange, evs)
-    assert len(m) == 1 and m[0].proposed_lane == "context" and "30" in m[0].claim
+    assert len(m) == 1 and m[0].proposed_lane == "lead" and "30 other" in m[0].claim
+    assert "whether they weaken protection is not established" in m[0].claim and len(m[0].events) == 10
 
 
 @pytest.mark.parametrize("argv", [
@@ -811,7 +812,7 @@ def test_a_service_restart_that_flushes_its_own_chains_is_one_lead_per_form_word
 
 @pytest.mark.parametrize("argv, lane", [
     (["ufw", "delete", "deny", "22"], "lead"),            # removing a block weakens
-    (["ufw", "delete", "allow", "22"], "context"),        # removing an allow tightens
+    (["ufw", "delete", "allow", "22"], "lead"),           # unclassified, so kept visible (it tightens)
 ])
 def test_ufw_delete_is_judged_by_what_it_removes(argv, lane):
     assert [x.proposed_lane for x in run(host.FirewallRuleChange, [exec_ev(argv)])] == [lane]
@@ -825,4 +826,13 @@ def test_ufw_delete_is_judged_by_what_it_removes(argv, lane):
     ["iptables-restore"],
 ])
 def test_other_ways_to_change_the_firewall_are_reported(argv):
+    assert [x.proposed_lane for x in run(host.FirewallRuleChange, [exec_ev(argv)])] == ["lead"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["firewall-cmd", "--set-default-zone", "trusted"],
+    ["firewall-cmd", "--zone=trusted", "--add-interface=eth0"],
+    ["ufw", "delete", "3"],
+])
+def test_firewall_changes_not_modelled_are_still_leads(argv):
     assert [x.proposed_lane for x in run(host.FirewallRuleChange, [exec_ev(argv)])] == ["lead"]
