@@ -151,10 +151,11 @@ class WebScanBurst(_Grouped):
 
 class DnsSubdomainEnumeration(_Grouped):
     """Forward names only. Names in the reverse-lookup trees (in-addr.arpa, ip6.arpa) are evaluated and left to
-    the reverse-lookup sweep rule, which reports every client this rule would have reported for them (its distinct
-    name threshold is the same) with a host-discovery claim and the swept address range."""
+    the reverse-lookup sweep rule, which reports any client with this rule's distinct-name count of reverse names at
+    this rule's lane, with a host-discovery claim and the swept address range. Question records are `query`
+    (`request` in newer sensor output) or carry no role; answers (`answer`, `response`) are not evaluated."""
     id = "net.dns_subdomain_enumeration"
-    version = "2"
+    version = "3"
     title = "Many distinct subdomains of one domain queried by one source"
     families = ("dns_query",)
     required_fields = ("source.ip", "dns.question.name")
@@ -181,7 +182,7 @@ class DnsSubdomainEnumeration(_Grouped):
 
     def consume(self, events):
         for e in self.applicable(events):
-            if e.get("dns.type") not in (None, "query"):
+            if e.get("dns.type") is not None and str(e.get("dns.type")).lower() not in ("query", "request"):
                 # answers/other record types are not evaluated by this rule: they must not count toward a
                 # complete negative (an answer-only capture still carries the enumeration)
                 self.evaluated -= 1

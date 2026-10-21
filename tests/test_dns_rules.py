@@ -23,21 +23,22 @@ def rec(dns_type="query", client=CLIENT, server=RESOLVER, name="www.example.test
     """One dns_query record. A query flows client -> server; an answer server -> client."""
     global _n
     _n += 1
-    src, dst = (server, client) if dns_type == "answer" else (client, server)
+    src, dst = (server, client) if dns_type in ("answer", "response") else (client, server)
     fields = {"source.ip": src, "destination.ip": dst, "dns.type": dns_type, "dns.question.name": name,
               "dns.question.type": qtype, "dns.response_code": rcode, "network.transport": transport,
               "suricata.flow_id": flow if flow is not None else _n}
-    fields.update(extra)
+    fields.update({k.replace("__", "."): v for k, v in extra.items()})
     return TypedEvent(id=f"d{_n:06d}", family="dns_query", ts=ts or T0, host="sensor",
                       fields={k: fv(v, f"fixture:{k}") for k, v in fields.items() if v is not None},
                       raw=[RawRef(target="fx", native_id=f"r{_n}")], normalizer="fixture")
 
 
-def pair(client=CLIENT, server=RESOLVER, name="www.example.test", qtype="A", rcode="NOERROR", ts=None):
+def pair(client=CLIENT, server=RESOLVER, name="www.example.test", qtype="A", rcode="NOERROR", ts=None,
+         transport="udp", roles=("query", "answer")):
     """A query and its answer on the same flow."""
-    q = rec("query", client, server, name, qtype, ts=ts)
-    a = rec("answer", client, server, name, qtype, rcode=rcode, ts=(ts or T0) + timedelta(milliseconds=3),
-            flow=q.get("suricata.flow_id"))
+    q = rec(roles[0], client, server, name, qtype, ts=ts, transport=transport)
+    a = rec(roles[1], client, server, name, qtype, rcode=rcode, ts=(ts or T0) + timedelta(milliseconds=3),
+            flow=q.get("suricata.flow_id"), transport=transport)
     return [q, a]
 
 
@@ -134,7 +135,8 @@ def test_internal_axfr_request_without_answer_is_a_lead_that_claims_only_a_reque
 
 
 def test_external_axfr_answered_noerror_by_internal_server_is_high():
-    q, a = pair(client=OUTSIDE, server=AUTH, name="corp.example.test", qtype="AXFR", rcode="NOERROR")
+    q, a = pair(client=OUTSIDE, server=AUTH, name="corp.example.test", qtype="AXFR", rcode="NOERROR",
+                transport="tcp")
     _pb, out = run(dns.DnsZoneTransferOrAnyRequest, [q, a])
     m = out[0]
     assert m.proposed_lane == "high" and m.severity == "high"
@@ -161,7 +163,8 @@ def test_answer_without_rcode_is_reported_as_not_recorded_never_answered():
 
 
 def test_answer_only_capture_still_reports_the_request_shape():
-    a = pair(client=OUTSIDE, server=AUTH, name="corp.example.test", qtype="AXFR", rcode="NOERROR")[1]
+    a = pair(client=OUTSIDE, server=AUTH, name="corp.example.test", qtype="AXFR", rcode="NOERROR",
+             transport="tcp")[1]
     _pb, out = run(dns.DnsZoneTransferOrAnyRequest, [a])
     assert "the question records themselves were not retrieved" in out[0].claim
     assert out[0].proposed_lane == "high"
@@ -207,7 +210,7 @@ def test_missing_question_type_or_address_is_partial_not_a_clean_negative():
 
 def test_question_and_answer_in_different_partitions_join_into_one_group():
     q, a = pair(client=OUTSIDE, server=AUTH, name="corp.example.test", qtype="AXFR", rcode="NOERROR",
-                ts=T0 + timedelta(minutes=59, seconds=59, milliseconds=999))
+                ts=T0 + timedelta(minutes=59, seconds=59, milliseconds=999), transport="tcp")
     _pb, out = run(dns.DnsZoneTransferOrAnyRequest, [q], [a])
     assert len(out) == 1 and out[0].proposed_lane == "high"
 
@@ -237,8 +240,8 @@ def test_dense_partial_block_reports_and_small_counts_do_not():
     assert out == []
 
 
-def test_scattered_reverse_lookups_at_the_enumeration_threshold_are_still_reported():
-    """Everything the enumeration rule reported for reverse trees (100 distinct names) is reported here."""
+def test_scattered_reverse_lookups_at_the_enumeration_threshold_are_reported():
+    """A client with the enumeration rule's count (100 distinct names) of reverse names is reported here."""
     events = [ptr("10.20.0.25", f"198.51.{i}.{i % 200 + 1}") for i in range(100)]
     _pb, out = run(dns.DnsReverseLookupSweep, events)
     assert len(out) == 1 and out[0].proposed_lane == "lead"
@@ -246,7 +249,7 @@ def test_scattered_reverse_lookups_at_the_enumeration_threshold_are_still_report
     assert "No block holds 32 or more" in out[0].claim and "0 of the 100 addresses are in internal ranges" in out[0].claim
 
 
-def test_enumeration_no_longer_reports_reverse_trees_but_sweep_does_at_the_same_lane():
+def test_enumeration_leaves_reverse_trees_to_the_sweep_at_the_same_lane():
     reverse = [ptr(CLIENT, f"10.30.4.{i}", dns__type="query") for i in range(150)]
     forward = [rec(client=CLIENT, name=f"h{i}.target.example.test") for i in range(120)]
     enum = network.DnsSubdomainEnumeration()
@@ -466,7 +469,7 @@ def test_missing_question_type_is_partial_but_still_reports_the_name_shape():
     events = tunnel(80, types=(None,), alphabet=B32)
     pb, out = run(dns.DnsTunnelShape, events)
     assert pb.missing_required == 80 and len(out) == 1 and out[0].proposed_lane == "lead"
-    assert "80 question record(s) carry no question type" in out[0].claim
+    assert "80 question(s) carry no question type" in out[0].claim
 
 
 def test_country_suffix_domains_are_not_merged():
@@ -537,3 +540,202 @@ def test_suricata_eve_v2_records_flow_through_the_normalizer():
     assert [(m.group_key, m.proposed_lane) for m in zone] == [(f"{OUTSIDE}|{AUTH}|corp.example.test", "high")]
     pb, nx = run(dns.DnsNxdomainBurst, events)
     assert [m.group_key for m in nx] == [CLIENT] and pb.missing_required == 0
+
+
+# ================================================================ zone-transfer high lane: deciding record, transport
+def _axfr(code, ts, transport="tcp", client=OUTSIDE, server=AUTH):
+    return pair(client=client, server=server, name="corp.example.test", qtype="AXFR", rcode=code, ts=ts,
+                transport=transport)
+
+
+def test_high_lane_cites_the_deciding_noerror_answer_and_its_query():
+    events = []
+    for i in range(25):
+        events += _axfr("REFUSED", T0 + timedelta(seconds=i))
+    deciding_q, deciding_a = _axfr("NOERROR", T0 + timedelta(minutes=5))
+    _pb, out = run(dns.DnsZoneTransferOrAnyRequest, events + [deciding_q, deciding_a])
+    m = out[0]
+    assert m.proposed_lane == "high"
+    ids = [e.id for e in m.events]
+    assert deciding_a.id in ids and deciding_q.id in ids and len(ids) <= 20
+    codes = [p.value for p in m.predicate if p.field == "dns.response_code"]
+    assert codes and codes[0] == "NOERROR"
+    assert deciding_a.ts.isoformat() in m.claim
+
+
+@pytest.mark.parametrize("transport", ["udp", None])
+def test_noerror_axfr_over_udp_or_unknown_transport_stays_lead(transport):
+    _pb, out = run(dns.DnsZoneTransferOrAnyRequest, _axfr("NOERROR", T0, transport=transport))
+    assert [m.proposed_lane for m in out] == ["lead"]
+    assert "TCP" in out[0].claim
+
+
+@pytest.mark.parametrize("client, server", [(CLIENT, AUTH), (CLIENT, OUTSIDE2), (OUTSIDE, OUTSIDE2)])
+def test_noerror_tcp_axfr_without_outside_client_and_inside_server_stays_lead(client, server):
+    _pb, out = run(dns.DnsZoneTransferOrAnyRequest, _axfr("NOERROR", T0, client=client, server=server))
+    assert [m.proposed_lane for m in out] == ["lead"]
+
+
+def test_suricata_v3_request_and_response_roles_are_queries_and_answers():
+    events = pair(client=OUTSIDE, server=AUTH, name="corp.example.test", qtype="AXFR", rcode="NOERROR",
+                  transport="tcp", roles=("request", "response"))
+    pb, out = run(dns.DnsZoneTransferOrAnyRequest, events)
+    assert pb.missing_required == 0 and [m.proposed_lane for m in out] == ["high"]
+    assert out[0].group_key == f"{OUTSIDE}|{AUTH}|corp.example.test"
+
+
+# ================================================================ answer-to-question matching
+def test_answer_matches_its_query_from_the_previous_batch_only():
+    q, a = pair(name="1.4.30.10.in-addr.arpa", qtype="PTR")
+    pb, _out = run(dns.DnsReverseLookupSweep, [q], [a])
+    assert pb.missing_required == 0
+    pb, _out = run(dns.DnsReverseLookupSweep, [q], [], [a])
+    assert pb.missing_required == 1
+
+
+def test_answer_on_a_reused_flow_for_another_question_is_missing():
+    q, _a = pair(name="1.4.30.10.in-addr.arpa", qtype="PTR")
+    other = rec("answer", name="2.4.30.10.in-addr.arpa", qtype="PTR", rcode="NOERROR",
+                flow=q.get("suricata.flow_id"))
+    pb, _out = run(dns.DnsReverseLookupSweep, [q, other])
+    assert pb.missing_required == 1
+
+
+def test_answer_with_a_different_transaction_id_is_missing():
+    q = rec(name="1.4.30.10.in-addr.arpa", qtype="PTR", dns__id=7)
+    a = rec("answer", name="1.4.30.10.in-addr.arpa", qtype="PTR", rcode="NOERROR", flow=q.get("suricata.flow_id"),
+            dns__id=8)
+    pb, _out = run(dns.DnsReverseLookupSweep, [q, a])
+    assert pb.missing_required == 1
+
+
+def test_suricata_v3_response_records_are_answers_for_the_question_rules():
+    events = []
+    for i in range(40):
+        events += pair(name=f"{i}.4.30.10.in-addr.arpa", qtype="PTR", rcode="NOERROR", roles=("request", "response"))
+    pb, out = run(dns.DnsReverseLookupSweep, events)
+    assert pb.missing_required == 0 and pb.evaluated == 40 and len(out) == 1
+    pb, out = run(dns.DnsNxdomainBurst, [rec("response", name=f"g{i}.example.test", rcode="NXDOMAIN")
+                                        for i in range(60)])
+    assert [m.group_key for m in out] == [CLIENT] and pb.missing_required == 0
+
+
+def test_enumeration_rule_reads_suricata_v3_requests():
+    enum = network.DnsSubdomainEnumeration()
+    enum.consume([rec("request", name=f"h{i}.target.example.test") for i in range(120)]
+                 + [rec("response", name="h1.target.example.test", rcode="NOERROR")])
+    assert [m.group_key for m in enum.finalize()] == [f"{CLIENT}|example.test"]
+    assert enum.evaluated == 120 and enum.missing_required == 1
+
+
+# ================================================================ multi-question records
+def test_multi_question_transaction_records_are_evaluated_per_name():
+    events = [rec(None, name=None, qtype="PTR",
+                  dns__question__names=sorted(f"{i}.{j}.30.10.in-addr.arpa" for j in (4, 5)))
+              for i in range(40)]
+    pb, out = run(dns.DnsReverseLookupSweep, events)
+    assert pb.missing_required == 0 and pb.evaluated == 40
+    assert "80 distinct reverse-lookup name(s)" in out[0].claim
+
+
+def test_scalar_name_is_used_when_the_names_list_is_absent():
+    pb, out = run(dns.DnsReverseLookupSweep, [ptr(CLIENT, f"10.30.4.{i}", dns_type=None) for i in range(40)])
+    assert pb.missing_required == 0 and len(out) == 1
+
+
+# ================================================================ citations from the deciding part of a group
+def test_nxdomain_citations_come_from_the_peak_window():
+    early = nx_answers(30, step=timedelta(minutes=7))                      # a slow drip first
+    burst_start = T0 + timedelta(hours=5)
+    burst = nx_answers(60, step=timedelta(seconds=3), start=burst_start)
+    _pb, out = run(dns.DnsNxdomainBurst, early + burst)
+    m = out[0]
+    assert all(burst_start <= e.ts < burst_start + timedelta(minutes=10) for e in m.events)
+    assert len(m.events) == 20
+
+
+def test_nxdomain_peak_citations_when_the_window_straddles_buckets():
+    bucket = T0 + timedelta(hours=2)                                       # a ten-minute boundary (14:30 + 2h)
+    start = bucket + timedelta(minutes=8)
+    burst = nx_answers(60, step=timedelta(seconds=9), start=start)
+    before = nx_answers(10, step=timedelta(seconds=1), start=bucket)        # same bucket, before the peak
+    _pb, out = run(dns.DnsNxdomainBurst, nx_answers(25, step=timedelta(minutes=3)) + before + burst)
+    m = out[0]
+    assert len(m.events) == 20
+    assert all(start <= e.ts < start + timedelta(minutes=10) for e in m.events)
+
+
+def test_reverse_sweep_cites_the_densest_block():
+    scattered = [ptr(CLIENT, f"198.51.{i}.7", ts=T0 + timedelta(seconds=i)) for i in range(30)]
+    dense = [ptr(CLIENT, f"10.30.4.{i}", ts=T0 + timedelta(hours=1, seconds=i)) for i in range(64)]
+    _pb, out = run(dns.DnsReverseLookupSweep, scattered + dense)
+    names = [e.get("dns.question.name") for e in out[0].events]
+    assert sum(1 for n in names if n.endswith(".4.30.10.in-addr.arpa")) >= 10
+
+
+# ================================================================ tunnel high gate and prevalence
+def test_strong_types_on_the_bare_domain_do_not_raise_a_txt_shape_to_high():
+    events = tunnel(400, domain="hashrep.test", types=("TXT",), label=40)
+    events += [rec(name="hashrep.test", qtype="MX", ts=T0 + timedelta(seconds=i)) for i in range(20)]
+    events += [rec(name=f"mail{i}.hashrep.test", qtype="MX") for i in range(20)]
+    _pb, out = run(dns.DnsTunnelShape, events)
+    assert [m.proposed_lane for m in out] == ["lead"]
+
+
+def test_mixed_txt_and_strong_type_long_names_are_high_and_cite_strong_questions():
+    events = tunnel(380, types=("TXT",), seed=8) + tunnel(40, types=("MX",), seed=9, start=T0 + timedelta(hours=2))
+    _pb, out = run(dns.DnsTunnelShape, events)
+    m = out[0]
+    assert m.proposed_lane == "high"
+    assert any(e.get("dns.question.type") == "MX" for e in m.events)
+    assert "40 questions for long names are NULL, CNAME, MX or private-use types" in m.claim
+
+
+def _md5_lookups(client, seed):
+    return tunnel(60, domain="avvendor.test", types=("A",), label=32, client=client, seed=seed)
+
+
+def test_shape_shared_by_many_clients_is_one_finding_per_domain():
+    events = []
+    for i in range(30):
+        events += _md5_lookups(f"10.20.1.{i + 1}", seed=100 + i)
+    events += [rec(client="10.20.2.1", name="www.avvendor.test")]           # queried, without the shape
+    _pb, out = run(dns.DnsTunnelShape, events)
+    assert len(out) == 1
+    m = out[0]
+    assert m.group_key == "*|avvendor.test" and m.proposed_lane == "lead"
+    assert "30 of the 31 clients" in m.claim
+    assert {e.get("source.ip") for e in m.events} == {f"10.20.1.{i + 1}" for i in range(30)}
+    assert any("10.20.1.30" in note for note in m.notes)
+
+
+def test_two_clients_with_the_shape_stay_separate_findings():
+    events = _md5_lookups("10.20.1.1", 1) + _md5_lookups("10.20.1.2", 2)
+    _pb, out = run(dns.DnsTunnelShape, events)
+    assert sorted(m.group_key for m in out) == ["10.20.1.1|avvendor.test", "10.20.1.2|avvendor.test"]
+
+
+def test_grouped_domain_keeps_the_highest_member_lane():
+    events = _md5_lookups("10.20.1.1", 1) + _md5_lookups("10.20.1.2", 2)
+    events += tunnel(400, domain="avvendor.test", types=("NULL",), alphabet=B32, client="10.20.1.3", seed=3)
+    _pb, out = run(dns.DnsTunnelShape, events)
+    assert [(m.group_key, m.proposed_lane) for m in out] == [("*|avvendor.test", "high")]
+    assert "10.20.1.3" in out[0].claim
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_nxdomain_citations_always_fill_from_inside_the_peak(seed):
+    rng = random.Random(seed)
+    offsets = sorted(rng.uniform(0, 3600) for _ in range(rng.randint(60, 400)))
+    events = [rec("answer", name=f"r{i}.example.test", rcode="NXDOMAIN", ts=T0 + timedelta(seconds=s))
+              for i, s in enumerate(offsets)]
+    pb = dns.DnsNxdomainBurst()
+    pb.consume(events)
+    peak, start = pb._peak(list(pb.times[CLIENT]))
+    out = pb.finalize()
+    if peak < pb.MIN_BURST:
+        assert out == []
+        return
+    window = pb.WINDOW // timedelta(microseconds=1)
+    cited = [dns._micros(e.ts) for e in out[0].events]
+    assert len(cited) == 20 and all(start <= c < start + window for c in cited)
