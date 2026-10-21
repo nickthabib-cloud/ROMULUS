@@ -114,6 +114,11 @@ CRED_FILES = {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"}
 FILE_READERS = {"cat", "head", "tail", "less", "more", "cp", "base64", "xxd", "od", "strings", "tac", "nl",
                 "dd", "tar", "vi", "vim", "nano", "view", "rsync", "scp"}
 FW_TOOLS = {"iptables", "ip6tables", "iptables-legacy", "iptables-nft", "nft", "ufw", "firewall-cmd"}
+FW_RESTORE_TOOLS = {"iptables-restore", "ip6tables-restore", "iptables-legacy-restore", "iptables-nft-restore"}
+FW_SERVICES = {"ufw", "firewalld", "nftables", "iptables", "ip6tables", "netfilter-persistent"}
+FW_SERVICE_VERBS = {"stop", "disable", "mask", "kill"}
+FIREWALLD_CHANGE = ("--add-", "--remove-", "--panic-", "--set-default-zone", "--reload", "--change-")
+NFT_BASE_CHAINS = {"input", "forward", "output", "prerouting", "postrouting"}
 FW_CHANGE_FLAGS = {"-A", "--append", "-I", "--insert", "-D", "--delete", "-R", "--replace", "-F", "--flush",
                    "-P", "--policy", "-X", "--delete-chain", "-N", "--new-chain", "-Z"}
 NFT_CHANGE = {"add", "insert", "delete", "flush", "replace", "create", "destroy"}
@@ -633,7 +638,7 @@ class FirewallRuleChange(Playbook):
     id = "host.firewall_rule_change_command"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "4"
+    version = "5"
     title = "Firewall command blocking, unblocking or weakening"
     kind = "aggregate"
     families = ("process_exec",)
@@ -647,23 +652,37 @@ class FirewallRuleChange(Playbook):
     def __init__(self):
         super().__init__()
         self.direct: list[Match] = []
+        self.weak: dict[tuple, list[TypedEvent]] = defaultdict(list)
+        self.weak_n: dict[tuple, int] = defaultdict(int)
         self.routine: dict[tuple, list[TypedEvent]] = defaultdict(list)
         self.routine_n: dict[tuple, int] = defaultdict(int)
         self.groups = self.routine
 
     def retained_events(self):
         # direct block/unblock matches are published at finalize too: their raw copies must be kept
-        return super().retained_events() + [e for m in self.direct for e in m.events]
+        return (super().retained_events() + [e for m in self.direct for e in m.events]
+                + [e for evs in self.weak.values() for e in evs])
 
     def consume(self, events):
         for e in self.applicable(events):
             argv = e.get("process.argv")
             name, args = basename(argv[0]), argv[1:]
+            if name == "systemctl":
+                if any(a in FW_SERVICE_VERBS for a in args) and any(a.removesuffix(".service") in FW_SERVICES
+                                                                    for a in args):
+                    self._weakening(e, name, ("the firewall service is stopped, disabled or masked", True))
+                continue
+            if name in FW_RESTORE_TOOLS or (name == "nft" and "-f" in args):
+                replaced = "the rule set is replaced from a file or stdin, whose content is not visible in the command line"
+                self._weakening(e, name, (replaced, False))
+                continue
             if name not in FW_TOOLS:      # sudo wrappers are not counted; the child exec is the action
                 continue
             changing = (name == "nft" and any(a in NFT_CHANGE for a in args)) or \
-                       (name == "ufw" and any(a in {"allow", "deny", "reject", "delete", "insert", "disable"}
-                                              for a in args)) or any(a in FW_CHANGE_FLAGS for a in args)
+                       (name == "ufw" and any(a in {"allow", "deny", "reject", "delete", "insert", "disable", "reset"}
+                                              for a in args)) or \
+                       (name == "firewall-cmd" and any(a.startswith(FIREWALLD_CHANGE) for a in args)) or \
+                       any(a in FW_CHANGE_FLAGS for a in args)
             if not changing:
                 continue
             chain = _flag_value(args, "-A", "--append", "-I", "--insert", "-D", "--delete")
@@ -672,12 +691,7 @@ class FirewallRuleChange(Playbook):
             specific_block = chain in BUILTIN_CHAINS and target in BLOCK_TARGETS and addr
             weakening = None if specific_block else _firewall_weakening(name, args, chain, target)
             if weakening:
-                # Disabling, flushing or opening the firewall is defense impairment (T1562.004), never routine.
-                claim = (f"A process execution event on {e.host} records '{name}' run in a form that weakens the host "
-                         f"firewall: {weakening} ({_argv_summary(argv)}); {outcome_phrase(e)}. Whether the change took "
-                         f"effect is not established by this event.")
-                self.direct.append(Match(self.id, claim, self.claim_type, [e], [pf(e, "process.argv")], e.ts,
-                                         "medium", "lead", "high", _exec_entities(e)))
+                self._weakening(e, name, weakening)
             elif specific_block:
                 verb = "remove" if any(a in ("-D", "--delete") for a in args) else "add"
                 claim = (f"A process execution event on {e.host} records '{name}' run to {verb} a {target} rule for "
@@ -694,11 +708,31 @@ class FirewallRuleChange(Playbook):
                     self.routine[key].append(e)
         return []
 
+    def _weakening(self, e: TypedEvent, name: str, weakening: tuple[str, bool]) -> None:
+        # Disabling, flushing or opening the firewall is defense impairment (T1562.004): always a lead, grouped per
+        # host, tool and form so a service restart that issues many such commands is one lead, not dozens.
+        key = (e.host, name, weakening)
+        self.weak_n[key] += 1
+        if len(self.weak[key]) < 20:
+            self.weak[key].append(e)
+
     def finalize(self):
         out = list(self.direct)
+        for key in sorted(self.weak, key=str):
+            host_, name, (reason, weakens) = key
+            evs = sorted(self.weak[key], key=lambda e: (e.ts, e.id))
+            n = self.weak_n[key]
+            what = "weakens the host firewall" if weakens else "changes firewall state"
+            claim = (f"{n} '{name}' command(s) on {host_} in a form that {what}: {reason} (e.g. "
+                     f"{_argv_summary(evs[0].get('process.argv'), 100)}); for the earliest, {outcome_phrase(evs[0])}."
+                     + ("" if weakens else " Whether this weakens protection is not established by the command line.")
+                     + (f" The earliest {len(evs)} are cited." if len(evs) < n else ""))
+            out.append(Match(self.id, claim, self.claim_type, evs, [pf(x, "process.argv") for x in evs], evs[0].ts,
+                             "medium", "lead", "high", _exec_entities(evs[0]),
+                             group_key=f"weak|{host_}|{name}|{reason}"))
         for (host_, name), evs in self.routine.items():
-            claim = (f"{self.routine_n[(host_, name)]} other '{name}' rule-change command(s) on {host_} that neither "
-                     f"block a specific address on a built-in chain nor weaken the firewall (e.g. "
+            claim = (f"{self.routine_n[(host_, name)]} other '{name}' rule-change command(s) on {host_} not "
+                     f"recognised as a specific-address block or a weakening form (e.g. "
                      f"{_argv_summary(evs[0].get('process.argv'), 100)}); retained for context.")
             out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
                              evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
@@ -710,32 +744,56 @@ _IPT_FLUSH = {"-F", "--flush", "-X", "--delete-chain"}
 _OPEN_TARGETS = {"ACCEPT", "RETURN"}
 
 
-def _firewall_weakening(name: str, args: list[str], chain: str | None, target: str | None) -> str | None:
-    """Why a firewall command weakens protection, or None. Typed from argv tokens only."""
+def _flushed_chain(args: list[str]) -> str | None:
+    for i, a in enumerate(args):
+        if a in _IPT_FLUSH:
+            nxt = args[i + 1] if i + 1 < len(args) else ""
+            return nxt if nxt and not nxt.startswith("-") else ""
+    return None
+
+
+def _firewall_weakening(name: str, args: list[str], chain: str | None, target: str | None) -> tuple[str, bool] | None:
+    """(the form, True when it plainly weakens protection) for a firewall command that weakens it or changes it in a
+    way that may; None otherwise. Typed from argv tokens only."""
     if name == "ufw":
+        if "delete" in args:          # a removal: of a block it weakens; of an allow it tightens
+            return ("a ufw blocking rule is removed", True) if any(a in ("deny", "reject") for a in args) else None
         if "disable" in args or "reset" in args:
-            return "the firewall is disabled or reset"
+            return ("the firewall is disabled or reset", True)
         if "allow" in args:
-            return "a rule allowing traffic is added"
+            return ("a ufw rule allowing traffic is added", True)
+        return None
+    if name == "firewall-cmd":
+        opened = [a for a in args if a.startswith(("--add-port", "--add-service", "--add-rich-rule", "--add-source",
+                                                   "--add-masquerade", "--add-forward-port"))]
+        if opened:
+            return (f"firewalld is opened ({opened[0].split('=')[0]})", True)
+        if "--panic-off" in args or any(a.startswith("--set-default-zone=trusted") for a in args):
+            return ("firewalld protection is relaxed (panic off or the trusted zone made default)", True)
         return None
     if name == "nft":
         if any(a in {"flush", "delete", "destroy"} for a in args):
-            return "rules, chains or tables are flushed or deleted"
+            if "ruleset" in args or any(a in NFT_BASE_CHAINS for a in args):
+                return ("the rule set or a base chain is flushed or deleted", True)
+            return ("a table or chain is flushed or deleted", False)
         if "accept" in args and any(a in {"add", "insert"} for a in args):
-            return "an accept rule is added"
+            return ("an accept rule is added", True)
         return None
-    if any(a in _IPT_FLUSH for a in args):
-        return "rules or chains are flushed or deleted"
+    flushed = _flushed_chain(args)
+    if flushed is not None:
+        if flushed == "" or flushed in BUILTIN_CHAINS:
+            return ("all rules or a built-in chain are flushed or deleted", True)
+        return (f"user-defined chain {flushed} is flushed or deleted", False)
     policy = _flag_value(args, "-P", "--policy")
     if policy:
         position = args.index(policy) if policy in args else -1
         if 0 <= position < len(args) - 1 and args[position + 1] == "ACCEPT":
-            return f"the default policy of {policy} is set to ACCEPT"
+            return (f"the default policy of {policy} is set to ACCEPT", True)
     if chain in BUILTIN_CHAINS and target in _OPEN_TARGETS and any(a in ("-A", "--append", "-I", "--insert")
                                                                    for a in args):
-        return f"an {target} rule is added to the {chain} chain"
+        return (f"an {target} rule is added to the {chain} chain", True)
     if chain in BUILTIN_CHAINS and target in BLOCK_TARGETS and any(a in ("-D", "--delete") for a in args):
-        return f"a {target} rule is removed from the {chain} chain"
+        return (f"a {target} rule is removed from the {chain} chain", True)
     return None
 
 

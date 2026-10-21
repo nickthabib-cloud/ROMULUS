@@ -798,3 +798,31 @@ def test_authorized_keys_direct_exec_vs_script_text_claims():
                  [exec_ev(["/bin/sh", "-c", "echo ssh-ed25519 AAAA x >> /root/.ssh/authorized_keys"])])
     assert direct[0].claim_type == "observed_action" and "records a command that writes" in direct[0].claim
     assert script[0].claim_type == "script_content" and "script that contains a write" in script[0].claim
+
+
+def test_a_service_restart_that_flushes_its_own_chains_is_one_lead_per_form_worded_as_a_change():
+    docker = [exec_ev(["iptables", "--wait", "-t", "nat", "-F", "DOCKER"]),
+              exec_ev(["iptables", "--wait", "-t", "filter", "-X", "DOCKER-ISOLATION-STAGE-1"]),
+              exec_ev(["iptables", "--wait", "-t", "nat", "-F", "DOCKER"])]
+    m = run(host.FirewallRuleChange, docker)
+    assert all(x.proposed_lane == "lead" for x in m) and len(m) == 2          # grouped per chain form, never context
+    assert all("changes firewall state" in x.claim and "weakens the host firewall" not in x.claim for x in m)
+
+
+@pytest.mark.parametrize("argv, lane", [
+    (["ufw", "delete", "deny", "22"], "lead"),            # removing a block weakens
+    (["ufw", "delete", "allow", "22"], "context"),        # removing an allow tightens
+])
+def test_ufw_delete_is_judged_by_what_it_removes(argv, lane):
+    assert [x.proposed_lane for x in run(host.FirewallRuleChange, [exec_ev(argv)])] == [lane]
+
+
+@pytest.mark.parametrize("argv", [
+    ["systemctl", "stop", "ufw"],
+    ["systemctl", "disable", "--now", "firewalld.service"],
+    ["firewall-cmd", "--permanent", "--add-port=4444/tcp"],
+    ["firewall-cmd", "--panic-off"],
+    ["iptables-restore"],
+])
+def test_other_ways_to_change_the_firewall_are_reported(argv):
+    assert [x.proposed_lane for x in run(host.FirewallRuleChange, [exec_ev(argv)])] == ["lead"]
