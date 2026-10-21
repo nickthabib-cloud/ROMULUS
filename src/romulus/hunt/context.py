@@ -135,7 +135,12 @@ def _finalize_rule(repo: Repo, hunt_id: str, playbook_cls, reaches: list[tuple],
         inst = playbook_cls()
         applicable = inst.accepts(anchor, link)
         eligible = inst.eligible_records(link_events) if applicable else []
-        coverage.append((anchor, link, inst.evaluated, inst.missing_required, applicable))
+        # Coverage counts come from the rule's full judgement of this reach (an unparseable script or a
+        # malformed address is counted there); its matches are discarded, the session pass below decides.
+        judged = playbook_cls()
+        if applicable:
+            judged.consume_linked(anchor, link, link_events)
+        coverage.append((anchor, link, judged.evaluated, judged.missing_required, applicable))
         for event in eligible:
             skey = _session_of(event, anchor, link)
             bucket = sessions.setdefault(skey, {"events": {}, "pairs": {}})

