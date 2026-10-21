@@ -324,15 +324,18 @@ class NonRootWriteRootExecutedFile(Playbook):
         path = event.get("file.path")
         root = _is_root(event)
         change = event.get("file.change")
+        if change in ("delete", "rename_source"):
+            self.evaluated += 1                 # the file left this path: not a write of it, whatever the path
+            self.file_change_records += 1
+            return
         if not path or not str(path).startswith("/") or root is None or not change:
             self.missing_required += 1
             return
         self.evaluated += 1
         self.file_change_records += 1
         # root, a setuid-root writer (it writes as root) and a failed call change nothing a non-root account
-        # controls; a file leaving the path is not a write of it
-        if (root or event.outcome == Outcome.failure or str(event.get("process.euid", "")) == "0"
-                or change in ("delete", "rename_source")):
+        # controls
+        if root or event.outcome == Outcome.failure or str(event.get("process.euid", "")) == "0":
             return
         key = (event.host or "", path_key(normalize_path(str(path))))
         account = _account(event)

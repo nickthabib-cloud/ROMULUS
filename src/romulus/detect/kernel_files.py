@@ -360,6 +360,8 @@ _SHELL_RC = {".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profil
 _AUTHORIZED_KEYS = {"authorized_keys", "authorized_keys2"}
 _PAM_MODULE = re.compile(r"^/(?:usr/)?lib(?:32|64)?/(?:[^/]+/)?security/[^/]+\.so$")
 _RC_LEVEL_DIR = re.compile(r"^/etc/rc[0-6S]\.d$")
+# Spools whose entries belong to the account that submitted them (its crontab, its at jobs).
+_PER_ACCOUNT_SPOOLS = {"/var/spool/cron", "/var/spool/cron/atjobs", "/var/spool/at"}
 
 # Changes that can install or alter what is run or read; removing a file does not establish anything.
 _INSTALLING = {"content", "create", "rename_target", "link", "attributes"}
@@ -377,7 +379,7 @@ def persistence_location(path: str) -> tuple[str, str, str, bool] | None:
         return path, description, technique, False
     for prefix, description, technique in _DIRS:
         if path.startswith(prefix + "/"):
-            return prefix, f"a file in {description} ({prefix})", technique, prefix == "/var/spool/cron"
+            return prefix, f"a file in {description} ({prefix})", technique, prefix in _PER_ACCOUNT_SPOOLS
     directory, name = posixpath.split(path)
     if _RC_LEVEL_DIR.match(directory):
         return directory, f"a file in a runlevel script directory ({directory})", "T1037.004", False
@@ -412,6 +414,7 @@ class _Change:
     account: str
     web: bool
     own: bool               # a per-account location, in a file the actor's own uid owns
+    setuid: bool            # a non-root account through a setuid-root program (effective uid 0)
     exe: str
     pid: int | None
     ppid: int | None
@@ -461,7 +464,9 @@ class PersistencePathChange(Playbook):
         "fidelity": "direct kernel record of the call on the file and its outcome; a write-intent open shows the "
                     "file was opened for writing, not what was written",
         "benign_and_cost": "package activity (one grouped lead per host, manager and location), root editors and "
-                           "agents (lead per host, location and account). Non-root changes are rare and high",
+                           "agents (lead per host, location and account), an account's own crontab, at jobs, keys "
+                           "or startup files and setuid-root helpers acting for an account (lead). Other non-root "
+                           "changes, and every web-service account change, are rare and high",
         "query_cost": "none beyond the sweep: it reads the host partitions every host rule reads",
         "next_pivot": "the file's content and the next run or read of it; the writer's session and lineage",
         "adds": "the argv rules see only commands that name the file; this sees the kernel's record of the change "
@@ -508,6 +513,9 @@ class PersistencePathChange(Playbook):
 
     def _change(self, event: TypedEvent) -> None:
         path, uid = event.get("file.path"), _str(event.get("process.uid"))
+        if event.get("file.change") in ("delete", "rename_source"):
+            self.evaluated += 1                 # removing or moving a file away installs nothing, whatever the path
+            return
         if not path or uid is None:
             self.missing_required += 1
             return
@@ -531,6 +539,7 @@ class PersistencePathChange(Playbook):
             location=location[0], description=location[1], technique=location[2], uid=uid,
             account=str(user or f"uid {uid}"), web=user in WEB_SERVICE_USERS,
             own=location[3] and _str(event.get("file.owner.id")) == uid,
+            setuid=uid != "0" and _str(event.get("process.euid")) == "0",
             exe=str(event.get("process.executable") or ""), pid=event.get("process.pid"),
             ppid=event.get("process.ppid"), auid=_str(event.get("process.auid")), tty=_str(event.get("process.tty")),
             outcome=event.outcome))
@@ -601,8 +610,8 @@ class PersistencePathChange(Playbook):
             who = f"account '{first.account}'" + (f" (uid {uid})" if not first.account.startswith("uid ") else "")
             if any(c.web for c in items):
                 who += ", a web-service account,"
-        claim = (f"On {host}, {who} changed {first.description}: {len(items)} kernel file-change record(s) "
-                 f"{_span(items[0].ts, items[-1].ts)} ({self._changes_text(items)}), by "
+        claim = (f"On {host}, {len(items)} kernel file-change record(s) {_span(items[0].ts, items[-1].ts)} show "
+                 f"{who} acting on {first.description} ({self._changes_text(items)}), by "
                  f"{', '.join(executables) or 'an unrecorded executable'}")
         if root:
             claim += f" {_root_session(items)}"
@@ -610,21 +619,27 @@ class PersistencePathChange(Playbook):
         if not ok:
             claim += " Every recorded call failed: these are attempts; no change was made by them."
         own_only = not root and all(c.own and not c.web for c in items)
+        setuid_only = not root and all(c.setuid and not c.web for c in items)
         if own_only:
             claim += (" Each file is the account's own (a per-account location, owned by the account's uid), as "
                       "when an account manages its own crontab, keys or shell startup files.")
+        elif setuid_only:
+            claim += (" Every call ran with effective uid 0 through a setuid-root program, which decides what it "
+                      "writes on the account's behalf (as crontab, at or chsh do).")
         claim += (" The records show the system call on the file, not the content written; the files here are "
                   "read or run by the system (scheduler, init, the login path or the loader).")
         if len(items) > len(cited):
             claim += f" The earliest {len(cited)} records are cited."
         # A non-root account changing what the system or another account acts on is high; a web-service account
         # always is. An account changing its own per-account files is a lead: that is also routine use.
-        lane = "high" if (not root and ok and not own_only) else "lead"
+        lane = "high" if (not root and ok and not own_only and not setuid_only) else "lead"
         notes = sorted({c.technique for c in items})
         if not root and not ok:
             notes.insert(0, "lane lowered: every recorded call failed (attempts)")
         elif own_only:
-            notes.insert(0, "lead: the account changed only its own per-account files")
+            notes.insert(0, "lead: the account acted only on its own per-account files")
+        elif setuid_only:
+            notes.insert(0, "lead: every call was made through a setuid-root program")
         confidence = "high" if ok and all(c.outcome == Outcome.success for c in ok) else "medium"
         match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, lane,
                       confidence, cited[0].entities(), group_key=f"{host}|{uid}|{location}")
@@ -635,8 +650,8 @@ class PersistencePathChange(Playbook):
         _kind, host, manager, location = key
         cited, predicate = self._cite(items)
         files = sorted({c.path for c in items})
-        claim = (f"On {host}, package activity changed {items[0].description}: {len(items)} kernel file-change "
-                 f"record(s) on {len(files)} file(s) {_span(items[0].ts, items[-1].ts)} "
+        claim = (f"On {host}, {len(items)} kernel file-change record(s) on {len(files)} file(s) "
+                 f"{_span(items[0].ts, items[-1].ts)} show package activity acting on {items[0].description} "
                  f"({self._changes_text(items)}). Each writing process is '{manager}' or a descendant of it in the "
                  f"kernel-recorded process lineage (executables {', '.join(sorted({c.exe for c in items}))}). "
                  f"This is how package installs and upgrades change these files; a malicious or tampered package "

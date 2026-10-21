@@ -279,7 +279,7 @@ def test_package_manager_lineage_is_one_batched_lead_worded_as_package_activity(
     assert len(out) == 1
     m = out[0]
     assert m.proposed_lane == "lead" and m.group_key == "app01|package:dpkg|/etc/cron.daily"
-    assert "package activity" in m.claim and "3 kernel file-change record(s) on 3 file(s)" in m.claim
+    assert "show package activity acting on" in m.claim and "3 kernel file-change record(s) on 3 file(s)" in m.claim
     assert "a malicious or tampered package" in m.claim
 
 
@@ -329,6 +329,21 @@ def test_an_accounts_own_per_account_files_are_a_lead_and_anothers_are_high():
     # a web-service account is never "routine" even in its own home
     _pb, out = run_persist([change("/var/www/.ssh/authorized_keys", uid="33")])
     assert out[0].proposed_lane == "high" and "T1098.004" in out[0].notes
+
+
+def test_setuid_root_helpers_writing_for_an_account_are_a_lead():
+    _pb, out = run_persist([change("/var/spool/cron/alice", uid="1000", owner="0", process__euid="0",
+                                   exe="/usr/bin/crontab")])
+    assert out[0].proposed_lane == "lead" and "setuid-root program" in out[0].claim
+    _pb, out = run_persist([change("/var/spool/cron/atjobs/a0001", uid="1000", change_="create")])
+    assert out[0].proposed_lane == "lead"                                  # the account's own at job
+
+
+def test_claims_say_what_the_records_show_not_that_content_changed():
+    _pb, out = run_persist([change("/etc/profile.d/x.sh", uid="1002", user="deploy", change_="content")])
+    m = out[0]
+    assert "show account 'deploy' (uid 1002) acting on" in m.claim and "x.sh: opened it for writing" in m.claim
+    assert " changed " not in m.claim
 
 
 def test_deletes_moves_away_and_other_paths_are_not_matched():
@@ -499,6 +514,13 @@ def test_deletes_moves_away_setuid_writers_and_failures_are_not_writes():
         pb, out = run_hijack([record, *cron_runs(T0 + timedelta(minutes=5))])
         assert out == [], record.fields
         assert pb.file_change_records == 1
+
+
+def test_unplaced_deletes_are_evaluated_not_missing():
+    pb, _out = run_hijack([ev("file_change", T0, file__change="delete", process__uid="33")])
+    assert pb.missing_required == 0 and pb.evaluated == 1
+    pb, _out = run_persist([ev("file_change", T0, file__change="rename_source", process__uid="33")])
+    assert pb.missing_required == 0 and pb.evaluated == 1
 
 
 def test_kernel_change_without_a_change_kind_is_missing():
