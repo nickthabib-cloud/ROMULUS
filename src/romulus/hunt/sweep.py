@@ -24,7 +24,8 @@ PARTITION_MAX_DOCS = 120_000
 HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
-DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth"}, "linux.audit.socket": {"net_socket"},
+DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth", "file_change"},
+                    "linux.audit.socket": {"net_socket"}, "linux.audit.file": {"file_change"},
                     "arkime.session": {"net_session"},
                     "systemd.journal": {"auth", "privilege_use"},
                     "apache.access": {"http_access"}, "apache.error": {"web_error"},
