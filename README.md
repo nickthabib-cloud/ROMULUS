@@ -4,9 +4,9 @@
 
 **ROMULUS is a defensive threat-hunting tool.** It searches host and network telemetry for signs of compromise and reports what it finds as ranked, cited findings, incidents and an attack-path timeline.
 
-It is built for cyber defense teams (Cyber Protection Teams, SOC and incident-response analysts) who are dropped onto a network with logs in Elasticsearch or OpenSearch, sessions in Arkime and packet captures on disk, and need to find out quickly whether, and how, an attacker got in.
+It is built for cyber defense teams (Cyber Protection Teams, SOC and incident-response analysts) who are dropped onto a network with logs in Elasticsearch or OpenSearch, sessions in Arkime and packet captures on disk.
 
-ROMULUS works **with or without an AI model**. Initial finding comes from deterministic, typed detection rules. The AI investigating agent works on top of those results, and furthers investigations.
+ROMULUS works **with or without an AI model**. Initial finding comes from deterministic, typed detection rules. The AI investigating agent works on top of those results, correlating and furthering investigations with custom queries and follow ups.
 
 ---
 
