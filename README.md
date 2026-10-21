@@ -28,8 +28,8 @@ Every claim cites the raw records it rests on. A negative ("this did not happen"
 
 | Source | Today | Planned |
 |---|---|---|
-| Linux auditd (exec, connect/accept, login records) | ✓ | |
-| Linux journal (sshd and other services) | ✓ | |
+| Linux auditd | ✓ | |
+| Linux journal | ✓ | |
 | Apache access and error logs | ✓ | other web servers |
 | Suricata alerts and flows | ✓ | |
 | Arkime sessions (via its Elasticsearch indices) | ✓ | |
