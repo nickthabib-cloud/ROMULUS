@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -112,6 +113,19 @@ entity = Table(
     Column("last_seen", DateTime(timezone=True)),
     Column("event_count", Integer, nullable=False, default=0),
 )
+
+agent_alias = Table(
+    "agent_alias", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("alias", String, nullable=False),
+    Column("kind", String, nullable=False),
+    Column("target_id", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("kind IN ('F', 'I', 'E', 'N', 'L')", name="ck_agent_alias_kind"),
+    UniqueConstraint("hunt_id", "alias", name="uq_agent_alias_name"),
+    UniqueConstraint("hunt_id", "kind", "target_id", name="uq_agent_alias_target"),
+)
+Index("ix_agent_alias_hunt_kind", agent_alias.c.hunt_id, agent_alias.c.kind)
 
 event_entity = Table(
     "event_entity", metadata,

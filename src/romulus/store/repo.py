@@ -223,6 +223,7 @@ class Repo:
                       .values(first_task_id=None))
             c.execute(t.hunt.update().where(t.hunt.c.parent_hunt_id == hunt_id).values(parent_hunt_id=None))
             rm("analyst_links", t.analyst_link.delete().where(t.analyst_link.c.hunt_id == hunt_id))
+            rm("agent_aliases", t.agent_alias.delete().where(t.agent_alias.c.hunt_id == hunt_id))
             rm("expansion_links", t.expansion_link.delete().where(t.expansion_link.c.hunt_id == hunt_id))
             rm("expansion_anchors", t.expansion_anchor.delete().where(t.expansion_anchor.c.hunt_id == hunt_id))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
@@ -429,6 +430,61 @@ class Repo:
         with self.engine.connect() as c:
             r = c.execute(select(t.candidate).where(t.candidate.c.id == cid)).mappings().first()
             return dict(r) if r else None
+
+    # ---- durable per-hunt aliases -----------------------------------------------------------
+    def agent_aliases(self, hunt_id: str) -> list[dict]:
+        query = (select(t.agent_alias).where(t.agent_alias.c.hunt_id == hunt_id)
+                 .order_by(t.agent_alias.c.kind, t.agent_alias.c.alias))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(query).mappings()]
+
+    def agent_alias(self, hunt_id: str, alias: str) -> dict | None:
+        query = select(t.agent_alias).where(
+            t.agent_alias.c.hunt_id == hunt_id, t.agent_alias.c.alias == alias,
+        )
+        with self.engine.connect() as c:
+            row = c.execute(query).mappings().first()
+            return dict(row) if row else None
+
+    def agent_alias_hunts(self, alias: str) -> list[str]:
+        query = (select(t.agent_alias.c.hunt_id).where(t.agent_alias.c.alias == alias)
+                 .order_by(t.agent_alias.c.hunt_id))
+        with self.engine.connect() as c:
+            return list(c.execute(query).scalars())
+
+    def agent_alias_target_hunts(self, kind: str, target_id: str) -> list[str]:
+        table = {"F": t.candidate, "E": t.typed_event, "N": t.entity, "L": t.expansion_link}.get(kind)
+        if table is None:
+            return []
+        with self.engine.connect() as c:
+            return list(c.execute(select(table.c.hunt_id).where(table.c.id == target_id)).scalars())
+
+    def get_or_create_agent_alias(self, hunt_id: str, kind: str, target_id: str) -> dict:
+        """Allocate the next alias inside the serialized repository writer."""
+        with write_txn(self.engine) as c:
+            if c.execute(select(t.hunt.c.id).where(t.hunt.c.id == hunt_id)).scalar() is None:
+                raise KeyError(hunt_id)
+            existing = c.execute(select(t.agent_alias).where(
+                t.agent_alias.c.hunt_id == hunt_id,
+                t.agent_alias.c.kind == kind,
+                t.agent_alias.c.target_id == target_id,
+            )).mappings().first()
+            if existing is not None:
+                return dict(existing)
+            names = c.execute(select(t.agent_alias.c.alias).where(
+                t.agent_alias.c.hunt_id == hunt_id, t.agent_alias.c.kind == kind,
+            )).scalars()
+            number = max((int(name[1:]) for name in names if name[1:].isdigit()), default=0) + 1
+            row = {"hunt_id": hunt_id, "alias": f"{kind}{number}", "kind": kind,
+                   "target_id": target_id, "created_at": utcnow()}
+            c.execute(t.agent_alias.insert().values(**row))
+            return row
+
+    def entities(self, hunt_id: str) -> list[dict]:
+        query = (select(t.entity).where(t.entity.c.hunt_id == hunt_id)
+                 .order_by(t.entity.c.kind, t.entity.c.value, t.entity.c.id))
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(query).mappings()]
 
     def update_context_candidate(
         self, candidate_id: str, values: dict, *, owner_token: str | None = None,
