@@ -19,17 +19,27 @@ class AuditParseError(ValueError):
 
 
 def _tokenize(body: str) -> list[tuple[str, str, bool]]:
-    """Split `k=v k2="quoted v" k3=HEX` into (key, value, was_quoted). Quotes never span pairs."""
-    out = []
+    """Split `k=v k2="quoted v" k3=HEX` into (key, value, was_quoted). Quotes never span pairs.
+
+    A space-separated word without `=` is not a field of its own: the kernel writes some unquoted values with a
+    space in them (an AppArmor subject is `subj=<label> (enforce)`). Such a word continues the preceding unquoted
+    value; after a quoted value, or with nothing before it, it is skipped so it cannot swallow the next key."""
+    out: list[tuple[str, str, bool]] = []
     i, n = 0, len(body)
     while i < n:
         while i < n and body[i] == " ":
             i += 1
         if i >= n:
             break
-        eq = body.find("=", i)
+        word_end = body.find(" ", i)
+        word_end = n if word_end < 0 else word_end
+        eq = body.find("=", i, word_end)
         if eq < 0:
-            break
+            if out and not out[-1][2]:
+                key, value, _quoted = out[-1]
+                out[-1] = (key, f"{value} {body[i:word_end]}", False)
+            i = word_end
+            continue
         key = body[i:eq]
         j = eq + 1
         if j < n and body[j] == '"':
