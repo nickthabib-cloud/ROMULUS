@@ -1,6 +1,6 @@
 # The AI investigating agent (planned)
 
-Status: designed, being built. Not available yet. Everything below describes how it will work. I'm using an API to connect to a model because my local model didn't have enough capability running on limited processing capability of my computer. In reality, teams would be able to run secure local models on a server.
+Status: designed, being built. Not available yet. Everything below describes how it will work. I'm using an API to connect to a model because my local model didn't have enough capability running on limited processing power of my computer. In reality, teams would be able to run secure local models on a server.
 
 ## What it does
 
