@@ -7,6 +7,8 @@ import itertools
 import posixpath
 import re
 from collections import defaultdict
+from datetime import UTC, datetime
+from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
 from romulus.detect.linux_argv import read_operand_paths
@@ -975,6 +977,132 @@ class SshLoginFromExternal(Playbook):
         return out
 
 
+_DELETED_SUFFIX = " (deleted)"
+_UNBACKED_CITE = 10
+
+
+def unbacked_executable(exe: str) -> tuple[str, str] | None:
+    """(class, meaning) when a kernel-recorded executable path shows an image with no ordinary file behind it."""
+    if exe.startswith("/memfd:"):
+        return ("memfd", ("the program image is an anonymous memory-backed file (memfd) with no path on any "
+                         "filesystem. In-memory loaders and fileless implants run this way; so does runc, which "
+                         "re-executes a copy of itself from a memfd when it starts a container"))
+    if exe.endswith(_DELETED_SUFFIX):
+        path = exe[:-len(_DELETED_SUFFIX)]
+        packaged = ". The path is in a package-managed directory" if path.startswith(PACKAGED_DIRS) else ""
+        return ("deleted", "the file at that path was deleted or replaced after the process started, so the "
+                           "running image no longer matches any file there. A package upgrade that replaces a "
+                           "long-running daemon's binary leaves this record; so does a program that deletes itself "
+                           "after starting" + packaged)
+    path = _normalize_posix_path(exe) if exe.startswith("/") else exe
+    if path.startswith("/dev/shm/"):
+        return ("shm", ("the executable is in /dev/shm, a shared-memory filesystem every account can write and "
+                       "that does not survive a reboot"))
+    if path.startswith("/run/user/"):
+        return ("run_user", ("the executable is in /run/user, an account's in-memory runtime directory that does "
+                            "not survive logout or a reboot"))
+    return None
+
+
+class UnbackedExecutable(Playbook):
+    """A process whose kernel-recorded executable is memory-backed, deleted or in an in-memory runtime directory,
+    seen on any audit record that carries the executable (exec, socket or file-change calls)."""
+    id = "host.unbacked_or_deleted_executable"
+    version = "1"
+    title = "Process running from a memory-backed, deleted or in-memory-directory executable"
+    anchor_class = "execution"
+    kind = "aggregate"
+    claim_type = "aggregate_observation"
+    families = ("process_exec", "net_socket", "file_change")
+    required_fields = ("process.executable",)
+    assures_negative = False
+    positive_only_reason = ("the audit rules record only some processes' calls (which accounts, calls and paths "
+                            "is not visible in telemetry), so a process absent from the records proves nothing")
+    severity, lane = "high", "lead"
+    attack = ("T1027.011", "T1620", "T1070.004", "T1036.005")
+    benign = ("daemons still running after a package upgrade replaced their binary (the path ends in ' (deleted)')",
+              "runc and other container runtimes re-executing themselves from a memfd",
+              "per-user tooling unpacked into /run/user (desktop sessions)")
+    next_checks = ("the process's parent and how it started; whether the path is package-owned and was upgraded",
+                   "the process's sockets and children while it ran",
+                   "for a memfd or self-deleted image: the creating process and its download or write")
+    card: ClassVar[dict] = {
+        "behavior": "the kernel-recorded executable of a process (SYSCALL exe) is a memfd, a deleted file, or a "
+                    "file in /dev/shm or /run/user",
+        "telemetry": "Linux auditd SYSCALL exe on process_exec, net_socket and file_change events "
+                     "(process.executable); present on every SYSCALL record in the lab profile, where the "
+                     "' (deleted)' records seen are package-upgraded daemons",
+        "fidelity": "direct kernel record of the running image's path at the call; it does not show who deleted "
+                    "the file or what the image contains",
+        "benign_and_cost": "post-upgrade daemons and container runtimes; grouped per (host, executable), so one "
+                           "lead per upgraded daemon",
+        "query_cost": "none beyond the sweep: it reads the host partitions every host rule reads",
+        "next_pivot": "the process lineage and its network activity; package upgrade history for deleted paths",
+        "adds": "the temp-directory exec rule sees only exec records under temporary directories; this sees "
+                "fileless and self-deleted images on any recorded call, including sockets",
+        "research_basis": "ATT&CK Enterprise 20.0 T1027.011 (Fileless Storage), T1620 (Reflective Code Loading), "
+                          "T1070.004 (File Deletion); /proc/<pid>/exe ' (deleted)' and memfd naming in the Linux "
+                          "kernel d_path conventions",
+        "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter "
+                     "only), a superset of what this evaluator reads",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self._seen: set[str] = set()
+        self.groups: dict[tuple[str, str], list[TypedEvent]] = defaultdict(list)
+        self.counts: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.spans: dict[tuple[str, str], list[float]] = {}
+        self.uids: dict[tuple[str, str], set[str]] = defaultdict(set)
+
+    def consume(self, events):
+        for e in sorted((e for e in events if e.family in self.families and e.id not in self._seen),
+                        key=lambda e: (e.ts, e.id)):
+            self._seen.add(e.id)
+            exe = e.get("process.executable")
+            if not exe:
+                self.missing_required += 1
+                continue
+            self.evaluated += 1
+            if unbacked_executable(str(exe)) is None:
+                continue
+            key = (e.host or "", str(exe))
+            self.counts[key][e.family] += 1
+            ts = e.ts.timestamp()
+            span = self.spans.setdefault(key, [ts, ts])
+            span[0], span[1] = min(span[0], ts), max(span[1], ts)
+            if e.get("process.uid") is not None:
+                self.uids[key].add(str(e.get("process.uid")))
+            if len(self.groups[key]) < _UNBACKED_CITE:
+                self.groups[key].append(e)
+        return []
+
+    def finalize(self):
+        out = []
+        names = {"process_exec": "exec", "net_socket": "socket call", "file_change": "file-change call"}
+        for key in sorted(self.groups):
+            host, exe = key
+            cls, meaning = unbacked_executable(exe)
+            evs = sorted(self.groups[key], key=lambda x: (x.ts, x.id))
+            counts = self.counts[key]
+            total = sum(counts.values())
+            first, last = self.spans[key]
+            when = (f"at {evs[0].ts.isoformat()}" if first == last else
+                    f"from {datetime.fromtimestamp(first, UTC).isoformat()} to "
+                    f"{datetime.fromtimestamp(last, UTC).isoformat()}")
+            kinds = ", ".join(f"{counts[f]} {names[f]} record(s)" for f in self.families if counts.get(f))
+            uids = sorted(self.uids[key])
+            claim = (f"On {host}, {total} audit record(s) {when} carry the kernel-recorded executable '{exe}' "
+                     f"({kinds}; process uid(s) {', '.join(uids) or 'not recorded'}): {meaning}.")
+            if total > len(evs):
+                claim += f" {len(evs)} of these records are cited."
+            m = Match(self.id, claim, self.claim_type, evs, [pf(e, "process.executable") for e in evs], evs[0].ts,
+                      self.severity, self.lane, "high", _exec_entities(evs[0]), group_key=f"{host}|{exe}")
+            m.notes = [f"executable class: {cls}"]
+            out.append(m)
+        return out
+
+
 HOST_PLAYBOOKS = [WebServiceSpawnsInterpreter, DownloadPipedToShell, DownloaderFeedsInterpreter, PtyUpgrade,
                   ExecFromTempDir, ScriptFromTempDir, FirewallRuleChange, CredentialStoreRead, AuthorizedKeysWrite,
-                  SshLoginFromExternal]
+                  SshLoginFromExternal, UnbackedExecutable]

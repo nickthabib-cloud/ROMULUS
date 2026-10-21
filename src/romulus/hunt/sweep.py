@@ -25,9 +25,10 @@ HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.erro
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
 # A login group that fails is tagged linux.audit.auth; it takes every record of its event, so it may also hide
-# an exec or socket record of that event and carries the whole audit family set.
-DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth"}, "linux.audit.socket": {"net_socket"},
-                    "linux.audit.auth": {"process_exec", "net_socket", "auth"},
+# an exec, socket or file record of that event and carries the whole audit family set.
+DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth", "file_change"},
+                    "linux.audit.socket": {"net_socket"}, "linux.audit.file": {"file_change"},
+                    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change"},
                     "arkime.session": {"net_session"},
                     "systemd.journal": {"auth", "privilege_use"},
                     "apache.access": {"http_access"}, "apache.error": {"web_error"},
