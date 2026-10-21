@@ -1,6 +1,6 @@
 # The AI investigating agent (planned)
 
-Status: being built. The model connection (provider adapters, egress rules, budgets, call records and the `doctor` check) is in place; the agent's investigation loop is not available yet. The rest of this page describes how it will work.
+Status: being built. The model connection (provider adapters, egress rules, budgets, call records and the `doctor` check) is in place; the agent's investigation loop is not available yet. The rest of this page describes how it will work. I'm using an API to connect to a model because my local model didn't have enough capability running on limited processing power of my computer. In reality, teams would be able to run secure local models on a server.
 
 ## What it does
 
@@ -88,7 +88,7 @@ Every argument is typed and validated. Every result carries evidence aliases, co
 | Output | `propose_finding`, `propose_link`, `add_note`, `request_rule` |
 | Control | `finish_session` |
 
-There is no free-form query, file or shell tool, and the model never writes query DSL, Arkime expressions, TShark filters, shell commands or paths. Records a pivot pulls in go through normalization and **every** deterministic detector and context rule; findings those rules produce keep their deterministic provenance and lane.
+Everything from the LLM is input validated. There is no free-form query, file or shell tool, shell commands or paths, and the model never writes query DSL, Arkime expressions, TShark filters directly. Records a pivot pulls in go through normalization and **every** deterministic detector and context rule; findings those rules produce keep their deterministic provenance and lane.
 
 ## Hypotheses
 
