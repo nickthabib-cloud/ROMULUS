@@ -123,11 +123,11 @@ class RootExecNonRootModifiableFile(Playbook):
         "telemetry": "Linux auditd EXECVE+SYSCALL+PATH+CWD as process_exec: process.uid, process.euid, "
                      "process.auid, process.session_id, process.exec_file.{path,owner.id,owner.name,group.id,mode,"
                      "inode,role}, process.interpreter_file.* (PATH item 0 and the #! interpreter item). Present "
-                     "in the lab profile: the executed file's PATH item is on all but 3 of 107k exec events",
+                     "in the lab profile on nearly every exec event",
         "fidelity": "direct kernel record of the exec and of the file's ownership and mode at that moment; it "
                     "does not show that the file was changed, nor writable parent directories or ACLs",
         "benign_and_cost": "vendor or deployment accounts owning root-run files. One grouped finding per (host, "
-                           "file, owner); the lab profile shows one such file",
+                           "file, owner); such files are rare",
         "query_cost": "none beyond the sweep: it reads the host partitions every host rule reads",
         "next_pivot": "the file's change history and the owning account's activity before the root runs",
         "adds": "the argv-identified hijack rule needs a recorded write; this one needs only the ownership the "
@@ -458,9 +458,8 @@ class PersistencePathChange(Playbook):
         "telemetry": "Linux auditd SYSCALL+PATH(+CWD) of file-changing calls as file_change: file.path, "
                      "file.change, file.nametype, process.uid, process.user, process.auid, process.tty, "
                      "process.pid, process.ppid, process.executable; process_exec for the package-manager "
-                     "lineage. Lab profile: watches cover /etc/cron.*, the crontab spool, /etc/init.d, "
-                     "/etc/profile.d, /etc/pam.d and /usr/bin; not systemd unit directories, ~/.bashrc, "
-                     "authorized_keys, /etc/ld.so.preload",
+                     "lineage. Coverage is watch-scoped: only locations the host's audit rules watch produce "
+                     "records, and the lab profile watches some of these locations, not all",
         "fidelity": "direct kernel record of the call on the file and its outcome; a write-intent open shows the "
                     "file was opened for writing, not what was written",
         "benign_and_cost": "package activity (one grouped lead per host, manager and location), root editors and "

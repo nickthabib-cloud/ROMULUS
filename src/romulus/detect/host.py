@@ -1007,8 +1007,8 @@ class UnbackedExecutable(Playbook):
         "behavior": "the kernel-recorded executable of a process (SYSCALL exe) is a memfd, a deleted file, or a "
                     "file in /dev/shm or /run/user",
         "telemetry": "Linux auditd SYSCALL exe on process_exec, net_socket and file_change events "
-                     "(process.executable); present on every SYSCALL record in the lab profile. Lab profile: "
-                     "' (deleted)' on 153 records, all package-upgraded /usr/bin daemons on non-exec calls; memfd 0",
+                     "(process.executable); present on every SYSCALL record in the lab profile, where the "
+                     "' (deleted)' records seen are package-upgraded daemons",
         "fidelity": "direct kernel record of the running image's path at the call; it does not show who deleted "
                     "the file or what the image contains",
         "benign_and_cost": "post-upgrade daemons and container runtimes; grouped per (host, executable), so one "
