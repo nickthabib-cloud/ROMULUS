@@ -401,7 +401,7 @@ def test_long_unidentified_connection_is_stitched_and_references_the_long_connec
     rule = LongUnidentifiedSession()
     [m] = run(rule, events(*chunks(4)))
     assert m.proposed_lane == "lead" and m.severity == "medium"
-    assert f"1 connection from 10.0.0.5 to {ATTACKER} on tcp/4444 lasted at least 30 minutes" in m.claim
+    assert f"1 connection to {ATTACKER} on tcp/4444 from 1 source (10.0.0.5: 1) lasted at least 30 minutes" in m.claim
     assert "tcp/4444 is registered here for no protocol" in m.claim and "hunt window is counted" not in m.claim
     assert "the longest ran 48 minutes" in m.claim and "(4 Arkime session records)" in m.claim
     assert any("net.long_external_connection" in note for note in m.notes)
@@ -411,7 +411,7 @@ def test_long_unidentified_connection_is_stitched_and_references_the_long_connec
 def test_the_same_long_connection_from_both_sensors_is_one_connection():
     flow = eve("f", sport=51000, dst=ATTACKER, dport=4444, seconds=48 * 60, c2s=40000, s2c=90000, pkts_s=300)
     [m] = run(LongUnidentifiedSession(), events(*chunks(4), flow))
-    assert "1 connection from" in m.claim and "1 unidentified data-carrying connection between them" in m.claim
+    assert "1 connection to" in m.claim and "1 unidentified data-carrying connection to it on this port" in m.claim
     assert "1 Suricata flow record and 4 Arkime session records" in m.claim
 
 
@@ -419,7 +419,7 @@ def test_short_unidentified_connections_are_counted_only_beside_a_long_one():
     short = chunks(1, prefix="s", sport=52000, start=T0 + timedelta(hours=2))
     assert run(LongUnidentifiedSession(), events(*short)) == []
     [m] = run(LongUnidentifiedSession(), events(*chunks(4), *short))
-    assert "2 unidentified data-carrying connections between them on this port in total" in m.claim
+    assert "2 unidentified data-carrying connections to it on this port in total" in m.claim
 
 
 @pytest.mark.parametrize("hits", [
@@ -587,17 +587,49 @@ def test_long_unidentified_on_a_registered_port_a_sensor_parses_belongs_to_the_m
     assert run(LongUnidentifiedSession(), events(flow, session)) == []
 
 
-def test_implant_on_source_port_443_to_a_high_port_is_judged():
+def test_implant_on_source_port_443_to_a_high_port_is_judged_against_its_source_port():
     hit = eve("i", sport=443, dst=ATTACKER, dport=45000, seconds=3 * 3600, c2s=90000, s2c=400000, pkts_c=600,
               pkts_s=900)
-    [m] = run(LongUnidentifiedSession(), events(hit))
-    assert "on tcp/45000" in m.claim
+    assert run(LongUnidentifiedSession(), events(hit)) == []
+    [m] = run(ProtocolPortMismatch(), events(hit))
+    assert f"1 connection from 10.0.0.5 port tcp/443 to 1 peer ({ATTACKER}: 1)" in m.claim
+    assert "the registered port is the initiator's source port" in m.claim
+    assert "tcp/443 is registered here for tls, which Suricata can parse (tls)" in m.claim
 
 
-def test_reversed_view_from_a_port_the_sensor_can_parse_is_judged():
-    # Arkime parses HTTP; a long session from source port 80 that it could not identify is not excused as an answer
-    [m] = run(LongUnidentifiedSession(), events(*chunks(4, dport=40000, sport=80)))
-    assert "on tcp/40000" in m.claim
+def test_reversed_view_from_a_port_the_sensor_can_parse_goes_to_the_protocol_port_rule():
+    # Arkime parses HTTP; a long session from source port 80 that it could not identify is judged on port 80
+    hits = events(*chunks(4, dport=40000, sport=80))
+    assert run(LongUnidentifiedSession(), hits) == []
+    [m] = run(ProtocolPortMismatch(), hits)
+    assert "10.0.0.5 port tcp/80" in m.claim and "Arkime listed only the transport on 4 session records" in m.claim
+
+
+def test_reversed_mid_stream_view_of_an_identified_tls_connection_is_not_unidentified():
+    forward = eve("f", src="10.0.0.5", sport=50123, dst=ATTACKER, dport=443, app_proto="tls", seconds=600,
+                  c2s=40000, s2c=90000, pkts_c=60, pkts_s=90)
+    reversed_view = eve("r", src=ATTACKER, sport=443, dst="10.0.0.5", dport=50123, seconds=50 * 60,
+                        start=T0 + timedelta(minutes=12), c2s=400000, s2c=40000, pkts_c=600, pkts_s=200)
+    hits = events(forward, reversed_view)
+    assert run(LongUnidentifiedSession(), hits) == []
+    assert run(ProtocolPortMismatch(), hits) == []
+
+
+def test_long_sessions_to_one_server_port_are_one_item_listing_every_client():
+    hits = [eve(f"k{c}_{b}", src=f"10.0.0.{10 + c}", sport=51000 + c, dst=f"10.0.3.{b + 1}", dport=9092,
+                seconds=3 * 3600, c2s=90000, s2c=400000, pkts_c=600, pkts_s=900) for c in range(5) for b in range(2)]
+    matches = run(LongUnidentifiedSession(), events(*hits))
+    assert len(matches) == 2
+    assert ("5 connections to 10.0.3.1 on tcp/9092 from 5 sources (10.0.0.10: 1, 10.0.0.11: 1, 10.0.0.12: 1, "
+            "10.0.0.13: 1, 10.0.0.14: 1) lasted at least 30 minutes") in matches[0].claim
+
+
+def test_single_small_udp_datagrams_carry_data():
+    # one 108-byte frame each way: 66 bytes of payload behind a 42-byte UDP header
+    hit = eve("d", proto="UDP", dst="198.51.100.53", dport=53, app_proto="failed", c2s=108, s2c=108, pkts_c=1,
+              pkts_s=1)
+    [m] = run(ProtocolPortMismatch(), events(hit))
+    assert "reported protocol detection 'failed' on 1 flow record" in m.claim
 
 
 def test_reversed_view_from_a_port_the_sensor_cannot_parse_is_skipped():
