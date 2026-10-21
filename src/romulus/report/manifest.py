@@ -92,9 +92,13 @@ POSITIVE_ONLY_CLAIMS = {
         "not assessable by design: positive-only correlation (a join between host connect() records and "
         "network-sensor records that finds nothing proves nothing; each side sees only part of the traffic)"
     ),
-    "context.post_access_discovery": _po("discovery behavior is identified from argv and only evaluated after "
-                                         "an anchor link; absence outside that linked scope proves nothing"),
 }
+
+
+# A rule may state its own reason. It is the single source of truth and wins over the table above; the table
+# remains for rules that state no reason of their own.
+_RULE_POSITIVE_ONLY = {cls.id: _po(cls.positive_only_reason) for cls in ALL_PLAYBOOKS
+                       if not cls.assures_negative and cls.positive_only_reason}
 
 
 POSITIVE_ONLY_RULE_IDS = frozenset({cls.id for cls in ALL_PLAYBOOKS if not cls.assures_negative}
@@ -157,10 +161,9 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         elif states.get("positive_only") or states.get("positive_only_partial") or rule in POSITIVE_ONLY_RULE_IDS:
             # decided by what the rule can prove *now*, not by cells stored under an older pack: a hunt swept
             # before a rule became positive-only must not render its old no_match_complete as "complete"
-            claim = POSITIVE_ONLY_CLAIMS.get(
-                rule,
-                _po("the rule identifies programs or actions from argv or text"),
-            ) + "".join(f"; {s}" for s in dict.fromkeys(scope[rule])) \
+            base = (_RULE_POSITIVE_ONLY.get(rule) or POSITIVE_ONLY_CLAIMS.get(rule)
+                    or _po("the rule identifies programs or actions from argv or text"))
+            claim = base + "".join(f"; {s}" for s in dict.fromkeys(scope[rule])) \
                 + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
         elif reasons:
             claim = "unresolved: " + "; ".join(reasons)

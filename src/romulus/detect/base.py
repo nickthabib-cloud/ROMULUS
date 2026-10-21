@@ -78,6 +78,9 @@ class Playbook:
     # False for rules that read script *text*: text can show intent but can never prove that something
     # did not run, so such rules publish positives only and never write a complete negative.
     assures_negative: ClassVar[bool] = True
+    # A positive-only rule carries its own explicit, non-rule-naming reason for assuring no negative (spec
+    # §7 catalog detail, §9). The report may also hold a copy; this is the rule's own source of truth.
+    positive_only_reason: ClassVar[str] = ""
 
     def __init__(self) -> None:
         self.evaluated = 0
@@ -132,19 +135,25 @@ class ContextPlaybook(Playbook):
     kind: ClassVar[str] = "context"
     anchor_classes: ClassVar[tuple[str, ...]] = ("*",)
     link_types: ClassVar[tuple[str, ...]] = ()
+    # Typed fields a record of each family must carry to be evaluated (missing ones are counted, never a clean
+    # no-match). The finalize pass reads it to pick the records a rule would see for a link.
+    required_by_family: ClassVar[dict[str, tuple[str, ...]]] = {}
 
     def consume(self, events: list[TypedEvent]) -> list[Match]:
         return []
+
+    def accepts(self, anchor: ContextAnchor | None, link: ContextLink) -> bool:
+        """Whether this rule may read records that arrived through this anchor class and link type. A rule only
+        ever sees records from a link type it lists, so out-of-scope links never reach it."""
+        return (anchor is not None
+                and ("*" in self.anchor_classes or anchor.anchor_class in self.anchor_classes)
+                and link.link_type in self.link_types)
 
     def consume_linked(
         self, anchor: ContextAnchor | None, link: ContextLink,
         events: list[TypedEvent],
     ) -> list[Match]:
-        if anchor is None:
-            return []
-        if "*" not in self.anchor_classes and anchor.anchor_class not in self.anchor_classes:
-            return []
-        if link.link_type not in self.link_types:
+        if not self.accepts(anchor, link):
             return []
         matches = self.match_linked(anchor, link, events)
         for match in matches:
@@ -153,7 +162,7 @@ class ContextPlaybook(Playbook):
                 match.notes.append("lane capped at lead: the context link is inferred")
             elif link.strength == "observed" and match.proposed_lane == "urgent":
                 match.proposed_lane = "high"
-                match.notes.append("lane capped at high until context rules are lab evaluated")
+                match.notes.append("lane capped at high: a context finding never reaches the urgent lane")
             cited = {event.id: event for event in match.events + anchor.events + link.evidence_events}
             match.events = sorted(cited.values(), key=lambda event: (event.ts, event.id))
         return matches
@@ -162,6 +171,28 @@ class ContextPlaybook(Playbook):
         self, anchor: ContextAnchor, link: ContextLink, events: list[TypedEvent],
     ) -> list[Match]:
         return []
+
+    def eligible_records(self, events: list[TypedEvent]) -> list[TypedEvent]:
+        """Eligible records using this rule's declared `required_by_family` (counts evaluated/missing)."""
+        return self.eligible(events, self.required_by_family)
+
+    def eligible(
+        self, events: list[TypedEvent], required_by_family: dict[str, tuple[str, ...]],
+    ) -> list[TypedEvent]:
+        """Events of a wanted family that carry that family's required typed fields. A wanted event missing a
+        required field is counted (missing_required), so the coverage cell is partial, never a clean no-match;
+        an event of an unwanted family is ignored (it is not evidence for or against this rule)."""
+        out = []
+        for event in events:
+            required = required_by_family.get(event.family)
+            if required is None:
+                continue
+            if any(event.get(name) in (None, "", [], {}) for name in required):
+                self.missing_required += 1
+                continue
+            self.evaluated += 1
+            out.append(event)
+        return out
 
 
 def outcome_phrase(e: TypedEvent) -> str:

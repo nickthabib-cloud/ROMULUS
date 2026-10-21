@@ -441,7 +441,9 @@ def test_default_and_no_expand_hunts_have_identical_sweep_findings(tmp_path, mon
 
     assert sweep_findings("h-default") == sweep_findings("h-sweep-only") != set()
     added = [row for row in repo.candidates("h-default") if row["source_anchor_id"]]
-    assert [row["rule_id"] for row in added] == ["host.credential_store_read"]
+    # Expansion re-detects the linked `cat /etc/shadow` with the direct pack (host.credential_store_read) and
+    # judges it in the anchored-session context (context.credential_access).
+    assert sorted(row["rule_id"] for row in added) == ["context.credential_access", "host.credential_store_read"]
     assert not [row for row in repo.candidates("h-sweep-only") if row["source_anchor_id"]]
 
 

@@ -1,7 +1,7 @@
 """Shared deterministic publication for sweep and investigator discoveries."""
 from __future__ import annotations
 
-from romulus.decide.policy import LANE_ORDER, decide
+from romulus.decide.policy import decide
 from romulus.detect.base import Match, Playbook
 from romulus.store.repo import Repo
 
@@ -11,7 +11,8 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   source_case_id: str | None = None, source_anchor_id: str | None = None,
                   source_link_id: str | None = None, context_reach: dict | None = None,
                   *, owner_token: str | None = None) -> dict | None:
-    """Persist cited evidence and publish a machine-decided candidate once."""
+    """Persist cited evidence and publish a machine-decided candidate once. Direct (sweep) findings only;
+    context findings are published by the single post-expansion pass (romulus.hunt.context.finalize_context)."""
     decision = decide(match, hunt_id)
     repo.save_evidence(hunt_id, match.events, raw_sources, task_id, owner_token=owner_token)
     row = {
@@ -45,33 +46,4 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         "source_anchor_id": source_anchor_id,
         "source_link_id": source_link_id,
     }
-    if repo.save_candidate(row, owner_token=owner_token):
-        return row
-    if context_reach is None or playbook.kind != "context":
-        return None
-    existing = repo.candidate(row["id"])
-    if existing is None:
-        return None
-    gates = dict(existing["gate_results"])
-    reaches = list(gates.get("_context_reaches", []))
-    if context_reach not in reaches:
-        reaches.append(context_reach)
-    gates["_context_reaches"] = sorted(
-        reaches, key=lambda reach: (
-            reach["anchor_id"], reach["link_id"], reach["link_type"], reach["strength"],
-        ),
-    )
-    stronger = LANE_ORDER.get(row["lane"], 9) < LANE_ORDER.get(existing["lane"], 9)
-    updates = {
-        "gate_results": gates,
-        "event_ids": sorted(set(existing["event_ids"] + row["event_ids"])),
-    }
-    if stronger:
-        updates.update({
-            key: row[key] for key in (
-                "claim", "severity", "confidence", "lane", "priority", "priority_reasons",
-                "source_anchor_id", "source_link_id",
-            )
-        })
-    repo.update_context_candidate(row["id"], updates, owner_token=owner_token)
-    return repo.candidate(row["id"])
+    return row if repo.save_candidate(row, owner_token=owner_token) else None
