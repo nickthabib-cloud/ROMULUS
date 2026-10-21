@@ -19,6 +19,7 @@ _CANONICAL = {
     "nc.openbsd": "nc", "nc.traditional": "nc", "ncat": "nc",
     "mawk": "awk", "gawk": "awk", "original-awk": "awk",
     "vim.basic": "vi", "vim.tiny": "vi", "vim": "vi", "nvi": "vi", "view": "vi",
+    "vim.nox": "vi", "vim.gtk": "vi", "vim.gtk3": "vi", "vim.athena": "vi", "gvim": "vi",
     "w.procps": "w", "egrep": "grep", "fgrep": "grep", "rgrep": "grep",
 }
 _PY3 = re.compile(r"^python3\.\d+$")
@@ -368,3 +369,340 @@ def nc_destination(args: list[str]) -> tuple[str | None, bool]:
     operands = operands_after_options(args, _CLIENT_VALUE_OPTS["nc"])
     host = operands[0] if operands else None
     return host, is_listen
+
+
+# ------------------------------------------------------------------------------------------------
+# Write-capable programs: the files a command line names as the file it changes.
+# ------------------------------------------------------------------------------------------------
+
+class WriteTarget(NamedTuple):
+    path: str        # normalized absolute path
+    form: str        # what the command line shows, worded as an attempt, never as a completed change
+    assumed: bool = False   # derived on the assumption that a destination operand is a directory
+
+
+# Editors (canonical names; `vi` covers vim, nvi and view, see canonical()). Read-only invocations are excluded.
+_VI_EDITORS = {"vi", "nvim"}
+_VI_VALUE = {"-c", "-S", "-u", "-U", "-i", "-T", "-w", "-W", "-s", "-t", "-q", "-r", "--cmd", "--servername",
+             "--startuptime", "--remote-send", "--remote-expr", "--log"}
+_VI_READONLY_FLAGS = {"-R", "-M"}
+_VI_READONLY_NAMES = {"view", "rview", "nview"}
+_NANO_EDITORS = {"nano", "pico", "rnano"}
+_NANO_VALUE = {"-o", "--operatingdir", "-Y", "--syntax", "-T", "--tabsize", "-r", "--fill", "-s", "--speller",
+               "-X", "--wordchars", "-Q", "--quotestr", "-J", "--guidestripe", "-f", "--rcfile"}
+_NANO_READONLY_FLAGS = {"-v", "--view"}
+_ED_EDITORS = {"ed", "red"}
+_ED_VALUE = {"-p", "--prompt"}
+_EMACS_VALUE = {"-l", "--load", "-f", "--funcall", "--eval", "-L", "--directory", "-u", "--user", "--insert",
+                "-t", "--terminal", "-d", "--display", "--chdir", "--execute", "--script", "-x"}
+_EMACS_FILE_OPTS = ("--file=", "--find-file=", "--visit=")
+_OTHER_EDITORS = {"joe", "jed", "mcedit", "micro", "ne", "kak", "hx", "helix", "mg", "jove", "zile", "jmacs",
+                  "jstar", "jpico", "vis", "emacs"}
+EDITORS = _VI_EDITORS | _NANO_EDITORS | _ED_EDITORS | _OTHER_EDITORS
+
+
+def _is_emacs(name: str) -> bool:
+    return name == "emacs" or name.startswith("emacs-")
+
+
+def is_editor(name: str) -> bool:
+    return name in EDITORS or _is_emacs(name)
+
+
+def _editor_files(name: str, args: list[str], argv0: str) -> list[str]:
+    """File operands an interactive editor was started on; [] for a read-only invocation."""
+    if name in _VI_EDITORS:
+        if basename(argv0) in _VI_READONLY_NAMES or any(arg in _VI_READONLY_FLAGS for arg in args):
+            return []
+        value_opts = _VI_VALUE
+    elif name in _NANO_EDITORS:
+        if any(arg in _NANO_READONLY_FLAGS for arg in args):
+            return []
+        value_opts = _NANO_VALUE
+    elif name in _ED_EDITORS:
+        value_opts = _ED_VALUE
+    elif _is_emacs(name):
+        value_opts = _EMACS_VALUE
+    else:
+        value_opts = set()
+    files: list[str] = []
+    index, ended = 0, False
+    while index < len(args):
+        arg = args[index]
+        if ended:
+            files.append(arg)
+        elif arg == "--":
+            ended = True
+        elif arg in value_opts:
+            index += 1
+        elif _is_emacs(name) and arg.startswith(_EMACS_FILE_OPTS):
+            files.append(arg.split("=", 1)[1])
+        elif arg.startswith(("-", "+")) and arg != "-":
+            pass                                    # a flag, or a `+line` / `+cmd` position argument
+        else:
+            files.append(arg)
+        index += 1
+    return [item for item in files if item != "-"]
+
+
+def _sed_in_place(args: list[str]) -> list[str]:
+    """Files GNU sed edits in place (`-i[SUFFIX]`, a grouped `-ni`, `--in-place[=SUFFIX]`); [] when sed only
+    writes to stdout. Without -e/-f the first operand is the script, not a file."""
+    in_place = script_given = False
+    operands: list[str] = []
+    index, ended = 0, False
+    while index < len(args):
+        arg = args[index]
+        if ended or arg == "-" or not arg.startswith("-"):
+            operands.append(arg)
+        elif arg == "--":
+            ended = True
+        elif arg.startswith("--"):
+            key = arg.split("=", 1)[0]
+            if key == "--in-place":
+                in_place = True
+            elif key in {"--expression", "--file", "--line-length"}:
+                script_given = script_given or key != "--line-length"
+                if "=" not in arg:
+                    index += 1
+        else:
+            letters = arg[1:]
+            for position, letter in enumerate(letters):
+                if letter == "i":
+                    in_place = True
+                    break                           # the rest of the group is the backup suffix
+                if letter in "efl":
+                    script_given = script_given or letter in "ef"
+                    if position == len(letters) - 1:
+                        index += 1                  # the value is the next argument
+                    break
+        index += 1
+    if not in_place:
+        return []
+    return operands if script_given else operands[1:]
+
+
+def _perl_in_place(args: list[str]) -> list[str]:
+    """Files perl edits in place (`-i[EXT]`, grouped as in `-pi`, `-pi.bak`); [] without -i."""
+    in_place = code_given = False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            index += 1
+            break
+        if not arg.startswith("-") or arg == "-":
+            break
+        letters = arg[1:]
+        for position, letter in enumerate(letters):
+            if letter == "i":
+                in_place = True
+                break                               # the rest of the group is the backup extension
+            if letter in "eE":
+                code_given = True
+                if position == len(letters) - 1:
+                    index += 1                      # the code is the next argument
+                break
+            if letter in "IMmxCFdDl0V":
+                break                               # the rest of the group is this switch's value
+        index += 1
+    if not in_place:
+        return []
+    operands = args[index:]
+    return operands if code_given else operands[1:]
+
+
+# Short options of cp, mv, install and ln that take a value (attached or as the next argument).
+_DEST_VALUE_LETTERS = {"cp": "St", "mv": "St", "install": "Stmog", "ln": "St"}
+_DEST_LONG_VALUE = {"--suffix", "--target-directory", "--mode", "--owner", "--group"}
+
+
+def _destination_spec(name: str, args: list[str]) -> tuple[list[str], str | None, bool, set[str]]:
+    """(operands, target directory, no-target-directory, short flags) for cp, mv, install and ln."""
+    value_letters = _DEST_VALUE_LETTERS[name]
+    operands: list[str] = []
+    flags: set[str] = set()
+    target_dir: str | None = None
+    no_target_dir = False
+    index, ended = 0, False
+    while index < len(args):
+        arg = args[index]
+        if ended or arg == "-" or not arg.startswith("-"):
+            operands.append(arg)
+        elif arg == "--":
+            ended = True
+        elif arg.startswith("--"):
+            key, has_value, inline = arg.partition("=")
+            if key == "--no-target-directory":
+                no_target_dir = True
+            elif key == "--directory":
+                flags.add("d")
+            elif key in _DEST_LONG_VALUE:
+                value = inline if has_value else (args[index + 1] if index + 1 < len(args) else "")
+                if not has_value:
+                    index += 1
+                if key == "--target-directory":
+                    target_dir = value
+        else:
+            letters = arg[1:]
+            for position, letter in enumerate(letters):
+                if letter in value_letters:
+                    rest = letters[position + 1:]
+                    if not rest:
+                        rest = args[index + 1] if index + 1 < len(args) else ""
+                        index += 1
+                    if letter == "t":
+                        target_dir = rest
+                    break
+                flags.add(letter)
+            if "T" in flags:
+                no_target_dir = True
+        index += 1
+    return operands, target_dir, no_target_dir, flags
+
+
+def _destination_files(name: str, args: list[str]) -> list[tuple[str, str, bool]]:
+    """(destination, how it was derived, assumed) for a copy, move, install or link command. A destination
+    operand may be a directory; the path inside it is offered too, marked assumed unless the operand ends in '/'."""
+    operands, target_dir, no_target_dir, flags = _destination_spec(name, args)
+    if name == "install" and "d" in flags:
+        return []                                   # install -d creates directories only
+    out: list[tuple[str, str, bool]] = []
+    if target_dir:
+        for source in operands:
+            leaf = posixpath.basename(source.rstrip("/"))
+            if leaf:
+                out.append((posixpath.join(target_dir, leaf), "target-directory operand plus the source name",
+                            False))
+        return out
+    if name == "ln" and len(operands) == 1:
+        leaf = posixpath.basename(operands[0].rstrip("/"))
+        return [(leaf, "link created in the working directory", False)] if leaf else []
+    if len(operands) < 2:
+        return []
+    destination, sources = operands[-1], operands[:-1]
+    is_dir = destination.endswith("/")
+    if not is_dir:
+        out.append((destination, "destination operand", False))
+    if not no_target_dir:
+        for source in sources:
+            leaf = posixpath.basename(source.rstrip("/"))
+            if leaf:
+                out.append((posixpath.join(destination, leaf),
+                            "destination directory operand plus the source name" if is_dir else
+                            "destination operand read as a directory, plus the source name", not is_dir))
+    return out
+
+
+_ATTR_FLAG_LETTERS = set("RcfvhHLP")
+
+
+def _attribute_files(args: list[str]) -> list[str]:
+    """Files chmod, chown or chgrp is given; the first operand is the mode or owner unless --reference is used.
+    A chmod mode such as `-x` is an operand, not a flag."""
+    reference = any(arg.startswith("--reference") for arg in args)
+    operands: list[str] = []
+    ended = False
+    for arg in args:
+        if ended:
+            operands.append(arg)
+        elif arg == "--":
+            ended = True
+        elif arg.startswith("--") or (len(arg) > 1 and arg[0] == "-" and set(arg[1:]) <= _ATTR_FLAG_LETTERS):
+            continue                                # an option (a mode such as `-x` is not all flag letters)
+        else:
+            operands.append(arg)
+    return operands if reference else operands[1:]
+
+
+_CURL_VALUE_LETTERS = set("oHduxXAebcTFwKrmEYyzCUQtPD")
+_WGET_VALUE_LETTERS = set("OoaPUeitTwQlARDIXB")
+
+
+def _output_file(args: list[str], letter: str, long_names: set[str], value_letters: set[str]) -> list[str]:
+    """The value of a downloader's output-file option (`-o F`, `-oF`, grouped `-so F`, `--output=F`)."""
+    out: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        key, has_value, inline = arg.partition("=")
+        if key in long_names:
+            if has_value:
+                out.append(inline)
+            elif index + 1 < len(args):
+                out.append(args[index + 1])
+                index += 1
+        elif arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+            letters = arg[1:]
+            for position, item in enumerate(letters):
+                if item in value_letters:
+                    rest = letters[position + 1:]
+                    if not rest and index + 1 < len(args):
+                        rest = args[index + 1]
+                        index += 1
+                    if item == letter and rest:
+                        out.append(rest)
+                    break
+        index += 1
+    return [item for item in out if item != "-"]
+
+
+def write_targets(name: str, args: list[str], cwd: str | None = None,
+                  argv0: str = "") -> tuple[list[WriteTarget], bool]:
+    """Files a write-capable command line names as the file it changes, and whether a named file could not be
+    placed (a relative operand with no usable working directory). Positive-only: a program can change files in
+    ways argv does not show, so an empty result proves nothing. Device and process pseudo-files are ignored."""
+    raw: list[tuple[str, str]] = []
+    assumed: set[int] = set()
+    if is_editor(name):
+        raw = [(item, f"the editor '{name}' was started on it") for item in _editor_files(name, args, argv0)]
+    elif name == "sed":
+        raw = [(item, "'sed' was run with in-place editing on it") for item in _sed_in_place(args)]
+    elif name == "perl":
+        raw = [(item, "'perl' was run with in-place editing on it") for item in _perl_in_place(args)]
+    elif name in {"tee", "sponge"}:
+        raw = [(item, f"'{name}' was given it as an output file")
+               for item in operands_after_options(args, set()) if item != "-"]
+    elif name in {"cp", "mv", "install", "ln"}:
+        verb = {"cp": "copy", "mv": "move", "install": "install", "ln": "link"}[name]
+        for item, how, guess in _destination_files(name, args):
+            if guess:
+                assumed.add(len(raw))
+            raw.append((item, f"a '{name}' {verb} named it ({how})"))
+    elif name in {"chmod", "chown", "chgrp"}:
+        raw = [(item, f"'{name}' was run to change its permissions or owner") for item in _attribute_files(args)]
+    elif name == "truncate":
+        raw = [(item, "'truncate' was run on it")
+               for item in operands_after_options(args, {"-s", "--size", "-r", "--reference"})]
+    elif name == "dd":
+        raw = [(arg[3:], "'dd' was given it as the output file (of=)") for arg in args if arg.startswith("of=")]
+    elif name == "curl":
+        raw = [(item, "'curl' was given it as the output file")
+               for item in _output_file(args, "o", {"--output"}, _CURL_VALUE_LETTERS)]
+    elif name == "wget":
+        raw = [(item, "'wget' was given it as the output document")
+               for item in _output_file(args, "O", {"--output-document"}, _WGET_VALUE_LETTERS)]
+    elif name in {"scp", "rsync"}:
+        operands = client_operands(name, args)
+        if len(operands) >= 2 and remote_endpoint(operands[-1]) is None:
+            destination = operands[-1]
+            raw.append((destination, f"'{name}' was given it as the local destination"))
+            for source in operands[:-1]:
+                leaf = posixpath.basename(source.split(":", 1)[-1].rstrip("/"))
+                if leaf:
+                    assumed.add(len(raw))
+                    raw.append((posixpath.join(destination, leaf),
+                                f"'{name}' local destination read as a directory, plus the source name"))
+    targets: list[WriteTarget] = []
+    unresolved = False
+    for position, (item, form) in enumerate(raw):
+        if not item:
+            continue
+        path = normalize_path(item, cwd)
+        if not path:
+            unresolved = True
+            continue
+        if is_under(path, ("/dev", "/proc", "/sys")):
+            continue
+        targets.append(WriteTarget(path, form, position in assumed))
+    return list(dict.fromkeys(targets)), unresolved

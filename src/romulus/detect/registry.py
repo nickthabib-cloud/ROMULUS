@@ -4,14 +4,15 @@ from __future__ import annotations
 from romulus.detect.base import Playbook
 from romulus.detect.context import CONTEXT_PLAYBOOKS
 from romulus.detect.correlation import CORRELATION_PLAYBOOKS
+from romulus.detect.hijack import HIJACK_PLAYBOOKS
 from romulus.detect.host import HOST_PLAYBOOKS
 from romulus.detect.indicators import INDICATOR_PLAYBOOKS
 from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
 
-PACK_VERSION = "pack@4"
-ALL_PLAYBOOKS = (HOST_PLAYBOOKS + NETWORK_PLAYBOOKS + SESSION_PLAYBOOKS + CORRELATION_PLAYBOOKS
+PACK_VERSION = "pack@5"
+ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + NETWORK_PLAYBOOKS + SESSION_PLAYBOOKS + CORRELATION_PLAYBOOKS
                  + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
