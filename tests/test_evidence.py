@@ -583,3 +583,12 @@ def test_conflicting_execve_continuation_is_an_error():
     cont = 'type=EXECVE msg=audit(1731940398.711:39824):  a1="b"'
     events, _, errors = normalize_hits([hit("c1", "linux.audit", head), hit("c2", "linux.audit", cont)])
     assert events == [] and errors and "conflicting" in errors[0][1]
+
+
+def test_a_later_unmodelled_redirect_keeps_earlier_complete_lines():
+    parsed = parse_script("echo pwn >> /opt/job.sh\necho done &> /dev/null", "posix")
+    assert parsed.ok is False and parsed.partial is True and "bash-only" in parsed.error
+    assert [c.redirects for c in parsed.commands()] == [[(">>", "/opt/job.sh")]]
+    # an unmodelled redirect on the same line as a command still discards that line
+    same_line = parse_script("echo pwn >> /opt/job.sh; echo done &> /dev/null", "posix")
+    assert same_line.ok is False and same_line.commands() == []

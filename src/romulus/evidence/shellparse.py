@@ -275,6 +275,20 @@ def parse_script(script: str, dialect: str = "bash") -> ParsedScript:
         tokens = e.tokens
         lex_error = str(e)
 
+    # A redirect that is lexically fine but not sound to model fails like a lexer error: keep only the
+    # complete lines before it (so earlier commands still yield indicators) and mark the result partial.
+    for position, token in enumerate(tokens):
+        if token.kind != "redirect" or position + 1 >= len(tokens) or tokens[position + 1].kind != "word":
+            continue
+        try:
+            _check_redirect(token.value, tokens[position + 1].value, dialect)
+        except _Unmodelled as e:
+            last_line = max((i for i, t in enumerate(tokens[:position])
+                             if t.kind == "operator" and t.value == "\n"), default=-1)
+            tokens = tokens[:last_line + 1]
+            lex_error = str(e)
+            break
+
     pipelines: list[Pipeline] = []
     current = Pipeline(commands=[])
     cmd = Command(argv=[])
@@ -300,7 +314,6 @@ def parse_script(script: str, dialect: str = "bash") -> ParsedScript:
             if token.kind == "redirect":
                 if index + 1 >= len(tokens) or tokens[index + 1].kind != "word":
                     raise _Unmodelled("redirect target is missing or unmodelled")
-                _check_redirect(token.value, tokens[index + 1].value, dialect)
                 cmd.redirects.append((token.value, tokens[index + 1].value))
                 requires_command = False
                 index += 2
