@@ -264,7 +264,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     anchor_class = "web_shell"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "10"
+    version = "11"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -276,15 +276,16 @@ class WebServiceSpawnsInterpreter(Playbook):
     next_checks = ("process_tree for the parent PID", "http_requests to this host just before the event",
                    "host_network outbound connections from this host around the event")
     RARE_MAX = 5
-    # A shape is routine only when it recurs like a schedule: across this many distinct hours of the window. A
-    # burst of the same command (an attacker looping a web shell) stays visible as a lead.
+    # A shape is routine only when it recurs like a schedule: in at least this many distinct clock hours, with no
+    # hour holding more than half of its runs. A burst of the same command (an attacker looping a web shell), even
+    # one that straddles hour boundaries, stays visible as a lead.
     ROUTINE_MIN_HOURS = 3
 
     def __init__(self):
         super().__init__()
         self.shapes: dict[tuple, list[TypedEvent]] = defaultdict(list)
         self.counts: dict[tuple, int] = defaultdict(int)
-        self.hours: dict[tuple, set] = defaultdict(set)
+        self.hours: dict[tuple, dict] = defaultdict(lambda: defaultdict(int))
 
     def consume(self, events):
         matches = []
@@ -300,8 +301,7 @@ class WebServiceSpawnsInterpreter(Playbook):
                 continue
             key = (e.host, user, command_shape(argv), _packaged_script(argv, e.get("process.cwd")))
             self.counts[key] += 1
-            if len(self.hours[key]) < self.ROUTINE_MIN_HOURS:
-                self.hours[key].add(e.ts.replace(minute=0, second=0, microsecond=0))
+            self.hours[key][e.ts.replace(minute=0, second=0, microsecond=0)] += 1
             if len(self.shapes[key]) < 20:
                 self.shapes[key].append(e)
         return matches
@@ -341,18 +341,21 @@ class WebServiceSpawnsInterpreter(Playbook):
                                  evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
                                  group_key=f"packaged|{host_}|{user}|{shape}"))
                 continue
-            if n > self.RARE_MAX and len(self.hours[key]) < self.ROUTINE_MIN_HOURS:
-                claim = (f"Repeated shape: account '{user}' on {host_} executed '{shape}' {n} times within fewer than "
-                         f"{self.ROUTINE_MIN_HOURS} distinct hours of the window, a burst rather than a schedule; the "
-                         f"command line carries no typed indicator."
-                         + (f" The first {len(evs)} runs are cited." if len(evs) < n else ""))
+            hours = self.hours[key]
+            scheduled = len(hours) >= self.ROUTINE_MIN_HOURS and max(hours.values()) * 2 <= n
+            if n > self.RARE_MAX and not scheduled:
+                evs = sorted(evs, key=lambda e: (e.ts, e.id))
+                claim = (f"Repeated shape: account '{user}' on {host_} executed '{shape}' {n} times; the runs are not "
+                         f"spread across {self.ROUTINE_MIN_HOURS} or more hours like a schedule (most fall within one "
+                         f"hour or few hours), and no typed indicator was found on the command line."
+                         + (f" The earliest {len(evs)} runs are cited." if len(evs) < n else ""))
                 out.append(Match(self.id, claim, "aggregate_observation", evs, [pf(e, "process.argv") for e in evs],
                                  evs[0].ts, "medium", "lead", "high", _exec_entities(evs[0]),
                                  group_key=f"burst|{host_}|{user}|{shape}" + (f"|{packaged}" if packaged else "")))
                 continue
             if n > self.RARE_MAX:
                 claim = (f"Routine pattern: account '{user}' on {host_} executed '{shape}' {n} times in the window, "
-                         f"recurring across at least {self.ROUTINE_MIN_HOURS} distinct hours like a schedule "
+                         f"spread across {len(hours)} distinct hours like a schedule "
                          f"(stack-counted; retained for context).")
                 out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
                                  evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
@@ -624,13 +627,14 @@ def _flag_value(args: list[str], *flags: str) -> str | None:
 
 
 class FirewallRuleChange(Playbook):
-    """Direct finding for commands that block/unblock a specific address on a built-in chain;
-    other rule-change commands are grouped per host as routine context."""
+    """Direct findings for commands that block or unblock a specific address on a built-in chain, leads for
+    commands that weaken the firewall (disable, flush, accept-by-default, open a port, remove a block); other
+    rule-change commands are grouped per host as context."""
     id = "host.firewall_rule_change_command"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "3"
-    title = "Firewall command blocking or unblocking a specific address"
+    version = "4"
+    title = "Firewall command blocking, unblocking or weakening"
     kind = "aggregate"
     families = ("process_exec",)
     required_fields = ("process.argv",)
@@ -665,7 +669,16 @@ class FirewallRuleChange(Playbook):
             chain = _flag_value(args, "-A", "--append", "-I", "--insert", "-D", "--delete")
             target = _flag_value(args, "-j", "--jump")
             addr = _flag_value(args, "-s", "--source", "-d", "--destination")
-            if chain in BUILTIN_CHAINS and target in BLOCK_TARGETS and addr:
+            specific_block = chain in BUILTIN_CHAINS and target in BLOCK_TARGETS and addr
+            weakening = None if specific_block else _firewall_weakening(name, args, chain, target)
+            if weakening:
+                # Disabling, flushing or opening the firewall is defense impairment (T1562.004), never routine.
+                claim = (f"A process execution event on {e.host} records '{name}' run in a form that weakens the host "
+                         f"firewall: {weakening} ({_argv_summary(argv)}); {outcome_phrase(e)}. Whether the change took "
+                         f"effect is not established by this event.")
+                self.direct.append(Match(self.id, claim, self.claim_type, [e], [pf(e, "process.argv")], e.ts,
+                                         "medium", "lead", "high", _exec_entities(e)))
+            elif specific_block:
                 verb = "remove" if any(a in ("-D", "--delete") for a in args) else "add"
                 claim = (f"A process execution event on {e.host} records '{name}' run to {verb} a {target} rule for "
                          f"{addr} on the {chain} chain ({_argv_summary(argv)}); {outcome_phrase(e)}. Whether the rule "
@@ -684,12 +697,46 @@ class FirewallRuleChange(Playbook):
     def finalize(self):
         out = list(self.direct)
         for (host_, name), evs in self.routine.items():
-            claim = (f"Routine pattern: {self.routine_n[(host_, name)]} '{name}' rule-change command(s) on {host_} "
-                     f"without a specific-address block on a built-in chain (e.g. {_argv_summary(evs[0].get('process.argv'), 100)}).")
+            claim = (f"{self.routine_n[(host_, name)]} other '{name}' rule-change command(s) on {host_} that neither "
+                     f"block a specific address on a built-in chain nor weaken the firewall (e.g. "
+                     f"{_argv_summary(evs[0].get('process.argv'), 100)}); retained for context.")
             out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
                              evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
                              group_key=f"routine|{host_}|{name}"))
         return out
+
+
+_IPT_FLUSH = {"-F", "--flush", "-X", "--delete-chain"}
+_OPEN_TARGETS = {"ACCEPT", "RETURN"}
+
+
+def _firewall_weakening(name: str, args: list[str], chain: str | None, target: str | None) -> str | None:
+    """Why a firewall command weakens protection, or None. Typed from argv tokens only."""
+    if name == "ufw":
+        if "disable" in args or "reset" in args:
+            return "the firewall is disabled or reset"
+        if "allow" in args:
+            return "a rule allowing traffic is added"
+        return None
+    if name == "nft":
+        if any(a in {"flush", "delete", "destroy"} for a in args):
+            return "rules, chains or tables are flushed or deleted"
+        if "accept" in args and any(a in {"add", "insert"} for a in args):
+            return "an accept rule is added"
+        return None
+    if any(a in _IPT_FLUSH for a in args):
+        return "rules or chains are flushed or deleted"
+    policy = _flag_value(args, "-P", "--policy")
+    if policy:
+        position = args.index(policy) if policy in args else -1
+        if 0 <= position < len(args) - 1 and args[position + 1] == "ACCEPT":
+            return f"the default policy of {policy} is set to ACCEPT"
+    if chain in BUILTIN_CHAINS and target in _OPEN_TARGETS and any(a in ("-A", "--append", "-I", "--insert")
+                                                                   for a in args):
+        return f"an {target} rule is added to the {chain} chain"
+    if chain in BUILTIN_CHAINS and target in BLOCK_TARGETS and any(a in ("-D", "--delete") for a in args):
+        return f"a {target} rule is removed from the {chain} chain"
+    return None
 
 
 class CredentialStoreRead(Playbook):

@@ -92,8 +92,34 @@ def test_a_burst_of_one_web_shell_command_is_a_lead_not_routine_context():
     burst = [exec_ev(["sh", "-c", "cat /var/www/html/config.php"], user="www-data", ts=T0 + timedelta(seconds=10 * i))
              for i in range(30)]
     m = run(host.WebServiceSpawnsInterpreter, burst)
-    assert [x.proposed_lane for x in m] == ["lead"] and "a burst rather than a schedule" in m[0].claim
-    assert "30 times" in m[0].claim and len(m[0].events) == 20 and "The first 20 runs are cited" in m[0].claim
+    assert [x.proposed_lane for x in m] == ["lead"] and "not spread across 3 or more hours" in m[0].claim
+    assert "30 times" in m[0].claim and len(m[0].events) == 20 and "The earliest 20 runs are cited" in m[0].claim
+
+
+def test_a_burst_straddling_hour_boundaries_is_still_a_lead():
+    # 61 minutes from 10:59:30 touches three clock hours; most runs fall in one hour, so it is not a schedule.
+    start = datetime(2024, 11, 18, 10, 59, 30, tzinfo=UTC)
+    burst = [exec_ev(["sh", "-c", "cat /var/www/html/config.php"], user="www-data", ts=start + timedelta(seconds=10 * i))
+             for i in range(370)]
+    assert [x.proposed_lane for x in run(host.WebServiceSpawnsInterpreter, burst)] == ["lead"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["ufw", "disable"],
+    ["iptables", "-F"],
+    ["iptables", "-P", "INPUT", "ACCEPT"],
+    ["iptables", "-I", "INPUT", "-p", "tcp", "--dport", "4444", "-j", "ACCEPT"],
+    ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", "22", "-j", "DROP"],
+    ["nft", "flush", "ruleset"],
+])
+def test_commands_that_weaken_the_firewall_are_leads_even_once(argv):
+    m = run(host.FirewallRuleChange, [exec_ev(argv)])
+    assert [x.proposed_lane for x in m] == ["lead"] and "weakens the host firewall" in m[0].claim
+
+
+def test_a_specific_address_unblock_stays_a_direct_high_finding():
+    m = run(host.FirewallRuleChange, [exec_ev(["iptables", "-D", "INPUT", "-s", "192.0.2.7", "-j", "DROP"])])
+    assert [x.proposed_lane for x in m] == ["high"] and "remove a DROP rule for 192.0.2.7" in m[0].claim
 
 
 def test_python_decoded_exec_indicator_is_parsed_not_substring():

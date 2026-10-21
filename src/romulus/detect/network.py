@@ -342,7 +342,7 @@ class PortScan(_Grouped):
             if lane == "context" and (dst, src) in scanned:
                 # The target's answers to a scan that is itself a lead belong to that attack: keep them visible.
                 lane, severity = self.lane, self.severity
-                claim += f" These flows answer the port scan from {dst} to {src}, which is reported as a lead."
+                claim += f" These are reverse-direction flows of the port scan from {dst} to {src}, which is reported as a lead."
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
                                                                      pf(evs[0], "destination.ip")],
                              evs[0].ts, severity, lane, "high", evs[0].entities(), group_key=f"{src}|{dst}"))

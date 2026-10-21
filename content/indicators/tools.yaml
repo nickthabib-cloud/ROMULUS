@@ -1,12 +1,12 @@
-# ROMULUS indicator list: offensive and dual-use program names (seed, 2026-10-19).
-# Source: content/research/tools.yaml leads (exe_basename / script basenames), made machine-readable.
+# ROMULUS indicator list: offensive and dual-use program names.
 #
-# Every match is POSITIVE-ONLY (ADR-004): a name can be changed in seconds, so a match is evidence and a miss
-# proves nothing. Values are matched EXACTLY (case-insensitive) against typed fields, never as substrings:
+# Every match is positive-only: a name can be changed in seconds, so a match is evidence and a miss proves
+# nothing. Values are matched exactly (case-insensitive) against typed fields, never as substrings:
 #   - executed program   : basename of the kernel-recorded process.executable  -> "program named X ran"
 #   - interpreter script : the script operand an interpreter was started with   -> "interpreter started with script X"
-#   - argument           : any other argv token whose basename equals X         -> "a command's argument names X" (context)
-# `lane` applies to the executed-program and interpreter-script roles; the argument role is always context.
+#   - argument           : any other argv token whose basename equals X         -> "a command's argument names X"
+# `lane` applies to the executed-program and interpreter-script roles. The argument role is a mention: it is kept
+# as a lead, capped at medium severity, and never claims the tool ran.
 # Analysts add lists by dropping more YAML files with the same schema into content/indicators/.
 schema_version: 1
 indicators:

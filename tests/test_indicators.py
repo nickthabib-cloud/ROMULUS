@@ -146,4 +146,4 @@ def test_a_mention_is_never_above_lead_whatever_its_rule_proposes():
     match = Match("x.rule", "a mention", "mention", [record], [pf(record, "process.argv")], record.ts, "high",
                   "urgent", "high", record.entities())
     decision = decide(match, "h1")
-    assert decision.admitted and decision.lane == "lead"
+    assert decision.admitted and decision.lane == "lead" and decision.severity == "medium"

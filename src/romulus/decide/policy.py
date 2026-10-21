@@ -46,9 +46,14 @@ def decide(m: Match, hunt_id: str) -> Decision:
     gates["claim_type"] = "pass" if m.claim_type != "mention" else "pass:mention (capped at lead, not an action)"
 
     lane = m.proposed_lane
-    if m.claim_type == "mention" and lane in ("urgent", "high"):
-        lane = "lead"
-        notes.append("lane capped at lead: a mention is not an action")
+    severity = m.severity
+    if m.claim_type == "mention":
+        if lane in ("urgent", "high"):
+            lane = "lead"
+            notes.append("lane capped at lead: a mention is not an action")
+        if severity in ("critical", "high"):
+            severity = "medium"
+            notes.append("severity capped at medium: a mention is not an action")
     confidence = m.confidence
     # Outcome semantics: a direct action claim whose exec outcome is unknown/failed is downgraded.
     if m.claim_type == "observed_action":
@@ -76,14 +81,14 @@ def decide(m: Match, hunt_id: str) -> Decision:
     if not admitted:
         lane = "context"
 
-    reasons = [f"severity {m.severity} (+{SEV_WEIGHT[m.severity]})", f"confidence {confidence} (+{CONF_WEIGHT[confidence]})"]
-    score = SEV_WEIGHT[m.severity] + CONF_WEIGHT[confidence]
+    reasons = [f"severity {severity} (+{SEV_WEIGHT[severity]})", f"confidence {confidence} (+{CONF_WEIGHT[confidence]})"]
+    score = SEV_WEIGHT[severity] + CONF_WEIGHT[confidence]
     if m.claim_type == "observed_action":
         score += 10
         reasons.append("direct observed action (+10)")
     if lane == "urgent":
         score += 20
         reasons.append("urgent lane (+20)")
-    return Decision(candidate_id=candidate_id(m, hunt_id), admitted=admitted, lane=lane, severity=m.severity,
+    return Decision(candidate_id=candidate_id(m, hunt_id), admitted=admitted, lane=lane, severity=severity,
                     confidence=confidence, priority=float(score), priority_reasons=reasons, gates=gates,
                     notes=notes + m.notes)
