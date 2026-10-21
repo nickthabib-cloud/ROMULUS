@@ -1,6 +1,7 @@
 """Playbook contract: required typed fields, claim wording, evaluation, coverage semantics."""
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar, Literal
@@ -43,6 +44,14 @@ class ContextAnchor:
     lane: str
     claim: str
     events: list[TypedEvent]
+    rule_id: str = ""
+    ts: datetime | None = None
+
+    @property
+    def identity(self) -> str:
+        """A content identity, stable across hunts: the anchor's rule and its records (the id is hunt-scoped)."""
+        records = ",".join(sorted(event.id for event in self.events))
+        return hashlib.sha256(f"{self.rule_id}|{records}".encode()).hexdigest()[:16]
 
 
 @dataclass
@@ -54,6 +63,8 @@ class ContextLink:
     evidence_events: list[TypedEvent]
     status: str
     reasons: list[str] = field(default_factory=list)
+    window_start: datetime | None = None
+    window_end: datetime | None = None
 
 
 def pf(ev: TypedEvent, name: str) -> PredicateField:

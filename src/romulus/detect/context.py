@@ -72,10 +72,11 @@ def _context_suffix(anchor: ContextAnchor, link: ContextLink) -> str:
 
 def _session_key(event: TypedEvent, anchor: ContextAnchor) -> tuple:
     """Group key for one session/lineage: host, boot id (when typed) and audit session id. When no session id
-    is typed (a lineage link), the anchor keeps lineages on one host apart."""
+    is typed (a lineage link), the anchor's content identity keeps lineages on one host apart; its id would differ
+    between identical hunts."""
     session = event.get("process.session_id")
     boot = event.get("host.boot.id")
-    return (event.host, boot, session if session is not None else f"lin:{anchor.id}")
+    return (event.host, boot, session if session is not None else f"lin:{anchor.identity}")
 
 
 def _group_id(key: tuple) -> str:

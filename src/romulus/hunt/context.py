@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from romulus.decide.policy import Decision, decide
 from romulus.detect.base import ContextAnchor, ContextLink, Match, Playbook
+from romulus.detect.context import _session_key
 from romulus.detect.registry import anchor_class_for_rule, fresh_context_pack
 from romulus.evidence.typed import TypedEvent
 from romulus.store.db import digest
@@ -70,21 +72,35 @@ def evaluate_context(
 # The single post-expansion pass.
 # ------------------------------------------------------------------------------------------------
 
+def _aware(value) -> datetime | None:
+    if value is None:
+        return None
+    when = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    return when.replace(tzinfo=UTC) if when.tzinfo is None else when.astimezone(UTC)
+
+
 def _session_of(event: TypedEvent, anchor: ContextAnchor, link: ContextLink) -> tuple:
-    """A record's session identity (host, boot id, audit session), matching the rules' own group key. When no
-    session id is typed, the anchor keeps lineages on one host apart."""
-    session = event.get("process.session_id") or link.key.get("process.session_id")
-    return (event.host, event.get("host.boot.id"), session if session is not None else f"lin:{anchor.id}")
+    """A record's session identity: exactly the rules' own group key, so one bucket never splits a group."""
+    return _session_key(event, anchor)
 
 
 def _content_key(pair: tuple) -> tuple:
     # Anchor and link ids are derived from hunt-specific candidate ids, so ordering by them would pick a
     # different reach in an identical hunt. Typed event ids are content-derived and stable across hunts.
+    # Built from what the canonical report projection uses (anchor rule and records, link type, key and window
+    # relative to the anchor), so two reaches tie only when they are the same reach.
     anchor, link = pair
+
+    def offset(when):
+        return None if when is None or anchor.ts is None else (when - anchor.ts).total_seconds()
+
     return (0 if link.strength == "observed" else 1,
+            anchor.rule_id,
             tuple(sorted(event.id for event in anchor.events)),
             link.link_type,
             json.dumps(link.key, sort_keys=True, default=str),
+            (offset(link.window_start) is None, offset(link.window_start) or 0.0,
+             offset(link.window_end) is None, offset(link.window_end) or 0.0),
             tuple(sorted(event.id for event in link.evidence_events)))
 
 
@@ -240,10 +256,12 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
         if cand is None:
             continue
         anchor = ContextAnchor(id=cand["id"], anchor_class=anchor_class_for_rule(cand["rule_id"]),
-                               lane=cand["lane"], claim=cand["claim"], events=events(cand["event_ids"]))
+                               lane=cand["lane"], claim=cand["claim"], events=events(cand["event_ids"]),
+                               rule_id=cand["rule_id"], ts=_aware(cand["ts"]))
         link = ContextLink(id=row["id"], link_type=row["link_type"], strength=row["strength"], key=row["key"],
                            evidence_events=events(row["evidence_ids"]), status=row["status"],
-                           reasons=row["reasons"])
+                           reasons=row["reasons"], window_start=_aware(row["window_start"]),
+                           window_end=_aware(row["window_end"]))
         reaches.append((anchor, link, events(row["event_ids"])))
 
     rule_classes = [type(playbook) for playbook in fresh_context_pack()]

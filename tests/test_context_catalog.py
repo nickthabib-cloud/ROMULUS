@@ -811,3 +811,38 @@ def test_the_representative_reach_does_not_depend_on_hunt_specific_ids():
                  sorted(c["event_ids"]), c["gate_results"]["_finalize_digest"])
                 for c in sorted(_discovery(repo.candidates("h1")), key=lambda c: c["claim"])]
     assert run("L-1", "L-2") == run("L-2", "L-1")
+
+
+def _reach(anchor_id, rule_id, link_id, minutes, events):
+    a = ContextAnchor(id=anchor_id, anchor_class="web_shell", lane="urgent", claim="x", events=events,
+                      rule_id=rule_id, ts=T0)
+    link = ContextLink(id=link_id, link_type="process_lineage", strength="observed", key={"process.pid": 9},
+                       evidence_events=events, status="complete", window_start=T0 - timedelta(minutes=minutes),
+                       window_end=T0 + timedelta(minutes=minutes))
+    return a, link
+
+
+def test_tied_windows_and_same_record_anchors_choose_by_content_not_ids():
+    from romulus.hunt.context import _representative
+    events = [exec_event("fa", ["/bin/sh"], process__pid=9)]
+    for first, second in (("L-1", "L-2"), ("L-2", "L-1")):          # same evidence at two windows, ids swapped
+        pairs = [_reach("F-A", "host.web_shell", first, 5, events), _reach("F-A", "host.web_shell", second, 30, events)]
+        _anchor, link = _representative(sorted(pairs, key=lambda p: p[1].id))
+        assert link.window_start == T0 - timedelta(minutes=30)       # the content order picks the same window
+    for first, second in (("F-1", "F-2"), ("F-2", "F-1")):          # two rules fired on the same record
+        pairs = [_reach(first, "host.web_shell", "L-a", 5, events), _reach(second, "ioc.indicator_match", "L-b", 5, events)]
+        anchor, _link = _representative(sorted(pairs, key=lambda p: p[0].id))
+        assert anchor.rule_id == "host.web_shell"
+
+
+def test_a_session_less_lineage_group_key_is_the_same_in_identical_hunts():
+    from romulus.detect.context import _session_key
+    record = exec_event("x", ["id"], executable="/usr/bin/id")
+    record = record.model_copy(update={"fields": {k: v for k, v in record.fields.items() if k != "process.session_id"}})
+    anchor_events = [exec_event("fa", ["/bin/sh"], process__pid=9)]
+    one = ContextAnchor(id="F-aaaa", anchor_class="web_shell", lane="urgent", claim="x", events=anchor_events,
+                        rule_id="host.web_shell")
+    two = ContextAnchor(id="F-bbbb", anchor_class="web_shell", lane="urgent", claim="x", events=anchor_events,
+                        rule_id="host.web_shell")
+    assert _session_key(record, one) == _session_key(record, two)
+    assert "F-aaaa" not in str(_session_key(record, one))
