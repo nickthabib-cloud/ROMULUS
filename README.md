@@ -1,120 +1,182 @@
 # ROMULUS
-NOTE: This tool is a very early proof of concept in progress. I'm updating and making changes daily.
 
-A defensive, AI-assisted threat-hunting tool.
+> **Early proof of concept, under active daily development.** It works end to end on lab data, but it is not validated for real missions. Interfaces and output formats will change. I'm actively brainstorming changes and improvements. I just threw it together and I'm not married to anything - I appreciate any reccomendations!
 
-ROMULUS runs a deterministic sweep over host and network telemetry: Elasticsearch/OpenSearch logs, Arkime sessions, and PCAPs read with TShark. Deterministic expansion then follows typed links from the strongest findings (process lineage, login session, network flow), judges the linked records in context, and assembles incidents. Every claim cites the raw evidence. ROMULUS can work with or without a large language model by performing deterministic searches.
+**ROMULUS is a defensive threat-hunting tool.** It searches host and network telemetry for signs of compromise and reports what it finds as ranked, cited findings, incidents and an attack-path timeline.
 
-**Planned: the AI investigating agent**. After the deterministic layer, the agent:
-- reads every indicator found in initial sweeps;
-- develops hypotheses about malicious activity;
-- follows further leads through typed, read-only pivots, and finds more indicators;
-- connects them into a bigger picture.
+It is built for cyber defense teams (Cyber Protection Teams, SOC and incident-response analysts) who are dropped onto a network with logs in Elasticsearch or OpenSearch, sessions in Arkime and packet captures on disk, and need to find out quickly whether, and how, an attacker got in.
 
-The final report opens with its **AI assessment**: the agent's overall hypothesis, every sentence cited, labelled as AI-generated and unconfirmed. The agent can add findings, labelled as agent findings and capped at `high`. It can never hide, close or demote findings.
+ROMULUS works **with or without an AI model**. Initial finding comes from deterministic, typed detection rules. The AI investigating agent works on top of those results, and furthers investigations.
 
-For testing purposes the model is reached through any OpenAI API. Earlier iterations used a local LLM through Ollama, but compute limitations hindered adequate agentic investigations. Actual teams use their own LLM server.
+---
 
-The full plan (how the agent connects to a model, keeps telemetry on site, what it may add, the report's AI assessment, safety and budgets) is in [`docs/architecture/ai-investigating-agent.md`](docs/architecture/ai-investigating-agent.md).
+## What it does today
 
-Outputs:
+1. **Sweeps** the hunt window across your sources with a catalog of typed detection rules: web shells, reverse shells, credential-file reads, downloads piped to a shell, firewall tampering, privilege-escalation tooling, port scans, beaconing, suspicious IDS alert stacks, indicator matches and more.
+2. **Reads packets** for the sessions that matter: it fetches them from Arkime by session ID and decodes them with TShark (for example, a file whose content does not match its claimed type).
+3. **Expands** from the strongest findings along typed links (the same process tree, the same login session, the same network flow) and judges the linked activity in that context: discovery commands, privilege probing, credential access, data staging and lateral movement that would be too weak on their own.
+4. **Assembles incidents**: findings joined by observed links, with a cited, time-ordered narrative. Inferred links are shown, but always labelled as hypotheses.
+5. **Reports**: an immutable report revision (JSON and Markdown) and a browser UI with findings, incidents and an attack-path timeline.
 
-- ranked findings
-- incidents with a cited, template narrative
-- an attack-path timeline
-- recommendations
-- a technical Markdown/JSON report (an executive DOCX is planned)
-- a browser UI for analysts
+Every claim cites the raw records it rests on. A negative ("this did not happen") is only stated when the evidence could have shown it; otherwise the report says what was not assessed.
 
-> **Status:** under active development and not yet validated for production missions.
+### Example finding
 
-## Detection scope
+```
+[URGENT] host.web_service_spawns_interpreter
+A process execution event on web01 records account 'www-data' executing 'bash' (argv: bash); the exec call succeeded.
+  cites: audit EXECVE/SYSCALL records (raw ids in the report), lane urgent, ATT&CK T1505.003, T1059.004
+```
 
-The goal is to find any malicious activity the telemetry can show, on any mission network. The detection catalog is built from systematic research:
-- MITRE ATT&CK Enterprise and ICS techniques;
-- Public detection corpora (Sigma, CAR, Atomic Red Team, LOLBAS/GTFOBins, ET Open and others);
-- Any telemetry family a hunt may meet: Windows, AD, Linux, macOS, identity and cloud logs, network devices, Zeek, Suricata, PCAP and ICS protocols.
+*(Placeholder: replace with a real, sanitized excerpt and a timeline screenshot.)*
 
-A generated ATT&CK coverage matrix will show what is covered, what is evaluated, and where the gaps are.
+## Supported data
+
+| Source | Today | Planned |
+|---|---|---|
+| Linux auditd (exec, connect/accept, login records) | ✓ | |
+| Linux journal (sshd and other services) | ✓ | |
+| Apache access and error logs | ✓ | other web servers |
+| Suricata alerts and flows | ✓ | |
+| Arkime sessions (via its Elasticsearch indices) | ✓ | |
+| PCAP via Arkime and TShark | ✓ (HTTP content) | more protocols |
+| Windows / Active Directory, Zeek, cloud and identity logs, ICS protocols | | ✓ |
+
+Sources are read through Elasticsearch or OpenSearch with **read-only** credentials. ROMULUS never writes to your telemetry.
+
+## Findings and lanes
+
+| Lane | Meaning |
+|---|---|
+| `urgent` | Strong evidence of attacker activity; look now |
+| `high` | Strong indicator that needs confirmation |
+| `lead` | Worth an analyst's look; uncertain or grouped activity (batches say so) |
+| `context` | Kept for completeness; activity with positive evidence of being benign |
+
+Nothing that might be attacker activity is dropped: noise is handled by grouping similar records into one finding, never by hiding them.
+
+## Requirements
+
+- A Linux host for ROMULUS (it is developed on Ubuntu)
+- Python 3.12+
+- Elasticsearch or OpenSearch holding the telemetry, and an account with read access to the indices only
+- Optional: Arkime (sessions and PCAP), TShark, PCAP files in an allow-listed directory
+- Optional: a model server (see [AI investigating agent](#ai-investigating-agent-in-progress))
+
+## Quick start
+
+```bash
+git clone https://github.com/nickthabib-cloud/ROMULUS.git && cd ROMULUS
+python3.12 -m venv venv
+venv/bin/pip install -e .
+
+export ROMULUS_HOME=~/romulus && mkdir -p "$ROMULUS_HOME"
+cp .env.example "$ROMULUS_HOME/.env" && chmod 600 "$ROMULUS_HOME/.env"
+# edit .env: ES_URL, ES_USERNAME/ES_PASSWORD (read-only), ES_INDEX_PATTERNS, ROMULUS_SECRET_KEY, optional Arkime and PCAP settings
+
+venv/bin/romulus --env-file "$ROMULUS_HOME/.env" doctor
+venv/bin/romulus --env-file "$ROMULUS_HOME/.env" hunt start --start 2026-01-01T10:00:00Z --end 2026-01-01T17:30:00Z
+venv/bin/romulus --env-file "$ROMULUS_HOME/.env" report <hunt-id>
+```
+
+`doctor` checks connectivity, that the account is read-only, the configured indices, TShark, the PCAP paths and storage, and tells you what to fix.
+
+To use the browser UI:
+
+```bash
+venv/bin/romulus --env-file "$ROMULUS_HOME/.env" user add alice --role lead
+venv/bin/romulus --env-file "$ROMULUS_HOME/.env" web      # serves on ROMULUS_WEB_BIND (default 127.0.0.1:8443)
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `doctor` | Checks sources, privileges, tools, model endpoint (if any) and storage |
+| `hunt start --start <ISO> --end <ISO>` | Runs a hunt: sweep, packet stage, expansion and incidents. Deterministic by default |
+| `hunt start ... --style directed --hypothesis "<text>"` | A hunt focused on one hypothesis |
+| `hunt resume <id>` / `hunt status [id]` | Continue an interrupted hunt / show progress |
+| `findings <id> [--lane urgent --lane high]` | List ranked findings |
+| `report <id>` | Publish a new immutable report revision (JSON and Markdown) |
+| `user add <name> --role lead\|analyst` | Create a web UI account (interactive) |
+| `web` | Serve the browser UI |
+| `db compact` | Return the space freed by deleted hunts to the disk |
+
+Add `--json` for machine-readable output.
+
+## Configuration
+
+All settings live in `$ROMULUS_HOME/.env` (template: [`.env.example`](.env.example)). Keep it `chmod 600` and never commit it. The main groups:
+
+- **ROMULUS:** `ROMULUS_HOME`, `ROMULUS_WEB_BIND`, `ROMULUS_SECRET_KEY`, `MISSION_TIMEZONE`
+- **Elasticsearch/OpenSearch:** `ES_URL`, `ES_FLAVOR`, credentials or `ES_API_KEY`, TLS options, `ES_INDEX_PATTERNS`
+- **Arkime and packets:** `ARKIME_URL`, credentials, `PCAP_ALLOWED_DIRS`, `TSHARK_BIN`
+- **Model (optional):** see below
+
+## AI investigating agent (In progress)
+
+After the deterministic hunt, an AI agent will read everything ROMULUS found, form hypotheses about what the attacker did, follow leads through typed, read-only pivots, and open the report with a cited **AI assessment**, labelled as AI-generated and unconfirmed. It can add findings (marked as agent findings), but it can never hide, close or demote anything the deterministic layer found.
+
+- Teams connect it to **their own model server**, so telemetry stays on their network.
+- A hosted model is allowed only for testing on public data, behind an explicit install-time switch, with a banner on every hunt and report that used it.
+- Usage is bounded by per-hunt budgets (calls, tokens, time, optional cost). If a budget runs out, the deterministic results are unaffected.
+
+Full design: [`docs/architecture/ai-investigating-agent.md`](docs/architecture/ai-investigating-agent.md).
 
 ## Design principles
 
-- **Strong indicators are reported on their own, immediately.** Correlation and attack paths come second. Inferred links are labeled as hypotheses.
-- **Nothing reportable is lost** to UI limits, model context or rendering. One immutable report manifest feeds every renderer, and every citation is checked.
-- **The model proposes typed actions only.** It requires input validation for DSL queries, Arkime expressions, TShark filters. All model output is validated, and telemetry is treated as untrusted data.
-- **Read-only toward telemetry.** Nothing is transmitted externally. Secrets never appear in the repo, logs, prompts or reports. One exception: a hosted model, used for testing on public data only. It needs an install-time switch, puts a banner on every hunt and report that used it, and is never on in release builds.
+- **Strong indicators are reported on their own, immediately.** Correlation and attack paths come second.
+- **A mention is not an action.** Rules match typed fields (the executable, a script operand, an address), never text that merely contains a word.
+- **Honest negatives.** Caps, timeouts, missing fields and partial responses are reported as "not assessed", never as "nothing found".
+- **Nothing reportable is lost** to UI limits, model context or rendering. One report manifest feeds every output.
+- **Read-only and on-site.** ROMULUS never writes to your telemetry and sends nothing off the host it runs on (except the optional, labelled test-model exception above). Secrets never appear in logs, prompts or reports.
+- **Models propose, code decides.** Any model output is a typed proposal that is validated; it never writes queries, filters, shell commands or paths.
 
-## How it works
+## How well does it work?
 
-A coverage ledger records every stage that can lose information: compile, execute, ingest, normalize and evaluate. That way the report can say exactly what was and wasn't assessed.
+Development is measured against a public, labelled attack dataset (AInception, on Zenodo), loaded into Elasticsearch and Arkime. On that development set, the latest deterministic run reported 16 of 22 observable attack steps and surfaced 20 of 22, with 9 of its top 10 findings correct and about 2.9 false leads per modelled hour of analyst review.
 
-Findings are sorted into lanes: `urgent`, `high`, `lead` and `context`.
+These are **development-set numbers and optimistic by design**: the rules were tuned while looking at this data. They are not a claim about performance on other networks. Testing on unseen data is planned.
 
-The full map is in [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md). A generated module map is in [`docs/architecture/MODULE_MAP.md`](docs/architecture/MODULE_MAP.md).
+## Architecture
 
-## Stack
+```
+sources (ES/OpenSearch, Arkime, PCAP) ─► sweep ─► packet stage ─► expansion ─► incidents ─► report ─► JSON | Markdown | web UI
+                                                                                  └─► AI agent (planned)
+```
 
-- **Core:** Python 3.12, organized as a modular monolith (`src/romulus/`).
-- **State:** SQLite (WAL) is the single state authority; Alembic handles migrations.
-- **Web UI:** FastAPI + Jinja + server-sent events. It has argon2 logins, lead/analyst roles, CSRF protection and a strict CSP.
-- **Model:** optional local Ollama today. Planned: any OpenAI-compatible endpoint for the agent. The agent is scored on and off by the evaluation harness.
-- **The Agent:** Uses native tool calling through the investigator, an explicit controller with SQLite as the only state.
+Python 3.12 modular monolith (`src/romulus/`), SQLite (WAL) as the single state store with Alembic migrations, FastAPI + Jinja web UI with local logins, roles, CSRF protection and a strict CSP. Details: [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) and the generated [`MODULE_MAP.md`](docs/architecture/MODULE_MAP.md).
 
-## Repository layout
+## Security and intended use
+
+- ROMULUS is for **authorized, defensive** threat hunting on networks you are permitted to analyze.
+- It is not hardened for exposure: the web UI has no built-in TLS yet. Bind it to localhost or put it behind a TLS reverse proxy on a trusted network.
+- Report security issues privately to *(contact to be added)*, not in public issues.
+
+## Development
+
+```bash
+venv/bin/pip install pytest respx ruff
+venv/bin/python -m pytest -q -p no:warnings
+venv/bin/ruff check src tests
+python scripts/archmap.py --check     # architecture dependency rules
+```
+
+Repository layout:
 
 | Path | Contents |
 |---|---|
 | `src/romulus/` | `config`, `store`, `sources`, `evidence`, `detect`, `decide`, `hunt`, `agent`, `report`, `web`, `cli` |
-| `tests/` | Unit, acceptance, hostile-input and regression tests |
-| `scripts/` | `deploy.ps1` (deploy to a Linux host over SSH), `web-restart.sh`, `archmap.py`, `smoke_live.py` |
+| `tests/` | Unit, adversarial and regression tests |
 | `content/` | Indicator lists and vendored MITRE ATT&CK data |
-| `docs/architecture/` | Architecture overview, the generated module map, and the planned AI investigating agent |
-| `.env.example` | Configuration template. Copy it to `$ROMULUS_HOME/.env`, then `chmod 600` |
+| `scripts/` | Deploy helper, web restart, architecture map, live smoke test |
+| `docs/architecture/` | Architecture, module map, AI agent design |
 
-## Getting started
+## Roadmap
 
-### Install
+- **Next:** the AI investigating agent; deeper network and packet analysis; host rules that can prove negatives from kernel file records.
+- **Then:** detection breadth (Windows/AD, Zeek, Sigma import, ATT&CK coverage matrix), testing on unseen datasets, the executive DOCX report and hardening.
 
-```bash
-python3.12 -m venv venv
-venv/bin/pip install -e .
-cp .env.example "$ROMULUS_HOME/.env"   # fill in sources, model endpoint and secret key
-```
+## License
 
-Use a **read-only** Elasticsearch account, never the `elastic` superuser. The model is optional: leave `OLLAMA_URL` empty to run model-off. If you use Ollama, keep `OLLAMA_NUM_CTX` explicit, because Ollama truncates prompts silently.
-
-Every setting, including agent provider keys, lives in `.env`. A lead-only Settings page for credentials is planned for a later release.
-
-### Run
-
-```bash
-romulus --env-file .env doctor
-```
-
-```bash
-romulus --env-file .env hunt start --start 2026-01-01T10:00:00Z --end 2026-01-01T17:30:00Z
-```
-
-| Command | What it does |
-|---|---|
-| `doctor` | Checks sources, privileges, the model endpoint, tools and storage |
-| `hunt start --start <ISO> --end <ISO> [--no-agent]` | Runs a sweep and then the investigator. `--no-agent` runs the sweep only |
-| `hunt resume <id>` / `hunt status [id]` | Resumes the investigator without rerunning the sweep / shows hunt state |
-| `findings <hunt> [--lane urgent --lane high]` | Lists ranked findings |
-| `report <hunt>` | Publishes a new immutable report revision (JSON + Markdown) |
-| `user add <name> --role lead\|analyst` | Creates a web UI account (interactive) |
-| `web` | Serves the browser UI on `ROMULUS_WEB_BIND` |
-
-The web UI shows each hunt's findings, incidents and an attack-path timeline (`/hunts/<id>/timeline`).
-
-### Tests
-
-```bash
-python -m pytest -q -p no:warnings
-```
-
-Install the dev dependencies (`pytest`, `respx`, `ruff`) first.
-
-## Evaluation
-
-Development is evaluated against the public Zenodo dataset, loaded into Elasticsearch and Arkime. Ground truth is kept out of the runtime and is read only by the evaluator (set `ROMULUS_EVAL_ROOT` so `doctor` checks that no source path overlaps it). Results on a development dataset are never presented as general effectiveness claims.
+*(To be decided by the owner.)*

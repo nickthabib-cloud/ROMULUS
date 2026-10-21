@@ -46,6 +46,15 @@ def outcome_sentence(m: dict) -> str:
     return s
 
 
+def _ai_agent_cell(m: dict) -> str:
+    ai = m.get("ai_agent") or {}
+    phase, configured = ai.get("phase") or {}, ai.get("configured") or {}
+    text = f"{phase.get('status', 'unknown')}: {phase.get('reason', '')}".rstrip(": ")
+    if configured.get("model"):
+        text += f" (provider {configured.get('provider')}, model {configured.get('model')}, "                 f"{configured.get('egress') or 'unknown'} endpoint)"
+    return text
+
+
 def render(m: dict, banner: str = BANNER) -> str:
     h = m["hunt"]
     graph = m.get("incident_graph") or {"incidents": [], "links": [], "nodes": [], "edges": []}
@@ -65,9 +74,12 @@ def render(m: dict, banner: str = BANNER) -> str:
            f"| Sources | {esc(', '.join(h['targets']))} |",
            f"| Lane counts | {esc(json.dumps(m['lane_counts'], sort_keys=True))} |",
            f"| Model investigator | {esc(m['agent'].get('status'))}: {esc(m['agent'].get('stop_reason', ''))} |",
+           f"| AI agent | {cell(_ai_agent_cell(m))} |",
            f"| Stop reason | {esc(m['stop_reason'])} |",
            f"| Broken citations | {m['integrity']['broken_citations']} |",
            f"| Broken investigation citations | {m['integrity'].get('broken_investigation_citations', 0)} |", ""]
+    for egress in m.get("banners") or []:
+        out += [f"> **Model egress:** {cell(egress)}", ""]
     if not m["integrity"]["finalizable"]:
         out += [("> **Degraded report:** one or more citations could not be resolved to retained evidence. "
                  "Those findings are listed with the broken citation marked."), ""]

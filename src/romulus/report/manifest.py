@@ -8,6 +8,7 @@ from datetime import UTC
 from sqlalchemy import func, select
 
 from romulus.agent.cases import seed_candidate_ids
+from romulus.agent.provider import egress_banners
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.report.incidents import build_incident_graph, incident_narrative
@@ -441,6 +442,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "coverage": coverage_for_hunt(repo, hunt_id),
         "tasks": {s: n for s, n in tasks},
         "agent": agent or {"status": "unknown"},
+        "ai_agent": _ai_agent(repo, hunt_id, hm),
+        "banners": egress_banners(hm.get("ai_agent"), repo.agent_usage(hunt_id)),
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
         "incident_graph": incident_graph,
         # an analyst's asserted relations: shown as assertions, never as observed or inferred links
@@ -460,6 +463,16 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                       "broken_incident_event_ids": broken_incidents[:50],
                       "finalizable": broken == 0 and not broken_inv and not broken_incidents}
     return _jsonable(m)
+
+
+def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
+    """The AI agent's provenance (provider, endpoint host, model, egress class) and what its phase did."""
+    configured = dict(hunt_manifest.get("ai_agent") or {})
+    configured.pop("budgets", None)
+    phase = repo.latest_audit(hunt_id, "hunt.ai_agent_summary")
+    usage = repo.agent_usage(hunt_id)
+    return {"configured": configured, "phase": phase["detail"] if phase else {"status": "unknown"},
+            "usage": {k: usage[k] for k in ("calls", "tokens", "cost_usd", "estimated")}}
 
 
 def _content_candidate_key(repo: Repo, candidate: dict) -> str:

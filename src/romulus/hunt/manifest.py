@@ -19,7 +19,8 @@ def new_hunt_id() -> str:
 
 
 def build_manifest(s: Settings, window: Window, original_input: dict, style: str, targets: list[str],
-                   profiles: dict[str, dict], hypothesis: str = "", budgets: dict | None = None) -> dict:
+                   profiles: dict[str, dict], hypothesis: str = "", budgets: dict | None = None,
+                   ai_agent: dict | None = None) -> dict:
     safe_cfg = {k: v for k, v in s.redacted().items() if k not in ("secret_key",)}
     return {
         "schema": "hunt-manifest@1",
@@ -40,5 +41,7 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         "agent_mode": s.agent_mode,
         "budgets": budgets or {"agent_steps_total": 60, "agent_steps_per_case": 8, "max_cases": 12,
                                "wall_clock_minutes": 120},
+        # the AI agent's provider and model as configured when the hunt was created (no key, no URL path)
+        "ai_agent": ai_agent or {"requested": False, "state": "not_configured", "reason": "not evaluated"},
         "config_digest": digest(safe_cfg),
     }
