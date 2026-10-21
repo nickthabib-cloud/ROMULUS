@@ -15,16 +15,18 @@ from romulus.decide.policy import decide
 from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.context import (
     CredentialAccessInContext,
+    EntryPointPromotion,
     LateralMovement,
     PostAccessDiscovery,
     PrivilegeProbing,
     StagingAndTransfer,
 )
+from romulus.detect.registry import fresh_context_pack
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt.context import evaluate_context
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkResult
-from romulus.hunt.publish import publish_match
+from romulus.hunt.publish import publish_match, refute_context_candidates
 from romulus.sources.models import Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -475,6 +477,110 @@ def test_expansion_engine_publishes_high_lateral_finding():
 
 
 # ------------------------------------------------------------------------------------------------
+# Root processes with an unknown parent, and rebuild-on-merge / refutation across windows.
+# ------------------------------------------------------------------------------------------------
+
+def _anchor(anchor_id, anchor_class="execution"):
+    return ContextAnchor(id=anchor_id, anchor_class=anchor_class, lane="urgent", claim="a foothold",
+                         events=[exec_event(f"{anchor_id}-ev", ["/bin/sh"], process__pid=9)])
+
+
+def _link(link_id, strength="observed", link_type="login_session"):
+    return ContextLink(id=link_id, link_type=link_type, strength=strength,
+                       key={"process.session_id": 42}, evidence_events=[], status="complete")
+
+
+def _evaluate_window(repo, hunt_id, anchor_obj, link_obj, events):
+    """Mirror ExpansionEngine._evaluate for one window: publish context matches, then refute untouched keys."""
+    produced = set()
+    for ev in evaluate_context(repo, hunt_id, anchor_obj, link_obj, events):
+        produced.add((ev.playbook.id, ev.match.group_key))
+        publish_match(repo, hunt_id, ev.playbook, ev.match, None, {},
+                      source_anchor_id=anchor_obj.id, source_link_id=link_obj.id,
+                      context_reach={"anchor_id": anchor_obj.id, "anchor_class": anchor_obj.anchor_class,
+                                     "link_id": link_obj.id, "link_type": link_obj.link_type,
+                                     "strength": link_obj.strength})
+    refute_context_candidates(repo, hunt_id, events, produced,
+                              {p.id: p for p in fresh_context_pack()})
+
+
+def test_root_with_unknown_parent_is_a_single_aggregated_lead_never_high():
+    # Three root records whose parent exec (pid 500) is not in the link events or the anchor's events.
+    roots = [exec_event(f"r{i}", [cmd], executable=f"/usr/bin/{cmd}", process__uid="0", process__euid="0",
+                        process__auid="1000", process__pid=200 + i, process__ppid=500)
+             for i, cmd in enumerate(("cat", "systemctl", "vim"))]
+    out = [m for m in one(PrivilegeProbing, roots) if "euid0" in m.group_key]
+    assert len(out) == 1 and out[0].proposed_lane == "lead" and out[0].notes == ["T1548"]
+    assert "parent exec is not in the linked records" in out[0].claim and "3 record(s)" in out[0].claim
+
+
+def test_two_anchors_union_forms_a_discovery_burst_high():
+    repo = _repo()
+    _evaluate_window(repo, "h1", _anchor("F-A"), _link("L-A"),
+                     [exec_event("id", ["id"], executable="/usr/bin/id"),
+                      exec_event("uname", ["uname", "-a"], executable="/usr/bin/uname")])
+    mid = [c for c in repo.candidates("h1") if c["rule_id"] == "context.post_access_discovery"]
+    assert len(mid) == 1 and mid[0]["lane"] == "lead"
+    _evaluate_window(repo, "h1", _anchor("F-B"), _link("L-B"),
+                     [exec_event("ps", ["ps", "aux"], executable="/usr/bin/ps"),
+                      exec_event("ss", ["ss", "-tunap"], executable="/usr/bin/ss")])
+    final = [c for c in repo.candidates("h1") if c["rule_id"] == "context.post_access_discovery"]
+    assert len(final) == 1 and final[0]["lane"] == "high"
+    assert "4 command(s)" in final[0]["claim"] and "4 distinct" in final[0]["claim"]
+
+
+def test_merge_result_is_independent_of_window_order():
+    def run(order):
+        repo = _repo()
+        windows = {
+            "A": (_anchor("F-A"), _link("L-A"), [exec_event("id", ["id"], executable="/usr/bin/id"),
+                                                 exec_event("uname", ["uname"], executable="/usr/bin/uname")]),
+            "B": (_anchor("F-B"), _link("L-B"), [exec_event("ps", ["ps"], executable="/usr/bin/ps"),
+                                                 exec_event("ss", ["ss"], executable="/usr/bin/ss")]),
+        }
+        for key in order:
+            _evaluate_window(repo, "h1", *windows[key])
+        row = next(c for c in repo.candidates("h1") if c["rule_id"] == "context.post_access_discovery")
+        return row["lane"], "4 command(s)" in row["claim"], tuple(sorted(row["event_ids"]))
+    assert run(["A", "B"]) == run(["B", "A"])
+
+
+def test_narrow_then_wider_same_pid_has_no_stale_high():
+    repo = _repo()
+    root = exec_event("r", ["cat", "/root/x"], executable="/usr/bin/cat", process__uid="0", process__euid="0",
+                      process__auid="1000", process__pid=200, process__ppid=500, ts=T0 + timedelta(minutes=1))
+    _evaluate_window(repo, "h1", _anchor("F-A"), _link("L-A"), [root])      # parent 500 unclipped -> unknown
+    narrow = [c for c in repo.candidates("h1") if c["rule_id"] == "context.privilege_probing"]
+    assert narrow and all(c["lane"] != "high" for c in narrow)
+    # wider window reveals the root shell (pid 500) and its sudo broker (pid 150)
+    shell = exec_event("sh", ["bash"], executable="/bin/bash", process__uid="1000", process__euid="1000",
+                       process__auid="1000", process__pid=100, process__ppid=50, ts=T0 - timedelta(minutes=20))
+    sudo = exec_event("su", ["sudo", "-i"], executable="/usr/bin/sudo", process__uid="1000", process__euid="0",
+                      process__auid="1000", process__pid=150, process__ppid=100, ts=T0 - timedelta(minutes=19))
+    root_shell = exec_event("rs", ["bash"], executable="/bin/bash", process__uid="0", process__euid="0",
+                            process__auid="1000", process__pid=500, process__ppid=150,
+                            ts=T0 - timedelta(minutes=19))
+    _evaluate_window(repo, "h1", _anchor("F-A"), _link("L-A"), [root, shell, sudo, root_shell])
+    final = [c for c in repo.candidates("h1") if c["rule_id"] == "context.privilege_probing"]
+    assert all(c["lane"] != "high" for c in final)                         # no stale high anywhere
+    assert any("euid0unknown" in c["group_key"] and c["lane"] == "context" for c in final)  # withdrawn
+    assert any(c["group_key"].startswith("euid0|") and c["lane"] == "lead" for c in final)  # brokered lead
+
+
+def test_entry_point_withdrawn_when_wider_window_shows_internal_source():
+    repo = _repo()
+    sourceless = auth_event("so", source=None, phase="session_open")
+    _evaluate_window(repo, "h1", _anchor("F-A", "remote_login"), _link("L-A"), [sourceless])
+    lead = next(c for c in repo.candidates("h1") if c["rule_id"] == "context.entry_point_promotion")
+    assert lead["lane"] == "lead"
+    internal = auth_event("in", source="10.0.0.8", phase="login")
+    _evaluate_window(repo, "h1", _anchor("F-A", "remote_login"), _link("L-A"), [sourceless, internal])
+    final = next(c for c in repo.candidates("h1") if c["rule_id"] == "context.entry_point_promotion")
+    assert final["lane"] == "context" and "withdrawn" in final["claim"]
+    assert repo.latest_audit("h1", "context.rebuild") is not None
+
+
+# ------------------------------------------------------------------------------------------------
 # Citations vs claims, parse failures, per-tool grammars, and lateral target/lineage matching.
 # ------------------------------------------------------------------------------------------------
 
@@ -575,7 +681,6 @@ def test_lateral_connect_matched_by_process_lineage_is_high():
 @pytest.mark.parametrize("source,expect", [
     ("203.0.113.8", "high"), (None, "lead")])
 def test_entry_point_external_high_sourceless_lead(source, expect):
-    from romulus.detect.context import EntryPointPromotion
     login = auth_event("lg", source=source, phase="login")
     link_ = ContextLink(id="L", link_type="login_session", strength="observed",
                         key={"process.session_id": 42}, evidence_events=[], status="complete")
@@ -586,7 +691,6 @@ def test_entry_point_external_high_sourceless_lead(source, expect):
 
 
 def test_entry_point_internal_source_not_promoted():
-    from romulus.detect.context import EntryPointPromotion
     internal = auth_event("in", source="10.0.0.8", phase="login")
     sourceless = auth_event("so", source=None, phase="session_open")
     link_ = ContextLink(id="L", link_type="login_session", strength="observed",

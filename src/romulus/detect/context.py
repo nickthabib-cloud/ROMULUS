@@ -162,7 +162,7 @@ def _ancestors(index: dict, event: TypedEvent, limit: int = 24) -> tuple[list[Ty
             return out, False
         out.append(ancestor)
         pid, ts = ancestor.get("process.ppid"), ancestor.ts
-    return out, True
+    return out, False                              # the depth limit ran out: the chain is not fully established
 
 
 class _HostContextRule(ContextPlaybook):
@@ -456,11 +456,14 @@ class PrivilegeProbing(_HostContextRule):
 
     def match_linked(self, anchor, link, events):
         eligible = self.eligible(events, EXEC_REQUIRED)
-        index = _exec_index(eligible)
+        # The anchor's own exec records are not among the link events on a lineage link, so add them to the
+        # index: a root record's parent may be the anchor's own shell. They are lookups only, not candidates.
+        index = _exec_index(eligible + list(anchor.events))
         probes: dict[tuple, list[tuple[str, str, TypedEvent]]] = defaultdict(list)
         setuid: dict[tuple, list[tuple[str, TypedEvent]]] = defaultdict(list)
+        unknown_parent: dict[tuple, list[TypedEvent]] = defaultdict(list)
         helper_first: dict[tuple, object] = {}
-        transitions: list[tuple[TypedEvent, TypedEvent | None, tuple]] = []
+        transitions: list[tuple[TypedEvent, TypedEvent, tuple]] = []
         seen_transition: set[tuple] = set()
         for event in sorted(eligible, key=lambda item: (item.ts, item.id)):
             prog = program(event)
@@ -476,7 +479,10 @@ class PrivilegeProbing(_HostContextRule):
                 continue
             if _is_real_root(event):
                 parent = _latest_at(index, event.host, event.get("process.ppid"), event.ts)
-                if parent is not None and _is_real_root(parent):
+                if parent is None:
+                    unknown_parent[key].append(event)   # cannot confirm a transition without the parent's exec
+                    continue
+                if _is_real_root(parent):
                     continue                        # inherited root, not a transition
                 tkey = (event.host, event.get("host.boot.id"), key[2], event.get("process.pid"),
                         event.get("process.executable"))
@@ -490,6 +496,7 @@ class PrivilegeProbing(_HostContextRule):
         out = []
         out.extend(self._probe_findings(probes, anchor, link))
         out.extend(self._transition_findings(transitions, index, helper_first, anchor, link))
+        out.extend(self._unknown_parent_findings(unknown_parent, anchor, link))
         out.extend(self._setuid_findings(setuid, anchor, link))
         return out
 
@@ -517,7 +524,6 @@ class PrivilegeProbing(_HostContextRule):
             helper_ancestor = next(
                 (a for a in ancestors
                  if (prog := program(a)) is not None and prog.name in ELEVATION_HELPERS), None)
-            lineage_known = parent is not None
             earlier_helper = key in helper_first and helper_first[key] <= event.ts
             cited = [event]
             if helper_ancestor is not None:
@@ -525,26 +531,21 @@ class PrivilegeProbing(_HostContextRule):
                 lane, techniques = "lead", ["T1548"]
                 note = (f"an elevation helper ({basename(str(helper_ancestor.get('process.executable')))}) is a "
                         "lineage ancestor through the ppid chain, so this is a brokered elevation")
-            elif not lineage_known:
-                if earlier_helper:
-                    lane, techniques = "lead", ["T1548"]
-                    note = ("the process lineage could not be established from the linked records, and an "
-                            "elevation helper ran earlier in the session; brokering cannot be ruled out")
-                else:
-                    lane, techniques = "high", ["T1548", "T1068"]
-                    note = ("the process lineage could not be established from the linked records and no "
-                            "elevation helper ran earlier in the session")
             else:
+                # A known non-root parent with no elevation helper among its ancestors is an exploit signal.
                 lane, techniques = "high", ["T1548", "T1068"]
-                note = ("no elevation helper is an ancestor in the recorded lineage"
-                        + ("; a helper ran earlier in the session but is not an ancestor"
-                           if earlier_helper else ""))
+                parent_exe = basename(str(parent.get("process.executable")))
+                note = (f"the parent ({parent_exe}, pid {parent.get('process.pid')}) is not root and no elevation "
+                        "helper is an ancestor in the recorded lineage"
+                        + ("; a helper ran earlier in the session but is not an ancestor" if earlier_helper
+                           else ""))
             field = _matched_root_field(event) or "process.uid"
             auid, pid = event.get("process.auid"), event.get("process.pid")
             exe = basename(str(event.get("process.executable")))
             claim = (f"On {event.host}, a process ({exe}, pid {pid}) ran with uid=0 (a root transition whose "
-                     f"parent is not root) while the session's kernel-recorded login user is the non-root "
-                     f"account auid={auid}; {note}. {outcome_phrase(event)}. {_context_suffix(anchor, link)}")
+                     f"parent is a known non-root process) while the session's kernel-recorded login user is the "
+                     f"non-root account auid={auid}; {note}. {outcome_phrase(event)}. "
+                     f"{_context_suffix(anchor, link)}")
             match = Match(self.id, claim, self.claim_type, _dedup_sorted(cited),
                           _predicate_all(cited, field, "process.uid", "process.euid", "process.auid",
                                          "process.executable", "process.ppid"),
@@ -553,6 +554,25 @@ class PrivilegeProbing(_HostContextRule):
                                     f"{event.get('process.executable')}")
             match.notes.extend(techniques)
             out.append(self._finish(match, [event]))
+        return out
+
+    def _unknown_parent_findings(self, unknown_parent, anchor, link):
+        out = []
+        for key, hits in unknown_parent.items():
+            cited = _dedup_sorted(hits)
+            summary, _s, _f = _outcome_summary(cited)
+            names = sorted({basename(str(event.get("process.executable"))) for event in cited})
+            claim = (f"On {key[0]}, root processes whose parent exec is not in the linked records "
+                     f"({len(cited)} record(s): {_and_more(names)}); the elevation that produced them is outside "
+                     f"this link's scope, so whether it was brokered is unknown. {summary}. "
+                     f"{_context_suffix(anchor, link)}")
+            match = Match(self.id, claim, self.claim_type, cited,
+                          _predicate_all(cited, "process.uid", "process.euid", "process.auid",
+                                         "process.executable", "process.ppid"),
+                          cited[0].ts, "medium", "lead", "medium", cited[0].entities(),
+                          group_key=f"euid0unknown|{_group_id(key)}")
+            match.notes.append("T1548")
+            out.append(self._finish(match, cited))
         return out
 
     def _setuid_findings(self, setuid, anchor, link):
@@ -707,6 +727,26 @@ def _is_decode(name: str, args: list[str]) -> bool:
     return bool(flags & _DECODE_BY_TOOL.get(name, set()))
 
 
+# Options that take a separate value, so the value is not an operand.
+_ZIP_VALUE_OPTS = {"-P", "-O", "-b", "-t", "-tt", "-n", "-ds", "-s", "-x", "-i", "--out", "--temp-path"}
+
+
+def _archive_inputs(name: str, args: list[str]) -> list[str] | None:
+    """Inputs of a zip/7z invocation, or None when the mode does not stage. The archive output (first
+    operand, after the 7z command letter) is never an input; `-P`/`-o` values are skipped."""
+    from romulus.detect.linux_argv import operands_after_options
+    operands = operands_after_options(args, _ZIP_VALUE_OPTS)
+    if name in {"7z", "7za"}:
+        if not operands or operands[0] not in {"a", "u"}:   # a=add, u=update stage; x/e/l/d/t do not
+            return None
+        operands = operands[1:]
+    else:
+        flags, _ops = split_flags(args)
+        if flags & {"-d", "--delete"}:
+            return None                                     # zip -d deletes entries, it does not stage
+    return operands[1:] if operands else []                 # the first remaining operand is the archive
+
+
 def _shell_devtcp(event: TypedEvent) -> tuple[str, str, str] | None:
     """Classify a shell -c command's /dev/tcp or /dev/udp redirection. Outbound write -> T1048 transfer;
     inbound read -> T1105 ingress. A shell -c whose script cannot be safely parsed is 'unknown' (counted)."""
@@ -738,7 +778,7 @@ def _shell_devtcp(event: TypedEvent) -> tuple[str, str, str] | None:
 
 
 def _curl_upload_files(args: list[str]) -> list[str]:
-    data_flags = {"-d", "--data", "--data-binary", "--data-urlencode"}
+    data_flags = {"-d", "--data", "--data-binary", "--data-ascii", "--data-urlencode", "--json"}
     upload_flags = {"-T", "--upload-file"}
     form_flags = {"-F", "--form"}
     files: list[str] = []
@@ -821,7 +861,8 @@ def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
     cwd = event.get("process.cwd")
     if name == "tar":
         staging, inputs, chdir = tar_spec(args)
-        sensitive = _sensitive_input(inputs, chdir or cwd) if staging else None
+        base = (normalize_path(chdir, cwd) or cwd) if chdir else cwd     # -C is itself relative to cwd
+        sensitive = _sensitive_input(inputs, base) if staging else None
         if sensitive:
             return ("T1560.001", "stage", f"a tar archive over the sensitive path {sensitive}")
         return None
@@ -834,10 +875,8 @@ def classify_staging(prog, event: TypedEvent) -> tuple[str, str, str] | None:
             return ("T1560.001", "stage", f"a '{name}' compression over the sensitive path {sensitive}")
         return None
     if name in {"zip", "7z", "7za"}:
-        flags, operands = split_flags(args)
-        if flags & {"-d", "--delete"}:
-            return None                            # zip -d deletes entries, it does not stage
-        sensitive = _sensitive_input(operands[1:], cwd)   # first operand is the archive (output)
+        inputs = _archive_inputs(name, args)
+        sensitive = _sensitive_input(inputs, cwd) if inputs else None
         if sensitive:
             return ("T1560.001", "stage", f"a '{name}' archive over the sensitive path {sensitive}")
         return None
@@ -1096,7 +1135,9 @@ class LateralMovement(_HostContextRule):
 
     @staticmethod
     def _matching_client(socket_event, destination, clients, index):
-        for client in clients:                     # IP-literal target match
+        # The connect must come after the client exec to be "followed by"; an earlier connect is temporal only.
+        prior = [client for client in clients if client.event.ts <= socket_event.ts]
+        for client in prior:                       # IP-literal target match
             if client.target_ip is not None and client.target_ip == destination:
                 return client
         pids = set()
@@ -1108,7 +1149,7 @@ class LateralMovement(_HostContextRule):
             ancestor_pid = ancestor.get("process.pid")
             if isinstance(ancestor_pid, int):
                 pids.add(ancestor_pid)
-        for client in clients:
+        for client in prior:
             if client.pid in pids:
                 return client
         return None

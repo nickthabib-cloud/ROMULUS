@@ -12,7 +12,12 @@ from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.host import is_internal
-from romulus.detect.registry import anchor_class_for_rule, fresh_direct_pack, rule_kind
+from romulus.detect.registry import (
+    anchor_class_for_rule,
+    fresh_context_pack,
+    fresh_direct_pack,
+    rule_kind,
+)
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.context import evaluate_context
 from romulus.hunt.links import (
@@ -24,7 +29,7 @@ from romulus.hunt.links import (
     LinkWindow,
     usable_key,
 )
-from romulus.hunt.publish import publish_match
+from romulus.hunt.publish import publish_match, refute_context_candidates
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
@@ -258,19 +263,26 @@ class ExpansionEngine:
             id=result.id, link_type=result.link_type, strength=result.strength, key=result.key,
             evidence_events=self._events(result.evidence_ids), status=result.status, reasons=result.reasons,
         )
+        produced: set = set()
         for evaluated in evaluate_context(
             self.repo, self.hunt_id, context_anchor, context_link, events,
             owner_token=self.owner_token,
         ):
+            produced.add((evaluated.playbook.id, evaluated.match.group_key))
             publish_match(
                 self.repo, self.hunt_id, evaluated.playbook, evaluated.match,
                 result.task_ids[0] if result.task_ids else None, {},
                 source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
                 context_reach={
-                    "anchor_id": candidate["id"], "link_id": result.id,
-                    "link_type": result.link_type, "strength": result.strength,
+                    "anchor_id": candidate["id"], "anchor_class": context_anchor.anchor_class,
+                    "link_id": result.id, "link_type": result.link_type, "strength": result.strength,
                 },
             )
+        # Re-judge context candidates this window touched but did not produce (a wider view may refute them).
+        refute_context_candidates(
+            self.repo, self.hunt_id, events, produced,
+            {playbook.id: playbook for playbook in fresh_context_pack()}, owner_token=self.owner_token,
+        )
         self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
 
     def _budget_reason(self, query_count: int) -> str | None:
