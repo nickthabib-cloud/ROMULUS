@@ -33,7 +33,7 @@ Every claim cites the raw records it rests on. A negative ("this did not happen"
 | Apache access and error logs | ✓ | other web servers |
 | Suricata alerts and flows | ✓ | |
 | Arkime sessions (via its Elasticsearch indices) | ✓ | |
-| PCAP via Arkime and TShark | ✓ (HTTP content) | more protocols |
+| PCAP via Arkime and TShark | ✓ | more protocols |
 | Windows / Active Directory, Zeek, cloud and identity logs, ICS protocols | | ✓ |
 
 Sources are read through Elasticsearch or OpenSearch with **read-only** credentials. ROMULUS never writes to your telemetry.
