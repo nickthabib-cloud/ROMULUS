@@ -531,10 +531,17 @@ def test_unmodelled_shell_text_is_partial(script):
 
 @pytest.mark.parametrize("script", [f"echo x &> {JOB}", f"echo x &>> {JOB}", f"echo x >& {JOB}"])
 def test_combined_stream_redirect_into_a_root_run_file_is_a_write(script):
-    # `&>` / `&>>` / `>&FILE` now parse: a redirect that writes the file root runs is detected.
-    _pb, out = run([web(["sh", "-c", script], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
+    # bash: `&>` / `&>>` / `>&FILE` parse, and a redirect that writes the file root runs is detected.
+    _pb, out = run([web(["bash", "-c", script], "/usr/bin/bash"), *cron_runs(T0 + timedelta(minutes=10))])
     assert len(out) == 1 and out[0].proposed_lane == "high"
     assert f"on {JOB} " in out[0].claim
+
+
+@pytest.mark.parametrize("script", [f"echo x &> {JOB}", f"echo x &>> {JOB}", f"echo x >& {JOB}"])
+def test_bash_only_redirect_under_dash_is_partial(script):
+    # dash reads these differently (or rejects them), so the text is unevaluable rather than guessed.
+    pb, out = run([web(["sh", "-c", script], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
+    assert out == [] and pb.missing_required >= 1
 
 
 def test_auth_record_without_service_is_missing():

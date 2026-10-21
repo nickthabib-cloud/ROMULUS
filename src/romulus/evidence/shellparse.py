@@ -245,8 +245,29 @@ class ParsedScript:
         return [c for p in self.pipelines for c in p.commands]
 
 
-def parse_script(script: str) -> ParsedScript:
-    """Parse only the explicit safe shell subset; every other construct is unevaluable."""
+def _check_redirect(op: str, target: str, dialect: str) -> None:
+    """Reject a redirect whose meaning is not sound to model: an unknown operator, a descriptor-prefixed
+    ``N>&WORD`` (N other than 1) or ``<&WORD`` with a non-digit WORD (a bash error or ambiguity), and,
+    for a POSIX shell, the bash-only "both streams" forms."""
+    redirect = classify_redirect(op, target)
+    if redirect.action == "unknown":
+        raise _Unmodelled(f"redirect operator {op!r} is not modelled")
+    bash_word = op.endswith(("&", "&>", "&>>")) and target != "-" and not target.isdigit()
+    if bash_word and op.endswith("<&"):
+        raise _Unmodelled("input duplication from a non-descriptor word is not modelled")
+    if bash_word and op.endswith(">&") and op[:-2] not in ("", "1"):
+        raise _Unmodelled("descriptor-prefixed duplication onto a file word is not modelled")
+    if dialect != "bash" and (op in ("&>", "&>>") or (bash_word and op.endswith(">&"))):
+        raise _Unmodelled("bash-only redirect form is not modelled for a POSIX sh")
+
+
+def parse_script(script: str, dialect: str = "bash") -> ParsedScript:
+    """Parse only the explicit safe shell subset; every other construct is unevaluable.
+
+    ``dialect`` is ``"bash"`` or ``"posix"`` (dash and other plain ``sh``). The bash-only redirect
+    forms ``&>WORD``, ``&>>WORD`` and ``>&WORD`` (non-digit WORD) mean something else, or are a
+    syntax error, in a POSIX shell, so under ``"posix"`` they are unevaluable rather than guessed.
+    """
     lex_error = ""
     try:
         tokens = _lex(script)
@@ -279,6 +300,7 @@ def parse_script(script: str) -> ParsedScript:
             if token.kind == "redirect":
                 if index + 1 >= len(tokens) or tokens[index + 1].kind != "word":
                     raise _Unmodelled("redirect target is missing or unmodelled")
+                _check_redirect(token.value, tokens[index + 1].value, dialect)
                 cmd.redirects.append((token.value, tokens[index + 1].value))
                 requires_command = False
                 index += 2
@@ -436,6 +458,17 @@ def network_redirects(parsed: ParsedScript) -> tuple[list[str], list[str]]:
 POSIX_SHELLS = {"sh", "bash", "dash", "ash", "busybox"}
 NON_POSIX_SHELLS = {"zsh", "ksh", "fish", "csh", "tcsh"}
 SHELLS = POSIX_SHELLS | NON_POSIX_SHELLS
+# Kernel executables that implement a plain POSIX sh (no bash redirect extensions).
+_POSIX_SH_EXES = {"dash", "sh"}
+
+
+def shell_dialect(executable: object, argv: object = None) -> str:
+    """``"posix"`` when the kernel-recorded executable (else argv[0]) is dash or plain sh, else
+    ``"bash"``. The dialect decides how bash-only redirect forms are read."""
+    name = str(executable).rsplit("/", 1)[-1] if executable else ""
+    if not name and isinstance(argv, list) and argv:
+        name = str(argv[0]).rsplit("/", 1)[-1].removeprefix("-")
+    return "posix" if name in _POSIX_SH_EXES else "bash"
 
 
 @dataclass(frozen=True)

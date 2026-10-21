@@ -361,7 +361,30 @@ def test_network_redirects_reads_reverse_shell_and_ignores_plain_fd_dup():
     assert network_redirects(parse_script("id 2>&1")) == ([], [])
 
 
+@pytest.mark.parametrize("script", [
+    "echo x &> /tmp/out", "echo x &>> /tmp/out", "echo x >& /tmp/out",
+])
+def test_bash_only_redirects_are_unevaluable_for_a_posix_sh(script):
+    assert parse_script(script).ok
+    parsed = parse_script(script, "posix")
+    assert parsed.ok is False and "bash-only" in parsed.error
+
+
+def test_posix_sh_still_models_descriptor_duplication():
+    parsed = parse_script("ls 2>&1 >&2", "posix")
+    assert parsed.ok and parsed.commands()[0].redirects == [("2>&", "1"), (">&", "2")]
+
+
+def test_shell_dialect_comes_from_the_kernel_executable():
+    from romulus.evidence.shellparse import shell_dialect
+    assert shell_dialect("/usr/bin/dash") == "posix" and shell_dialect("/bin/sh") == "posix"
+    assert shell_dialect("/usr/bin/bash") == "bash"
+    assert shell_dialect(None, ["sh", "-c", "x"]) == "posix"
+
+
 @pytest.mark.parametrize("script,reason", [
+    ("echo x 2>&/tmp/out", "descriptor-prefixed duplication"),   # N>&WORD with N other than 1
+    ("cat <&/tmp/in", "input duplication"),                      # <&WORD: a bash error
     ("exec 5<>/dev/tcp/h/p", "command is not modelled"),          # exec builtin: fails closed
     ("cat <(curl http://e/x)", "process substitution"),
     ("cat >& ", "redirect target"),                               # dangling duplication target

@@ -14,6 +14,7 @@ from romulus.evidence.shellparse import (
     UnknownShellScript,
     classify_redirect,
     parse_script,
+    shell_dialect,
     shell_script_file_of,
     shell_script_of,
 )
@@ -468,7 +469,7 @@ class DownloadPipedToShell(Playbook):
     Positive-only: whether the pipeline ran is shown by process-level evidence
     (host.downloader_feeds_interpreter), never inferred from text."""
     id = "host.download_piped_to_shell"
-    version = "3"
+    version = "4"
     title = "Shell started with a script that pipes a download into an interpreter"
     claim_type = "script_content"
     assures_negative = False
@@ -487,7 +488,7 @@ class DownloadPipedToShell(Playbook):
             return []
         if not script:
             return []
-        parsed = parse_script(script)
+        parsed = parse_script(script, shell_dialect(e.get("process.executable"), e.get("process.argv")))
         if not parsed.ok:
             self.missing_required += 1
             return []
@@ -867,7 +868,7 @@ class AuthorizedKeysWrite(Playbook):
         if isinstance(script, UnknownShellScript):
             self.missing_required += 1
         elif script:
-            parsed = parse_script(script)
+            parsed = parse_script(script, shell_dialect(e.get("process.executable"), argv))
             if parsed.ok:
                 for c in parsed.commands():
                     from_script = True

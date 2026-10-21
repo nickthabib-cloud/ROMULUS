@@ -46,6 +46,7 @@ from romulus.evidence.shellparse import (
     UnknownShellScript,
     network_redirects,
     parse_script,
+    shell_dialect,
     shell_script_of,
 )
 from romulus.evidence.typed import Outcome, TypedEvent
@@ -771,7 +772,7 @@ def _shell_devtcp(event: TypedEvent) -> tuple[str, str, str] | None:
         return None                                # not a shell -c command
     if isinstance(script, UnknownShellScript):
         return ("T1048", "unknown", "a shell -c command whose script position is not safely modelled")
-    parsed = parse_script(script)
+    parsed = parse_script(script, shell_dialect(event.get("process.executable"), argv))
     if not parsed.ok:
         return ("T1048", "unknown", "a shell -c command whose script text could not be fully parsed")
     # A redirection of stdout/stderr to /dev/tcp|/dev/udp is an outbound transfer; a read from one is

@@ -6,7 +6,10 @@ documentation ranges, never any evaluation dataset's values.
 """
 from datetime import UTC, datetime, timedelta
 
-from romulus.detect.lineage import MAX_GAP, ReverseShellByLineage
+import pytest
+
+from romulus.detect.correlation import StageMissing
+from romulus.detect.lineage import MAX_GAP, TIGHT_GAP, ReverseShellByLineage
 from romulus.detect.registry import ALL_PLAYBOOKS, fresh_pack
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 
@@ -217,3 +220,137 @@ def test_rule_is_registered_positive_only_and_staged_with_valid_attack_ids():
            and not obj.get("revoked") and not obj.get("x_mitre_deprecated")
            for ref in obj.get("external_references", []) if ref.get("source_name") == "mitre-attack"}
     assert set(cls.attack) <= ids
+
+
+# ---------------------------------------------------------------- review fixes: lane gate
+def _interp_owner(child_argv, *, ip=EXT, port=4444, gap=1):
+    return [
+        exc("/usr/bin/python3", 500, T0, ppid=1, user="deploy"),
+        sock("connect", 500, T0 + timedelta(seconds=1), ip=ip, port=port, user="deploy"),
+        exc("/bin/sh", 501, T0 + timedelta(seconds=1 + gap), ppid=500, argv=child_argv),
+    ]
+
+
+def test_non_web_interpreter_running_a_c_script_subprocess_is_lead():
+    _pb, out = run(_interp_owner(["sh", "-c", "make install"]))
+    assert len(out) == 1 and out[0].proposed_lane == "lead"
+
+
+@pytest.mark.parametrize("ip,port", [("8.8.8.8", 53)])
+def test_dns_call_then_stdin_shell_is_lead(ip, port):
+    _pb, out = run(_interp_owner(["sh", "-i"], ip=ip, port=port))
+    assert len(out) == 1 and out[0].proposed_lane == "lead"
+
+
+def test_port_zero_connect_is_skipped():
+    _pb, out = run(_interp_owner(["sh", "-i"], port=0))
+    assert out == []
+
+
+def test_interpreter_then_stdin_shell_within_tight_gap_is_high():
+    _pb, out = run(_interp_owner(["sh", "-i"]))
+    assert len(out) == 1 and out[0].proposed_lane == "high"
+    assert any("lane high" in n for n in out[0].notes)
+
+
+def test_interpreter_then_stdin_shell_beyond_tight_gap_is_lead():
+    _pb, out = run(_interp_owner(["sh", "-i"], gap=int(TIGHT_GAP) + 5))
+    assert len(out) == 1 and out[0].proposed_lane == "lead"
+
+
+# ---------------------------------------------------------------- review fixes: peer naming
+def test_claim_names_the_latest_peer_and_lists_the_others():
+    events = [
+        exc("/usr/bin/python3", 500, T0, ppid=1),
+        sock("connect", 500, T0 + timedelta(seconds=1), ip="8.8.8.8", port=53),
+        sock("connect", 500, T0 + timedelta(seconds=2), ip="198.51.100.66", port=4444),
+        exc("/bin/sh", 501, T0 + timedelta(seconds=3), ppid=500, argv=["sh", "-i"]),
+    ]
+    _pb, out = run(events)
+    assert len(out) == 1
+    m = out[0]
+    assert "external address 198.51.100.66:4444 (its latest external socket call" in m.claim
+    assert "Other external peers of that pid in the same window: 8.8.8.8:53" in m.claim
+    assert m.proposed_lane == "high" and m.group_key.endswith("|198.51.100.66")
+
+
+# ---------------------------------------------------------------- review fixes: PID identity windows
+def test_fork_only_pid_reuse_is_worded_and_not_high():
+    # pid 500's recorded exec connected long ago; a later child of "pid 500" may come from a forked process
+    # with no exec record. The join is possible but never high, and the claim states the exec-record basis.
+    events = [
+        exc("/usr/sbin/myd", 500, T0, ppid=1),
+        sock("connect", 500, T0 + timedelta(seconds=1), exe="/usr/sbin/myd"),
+        exc("/bin/sh", 501, T0 + timedelta(seconds=600), ppid=500, argv=["sh", "-i"]),
+    ]
+    _pb, out = run(events)
+    assert len(out) == 1 and out[0].proposed_lane == "lead"
+    assert "no other exec recorded for pid 500 in between" in out[0].claim
+    assert any("PID reuse" in n for n in out[0].notes)
+
+
+def test_cron_style_reuse_after_a_new_exec_does_not_join():
+    events = [
+        exc("/usr/bin/python3", 500, T0, ppid=1),
+        sock("connect", 500, T0 + timedelta(seconds=1)),
+        exc("/usr/sbin/cron", 500, T0 + timedelta(seconds=5), ppid=1),          # pid 500 now runs cron
+        exc("/bin/sh", 501, T0 + timedelta(seconds=6), ppid=500, argv=["sh", "-c", "run-parts /etc/cron.hourly"]),
+    ]
+    _pb, out = run(events)
+    assert out == []
+
+
+def test_a_connect_after_the_chain_child_was_started_does_not_join():
+    events = [
+        exc("/usr/bin/python3", 500, T0, ppid=1),
+        exc("/bin/bash", 501, T0 + timedelta(seconds=2), ppid=500, argv=["bash", "script.sh"]),
+        sock("connect", 500, T0 + timedelta(seconds=3)),                         # after 501 was started
+        exc("/bin/sh", 502, T0 + timedelta(seconds=4), ppid=501, argv=["sh", "-i"]),
+    ]
+    _pb, out = run(events)
+    assert out == []
+
+
+def test_window_lower_bound_excludes_a_socket_before_the_owner_exec():
+    events = [
+        sock("connect", 500, T0),
+        exc("/usr/bin/python3", 500, T0 + timedelta(seconds=1), ppid=1),
+        exc("/bin/sh", 501, T0 + timedelta(seconds=2), ppid=500, argv=["sh", "-i"]),
+    ]
+    _pb, out = run(events)
+    assert out == []
+
+
+def test_boot_identity_keys_the_join():
+    events = [
+        exc("/usr/bin/python3", 500, T0, ppid=1, boot="boot-a"),
+        sock("connect", 500, T0 + timedelta(seconds=1), boot="boot-b"),
+        exc("/bin/sh", 501, T0 + timedelta(seconds=2), ppid=500, argv=["sh", "-i"], boot="boot-a"),
+    ]
+    _pb, out = run(events)
+    assert out == []
+
+
+def test_missing_staged_event_raises_stage_missing():
+    pb = ReverseShellByLineage()
+    pb.consume(_interp_owner(["sh", "-i"]))
+    pb.drain_staged()
+    pb.bind_loader(lambda ids: [])
+    with pytest.raises(StageMissing):
+        pb.finalize()
+
+
+# ---------------------------------------------------------------- review fixes: sshd by exact path
+def test_a_binary_named_sshd_outside_the_system_path_is_reported():
+    events = [
+        exc("/tmp/.x/sshd", 900, T0, ppid=1),
+        sock("accept", 900, T0 + timedelta(seconds=1), ip="198.51.100.5", port=50022, exe="/tmp/.x/sshd"),
+        exc("/bin/bash", 901, T0 + timedelta(seconds=2), ppid=900, argv=["bash", "-i"]),
+    ]
+    _pb, out = run(events)
+    assert len(out) == 1
+
+
+def test_socket_user_is_in_the_predicate():
+    _pb, out = run(_interp_owner(["sh", "-i"]))
+    assert any(p.field == "process.user" and p.value == "deploy" for p in out[0].predicate)
