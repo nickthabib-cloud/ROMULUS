@@ -135,11 +135,18 @@ def _gap_reasons(cell: dict) -> list[str]:
     return reasons or [f"{cell['state']}: no reason recorded"]
 
 
-def _gaps(cells: list[dict]) -> list[dict]:
-    """Every (target, partition) with an unresolved cell, the rules it leaves unresolved and why. Nothing is
-    capped: each gap is listed, whatever their number."""
+def _gaps(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None) -> list[dict]:
+    """Every (target, partition) with an unresolved cell, the rules it leaves unresolved and why, plus every
+    hunt target with no cell at all. Nothing is capped: each gap is listed, whatever their number."""
     rules_at: dict[tuple, set] = defaultdict(set)
     gaps: dict[tuple, dict] = {}
+    covered = {c["target"].removeprefix(PCAP_CELL_PREFIX) for c in cells}
+    every_rule = sorted(set(rule_ids or []) | {c["rule_id"] for c in cells})
+    for target in sorted(set(targets or []) - covered):
+        gaps[(target, "")] = {"target": target, "partition": "whole hunt window",
+                              "rules": dict.fromkeys(every_rule, "not evaluated"),
+                              "reasons": ["no coverage was recorded for this target"]}
+        rules_at[(target, "")] = set(every_rule)
     for c in cells:
         key = (c["target"], c["partition"])
         rules_at[key].add(c["rule_id"])
@@ -239,7 +246,7 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
             claim = "not applicable to the data in scope"
         rows.append({"rule_id": rule, "states": dict(states), "records_evaluated": evaluated[rule],
                      "negative_claim": claim})
-    return {"rules": rows, "gaps": _gaps(cells)}
+    return {"rules": rows, "gaps": _gaps(cells, targets, rule_ids)}
 
 
 def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:

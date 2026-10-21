@@ -239,6 +239,43 @@ def test_sweep_fault_never_yields_a_complete_negative(fault):
     _assert_gap_listed(manifest, text, fault, HOST_TARGET)
 
 
+def test_the_outcome_sentence_points_at_unresolved_negatives():
+    repo, sweep = _sweep("timed_out")
+    _finish(repo, sweep=sweep)
+    manifest, text = _report(repo)
+    rules = {rule for gap in manifest["coverage"]["gaps"] for rule in gap["rules"]}
+    outcome = text.split("## Outcome", 1)[1].split("| Item |", 1)[0]
+    assert rules and f"{len(rules)} rule(s) have unresolved negatives; see Coverage gaps." in outcome
+    control_repo, control = _sweep("none")
+    _finish(control_repo, sweep=control)
+    assert "unresolved negatives" not in _report(control_repo)[1]
+
+
+def test_a_target_with_no_coverage_at_all_is_a_listed_gap():
+    repo, sweep = _sweep("none")
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        hunt = repo.get_hunt("h1")
+        connection.execute(tables.hunt.update().where(tables.hunt.c.id == "h1").values(
+            manifest={**hunt["manifest"], "targets": [HOST_TARGET, "romulus-host-y"]}))
+    _finish(repo, sweep=sweep)
+    manifest, text = _report(repo)
+    gap = next(g for g in manifest["coverage"]["gaps"] if g["target"] == "romulus-host-y")
+    assert gap["reasons"] == ["no coverage was recorded for this target"] and NEGATIVE_RULE in gap["rules"]
+    assert _coverage_row(manifest, NEGATIVE_RULE)["negative_claim"].startswith("unresolved")
+    assert "romulus-host-y" in text.split("### Coverage gaps", 1)[1]
+
+
+def test_packet_cells_keep_every_reason(tmp_path, monkeypatch):
+    sessions = [packet_fixtures._session(f"241118-SESS{i:08d}", 50000 + i) for i in range(3)]
+    reasons = [f"{packet_fixtures.TARGET}: selection gap {i}" for i in range(25)]
+    monkeypatch.setattr(hp, "_candidates", lambda client, target, contract, window: (
+        sessions, list(reasons), hp.SELECTION_OVERLAP))
+    repo, summary = _packet_stage(tmp_path, monkeypatch, "none")
+    cell = next(c for c in repo.rule_cells("h1") if c["rule_id"] == packet_fixtures.RULE)
+    assert cell["detail"]["reasons"] == reasons and summary["status"] == "partial"
+
+
 def test_every_capped_leaf_is_listed_not_only_the_first_ten():
     """A cap that survives splitting leaves many partial leaves; the report lists every one of them."""
     repo, sweep = _sweep("cap")

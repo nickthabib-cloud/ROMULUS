@@ -43,6 +43,9 @@ def outcome_sentence(m: dict) -> str:
              "that the environment is clean.")
     if partial:
         s += f" The hunt is {m['execution_state']}: some sources, windows or tasks were not fully assessed."
+    unresolved = {rule for gap in (m.get("coverage") or {}).get("gaps") or [] for rule in gap["rules"]}
+    if unresolved:
+        s += f" {len(unresolved)} rule(s) have unresolved negatives; see Coverage gaps."
     return s
 
 
