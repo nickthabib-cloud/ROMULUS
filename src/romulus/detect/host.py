@@ -264,7 +264,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     anchor_class = "web_shell"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "9"
+    version = "10"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -276,11 +276,15 @@ class WebServiceSpawnsInterpreter(Playbook):
     next_checks = ("process_tree for the parent PID", "http_requests to this host just before the event",
                    "host_network outbound connections from this host around the event")
     RARE_MAX = 5
+    # A shape is routine only when it recurs like a schedule: across this many distinct hours of the window. A
+    # burst of the same command (an attacker looping a web shell) stays visible as a lead.
+    ROUTINE_MIN_HOURS = 3
 
     def __init__(self):
         super().__init__()
         self.shapes: dict[tuple, list[TypedEvent]] = defaultdict(list)
         self.counts: dict[tuple, int] = defaultdict(int)
+        self.hours: dict[tuple, set] = defaultdict(set)
 
     def consume(self, events):
         matches = []
@@ -296,6 +300,8 @@ class WebServiceSpawnsInterpreter(Playbook):
                 continue
             key = (e.host, user, command_shape(argv), _packaged_script(argv, e.get("process.cwd")))
             self.counts[key] += 1
+            if len(self.hours[key]) < self.ROUTINE_MIN_HOURS:
+                self.hours[key].add(e.ts.replace(minute=0, second=0, microsecond=0))
             if len(self.shapes[key]) < 20:
                 self.shapes[key].append(e)
         return matches
@@ -335,8 +341,18 @@ class WebServiceSpawnsInterpreter(Playbook):
                                  evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
                                  group_key=f"packaged|{host_}|{user}|{shape}"))
                 continue
+            if n > self.RARE_MAX and len(self.hours[key]) < self.ROUTINE_MIN_HOURS:
+                claim = (f"Repeated shape: account '{user}' on {host_} executed '{shape}' {n} times within fewer than "
+                         f"{self.ROUTINE_MIN_HOURS} distinct hours of the window, a burst rather than a schedule; the "
+                         f"command line carries no typed indicator."
+                         + (f" The first {len(evs)} runs are cited." if len(evs) < n else ""))
+                out.append(Match(self.id, claim, "aggregate_observation", evs, [pf(e, "process.argv") for e in evs],
+                                 evs[0].ts, "medium", "lead", "high", _exec_entities(evs[0]),
+                                 group_key=f"burst|{host_}|{user}|{shape}" + (f"|{packaged}" if packaged else "")))
+                continue
             if n > self.RARE_MAX:
-                claim = (f"Routine pattern: account '{user}' on {host_} executed '{shape}' {n} times in the window "
+                claim = (f"Routine pattern: account '{user}' on {host_} executed '{shape}' {n} times in the window, "
+                         f"recurring across at least {self.ROUTINE_MIN_HOURS} distinct hours like a schedule "
                          f"(stack-counted; retained for context).")
                 out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
                                  evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),

@@ -209,3 +209,14 @@ def test_a_fixed_low_source_port_scan_of_high_service_ports_is_a_lead():
     rule.consume(spoofed)
     [match] = rule.finalize()
     assert match.proposed_lane == "lead" and "fixed low source port" in match.claim
+
+
+def test_a_targets_answers_to_a_reported_scan_stay_visible_as_a_lead():
+    # The scanner probes 40 ports from ephemeral ports; the target answers each from the probed port.
+    probes = [flow(i, "10.0.0.66", 40000 + i, "10.0.0.9", 1000 + i) for i in range(40)]
+    answers = [flow(100 + i, "10.0.0.9", 1000 + i, "10.0.0.66", 40000 + i) for i in range(40)]
+    rule = PortScan()
+    rule.consume(probes + answers)
+    lanes_by_pair = {m.group_key: m.proposed_lane for m in rule.finalize()}
+    assert lanes_by_pair["10.0.0.66|10.0.0.9"] == "lead"
+    assert lanes_by_pair.get("10.0.0.9|10.0.0.66") in (None, "lead")      # never demoted to context

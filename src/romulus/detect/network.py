@@ -253,7 +253,7 @@ class PortScan(_Grouped):
     # answers go to ports there; a sweep of service ports lands mostly below it.
     EPHEMERAL_FLOOR = 32768
     MAX_REQUESTS = 500_000
-    version = "5"
+    version = "6"
 
     def __init__(self):
         super().__init__()
@@ -304,7 +304,7 @@ class PortScan(_Grouped):
         return False
 
     def finalize(self):
-        out = []
+        rows = []
         for key, evs in self.groups.items():
             src, dst = key
             forward = self.extra[key]["ports"]
@@ -335,6 +335,14 @@ class PortScan(_Grouped):
                 # Mostly a service answering clients: kept visible, not a lead.
                 lane, severity = "context", "low"
                 claim += f" Only {len(probed)} port(s) look probed (retained for context)."
+            rows.append((src, dst, claim, lane, severity, evs))
+        scanned = {(src, dst) for src, dst, _claim, lane, _sev, _evs in rows if lane == self.lane}
+        out = []
+        for src, dst, claim, lane, severity, evs in rows:
+            if lane == "context" and (dst, src) in scanned:
+                # The target's answers to a scan that is itself a lead belong to that attack: keep them visible.
+                lane, severity = self.lane, self.severity
+                claim += f" These flows answer the port scan from {dst} to {src}, which is reported as a lead."
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
                                                                      pf(evs[0], "destination.ip")],
                              evs[0].ts, severity, lane, "high", evs[0].entities(), group_key=f"{src}|{dst}"))

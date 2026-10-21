@@ -41,9 +41,14 @@ def decide(m: Match, hunt_id: str) -> Decision:
     gates["predicate_fields"] = "pass" if m.predicate and all(p.origin for p in m.predicate) \
         else "fail:predicate lacks field lineage"
     gates["entity_time"] = "pass" if m.events and m.events[0].host or m.entities else "fail:no affected entity"
-    gates["claim_type"] = "pass" if m.claim_type != "mention" else "fail:mention cannot be an action finding"
+    # A mention (a tool or indicator named in text) is never an action finding. It is still kept visible when it
+    # is associated with an attack: admitted, capped at lead, and worded as a mention by its rule.
+    gates["claim_type"] = "pass" if m.claim_type != "mention" else "pass:mention (capped at lead, not an action)"
 
     lane = m.proposed_lane
+    if m.claim_type == "mention" and lane in ("urgent", "high"):
+        lane = "lead"
+        notes.append("lane capped at lead: a mention is not an action")
     confidence = m.confidence
     # Outcome semantics: a direct action claim whose exec outcome is unknown/failed is downgraded.
     if m.claim_type == "observed_action":

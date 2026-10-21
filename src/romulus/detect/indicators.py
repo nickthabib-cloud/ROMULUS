@@ -145,7 +145,7 @@ _SET = load_indicators()
 class IndicatorMatch(Playbook):
     id = "ioc.indicator_match"
     anchor_class = "indicator"
-    version = f"1+{_SET.digest}"
+    version = f"2+{_SET.digest}"
     title = "Indicator list match in the field that gives it meaning"
     kind = "aggregate"
     claim_type = "observed_action"
@@ -284,9 +284,11 @@ class IndicatorMatch(Playbook):
                          f"verified.")
                 lane, claim_type = ind.lane, "script_content"
             elif role == "argument":
+                # A command naming an offensive tool (downloading, unpacking or chmod-ing it) is associated with an
+                # attack even though it does not show the tool ran: surfaced as a lead, worded as a mention.
                 claim = (f"{n} command(s) on {host} have an argument naming '{value}', matching {listed} ({span}). "
                          f"An argument naming a tool is a mention, not evidence that the tool ran.")
-                lane, claim_type = "context", "mention"
+                lane, claim_type = "lead", "mention"
             elif role.startswith("address:"):
                 claim = (f"{n} {e0.family} record(s) observed by {host} have {role.split(':')[1]} address {value}, "
                          f"matching {listed} ({span}).")

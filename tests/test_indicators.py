@@ -61,10 +61,12 @@ def test_interpreter_script_operand_is_matched_as_a_script(rule):
     (["grep", "-r", "linpeas", "/var/log/syslog"], "/usr/bin/grep"),         # searching for the name
     (["cat", "/opt/notes/linpeas.sh"], "/usr/bin/cat"),                       # reading a file of that name
 ])
-def test_a_name_in_an_argument_is_a_mention_in_the_context_lane(rule, argv, exe):
+def test_a_name_in_an_argument_is_a_mention_surfaced_as_a_lead(rule, argv, exe):
+    # Naming an offensive tool is associated with an attack even when the tool is not shown running: it stays
+    # visible as a lead, and the claim says it is a mention.
     m = run(rule, exec_event(argv, exe))
     assert len(m) == 1 and "is a mention, not evidence that the tool ran" in m[0].claim
-    assert decide(m[0], "h1").lane == "context"
+    assert m[0].claim_type == "mention" and decide(m[0], "h1").lane == "lead"
 
 
 @pytest.mark.parametrize("argv, exe", [
@@ -136,3 +138,12 @@ def test_shipped_seed_list_loads():
 def test_no_lists_means_no_matches(tmp_path):
     rule = IndicatorMatch(load_indicators(tmp_path))
     assert run(rule, exec_event(["/tmp/linpeas.sh"], "/tmp/linpeas.sh")) == []
+
+
+def test_a_mention_is_never_above_lead_whatever_its_rule_proposes():
+    from romulus.detect.base import Match, pf
+    record = exec_event(["cat", "/opt/notes/linpeas.sh"], "/usr/bin/cat")
+    match = Match("x.rule", "a mention", "mention", [record], [pf(record, "process.argv")], record.ts, "high",
+                  "urgent", "high", record.entities())
+    decision = decide(match, "h1")
+    assert decision.admitted and decision.lane == "lead"

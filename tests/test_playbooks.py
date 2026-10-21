@@ -36,7 +36,9 @@ def test_web_user_shell_is_found():
 
 
 def test_web_user_routine_shapes_collapse_and_injection_escalates():
-    routine = [exec_ev(["sh", "-c", "/usr/bin/zmdc.pl check"], user="www-data") for _ in range(50)]
+    # a scheduled helper: 50 runs spread across the afternoon
+    routine = [exec_ev(["sh", "-c", "/usr/bin/zmdc.pl check"], user="www-data", ts=T0 + timedelta(minutes=7 * i))
+               for i in range(50)]
     injected = exec_ev(["sh", "-c", "/usr/bin/zmu -A -a -m ;echo payload | python3 -"], user="www-data")
     stdin_shell = exec_ev(["/bin/sh"], user="www-data")
     m = run(host.WebServiceSpawnsInterpreter, routine + [injected, stdin_shell])
@@ -73,7 +75,8 @@ def test_indicator_after_shape_and_example_limits_is_not_hidden():
     prefix = "padding = 'this prefix is deliberately longer than forty eight characters'\n"
     benign_code = prefix + "print(padding)"
     indicator_code = prefix + "exec(__import__('base64').b64decode('cHJpbnQoMSk='))"
-    events = [exec_ev(["python3", "-c", benign_code], user="www-data") for _ in range(20)]
+    events = [exec_ev(["python3", "-c", benign_code], user="www-data", ts=T0 + timedelta(minutes=15 * i))
+              for i in range(20)]
     indicator_event = exec_ev(["python3", "-c", indicator_code], user="www-data")
 
     matches = run(host.WebServiceSpawnsInterpreter, events + [indicator_event])
@@ -82,6 +85,15 @@ def test_indicator_after_shape_and_example_limits_is_not_hidden():
     urgent = next(match for match in matches if match.proposed_lane == "urgent")
     assert urgent.events == [indicator_event]
     assert any("decoded data" in note for note in urgent.notes)
+
+
+def test_a_burst_of_one_web_shell_command_is_a_lead_not_routine_context():
+    # An attacker looping the same command through a web shell: many runs, all within minutes.
+    burst = [exec_ev(["sh", "-c", "cat /var/www/html/config.php"], user="www-data", ts=T0 + timedelta(seconds=10 * i))
+             for i in range(30)]
+    m = run(host.WebServiceSpawnsInterpreter, burst)
+    assert [x.proposed_lane for x in m] == ["lead"] and "a burst rather than a schedule" in m[0].claim
+    assert "30 times" in m[0].claim and len(m[0].events) == 20 and "The first 20 runs are cited" in m[0].claim
 
 
 def test_python_decoded_exec_indicator_is_parsed_not_substring():
