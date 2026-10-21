@@ -1,6 +1,6 @@
 # The AI investigating agent (planned)
 
-Status: designed, being built. Not available yet. Everything below describes how it will work.
+Status: being built. The model connection (provider adapters, egress rules, budgets, call records and the `doctor` check) is in place; the agent's investigation loop is not available yet. The rest of this page describes how it will work.
 
 ## What it does
 
@@ -37,20 +37,31 @@ Configuration lives in `$ROMULUS_HOME/.env`:
 | Key | Meaning |
 |---|---|
 | `AGENT_PROVIDER` | `openai_compatible` (default) or `ollama` |
-| `AGENT_BASE_URL`, `AGENT_API_KEY`, `AGENT_MODEL` | Endpoint, key and model. Pin a dated model snapshot, not a `latest` alias |
+| `AGENT_BASE_URL`, `AGENT_API_KEY`, `AGENT_MODEL` | Endpoint (the API root that contains `/chat/completions`), key and model. A remote endpoint needs a key; your own local server may not. Pin a dated model snapshot, not a `latest` alias |
 | `ROMULUS_MODEL_EGRESS` | Must be `lab-public-data` before any non-local endpoint is allowed (see below) |
-| `MODEL_LOCAL_HOSTS` | Extra hosts treated as local, such as a team's model server on a routable enclave address |
-| `AGENT_MAX_CALLS`, `AGENT_MAX_TOKENS`, `AGENT_MAX_WALL_SECONDS`, `AGENT_MAX_COST_USD` | Per-hunt budgets (cost is optional and estimated from reported usage) |
+| `MODEL_LOCAL_HOSTS` | Extra hostnames, addresses or CIDR networks treated as local, such as a team's model server on a routable enclave address |
+| `AGENT_CONTEXT_TOKENS` | The model's context window, so a cut-off prompt is detected; `0` leaves it to the server (Ollama uses `OLLAMA_NUM_CTX`) |
+| `AGENT_MAX_OUTPUT_TOKENS`, `AGENT_TIMEOUT_SECONDS` | Per-call output allowance and timeout |
+| `AGENT_MAX_CALLS`, `AGENT_MAX_TOKENS`, `AGENT_MAX_WALL_SECONDS`, `AGENT_MAX_COST_USD` | Per-hunt budgets. The cost budget is optional, estimated from reported usage with `AGENT_PRICE_INPUT_PER_MTOK` and `AGENT_PRICE_OUTPUT_PER_MTOK` |
 | `AGENT_MAX_TOOL_CALLS_PER_SESSION` | Bounds one investigation session (default 25) |
 | `AGENT_CONCURRENCY` | Parallel investigation sessions (default 2) |
-| `AGENT_DEFAULT` | `on` or `off`: the New hunt default when the provider is reachable |
+| `AGENT_DEFAULT` | `on` or `off`: whether new hunts use the agent when it is configured (`hunt start --no-agent` turns it off for one hunt) |
+
+With no endpoint, no model, or a remote endpoint with no key, the agent is **not configured**: `romulus doctor` says so, hunts run without it, and their results are exactly the deterministic ones. Adding the missing value to `.env` is the only step needed to turn it on.
+
+### What the connection checks
+
+Every reply must say why generation stopped and how many tokens it used. A reply cut off at the output limit, a prompt that reached the context window, a refusal, a reply with no stop reason, malformed tool-call arguments, a call to a tool that was not offered, and output that does not match the requested JSON schema are all reported as such, never passed on as a complete answer. A prompt estimated to exceed the context window is not sent. Transport errors and `429`/`5xx` responses are retried up to three times with backoff; then the endpoint counts as unavailable. Redirects are not followed.
+
+`romulus doctor` checks the agent's endpoint: its egress class, reachability, that the model is listed, that tool calling and JSON-schema output work (with a tiny request that carries no telemetry), that usage is reported, and that the model the server reports matches the pinned one.
 
 ### Keeping telemetry on site
 
-An endpoint is **local** when it resolves to loopback, a private (RFC 1918) address, or a host listed in `MODEL_LOCAL_HOSTS`. Every other endpoint is **remote**.
+An endpoint is **local** when it is loopback, a private (RFC 1918) or IPv6 unique-local address, or is listed in `MODEL_LOCAL_HOSTS`. A hostname is local only when every address it resolves to is; a name that does not resolve counts as remote. Every other endpoint is **remote**.
 
 - Mission teams run their own model inside their enclave, so telemetry never leaves it.
-- A remote endpoint is refused unless the bootstrap `.env` sets `ROMULUS_MODEL_EGRESS=lab-public-data`. That switch is meant only for testing on public datasets; the web UI can never set it. With it set, `doctor` warns, and every hunt and report that used the model carries a banner naming the host and model.
+- A remote endpoint is refused unless the bootstrap `.env` sets `ROMULUS_MODEL_EGRESS=lab-public-data`, and even then only over HTTPS. That switch is meant only for testing on public datasets; the web UI can never set it, and any other value is a configuration error. With it set, `doctor` warns, and every hunt and report that used the model carries a banner naming the host and model. Without it, `doctor` fails the check and hunts run without the agent.
+- Secrets are removed from every outgoing message, and the hunt manifest records the provider, endpoint host, model and egress class, never the key or the URL's path.
 - Every call is logged: a prompt digest, the model and reported version, parameters, the raw response, validation results, usage and an estimated cost. Results always record which provider and model produced them.
 
 ## What the agent sees

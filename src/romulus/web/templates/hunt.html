@@ -8,7 +8,9 @@
   <div><span class="label">Window (UTC)</span> {{ h.manifest.window.start }} → {{ h.manifest.window.end }}</div>
   <div><span class="label">Sources</span> {{ h.manifest.targets | join(', ') }}</div>
   {% if h.stop_reason %}<div class="wide"><span class="label">Stop reason</span> {{ h.stop_reason }}</div>{% endif %}
+  {% if ai_agent %}<div class="wide"><span class="label">AI agent</span> {{ ai_agent.status }}{% if ai_agent.reason %}: {{ ai_agent.reason }}{% endif %}</div>{% endif %}
 </div>
+{% for egress in egress_banners %}<p class="warn"><b>Model egress:</b> {{ egress }}</p>{% endfor %}
 
 <p><a href="/hunts/{{ h.id }}/timeline">Attack-path timeline →</a></p>
 

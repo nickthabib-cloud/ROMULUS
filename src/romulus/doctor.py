@@ -11,6 +11,8 @@ from pathlib import Path
 
 import httpx
 
+from romulus.agent.provider import EGRESS_SWITCH_VALUE, agent_readiness, build_provider
+from romulus.agent.provider.egress import Resolver, system_resolver
 from romulus.config import Settings, redact_text
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.store.db import integrity_check, make_engine, migrate, space_report
@@ -109,6 +111,40 @@ def check_ollama(s: Settings) -> list[Check]:
     return out
 
 
+def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
+                resolver: Resolver = system_resolver) -> list[Check]:
+    """The AI agent's provider: configuration, egress class, reachability, model, tool calls, schema, usage."""
+    try:
+        readiness = agent_readiness(s, resolver)
+    except Exception as exc:  # noqa: BLE001 - a readiness error is a failed check
+        return [Check("agent.provider", "fail", redact_text(f"agent readiness check failed: {exc}", s))]
+    if readiness.state == "not_configured":
+        return [Check("agent.provider", "ok", f"{readiness.message()}; hunts run without the AI agent")]
+    if readiness.state == "blocked":
+        return [Check("agent.provider", "fail", readiness.message())]
+    d = readiness.decision
+    out = [Check("agent.provider", "ok", f"{readiness.provider} model {readiness.model} at {d.host}")]
+    if d.egress == "remote":
+        out.append(Check("agent.egress", "warn",
+                         f"remote endpoint {d.host}, allowed only by ROMULUS_MODEL_EGRESS={EGRESS_SWITCH_VALUE}: "
+                         "telemetry excerpts will be sent to it; hunt public data only"))
+    else:
+        out.append(Check("agent.egress", "warn" if s.model_egress else "ok",
+                         f"local endpoint ({d.basis})" + ("; ROMULUS_MODEL_EGRESS is set but not needed: unset it"
+                                                          if s.model_egress else "")))
+    if readiness.provider == "openai_compatible" and not s.agent_context_tokens and d.egress == "local":
+        out.append(Check("agent.context", "warn", "AGENT_CONTEXT_TOKENS is 0: a local server that silently cuts "
+                                                  "long prompts cannot be detected; set it to the model's context window"))
+    provider = build_provider(s, transport=transport, resolver=resolver, readiness=readiness)
+    try:
+        probes = provider.probe()
+    except Exception as exc:  # noqa: BLE001 - a broken or hostile endpoint must not take the other checks down
+        probes = [("agent.reachable", "fail", f"probe failed: {exc.__class__.__name__}: {exc}"[:300])]
+    for name, status, detail in probes:
+        out.append(Check(name, status, redact_text(detail, s)))
+    return out
+
+
 def check_tshark(s: Settings) -> Check:
     exe = shutil.which(s.tshark_bin)
     if not exe:
@@ -157,6 +193,7 @@ def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks = check_es(s)
     checks.append(check_arkime(s))
     checks += check_ollama(s)
+    checks += check_agent(s)
     checks.append(check_tshark(s))
     checks += check_paths(s, env_file)
     checks.append(check_db(s))

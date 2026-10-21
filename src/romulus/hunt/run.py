@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 
 from romulus.agent.controller import Investigator
+from romulus.agent.provider import agent_readiness
 from romulus.config import Settings
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.expansion import ExpansionEngine
@@ -34,8 +35,20 @@ def open_repo(s: Settings) -> Repo:
     return Repo(e)
 
 
+def ai_agent_entry(s: Settings, requested: bool | None = None) -> dict:
+    """The manifest's record of the AI agent: whether this hunt asked for it, and its provider readiness."""
+    wanted = (s.agent_default == "on") if requested is None else requested
+    try:
+        readiness = agent_readiness(s)
+    except Exception as exc:      # the agent's configuration must never stop a deterministic hunt
+        log.exception("agent readiness failed")
+        return {"requested": wanted, "state": "blocked", "reason": f"readiness check failed: {exc}"[:300]}
+    return {"requested": wanted, **readiness.provenance(s)}
+
+
 def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, style: str = "broad",
-                hypothesis: str = "", original_input: dict | None = None, expand: bool = True) -> str:
+                hypothesis: str = "", original_input: dict | None = None, expand: bool = True,
+                ai_agent: bool | None = None) -> str:
     repo = open_repo(s)
     window = Window(start=start, end=end)
     client = ElasticClient(s)
@@ -53,7 +66,7 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
             profiles[target] = prof.model_dump(mode="json")
             targets.append(target)
     manifest = build_manifest(s, window, original_input or {"start": start.isoformat(), "end": end.isoformat()},
-                              style, targets, profiles, hypothesis)
+                              style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent))
     manifest["expansion"] = {"enabled": expand, "max_depth": 3, "max_source_queries": 180}
     hid = new_hunt_id()
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
@@ -78,6 +91,35 @@ def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient,
     return contracts
 
 
+def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner_token: str | None,
+                    requested: bool | None = None) -> dict:
+    """Record what the AI agent phase did. It never changes detection results, lanes, coverage or the hunt's
+    execution state: with the agent absent, refused or failing, the deterministic findings stand as they are."""
+    entry = manifest.get("ai_agent") or {}
+    wanted = entry.get("requested", False) if requested is None else requested
+    try:
+        readiness = agent_readiness(s)
+    except Exception as exc:      # never leave a finished deterministic hunt unfinished
+        log.exception("agent readiness failed")
+        summary = {"status": "blocked", "reason": f"agent readiness check failed: {exc}"[:300], "model_calls": 0}
+        repo.audit("system", "hunt.ai_agent_summary", hunt_id, summary, owner_token=owner_token)
+        return summary
+    base = {"provider": readiness.provider, "model": readiness.model,
+            "endpoint_host": readiness.decision.host if readiness.decision else None,
+            "egress": readiness.decision.egress if readiness.decision else None, "model_calls": 0}
+    if not wanted:
+        summary = {**base, "status": "disabled", "reason": "the AI agent was not requested for this hunt"}
+    elif readiness.state == "not_configured":
+        summary = {**base, "status": "not_configured", "reason": readiness.message()}
+    elif readiness.state == "blocked":
+        summary = {**base, "status": "blocked", "reason": readiness.message()}
+    else:
+        summary = {**base, "status": "not_run",
+                   "reason": "the AI agent phase is not available in this build; the provider is ready"}
+    repo.audit("system", "hunt.ai_agent_summary", hunt_id, summary, owner_token=owner_token)
+    return summary
+
+
 def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
     counts = repo.lane_counts(hunt_id)
     reportable = counts.get("urgent", 0) + counts.get("high", 0)
@@ -89,7 +131,7 @@ def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
 def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
             *, stats: dict | None = None, partial_reasons: list[str] | None = None,
             expansion_summary: dict | None = None, packet_summary: dict | None = None,
-            owner_token: str | None = None) -> dict:
+            ai_agent_summary: dict | None = None, owner_token: str | None = None) -> dict:
     partial_reasons = list(partial_reasons or sweep_summary.get("partial_reasons") or [])
     sweep_complete = bool(sweep_summary.get("complete"))
     missing_summary = not sweep_summary
@@ -131,6 +173,7 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         "detection_result": result,
         "partial_reasons": partial_reasons,
         "agent": agent_summary,
+        "ai_agent": ai_agent_summary or {},
         "expansion": expansion_summary or {},
     }
 
@@ -236,7 +279,7 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
 
 
 def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=None,
-             agent_mode: str | None = None, expand: bool | None = None) -> dict:
+             agent_mode: str | None = None, expand: bool | None = None, ai_agent: bool | None = None) -> dict:
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -316,14 +359,16 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
                 "stop_reason": f"investigator error: {exc}",
                 "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
             }
+    ai_agent_summary = _ai_agent_phase(s, repo, hunt_id, m, owner_token, ai_agent)
     return _finish(
         repo, hunt_id, agent_summary, sweep_summary,
         stats=sweep.stats, partial_reasons=sweep.partial_reasons,
-        expansion_summary=expansion_summary, packet_summary=packet_summary, owner_token=owner_token,
+        expansion_summary=expansion_summary, packet_summary=packet_summary,
+        ai_agent_summary=ai_agent_summary, owner_token=owner_token,
     )
 
 
-def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dict:
+def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_agent: bool | None = None) -> dict:
     """Resume only persisted investigator work; the deterministic sweep is never re-run."""
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
@@ -398,7 +443,9 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None) -> dic
                 "stop_reason": f"investigator error: {exc}",
                 "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
             }
+    ai_agent_summary = _ai_agent_phase(s, repo, hunt_id, manifest, owner_token, ai_agent)
     return _finish(
         repo, hunt_id, agent_summary, sweep_summary,
-        expansion_summary=expansion_summary, packet_summary=packet_summary, owner_token=owner_token,
+        expansion_summary=expansion_summary, packet_summary=packet_summary,
+        ai_agent_summary=ai_agent_summary, owner_token=owner_token,
     )
