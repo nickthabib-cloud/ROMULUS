@@ -6,8 +6,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
+from romulus.store import repo as repo_module
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -48,7 +49,9 @@ def _segment(segment_id: str = "seg-b", **overrides) -> dict:
 def _count(segment_id: str = "seg-b", **overrides) -> dict:
     row = {
         "segment_id": segment_id,
+        "scope_kind": "host",
         "scope": "host:web01",
+        "key_id": "id-b",
         "key_digest": "key-b",
         "key": {"executable": "/bin/sh"},
         "bucket": T0,
@@ -61,7 +64,7 @@ def _count(segment_id: str = "seg-b", **overrides) -> dict:
 
 
 def _scope_hour(segment_id: str = "seg-b", **overrides) -> dict:
-    row = {"segment_id": segment_id, "scope": "host:web01", "hour": T0, "events": 3}
+    row = {"segment_id": segment_id, "scope_kind": "host", "scope": "host:web01", "hour": T0, "events": 3}
     row.update(overrides)
     return row
 
@@ -85,7 +88,9 @@ def _observation(hunt_id: str, key_digest: str = "key-b", **overrides) -> dict:
         "hunt_id": hunt_id,
         "spec_id": "bl.exec_path",
         "spec_version": "1",
+        "scope_kind": "host",
         "scope": "host:web01",
+        "key_id": f"id-{key_digest}",
         "key_digest": key_digest,
         "key": {"executable": "/bin/sh"},
         "window_count": 1,
@@ -235,3 +240,91 @@ def test_baseline_listings_are_deterministically_sorted():
         ("host:a", "a"), ("host:z", "z"),
     ]
     assert [row["scope"] for row in repo.baseline_scope_hours("seg-a")] == ["host:a", "host:z"]
+
+
+BASELINE_TABLES = ("baseline_segment", "baseline_count", "baseline_scope_hour", "baseline_snapshot",
+                   "baseline_observation")
+
+
+def _shape(engine) -> dict:
+    inspector = inspect(engine)
+    shape = {}
+    for table in BASELINE_TABLES:
+        shape[table] = {
+            "columns": sorted((col["name"], type(col["type"]).__name__, col["nullable"])
+                              for col in inspector.get_columns(table)),
+            "pk": inspector.get_pk_constraint(table)["constrained_columns"],
+            "indexes": sorted((index["name"], tuple(index["column_names"]))
+                              for index in inspector.get_indexes(table)),
+        }
+    return shape
+
+
+def test_migration_and_metadata_define_the_same_baseline_tables(tmp_path):
+    migrated = make_engine(tmp_path / "migrated.db")
+    migrate(migrated)
+    assert _shape(migrated) == _shape(_repo().engine)
+
+
+def test_redundant_baseline_indexes_are_gone_and_the_key_id_index_exists():
+    indexes = {table: {name for name, _ in shape["indexes"]} for table, shape in _shape(_repo().engine).items()}
+    assert indexes["baseline_count"] == {"ix_baseline_count_key"}
+    assert indexes["baseline_observation"] == {"ix_baseline_observation_first_event"}
+    assert dict(_shape(_repo().engine)["baseline_count"]["indexes"])["ix_baseline_count_key"] == (
+        "key_id", "scope_kind", "scope", "segment_id",
+    )
+
+
+def _seed_prevalence(repo: Repo) -> None:
+    rows = {
+        "seg-1": [("host", "host:a", "shared"), ("host", "host:b", "shared"), ("account", "account:x", "shared"),
+                  ("host", "host:a", "other")],
+        "seg-2": [("host", "host:a", "shared"), ("host", "host:c", "shared")],
+        "seg-3": [("host", "host:d", "shared")],
+    }
+    for segment_id, keys in rows.items():
+        repo.save_baseline_segment(
+            _segment(segment_id),
+            [_count(segment_id, scope_kind=kind, scope=scope, key_id=key_id, key_digest=f"{scope}|{key_id}")
+             for kind, scope, key_id in keys],
+            [_scope_hour(segment_id, scope_kind=kind, scope=scope) for kind, scope, key_id in keys
+             if key_id == "shared"],
+        )
+
+
+def test_prevalence_counts_distinct_scopes_of_one_kind_holding_a_key_id_in_the_given_segments():
+    repo = _repo()
+    _seed_prevalence(repo)
+    assert repo.baseline_key_prevalence("shared", "host", ["seg-1", "seg-2"]) == 3
+    assert repo.baseline_key_prevalence("shared", "account", ["seg-1", "seg-2"]) == 1
+    assert repo.baseline_key_prevalence("shared", "host", ["seg-3"]) == 1
+    assert repo.baseline_key_prevalence("missing", "host", ["seg-1"]) == 0
+    assert repo.baseline_key_prevalence("shared", "host", []) == 0
+    assert repo.baseline_peer_scopes("host", ["seg-1", "seg-2"]) == 3
+    history = repo.baseline_key_history("shared", "host", "host:a", ["seg-1", "seg-2", "seg-3"])
+    assert sorted(row["segment_id"] for row in history) == ["seg-1", "seg-2"]
+    assert all(row["count"] == 3 for row in history)
+
+
+def _plan(engine, statement) -> str:
+    compiled = statement.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})
+    with engine.connect() as connection:
+        return " | ".join(row[-1] for row in connection.execute(text(f"EXPLAIN QUERY PLAN {compiled}")))
+
+
+def test_query_plans_serve_the_baseline_probes_from_indexes_without_temp_btrees(tmp_path):
+    engine = make_engine(tmp_path / "plans.db")
+    migrate(engine)
+    segments = ["seg-1", "seg-2", "seg-3"]
+    plans = {
+        "prevalence": _plan(engine, repo_module.baseline_prevalence_query("k", "host", segments)),
+        "peers": _plan(engine, repo_module.baseline_peer_scopes_query("host", segments)),
+        "history": _plan(engine, repo_module.baseline_key_history_query("k", "host", "host:a", segments)),
+        "scope_hours": _plan(engine, repo_module.baseline_scope_series_query("host", "host:a", segments)),
+    }
+    assert "COVERING INDEX ix_baseline_count_key (key_id=? AND scope_kind=?)" in plans["prevalence"]
+    assert "INDEX ix_baseline_count_key (key_id=? AND scope_kind=? AND scope=? AND segment_id=?)" in plans["history"]
+    assert "COVERING INDEX ix_baseline_scope_hour_lookup (scope_kind=?)" in plans["peers"]
+    assert "INDEX ix_baseline_scope_hour_lookup (scope_kind=? AND scope=? AND segment_id=?)" in plans["scope_hours"]
+    for plan in plans.values():
+        assert "TEMP B-TREE" not in plan and "SCAN baseline" not in plan

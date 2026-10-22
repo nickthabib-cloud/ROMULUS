@@ -49,7 +49,9 @@ def upgrade() -> None:
         "baseline_count",
         sa.Column("segment_id", sa.String(), sa.ForeignKey("baseline_segment.id", ondelete="CASCADE"),
                   nullable=False),
+        sa.Column("scope_kind", sa.String(), nullable=False),
         sa.Column("scope", sa.String(), nullable=False),
+        sa.Column("key_id", sa.String(), nullable=False),
         sa.Column("key_digest", sa.String(), nullable=False),
         sa.Column("key", sa.JSON(), nullable=False),
         sa.Column("bucket", sa.DateTime(timezone=True), nullable=False),
@@ -59,19 +61,22 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("segment_id", "scope", "key_digest", "bucket", name="pk_baseline_count"),
         sa.CheckConstraint("count >= 0", name="ck_baseline_count_count"),
     )
-    op.create_index("ix_baseline_count_lookup", "baseline_count", ["scope", "key_digest", "bucket"])
+    op.create_index("ix_baseline_count_key", "baseline_count", ["key_id", "scope_kind", "scope", "segment_id"])
 
     op.create_table(
         "baseline_scope_hour",
         sa.Column("segment_id", sa.String(), sa.ForeignKey("baseline_segment.id", ondelete="CASCADE"),
                   nullable=False),
+        sa.Column("scope_kind", sa.String(), nullable=False),
         sa.Column("scope", sa.String(), nullable=False),
         sa.Column("hour", sa.DateTime(timezone=True), nullable=False),
         sa.Column("events", sa.Integer(), nullable=False),
         sa.PrimaryKeyConstraint("segment_id", "scope", "hour", name="pk_baseline_scope_hour"),
         sa.CheckConstraint("events >= 0", name="ck_baseline_scope_hour_events"),
     )
-    op.create_index("ix_baseline_scope_hour_lookup", "baseline_scope_hour", ["scope", "hour"])
+    op.create_index(
+        "ix_baseline_scope_hour_lookup", "baseline_scope_hour", ["scope_kind", "scope", "segment_id", "hour"],
+    )
 
     op.create_table(
         "baseline_snapshot",
@@ -92,7 +97,9 @@ def upgrade() -> None:
         sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id"), nullable=False),
         sa.Column("spec_id", sa.String(), nullable=False),
         sa.Column("spec_version", sa.String(), nullable=False),
+        sa.Column("scope_kind", sa.String(), nullable=False),
         sa.Column("scope", sa.String(), nullable=False),
+        sa.Column("key_id", sa.String(), nullable=False),
         sa.Column("key_digest", sa.String(), nullable=False),
         sa.Column("key", sa.JSON(), nullable=False),
         sa.Column("window_count", sa.Integer(), nullable=False),
@@ -120,19 +127,16 @@ def upgrade() -> None:
             name="ck_baseline_observation_verdict",
         ),
     )
-    op.create_index(
-        "ix_baseline_observation_hunt_spec", "baseline_observation",
-        ["hunt_id", "spec_id", "spec_version", "scope"],
-    )
+    op.create_index("ix_baseline_observation_first_event", "baseline_observation", ["first_event_id"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_baseline_observation_hunt_spec", table_name="baseline_observation")
+    op.drop_index("ix_baseline_observation_first_event", table_name="baseline_observation")
     op.drop_table("baseline_observation")
     op.drop_table("baseline_snapshot")
     op.drop_index("ix_baseline_scope_hour_lookup", table_name="baseline_scope_hour")
     op.drop_table("baseline_scope_hour")
-    op.drop_index("ix_baseline_count_lookup", table_name="baseline_count")
+    op.drop_index("ix_baseline_count_key", table_name="baseline_count")
     op.drop_table("baseline_count")
     op.drop_index("ix_baseline_segment_built_hunt", table_name="baseline_segment")
     op.drop_index("ix_baseline_segment_source_hunt", table_name="baseline_segment")
