@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from romulus.baseline.spec import (
     BaselineKey,
@@ -36,13 +36,22 @@ class KeyCounter:
     The exact bound is ``token_cap`` distinct ``(scope, key_digest, token)``
     triples for one open bucket. Moving to the next bucket releases every token.
     Hitting the cap marks the counter partial; callers must not write its rows.
+
+    With ``span`` (a segment's retrieval interval), every record counts in that segment: a record the source
+    returned for the interval whose typed time lies outside it (shipping delay, clock skew) is counted at its
+    time clamped into the interval, for its bucket, scope-hour and first/last times. It is never dropped and
+    never makes the segment unwritable. Writers of the same hours must use the same rule.
     """
 
     def __init__(self, segment_id: str, spec: BaselineSpec, *,
                  token_cap: int = DEFAULT_TOKEN_CAP, row_cap: int = DEFAULT_ROW_CAP,
-                 pending_cap: int = DEFAULT_PENDING_CAP):
+                 pending_cap: int = DEFAULT_PENDING_CAP,
+                 span: tuple[datetime, datetime] | None = None):
         if min(token_cap, row_cap, pending_cap) < 1:
             raise ValueError("counter caps must be positive")
+        if span is not None and not span[0] < span[1]:
+            raise ValueError("counter span must be nonempty")
+        self.span = None if span is None else (span[0].astimezone(UTC), span[1].astimezone(UTC))
         self.segment_id = segment_id
         self.spec = spec
         self.token_cap = token_cap
@@ -108,6 +117,8 @@ class KeyCounter:
         keys = list({key.key_digest: key for key in keys}.values())
         if not keys or self.partial:
             return
+        if self.span is not None:
+            ts = min(max(ts.astimezone(UTC), self.span[0]), self.span[1] - timedelta(microseconds=1))
         event_scopes = {(key.scope_kind, key.scope) for key in keys}
         bucket = _bucket(ts, self.spec.bucket)
         if self._open_bucket is None or bucket > self._open_bucket:

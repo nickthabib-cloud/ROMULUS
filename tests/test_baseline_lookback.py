@@ -742,3 +742,36 @@ def test_work_beyond_the_target_hour_cap_is_returned_as_gaps(monkeypatch):
         ("b", START - timedelta(hours=4), START - timedelta(hours=2), "omitted_budget"),
     ]
     assert "target-hour cap 5" in result.gaps[0].reason
+
+
+def test_event_stamped_outside_its_retrieval_hour_counts_in_that_hour_and_never_makes_a_recurring_gap():
+    hour = START - timedelta(hours=1)
+    # The source retrieves by its own time field; these records' typed times lie just outside the hour
+    # the source returned them for (shipping delay, clock skew).
+    early, late = _event(1, hour - timedelta(seconds=5)), _event(2, START + timedelta(seconds=5))
+
+    class Skewed(FakeHistory):
+        def plan(self, target, start, end, *, query_budget):
+            self.plans.append((target, start))
+            return HistoryPlan((HistoryPartition(target, start, end, 2, "skewed"),), 1, "complete", ())
+
+        def fetch(self, partition, **kwargs):
+            self.fetches.append(partition)
+            return HistoryFetch((early, late), "complete", (), 2)
+
+    repo = _repo()
+    first = _writer(repo, Skewed()).fill(hunt_id="build", targets=["host"], start=hour, end=START)
+    assert first.gaps == () and first.complete == 1
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    rows = list(repo.baseline_counts(segment["id"]))
+    # Each record counts once, in the hour it was retrieved for; its times are clamped into that hour.
+    direct = KeyCounter("direct", SPEC)
+    for event in (early, late):
+        direct.consume(event, KeyContext())
+    assert sum(row["count"] for row in rows) == sum(row["count"] for row in direct.count_rows())
+    assert min(row["first_ts"] for row in rows) == hour
+    assert max(row["last_ts"] for row in rows) < START
+    assert {row["hour"] for row in repo.baseline_scope_hours(segment["id"])} == {hour}
+    again = Skewed()
+    _writer(repo, again).fill(hunt_id="build", targets=["host"], start=hour, end=START)
+    assert again.plans == []

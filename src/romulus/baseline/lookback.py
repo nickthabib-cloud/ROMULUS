@@ -188,7 +188,7 @@ class LookbackWriter:
                     tuple(spec.id for spec in missing),
                 ))
                 continue
-            counters = {spec.id: KeyCounter("pending", spec) for spec in missing}
+            counters = {spec.id: KeyCounter("pending", spec, span=(hour_start, hour_end)) for spec in missing}
             carry = self.parent_carry.for_target(target) if self.parent_carry is not None else None
             hour_parents = PidTable()
             hour_context = KeyContext(
