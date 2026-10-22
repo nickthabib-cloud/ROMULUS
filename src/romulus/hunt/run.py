@@ -7,13 +7,14 @@ from datetime import datetime
 from romulus.agent.controller import Investigator
 from romulus.agent.provider import agent_readiness
 from romulus.config import Settings
+from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkFetcher
 from romulus.hunt.manifest import build_manifest, new_hunt_id
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
-from romulus.hunt.site_networks import install_for_hunt
+from romulus.hunt.site_networks import check_host_addresses, install_for_hunt
 from romulus.hunt.stage import clear_stale_stages
 from romulus.hunt.sweep import Sweep
 from romulus.sources.es import ElasticClient
@@ -119,6 +120,19 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
                    "reason": "the AI agent phase is not available in this build; the provider is ready"}
     repo.audit("system", "hunt.ai_agent_summary", hunt_id, summary, owner_token=owner_token)
     return summary
+
+
+def _site_network_check(client: ElasticClient, contracts: dict, window: Window) -> dict:
+    """Host addresses in the hunt window outside the installed internal-network definition: a warning for the
+    sweep summary. A failed check is recorded and never stops the hunt."""
+    try:
+        result = check_host_addresses(client, contracts, netdef.current(), window)
+    except Exception as exc:          # a warning check must never sink the hunt
+        log.exception("internal-network check failed")
+        return {"definition": netdef.current().summary(), "error": f"{exc}"[:300], "warning": None}
+    if result["warning"]:
+        log.warning(result["warning"])
+    return result
 
 
 def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
@@ -336,6 +350,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
         "complete": not sweep.partial_reasons,
         "partial_reasons": sweep.partial_reasons,
         "stats": sweep.stats,
+        "internal_networks": _site_network_check(client, contracts, window),
     }
     repo.audit(
         "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,

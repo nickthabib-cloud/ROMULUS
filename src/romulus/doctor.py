@@ -14,7 +14,10 @@ import httpx
 from romulus.agent.provider import EGRESS_SWITCH_VALUE, agent_readiness, build_provider
 from romulus.agent.provider.egress import Resolver, system_resolver
 from romulus.config import Settings, redact_text
+from romulus.detect.netdef import INTERNAL_SETTING, SiteNetworks
+from romulus.hunt.site_networks import check_host_addresses
 from romulus.sources.es import ElasticClient, SourceError
+from romulus.sources.profile import contract_from_types, flatten_mapping
 from romulus.store.db import integrity_check, make_engine, migrate, space_report
 
 
@@ -64,6 +67,35 @@ def check_es(s: Settings) -> list[Check]:
     except SourceError as e:
         out.append(Check("es.privileges", "warn", str(e)))
     return out
+
+
+def check_site_networks(s: Settings, client: ElasticClient | None = None) -> Check:
+    """The internal-network definition, checked against the addresses of the site's own hosts (host.ip in host
+    telemetry). Outside addresses, or no definition at all, are warnings that name the setting; never a failure."""
+    definition = SiteNetworks.from_settings(s)
+    notes = []
+    if not definition.configured:
+        notes.append(f"{INTERNAL_SETTING} is not set: {definition.summary()}; rules whose negative depends on "
+                     "traffic direction report partial coverage")
+    client = client or ElasticClient(s)
+    try:
+        contracts = {target: contract_from_types(target, flatten_mapping(client.mapping(target)))
+                     for pattern in s.es_index_patterns for target in client.resolve(pattern)}
+        result = check_host_addresses(client, contracts, definition, None)
+    except SourceError as e:
+        notes.append(f"{definition.summary()}; host addresses could not be checked: {e}")
+        return Check("site.internal_networks", "warn", "; ".join(notes))
+    if result["warning"]:
+        notes.append(result["warning"])
+    elif not result["addresses"]:
+        unchecked = "; ".join(f"{t}: {why}" for t, why in sorted(result["unchecked_targets"].items()))
+        notes.append(f"{definition.summary()}; no host.ip value in host telemetry, so the definition could not be "
+                     "checked against the site's own hosts" + (f" ({unchecked})" if unchecked else ""))
+    else:
+        notes.append(f"{definition.summary()}; {'at least ' if result['at_least'] else ''}{result['addresses']} "
+                     "host address(es) checked, all inside")
+    status = "warn" if result["warning"] or not definition.configured else "ok"
+    return Check("site.internal_networks", status, "; ".join(notes), data=result)
 
 
 def check_arkime(s: Settings) -> Check:
@@ -191,6 +223,7 @@ def check_db_space(s: Settings) -> Check:
 
 def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks = check_es(s)
+    checks.append(check_site_networks(s))
     checks.append(check_arkime(s))
     checks += check_ollama(s)
     checks += check_agent(s)

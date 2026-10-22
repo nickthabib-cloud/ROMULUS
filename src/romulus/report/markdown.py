@@ -90,6 +90,8 @@ def render(m: dict, banner: str = BANNER) -> str:
            f"| Broken investigation citations | {m['integrity'].get('broken_investigation_citations', 0)} |", ""]
     for egress in m.get("banners") or []:
         out += [f"> **Model egress:** {cell(egress)}", ""]
+    if (m.get("internal_networks") or {}).get("warning"):
+        out += [f"> **Internal networks:** {cell(m['internal_networks']['warning'])}", ""]
     if not m["integrity"]["finalizable"]:
         out += [("> **Degraded report:** one or more citations could not be resolved to retained evidence. "
                  "Those findings are listed with the broken citation marked."), ""]

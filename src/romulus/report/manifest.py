@@ -511,7 +511,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "execution_state": h["execution_state"],
         "detection_result": h["detection_result"],
         "stop_reason": h["stop_reason"],
-        "internal_networks": recorded_view(hm.get("internal_networks")),
+        "internal_networks": internal_networks_view(repo, hunt_id, hm),
         "lane_counts": dict(lane_counts),
         "findings": findings,
         "context_items": lane_counts.get("context", 0),
@@ -539,6 +539,16 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                       "broken_incident_event_ids": broken_incidents[:50],
                       "finalizable": broken == 0 and not broken_inv and not broken_incidents}
     return _jsonable(m)
+
+
+def internal_networks_view(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
+    """The definition the hunt recorded, with the sweep's host-address check and its warning when it ran."""
+    view = recorded_view(hunt_manifest.get("internal_networks"))
+    sweep = repo.latest_audit(hunt_id, "hunt.sweep_summary")
+    check = ((sweep or {}).get("detail") or {}).get("internal_networks")
+    if check:
+        view = {**view, "host_address_check": check, "warning": check.get("warning")}
+    return view
 
 
 def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
