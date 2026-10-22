@@ -4,7 +4,7 @@ import json
 import pytest
 
 from romulus.evidence.auditd import execve_argv, parse_record
-from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.normalize import group_audit, normalize_exec_group, normalize_hits
 from romulus.evidence.shellparse import (
     UnknownShellScript,
     classify_redirect,
@@ -73,6 +73,32 @@ def test_exec_group_joins_syscall_and_keeps_unknowns_explicit():
     # without the SYSCALL companion: outcome/uid unknown, with a caveat (never defaulted)
     events, _, _ = normalize_hits([hit("e1", "linux.audit", EXECVE_HEX)])
     assert events[0].outcome == Outcome.unknown and not events[0].has("process.user") and events[0].caveats
+
+
+def test_exec_group_builds_identical_event_with_at_most_three_full_group_scans():
+    path = ('type=PATH msg=audit(1731950250.320:76806): item=0 name="/usr/bin/dash" '
+            'inode=12 dev=08:01 mode=0100755 ouid=0 ogid=0 nametype=NORMAL')
+    records = [
+        hit("e1", "linux.audit", EXECVE_HEX, system={"boot": {"id": "boot-a"}}),
+        hit("s1", "linux.audit", SYSCALL, system={"boot": {"id": "boot-a"}}),
+        hit("p1", "linux.audit", path, system={"boot": {"id": "boot-a"}}),
+    ]
+    expected = normalize_hits(records)[0][0].model_dump(mode="json")
+    groups, errors = group_audit(records)
+
+    class CountingMembers(list):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    members = CountingMembers(next(iter(groups.values())))
+    actual = normalize_exec_group("videoserver", members)
+
+    assert errors == []
+    assert actual.model_dump(mode="json") == expected
+    assert members.iterations <= 3
 
 
 def test_unset_audit_session_id_stays_absent():
