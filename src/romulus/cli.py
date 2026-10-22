@@ -195,27 +195,26 @@ def cmd_web(args) -> int:
 
 
 def cmd_db(args) -> int:
-    from datetime import UTC, datetime
-
     from romulus.hunt.run import open_repo
     from romulus.store.db import compact
     s = load_settings(_env_file(args))
     repo = open_repo(s)
-    now = datetime.now(UTC).replace(tzinfo=None)
-    active = [h["id"] for h in repo.list_hunts()
-              if h.get("execution_state") == "running" and h.get("lease_until")
-              and h["lease_until"].replace(tzinfo=None) > now]
+    active = repo.hunts_with_live_lease()
     if active:
         print(f"refusing to compact while hunts hold an active lease: {', '.join(active)}", file=sys.stderr)
         return EXIT_FAIL
+    purged = repo.purge_orphan_audit()
     res = compact(repo.engine)
+    res["orphan_audit_records_removed"] = purged
     b, a = res["before"], res["after"]
     if args.json:
         print(json.dumps(res, indent=2))
     else:
         print(f"database {b['file_bytes'] / 1e6:.0f} MB + log {b['wal_bytes'] / 1e6:.0f} MB -> "
-              f"{a['file_bytes'] / 1e6:.0f} MB + log {a['wal_bytes'] / 1e6:.0f} MB")
-    repo.audit(f"cli:{os.environ.get('USER', '?')}", "db.compact", detail={"before": b, "after": a})
+              f"{a['file_bytes'] / 1e6:.0f} MB + log {a['wal_bytes'] / 1e6:.0f} MB; "
+              f"{purged} system record(s) of deleted hunts removed")
+    repo.audit(f"cli:{os.environ.get('USER', '?')}", "db.compact",
+               detail={"before": b, "after": a, "orphan_audit_records_removed": purged})
     return EXIT_OK
 
 

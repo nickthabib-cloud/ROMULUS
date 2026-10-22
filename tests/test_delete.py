@@ -233,3 +233,41 @@ def test_delete_keeps_events_another_hunts_expansion_links_cite():
     kept = repo.events_by_ids(["ev-shared"])
     assert len(kept) == 1 and kept[0]["hunt_id"] == "hB"
     assert repo.raw_records([kept[0]["raw_ids"][0]])
+
+# ---------------------------------------------------------------- what a deletion leaves behind
+def test_delete_removes_the_hunts_machine_records_and_keeps_what_people_did(env):
+    _c, repo, _s, _pw = env
+    repo.audit("system", "hunt.sweep_summary", "h1", {"big": "x" * 1000})
+    repo.audit("system", "hunt.boot_intervals", "h1", {"hosts": {}})
+    repo.audit("web:lead1", "hunt.partial", "h1", {"note": "a person's action"})
+    repo.audit("system", "hunt.sweep_summary", "h2", {"kept": True})
+    counts = repo.delete_hunt("h1", actor="test")
+    assert counts["audit_records"] >= 2
+    with repo.engine.connect() as conn:
+        left = {(r.actor, r.action) for r in conn.execute(
+            select(t.audit_event.c.actor, t.audit_event.c.action).where(t.audit_event.c.hunt_id == "h1"))}
+    # who did what stays auditable; the system's own per-hunt output goes with the hunt
+    assert ("system", "hunt.sweep_summary") not in left and ("system", "hunt.boot_intervals") not in left
+    assert ("web:lead1", "hunt.partial") in left and ("test", "hunt.delete") in left
+    assert _count(repo, t.audit_event, hunt_id="h2", action="hunt.sweep_summary") == 1
+
+
+def test_purge_removes_machine_records_left_by_earlier_deletions(env):
+    _c, repo, _s, _pw = env
+    repo.audit("system", "hunt.sweep_summary", "gone-hunt", {"x": 1})
+    repo.audit("web:lead1", "hunt.delete", "gone-hunt", {})
+    repo.audit("system", "hunt.sweep_summary", "h1", {"x": 1})
+    assert repo.purge_orphan_audit() == 1
+    assert _count(repo, t.audit_event, hunt_id="gone-hunt", action="hunt.delete") == 1
+    assert _count(repo, t.audit_event, hunt_id="h1", action="hunt.sweep_summary") == 1
+
+
+def test_a_hunt_left_running_with_an_expired_lease_does_not_block_compaction(env):
+    _c, repo, _s, _pw = env
+    with repo.engine.begin() as conn:
+        conn.execute(t.hunt.update().where(t.hunt.c.id == "h2").values(
+            execution_state="running", lease_until=utcnow() - timedelta(hours=1)))
+    assert repo.hunts_with_live_lease() == []
+    with repo.engine.begin() as conn:
+        conn.execute(t.hunt.update().where(t.hunt.c.id == "h2").values(lease_until=utcnow() + timedelta(minutes=5)))
+    assert repo.hunts_with_live_lease() == ["h2"]
