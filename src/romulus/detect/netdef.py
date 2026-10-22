@@ -138,6 +138,8 @@ class SiteNetworks:
 
     # -- lookups -----------------------------------------------------------------------------------
     def _decide(self, ip: IPAddress) -> bool:
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped                         # ::ffff:a.b.c.d names the IPv4 host a.b.c.d
         value = int(ip)
         bits = ip.max_prefixlen
         for length, entries in self._tables[ip.version]:

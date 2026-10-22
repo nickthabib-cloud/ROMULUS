@@ -21,7 +21,16 @@ SAMPLES = ["10.0.0.1", "10.255.255.255", "11.0.0.0", "9.255.255.255", "172.15.25
 
 
 def _previous(ip) -> bool:
+    # an IPv4-mapped IPv6 address is the IPv4 host it names (the previous list read it as outside every range)
+    ip = ip.ipv4_mapped or ip if ip.version == 6 else ip
     return any(ip in n for n in PREVIOUS_DEFAULT if n.version == ip.version)
+
+
+@pytest.mark.parametrize(("mapped", "internal"), [("::ffff:10.1.2.3", True), ("::ffff:198.51.100.20", True),
+                                                  ("::ffff:10.50.0.9", False), ("::ffff:203.0.113.9", False)])
+def test_an_ipv4_mapped_address_is_judged_as_its_ipv4_address(mapped, internal):
+    assert site().is_internal(ipaddress.ip_address(mapped)) is internal
+    assert SiteNetworks.default().is_internal(ipaddress.ip_address("::ffff:10.1.2.3"))
 
 
 def site(internal=("198.51.100.0/24", "10.0.0.0/8"), external=("10.50.0.0/16",)) -> SiteNetworks:
@@ -39,7 +48,7 @@ def test_unset_setting_is_the_labelled_default():
     assert definition == SiteNetworks.default()
 
 
-def test_default_definition_answers_exactly_as_the_previous_list():
+def test_default_definition_answers_as_the_previous_list_with_mapped_addresses_unmapped():
     default = SiteNetworks.default()
     for text in SAMPLES:
         ip = ipaddress.ip_address(text)
