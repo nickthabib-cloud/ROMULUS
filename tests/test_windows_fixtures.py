@@ -59,4 +59,3 @@ def test_mission_volume_generator_is_streaming_deterministic_and_uses_documentat
     rendered = str(first)
     assert "example.test" in rendered
     assert any(prefix in rendered for prefix in ("192.0.2.", "198.51.100.", "203.0.113."))
-

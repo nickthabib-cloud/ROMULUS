@@ -231,4 +231,3 @@ def test_sweep_cell_can_be_complete_only_after_all_windows_gates_pass(tmp_path, 
     assert unresolved["detail"]["reasons"] == [
         "collection not attested: Sysmon event id 1 on ws01.example.test"
     ]
-

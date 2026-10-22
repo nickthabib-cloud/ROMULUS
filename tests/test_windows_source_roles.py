@@ -211,4 +211,3 @@ def test_windows_lineage_session_and_flow_host_links_select_os_specific_keys_and
     for planned in (lineage[2], session[2], flow[2]):
         assert planned
         assert all("linux.audit" not in str(intent.model_dump(mode="json")) for intent in planned)
-

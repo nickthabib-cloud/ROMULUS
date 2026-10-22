@@ -127,13 +127,21 @@ def test_sysmon_hashes_are_split_with_parsed_lineage():
     assert record.origin("Hashes.SHA256").endswith("#parsed:sysmon-hashes")
 
 
-def _xml(*, command_line: str) -> str:
+def _xml(*, command_line: str, system_time: str = "2026-01-02T03:04:03.000Z") -> str:
     return f"""\
 <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
-  <System><Provider Name="Microsoft-Windows-Sysmon"/><EventID>1</EventID></System>
+  <System><Provider Name="Microsoft-Windows-Sysmon"/><EventID>1</EventID><TimeCreated SystemTime="{system_time}"/></System>
   <EventData>
     <Data Name="Image">C:\\Windows\\example.exe</Data>
     <Data Name="CommandLine">{command_line}</Data>
   </EventData>
 </Event>
 """
+
+
+def test_event_original_timecreated_attribute_is_typed_with_xml_lineage():
+    event = normalize_hits([_hit(event_data=None, original=_xml(command_line="from-xml.exe"))])[0][0]
+
+    assert event.ts.isoformat() == "2026-01-02T03:04:03+00:00"
+    assert event.get("event.created") == "2026-01-02T03:04:03+00:00"
+    assert event.fields["event.created"].origin.endswith("TimeCreated#xml")

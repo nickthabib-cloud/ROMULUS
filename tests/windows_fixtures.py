@@ -171,6 +171,7 @@ def windows_hit(event: LogicalWindowsEvent, shape: Shape) -> dict:
             "event_id": event.event_id,
             "computer_name": event.computer,
             "record_id": event.record_id,
+            "time_created": event.timestamp,
             "event_data": dict(event.data),
         },
     }
@@ -243,4 +244,3 @@ def mission_windows_volume(count: int, *, shape: Shape, seed: int = 1):
             data=data,
         )
         yield windows_hit(logical, shape)
-

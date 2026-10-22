@@ -117,6 +117,17 @@ def test_host_identity_uses_computer_name_and_keeps_short_and_full_forms():
     assert "forwarder" not in event.model_dump_json()
 
 
+def test_structured_winlog_time_created_is_the_typed_event_time():
+    hit = _hit(4624)
+    hit["_source"]["winlog"]["time_created"] = "2026-01-02T03:04:03.000Z"
+
+    event = normalize_hits([hit])[0][0]
+
+    assert event.ts.isoformat() == "2026-01-02T03:04:03+00:00"
+    assert event.get("event.created") == "2026-01-02T03:04:03+00:00"
+    assert event.fields["event.created"].origin.endswith("winlog.time_created")
+
+
 def test_process_identity_prefers_guid_and_4688_uses_a_fenced_pid_key():
     sysmon = normalize_hits(
         [
@@ -165,6 +176,23 @@ def test_accounts_are_sid_first_then_domain_name_case_insensitively():
     assert name.get("auth.target_account") == r"name:example\alice"
 
 
+def test_sysmon_process_user_is_a_case_insensitive_account_identity():
+    event = normalize_hits(
+        [
+            _hit(
+                1,
+                channel=SYSMON_CHANNEL,
+                provider=SYSMON,
+                data={"ProcessId": "512", "User": r"EXAMPLE\Alice"},
+            )
+        ]
+    )[0][0]
+
+    assert event.get("user.entity_id") == r"name:example\alice"
+    assert event.get("user.domain") == "example"
+    assert event.get("user.name") == "alice"
+
+
 def test_sessions_are_host_scoped_and_keep_logon_guid():
     event = normalize_hits(
         [_hit(4624, data={"TargetLogonId": "0x4A", "LogonGuid": "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"})]
@@ -205,4 +233,3 @@ def test_windows_paths_compare_case_insensitively_without_changing_display_value
     assert windows_path_key(r"C:\Windows\System32\CMD.EXE") == windows_path_key(
         r"c:\windows\system32\cmd.exe"
     )
-

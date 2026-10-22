@@ -128,15 +128,20 @@ def _xml_data(original: str, native_id: str) -> dict[str, FieldValue]:
     values: dict[str, FieldValue] = {}
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1]
-        if tag == "Data" and element.attrib.get("Name"):
+        if tag == "TimeCreated" and element.attrib.get("SystemTime"):
+            name = "TimeCreated"
+            value = element.attrib["SystemTime"]
+        elif tag == "Data" and element.attrib.get("Name"):
             name = element.attrib["Name"]
+            value = element.text or ""
         elif element is not root and element.text and tag not in {"System", "EventData", "UserData"}:
             name = tag
+            value = element.text
         else:
             continue
         if name in values:
             raise WindowsInputError(f"event.original XML contains duplicate field {name!r}")
-        values[name] = fv(element.text or "", f"{native_id}:event.original:{name}#xml")
+        values[name] = fv(value, f"{native_id}:event.original:{name}#xml")
     return values
 
 
@@ -192,6 +197,9 @@ def read_windows_event(hit: dict) -> WindowsRecord:
         if not isinstance(original, str):
             raise WindowsInputError("event.original must be text")
         data = _xml_data(original, hit["_id"])
+    time_created = winlog.get("time_created")
+    if time_created not in (None, "") and "TimeCreated" not in data:
+        data["TimeCreated"] = fv(time_created, f"{hit['_id']}:winlog.time_created")
     _parsed_hashes(data)
     return WindowsRecord(hit, event_class, data)
 
@@ -264,6 +272,14 @@ def _account_fields(fields: dict[str, FieldValue], record: WindowsRecord) -> Non
         fields["user.name"] = fv(subject_name, record.origin("SubjectUserName"))
     if subject_domain:
         fields["user.domain"] = fv(subject_domain, record.origin("SubjectDomainName"))
+    if not subject and record.value("User"):
+        user = str(record.value("User")).strip()
+        domain, separator, name = user.partition("\\")
+        canonical = user.casefold()
+        fields["user.entity_id"] = fv(f"name:{canonical}", record.origin("User"))
+        fields["user.name"] = fv((name if separator else domain).casefold(), record.origin("User"))
+        if separator:
+            fields["user.domain"] = fv(domain.casefold(), record.origin("User"))
     if target:
         origin = record.origin("TargetUserSid") if record.value("TargetUserSid") else record.origin("TargetUserName")
         fields["auth.target_account"] = fv(target, origin)
@@ -421,7 +437,11 @@ def normalize_windows(hit: dict) -> TypedEvent:
             raise WindowsInputError(f"winlog.record_id is malformed: {exc}") from exc
     fields.update({f"windows.event_data.{name}": value for name, value in record.data.items()})
     timestamp = datetime.fromisoformat(str(source["@timestamp"])).astimezone(UTC)
-    event_time = record.data.get("UtcTime") or record.data.get("SystemTime")
+    event_time = (
+        record.data.get("UtcTime")
+        or record.data.get("TimeCreated")
+        or record.data.get("SystemTime")
+    )
     if event_time:
         timestamp = _event_time(event_time.value)
         fields["event.created"] = fv(timestamp.isoformat(), event_time.origin)
@@ -440,4 +460,3 @@ def normalize_windows(hit: dict) -> TypedEvent:
         raw=[ref],
         normalizer=WINDOWS_NORMALIZER,
     )
-

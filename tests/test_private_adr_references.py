@@ -12,4 +12,3 @@ def test_production_code_does_not_reference_private_windows_decision_records():
         if any(value in text for value in banned):
             offenders.append(path.relative_to(source_root).as_posix())
     assert offenders == []
-

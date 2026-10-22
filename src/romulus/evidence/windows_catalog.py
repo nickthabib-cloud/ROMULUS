@@ -170,4 +170,3 @@ def lookup_event_class(channel: object, provider: object, event_id: object) -> W
     except (TypeError, ValueError):
         return None
     return _BY_KEY.get((channel.casefold(), provider.casefold(), numeric_id))
-
