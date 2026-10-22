@@ -16,6 +16,8 @@ from romulus.hunt.sweep import stored_boot_intervals
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 
+EVENT_CHUNK = 500           # stored events read per query by the final pass
+
 
 @dataclass
 class ContextEvaluation:
@@ -170,29 +172,42 @@ def _publish_context(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
     return row["id"]
 
 
-def _finalize_rule(repo: Repo, hunt_id: str, playbook_cls, reaches: list[tuple],
-                   *, owner_token: str | None = None) -> set[str]:
-    # Records are grouped by session across every accepted reach, so a group's judgement (for example whether a
-    # root process's parent is known) sees the whole session, not one window. A reach only ever contributes
-    # records of a link type the rule accepts.
-    coverage = []                                   # (anchor, link, evaluated, missing, applicable)
-    sessions: dict[tuple, dict] = {}                # session key -> {events: {id: ev}, pairs: {(a.id,l.id): (a,l)}}
-    for anchor, link, link_events in reaches:
-        inst = playbook_cls()
+class _RuleReaches:
+    """One context rule's view of every reach, built one link at a time. Records are grouped by session across every
+    accepted reach, so a group's judgement (for example whether a root process's parent is known) sees the whole
+    session, not one window. A reach only ever contributes records of a link type the rule accepts, and only the
+    records the rule is eligible to read are held."""
+
+    def __init__(self, playbook_cls):
+        self.playbook_cls = playbook_cls
+        self.coverage: list[tuple] = []             # (anchor, link, evaluated, missing, applicable)
+        self.sessions: dict[tuple, dict] = {}       # session key -> {events: {id: ev}, pairs: {(a.id,l.id): (a,l)}}
+
+    def add(self, anchor: ContextAnchor, link: ContextLink, link_events: list[TypedEvent],
+            held: dict[str, TypedEvent]) -> None:
+        """Judge one reach for coverage and hold its eligible records. `held` is shared by every rule, so a record
+        several rules hold is one object."""
+        inst = self.playbook_cls()
         applicable = inst.accepts(anchor, link)
         eligible = inst.eligible_records(link_events) if applicable else []
         # Coverage counts come from the rule's full judgement of this reach (an unparseable script or a
         # malformed address is counted there); its matches are discarded, the session pass below decides.
-        judged = playbook_cls()
+        judged = self.playbook_cls()
         if applicable:
             judged.consume_linked(anchor, link, link_events)
-        coverage.append((anchor, link, judged.evaluated, judged.missing_required, applicable))
+        self.coverage.append((anchor, link, judged.evaluated, judged.missing_required, applicable))
         for event in eligible:
+            event = held.setdefault(event.id, event)
             skey = _session_of(event, anchor, link)
-            bucket = sessions.setdefault(skey, {"events": {}, "pairs": {}})
+            bucket = self.sessions.setdefault(skey, {"events": {}, "pairs": {}})
             bucket["events"][event.id] = event
             bucket["pairs"][(anchor.id, link.id)] = (anchor, link)
-    sessions = _merge_boot_buckets(sessions)
+
+
+def _finalize_rule(repo: Repo, hunt_id: str, reaches: _RuleReaches,
+                   *, owner_token: str | None = None) -> set[str]:
+    playbook_cls, coverage = reaches.playbook_cls, reaches.coverage
+    sessions = _merge_boot_buckets(reaches.sessions)
 
     # One run per session over the union of its records; collect the admitted matches and which reaches fed them.
     admitted: dict[str, tuple] = {}                 # group key -> (match, decision, contributing pairs)
@@ -260,14 +275,26 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
     # Records without a boot id take the boot the hunt's boot-interval map places them in, so session keys tell a
     # session id reused after a reboot apart. The whole map is used, so the result does not depend on stage order.
     boots = stored_boot_intervals(repo, hunt_id)
+    # The pass streams: one link's records are read at a time, every rule judges that reach, and only records some
+    # rule is eligible to read stay in memory, one object per id (`held`). A record already held is never read or
+    # deserialized again; the rest of a link's records are released before the next link is read.
+    held: dict[str, TypedEvent] = {}
 
     def events(ids: list[str]) -> list[TypedEvent]:
-        found = [TypedEvent.model_validate(item["event"]) for item in repo.events_by_ids(ids)]
-        boots.fill(found, rederive=True)
-        return sorted(found, key=lambda event: (event.ts, event.id))
+        wanted = list(dict.fromkeys(ids))
+        found = [held[i] for i in wanted if i in held]
+        missing = [i for i in wanted if i not in held]
+        loaded = []
+        for start in range(0, len(missing), EVENT_CHUNK):
+            loaded += [TypedEvent.model_validate(item["event"])
+                       for item in repo.events_by_ids(missing[start:start + EVENT_CHUNK])]
+        boots.fill(loaded, rederive=True)
+        return sorted(found + loaded, key=lambda event: (event.ts, event.id))
 
+    rule_classes = [type(playbook) for playbook in fresh_context_pack()]
+    reaches = [_RuleReaches(cls) for cls in rule_classes]
     candidates: dict[str, dict | None] = {}
-    reaches = []
+    anchors: dict[str, ContextAnchor] = {}
     for row in link_rows:
         anchor_id = row["anchor_id"]
         if anchor_id not in candidates:
@@ -275,17 +302,21 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
         cand = candidates[anchor_id]
         if cand is None:
             continue
-        anchor = ContextAnchor(id=cand["id"], anchor_class=anchor_class_for_rule(cand["rule_id"]),
-                               lane=cand["lane"], claim=cand["claim"], events=events(cand["event_ids"]),
-                               rule_id=cand["rule_id"], ts=_aware(cand["ts"]))
+        anchor = anchors.get(anchor_id)
+        if anchor is None:
+            anchor = anchors[anchor_id] = ContextAnchor(
+                id=cand["id"], anchor_class=anchor_class_for_rule(cand["rule_id"]), lane=cand["lane"],
+                claim=cand["claim"], events=events(cand["event_ids"]), rule_id=cand["rule_id"],
+                ts=_aware(cand["ts"]))
         link = ContextLink(id=row["id"], link_type=row["link_type"], strength=row["strength"], key=row["key"],
                            evidence_events=events(row["evidence_ids"]), status=row["status"],
                            reasons=row["reasons"], window_start=_aware(row["window_start"]),
                            window_end=_aware(row["window_end"]))
-        reaches.append((anchor, link, events(row["event_ids"])))
+        link_events = events(row["event_ids"])
+        for rule in reaches:
+            rule.add(anchor, link, link_events, held)
 
-    rule_classes = [type(playbook) for playbook in fresh_context_pack()]
     produced_ids: set[str] = set()
-    for playbook_cls in rule_classes:
-        produced_ids |= _finalize_rule(repo, hunt_id, playbook_cls, reaches, owner_token=owner_token)
+    for rule in reaches:
+        produced_ids |= _finalize_rule(repo, hunt_id, rule, owner_token=owner_token)
     _withdraw_dropped(repo, hunt_id, {cls.id for cls in rule_classes}, produced_ids, owner_token=owner_token)
