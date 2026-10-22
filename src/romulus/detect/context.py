@@ -100,11 +100,11 @@ def _session_key(event: TypedEvent, anchor: ContextAnchor, boots: dict[tuple, st
     is typed (a lineage link), the anchor's content identity keeps lineages on one host apart; its id would differ
     between identical hunts.
 
-    Records reached by expansion links usually carry no boot id (their journald copies are not retrieved) while the
-    sweep's own records do. A record without one takes the session's only recorded boot among `boots` (see
-    `_session_boots`), so one session is never split by boot presence; two recorded boots are two sessions. Without
-    `boots` the record's own boot id (or None) is used. A session id reused after a reboot, where neither side's
-    records carry a boot id, can still join two logins."""
+    Records reached by expansion links take their boot id from the hunt's boot-interval map, which leaves a record
+    in a gap between boots or near a boot's edge without one. A record without one takes the session's only
+    recorded boot among `boots` (see `_session_boots`), so one session is never split by boot presence; two recorded
+    boots are two sessions. Without `boots` the record's own boot id (or None) is used. A session id reused after a
+    reboot, where neither side's records carry a boot id, can still join two logins."""
     part = _session_part(event, anchor)
     boot = boot_of(event)
     if boot is None and boots:

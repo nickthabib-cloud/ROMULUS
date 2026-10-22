@@ -497,7 +497,7 @@ def _sweep_records(monkeypatch, records, *, profiles=None, normalized=None):
 
     monkeypatch.setattr(sweep_mod, "execute", execute)
     if normalized is not None:
-        monkeypatch.setattr(sweep_mod, "normalize_hits", lambda hits: normalized)
+        monkeypatch.setattr(sweep_mod, "normalize_hits", lambda hits, boots=None: normalized)
     repo = _repo(profiles=profiles)
     sweep = Sweep(repo, None, "h1", WINDOW, _contracts())
     sweep.run_target(HOST_TARGET)

@@ -8,7 +8,12 @@ from datetime import datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
 from romulus.detect.registry import fresh_pack
-from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.normalize import (
+    BOOT_FILL_FAMILIES,
+    BOOT_INTERVAL_ORIGIN,
+    BootIntervals,
+    normalize_hits,
+)
 from romulus.hunt.publish import publish_match
 from romulus.hunt.stage import EventStage
 from romulus.sources.es import ElasticClient
@@ -43,6 +48,14 @@ WINDOW_ROLLUP_PARTIAL = ("whole-window result over partitions of which one or mo
 
 BUCKET_SECONDS = 300
 MIN_SPLIT = timedelta(seconds=5)
+# The audit action that holds a hunt's boot-interval map, written once when the sweep has read every partition.
+BOOT_INTERVALS_AUDIT = "hunt.boot_intervals"
+
+
+def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
+    """The boot-interval map the hunt's sweep recorded; empty (it places nothing) when there is none."""
+    row = repo.latest_audit(hunt_id, BOOT_INTERVALS_AUDIT) if hasattr(repo, "latest_audit") else None
+    return BootIntervals.from_json((row or {}).get("detail") or {})
 
 
 def plan_partitions(client: ElasticClient, target: str, contract: FieldContract, window: Window,
@@ -85,7 +98,11 @@ class Sweep:
         self.stage_dir = stage_dir
         self.pack: list[Playbook] = fresh_pack()
         self.partial_reasons: list[str] = []
-        self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0}
+        # Built as partitions are read, in time order per target: each batch's events are placed with what has
+        # been observed so far. Expansion and the context pass use the whole map, recorded at finalize.
+        self.boots = BootIntervals()
+        self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0,
+                      "boot": {"recorded": 0, "from_interval": 0, "unknown": 0}}
 
     # -------------------------------------------------------------------------------------
     def _publish(self, m: Match, task_id: str | None, raw_sources: dict[str, dict]):
@@ -181,8 +198,9 @@ class Sweep:
                                         {"error": out.error})
             self.repo.update_task(tid, "failed", error=out.error)
             return
-        events, skips, errors = normalize_hits(out.records)
+        events, skips, errors = normalize_hits(out.records, self.boots)
         self.stats["events"] += len(events)
+        self._count_boots(events)
         self.stats["errors"] += len(errors)
         for k, v in skips.items():
             self.stats["skips"][k] = self.stats["skips"].get(k, 0) + v
@@ -257,6 +275,16 @@ class Sweep:
                                     {"missing_required": missing, "reasons": reasons})
         self.repo.update_task(tid, "evaluated")
 
+    def _count_boots(self, events) -> None:
+        """Host-record events by where their boot id came from: a record, the boot-interval map, or nowhere."""
+        counts = self.stats.setdefault("boot", {"recorded": 0, "from_interval": 0, "unknown": 0})
+        for event in events:
+            if event.family not in BOOT_FILL_FAMILIES or not event.host:
+                continue
+            boot = event.fields.get("host.boot.id")
+            counts["unknown" if boot is None or boot.value in (None, "") else
+                   "from_interval" if boot.origin.endswith(BOOT_INTERVAL_ORIGIN) else "recorded"] += 1
+
     def _event_stage(self) -> EventStage:
         stage = getattr(self, "_stage", None)
         if stage is None:
@@ -274,6 +302,8 @@ class Sweep:
 
     def finalize(self):
         self.heartbeat()
+        # Every partition has been read: record the whole map once, for expansion, the context pass and resume.
+        self.repo.audit("system", BOOT_INTERVALS_AUDIT, self.hunt_id, self.boots.to_json())
         agg_raw = getattr(self, "_agg_raw", {})
         for pb in self.pack:
             if pb.kind != "aggregate":

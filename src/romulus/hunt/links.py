@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from romulus.agent.models import PivotCoverage
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
+from romulus.evidence.normalize import BootIntervals
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.pivot import (
     HOST_LOOKUP_BUDGET,
@@ -139,10 +140,14 @@ def _tuple_matches(left: tuple, right: tuple) -> bool:
 class LinkFetcher:
     """Fetch each `(anchor, link, window)` once and keep typed-key semantics local and explicit."""
 
-    def __init__(self, executor: PivotExecutor, hunt_start: datetime, hunt_end: datetime):
+    def __init__(self, executor: PivotExecutor, hunt_start: datetime, hunt_end: datetime,
+                 boots: BootIntervals | None = None):
         self.executor = executor
         self.hunt_start = hunt_start.astimezone(UTC)
         self.hunt_end = hunt_end.astimezone(UTC)
+        # The hunt's boot-interval map: fetched audit records without a boot id take the boot it places their time
+        # in, so lineage and session filters can tell a reused pid or session id after a reboot.
+        self.boots = boots if boots is not None else BootIntervals()
         self._cache: dict[str, LinkResult] = {}
         self._hosts: dict[str, tuple[str | None, str | None]] = {}
 
@@ -206,8 +211,15 @@ class LinkFetcher:
             self._cache[fetch_key] = result
             return result
         query_start = getattr(self.executor, "source_queries", 0)
+
+        def placed(event: TypedEvent) -> bool:
+            # The executor stores what `retain` keeps, so each record's boot is placed before it is stored and
+            # before `select` filters by boot. Link fetches carry no journald copies of their own.
+            self.boots.fill([event])
+            return retain(event)
+
         batch = self.executor.fetch_intents(
-            anchor.finding_id, fetch_key, intents, retain, anchor_ts=anchor.ts, query_cap=query_cap,
+            anchor.finding_id, fetch_key, intents, placed, anchor_ts=anchor.ts, query_cap=query_cap,
             planning_coverage=planning_coverage,
         )
         linked = select(batch.events)
@@ -291,9 +303,9 @@ class LinkFetcher:
         intents = self._host_intents(window, ("linux.audit",), anchor.host) if isinstance(pid, int) else []
 
         def select(events):
-            # A record of another recorded boot is another process. One without a recorded boot is kept: the
-            # link retrieves audit records without their journald copies, so its own records carry no boot id and
-            # a pid reused after a reboot inside the window cannot be excluded.
+            # A record of another boot is another process. The link retrieves audit records without their journald
+            # copies; their boot comes from the hunt's boot-interval map. One the map cannot place (a gap between
+            # boots, near a boot's edge) is kept: a pid reused after a reboot cannot be excluded for it.
             all_events = {event.id: event for event in anchor.events + events
                           if event.family == "process_exec" and event.host == anchor.host
                           and not boots_conflict(boot_id, boot_of(event))}

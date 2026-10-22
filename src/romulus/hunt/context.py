@@ -12,6 +12,7 @@ from romulus.detect.context import _session_key
 from romulus.detect.correlation import merge_unknown_boot
 from romulus.detect.registry import anchor_class_for_rule, fresh_context_pack
 from romulus.evidence.typed import TypedEvent
+from romulus.hunt.sweep import stored_boot_intervals
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 
@@ -86,8 +87,9 @@ def _session_of(event: TypedEvent, anchor: ContextAnchor, link: ContextLink) -> 
 
 
 def _merge_boot_buckets(sessions: dict[tuple, dict]) -> dict[tuple, dict]:
-    """A bucket of records without a boot id joins the session's only recorded boot (records reached by links
-    usually carry none); with two recorded boots it stays apart, and two recorded boots never share a bucket."""
+    """A bucket of records without a boot id joins the session's only recorded boot (records the boot-interval map
+    could not place carry none); with two recorded boots it stays apart, and two recorded boots never share a
+    bucket."""
     merged: dict[tuple, dict] = {}
     for key, olds in merge_unknown_boot({key: [key] for key in sessions}, 1).items():
         bucket = merged.setdefault(key, {"events": {}, "pairs": {}})
@@ -255,9 +257,13 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
     the output depends only on the set of reaches."""
     link_rows = sorted((row for row in repo.expansion_links(hunt_id) if row["evaluated"]),
                        key=lambda row: (row["anchor_id"], row["id"]))
+    # Records without a boot id take the boot the hunt's boot-interval map places them in, so session keys tell a
+    # session id reused after a reboot apart. The whole map is used, so the result does not depend on stage order.
+    boots = stored_boot_intervals(repo, hunt_id)
 
     def events(ids: list[str]) -> list[TypedEvent]:
         found = [TypedEvent.model_validate(item["event"]) for item in repo.events_by_ids(ids)]
+        boots.fill(found, rederive=True)
         return sorted(found, key=lambda event: (event.ts, event.id))
 
     candidates: dict[str, dict | None] = {}
