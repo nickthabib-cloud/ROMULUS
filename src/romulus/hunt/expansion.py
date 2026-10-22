@@ -14,6 +14,7 @@ from romulus.detect.host import is_internal
 from romulus.detect.registry import fresh_direct_pack, rule_kind
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.context import finalize_context
+from romulus.hunt.expansion_plan import TIER_PLAN
 from romulus.hunt.links import (
     HOST_SIDE_LINKS,
     LinkAnchor,
@@ -27,15 +28,6 @@ from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
-TIER_PLAN: tuple[tuple[str, tuple[LinkType, ...], str], ...] = (
-    ("T1", ("login_session", "process_lineage", "network_flow"), "anchor ±5 min"),
-    ("T2", ("host_after_anchor", "flow_host_side"), "anchor ±5 min"),
-    ("T3", ("login_session", "process_lineage", "network_flow", "host_after_anchor",
-            "flow_host_side"), "anchor ±30 min"),
-    ("T4", ("source_ip", "account"), "anchor ±5 min"),
-    ("T5", ("login_session", "process_lineage", "network_flow", "host_after_anchor",
-            "flow_host_side", "source_ip", "account"), "anchor ±2 h"),
-)
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 DEFAULT_MAX_DEPTH = 3
 DEFAULT_MAX_SOURCE_QUERIES = 180

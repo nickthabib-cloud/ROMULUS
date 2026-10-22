@@ -11,7 +11,7 @@ from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.provider.budget import AgentBudget, BudgetLimits
 from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
-from romulus.hunt.expansion import TIER_PLAN
+from romulus.hunt.expansion_plan import TIER_PLAN
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import coverage_for_hunt
 from romulus.store.db import digest
