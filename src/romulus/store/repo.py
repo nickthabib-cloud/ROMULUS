@@ -2064,37 +2064,53 @@ class Repo:
             )).scalars())
 
     def upsert_baseline_parents(self, rows: Iterable[dict]) -> None:
-        """Keep the latest two observed exec generations for each live PID."""
+        """Keep the latest two observed exec generations for each live PID, ordered by (time, audit serial).
+
+        An exec at the instant of a held generation is the same exec unless both carry distinct serials (then the
+        serial orders them). If it is "the same" instant but a different image, the generation is marked
+        ambiguous: without an order the PID's image after that instant is unknown, never guessed.
+        """
         stmt = insert(t.baseline_parent_carry)
         table, excluded = t.baseline_parent_carry.c, stmt.excluded
-        newer = excluded.exec_ts > table.exec_ts
+
+        def ordered(ts_a, serial_a, ts_b, serial_b):
+            return and_(ts_a == ts_b, serial_a.is_not(None), serial_b.is_not(None), serial_a > serial_b)
+
+        def same_instant(ts_a, serial_a, ts_b, serial_b):
+            return and_(ts_a == ts_b, or_(serial_a.is_(None), serial_b.is_(None), serial_a == serial_b))
+
+        newer = or_(excluded.exec_ts > table.exec_ts,
+                    ordered(excluded.exec_ts, excluded.serial, table.exec_ts, table.serial))
+        at_current = same_instant(excluded.exec_ts, excluded.serial, table.exec_ts, table.serial)
         older_candidate = and_(
-            excluded.exec_ts < table.exec_ts,
-            or_(table.previous_exec_ts.is_(None), excluded.exec_ts > table.previous_exec_ts),
+            ~newer, ~at_current,
+            or_(table.previous_exec_ts.is_(None), excluded.exec_ts > table.previous_exec_ts,
+                ordered(excluded.exec_ts, excluded.serial, table.previous_exec_ts, table.previous_serial)),
         )
+        at_previous = and_(~newer, ~at_current, same_instant(
+            excluded.exec_ts, excluded.serial, table.previous_exec_ts, table.previous_serial))
+
+        def flag(held, ambiguous, held_executable):
+            return case((or_(held == 1, ambiguous == 1, excluded.executable != held_executable), 1), else_=0)
+
         stmt = stmt.on_conflict_do_update(
             index_elements=["hunt_id", "target", "host", "boot", "pid"],
             set_={
-                "previous_exec_ts": case(
-                    (newer, table.exec_ts), (older_candidate, excluded.exec_ts),
-                    else_=table.previous_exec_ts,
+                **{f"previous_{name}": case((newer, table[name]), (older_candidate, excluded[name]),
+                                            else_=table[f"previous_{name}"])
+                   for name in ("exec_ts", "executable", "parent_pid", "raw_id", "serial")},
+                "previous_ambiguous": case(
+                    (newer, table.ambiguous), (older_candidate, excluded.ambiguous),
+                    (at_previous, flag(table.previous_ambiguous, excluded.ambiguous, table.previous_executable)),
+                    else_=table.previous_ambiguous,
                 ),
-                "previous_executable": case(
-                    (newer, table.executable), (older_candidate, excluded.executable),
-                    else_=table.previous_executable,
+                **{name: case((newer, excluded[name]), else_=table[name])
+                   for name in ("exec_ts", "executable", "parent_pid", "raw_id", "serial")},
+                "ambiguous": case(
+                    (newer, excluded.ambiguous),
+                    (at_current, flag(table.ambiguous, excluded.ambiguous, table.executable)),
+                    else_=table.ambiguous,
                 ),
-                "previous_parent_pid": case(
-                    (newer, table.parent_pid), (older_candidate, excluded.parent_pid),
-                    else_=table.previous_parent_pid,
-                ),
-                "previous_raw_id": case(
-                    (newer, table.raw_id), (older_candidate, excluded.raw_id),
-                    else_=table.previous_raw_id,
-                ),
-                "exec_ts": case((newer, excluded.exec_ts), else_=table.exec_ts),
-                "executable": case((newer, excluded.executable), else_=table.executable),
-                "parent_pid": case((newer, excluded.parent_pid), else_=table.parent_pid),
-                "raw_id": case((newer, excluded.raw_id), else_=table.raw_id),
             },
         )
         for chunk in _chunks(rows, BASELINE_CHUNK):
@@ -2115,16 +2131,18 @@ class Repo:
             )).mappings().first()
         if row is None:
             return None
+        # The sixth element says whether the generation is ambiguous (two images at one unordered instant).
         exec_ts = _stored_utc(row["exec_ts"])
         if exec_ts <= at and row["executable"]:
-            return exec_ts.timestamp(), row["executable"], row["parent_pid"], row["raw_id"], boot
+            return (exec_ts.timestamp(), row["executable"], row["parent_pid"], row["raw_id"], boot,
+                    bool(row["ambiguous"]))
         if row["previous_exec_ts"] is None or not row["previous_executable"]:
             return None
         previous_ts = _stored_utc(row["previous_exec_ts"])
         if previous_ts > at:
             return None
         return (previous_ts.timestamp(), row["previous_executable"], row["previous_parent_pid"],
-                row["previous_raw_id"], boot)
+                row["previous_raw_id"], boot, bool(row["previous_ambiguous"]))
 
     def baseline_parent_count(self, hunt_id: str) -> int:
         with self.engine.connect() as c:

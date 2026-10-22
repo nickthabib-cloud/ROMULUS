@@ -9,11 +9,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from romulus.baseline.carry import CarryInStore, PendingResolver
+from romulus.baseline.carry import CarryInStore, HourParents, PendingResolver, exec_serial
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.protocol import HistorySource
 from romulus.baseline.spec import BaselineSpec, KeyContext
-from romulus.detect.correlation import PidTable
 from romulus.store.db import utcnow
 from romulus.store.repo import Repo
 
@@ -194,7 +193,7 @@ class LookbackWriter:
             # unbroken from its parent's exec through every later history hour.
             carry = (self.parent_carry.for_target(target, horizon=end)
                      if self.parent_carry is not None else None)
-            hour_parents = PidTable()
+            hour_parents = HourParents()
             hour_context = KeyContext(
                 pid_table=hour_parents,
                 service_accounts=self.context.service_accounts,
@@ -239,7 +238,10 @@ class LookbackWriter:
                 events_total += len(fetched.events)
                 if carry is not None:
                     carry.observe_events(fetched.events, hour=(hour_start, hour_end))
-                ordered_events = sorted(fetched.events, key=lambda item: (item.ts, item.id))
+                # Time, then the audit serial, orders one instant's execs (a shebang's env, then its interpreter).
+                ordered_events = sorted(fetched.events, key=lambda item: (
+                    item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
+                ))
                 for event in ordered_events:
                     hour_parents.add(event)
                 for event in ordered_events:

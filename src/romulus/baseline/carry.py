@@ -1,12 +1,13 @@
 """Disk-backed process-parent carry-in and explicit Pending resolution."""
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from romulus.baseline.spec import SPEC_BY_ID, BaselineKey, BaselineSpec, Pending, exec_pair_key
-from romulus.detect.correlation import boot_of
+from romulus.detect.correlation import boot_of, boots_conflict
 from romulus.evidence.typed import Outcome, TypedEvent
 from romulus.store.repo import Repo
 
@@ -24,6 +25,63 @@ class ParentExec:
     executable: str
     parent_pid: int | None
     raw_id: str
+    # The kernel's audit serial, which increases within a boot: it orders execs of one instant (a shebang's
+    # env, then its interpreter, on the same pid). None when the record carries none.
+    serial: int | None = None
+
+
+def exec_serial(event: TypedEvent) -> int | None:
+    value = event.get("audit.serial")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _same_instant(a_serial: int | None, b_serial: int | None) -> bool:
+    """Two execs of one pid at one timestamp are only ordered when both carry distinct serials."""
+    return a_serial is None or b_serial is None or a_serial == b_serial
+
+
+class HourParents:
+    """ParentLookup over the execs of one completely fetched hour, for children in that hour.
+
+    The PID's meaning at `ts` is its latest successful exec at or before `ts`, ordered by (time, audit serial).
+    Execs of one pid at one instant without distinct serials are ambiguous when their images differ, and an exec
+    of unknown outcome or without an executable leaves the image unknown: both answer None, so the child stays
+    Pending and the carry (which records the same facts) leaves it unresolved. A failed exec never replaced the
+    image and is ignored.
+    """
+
+    def __init__(self):
+        self._execs: dict[tuple[str, int], list[tuple]] = defaultdict(list)
+
+    def add(self, event: TypedEvent) -> None:
+        if event.family != "process_exec" or event.outcome == Outcome.failure or not event.host:
+            return
+        pid, executable = event.get("process.pid"), event.get("process.executable")
+        if isinstance(pid, bool) or not isinstance(pid, int):
+            return
+        known = event.outcome == Outcome.success and isinstance(executable, str) and bool(executable)
+        ppid = event.get("process.ppid")
+        self._execs[(event.host, pid)].append((
+            event.ts.timestamp(), exec_serial(event), executable if known else None,
+            ppid if isinstance(ppid, int) and not isinstance(ppid, bool) else None,
+            event.raw[0].native_id if event.raw else "", boot_of(event),
+        ))
+
+    def lookup(self, host: str, pid: int, ts: float, boot: str | None = None):
+        before = [entry for entry in self._execs.get((host, pid), ()) if entry[0] <= ts]
+        if not before:
+            return None
+        latest = max(entry[0] for entry in before)
+        tied = [entry for entry in before if entry[0] == latest]
+        chosen = tied[0]
+        for entry in tied[1:]:
+            if not _same_instant(entry[1], chosen[1]):
+                chosen = max(chosen, entry, key=lambda item: item[1])
+            elif entry[2] != chosen[2]:
+                return None   # one instant, two images, no order between them
+        if chosen[2] is None or boots_conflict(boot, chosen[5]):
+            return None
+        return chosen[0], chosen[2], chosen[3], chosen[4], chosen[5]
 
 
 @dataclass(frozen=True)
@@ -139,9 +197,11 @@ class CarryInStore:
         exec_hour = _hour(datetime.fromtimestamp(entry[0], UTC))
         if not self.repo.baseline_parent_observed_covers(self.hunt_id, self.target, exec_hour, observed_end):
             return None, UNOBSERVED_HOUR
-        if self.repo.baseline_parent_break_overlaps(self.hunt_id, self.target, host, exec_hour, child_end):
+        if entry[5] or self.repo.baseline_parent_break_overlaps(
+                self.hunt_id, self.target, host, exec_hour, child_end):
+            # An ambiguous generation (two images at one instant, unordered) is an uncarried exec too.
             return None, UNCARRIED_EXEC
-        return entry, None
+        return entry[:5], None
 
     def lookup(self, host: str, pid: int, ts: float, boot: str | None = None) -> tuple | None:
         """ParentLookup: the continuity-checked parent identity, else None."""
@@ -166,9 +226,10 @@ class CarryInStore:
                        hour: tuple[datetime, datetime] | None = None) -> int:
         """Feed execs; `hour` is the retrieval interval they came from, when known.
 
-        A failed exec never replaced the PID's image, so it is skipped. Every other exec is stored, or recorded
-        as uncarried (see the class note). With `hour`, an exec typed outside it is stored and also recorded as
-        uncarried at both its typed and retrieval hours: the hours then no longer vouch for that host.
+        A failed exec never replaced the PID's image, so it is skipped. An exec of unknown outcome may or may not
+        have, so it is uncarried. Every other exec is stored, or recorded as uncarried (see the class note). With
+        `hour`, an exec typed outside it is stored and also recorded as uncarried at both its typed and retrieval
+        hours: the hours then no longer vouch for that host.
         """
         def rows():
             for event in events:
@@ -181,15 +242,15 @@ class CarryInStore:
                     self._uncarry(event.host, event.ts)
                     self._uncarry(event.host, hour[0])
                 pid, executable = event.get("process.pid"), event.get("process.executable")
-                if (isinstance(pid, bool) or not isinstance(pid, int) or pid < 0
-                        or not isinstance(executable, str) or not executable):
+                if (event.outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int)
+                        or pid < 0 or not isinstance(executable, str) or not executable):
                     self._uncarry(event.host, event.ts)
                     continue
                 ppid = event.get("process.ppid")
                 yield ParentExec(
                     event.host, boot_of(event), pid, event.ts, executable,
                     ppid if isinstance(ppid, int) and not isinstance(ppid, bool) else None,
-                    event.raw[0].native_id if event.raw else "",
+                    event.raw[0].native_id if event.raw else "", exec_serial(event),
                 )
 
         return self.observe_rows(rows(), chunk_size=chunk_size)
@@ -254,19 +315,33 @@ class CarryInStore:
             key = (item.host, boot, item.pid)
             row = {
                 "hunt_id": self.hunt_id, "target": self.target, "host": item.host, "boot": boot, "pid": item.pid,
-                "exec_ts": timestamp, "executable": item.executable,
-                "parent_pid": item.parent_pid, "raw_id": item.raw_id,
+                "exec_ts": timestamp, "serial": item.serial, "executable": item.executable,
+                "parent_pid": item.parent_pid, "raw_id": item.raw_id, "ambiguous": 0,
             }
-            generations = pending.setdefault(key, [])
-            if all(generation["exec_ts"] != timestamp for generation in generations):
-                generations.append(row)
-                generations.sort(key=lambda generation: generation["exec_ts"], reverse=True)
-                del generations[2:]
+            _keep_latest_two(pending.setdefault(key, []), row)
             seen += 1
             if seen >= chunk_size:
                 flush()
         flush()
         return maximum
+
+
+def _keep_latest_two(generations: list[dict], row: dict) -> None:
+    """Merge one exec into a pid's buffered generations, newest first by (time, serial), keeping two.
+
+    The same rule as the store's upsert: an exec at the instant of a held generation is the same exec when the
+    serials match or the images match; with different images and no distinct serials the generation is marked
+    ambiguous, so it can never answer as a parent.
+    """
+    for generation in generations:
+        if generation["exec_ts"] == row["exec_ts"] and _same_instant(generation["serial"], row["serial"]):
+            if generation["executable"] != row["executable"]:
+                generation["ambiguous"] = 1
+            return
+    generations.append(row)
+    generations.sort(key=lambda item: (item["exec_ts"], item["serial"] if item["serial"] is not None else -1),
+                     reverse=True)
+    del generations[2:]
 
 
 class PendingResolver:

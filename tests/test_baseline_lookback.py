@@ -10,7 +10,7 @@ import pytest
 from romulus.baseline import CarryInStore, HistoryFetch, HistoryPartition, HistoryPlan, KeyContext
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.lookback import LookbackBudget, LookbackWriter, segment_content_id
-from romulus.baseline.spec import SPEC_BY_ID
+from romulus.baseline.spec import SPEC_BY_ID, Pending
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -337,7 +337,7 @@ def test_parent_in_an_earlier_hour_is_explicit_then_resolves_on_resume():
     repo = _repo()
     repo.create_hunt("build", {}, "d", "test")
     parent = TypedEvent(
-        id="parent", family="process_exec", ts=START - timedelta(minutes=90), host="web01",
+        id="parent", family="process_exec", ts=START - timedelta(minutes=90), host="web01", outcome=Outcome.success,
         fields={
             "process.pid": fv(10, "fixture"), "process.ppid": fv(1, "fixture"),
             "process.executable": fv("/usr/sbin/parent", "fixture"),
@@ -345,7 +345,7 @@ def test_parent_in_an_earlier_hour_is_explicit_then_resolves_on_resume():
         }, raw=[], normalizer="fixture@1",
     )
     child = TypedEvent(
-        id="child", family="process_exec", ts=START - timedelta(minutes=30), host="web01",
+        id="child", family="process_exec", ts=START - timedelta(minutes=30), host="web01", outcome=Outcome.success,
         fields={
             "process.pid": fv(11, "fixture"), "process.ppid": fv(10, "fixture"),
             "process.executable": fv("/bin/sh", "fixture"),
@@ -373,7 +373,7 @@ def test_exec_pair_writer_matches_direct_counter_with_same_hour_parent():
     repo = _repo()
     repo.create_hunt("build", {}, "d", "test")
     parent = TypedEvent(
-        id="parent", family="process_exec", ts=START - timedelta(minutes=2), host="web01",
+        id="parent", family="process_exec", ts=START - timedelta(minutes=2), host="web01", outcome=Outcome.success,
         fields={
             "process.pid": fv(10, "fixture"), "process.ppid": fv(1, "fixture"),
             "process.executable": fv("/usr/sbin/parent", "fixture"),
@@ -381,7 +381,7 @@ def test_exec_pair_writer_matches_direct_counter_with_same_hour_parent():
         }, raw=[], normalizer="fixture@1",
     )
     child = TypedEvent(
-        id="child", family="process_exec", ts=START - timedelta(minutes=1), host="web01",
+        id="child", family="process_exec", ts=START - timedelta(minutes=1), host="web01", outcome=Outcome.success,
         fields={
             "process.pid": fv(11, "fixture"), "process.ppid": fv(10, "fixture"),
             "process.executable": fv("/bin/sh", "fixture"),
@@ -412,7 +412,7 @@ def test_exec_pair_resolves_children_before_three_pid_reuses_are_compacted():
     events = []
     for index, executable in enumerate(("/p1", "/p3", "/p5"), start=1):
         events.append(TypedEvent(
-            id=f"parent-{index}", family="process_exec",
+            id=f"parent-{index}", family="process_exec", outcome=Outcome.success,
             ts=START - timedelta(minutes=10) + timedelta(seconds=index * 2), host="web01",
             fields={
                 "process.pid": fv(10, "fixture"), "process.ppid": fv(1, "fixture"),
@@ -421,7 +421,7 @@ def test_exec_pair_resolves_children_before_three_pid_reuses_are_compacted():
             }, raw=[], normalizer="fixture@1",
         ))
         events.append(TypedEvent(
-            id=f"child-{index}", family="process_exec",
+            id=f"child-{index}", family="process_exec", outcome=Outcome.success,
             ts=events[-1].ts + timedelta(seconds=1), host="web01",
             fields={
                 "process.pid": fv(20 + index, "fixture"), "process.ppid": fv(10, "fixture"),
@@ -901,3 +901,102 @@ def test_an_exec_without_a_host_keeps_its_hour_out_of_the_observed_ledger():
         hunt_id="build", targets=["host-index"], start=G_HOUR, end=START,
     )
     assert repo.baseline_parent_observed_ranges("build", "host-index") == [(H_HOUR, START)]
+
+
+def _serial(event, serial):
+    if serial is not None:
+        event.fields["audit.serial"] = fv(serial, "fixture")
+    return event
+
+
+def _shebang(at, *, serials, env_id, interpreter_id):
+    """`#!/usr/bin/env python3`: the kernel execs env, and env execs python3 on the same pid, same instant."""
+    env = _serial(_exec(env_id, at, 10, 500, "/usr/bin/env"), serials[0])
+    interpreter = _serial(_exec(interpreter_id, at, 10, 500, "/usr/bin/python3"), serials[1])
+    return [env, interpreter]
+
+
+@pytest.mark.parametrize("fed", [1, -1], ids=["env-fed-first", "env-fed-last"])
+@pytest.mark.parametrize("env_id,interpreter_id", [(1, 2), (9, 2)], ids=["env-sorts-first", "env-sorts-last"])
+def test_a_shebang_exec_chain_resolves_to_the_interpreter_by_audit_serial(env_id, interpreter_id, fed):
+    at = G_HOUR + timedelta(minutes=10)
+    child_ts = H_HOUR + timedelta(minutes=5)
+    events = [*_shebang(at, serials=(100, 101), env_id=env_id, interpreter_id=interpreter_id),
+              _exec(3, child_ts, 11, 10, "/bin/sh")]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    for _ in range(2):
+        _pair_writer(repo, FakeHistory(events[:2][::fed] + events[2:]), carry).fill(
+            hunt_id="build", targets=["host-index"], start=G_HOUR, end=START,
+        )
+    parents = {parent for _, parent, child in _pair_keys(repo) if child == "/bin/sh"}
+    assert parents == {"/usr/bin/python3"}
+
+
+def test_an_equal_time_exec_chain_without_serials_is_ambiguous_never_a_guess():
+    at = G_HOUR + timedelta(minutes=10)
+    child_ts = H_HOUR + timedelta(minutes=5)
+    events = [*_shebang(at, serials=(None, None), env_id=1, interpreter_id=2),
+              _exec(3, child_ts, 11, 10, "/bin/sh")]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    for _ in range(2):
+        result = _pair_writer(repo, FakeHistory(events), carry).fill(
+            hunt_id="build", targets=["host-index"], start=G_HOUR, end=START,
+        )
+    assert not [parent for _, parent, child in _pair_keys(repo) if child == "/bin/sh"]
+    child_gap = [gap for gap in result.gaps if "e3:" in gap.reason]
+    assert child_gap and "e3: an exec of the host between parent and child was not carried" in child_gap[0].reason
+
+
+def test_an_exec_of_unknown_outcome_is_never_a_parent_generation():
+    """A failed execve logged without its outcome must not replace the pid's image."""
+    child_ts = H_HOUR + timedelta(minutes=5)
+    unknown = _exec(2, G_HOUR + timedelta(minutes=20), 10, 500, "/tmp/notrun")
+    unknown.outcome = Outcome.unknown
+    events = [_exec(1, G_HOUR + timedelta(minutes=10), 10, 500, "/usr/bin/real"), unknown,
+              _exec(3, child_ts, 11, 10, "/bin/sh")]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    for _ in range(2):
+        result = _pair_writer(repo, FakeHistory(events), carry).fill(
+            hunt_id="build", targets=["host-index"], start=G_HOUR, end=START,
+        )
+    assert not [parent for _, parent, child in _pair_keys(repo) if child == "/bin/sh"]
+    assert any("e3: an exec of the host between parent and child was not carried" in gap.reason
+               for gap in result.gaps)
+
+
+def _hour_parent(events, child):
+    from romulus.baseline.carry import HourParents
+
+    table = HourParents()
+    for event in events:
+        table.add(event)
+    keys = SPEC_BY_ID["bl.exec_pair"].keys(child, KeyContext(pid_table=table))
+    return keys if isinstance(keys, Pending) else {key.key["parent_executable"] for key in keys}
+
+
+@pytest.mark.parametrize("env_id,interpreter_id", [(1, 2), (9, 2)], ids=["env-sorts-first", "env-sorts-last"])
+def test_the_hour_table_orders_an_equal_time_exec_chain_by_audit_serial(env_id, interpreter_id):
+    at = G_HOUR + timedelta(minutes=10)
+    child = _exec(3, at + timedelta(minutes=5), 11, 10, "/bin/sh")
+    for order in (1, -1):
+        events = _shebang(at, serials=(100, 101), env_id=env_id, interpreter_id=interpreter_id)[::order]
+        assert _hour_parent(events, child) == {"/usr/bin/python3"}
+    # Without serials the chain is ambiguous: the child waits for the carry, which never guesses either.
+    unordered = _shebang(at, serials=(None, None), env_id=env_id, interpreter_id=interpreter_id)
+    assert isinstance(_hour_parent(unordered, child), Pending)
+
+
+def test_the_hour_table_skips_failed_execs_and_never_answers_with_an_unknown_outcome():
+    real = _exec(1, G_HOUR + timedelta(minutes=10), 10, 500, "/usr/bin/real")
+    attempt = _exec(2, G_HOUR + timedelta(minutes=20), 10, 500, "/tmp/notrun")
+    child = _exec(3, G_HOUR + timedelta(minutes=30), 11, 10, "/bin/sh")
+    attempt.outcome = Outcome.failure
+    assert _hour_parent([real, attempt], child) == {"/usr/bin/real"}
+    attempt.outcome = Outcome.unknown
+    assert isinstance(_hour_parent([real, attempt], child), Pending)

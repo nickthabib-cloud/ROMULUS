@@ -194,3 +194,30 @@ def test_resolved_pending_key_is_the_spec_extractor_key_under_its_own_key_versio
 
     direct = spec.keys(child, KeyContext(pid_table=Parents()))
     assert resolved.keys == tuple(direct)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 100], ids=["store-upsert", "buffer"])
+def test_equal_time_generations_order_by_serial_or_stay_ambiguous(chunk_size):
+    def parent_at(store, seconds):
+        return store.parent("host", 10, START + timedelta(seconds=seconds), "boot-a")
+
+    def exec_(seconds, executable, serial):
+        return ParentExec("host", "boot-a", 10, START + timedelta(seconds=seconds), executable, 1, executable, serial)
+
+    _repo, ordered = _store()
+    ordered.observe_rows([exec_(1, "/usr/bin/python3", 101), exec_(1, "/usr/bin/env", 100)], chunk_size=chunk_size)
+    assert parent_at(ordered, 2)[0][1] == "/usr/bin/python3"
+
+    _repo, unordered = _store()
+    unordered.observe_rows([exec_(1, "/usr/bin/env", None), exec_(1, "/usr/bin/python3", None)],
+                           chunk_size=chunk_size)
+    assert parent_at(unordered, 2) == (None, "an exec of the host between parent and child was not carried")
+    # Ambiguity follows the generation when a newer exec pushes it to the previous slot.
+    unordered.observe_rows([exec_(5, "/usr/bin/later", None)], chunk_size=chunk_size)
+    assert parent_at(unordered, 3) == (None, "an exec of the host between parent and child was not carried")
+    assert parent_at(unordered, 6)[0][1] == "/usr/bin/later"
+
+    _repo, refed = _store()
+    for _ in range(2):
+        refed.observe_rows([exec_(1, "/usr/bin/env", None)], chunk_size=chunk_size)
+    assert parent_at(refed, 2)[0][1] == "/usr/bin/env"

@@ -513,10 +513,16 @@ baseline_parent_carry = Table(
     Column("executable", String, nullable=False),
     Column("parent_pid", Integer),
     Column("raw_id", String, nullable=False),
+    # Audit serial (orders execs of one instant) and whether the generation is ambiguous (two images at one
+    # instant with no order between them), for the latest and the previous generation.
+    Column("serial", Integer),
+    Column("ambiguous", Integer, nullable=False, server_default="0"),
     Column("previous_exec_ts", DateTime(timezone=True)),
     Column("previous_executable", String),
     Column("previous_parent_pid", Integer),
     Column("previous_raw_id", String),
+    Column("previous_serial", Integer),
+    Column("previous_ambiguous", Integer, nullable=False, server_default="0"),
     PrimaryKeyConstraint("hunt_id", "target", "host", "boot", "pid", name="pk_baseline_parent_carry"),
     CheckConstraint("pid >= 0", name="ck_baseline_parent_carry_pid"),
     CheckConstraint("executable <> ''", name="ck_baseline_parent_carry_executable"),
