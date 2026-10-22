@@ -585,7 +585,7 @@ class Repo:
                 "summary": summary, "item_count": count}
 
     def create_entity_event_page_plan(self, hunt_id: str, cursor: str, identity: dict,
-                                      summary: dict, entity_id: str) -> dict:
+                                      entity_id: str) -> dict:
         ordering = (t.typed_event.c.ts, t.typed_event.c.id)
         snapshot = (select(
             literal(hunt_id), literal(cursor),
@@ -594,6 +594,20 @@ class Repo:
         ).join(t.event_entity, t.event_entity.c.event_id == t.typed_event.c.id)
           .where(t.event_entity.c.entity_id == entity_id))
         with write_txn(self.engine) as connection:
+            base = t.typed_event.join(
+                t.event_entity, t.event_entity.c.event_id == t.typed_event.c.id,
+            )
+            total = int(connection.execute(
+                select(func.count()).select_from(base).where(
+                    t.event_entity.c.entity_id == entity_id,
+                ),
+            ).scalar_one())
+            families = {str(family): int(count) for family, count in connection.execute(
+                select(t.typed_event.c.family, func.count()).select_from(base)
+                .where(t.event_entity.c.entity_id == entity_id)
+                .group_by(t.typed_event.c.family).order_by(t.typed_event.c.family),
+            )}
+            summary = {"families": families}
             connection.execute(t.agent_page_plan.insert().values(
                 hunt_id=hunt_id, cursor=cursor, identity=identity, summary=summary,
                 item_count=0, created_at=utcnow(),
@@ -604,24 +618,14 @@ class Repo:
             count = int(connection.execute(select(func.count()).select_from(
                 t.agent_page_item).where(t.agent_page_item.c.hunt_id == hunt_id,
                                          t.agent_page_item.c.cursor == cursor)).scalar_one())
+            if count != total:  # pragma: no cover - one transaction makes this an invariant
+                raise RuntimeError("entity event snapshot count changed inside its transaction")
             connection.execute(t.agent_page_plan.update().where(
                 t.agent_page_plan.c.hunt_id == hunt_id,
                 t.agent_page_plan.c.cursor == cursor,
             ).values(item_count=count))
         return {"hunt_id": hunt_id, "cursor": cursor, "identity": identity,
                 "summary": summary, "item_count": count}
-
-    def entity_event_counts(self, entity_id: str) -> tuple[int, dict[str, int]]:
-        base = (t.typed_event.join(t.event_entity,
-                                  t.event_entity.c.event_id == t.typed_event.c.id))
-        total_query = select(func.count()).select_from(base).where(t.event_entity.c.entity_id == entity_id)
-        family_query = (select(t.typed_event.c.family, func.count()).select_from(base)
-                        .where(t.event_entity.c.entity_id == entity_id)
-                        .group_by(t.typed_event.c.family).order_by(t.typed_event.c.family))
-        with self.engine.connect() as connection:
-            total = int(connection.execute(total_query).scalar_one())
-            families = {str(family): int(count) for family, count in connection.execute(family_query)}
-        return total, families
 
     VALID: ClassVar = {
         "planned": {"running", "canceled"},

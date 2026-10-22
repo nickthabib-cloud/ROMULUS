@@ -183,6 +183,36 @@ def test_continuation_pages_require_cursor_and_ignore_later_rows():
         assert second_events["counts"]["total"] == first_events["counts"]["total"]
 
 
+def test_entity_profile_count_and_snapshot_share_one_transaction(monkeypatch):
+    repo = _repo(ENTITY_EVENT_LIMIT)
+    toolbox = Toolbox(repo, "h1")
+    entity = toolbox.execute("get_finding", {"finding": "F1"})["data"]["finding"]["entities"][0]["alias"]
+    original = repo.create_entity_event_page_plan
+    inserted = False
+
+    def insert_before_snapshot(*args, **kwargs):
+        nonlocal inserted
+        if not inserted:
+            inserted = True
+            event = TypedEvent(
+                id="event-race", family="process_exec", ts=T + timedelta(minutes=2), host="web01",
+                outcome=Outcome.success,
+                fields={"process.argv": fv(["id"], "race:event.original")}, raw=[], normalizer="test@1",
+            )
+            repo.save_evidence("h1", [event], {}, None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "create_entity_event_page_plan", insert_before_snapshot)
+    first = toolbox.execute("entity_profile", {"entity": entity, "page": 1})
+    second = toolbox.execute("entity_profile", {
+        "entity": entity, "page": 2, "cursor": first["data"]["entity"]["cursor"],
+    })
+
+    assert first["counts"] == {"returned": ENTITY_EVENT_LIMIT, "total": ENTITY_EVENT_LIMIT + 1}
+    assert first["more"] is True
+    assert second["counts"] == {"returned": 1, "total": ENTITY_EVENT_LIMIT + 1}
+
+
 def test_list_findings_bounds_coverage_and_list_coverage_pages_a_stable_snapshot():
     repo = _repo(2)
     for index in range(300):

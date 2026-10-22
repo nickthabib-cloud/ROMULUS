@@ -718,11 +718,12 @@ class Toolbox:
         else:
             if args.page != 1:
                 return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
-            total, families = self.repo.entity_event_counts(entity_id)
             cursor = "R" + uuid4().hex[:20]
-            self.repo.create_entity_event_page_plan(
-                self.hunt_id, cursor, identity, {"families": families}, entity_id,
+            plan = self.repo.create_entity_event_page_plan(
+                self.hunt_id, cursor, identity, entity_id,
             )
+            total = int(plan["item_count"])
+            families = plan["summary"]["families"]
         start = (args.page - 1) * ENTITY_EVENT_LIMIT
         page_ids = [item["event_id"] for item in self.repo.agent_page_items(
             self.hunt_id, cursor, offset=start, limit=ENTITY_EVENT_LIMIT,
