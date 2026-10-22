@@ -1103,17 +1103,30 @@ class PivotExecutor:
     @staticmethod
     def _retain(request: ToolRequest, event: TypedEvent) -> bool:
         args = request.arguments
+        windows_host = event.get("host.os.family") == "windows" or event.normalizer.startswith("windows-")
+
+        def same_host(left: object, right: object) -> bool:
+            left_text = str(left or "").strip().rstrip(".")
+            right_text = str(right or "").strip().rstrip(".")
+            if windows_host:
+                return left_text.split(".", 1)[0].casefold() == right_text.split(".", 1)[0].casefold()
+            return left_text == right_text
+
         if isinstance(request, EntityTimelineRequest):
             entity = args.entity
-            return any(item.kind == entity.kind and item.value == entity.value for item in _event_entities(event))
+            return any(
+                item.kind == entity.kind
+                and (same_host(item.value, entity.value) if entity.kind == "host" else item.value == entity.value)
+                for item in _event_entities(event)
+            )
         if isinstance(request, AuthActivityRequest):
             if event.family not in {"auth", "privilege_use"}:
                 return False
             entity = args.entity
-            return (event.host == entity.value if entity.kind == "host" else
+            return (same_host(event.host, entity.value) if entity.kind == "host" else
                     any(item.kind == "account" and item.value == entity.value for item in _event_entities(event)))
         if isinstance(request, ProcessTreeRequest):
-            if event.host != args.host:
+            if not same_host(event.host, args.host):
                 return False
             if event.get("host.os.family") == "windows":
                 return event.family in {"process_exec", "process_termination", "system_state"}
@@ -1123,7 +1136,7 @@ class PivotExecutor:
             if event.family != "net_alert":
                 return False
             entity = args.entity
-            return (event.host == entity.value if entity.kind == "host" else
+            return (same_host(event.host, entity.value) if entity.kind == "host" else
                     any(item.kind == "ip" and item.value == entity.value for item in _event_entities(event)))
         return False
 
@@ -1132,7 +1145,9 @@ class PivotExecutor:
         events: list[TypedEvent], args: ProcessTreeArgs, anchor_ts: datetime | None,
     ) -> tuple[list[TypedEvent], str | None]:
         candidates = sorted(
-            (event for event in events if event.host == args.host),
+            (event for event in events
+             if str(event.host or "").strip().rstrip(".").split(".", 1)[0].casefold()
+             == str(args.host).strip().rstrip(".").split(".", 1)[0].casefold()),
             key=lambda event: (event.ts, event.id),
         )
         roots = [
@@ -1182,6 +1197,20 @@ class PivotExecutor:
             if event.family == "process_exec" and lower <= event.ts < upper
             and args.process_id in {event.get("process.pid"), event.get("process.ppid")}
         ], None
+
+    @staticmethod
+    def _select_process_tree_by_os(
+        events: list[TypedEvent], args: ProcessTreeArgs, anchor_ts: datetime | None,
+    ) -> tuple[list[TypedEvent], str | None]:
+        """Fence only Windows PID lineage; mixed-source Linux results keep Linux semantics."""
+        windows = [event for event in events if event.get("host.os.family") == "windows"
+                   or event.normalizer.startswith("windows-")]
+        if not windows:
+            return events, None
+        windows_objects = {id(event) for event in windows}
+        other = [event for event in events if id(event) not in windows_objects]
+        selected, reason = PivotExecutor._select_windows_process_tree(windows, args, anchor_ts)
+        return [*other, *selected], reason
 
     def run(self, case_id: str, request: ToolRequest, *,
             anchor_ts: datetime | None = None) -> PivotResult:
@@ -1314,10 +1343,8 @@ class PivotExecutor:
             )
             self.repo.update_task(task_id, "evaluated", owner_token=self.owner_token)
 
-        if isinstance(request, ProcessTreeRequest) and any(
-            self.contracts[intent.target].os_family == "windows" for intent in intents
-        ):
-            retained, fence_reason = self._select_windows_process_tree(
+        if isinstance(request, ProcessTreeRequest):
+            retained, fence_reason = self._select_process_tree_by_os(
                 retained, request.arguments, anchor_ts,
             )
             if fence_reason:

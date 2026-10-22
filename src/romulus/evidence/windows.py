@@ -15,6 +15,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 
 WINDOWS_NORMALIZER = "windows-ecs@1"
 _GUID = re.compile(r"^\{?([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\}?$")
+_SID = re.compile(r"^S-\d+(?:-\d+)+$", re.IGNORECASE)
 
 
 class WindowsInputError(ValueError):
@@ -128,9 +129,9 @@ def _get(source: dict, path: str):
 
 def is_windows_source(source: dict) -> bool:
     """Require an Elastic Agent Windows dataset or Winlogbeat's own agent marker."""
-    dataset = _get(source, "data_stream.dataset") or _get(source, "event.dataset")
+    datasets = (_get(source, "data_stream.dataset"), _get(source, "event.dataset"))
     winlogbeat = str(_get(source, "agent.type") or "").casefold() == "winlogbeat"
-    return (isinstance(dataset, str) and dataset.casefold() in WINDOWS_DATASETS) or (
+    return any(isinstance(dataset, str) and dataset.casefold() in WINDOWS_DATASETS for dataset in datasets) or (
         winlogbeat and isinstance(source.get("winlog"), dict)
     )
 
@@ -283,26 +284,29 @@ def _put(fields: dict[str, FieldValue], record: WindowsRecord, typed: str, *nati
         return
 
 
-def _account(record: WindowsRecord, prefix: str) -> tuple[str | None, str | None, str | None]:
+def _account(record: WindowsRecord, prefix: str) -> tuple[str | None, str | None, str | None, str | None]:
     sid = record.value(f"{prefix}UserSid")
     domain = record.value(f"{prefix}DomainName")
     name = record.value(f"{prefix}UserName")
-    if sid and str(sid) not in {"-", "S-1-0-0"}:
-        key = f"sid:{str(sid).casefold()}"
+    sid_text = str(sid).strip() if sid is not None else ""
+    if _SID.fullmatch(sid_text) and sid_text.casefold() != "s-1-0-0":
+        key = f"sid:{sid_text.casefold()}"
+        origin = record.origin(f"{prefix}UserSid")
     elif name:
         joined = f"{domain}\\{name}" if domain and str(domain) not in {"-", "."} else str(name)
         key = f"name:{joined.casefold()}"
+        origin = record.origin(f"{prefix}UserName")
     else:
         key = None
-    return key, str(domain).casefold() if domain else None, str(name).casefold() if name else None
+        origin = None
+    return key, str(domain).casefold() if domain else None, str(name).casefold() if name else None, origin
 
 
 def _account_fields(fields: dict[str, FieldValue], record: WindowsRecord) -> None:
-    subject, subject_domain, subject_name = _account(record, "Subject")
-    target, target_domain, target_name = _account(record, "Target")
+    subject, subject_domain, subject_name, subject_origin = _account(record, "Subject")
+    target, target_domain, target_name, target_origin = _account(record, "Target")
     if subject:
-        origin = record.origin("SubjectUserSid") if record.value("SubjectUserSid") else record.origin("SubjectUserName")
-        fields["user.entity_id"] = fv(subject, origin)
+        fields["user.entity_id"] = fv(subject, subject_origin)
     if subject_name:
         fields["user.name"] = fv(subject_name, record.origin("SubjectUserName"))
     if subject_domain:
@@ -316,9 +320,8 @@ def _account_fields(fields: dict[str, FieldValue], record: WindowsRecord) -> Non
         if separator:
             fields["user.domain"] = fv(domain.casefold(), record.origin("User"))
     if target:
-        origin = record.origin("TargetUserSid") if record.value("TargetUserSid") else record.origin("TargetUserName")
-        fields["auth.target_account"] = fv(target, origin)
-        fields["auth.target_user"] = fv(target, origin)
+        fields["auth.target_account"] = fv(target, target_origin)
+        fields["auth.target_user"] = fv(target, target_origin)
     if target_name:
         fields["account.name"] = fv(target_name, record.origin("TargetUserName"))
     if target_domain:

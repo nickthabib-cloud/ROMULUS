@@ -81,7 +81,9 @@ def _pred(p: Predicate, contract: FieldContract) -> dict:
             "bool": {"should": clauses, "minimum_should_match": 1}
         }
     if p.field == "host.name" and p.op == "eq" and spec.native == "winlog.computer_name":
-        value = _escape_wildcard(str(p.value).strip().rstrip("."))
+        # Normalized Windows hosts use their first DNS label. Query both the native
+        # short form and any FQDN regardless of which form the caller supplied.
+        value = _escape_wildcard(str(p.value).strip().rstrip(".").split(".", 1)[0])
         clauses = [
             {"wildcard": {spec.native: {"value": pattern, "case_insensitive": True}}}
             for pattern in (value, f"{value}.*")

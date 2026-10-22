@@ -1890,10 +1890,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     for h in hits:
         ds = _get(h["_source"], "event.dataset") or ""
         try:
-            if not ds and is_arkime_session(h["_source"]):
-                ds = "arkime.session"
-                events.append(normalize_arkime_session(h))
-            elif is_windows_source(h["_source"]):
+            if is_windows_source(h["_source"]):
                 windows_event = normalize_windows(h)
                 logical_key = windows_record_key(h)
                 prior = windows_events.get(logical_key) if logical_key is not None else None
@@ -1905,6 +1902,9 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                     known = {raw.key for raw in prior.raw}
                     prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)
                     skips["duplicate Windows event copy (computer/channel/record_id)"] += 1
+            elif not ds and is_arkime_session(h["_source"]):
+                ds = "arkime.session"
+                events.append(normalize_arkime_session(h))
             elif ds == "linux.audit":
                 audit_hits.append(h)
             elif ds.startswith("suricata.eve"):

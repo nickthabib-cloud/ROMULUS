@@ -137,6 +137,53 @@ def test_short_windows_host_predicate_is_a_case_insensitive_fqdn_superset():
     assert all(next(iter(item["wildcard"].values()))["case_insensitive"] for item in host_filter["bool"]["should"])
 
 
+def test_fqdn_windows_host_predicate_also_retrieves_native_short_names():
+    contract = contract_from_types("idx", _windows_types(), role="host")
+    query = build_query(SearchIntent(
+        kind="raw", target="idx", window=Window(start=START, end=END),
+        filters=[Predicate(field="host.name", op="eq", value="WS01.Example.Test.")],
+    ), contract)
+
+    host_filter = query["bool"]["filter"][1]
+    patterns = [next(iter(item["wildcard"].values()))["value"] for item in host_filter["bool"]["should"]]
+    assert patterns == ["WS01", "WS01.*"]
+
+
+def test_windows_host_retention_treats_short_and_fqdn_names_as_the_same_host():
+    event = _event(1, data={"ProcessId": "512"})
+    request = ProcessTreeRequest(
+        tool="process_tree",
+        arguments=ProcessTreeArgs(host="WS01.Example.Test", process_id=512, start=START, end=END),
+    )
+
+    assert PivotExecutor._retain(request, event)
+
+
+def test_security_4688_parent_pid_alias_includes_native_process_id():
+    contract = contract_from_types("idx", _windows_types(), role="host")
+    query = build_query(SearchIntent(
+        kind="raw", target="idx", window=Window(start=START, end=END),
+        filters=[Predicate(field="process.ppid", op="eq", value=512)],
+    ), contract)
+
+    natives = {next(iter(clause["term"])) for clause in query["bool"]["filter"][1]["bool"]["should"]}
+    assert "winlog.event_data.ProcessId" in natives
+
+
+def test_data_stream_dataset_is_an_explicit_typed_alias():
+    types = _windows_types()
+    types.pop("event.dataset")
+    types["data_stream.dataset"] = "constant_keyword"
+    contract = contract_from_types("idx", types, role="host")
+
+    query = build_query(SearchIntent(
+        kind="raw", target="idx", window=Window(start=START, end=END),
+        filters=[Predicate(field="event.dataset", op="in", value=["system.security"])],
+    ), contract)
+
+    assert query["bool"]["filter"][1] == {"terms": {"data_stream.dataset": ["system.security"]}}
+
+
 def test_forwarded_events_are_retrieved_and_mapped_to_every_w0_windows_family():
     assert "windows.forwarded" in WINDOWS_HOST_DATASETS
     assert WINDOWS_DATASET_FAMILIES["windows.forwarded"] == frozenset(
@@ -320,3 +367,22 @@ def test_windows_process_tree_prefers_process_guid_lineage_over_pid_reuse():
 
     assert {event.id for event in selected} == {"root", "child"}
     assert reason is None
+
+
+def test_mixed_source_process_tree_applies_windows_fences_without_dropping_linux_events():
+    windows = _event(1, data={"ProcessId": "512"}).model_copy(
+        update={"id": "windows", "ts": START + timedelta(minutes=10)}
+    )
+    linux = windows.model_copy(update={
+        "id": "linux", "normalizer": "lab-ecs@9",
+        "fields": {
+            "process.pid": windows.fields["process.pid"],
+            "process.ppid": windows.fields.get("process.ppid"),
+        },
+    })
+    args = ProcessTreeArgs(host="ws01", process_id=512, start=START, end=END)
+
+    selected, reason = PivotExecutor._select_process_tree_by_os([linux, windows], args, windows.ts)
+
+    assert {event.id for event in selected} == {"linux", "windows"}
+    assert reason == "process_tree PID fence evidence unavailable"

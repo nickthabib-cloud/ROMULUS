@@ -99,6 +99,7 @@ ARKIME_SESSION_MARKERS = ("firstPacket", "lastPacket", "network.community_id")
 # A flattened Winlogbeat/Elastic Agent object does not expose child mappings, so aliases name the native leaf.
 # Forwarded events deliberately map host identity to the computer that wrote the event, not the collector.
 WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
+    "event.dataset": ("event.dataset", "data_stream.dataset"),
     "event.channel": ("winlog.channel",),
     "event.provider": ("winlog.provider_name",),
     "event.code": ("winlog.event_id",),
@@ -108,7 +109,10 @@ WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
         "winlog.event_data.Image", "winlog.event_data.NewProcessName", "winlog.event_data.ProcessName",
     ),
     "process.pid": ("winlog.event_data.ProcessId", "winlog.event_data.NewProcessId"),
-    "process.ppid": ("winlog.event_data.ParentProcessId", "winlog.event_data.CreatorProcessId"),
+    "process.ppid": (
+        "winlog.event_data.ParentProcessId", "winlog.event_data.CreatorProcessId",
+        "winlog.event_data.ProcessId",
+    ),
     "process.guid": ("winlog.event_data.ProcessGuid",),
     "process.parent.guid": ("winlog.event_data.ParentProcessGuid",),
     "auth.session_id": ("winlog.event_data.TargetLogonId", "winlog.event_data.SubjectLogonId"),
@@ -222,8 +226,9 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
     # Arkime sessions: time is the first packet; the "dataset" is the session protocol and the
     # reporting host is the capture node
     windows = "winlog.computer_name" in field_types
+    dataset_field = "event.dataset" if "event.dataset" in field_types else "data_stream.dataset"
     tf, ds_field, host_field = (("firstPacket", "protocol", "node") if schema == "arkime_sessions"
-                                else ("@timestamp", "event.dataset",
+                                else ("@timestamp", dataset_field,
                                       "winlog.computer_name" if windows else "host.name"))
     body = {
         "size": 0, "track_total_hits": True,

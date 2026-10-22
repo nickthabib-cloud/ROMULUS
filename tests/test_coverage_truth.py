@@ -27,7 +27,7 @@ from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.sweep import Sweep
 from romulus.report import markdown
-from romulus.report.manifest import _coverage, publish_revision
+from romulus.report.manifest import _coverage, _not_assessed, publish_revision
 from romulus.sources import packets as pk
 from romulus.sources.es import ElasticClient
 from romulus.sources.models import Completeness, SearchOutcome, Window
@@ -541,6 +541,22 @@ def test_unknown_windows_event_classes_are_listed_but_do_not_poison_unrelated_ru
     assert _coverage_row(manifest, NEGATIVE_RULE)["negative_claim"] == "complete"
     item = next(item for item in manifest["coverage"]["not_assessed"] if reason in item["reason"])
     assert item["records"] == 1
+
+
+def test_scoped_windows_skips_do_not_hide_unscoped_linux_skips_in_mixed_hunts():
+    detail = {"stats": {
+        "skips": {"Windows unknown": 2, "journal noise": 3},
+        "skips_by_target": {"windows-target": {"Windows unknown": 2}},
+    }}
+
+    rows = _not_assessed({}, detail)
+
+    assert {(
+        row["target"], row["records"], row["reason"].rsplit(": ", 1)[-1]
+    ) for row in rows} == {
+        ("windows-target", 2, "Windows unknown"),
+        ("all sweep targets", 3, "journal noise"),
+    }
 
 
 def test_a_target_without_a_dataset_inventory_still_says_what_was_not_retrieved(monkeypatch):

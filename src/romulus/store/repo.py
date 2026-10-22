@@ -1012,10 +1012,15 @@ class Repo:
             # get this hunt's entity rows, which deletion relies on to keep events another hunt uses
             ids = sorted({event.id for event in events})
             own_ids: set[str] = set()
+            existing: dict[str, dict] = {}
             for start in range(0, len(ids), 500):
-                own_ids.update(c.execute(select(t.typed_event.c.id).where(
-                    t.typed_event.c.id.in_(ids[start:start + 500]), t.typed_event.c.hunt_id == hunt_id,
-                )).scalars())
+                for row in c.execute(select(
+                    t.typed_event.c.id, t.typed_event.c.hunt_id,
+                    t.typed_event.c.event, t.typed_event.c.raw_ids,
+                ).where(t.typed_event.c.id.in_(ids[start:start + 500]))).mappings():
+                    existing[row["id"]] = dict(row)
+                    if row["hunt_id"] == hunt_id:
+                        own_ids.add(row["id"])
             raw_rows, ev_rows, ent_rows, link_rows = [], [], {}, []
             for e in events:
                 for r in e.raw:
@@ -1037,9 +1042,66 @@ class Repo:
                     link_rows.append({"event_id": e.id, "entity_id": eid, "role": role})
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
             _upsert_ignore(c, t.typed_event, ev_rows, ["id"])
+            self._merge_stored_raw(c, existing, events)
             self._fill_boot(c, events)
             _upsert_ignore(c, t.entity, list(ent_rows.values()), ["id"])
             _upsert_ignore(c, t.event_entity, link_rows, ["event_id", "entity_id", "role"])
+
+    @staticmethod
+    def _merge_stored_raw(c, existing: dict[str, dict], events: list) -> None:
+        """Attach later source copies to an existing stable event without changing its owner hunt."""
+        for event in events:
+            row = existing.get(event.id)
+            if row is None:
+                continue
+            stored = dict(row["event"])
+            stored_raw = list(stored.get("raw") or [])
+            known = {(item.get("target"), item.get("native_id")) for item in stored_raw}
+            additions = [raw.model_dump(mode="json") for raw in event.raw
+                         if (raw.target, raw.native_id) not in known]
+            if not additions:
+                continue
+            merged_ids = list(dict.fromkeys([
+                *(row["raw_ids"] or []),
+                *(raw_id(raw.target, raw.native_id) for raw in event.raw),
+            ]))
+            stored["raw"] = [*stored_raw, *additions]
+            c.execute(t.typed_event.update().where(t.typed_event.c.id == event.id).values(
+                event=stored, raw_ids=merged_ids,
+            ))
+            row["event"] = stored
+            row["raw_ids"] = merged_ids
+
+    def merge_evidence_raw(self, hunt_id: str, events: Iterable, raw_sources: dict[str, dict], *,
+                           owner_token: str | None = None) -> None:
+        """Merge raw copies only when a cited event already exists; never persist an uncited event."""
+        events = list(events)
+        ids = sorted({event.id for event in events})
+        if not ids:
+            return
+        with write_txn(self.engine) as c:
+            self._fence_lease(c, hunt_id, owner_token)
+            existing: dict[str, dict] = {}
+            for start in range(0, len(ids), 500):
+                for row in c.execute(select(
+                    t.typed_event.c.id, t.typed_event.c.hunt_id,
+                    t.typed_event.c.event, t.typed_event.c.raw_ids,
+                ).where(t.typed_event.c.id.in_(ids[start:start + 500]))).mappings():
+                    existing[row["id"]] = dict(row)
+            raw_rows = []
+            for event in events:
+                if event.id not in existing:
+                    continue
+                for raw in event.raw:
+                    source = raw_sources.get(raw.key)
+                    if source is not None:
+                        raw_rows.append({
+                            "id": raw_id(raw.target, raw.native_id), "target": raw.target,
+                            "native_id": raw.native_id, "digest": raw.digest, "source": source,
+                            "first_task_id": None, "retrieved_at": utcnow(),
+                        })
+            _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
+            self._merge_stored_raw(c, existing, events)
 
     @staticmethod
     def _fill_boot(c, events: list) -> None:

@@ -53,21 +53,61 @@ class EventStage:
         self.db.execute("CREATE TABLE raw (key TEXT PRIMARY KEY, body TEXT NOT NULL)")
         self.events = 0
 
-    def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
-        """Stage events and the raw copies they cite. Idempotent: re-reading a partition is safe. The first staged
-        copy of an event id is kept; a repeated id is not serialized again."""
+    @staticmethod
+    def _merge_raw(first: TypedEvent, later: TypedEvent) -> tuple[TypedEvent, bool]:
+        known = {raw.key for raw in first.raw}
+        additions = [raw for raw in later.raw if raw.key not in known]
+        if not additions:
+            return first, False
+        return first.model_copy(update={"raw": [*first.raw, *additions]}), True
+
+    def _store(self, events: list[TypedEvent], raw_sources: dict[str, dict], *, classify: bool
+               ) -> tuple[list[TypedEvent], list[TypedEvent]]:
         if not events:
-            return
-        first: dict[str, TypedEvent] = {}
-        for e in events:
-            first.setdefault(e.id, e)
-        self.db.executemany("INSERT OR IGNORE INTO event VALUES (?, ?)",
-                            [(eid, e.model_dump_json()) for eid, e in first.items()])
+            return [], []
+        ids = sorted({event.id for event in events})
+        stored: dict[str, TypedEvent] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ",".join("?" * len(chunk))
+            for event_id, body in self.db.execute(
+                f"SELECT id, body FROM event WHERE id IN ({marks})", chunk,
+            ):
+                stored[event_id] = TypedEvent.model_validate_json(body)
+        fresh: list[TypedEvent] = []
+        duplicates: list[TypedEvent] = []
+        inserts: list[tuple[str, str]] = []
+        updates: list[tuple[str, str]] = []
+        for event in events:
+            prior = stored.get(event.id)
+            if prior is None:
+                stored[event.id] = event
+                fresh.append(event)
+                inserts.append((event.id, event.model_dump_json()))
+                continue
+            merged, changed = self._merge_raw(prior, event)
+            stored[event.id] = merged
+            if changed:
+                updates.append((merged.model_dump_json(), event.id))
+            if classify:
+                duplicates.append(merged)
+        self.db.executemany("INSERT OR IGNORE INTO event VALUES (?, ?)", inserts)
+        self.db.executemany("UPDATE event SET body = ? WHERE id = ?", updates)
         raws = {r.key: raw_sources[r.key] for e in events for r in e.raw if r.key in raw_sources}
         self.db.executemany("INSERT OR IGNORE INTO raw VALUES (?, ?)",
                             [(k, json.dumps(v, sort_keys=True)) for k, v in raws.items()])
         self.db.commit()
         self.events += len(events)
+        return fresh, duplicates
+
+    def unique(self, events: list[TypedEvent], raw_sources: dict[str, dict]
+               ) -> tuple[list[TypedEvent], list[TypedEvent]]:
+        """Return events not seen earlier in this sweep and merge later raw copies on disk."""
+        return self._store(events, raw_sources, classify=True)
+
+    def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+        """Stage cited events and raw copies, merging provenance for repeated stable ids."""
+        self._store(events, raw_sources, classify=False)
 
     def load(self, ids: list[str]) -> list[TypedEvent]:
         out: dict[str, TypedEvent] = {}

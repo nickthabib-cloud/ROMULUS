@@ -187,6 +187,18 @@ def test_accounts_are_sid_first_then_domain_name_case_insensitively():
     assert name.get("auth.target_account") == r"name:example\alice"
 
 
+@pytest.mark.parametrize("sid", ["not-a-sid", "s-1-0-0"])
+def test_invalid_and_sentinel_sids_fall_back_to_name_with_name_lineage(sid):
+    event = normalize_hits([_hit(4624, data={
+        "TargetUserSid": sid,
+        "TargetDomainName": "EXAMPLE",
+        "TargetUserName": "Alice",
+    })])[0][0]
+
+    assert event.get("auth.target_account") == r"name:example\alice"
+    assert event.fields["auth.target_account"].origin.endswith("TargetUserName")
+
+
 def test_sysmon_process_user_is_a_case_insensitive_account_identity():
     event = normalize_hits(
         [

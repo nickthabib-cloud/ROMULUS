@@ -10,7 +10,7 @@ from romulus.hunt import sweep as sw
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.store import schema as t
 from romulus.store.db import make_engine, migrate, write_txn
-from romulus.store.repo import Repo, _upsert_ignore
+from romulus.store.repo import Repo, _upsert_ignore, raw_id
 
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 # SQLite's default limit on bind parameters in one statement (SQLITE_MAX_VARIABLE_NUMBER since 3.32)
@@ -72,6 +72,40 @@ def test_save_evidence_takes_a_batch_larger_than_one_statement_can_bind(tmp_path
         assert count(t.typed_event) == 12_000 and count(t.raw_record) == 36_000
         assert count(t.event_entity) == 12_000 * 3
     assert repo.events_by_ids(["e000042"])[0]["event"] == events[42].model_dump(mode="json")
+
+
+def test_stage_deduplicates_across_calls_and_merges_later_raw_provenance(tmp_path):
+    stage = stage_mod.EventStage(tmp_path)
+    first = _event(1).model_copy(update={"raw": [RawRef(target="a", native_id="1", digest="a")]})
+    later = first.model_copy(update={"raw": [RawRef(target="b", native_id="2", digest="b")]})
+
+    assert stage.unique([first], {"a/1": {"copy": 1}}) == ([first], [])
+    fresh, duplicates = stage.unique([later], {"b/2": {"copy": 2}})
+    merged = stage.load([first.id])[0]
+
+    assert fresh == [] and len(duplicates) == 1
+    assert {raw.key for raw in merged.raw} == {"a/1", "b/2"}
+    assert stage.raw_sources([merged]) == {"a/1": {"copy": 1}, "b/2": {"copy": 2}}
+    stage.close()
+
+
+def test_same_event_seen_by_another_hunt_merges_raw_provenance_without_reownership():
+    repo = _repo()
+    repo.create_hunt("h2", {"targets": ["other"]}, "d2", "t")
+    first = _event(2).model_copy(update={"raw": [RawRef(target="a", native_id="1", digest="a")]})
+    later = first.model_copy(update={"raw": [
+        RawRef(target="a", native_id="1", digest="a"),
+        RawRef(target="b", native_id="2", digest="b"),
+    ]})
+
+    repo.save_evidence("h1", [first], {"a/1": {"copy": 1}}, None)
+    repo.save_evidence("h2", [later], {"b/2": {"copy": 2}}, None)
+    stored = repo.events_by_ids([first.id])[0]
+
+    assert stored["hunt_id"] == "h1"
+    raw_ids = {raw_id("a", "1"), raw_id("b", "2")}
+    assert set(stored["raw_ids"]) == raw_ids
+    assert {raw["id"] for raw in repo.raw_records(sorted(raw_ids))} == raw_ids
 
 
 def test_rule_cells_written_together_match_cells_written_one_by_one():

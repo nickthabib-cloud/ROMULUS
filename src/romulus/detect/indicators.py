@@ -307,13 +307,17 @@ class IndicatorMatch(Playbook):
             e0 = evs[0]
             span = f"{evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}"
             listed = f"indicator {ind.id} ({ind.label}, list {ind.source})"
+            process_record = ("Windows process-creation" if e0.get("host.os.family") == "windows"
+                              else "auditd exec")
+            executable_source = ("recorded executable" if e0.get("host.os.family") == "windows"
+                                 else "kernel-recorded executable")
             if role == "executed":
-                claim = (f"{n} auditd exec record(s) on {host} show a program whose kernel-recorded executable is named "
+                claim = (f"{n} {process_record} record(s) on {host} show a program whose {executable_source} is named "
                          f"'{value}' ({e0.get('process.executable')}), matching {listed} ({span}). The name matches; "
                          f"whether the program is that tool is not established, and a renamed copy would not match.")
                 lane, claim_type = ind.lane, "observed_action"
             elif role == "script":
-                claim = (f"{n} auditd exec record(s) on {host} show an interpreter started with script operand "
+                claim = (f"{n} {process_record} record(s) on {host} show an interpreter started with script operand "
                          f"'{value}', matching {listed} ({span}). The argv names the script; its content is not "
                          f"verified.")
                 lane, claim_type = ind.lane, "script_content"

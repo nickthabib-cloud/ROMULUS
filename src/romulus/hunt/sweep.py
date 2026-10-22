@@ -451,11 +451,15 @@ class Sweep:
             self.repo.update_task(tid, "failed", error=out.error)
             return
         events, skips, errors = normalize_hits(out.records, self.boots)
+        raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
+        events, duplicate_events = self._event_stage().unique(events, raw_sources)
+        if duplicate_events:
+            skips["duplicate typed event across source partitions"] = len(duplicate_events)
+            self.repo.merge_evidence_raw(self.hunt_id, duplicate_events, raw_sources)
         self.stats["events"] += len(events)
         self._count_boots(events)
         self.stats["errors"] += len(errors)
         self._record_skips(target, skips)
-        raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
         # records retrieved but of a dataset/event type no normalizer supports: we cannot say what
         # they contain, so no rule may claim a complete negative over this partition
         unsupported = self._unsupported_skips(skips)

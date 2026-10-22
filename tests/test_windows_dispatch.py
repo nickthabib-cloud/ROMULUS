@@ -92,6 +92,30 @@ def test_windows_shipper_marker_wins_over_a_conflicting_linux_dataset_label():
     assert skips == {} and errors == []
 
 
+def test_each_dataset_marker_is_checked_independently_when_the_other_conflicts():
+    hit = _hit(dataset="system.security", agent_type="filebeat", channel="Security",
+               provider="Microsoft-Windows-Security-Auditing", event_id=4688)
+    hit["_source"]["data_stream"]["dataset"] = "custom.application"
+
+    events, skips, errors = normalize_hits([hit])
+
+    assert len(events) == 1 and events[0].normalizer == "windows-ecs@1"
+    assert skips == {} and errors == []
+
+
+def test_windows_marker_wins_over_an_arkime_shaped_record():
+    hit = _hit()
+    hit["_source"]["event"].pop("dataset")
+    hit["_source"]["firstPacket"] = 1
+    hit["_source"]["lastPacket"] = 2
+    hit["_source"]["network"] = {"community_id": "1:example="}
+
+    events, skips, errors = normalize_hits([hit])
+
+    assert len(events) == 1 and events[0].normalizer == "windows-ecs@1"
+    assert skips == {} and errors == []
+
+
 def test_message_is_never_parsed_and_structured_fields_win_over_xml():
     xml = _xml(command_line="xml-payload.exe")
     hit = _hit(

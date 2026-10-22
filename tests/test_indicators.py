@@ -85,6 +85,19 @@ def test_name_match_is_case_insensitive_and_grouped(rule):
     assert len(m) == 1 and m[0].claim.startswith("2 auditd exec record(s)")
 
 
+def test_windows_executable_basename_matches_and_claim_does_not_call_it_auditd(rule):
+    event = exec_event([], r"C:\Tools\LINPEAS.EXE")
+    event.fields["host.os.family"] = fv("windows", "fixture:os")
+    # Reuse the loaded rule shape while making the assertion independent of the repository's indicator files.
+    indicator = next(item for item in rule.set.indicators if item.id == "t.linpeas")
+    rule.names = {"linpeas.exe": indicator}
+
+    [match] = run(rule, event)
+
+    assert "executable is named 'LINPEAS.EXE'" in match.claim
+    assert "auditd" not in match.claim
+
+
 # ---- network indicators ------------------------------------------------------------------------
 
 def test_address_and_range_match_typed_address_fields(rule):
