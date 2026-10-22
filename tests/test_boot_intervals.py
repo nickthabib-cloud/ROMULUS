@@ -31,7 +31,7 @@ from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.store.db import make_engine, migrate
-from romulus.store.repo import Repo
+from romulus.store.repo import DERIVED_BOOT_SUFFIX, Repo
 from tests.test_boot_identity import (
     BOOT_A,
     BOOT_B,
@@ -550,6 +550,59 @@ def _repo():
     repo = Repo(engine)
     repo.create_hunt("h1", {"targets": []}, "digest", "test")
     return repo, engine
+
+
+def _stored_boot(repo, event_id):
+    row = repo.events_by_ids([event_id])[0]
+    return (row["event"]["fields"].get("host.boot.id") or {}).get("value"), (
+        row["event"]["fields"].get("host.boot.id") or {}).get("origin")
+
+
+def _with_boot(event, boot_id, origin):
+    fields = {k: v for k, v in event.fields.items() if k != "host.boot.id"}
+    if boot_id is not None:
+        fields["host.boot.id"] = fv(boot_id, origin)
+    return event.model_copy(update={"fields": fields})
+
+
+def test_a_stored_row_never_takes_a_derived_boot_forward_but_a_recorded_one_replaces_a_derived_one():
+    derived = f"a0..a2{BOOT_INTERVAL_ORIGIN}"
+    base = _session_record("exec-1", 0)
+    repo, _engine = _repo()
+    # stored without a boot; a later copy with a map-placed boot leaves the row alone
+    repo.save_evidence("h1", [base], {}, None)
+    repo.save_evidence("h1", [_with_boot(base, BOOT_A, derived)], {}, None)
+    assert _stored_boot(repo, "exec-1") == (None, None)
+    # a recorded boot (journald copy or shipper field) fills it
+    repo.save_evidence("h1", [_with_boot(base, BOOT_A, "c1:event.original#journal:_BOOT_ID")], {}, None)
+    assert _stored_boot(repo, "exec-1") == (BOOT_A, "c1:event.original#journal:_BOOT_ID")
+    # a recorded boot is never overwritten, by a derived or another recorded one
+    repo.save_evidence("h1", [_with_boot(base, BOOT_B, derived)], {}, None)
+    repo.save_evidence("h1", [_with_boot(base, BOOT_B, "x:host.boot.id")], {}, None)
+    assert _stored_boot(repo, "exec-1") == (BOOT_A, "c1:event.original#journal:_BOOT_ID")
+    # first stored with a derived boot: a recorded one replaces it, a derived one does not
+    other = _session_record("exec-2", 10)
+    repo.save_evidence("h1", [_with_boot(other, BOOT_A, derived)], {}, None)
+    repo.save_evidence("h1", [_with_boot(other, BOOT_B, f"b0..b1{BOOT_INTERVAL_ORIGIN}")], {}, None)
+    assert _stored_boot(repo, "exec-2") == (BOOT_A, derived)
+    repo.save_evidence("h1", [_with_boot(other, BOOT_B, "x:host.boot.id")], {}, None)
+    assert _stored_boot(repo, "exec-2") == (BOOT_B, "x:host.boot.id")
+
+
+def test_the_store_and_the_normalizer_agree_on_the_derived_boot_suffix():
+    assert DERIVED_BOOT_SUFFIX == BOOT_INTERVAL_ORIGIN
+
+
+def test_a_derived_boot_from_another_hunt_is_removed_by_a_hunt_without_a_map():
+    # rows are shared between hunts; a boot another hunt's map derived is not this hunt's evidence
+    event = aev("process_exec", at(500), process__pid=7)
+    two_boots().fill([event])
+    assert boot(event) == BOOT_A
+    BootIntervals().fill([event], rederive=True)
+    assert not event.has("host.boot.id")
+    recorded = aev("process_exec", at(500), boot=BOOT_B, process__pid=7)
+    BootIntervals().fill([recorded], rederive=True)
+    assert boot(recorded) == BOOT_B
 
 
 def _discovery(event_id, exe, argv, seconds):

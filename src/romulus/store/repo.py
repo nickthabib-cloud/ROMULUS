@@ -13,6 +13,17 @@ from sqlalchemy.dialects.sqlite import insert
 from romulus.store import schema as t
 from romulus.store.db import utcnow, write_txn
 
+# The origin suffix of a boot id a hunt's boot-interval map placed (the normalizer's BOOT_INTERVAL_ORIGIN; the
+# store does not import the evidence layer, and a test keeps the two equal).
+DERIVED_BOOT_SUFFIX = "#derived:boot-interval"
+
+
+def is_derived_boot(field: dict | None) -> bool:
+    """Whether a stored boot id field was placed by a boot-interval map rather than stated by a record."""
+    origin = (field or {}).get("origin")
+    return isinstance(origin, str) and origin.endswith(DERIVED_BOOT_SUFFIX)
+
+
 # Lanes an analyst may join with an asserted link (the report's reportable lanes).
 REPORTABLE_LANES = ("urgent", "high", "lead")
 
@@ -401,10 +412,13 @@ class Repo:
     @staticmethod
     def _fill_boot(c, ev_rows: list[dict]) -> None:
         """An audit event's boot id depends on its journald copy being in the same retrieval batch, so one event id
-        can be stored first without it (a link fetch) and seen later with it (the sweep). Fill a missing boot id
-        forward onto the stored row; a recorded one is never overwritten. Nothing else about the row changes."""
+        can be stored first without it (a link fetch) and seen later with it (the sweep). Fill a recorded boot id
+        forward onto the stored row when the row has none, or only one a boot-interval map placed (a hunt's
+        inference, see `is_derived_boot`); a map-placed boot id is never written forward, and a recorded one is
+        never overwritten. Nothing else about the row changes."""
         booted = {row["id"]: row["event"]["fields"]["host.boot.id"] for row in ev_rows
-                  if (row["event"].get("fields") or {}).get("host.boot.id", {}).get("value") not in (None, "")}
+                  if (row["event"].get("fields") or {}).get("host.boot.id", {}).get("value") not in (None, "")
+                  and not is_derived_boot(row["event"]["fields"]["host.boot.id"])}
         ids = sorted(booted)
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
@@ -412,7 +426,8 @@ class Repo:
                                  .where(t.typed_event.c.id.in_(chunk))).mappings():
                 stored = row["event"]
                 fields = stored.get("fields") or {}
-                if (fields.get("host.boot.id") or {}).get("value") not in (None, ""):
+                current = fields.get("host.boot.id") or {}
+                if current.get("value") not in (None, "") and not is_derived_boot(current):
                     continue
                 stored = {**stored, "fields": {**fields, "host.boot.id": booted[row["id"]]}}
                 c.execute(t.typed_event.update().where(t.typed_event.c.id == row["id"]).values(event=stored))

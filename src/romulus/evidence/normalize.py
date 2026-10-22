@@ -175,6 +175,7 @@ BOOT_FILL_FAMILIES = frozenset({"process_exec", "net_socket", "file_change", "au
 # when a program made a record and when journald received it, which is about a second. A larger clock step at a
 # reboot puts records of two boots at overlapping times, and a time inside two spans is never placed.
 BOOT_EDGE_SKEW = timedelta(seconds=30)
+# The origin suffix of a boot id this map placed: an inference of one hunt, never a record's statement.
 BOOT_INTERVAL_ORIGIN = "#derived:boot-interval"
 # Why an event without a boot id was not placed.
 UNPLACED_NO_CLOCK = "no host-clock time"
@@ -438,12 +439,12 @@ class BootIntervals:
     def fill(self, events: list[TypedEvent], *, rederive: bool = False, incremental: bool = False) -> Counter[str]:
         """Give each host-record event without a boot id the boot its host-clock time falls in, citing the span's
         first and last records, and return why the others were not placed. With `rederive`, a boot id an earlier,
-        smaller map derived is placed again by this one, and removed when this one cannot place it. A boot id a
-        record states is never changed. With `incremental` (the sweep, part way through its reading), placements
-        are remembered for checking against later records, and nothing is placed on a host where such a check has
-        failed. An empty map does nothing outside the sweep."""
+        smaller map (or another hunt's map: stored rows are shared) derived is placed again by this one, and
+        removed when this one cannot place it; an empty map removes it. A boot id a record states is never
+        changed. With `incremental` (the sweep, part way through its reading), placements are remembered for
+        checking against later records, and nothing is placed on a host where such a check has failed."""
         reasons: Counter[str] = Counter()
-        if not self.spans and not incremental:
+        if not self.spans and not incremental and not rederive:
             return reasons
         for event in events:
             if event.family not in BOOT_FILL_FAMILIES or not event.host:
