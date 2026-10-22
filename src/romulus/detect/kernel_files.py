@@ -562,7 +562,6 @@ class PersistencePathChange(Playbook):
     # Exec history: processes held at once (about 200 bytes each, so 60 MB) and execs per pid. Changes in persistence
     # locations are rare except package upgrades: about 600 bytes each, so 120 MB at the budget.
     EXEC_CAPACITY = 300_000
-    EXEC_PER_PID = 16
     MAX_CHANGES = 200_000
 
     def __init__(self):
@@ -573,7 +572,7 @@ class PersistencePathChange(Playbook):
         self.load = lambda ids: []
         self.changes: list[_Change] = []
         # (time, parent pid, executable, boot) per (host, pid), bounded; a root change pins the lineage it rests on
-        self.execs = ExecHistory(self.EXEC_CAPACITY, self.EXEC_PER_PID)
+        self.execs = ExecHistory(self.EXEC_CAPACITY, 2**62, self, "persistence_execs")
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
@@ -590,6 +589,7 @@ class PersistencePathChange(Playbook):
                 self._exec(event)
             else:
                 self._change(event)
+        self.execs.trim()
         return []
 
     def _exec(self, event: TypedEvent) -> None:
@@ -637,28 +637,6 @@ class PersistencePathChange(Playbook):
             ppid=event.get("process.ppid"), auid=_str(event.get("process.auid")), tty=_str(event.get("process.tty")),
             boot=boot_of(event),
             outcome=event.outcome))
-        if uid == "0":
-            self._pin(self.changes[-1])         # a root change's package lineage, held beyond process release
-
-    def _pin(self, change: _Change) -> None:
-        ppid, ts, boot = change.ppid, change.ts, change.boot
-        for _ in range(LINEAGE_DEPTH):
-            if not isinstance(ppid, int) or ppid <= 1:
-                return
-            parent = _latest(self.execs.get((change.host, ppid)), ts, boot)
-            if parent is None:
-                return
-            self.execs.pin((change.host, ppid), [parent])
-            ts, ppid, _exe, parent_boot = parent
-            boot = boot if boot is not None else parent_boot
-
-    def limit_reasons(self) -> list[str]:
-        if self.execs.evicted:
-            self.note_limit("lineage", f"exec records of {self.execs.evicted} process(es) were released to hold at "
-                                       f"most {self.EXEC_CAPACITY:,}; each root change's lineage was pinned when it "
-                                       f"was read, but a parent read after the change may be missing (the change is "
-                                       f"then reported per writing process, not as package activity)")
-        return super().limit_reasons()
 
     # ---------------------------------------------------------------- finalize
     def _manager(self, change: _Change) -> str | None:

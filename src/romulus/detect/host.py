@@ -6,12 +6,12 @@ import ipaddress
 import itertools
 import posixpath
 import re
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
-from romulus.detect.bounded import HeldExamples, RecentIds
+from romulus.detect.bounded import HeldExamples, KeyedStore, RecentIds
 from romulus.detect.linux_argv import canonical, read_operand_paths
 from romulus.evidence.shellparse import (
     SHELLS,
@@ -1300,27 +1300,22 @@ class Lineage(NamedTuple):
 
 
 class ProcessLineage:
-    """Exec-record ancestry on each host. Every process_exec record with a pid is remembered (a few per pid, a bounded
-    number overall, oldest forgotten first); a record's parent is the latest exec of its parent pid that began no
-    later than it did. The walk is only as complete as the retrieved exec records: a parent that did not exec
-    inside the window (a daemon started earlier) ends the chain. Lineage can therefore raise or explain a lane, but
-    its absence proves nothing."""
+    """Exec-record ancestry on each host. Every process_exec record with a pid is remembered (its latest PER_PID per
+    pid); a record's parent is the latest exec of its parent pid that began no later than it did. The CAPACITY most
+    recently used processes are held in memory and the rest on the owning rule's disk spill, read back when a walk
+    reaches them, so nothing is forgotten. The walk is only as complete as the retrieved exec records: a parent that
+    did not exec inside the window (a daemon started earlier) ends the chain. Lineage can therefore raise or explain
+    a lane, but its absence proves nothing."""
     DEPTH = 16
     CAPACITY = 100_000
     PER_PID = 4
 
-    def __init__(self):
-        self.records: OrderedDict[tuple[str | None, int], list[Ancestor]] = OrderedDict()
-        # Processes released to stay within CAPACITY (about 400 bytes each, so 40 MB): a walk through one of them
-        # stops early. A process found as a parent becomes recent, so a parent that keeps starting children stays.
-        self.evicted = 0
+    def __init__(self, owner=None):
+        self.records = KeyedStore(owner, "process_lineage", self.CAPACITY)
 
-    def note(self, playbook) -> None:
-        """State on the owning rule's coverage that lineage walks may have stopped early."""
-        if self.evicted:
-            playbook.note_limit("lineage", f"exec records of {self.evicted} process(es) were released to hold at most "
-                                           f"{self.CAPACITY:,}; a lineage walk through one stops early, so a "
-                                           f"lineage-based lane or wording may be missing")
+    def trim(self) -> None:
+        """Move the least recently used processes beyond CAPACITY to disk (when a batch ends)."""
+        self.records.trim()
 
     @staticmethod
     def entry(event: TypedEvent) -> Ancestor:
@@ -1349,10 +1344,9 @@ class ProcessLineage:
         key = (event.host, pid)
         entries = self.records.pop(key, [])
         entries = sorted([*entries, self.entry(event)], key=lambda a: (a.ts, a.event_id))[-self.PER_PID:]
-        self.records[key] = entries
-        while len(self.records) > self.CAPACITY:
-            self.records.popitem(last=False)
-            self.evicted += 1
+        if not self.records.put(key, entries) and self.records.owner is not None:
+            self.records.owner.note_limit("lineage", "exec records on disk reached the disk budget; a later "
+                                                     "process's lineage is not recorded")
 
     def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None) -> Ancestor | None:
         """The latest exec of `ppid` no later than `ts`, unless it was recorded in a boot other than `boot`: the
@@ -1360,12 +1354,9 @@ class ProcessLineage:
         if ppid is None or ppid <= 1:
             return None
         best = None
-        entries = self.records.get((host, ppid))
-        for entry in entries or ():
+        for entry in self.records.get((host, ppid)) or ():
             if entry.ts <= ts:
                 best = entry
-        if entries:
-            self.records.move_to_end((host, ppid))
         return None if best is not None and boots_conflict(boot, best.boot) else best
 
     def classify(self, event: TypedEvent) -> Lineage:

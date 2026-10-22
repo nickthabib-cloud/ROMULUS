@@ -365,7 +365,7 @@ class _TamperRule(Playbook):
 
     def __init__(self):
         super().__init__()
-        self.lineage = ProcessLineage()
+        self.lineage = ProcessLineage(self)
         self.markers = _ShutdownMarkers()
         self.items: list[_Item] = []
         self._seen = RecentIds()        # bounded re-read guard
@@ -383,13 +383,10 @@ class _TamperRule(Playbook):
                     self.missing_required += int(argv_incomplete(e))
                     continue
             self._event(e)
+        self.lineage.trim()
         return []
 
     program_prefilter = True
-
-    def limit_reasons(self) -> list[str]:
-        self.lineage.note(self)
-        return super().limit_reasons()
 
     def _process_relevant(self, event: TypedEvent) -> bool:
         name = program_name_hint(event)

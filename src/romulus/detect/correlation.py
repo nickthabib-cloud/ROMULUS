@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 
 from romulus.detect.base import Match, Playbook, basename, pf
-from romulus.detect.bounded import ExecHistory, HeldExamples, RecentIds, Spill
+from romulus.detect.bounded import ExecHistory, HeldExamples, KeyedStore, RecentIds, Spill
 from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
     INTERPRETERS,
     WEB_SERVICE_USERS,
@@ -151,19 +151,13 @@ class PidTable:
     pid restarted at the reboot, and its exec in the new boot is not in the window. An exec or a lookup without a
     recorded boot is boot-blind (see `boots_conflict`)."""
 
-    # Detector rules hold at most CAPACITY processes (about 250 bytes each, so 75 MB), PER_PID execs each; other
-    # callers (an expansion fetch, a baseline period) pass no capacity and hold everything they were given.
+    # A detector rule (`owner`) holds the CAPACITY most recently used processes in memory (about 250 bytes each, so
+    # 75 MB) and the rest in its on-disk spill, read back when a walk reaches them: every lookup is exact. Callers
+    # without an owner (an expansion fetch, a baseline period) hold everything they were given in memory.
     CAPACITY = 300_000
-    PER_PID = 16
 
-    def __init__(self, capacity: int | None = None):
-        bounded = capacity is not None
-        self.execs = ExecHistory(capacity if bounded else _UNBOUNDED, self.PER_PID if bounded else _UNBOUNDED)
-
-    @property
-    def evicted(self) -> int:
-        """Processes whose exec records were released to stay within the capacity."""
-        return self.execs.evicted
+    def __init__(self, capacity: int | None = None, owner=None):
+        self.execs = ExecHistory(capacity if capacity is not None else _UNBOUNDED, _UNBOUNDED, owner, "pid_table")
 
     def add(self, e: TypedEvent) -> None:
         pid, exe = e.get("process.pid"), e.get("process.executable")
@@ -173,25 +167,12 @@ class PidTable:
         self.execs.add((e.host, pid), (e.ts.timestamp(), str(exe), ppid if isinstance(ppid, int) else None,
                                        e.raw[0].native_id if e.raw else "", boot_of(e)))
 
-    def _entries(self, host: str, pid: int):
-        return self.execs.get((host, pid), touch=True)
+    def trim(self) -> None:
+        """Move the least recently used processes beyond the capacity to disk (when a batch ends)."""
+        self.execs.trim()
 
-    def pin_chain(self, host: str, ppid, ts: float, boot: str | None = None, *, own_pid=None) -> None:
-        """Pin the exec entries a lineage walk from `ppid` as of `ts` rests on now (and, with `own_pid`, that pid's
-        exec strictly before `ts`), so a walk made later still finds them after their processes were released."""
-        if isinstance(own_pid, int):
-            prior = self._lookup(host, own_pid, ts, boot, strict=True)
-            if prior is not None:
-                self.execs.pin((host, own_pid), [prior])
-        pid = ppid
-        for _ in range(LINEAGE_DEPTH):
-            if not isinstance(pid, int) or pid in (0, 1):
-                return
-            entry = self._lookup(host, pid, ts, boot)
-            if entry is None:
-                return
-            self.execs.pin((host, pid), [entry])
-            pid, ts, boot = entry[2], entry[0], boot if boot is not None else entry[4]
+    def _entries(self, host: str, pid: int):
+        return self.execs.get((host, pid))
 
     def _lookup(self, host: str, pid: int, ts: float, boot: str | None = None, *, strict: bool = False):
         latest = None
@@ -290,17 +271,15 @@ class InterpreterExternalConnection(Playbook):
                    ("whether this process or a child then executed a shell "
                     "(host.shell_spawned_by_connected_process), which would make this a reverse shell"))
 
-    # Groups are (host, program, account, port) of notable processes: about 3 KB each with their cited ids, so 150 MB
-    # at the budget. Destinations are counted per group up to DESTS_PER_GROUP; above it the claim says "at least".
+    # Per (host, program, account, port) of notable processes: counts, destinations and the first cited calls (as ids
+    # once staged), in a keyed store: the HOT most recent groups in memory, the rest on disk, never forgotten.
     staged = True
-    MAX_KEYS = 50_000
-    DESTS_PER_GROUP = 10_000
+    HOT = 20_000
 
     def __init__(self):
         super().__init__()
-        self.pids = PidTable(PidTable.CAPACITY)
-        self.groups: dict[str, HeldExamples] = {}
-        self.info: dict[str, dict] = {}
+        self.pids = PidTable(PidTable.CAPACITY, owner=self)
+        self.groups = KeyedStore(self, "iec_groups", self.HOT)        # key -> [info, HeldExamples]
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
@@ -310,6 +289,8 @@ class InterpreterExternalConnection(Playbook):
         for store in self._fresh:
             store.staged()
         self._fresh = []
+        self.groups.trim()
+        self.pids.trim()
         return out
 
     def consume(self, events):
@@ -330,40 +311,29 @@ class InterpreterExternalConnection(Playbook):
             if reason is None:
                 continue
             key = f"{e.host}|{e.get('process.executable')}|{e.get('process.user')}|{port}"
-            if key not in self.info and len(self.info) >= self.MAX_KEYS:
+            state = self.groups.setdefault(key, lambda e=e, reason=reason, lane=lane: [
+                {"count": 0, "dests": Counter(), "outcomes": Counter(), "first": e.ts, "last": e.ts,
+                 "reason": reason, "lane": lane}, HeldExamples(EXAMPLE_LIMIT)])
+            if state is None:
                 self.evaluated -= 1
-                self.refuse("groups", f"(host, program, account, port) groups reached {self.MAX_KEYS:,}; a call of a "
-                                      f"new group is not evaluated")
+                self.refuse("disk", "the groups' disk budget is spent; a call of a new group is not evaluated")
                 continue
-            info = self.info.setdefault(key, {"count": 0, "dests": Counter(), "outcomes": Counter(),
-                                              "first": e.ts, "last": e.ts, "reason": reason, "lane": lane,
-                                              "capped": False})
+            info, group = state
             info["count"] += 1
-            if ip in info["dests"] or len(info["dests"]) < self.DESTS_PER_GROUP:
-                info["dests"][ip] += 1
-            else:
-                info["capped"] = True
+            info["dests"][ip] += 1
             info["outcomes"][str(e.outcome)] += 1
             info["first"], info["last"] = min(info["first"], e.ts), max(info["last"], e.ts)
-            group = self.groups.get(key)
-            if group is None:
-                group = self.groups[key] = HeldExamples(EXAMPLE_LIMIT)
             if group.offer(e):
                 self._pending.append(e)
                 self._fresh.append(group)
-                # the lineage the finding may rest on, held beyond the release of its processes
-                self.pids.pin_chain(e.host, e.get("process.ppid"), e.ts.timestamp(), boot_of(e))
         return []
 
     def finalize(self):
-        if self.pids.evicted:
-            self.note_limit("lineage", f"exec records of {self.pids.evicted} process(es) were released to hold at "
-                                       f"most {PidTable.CAPACITY:,}; an ancestry walk may stop early and is then "
-                                       f"stated as not fully recorded (lineage can only lower a lane)")
         out = []
-        for key in sorted(self.groups):
-            evs = sorted(self.groups[key].events(self.load), key=lambda x: (x.ts, x.id))
-            info, e0 = self.info[key], evs[0]
+        for key in sorted(self.groups.keys()):
+            info, group = self.groups.peek(key)
+            evs = sorted(group.events(self.load), key=lambda x: (x.ts, x.id))
+            e0 = evs[0]
             verdict, chain = self.pids.ancestry(e0.host, e0.get("process.ppid"), e0.ts.timestamp(), boot_of(e0))
             lane, notes = lineage_lane(info["reason"], info["lane"], verdict, chain)
             if lane == "high" and all(o == Outcome.failure for o in info["outcomes"]):
@@ -371,8 +341,6 @@ class InterpreterExternalConnection(Playbook):
                 notes.append("lane lowered to lead: every connect() call failed")
             dests = ", ".join(f"{ip} ({n})" for ip, n in info["dests"].most_common(8))
             more = f" and {len(info['dests']) - 8} more" if len(info["dests"]) > 8 else ""
-            if info["capped"]:
-                more += " (destination count capped: a lower bound)"
             outcomes = ", ".join(f"{n} {w}" for w, n in (
                 ("succeeded", info["outcomes"].get(Outcome.success, 0)),
                 ("failed", info["outcomes"].get(Outcome.failure, 0)),

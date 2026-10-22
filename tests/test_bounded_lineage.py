@@ -4,7 +4,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.detect import auth
 from romulus.detect.correlation import InterpreterExternalConnection, PidTable
 from romulus.detect.host import ProcessLineage
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
@@ -19,151 +18,156 @@ def ev(event_id, family, ts, host="web1", outcome=Outcome.success, **fields):
 
 
 def execd(pid, ppid, exe, ts, **fields):
+    fields.setdefault("process__argv", [exe])
     return ev(f"exec-{pid}-{ts.timestamp()}", "process_exec", ts, process__pid=pid, process__ppid=ppid,
-              process__executable=exe, process__argv=[exe], **fields)
+              process__executable=exe, **fields)
+
+
+class _Owner:
+    """A stand-in playbook owner for a store (its spill under tmp_path)."""
+
+    def __init__(self, directory):
+        from romulus.detect.base import Playbook
+
+        class Holder(Playbook):
+            id = "test.holder"
+            title = "test"
+            families = ()
+        self.playbook = Holder()
+        self.playbook.spill_dir = directory
 
 
 @pytest.mark.slow
-def test_pid_table_holds_at_most_its_capacity_over_a_million_processes():
-    table = PidTable(capacity=10_000)
+def test_pid_table_memory_holds_its_capacity_and_every_lookup_stays_exact(tmp_path):
+    owner = _Owner(tmp_path).playbook
+    table = PidTable(capacity=10_000, owner=owner)
     for pid in range(1_000_000):
-        table.add(execd(pid, 1, "/usr/bin/true", T0 + timedelta(milliseconds=pid)))
-        assert len(table.execs) <= 10_000
-    assert table.evicted == 990_000
-    assert table.lookup("web1", 999_999, (T0 + timedelta(hours=1)).timestamp()) is not None
-    unbounded = PidTable()                                       # expansion and baseline callers: everything
-    for pid in range(20_000):
-        unbounded.add(execd(pid, 1, "/usr/bin/true", T0))
-    assert len(unbounded.execs) == 20_000 and unbounded.evicted == 0
+        table.add(execd(pid, pid - 1, "/usr/bin/true", T0 + timedelta(milliseconds=pid)))
+        if pid % 10_000 == 9_999:
+            table.trim()
+            assert len(table.execs.store.hot) <= 10_000
+    table.trim()
+    assert len(table.execs) == 1_000_000 and table.execs.store.on_disk >= 990_000
+    late = (T0 + timedelta(hours=1)).timestamp()
+    assert table.lookup("web1", 3, late)[2] == 2                     # read back from disk, exact
+    assert [pid for pid, *_rest in table.lineage_entries("web1", 500_000, late)] == list(range(500_000, 499_994, -1))
+    owner.close_spill()
 
 
-def test_a_cited_connection_keeps_its_web_server_lineage_after_release(monkeypatch):
-    monkeypatch.setattr(PidTable, "CAPACITY", 50)
-    rule = InterpreterExternalConnection()
-    apache = execd(90, 1, "/usr/sbin/apache2", T0)
-    sock = ev("s1", "net_socket", T0 + timedelta(seconds=5), socket__syscall="connect",
-              process__executable="/usr/bin/perl", process__user="www-data", process__pid=100, process__ppid=90,
-              destination__ip="203.0.113.5", destination__port=443)
-    churn = [execd(1000 + i, 1, "/usr/bin/true", T0 + timedelta(seconds=10 + i)) for i in range(500)]
-    rule.consume([apache])
-    rule.consume([sock])
-    rule.consume(churn)
-    assert len(rule.pids.execs) <= 50 and rule.pids.evicted > 0
-    [m] = rule.finalize()
-    assert "ancestry includes the web server '/usr/sbin/apache2'" in m.claim and m.proposed_lane == "high"
-    assert any("released" in reason for reason in rule.limit_reasons())
+def _iec_run(events, capacity, directory):
+    from romulus.detect import correlation
+    old = correlation.PidTable.CAPACITY
+    correlation.PidTable.CAPACITY = capacity
+    try:
+        rule = InterpreterExternalConnection()
+        rule.spill_dir = directory
+        stage = {}
+        for batch in events:
+            rule.consume(batch)
+            stage.update({e.id: e for e in rule.drain_staged()})
+        rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+        return [(m.claim, m.proposed_lane, [e.id for e in m.events]) for m in rule.finalize()], rule
+    finally:
+        correlation.PidTable.CAPACITY = old
 
 
-def test_process_lineage_keeps_an_active_parent_and_states_releases(monkeypatch):
+def test_pid_reuse_after_release_gives_the_unbounded_answer(tmp_path):
+    """apache2 on pid 500, then python3 reuses pid 500 and connects out from a child; churn moves pid 500 to disk.
+    The lineage walk must see python3 (the latest exec of 500 before the call), never the older apache2."""
+    batches = [[execd(500, 1, "/usr/sbin/apache2", T0)],
+               [execd(500, 1, "/usr/bin/python3", T0 + timedelta(minutes=5))],
+               [ev("s1", "net_socket", T0 + timedelta(minutes=6), socket__syscall="connect",
+                   process__executable="/usr/bin/perl", process__user="www-data", process__pid=600,
+                   process__ppid=500, destination__ip="203.0.113.5", destination__port=443)],
+               [execd(1000 + i, 1, "/usr/bin/true", T0 + timedelta(minutes=7, seconds=i)) for i in range(500)]]
+    bounded, rule = _iec_run(batches, 20, tmp_path / "small")
+    unbounded, _ = _iec_run(batches, 10**9, tmp_path / "big")
+    assert rule.pids.execs.store.on_disk > 0                             # pid 500 really was moved to disk
+    assert bounded == unbounded
+    # python3 under pid 1 is not a web server: the web account's call is lowered to lead, as without bounds
+    assert "ancestry includes the web server" not in bounded[0][0] and bounded[0][1] == "lead"
+
+
+def test_process_lineage_never_forgets_an_inactive_parent(tmp_path, monkeypatch):
     monkeypatch.setattr(ProcessLineage, "CAPACITY", 20)
-    lineage = ProcessLineage()
+    owner = _Owner(tmp_path).playbook
+    lineage = ProcessLineage(owner)
     lineage.observe(execd(50, 1, "/usr/bin/dpkg", T0))
-    for i in range(200):
-        child = execd(1000 + i, 50, "/bin/sh", T0 + timedelta(seconds=i + 1))
-        lineage.observe(child)
-        assert lineage.classify(child).kind == "package"           # the parent stays while it keeps starting children
-    assert len(lineage.records) <= 20 and lineage.evicted > 0
-
-    class Owner:
-        def __init__(self):
-            self.noted = []
-
-        def note_limit(self, name, text, records=0):
-            self.noted.append((name, text))
-    owner = Owner()
-    lineage.note(owner)
-    assert owner.noted and owner.noted[0][0] == "lineage"
-
-
-def test_ssh_tallies_budget_refuses_new_sources(monkeypatch):
-    monkeypatch.setattr(auth._SshAttemptStream, "MAX_KEYS", 3)
-    rule = auth.SshPasswordGuessing()
-    events = [ev(f"a{i}", "auth", T0 + timedelta(seconds=i), outcome=Outcome.failure, auth__service="sshd",
-                 auth__phase="authentication", source__ip=f"198.51.100.{i}", source__port=40000 + i,
-                 user__name="root") for i in range(1, 8)]
-    rule.consume(events)
-    rule.finalize()
-    assert len(rule.tallies) == 3 and rule.capped == 4
-    assert any("4 record(s) not evaluated" in r for r in rule.limit_reasons())
-
-
-def test_account_change_budget_refuses_later_changes(monkeypatch):
-    monkeypatch.setattr(auth.AccountOrGroupChange, "MAX_HELD", 2)
-    rule = auth.AccountOrGroupChange()
-    events = [ev(f"u{i}", "process_exec", T0 + timedelta(seconds=i), process__pid=300 + i, process__ppid=1,
-                 process__executable="/usr/sbin/useradd", process__argv=["useradd", f"user{i}"], process__uid="0",
-                 process__user="root") for i in range(5)]
-    rule.consume(events)
-    assert len(rule.changes) == 2 and rule.capped == 3
+    lineage.trim()
+    for i in range(2000):                                   # 2,000 unrelated processes push dpkg to disk
+        lineage.observe(execd(5000 + i, 1, "/usr/bin/true", T0 + timedelta(seconds=1 + i / 1000)))
+        lineage.trim()
+    child = execd(9999, 50, "/bin/sh", T0 + timedelta(seconds=10))
+    assert lineage.classify(child).kind == "package"
+    assert len(lineage.records.hot) <= 21
+    owner.close_spill()
 
 
 @pytest.mark.slow
-def test_reverse_shell_join_streams_and_still_finds_the_shell():
-    """A week of hourly partitions: every minute a cron shell, and a monitoring agent connecting out; on day 5 a
-    python process connects out and execs a stdin shell. Waiting shells and held sockets stay about an hour's
-    worth; the reverse shell is found."""
+def test_reverse_shell_memory_stays_bounded_without_pins_and_results_match(tmp_path, monkeypatch):
+    """259,200 cron shells and an agent's sockets over nine days (the reviewer's volume): memory holds the hot sets
+    only (there are no pins), and the findings equal an unbounded run's."""
     from romulus.detect.lineage import ReverseShellByLineage
-    rule = ReverseShellByLineage()
-    peak_shells = peak_sockets = 0
-    stage = {}
-    pid = 10_000
-    for hour in range(24 * 7):
-        start = T0 + timedelta(hours=hour)
-        batch = []
-        for minute in range(60):
-            ts = start + timedelta(minutes=minute)
-            pid += 2
-            batch.append(execd(pid, 1, "/usr/bin/dash", ts))
-            batch.append(ev(f"agent-{pid}", "net_socket", ts + timedelta(seconds=1), socket__syscall="connect",
-                            process__executable="/opt/agent/agent", process__pid=pid + 1, process__user="root",
-                            destination__ip="198.51.100.20", destination__port=443))
-        if hour == 24 * 5 + 3:
-            ts = start + timedelta(minutes=30, seconds=10)
-            batch += [execd(777, 1, "/usr/bin/python3", ts),
-                      ev("rs-sock", "net_socket", ts + timedelta(seconds=2), socket__syscall="connect",
-                         process__executable="/usr/bin/python3", process__pid=777, process__user="root",
-                         destination__ip="203.0.113.66", destination__port=4444),
-                      execd(778, 777, "/bin/sh", ts + timedelta(seconds=3))]
-        rule.consume(batch)
-        stage.update({e.id: e for e in rule.drain_staged()})
-        peak_shells = max(peak_shells, len(rule.shells))
-        peak_sockets = max(peak_sockets, sum(len(v) for v in rule.sockets.values()))
-    assert peak_shells <= 2 * 60 + 1 and peak_sockets <= 3 * 60 + 1, (peak_shells, peak_sockets)
-    rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
-    out = rule.finalize()
-    assert [(m.group_key, m.proposed_lane) for m in out] == [("web1|None|777|203.0.113.66", "high")]
+
+    def batches():
+        pid = 10_000
+        for hour in range(216):
+            start = T0 + timedelta(hours=hour)
+            batch = []
+            for k in range(1200):
+                ts = start + timedelta(seconds=3 * k)
+                pid += 2
+                batch.append(execd(pid, 1, "/usr/bin/dash", ts, process__argv=["sh", "-c", "true"]))
+                if k % 20 == 0:
+                    batch.append(ev(f"agent-{pid}", "net_socket", ts, socket__syscall="connect",
+                                    process__executable="/opt/agent/agent", process__pid=pid + 1,
+                                    process__user="root", destination__ip="198.51.100.20", destination__port=443))
+            if hour == 150:
+                ts = start + timedelta(minutes=30, seconds=10)
+                batch += [execd(777, 1, "/usr/bin/python3", ts),
+                          ev("rs-sock", "net_socket", ts + timedelta(seconds=2), socket__syscall="connect",
+                             process__executable="/usr/bin/python3", process__pid=777, process__user="root",
+                             destination__ip="203.0.113.66", destination__port=4444),
+                          execd(778, 777, "/bin/sh", ts + timedelta(seconds=3))]
+            yield batch
+
+    def run(hot, directory):
+        monkeypatch.setattr(ReverseShellByLineage, "HOT", hot)
+        monkeypatch.setattr(PidTable, "CAPACITY", hot)
+        rule = ReverseShellByLineage()
+        rule.spill_dir = directory
+        stage, peak = {}, 0
+        for batch in batches():
+            rule.consume(batch)
+            stage.update({e.id: e for e in rule.drain_staged()})
+            peak = max(peak, len(rule.pids.execs.store.hot), len(rule.shells.buffer), len(rule.sockets.hot))
+        rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+        out = [(m.group_key, m.claim, m.proposed_lane) for m in rule.finalize()]
+        rule.close_spill()
+        return out, peak, rule
+
+    bounded, peak, rule = run(5_000, tmp_path / "small")
+    assert peak <= 5_000 + 1_300 and not hasattr(rule.pids.execs, "pinned")
+    assert [(key, lane) for key, _claim, lane in bounded] == [("web1|None|777|203.0.113.66", "high")]
+    unbounded, _peak, _rule = run(10**9, tmp_path / "big")
+    assert bounded == unbounded
 
 
-def test_root_exec_runs_are_budgeted_per_session_and_cited_as_ids(monkeypatch):
-    from romulus.detect.kernel_files import RootExecNonRootModifiableFile
-    from tests.test_kernel_files import root_exec
-    monkeypatch.setattr(RootExecNonRootModifiableFile, "MAX_RUNS", 5)
-    rule = RootExecNonRootModifiableFile()
-    runs = [root_exec(ts=T0 + timedelta(minutes=i), auid="0", ses=100 + i) for i in range(9)]    # a session per run
-    rule.consume(runs)
-    staged = {e.id: e for e in rule.drain_staged()}
-    assert rule.runs_held == 5 and rule.capped == 4 and rule.retained_events() == []
-    rule.bind_loader(lambda ids: [staged[i] for i in ids if i in staged])
-    [m] = rule.finalize()
-    assert "5 times" in m.claim
-    assert any("4 record(s) not evaluated" in r for r in rule.limit_reasons())
-
-
-def test_package_lineage_of_a_root_change_survives_exec_history_release(monkeypatch):
+def test_package_lineage_of_a_root_change_survives_exec_history_release(monkeypatch, tmp_path):
     from romulus.detect.kernel_files import PersistencePathChange
     from tests.test_kernel_files import change, pexec
     monkeypatch.setattr(PersistencePathChange, "EXEC_CAPACITY", 50)
     rule = PersistencePathChange()
+    rule.spill_dir = tmp_path
     rule.consume([pexec("/usr/bin/dpkg", 100, 90, ts=T0)])
     rule.consume([change("/etc/cron.d/a", uid="0", exe="/usr/bin/dash", pid=101, ppid=100,
                          ts=T0 + timedelta(seconds=1))])
     rule.consume([pexec("/usr/bin/true", 1000 + i, 1, ts=T0 + timedelta(seconds=2 + i)) for i in range(500)])
     staged = {e.id: e for e in rule.drain_staged()}
-    assert len(rule.execs) <= 50 and rule.execs.evicted > 0
+    assert len(rule.execs.store.hot) <= 50 and rule.execs.evicted > 0       # dpkg's exec is on disk, not lost
     rule.bind_loader(lambda ids: [staged[i] for i in ids if i in staged])
     [m] = rule.finalize()
-    assert m.group_key == "app01|package:dpkg"
-    assert any("released" in r for r in rule.limit_reasons())
+    assert m.group_key == "app01|package:dpkg" and rule.limit_reasons() == []
 
 
 @pytest.mark.slow

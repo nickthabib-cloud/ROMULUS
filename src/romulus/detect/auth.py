@@ -1073,7 +1073,7 @@ class AccountOrGroupChange(Playbook):
 
     def __init__(self):
         super().__init__()
-        self.lineage = ProcessLineage()
+        self.lineage = ProcessLineage(self)
         self.changes: list[_Change] = []
         self.by_pid: dict[tuple, list[_Change]] = defaultdict(list)
         self.records: list[TypedEvent] = []
@@ -1083,10 +1083,6 @@ class AccountOrGroupChange(Playbook):
     # Account changes and tool records are held as events until finalize (they are the findings' citations): at
     # about 8 KB each, 20,000 is 160 MB. A change beyond it is not evaluated and coverage says so.
     MAX_HELD = 20_000
-
-    def limit_reasons(self) -> list[str]:
-        self.lineage.note(self)
-        return super().limit_reasons()
 
     def _room(self) -> bool:
         if len(self.changes) + len(self.records) < self.MAX_HELD:
@@ -1118,6 +1114,7 @@ class AccountOrGroupChange(Playbook):
                     self.boots[e.host].append(e)
             else:
                 self._record(e)
+        self.lineage.trim()
         return []
 
     def _exec(self, e: TypedEvent) -> None:

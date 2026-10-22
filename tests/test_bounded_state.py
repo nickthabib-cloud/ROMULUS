@@ -107,3 +107,80 @@ def test_without_a_reached_limit_cells_are_unchanged(monkeypatch):
     cells = _run(monkeypatch, _Capped(), [_event(i, f"host{i % 2}") for i in range(4)])
     window = cells[("*", "window")]
     assert window["state"] == "no_match_complete" and window["detail"]["reasons"] == []
+
+
+# ---- the disk-backed keyed store --------------------------------------------------------------------------------
+class _Owner(Playbook):
+    id = "test.owner"
+    title = "test"
+    families = ()
+
+
+def test_keyed_store_moves_cold_state_to_disk_and_reads_it_back_exactly(tmp_path):
+    from romulus.detect.bounded import KeyedStore
+    owner = _Owner()
+    owner.spill_dir = tmp_path
+    store = KeyedStore(owner, "s", hot=10, candidate=lambda state: state["n"] >= 3)
+    for i in range(5000):
+        state = store.setdefault(f"k{i % 1000}", lambda: {"n": 0, "seen": []})
+        state["n"] += 1
+        state["seen"].append(i)
+        if i % 100 == 99:
+            store.trim()
+            assert len(store.hot) <= 10
+    store.trim()
+    assert len(store) == 1000 and store.on_disk >= 990
+    assert store.get("k7") == {"n": 5, "seen": [7, 1007, 2007, 3007, 4007]}       # never forgotten
+    assert "k999" in store and "nope" not in store
+    assert sum(1 for _ in store.items()) == 1000
+    assert sum(1 for _ in store.items(candidates=True)) == 1000                    # every key reached n >= 3
+    owner.close_spill()
+    assert not list(tmp_path.glob("romulus-stage-spill-*"))
+
+
+def test_only_the_disk_budget_refuses_a_new_key(tmp_path):
+    from romulus.detect.bounded import KeyedStore
+    owner = _Owner()
+    owner.spill_dir = tmp_path
+    store = KeyedStore(owner, "s", hot=1, disk_budget=200)
+    accepted = 0
+    for i in range(100):
+        if store.put(f"k{i}", {"payload": "x" * 50}):
+            accepted += 1
+        store.trim()
+    assert 1 < accepted < 100 and store.disk_bytes >= 200
+    assert store.get("k0") == {"payload": "x" * 50}                               # what was held is kept
+    owner.close_spill()
+
+
+def test_grouped_reads_a_group_together_and_spill_list_keeps_order(tmp_path):
+    from romulus.detect.bounded import KeyedStore, SpillList
+    owner = _Owner()
+    owner.spill_dir = tmp_path
+    store = KeyedStore(owner, "g", hot=2, group=lambda key: key[0])
+    for i in range(30):
+        store.put((f"g{i % 3}", i), i)
+        store.trim()
+    groups = [key[0] for key, _value in store.grouped()]
+    assert groups == sorted(groups) and len(groups) == 30
+    records = SpillList(owner, "l", hot=5)
+    for i in range(53):
+        records.append(i)
+        records.trim()
+    assert list(records) == list(range(53)) and records.on_disk >= 48
+    owner.close_spill()
+
+
+def test_a_live_spill_is_marked_fresh_for_the_stale_stage_cleanup(tmp_path):
+    import os
+    import time
+
+    from romulus.hunt.stage import clear_stale_stages
+    owner = _Owner()
+    owner.spill_dir = tmp_path
+    spill = owner.spill()
+    old = time.time() - 7 * 3600
+    os.utime(spill._dir, (old, old))
+    spill.flush()                                    # any write marks it live again
+    assert clear_stale_stages(tmp_path) == 0 and owner.spill() is spill
+    owner.close_spill()

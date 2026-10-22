@@ -327,7 +327,8 @@ class NonRootWriteRootExecutedFile(Playbook):
         self.watermark: float | None = None
         self._pruned: float | None = None
         self.recent_auth: dict[str, OrderedDict[str, TypedEvent]] = defaultdict(OrderedDict)
-        self.daemons = ExecHistory(self.DAEMON_CAPACITY, 16)    # root execs outside any login, per (host, pid)
+        # root execs outside any login, per (host, pid): the most recent in memory, the rest on disk
+        self.daemons = ExecHistory(self.DAEMON_CAPACITY, 2**62, self, "hijack_daemons")
         self.changes: dict[tuple[str, str], list[tuple[float, str, str, str]]] = defaultdict(list)
         self.kernel_writes: dict[tuple[str, str], list[_Write]] = defaultdict(list)
         self.file_change_records = 0
@@ -359,6 +360,7 @@ class NonRootWriteRootExecutedFile(Playbook):
             else:
                 self._exec(event)
         self._prune_sessions()
+        self.daemons.trim()
         return []
 
     def _prune_sessions(self) -> None:
@@ -380,13 +382,6 @@ class NonRootWriteRootExecutedFile(Playbook):
             return True
         self.refuse("files", f"{what} held reached {self.MAX_KEYS:,}; a record of a new file is not evaluated")
         return False
-
-    def limit_reasons(self) -> list[str]:
-        if self.daemons.evicted:
-            self.note_limit("lineage", f"root execs outside any login of {self.daemons.evicted} process(es) were "
-                                       f"released to hold at most {self.DAEMON_CAPACITY:,}; a service-manager walk "
-                                       f"through one stops early and the run is reported as a daemon's")
-        return super().limit_reasons()
 
     def _auth(self, event: TypedEvent) -> None:
         service = event.get("auth.service")

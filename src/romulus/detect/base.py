@@ -187,9 +187,20 @@ class Playbook:
     # Where a playbook that spills rows to disk (romulus.detect.bounded.Spill) puts its private directory: the sweep's
     # stage directory; None (tests, ad hoc runs) uses the system temporary directory.
     spill_dir = None
+    _spill = None
+
+    def spill(self):
+        """This playbook's private on-disk tables (created on first use)."""
+        if self._spill is None:
+            from romulus.detect.bounded import Spill
+            self._spill = Spill(self.spill_dir)
+        return self._spill
 
     def close_spill(self) -> None:
         """Remove any on-disk spill. The sweep calls it on every exit path it controls."""
+        if self._spill is not None:
+            self._spill.close()
+            self._spill = None
 
     def release_state(self) -> None:
         """Release aggregate working state after its findings and coverage are persisted."""

@@ -13,6 +13,10 @@ This module holds the shared pieces: the re-delivery guard and the limit record 
 """
 from __future__ import annotations
 
+import contextlib
+import json
+import os
+import pickle
 from bisect import insort
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -127,75 +131,6 @@ class HeldExamples:
         return [item[1] if item[1] is not None else found[item[0][1]] for item in self.items]
 
 
-class ExecHistory:
-    """Exec records per (host, pid), for lineage. A hunt over weeks on thousands of hosts sees a new pid for almost
-    every exec, so the history is held for at most `capacity` processes, least recently used first out: adding an
-    exec or finding a process as an ancestor makes it recent, so a long-lived parent that keeps starting children
-    stays. Each process keeps its latest `per_key` execs (pids are reused). A rule can `pin` the entries a record's
-    lineage rested on when it read the record, so a finding made at finalize still sees them after release.
-
-    A released process makes later lineage walks stop early; `evicted` counts releases so the rule can say so. An
-    entry is a tuple whose first element is its time; entries of one process are kept in time order (stable)."""
-
-    __slots__ = ("capacity", "entries", "evicted", "per_key", "pinned")
-
-    def __init__(self, capacity: int, per_key: int):
-        self.capacity = capacity
-        self.per_key = per_key
-        self.entries: OrderedDict[tuple, list[tuple]] = OrderedDict()
-        self.pinned: dict[tuple, list[tuple]] = {}
-        self.evicted = 0
-
-    def __len__(self) -> int:
-        return len(self.entries)
-
-    def add(self, key: tuple, entry: tuple) -> None:
-        held = self.entries.get(key)
-        if held is None:
-            held = self.entries[key] = []
-        else:
-            self.entries.move_to_end(key)
-        insort(held, entry, key=_first)
-        if len(held) > self.per_key:
-            del held[0]
-        while len(self.entries) > self.capacity:
-            self.entries.popitem(last=False)
-            self.evicted += 1
-
-    def get(self, key: tuple, *, touch: bool = False) -> list[tuple]:
-        """The process's entries in time order (held and pinned); `touch` makes it recent."""
-        held = self.entries.get(key)
-        if held is not None and touch:
-            self.entries.move_to_end(key)
-        pinned = self.pinned.get(key)
-        if not pinned:
-            return held or []
-        if not held:
-            return pinned
-        merged = list(held)
-        for entry in pinned:
-            if entry not in merged:
-                insort(merged, entry, key=_first)
-        return merged
-
-    def pin(self, key: tuple, entries: list[tuple]) -> None:
-        """Keep these entries of a process beyond its release (a cited record's lineage)."""
-        if not entries:
-            return
-        kept = self.pinned.setdefault(key, [])
-        for entry in entries:
-            if entry not in kept:
-                insort(kept, entry, key=_first)
-
-    def clear(self) -> None:
-        self.entries.clear()
-        self.pinned.clear()
-
-
-def _first(entry: tuple):
-    return entry[0]
-
-
 SPILL_PREFIX = "romulus-stage-spill-"     # the sweep clears stale stage directories by this prefix
 SPILL_BATCH = 5000
 
@@ -237,6 +172,12 @@ class Spill:
                 self.db.executemany(sql, rows)
                 rows.clear()
         self.db.commit()
+        self.touch()
+
+    def touch(self) -> None:
+        """Mark the spill live, so another hunt's stale-stage cleanup (by directory age) never removes it."""
+        with contextlib.suppress(OSError):
+            os.utime(self._dir)
 
     def execute(self, sql: str, params: tuple = ()):
         self.flush()
@@ -250,3 +191,294 @@ class Spill:
                 self.db.close()
             self.db = None
         shutil.rmtree(self._dir, ignore_errors=True)
+
+
+def scalar(value):
+    """A value SQLite can bind: scalars as they are, anything else (a list, a mapping) as its JSON text."""
+    if value is None or isinstance(value, (str, int, float)):
+        return value
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+# Per-store disk budget: the only limit that may refuse a record. Rows are compact pickled per-key states.
+DISK_BUDGET = 8 * 2**30
+
+
+class KeyedStore:
+    """Per-key rule state that never forgets: a hot set in memory, least recently used out to a keyed table on disk,
+    and brought back when the key is read again. Memory holds at most `hot` keys between batches (`trim`, called
+    when a batch ends, so a state read in a batch stays valid for the whole batch). Only the disk byte budget
+    refuses: `put` of a new key returns False once the store's rows reach `disk_budget` bytes, and the rule refuses
+    that record through its honest coverage path.
+
+    `candidate(state)` (optional) is kept as a column, so finalize can read only states that can still be reported;
+    `group(key)` (optional) is kept as a text column, so finalize can read states grouped. Without an owner the
+    store is memory only (callers outside the sweep whose input is bounded)."""
+
+    def __init__(self, owner, name: str, hot: int, *, disk_budget: int | None = None, candidate=None, group=None):
+        self.owner = owner
+        self.name = name
+        self.hot_size = hot
+        self.disk_budget = DISK_BUDGET if disk_budget is None else disk_budget
+        self.candidate = candidate
+        self.group = group
+        self.hot: OrderedDict = OrderedDict()
+        self.on_disk = 0
+        self.disk_bytes = 0
+        self._ready = False
+
+    # ---- disk -------------------------------------------------------------------------------------
+    def _db(self):
+        spill = self.owner.spill()
+        if not self._ready:
+            spill.db.execute(f"CREATE TABLE IF NOT EXISTS {self.name} (k BLOB PRIMARY KEY, v BLOB, n INTEGER, "
+                             f"c INTEGER, g TEXT)")
+            self._ready = True
+        return spill.db
+
+    @staticmethod
+    def _k(key) -> bytes:
+        return pickle.dumps(key, protocol=4)
+
+    def _load(self, key, *, remove: bool):
+        if not self.on_disk:
+            return None
+        db = self._db()
+        row = db.execute(f"SELECT v, n FROM {self.name} WHERE k = ?", (self._k(key),)).fetchone()
+        if row is None:
+            return None
+        if remove:
+            db.execute(f"DELETE FROM {self.name} WHERE k = ?", (self._k(key),))
+            self.on_disk -= 1
+            self.disk_bytes -= row[1]
+        return pickle.loads(row[0])
+
+    def _rows(self, sql: str):
+        cursor = self._db().execute(sql)
+        while True:
+            batch = cursor.fetchmany(1000)
+            if not batch:
+                return
+            yield from batch
+
+    # ---- reads and writes ---------------------------------------------------------------------------
+    def get(self, key, default=None):
+        """The key's state, made hot (read back from disk when it was moved there)."""
+        state = self.hot.get(key)
+        if state is not None:
+            self.hot.move_to_end(key)
+            return state
+        state = self._load(key, remove=True)
+        if state is None:
+            return default
+        self.hot[key] = state
+        return state
+
+    def peek(self, key, default=None):
+        """The key's state without making it hot (for finalize, while iterating)."""
+        state = self.hot.get(key)
+        if state is not None:
+            return state
+        state = self._load(key, remove=False)
+        return default if state is None else state
+
+    def __contains__(self, key) -> bool:
+        return key in self.hot or self._load(key, remove=False) is not None
+
+    def __len__(self) -> int:
+        return len(self.hot) + self.on_disk
+
+    def put(self, key, state) -> bool:
+        """Hold a new key's state; False when the disk budget is spent (the caller refuses the record)."""
+        if key not in self.hot and self.disk_bytes >= self.disk_budget:
+            return False
+        self.hot[key] = state
+        self.hot.move_to_end(key)
+        return True
+
+    def setdefault(self, key, factory):
+        """The key's state, created by `factory` when new; None when the disk budget refuses a new key."""
+        state = self.get(key)
+        if state is None:
+            state = factory()
+            if not self.put(key, state):
+                return None
+        return state
+
+    def pop(self, key, default=None):
+        state = self.hot.pop(key, None)
+        if state is None:
+            state = self._load(key, remove=True)
+        return default if state is None else state
+
+    def trim(self, keep: int | None = None) -> None:
+        """Write the least recently used states beyond the hot size (or `keep`) to disk."""
+        limit = self.hot_size if keep is None else keep
+        if len(self.hot) <= limit or self.owner is None:
+            return
+        db = self._db()
+        rows = []
+        while len(self.hot) > limit:
+            key, state = self.hot.popitem(last=False)
+            blob = pickle.dumps(state, protocol=4)
+            rows.append((self._k(key), blob, len(blob), 1 if self.candidate is None or self.candidate(state) else 0,
+                         None if self.group is None else self.group(key)))
+            self.disk_bytes += len(blob)
+        db.executemany(f"INSERT OR REPLACE INTO {self.name} VALUES (?, ?, ?, ?, ?)", rows)
+        self.on_disk += len(rows)
+        self.owner.spill().touch()
+
+    # ---- finalize -------------------------------------------------------------------------------------
+    def items(self, *, candidates: bool = False):
+        """Every (key, state), hot ones first then from disk a batch at a time (read only)."""
+        for key, state in list(self.hot.items()):
+            if not candidates or self.candidate is None or self.candidate(state):
+                yield key, state
+        if self.on_disk:
+            where = " WHERE c = 1" if candidates else ""
+            for k, v in self._rows(f"SELECT k, v FROM {self.name}{where} ORDER BY rowid"):
+                yield pickle.loads(k), pickle.loads(v)
+
+    def keys(self, *, candidates: bool = False) -> list:
+        """Every key (or every candidate's key). Holds the keys, not the states."""
+        out = [key for key, state in self.hot.items()
+               if not candidates or self.candidate is None or self.candidate(state)]
+        if self.on_disk:
+            where = " WHERE c = 1" if candidates else ""
+            out += [pickle.loads(k) for (k,) in self._rows(f"SELECT k FROM {self.name}{where}")]
+        return out
+
+    def grouped(self):
+        """Every (key, state) ordered by the group column, all moved to disk first, so a group's states arrive
+        together and nothing is held but the group being read."""
+        if self.owner is None:
+            yield from sorted(self.hot.items(), key=lambda item: self.group(item[0]))
+            return
+        self.trim(0)
+        for k, v in self._rows(f"SELECT k, v FROM {self.name} ORDER BY g, rowid"):
+            yield pickle.loads(k), pickle.loads(v)
+
+    def clear(self) -> None:
+        self.hot.clear()
+        if self.on_disk and self.owner is not None and self._ready:
+            self._db().execute(f"DELETE FROM {self.name}")
+        self.on_disk = self.disk_bytes = 0
+
+
+class SpillList:
+    """An append-only list of compact records that never forgets: at most `hot` in memory, the rest on disk, read
+    back in arrival order, or in the order of a (number, text) key given at append (`ordered`). Only the disk byte
+    budget refuses (`append` returns False)."""
+
+    def __init__(self, owner, name: str, hot: int, *, disk_budget: int | None = None):
+        self.owner = owner
+        self.name = name
+        self.hot_size = hot
+        self.disk_budget = DISK_BUDGET if disk_budget is None else disk_budget
+        self.buffer: list = []                  # (order, record)
+        self.on_disk = 0
+        self.disk_bytes = 0
+        self._ready = False
+
+    def __len__(self) -> int:
+        return len(self.buffer) + self.on_disk
+
+    def append(self, record, order: tuple = (0.0, "")) -> bool:
+        if self.disk_bytes >= self.disk_budget:
+            return False
+        self.buffer.append((order, record))
+        return True
+
+    def trim(self, keep: int | None = None) -> None:
+        """Write the records beyond the hot size (or `keep`) to disk (called when a batch ends)."""
+        limit = self.hot_size if keep is None else keep
+        if len(self.buffer) <= limit or self.owner is None:
+            return
+        db = self.owner.spill().db
+        if not self._ready:
+            db.execute(f"CREATE TABLE IF NOT EXISTS {self.name} (seq INTEGER PRIMARY KEY, o1, o2, v BLOB)")
+            self._ready = True
+        rows = []
+        for (o1, o2), record in self.buffer:
+            blob = pickle.dumps(record, protocol=4)
+            self.disk_bytes += len(blob)
+            rows.append((self.on_disk, o1, o2, blob))
+            self.on_disk += 1
+        db.executemany(f"INSERT INTO {self.name} VALUES (?, ?, ?, ?)", rows)
+        self.buffer = []
+        self.owner.spill().touch()
+
+    def _disk(self, order_by: str):
+        cursor = self.owner.spill().db.execute(f"SELECT v FROM {self.name} ORDER BY {order_by}")
+        while True:
+            batch = cursor.fetchmany(1000)
+            if not batch:
+                return
+            for (blob,) in batch:
+                yield pickle.loads(blob)
+
+    def __iter__(self):
+        if self.on_disk:
+            yield from self._disk("seq")
+        yield from [record for _order, record in list(self.buffer)]
+
+    def ordered(self):
+        """Every record in (number, text) order of its append key, then arrival (all moved to disk first)."""
+        if self.owner is None:
+            yield from [record for _order, record in sorted(self.buffer, key=lambda item: item[0])]
+            return
+        self.trim(0)
+        if self.on_disk:
+            yield from self._disk("o1, o2, seq")
+
+    def clear(self) -> None:
+        if self.on_disk and self._ready:
+            self.owner.spill().db.execute(f"DELETE FROM {self.name}")
+        self.buffer, self.on_disk, self.disk_bytes = [], 0, 0
+
+
+class ExecHistory:
+    """Exec records per (host, pid), for lineage. A process's entries are kept in time order (stable), its latest
+    `per_key` (pids are reused). Memory holds the `capacity` most recently used processes; the rest are on disk and
+    read back when a lineage walk reaches them, so a lookup is exact however old the process. Without an owner it is
+    memory only (expansion and baseline callers, whose input is bounded)."""
+
+    __slots__ = ("per_key", "store")
+
+    def __init__(self, capacity: int, per_key: int, owner=None, name: str = "exec_history"):
+        self.per_key = per_key
+        self.store = KeyedStore(owner, name, capacity)
+
+    def __len__(self) -> int:
+        return len(self.store)
+
+    @property
+    def evicted(self) -> int:
+        """Processes whose records are on disk now (read back when needed; never forgotten)."""
+        return self.store.on_disk
+
+    def add(self, key: tuple, entry: tuple) -> None:
+        held = self.store.get(key)
+        if held is None:
+            held = []
+            if not self.store.put(key, held):
+                self.store.owner.note_limit("exec_history", "exec records on disk reached the disk budget; a later "
+                                                            "process's lineage is not recorded")
+                return
+        insort(held, entry, key=_first)
+        if len(held) > self.per_key:
+            del held[0]
+
+    def get(self, key: tuple, *, touch: bool = False) -> list[tuple]:
+        """The process's entries in time order (read back from disk when it was moved there)."""
+        return self.store.get(key) or []
+
+    def trim(self) -> None:
+        self.store.trim()
+
+    def clear(self) -> None:
+        self.store.clear()
+
+
+def _first(entry: tuple):
+    return entry[0]

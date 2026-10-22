@@ -48,12 +48,11 @@ excluded with a recorded reason. A binary merely named `sshd` elsewhere is repor
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.bounded import RecentIds
+from romulus.detect.bounded import KeyedStore, RecentIds, SpillList
 from romulus.detect.correlation import (
     PidTable,
     StageMissing,
@@ -267,32 +266,21 @@ class ReverseShellByLineage(Playbook):
                      "only), a superset of the net_socket and process_exec records this evaluator reads",
     }
 
-    # Streaming. A shell is joined once the newest record read is SETTLE past it: the sweep reads a host target's
-    # partitions in time order, so its sockets and its lineage's execs (all earlier than the shell) have arrived by
-    # then. Its lineage is pinned when the shell is read, so the bounded exec history may release those processes
-    # meanwhile. A socket older than SETTLE + MAX_GAP behind the newest record can serve no shell still waiting and
-    # is released. A shell or socket that still arrives into a joined or released stretch (a target read later) is
-    # joined with what is held and stated on coverage.
-    SETTLE = 3600.0
-    # Hits held for findings (each with its owner's sockets in the window, at most WINDOW_HELD of them): about 2 KB
-    # each, so 400 MB at the budget; a hit beyond it is not evaluated and coverage says so.
-    MAX_HITS = 200_000
-    WINDOW_HELD = 256
+    # Shells, sockets and the exec history are held to finalize, as the join needs them all (a target is read whole
+    # before the next, so a shell's socket or ancestor may be read after it). Each lives in a keyed store or list
+    # over the rule's on-disk spill: HOT entries in memory, the rest on disk, never forgotten.
+    HOT = 100_000
+    TRIM_EVERY = 10_000
 
     def __init__(self):
         super().__init__()
-        self.pids = PidTable(PidTable.CAPACITY)
-        self.shells: list[_Shell] = []                  # shells not yet joined
-        self.sockets: dict[tuple, list[_Socket]] = defaultdict(list)
-        self.groups: dict[tuple, list[_Hit]] = defaultdict(list)
-        self.hits = 0
+        self.pids = PidTable(PidTable.CAPACITY, owner=self)
+        self.shells = SpillList(self, "rs_shells", self.HOT)
+        self.sockets = KeyedStore(self, "rs_sockets", self.HOT)         # (host, pid) -> [_Socket]
         self._seen = RecentIds()        # bounded re-read guard
         self._staged = RecentIds()      # bounded re-stage guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
-        self.watermark: float | None = None
-        self.joined_to = float("-inf")                  # shells up to this time have been joined
-        self.released_to = float("-inf")                # sockets before this time have been released
 
     # ---------------------------------------------------------------- staging
     def drain_staged(self) -> list[TypedEvent]:
@@ -307,44 +295,28 @@ class ReverseShellByLineage(Playbook):
             self._staged.add(event.id)
             self._pending.append(event)
 
+    def _trim(self) -> None:
+        self.pids.trim()
+        self.shells.trim()
+        self.sockets.trim()
+
     # ---------------------------------------------------------------- consume
     def consume(self, events):
         for event in events:
             if event.family not in _FAMILIES or event.id in self._seen:
                 continue                                # re-reading a partition must not double count
             self._seen.add(event.id)
-            ts = event.ts.timestamp()
-            self.watermark = ts if self.watermark is None else max(self.watermark, ts)
             if event.family == "process_exec":
                 self.pids.add(event)
                 self._consider_shell(event)
             else:
                 self._consider_socket(event)
-        if self.watermark is not None:
-            self._join(self.watermark - self.SETTLE)
+        self._trim()
         return []
 
-    def _late(self, what: str) -> None:
-        self.note_limit("late", f"{what} arrived for a stretch already joined or released (a target read after "
-                                f"another one); it was joined with the records still held")
-
-    def _join(self, upto: float) -> None:
-        """Join every waiting shell up to `upto`, then release sockets no waiting shell can use."""
-        ready = sorted((s for s in self.shells if s.ts <= upto), key=lambda s: (s.ts, s.event_id))
-        if ready:
-            self.shells = [s for s in self.shells if s.ts > upto]
-            for shell in ready:
-                self._hits(shell)
-        self.joined_to = max(self.joined_to, upto)
-        horizon = upto - MAX_GAP
-        if horizon > self.released_to:
-            for key in list(self.sockets):
-                kept = [s for s in self.sockets[key] if s.ts >= horizon]
-                if kept:
-                    self.sockets[key] = kept
-                else:
-                    del self.sockets[key]
-            self.released_to = horizon
+    def _disk_full(self, what: str) -> None:
+        self.evaluated -= 1
+        self.refuse("disk", f"the {what} disk budget is spent; a later record is not evaluated")
 
     def _consider_shell(self, event: TypedEvent) -> None:
         exe = event.get("process.executable")
@@ -365,15 +337,12 @@ class ReverseShellByLineage(Playbook):
             devtcp = shaped = False
         else:
             devtcp, shaped = _devtcp_redirect(argv, exe), _reverse_shell_shaped(argv, exe)
-        shell = _Shell(
-            ts=event.ts.timestamp(), host=event.host or "", boot=boot_of(event), pid=pid,
-            ppid=event.get("process.ppid"), exe=str(exe), event_id=event.id, devtcp=devtcp, shaped=shaped,
-            incomplete=argv_incomplete(event))
-        if shell.ts - MAX_GAP < self.released_to:
-            self._late("a shell execution")
-        self.shells.append(shell)
-        # the lineage the join will walk, held beyond the release of its processes
-        self.pids.pin_chain(shell.host, shell.ppid, shell.ts, shell.boot, own_pid=shell.pid)
+        if not self.shells.append(_Shell(
+                ts=event.ts.timestamp(), host=event.host or "", boot=boot_of(event), pid=pid,
+                ppid=event.get("process.ppid"), exe=str(exe), event_id=event.id, devtcp=devtcp, shaped=shaped,
+                incomplete=argv_incomplete(event))):
+            self._disk_full("shell executions'")
+            return
         self._stage(event)
 
     def _consider_socket(self, event: TypedEvent) -> None:
@@ -396,11 +365,13 @@ class ReverseShellByLineage(Playbook):
         if not external(ip) or (syscall == "connect" and _port(port) == 0):
             return                                      # port 0: a route or address-sort probe, no connection
         self.evaluated += 1
-        if event.ts.timestamp() <= self.joined_to:
-            self._late("an external socket call")
         user = event.get("process.user")
         web = user in WEB_SERVICE_USERS or event.get("process.effective_user") in WEB_SERVICE_USERS
-        self.sockets[(event.host or "", pid)].append(_Socket(
+        held = self.sockets.setdefault((event.host or "", pid), list)
+        if held is None:
+            self._disk_full("sockets'")
+            return
+        held.append(_Socket(
             ts=event.ts.timestamp(), syscall=str(syscall), peer_ip=ip, peer_port=port, exe=str(exe), user=user,
             web=web, event_id=event.id, boot=boot_of(event)))
         self._stage(event)
@@ -428,7 +399,7 @@ class ReverseShellByLineage(Playbook):
             raise StageMissing(f"{self.id}: {len(unique) - len(loaded)} cited event(s) absent from the stage")
         return {event.id: event for event in loaded}
 
-    def _hits(self, shell: _Shell) -> None:
+    def _hits(self, shell: _Shell, groups: KeyedStore) -> None:
         """Join one shell with its owners' external socket calls; every hit goes to its group."""
         for owner_pid, start, end, relation in self._owners(shell):
             window = sorted((s for s in self.sockets.get((shell.host, owner_pid), ())
@@ -444,34 +415,31 @@ class ReverseShellByLineage(Playbook):
             latest = channels[-1] if channels else window[-1]
             if latest.syscall in ACCEPT_SYSCALLS and latest.exe in SSHD_PATHS:
                 continue                            # the system sshd's accepted login: auth rules cover it
-            if self.hits >= self.MAX_HITS:
-                self.refuse("hits", f"joined shell executions held reached {self.MAX_HITS:,}; a later join is not "
-                                    f"evaluated")
-                continue
-            if len(window) > self.WINDOW_HELD:
-                window = window[-self.WINDOW_HELD:]
-                self.note_limit("window", f"an owner's external socket calls before one shell exceeded "
-                                          f"{self.WINDOW_HELD}; only the latest are listed as its peers")
             hit = _Hit(shell, latest, owner_pid, relation, shell.ts - latest.ts, window)
             boot = shell.boot if shell.boot is not None else latest.boot
             key = ((shell.host, latest.exe, "helpers") if hit.helper
                    else (shell.host, boot, owner_pid, latest.peer_ip))
-            self.groups[key].append(hit)
-            self.hits += 1
+            held = groups.setdefault(key, list)
+            if held is None:
+                self.refuse("disk", "the joined hits' disk budget is spent; a later join is not evaluated")
+                continue
+            held.append(hit)
 
     def finalize(self):
-        self._join(float("inf"))
-        if self.pids.evicted:
-            self.note_limit("lineage", f"exec records of {self.pids.evicted} process(es) were released to hold at "
-                                       f"most {PidTable.CAPACITY:,}; each shell's lineage was pinned when it was "
-                                       f"read, but an ancestor read after its descendant shell may be missing")
-        groups = self.groups
-        groups = {**{k: v for k, v in groups.items() if len(k) == 3},
-                  **merge_unknown_boot({k: v for k, v in groups.items() if len(k) == 4}, 1)}
+        groups = KeyedStore(self, "rs_groups", self.HOT)
+        for i, shell in enumerate(self.shells):
+            self._hits(shell, groups)
+            if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
+                self._trim()
+                groups.trim()
+        keys = groups.keys()
+        merged = {**{k: [k] for k in keys if len(k) == 3},
+                  **merge_unknown_boot({k: [k] for k in keys if len(k) == 4}, 1)}
         out = []
-        for key in sorted(groups, key=lambda k: tuple("" if part is None else str(part) for part in k)):
-            hits = groups[key]
+        for key in sorted(merged, key=lambda k: tuple("" if part is None else str(part) for part in k)):
+            hits = [hit for old in merged[key] for hit in groups.peek(old)]
             out.append(self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits))
+        groups.clear()
         return out
 
     def _helpers(self, key: tuple, hits: list[_Hit]) -> Match:
