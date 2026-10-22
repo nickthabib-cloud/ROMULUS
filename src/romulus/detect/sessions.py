@@ -358,6 +358,8 @@ class ArkimeSshReverseShellTag(Playbook):
                 value = e.get(name)
                 if isinstance(value, int) and not isinstance(value, bool):
                     g[side] += value
+                else:
+                    g[f"{side}_missing"] = g.get(f"{side}_missing", 0) + 1
             for name, bucket in (("ssh.version", "versions"), ("ssh.hassh", "hassh"),
                                  ("ssh.hassh_server", "hassh_server")):
                 value = e.get(name)
@@ -387,7 +389,14 @@ class ArkimeSshReverseShellTag(Playbook):
         src, dst, port = key
         text = self._scope(src, dst)
         span = (g["end"] - g["first"].timestamp()) if g["end"] is not None else None
-        text += (f" The tagged record(s) carry {g['c2s']} bytes from the client and {g['s2c']} from the server"
+        def volume(side: str) -> str:
+            missing = g.get(f"{side}_missing", 0)
+            if missing == g["records"]:
+                return "a byte count not recorded"
+            return (f"at least {g[side]} bytes (not recorded on {missing} record(s))" if missing
+                    else f"{g[side]} bytes")
+
+        text += (f" The tagged record(s) carry {volume('c2s')} from the client and {volume('s2c')} from the server"
                  + (f" over {span:.0f} s." if span is not None else "."))
         if g["versions"]:
             text += (" SSH software the two ends announced (self-reported; Arkime does not say which end sent which): "
