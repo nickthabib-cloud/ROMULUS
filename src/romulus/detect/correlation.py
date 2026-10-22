@@ -8,6 +8,8 @@ same network records also match another host's or process's connect() call.
 """
 from __future__ import annotations
 
+import bisect
+import heapq
 import ipaddress
 import json
 from collections import Counter, defaultdict
@@ -16,7 +18,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 
 from romulus.detect.base import Match, Playbook, basename, pf
-from romulus.detect.bounded import ExecHistory, HeldExamples, KeyedStore, RecentIds, Spill
+from romulus.detect.bounded import ExecHistory, HeldExamples, KeyedStore, RecentIds, Spill, scalar
 from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
     INTERPRETERS,
     WEB_SERVICE_USERS,
@@ -460,7 +462,13 @@ class ProcessNetworkLink(Playbook):
     remote endpoint (either direction) that start within the join window, plus records sharing their
     community ID inside the flow's own lifetime. Publishes when the joined records carry an IDS alert
     (the alert gets a process) or when the process meets the external-connection criteria (the process
-    gets its network evidence). Memory holds compact keys only; full events are staged on disk.
+    gets its network evidence).
+
+    State: socket calls and network records are compact rows in the rule's private on-disk spill (one target is
+    read whole before the next, so the two sides cannot be streamed against each other); the full events are
+    staged. Finalize links them with SQL and builds each (host, program, account, endpoint) group by streaming its
+    rows: memory holds a bounded sample of the group (its first cited calls and records, counts), and the group's
+    distinct records sit in spill tables emptied when it is done. Only the spill's disk byte budget refuses a record.
 
     Attribution: a host's local address on a sensor (per IP version) is inferred from its unique joins.
     A record whose local address is established for another host is never linked. A record whose local
@@ -483,15 +491,16 @@ class ProcessNetworkLink(Playbook):
     next_checks = ("flow detail for the linked community IDs", "process_tree for the connecting process",
                    "peer activity for the remote address across hosts and sessions")
     HEARTBEAT_EVERY = 1000
+    # Bytes of spilled rows (socket calls, network records and their endpoint index) after which a further record is
+    # refused through the coverage ledger. A network record is about 150 bytes, so this is about 100 million records;
+    # the join's own tables at finalize take a similar amount again.
+    DISK_BUDGET = 16 * 2**30
 
-    # The join is disk-backed: socket calls and network records are compact rows in a private SQLite spill (one
-    # target is read whole before the next, so the two sides cannot be streamed against each other), joined at
-    # finalize with SQL, and only one (host, program, account, endpoint) group is held in memory at a time. Memory
-    # does not grow with the records read; the spill is about 150 bytes per network record.
     def __init__(self):
         super().__init__()
         self._spill: Spill | None = None
         self._net_seq = 0
+        self.spilled_bytes = 0
         self._seen = RecentIds()        # bounded re-read guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
@@ -518,6 +527,16 @@ class ProcessNetworkLink(Playbook):
     def release_state(self) -> None:
         self.close_spill()
 
+    def _room(self, *rows: tuple) -> bool:
+        """Count the rows against the disk budget. Once it is spent the record is refused (not evaluated) instead."""
+        if self.spilled_bytes >= self.DISK_BUDGET:
+            self.evaluated -= 1
+            self.refuse("disk", f"the join's spilled rows reached their disk budget of {self.DISK_BUDGET:,} bytes; "
+                                f"later socket calls and network records are not evaluated")
+            return False
+        self.spilled_bytes += sum(len(value) if isinstance(value, str) else 8 for row in rows for value in row)
+        return True
+
     def _sock(self, e: TypedEvent) -> None:
         if e.get("socket.syscall") != "connect":
             return
@@ -530,9 +549,12 @@ class ProcessNetworkLink(Playbook):
         reason, lane = process_interest(e) if external(ip) else (None, "lead")
         self.evaluated += 1
         s = Sock(e.id, e.host or "", e.ts.timestamp(), ip, int(port), str(e.get("process.executable")),
-                 str(e.get("process.user")), e.get("process.pid"), str(e.outcome), reason, lane)
-        self._store().add("sock", (s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason,
-                                   s.process_lane, s.group, _claimant_key(s.claimant)))
+                 str(e.get("process.user")), scalar(e.get("process.pid")), str(e.outcome), reason, lane)
+        row = (s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.process_lane, s.group,
+               _claimant_key(s.claimant))
+        if not self._room(row):
+            return
+        self._store().add("sock", row)
         self._pending.append(e)
 
     def _net(self, e: TypedEvent) -> None:
@@ -549,15 +571,18 @@ class ProcessNetworkLink(Playbook):
         start = _epoch(e.get("flow.start")) or e.ts.timestamp()
         end = _epoch(e.get("flow.end"))
         sev = e.get("alert.severity")
-        cid = e.get("network.community_id")
-        self._net_seq += 1
+        seq = self._net_seq + 1
+        row = (e.id, e.family, e.host or "", start, end, src, sport, dst, dport,
+               scalar(e.get("network.community_id")) or None, sev if isinstance(sev, int) else None,
+               scalar(e.get("alert.category")), scalar(e.get("alert.signature")), seq)
+        endpoints = [(dst, dport, start, seq)] + ([(src, sport, start, seq)] if (src, sport) != (dst, dport) else [])
+        if not self._room(row, *endpoints):
+            return
+        self._net_seq = seq
         store = self._store()
-        store.add("net", (e.id, e.family, e.host or "", start, end, src, sport, dst, dport, cid or None,
-                          sev if isinstance(sev, int) else None, e.get("alert.category"), e.get("alert.signature"),
-                          self._net_seq))
-        store.add("ep", (dst, dport, start, self._net_seq))
-        if (src, sport) != (dst, dport):
-            store.add("ep", (src, sport, start, self._net_seq))
+        store.add("net", row)
+        for endpoint in endpoints:
+            store.add("ep", endpoint)
         self._pending.append(e)
 
     def consume(self, events):
@@ -596,10 +621,16 @@ class ProcessNetworkLink(Playbook):
                    'OR (m.src = d.dst AND m.sport = d.dport AND m.dst = d.src AND m.dport = d.sport))',
                    (FLOW_SLACK, JOIN_AFTER, FLOW_SLACK))
         self.heartbeat()
+        db.execute("CREATE INDEX link_net ON link (net)")
         # how many distinct processes claim each linked record
         db.execute("CREATE TABLE nc (net INTEGER PRIMARY KEY, n INTEGER)")
         db.execute("INSERT INTO nc SELECT l.net, COUNT(DISTINCT s.claimant) FROM link l JOIN sock s "
                    "ON s.rowid = l.sock GROUP BY l.net")
+        # the group being built: its distinct linked records (with the latest call's attribution status), the calls
+        # that kept a link, and the records more than one process claims
+        db.execute("CREATE TABLE gp (nid PRIMARY KEY, family, observer, local, conn, sig, status)")
+        db.execute("CREATE TABLE gs (sock INTEGER PRIMARY KEY)")
+        db.execute("CREATE TABLE gsh (nid, seq INTEGER, PRIMARY KEY (nid, seq)) WITHOUT ROWID")
         db.commit()
 
     _ROWS = ('SELECT s.rowid, s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.lane, '
@@ -615,7 +646,7 @@ class ProcessNetworkLink(Playbook):
         return row[0], sock, net, row[26], row[27]
 
     def _socket_rows(self, order: str):
-        """The linked rows, one socket call at a time, in `order`."""
+        """The linked rows, one socket call at a time, in `order`: (call rowid, call, record, claimants, record seq)."""
         current, rows = None, []
         for i, row in enumerate(self._spill.execute(self._ROWS + order)):
             if i % (self.HEARTBEAT_EVERY * 10) == 0:
@@ -625,7 +656,7 @@ class ProcessNetworkLink(Playbook):
                 yield rows
                 rows = []
             current = sock_rowid
-            rows.append((sock, net, claimed, seq))
+            rows.append((sock_rowid, sock, net, claimed, seq))
         if rows:
             yield rows
 
@@ -637,11 +668,11 @@ class ProcessNetworkLink(Playbook):
         # pass 1: each host's local address per (sensor, IP version), from calls whose records nobody else claims
         seen: dict[tuple[str, str, int], Counter] = defaultdict(Counter)
         for rows in self._socket_rows("ORDER BY l.sock, n.start, n.id"):
-            s = rows[0][0]
-            if any(claimed > 1 for _s, _n, claimed, _q in rows):
+            s = rows[0][1]
+            if any(claimed > 1 for _r, _s, _n, claimed, _q in rows):
                 continue
             by_observer: dict[str, set] = defaultdict(set)
-            for _s, n, _c, _q in rows:
+            for _r, _s, n, _c, _q in rows:
                 by_observer[n.observer].add(n.local_side(s.ip, s.port))
             for observer, locals_ in by_observer.items():
                 if len(locals_) == 1:
@@ -656,79 +687,71 @@ class ProcessNetworkLink(Playbook):
         owner: dict[tuple[str, str], set[str]] = defaultdict(set)      # (sensor, address) -> hosts
         for (host, observer, _v), (best, _n, _t) in address.items():
             owner[(observer, best)].add(host)
-        # pass 2, one group at a time: never link a record whose local address another host owns; mark
+        # pass 2, one group at a time, streamed: never link a record whose local address another host owns; mark
         # unestablished ones
         out = []
-        group_key, socks, joins, shared = None, [], {}, set()
+        group: _Group | None = None
         for rows in self._socket_rows("ORDER BY s.grp, s.ts, s.id, l.sock, n.start, n.id"):
-            s = rows[0][0]
-            if s.group != group_key:
-                if socks:
-                    out += self._finish(group_key, socks, joins, shared, address)
-                group_key, socks, joins, shared = s.group, [], {}, set()
+            sock_rowid, s = rows[0][0], rows[0][1]
+            if group is None or s.group != group.key:
+                if group is not None:
+                    out += self._finish(group, address)
+                group = _Group(s.group, self._spill.db)
             kept = []
-            for _s, n, claimed, seq in rows:
+            for _r, _s, n, claimed, seq in rows:
                 if claimed > 1:
-                    shared.add((n.id, seq))
+                    group.shared(n.id, seq)
                 local = n.local_side(s.ip, s.port)
                 known = address.get((s.host, n.observer, _version(local)))
                 if known and local == known[0]:
-                    kept.append((n, "established"))
+                    kept.append((n, local, "established"))
                 elif owner.get((n.observer, local), set()) - {s.host}:
                     continue                              # positively another host's address on this sensor
                 else:
-                    kept.append((n, "differs" if known else "unestablished"))
+                    kept.append((n, local, "differs" if known else "unestablished"))
             if kept:
-                joins[s.id] = kept
-                socks.append(s)
-        if socks:
-            out += self._finish(group_key, socks, joins, shared, address)
+                group.add(sock_rowid, s, kept)
+        if group is not None:
+            out += self._finish(group, address)
         return out
 
-    def _finish(self, key, socks, joins, shared, address) -> list[Match]:
-        """One group's match. Only records more than one process claims can name another claimant, so only their
-        claimants are read back."""
-        partner_ids = {n.id for s in socks for n, _status in joins[s.id]}
-        claimants: dict[str, set] = defaultdict(set)
-        for net_id, seq in shared:
-            if net_id in partner_ids:
-                for host, exe, pid in self._spill.execute(
-                        "SELECT DISTINCT s.host, s.exe, s.pid FROM link l JOIN sock s ON s.rowid = l.sock "
-                        "WHERE l.net = ?", (seq,)).fetchall():
-                    claimants[net_id].add((host, exe, pid))
-        m = self._group_match(key, socks, joins, claimants, address)
+    def _finish(self, group: _Group, address) -> list[Match]:
+        try:
+            m = self._group_match(group, address) if group.socks else None
+        finally:
+            group.clear()
         return [m] if m is not None else []
 
-    def _group_match(self, key, socks, joins, claimants, address) -> Match | None:
-        partners: dict[str, Net] = {}
-        attribution: dict[str, str] = {}
-        for s in socks:
-            for n, status in joins[s.id]:
-                partners.setdefault(n.id, n)
-                attribution[n.id] = status
-        alerts = [n for n in partners.values() if n.family == "net_alert"]
-        notable = [s for s in socks if s.reason is not None]
+    def _group_match(self, g: _Group, address) -> Match | None:
+        db = self._spill.db
         components = []
-        if notable:
-            lane = notable[0].process_lane
-            if all(s.outcome == Outcome.failure for s in notable):
+        if g.notable is not None:
+            lane = g.notable.process_lane
+            if g.notable_all_failed:
                 lane = "lead"                       # every notable call failed: an attempt, not a connection
             components.append(lane)
-        alert_lanes = [lane for lane in (alert_lane(a) for a in alerts) if lane is not None]
-        if alert_lanes:
-            components.append(min(alert_lanes, key=LANE_RANK.__getitem__))
+        if g.alert_lane is not None:
+            components.append(g.alert_lane)
         if not components:
             return None
         lane = min(components, key=LANE_RANK.__getitem__)
-        s0 = socks[0]
-        others = sorted({c for n in partners.values() for c in claimants[n.id]} - {s.claimant for s in socks},
-                        key=str)
-        locals_ = sorted({n.local_side(s0.ip, s0.port) for n in partners.values()} - {None})
-        unestablished = sorted({n.observer for n in partners.values() if attribution[n.id] == "unestablished"})
-        differs = sorted({n.local_side(s0.ip, s0.port) for n in partners.values()
-                          if attribution[n.id] == "differs"} - {None})
+        s0 = g.socks[0]
+        # other processes claiming the group's shared records: counted, and the first five named, as they stream
+        n_others, others = 0, []
+        for claimant in db.execute(
+                "SELECT DISTINCT s.host, s.exe, s.pid FROM gsh JOIN gp ON gp.nid = gsh.nid JOIN link l "
+                "ON l.net = gsh.seq JOIN sock s ON s.rowid = l.sock EXCEPT SELECT s.host, s.exe, s.pid FROM gs "
+                "JOIN sock s ON s.rowid = gs.sock"):
+            n_others += 1
+            others = heapq.nsmallest(5, [*others, tuple(claimant)], key=str)
+        locals_ = [local for (local,) in db.execute(
+            "SELECT DISTINCT local FROM gp WHERE local IS NOT NULL ORDER BY local")]
+        unestablished = [observer for (observer,) in db.execute(
+            "SELECT DISTINCT observer FROM gp WHERE status = 'unestablished' ORDER BY observer")]
+        differs = [local for (local,) in db.execute(
+            "SELECT DISTINCT local FROM gp WHERE status = 'differs' AND local IS NOT NULL ORDER BY local")]
         caps = []
-        if others:
+        if n_others:
             caps.append("shared")
         if len(locals_) > 1:
             caps.append("ambiguous")
@@ -736,15 +759,17 @@ class ProcessNetworkLink(Playbook):
             caps.append("unestablished")
         if caps and lane == "high":
             lane = "lead"
-        flows = [n for n in partners.values() if n.family in ("net_flow", "net_session")]
-        connections = {n.cid or f"{n.src}:{n.sport}-{n.dst}:{n.dport}" for n in partners.values()}
-        observers = sorted({n.observer for n in partners.values()})
-        sigs = sorted({str(a.alert_sig) for a in alerts})
-        outcomes = Counter(s.outcome for s in socks)
+        n_partners, n_flows, n_alerts, n_connections = db.execute(
+            "SELECT COUNT(*), TOTAL(family IN ('net_flow', 'net_session')), TOTAL(family = 'net_alert'), "
+            "COUNT(DISTINCT conn) FROM gp").fetchone()
+        n_flows, n_alerts = int(n_flows), int(n_alerts)
+        observers = [observer for (observer,) in db.execute("SELECT DISTINCT observer FROM gp ORDER BY observer")]
+        (n_sigs,) = db.execute("SELECT COUNT(DISTINCT sig) FROM gp WHERE family = 'net_alert'").fetchone()
+        sigs = [sig for (sig,) in db.execute(
+            "SELECT DISTINCT sig FROM gp WHERE family = 'net_alert' ORDER BY sig LIMIT 3")]
+        outcomes = g.outcomes
 
-        ids = [s.id for s in socks[:EXAMPLE_LIMIT]] + [
-            n.id for n in sorted(partners.values(), key=lambda n: (n.family != "net_alert", n.start, n.id))
-        ][:EXAMPLE_LIMIT]
+        ids = [s.id for s in g.socks] + [n.id for _k, n, _o in g.first_partners]
         loaded = {e.id: e for e in self.load(ids)}
         missing = [i for i in ids if i not in loaded]
         if missing:
@@ -755,15 +780,15 @@ class ProcessNetworkLink(Playbook):
             ("succeeded", outcomes.get(Outcome.success, 0)), ("failed", outcomes.get(Outcome.failure, 0)),
             ("with unknown or in-progress outcome", outcomes.get(Outcome.unknown, 0))) if n)
         parts = [
-            (f"Observed on {s0.host} (auditd): {_process_words(first)} made {len(socks)} connect() call(s) to "
-            f"{s0.ip} port {s0.port} that join network records "
-            f"({datetime.fromtimestamp(socks[0].ts, UTC).isoformat()} – "
-            f"{datetime.fromtimestamp(socks[-1].ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."),
-            f"Observed by network sensor(s) {', '.join(observers)}: {len(flows)} flow or session record(s) across "
-            f"{len(connections)} connection(s) to {s0.ip} port {s0.port} starting within seconds of those calls"
+            (f"Observed on {s0.host} (auditd): {_process_words(first)} made {g.n_socks} connect() call(s) to "
+             f"{s0.ip} port {s0.port} that join network records "
+             f"({datetime.fromtimestamp(s0.ts, UTC).isoformat()} – "
+             f"{datetime.fromtimestamp(g.last_ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."),
+            f"Observed by network sensor(s) {', '.join(observers)}: {n_flows} flow or session record(s) across "
+            f"{n_connections} connection(s) to {s0.ip} port {s0.port} starting within seconds of those calls"
             + (f", with local address(es) {', '.join(locals_)}" if locals_ else "")
-            + (f", and {len(alerts)} IDS alert(s) on those connections: {'; '.join(sigs[:3])}"
-               + (f" and {len(sigs) - 3} more" if len(sigs) > 3 else "") if alerts else "") + ".",
+            + (f", and {n_alerts} IDS alert(s) on those connections: {'; '.join(sigs)}"
+               + (f" and {n_sigs - 3} more" if n_sigs > 3 else "") if n_alerts else "") + ".",
             "The link between the host process and these network records is inferred from address, port and "
             "time; it is not itself observed"
             + (". It is ambiguous: more than one local address matched" if len(locals_) > 1 else "") + ".",
@@ -775,26 +800,28 @@ class ProcessNetworkLink(Playbook):
         if differs:
             parts.append(f"Local address(es) {', '.join(differs)} differ from the address usually seen for "
                          f"{s0.host} on the same sensor.")
-        if others:
-            names = "; ".join(f"{h} '{exe}' (pid {pid})" for h, exe, pid in others[:5])
-            parts.append(f"The same network records also join connect() calls by {len(others)} other "
-                         f"process(es): {names}" + (" and more" if len(others) > 5 else "") + ".")
+        if n_others:
+            names = "; ".join(f"{h} '{exe}' (pid {pid})" for h, exe, pid in others)
+            parts.append(f"The same network records also join connect() calls by {n_others} other "
+                         f"process(es): {names}" + (" and more" if n_others > 5 else "") + ".")
         if caps:
             parts.append("Because the attribution is " + " and ".join(
                 {"shared": "shared", "ambiguous": "ambiguous", "unestablished": "not established"}[c] for c in caps)
                 + ", the lane is capped at lead.")
-        if notable:
-            parts.append(f"The process is notable as {notable[0].reason} calling connect() to a non-private "
+        if g.notable is not None:
+            parts.append(f"The process is notable as {g.notable.reason} calling connect() to a non-private "
                          f"address.")
-        alert_event = next((loaded[n.id] for n in alerts if n.id in loaded), None)
-        flow_event = next((loaded[n.id] for n in flows if n.id in loaded), None)
+        # the first-seen alert (and flow) among the cited records
+        by_order = sorted(g.first_partners, key=lambda item: item[2])
+        alert_event = next((loaded[n.id] for _k, n, _o in by_order if n.family == "net_alert"), None)
+        flow_event = next((loaded[n.id] for _k, n, _o in by_order if n.family in ("net_flow", "net_session")), None)
         preds = [pf(first, "process.executable"), pf(first, "destination.ip"), pf(first, "destination.port")]
         if alert_event is not None and alert_event.has("alert.signature"):
             preds.append(pf(alert_event, "alert.signature"))
         elif flow_event is not None and flow_event.has("network.community_id"):
             preds.append(pf(flow_event, "network.community_id"))
         m = Match(self.id, " ".join(parts), self.claim_type, cited, preds, first.ts, LANE_SEVERITY[lane], lane,
-                  "medium", first.entities(), group_key=key)
+                  "medium", first.entities(), group_key=g.key)
         for observer in observers:
             for version in (4, 6):
                 known = address.get((s0.host, observer, version))
@@ -802,10 +829,65 @@ class ProcessNetworkLink(Playbook):
                     best, n, total = known
                     m.notes.append(f"inferred, not an asset record: sensor {observer} saw {s0.host}'s uniquely "
                                    f"joined IPv{version} connections from {best} in {n} of {total} joins")
-        if len(socks) > EXAMPLE_LIMIT or len(partners) > EXAMPLE_LIMIT:
-            m.notes.append(f"{len(socks)} connect() record(s) and {len(partners)} network record(s) joined; up to "
+        if g.n_socks > EXAMPLE_LIMIT or n_partners > EXAMPLE_LIMIT:
+            m.notes.append(f"{g.n_socks} connect() record(s) and {n_partners} network record(s) joined; up to "
                            f"{EXAMPLE_LIMIT} of each are cited")
         return m
+
+
+class _Group:
+    """One (host, program, account, endpoint) group while its linked rows stream by. Memory holds its first
+    EXAMPLE_LIMIT calls, counts, the first notable call, the strongest alert lane, and the EXAMPLE_LIMIT partner records
+    first in citation order (alerts, then by start and id). Its distinct partners, the calls that kept a link and its
+    shared records are rows of the spill's gp, gs and gsh tables, emptied by `clear`."""
+
+    def __init__(self, key: str, db):
+        self.key = key
+        self.db = db
+        self.socks: list[Sock] = []
+        self.n_socks = 0
+        self.last_ts = 0.0
+        self.outcomes: Counter = Counter()
+        self.notable: Sock | None = None
+        self.notable_all_failed = True
+        self.alert_lane: str | None = None
+        self.first_partners: list[tuple] = []     # (citation key, record, first-seen order), sorted by key
+        self.order = 0
+
+    def shared(self, net_id: str, seq: int) -> None:
+        self.db.execute("INSERT OR IGNORE INTO gsh VALUES (?, ?)", (net_id, seq))
+
+    def add(self, sock_rowid: int, s: Sock, kept: list[tuple]) -> None:
+        self.n_socks += 1
+        if len(self.socks) < EXAMPLE_LIMIT:
+            self.socks.append(s)
+        self.last_ts = s.ts
+        self.outcomes[s.outcome] += 1
+        if s.reason is not None:
+            if self.notable is None:
+                self.notable = s
+            self.notable_all_failed = self.notable_all_failed and s.outcome == Outcome.failure
+        self.db.execute("INSERT OR IGNORE INTO gs VALUES (?)", (sock_rowid,))
+        for n, local, status in kept:
+            if not self.db.execute(
+                    "INSERT OR IGNORE INTO gp VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (n.id, n.family, n.observer, local, n.cid or f"{n.src}:{n.sport}-{n.dst}:{n.dport}",
+                     str(n.alert_sig), status)).rowcount:
+                self.db.execute("UPDATE gp SET status = ? WHERE nid = ?", (status, n.id))   # the latest call's
+                continue
+            if n.family == "net_alert":
+                lane = alert_lane(n)
+                if lane is not None and (self.alert_lane is None or LANE_RANK[lane] < LANE_RANK[self.alert_lane]):
+                    self.alert_lane = lane
+            key = (n.family != "net_alert", n.start, n.id)
+            if len(self.first_partners) < EXAMPLE_LIMIT or key < self.first_partners[-1][0]:
+                bisect.insort(self.first_partners, (key, n, self.order), key=lambda item: item[0])
+                del self.first_partners[EXAMPLE_LIMIT:]
+            self.order += 1
+
+    def clear(self) -> None:
+        for table in ("gp", "gs", "gsh"):
+            self.db.execute(f"DELETE FROM {table}")
 
 
 CORRELATION_PLAYBOOKS = [InterpreterExternalConnection, ProcessNetworkLink]

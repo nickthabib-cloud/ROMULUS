@@ -40,14 +40,28 @@ def _cell_state(playbook: Playbook, link_status: str, evaluated: int, missing: i
     return "evaluated_partial" if partial else "no_match_complete"
 
 
-def _write_cell(repo: Repo, hunt_id: str, playbook: Playbook, anchor: ContextAnchor, link: ContextLink,
+@dataclass(frozen=True, slots=True)
+class _CellLink:
+    """What a coverage cell needs of a link: its identity and status, not its records."""
+    id: str
+    link_type: str
+    strength: str
+    status: str
+    reasons: list
+
+    @classmethod
+    def of(cls, link: ContextLink) -> _CellLink:
+        return cls(link.id, link.link_type, link.strength, link.status, link.reasons)
+
+
+def _write_cell(repo: Repo, hunt_id: str, playbook: Playbook, anchor_id: str, link: ContextLink | _CellLink,
                 evaluated: int, missing: int, admitted: int, applicable: bool,
                 *, owner_token: str | None = None) -> None:
     state = _cell_state(playbook, link.status, evaluated, missing, admitted, applicable)
     repo.set_rule_cell(
         hunt_id, playbook.id, playbook.version, f"link:{link.link_type}",
-        f"anchor:{anchor.id}|link:{link.id}", state, admitted, evaluated,
-        {"anchor_id": anchor.id, "link_id": link.id, "link_type": link.link_type,
+        f"anchor:{anchor_id}|link:{link.id}", state, admitted, evaluated,
+        {"anchor_id": anchor_id, "link_id": link.id, "link_type": link.link_type,
          "strength": link.strength, "missing_required": missing, "reasons": link.reasons},
         owner_token=owner_token,
     )
@@ -66,7 +80,7 @@ def evaluate_context(
         admitted = [ContextEvaluation(playbook, match, decide(match, hunt_id))
                     for match in matches if decide(match, hunt_id).admitted]
         evaluations.extend(admitted)
-        _write_cell(repo, hunt_id, playbook, anchor, link,
+        _write_cell(repo, hunt_id, playbook, anchor.id, link,
                     playbook.evaluated - before_eval, playbook.missing_required - before_missing,
                     len(admitted), playbook.accepts(anchor, link), owner_token=owner_token)
     return evaluations
@@ -176,11 +190,15 @@ class _RuleReaches:
     """One context rule's view of every reach, built one link at a time. Records are grouped by session across every
     accepted reach, so a group's judgement (for example whether a root process's parent is known) sees the whole
     session, not one window. A reach only ever contributes records of a link type the rule accepts, and only the
-    records the rule is eligible to read are held."""
+    records the rule is eligible to read are held.
+
+    Memory: a few scalars per reach for its coverage cell (no records), plus the sessions: every eligible record, and
+    for each reach that contributed one, its anchor and link with their evidence records. Those stay O(eligible
+    records), as a session is judged over all of its records at once."""
 
     def __init__(self, playbook_cls):
         self.playbook_cls = playbook_cls
-        self.coverage: list[tuple] = []             # (anchor, link, evaluated, missing, applicable)
+        self.coverage: list[tuple] = []             # (anchor id, _CellLink, evaluated, missing, applicable)
         self.sessions: dict[tuple, dict] = {}       # session key -> {events: {id: ev}, pairs: {(a.id,l.id): (a,l)}}
 
     def add(self, anchor: ContextAnchor, link: ContextLink, link_events: list[TypedEvent],
@@ -195,7 +213,7 @@ class _RuleReaches:
         judged = self.playbook_cls()
         if applicable:
             judged.consume_linked(anchor, link, link_events)
-        self.coverage.append((anchor, link, judged.evaluated, judged.missing_required, applicable))
+        self.coverage.append((anchor.id, _CellLink.of(link), judged.evaluated, judged.missing_required, applicable))
         for event in eligible:
             event = held.setdefault(event.id, event)
             skey = _session_of(event, anchor, link)
@@ -230,9 +248,9 @@ def _finalize_rule(repo: Repo, hunt_id: str, reaches: _RuleReaches,
     for _group_key, (match, decision, pairs) in sorted(admitted.items()):
         produced_ids.add(_publish_context(repo, hunt_id, playbook_cls(), match, decision, pairs,
                                           owner_token=owner_token))
-    for anchor, link, evaluated, missing, applicable in coverage:
-        contributed = (anchor.id, link.id) in contributing_reaches
-        _write_cell(repo, hunt_id, playbook_cls(), anchor, link, evaluated, missing,
+    for anchor_id, link, evaluated, missing, applicable in coverage:
+        contributed = (anchor_id, link.id) in contributing_reaches
+        _write_cell(repo, hunt_id, playbook_cls(), anchor_id, link, evaluated, missing,
                     1 if contributed else 0, applicable, owner_token=owner_token)
     return produced_ids
 
@@ -277,7 +295,8 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
     boots = stored_boot_intervals(repo, hunt_id)
     # The pass streams: one link's records are read at a time, every rule judges that reach, and only records some
     # rule is eligible to read stay in memory, one object per id (`held`). A record already held is never read or
-    # deserialized again; the rest of a link's records are released before the next link is read.
+    # deserialized again; the rest of a link's records are released before the next link is read. What stays is
+    # O(eligible records) plus a few scalars per (rule, reach) for its coverage cell; see _RuleReaches.
     held: dict[str, TypedEvent] = {}
 
     def events(ids: list[str]) -> list[TypedEvent]:

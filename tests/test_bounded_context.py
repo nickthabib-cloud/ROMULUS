@@ -48,3 +48,23 @@ def test_final_pass_holds_only_eligible_records_and_reads_each_held_record_once(
     assert decoded["fa"] == 1                                # the anchor is built once
     final = _discovery(repo.candidates("h1"))
     assert len(final) == 1 and "3 command(s)" in final[0]["claim"]
+
+
+def test_coverage_keeps_what_a_cell_needs_of_each_link_not_its_records(monkeypatch):
+    repo = _repo()
+    _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
+    for n in range(5):
+        _seed_link(repo, "h1", f"L-{n}", "F-A", [_noise(n * 10 + i) for i in range(10)])
+    kept = []
+    finalize_rule = ctx._finalize_rule
+
+    def watching(repo, hunt_id, reaches, **kwargs):
+        kept.extend(reaches.coverage)
+        return finalize_rule(repo, hunt_id, reaches, **kwargs)
+
+    monkeypatch.setattr(ctx, "_finalize_rule", watching)
+    ctx.finalize_context(repo, "h1")
+    assert kept and all(isinstance(anchor_id, str) and type(link) is ctx._CellLink
+                        for anchor_id, link, *_counts in kept)
+    cells = [c for c in repo.rule_cells("h1") if c["partition"].startswith("anchor:F-A|link:L-")]
+    assert len(cells) == len(kept) and {c["detail"]["link_id"] for c in cells} == {f"L-{n}" for n in range(5)}

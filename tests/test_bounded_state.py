@@ -184,3 +184,31 @@ def test_a_live_spill_is_marked_fresh_for_the_stale_stage_cleanup(tmp_path):
     spill.flush()                                    # any write marks it live again
     assert clear_stale_stages(tmp_path) == 0 and owner.spill() is spill
     owner.close_spill()
+
+
+def test_each_partition_names_only_its_own_refused_records(monkeypatch):
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": ["romulus-host-x"]}, "d", "t")
+    now = datetime.now(UTC)
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: SearchOutcome(
+        target=intent.target, fingerprint="f", started_at=now, ended_at=now, completeness=Completeness.complete,
+        total=0, total_relation="eq", returned=0, records=[]))
+    batches = iter([[_event(i, f"host{i % 3}") for i in range(6)],          # host2 refused: 2 records
+                    [_event(i, f"host{i % 4}") for i in range(6, 14)]])     # host2 and host3 refused: 4 records
+    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots: (next(batches), {}, []))
+    sweep = sw.Sweep(repo, object(), "h1", Window(start=START, end=START + timedelta(minutes=10)),
+                     {"romulus-host-x": None})
+    sweep.pack = [_Capped()]
+    for minutes in (0, 5):
+        start = START + timedelta(minutes=minutes)
+        sweep.run_partition("romulus-host-x", None, [], Window(start=start, end=start + timedelta(minutes=5)), est=1)
+    sweep.finalize()
+    cells = repo.rule_cells("h1")
+    parts = sorted((c for c in cells if c["target"] == "romulus-host-x"), key=lambda c: c["partition"])
+    assert [c["detail"]["state_capped"] for c in parts] == [2, 4]
+    assert any("at most 2 hosts are tracked (2 record(s) not evaluated)" in r for r in parts[0]["detail"]["reasons"])
+    assert any("at most 2 hosts are tracked (4 record(s) not evaluated)" in r for r in parts[1]["detail"]["reasons"])
+    window = next(c for c in cells if c["target"] == "*")
+    assert any("(6 record(s) not evaluated)" in r for r in window["detail"]["reasons"])

@@ -335,6 +335,7 @@ class Sweep:
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
+            before_limits = {name: limit.records for name, limit in pb.limits.items()}
             matches = pb.consume(events)
             for m in matches:
                 self._publish(m, tid, raw_sources)
@@ -371,8 +372,12 @@ class Sweep:
                 reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
             detail = {"missing_required": missing, "reasons": reasons}
             if capped:
+                # this partition's own refusals, per budget (the rule's totals are on its hunt-level coverage)
+                refused = [f"state limit: {limit.text} ({limit.records - before_limits.get(name, 0)} record(s) not "
+                           f"evaluated)" for name, limit in pb.limits.items()
+                           if limit.records > before_limits.get(name, 0)]
                 reasons.append(f"state_capped={capped}: records not evaluated because a state budget of this rule "
-                               f"was full; " + "; ".join(pb.limit_reasons()))
+                               f"was full; " + "; ".join(refused))
                 detail["state_capped"] = capped
             cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated, detail))
         if any(pb.staged for pb in self.pack):

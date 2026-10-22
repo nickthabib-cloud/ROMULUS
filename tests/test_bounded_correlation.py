@@ -71,6 +71,109 @@ def test_join_holds_no_per_record_state_and_finds_the_alerted_connection(tmp_pat
     assert not list(Path(tmp_path).glob("romulus-stage-spill-*"))
 
 
+SIGS = [f"ET beacon variant {k}" for k in range(5)]
+
+
+def _beacon(hours: int, every: int = 10):
+    """One process beaconing to one endpoint every `every` seconds for `hours`: one (host, program, account,
+    endpoint) group. Every call has its flow; every 500th has an IDS alert on it; every 7th failed."""
+    events = []
+    for i in range(hours * 3600 // every):
+        ts = T0 + timedelta(seconds=every * i)
+        call = sock(ts, 4000 + i % 30000, "203.0.113.99", 443)
+        if i % 7 == 3:
+            call = call.model_copy(update={"outcome": Outcome.failure})
+        events += [call, flow(ts + timedelta(seconds=1), "10.1.0.5", 1024 + i, "203.0.113.99", 443)]
+        if i % 500 == 0:
+            events.append(flow(ts + timedelta(seconds=2), "10.1.0.5", 1024 + i, "203.0.113.99", 443,
+                               family="net_alert", alert__severity=1, alert__signature=SIGS[i // 500 % 5],
+                               alert__category="Trojan"))
+    return events
+
+
+def _expected(events) -> dict:
+    """What the join must say of the beacon, worked out directly from the records held in memory."""
+    calls = [e for e in events if e.family == "net_socket"]
+    network = [e for e in events if e.family != "net_socket"]
+    alerts = [e for e in network if e.family == "net_alert"]
+    cited = sorted(network, key=lambda e: (e.family != "net_alert", e.ts, e.id))[:20]
+    failed = sum(e.outcome == Outcome.failure for e in calls)
+    return {"calls": len(calls), "flows": len(network) - len(alerts), "alerts": len(alerts),
+            "connections": len(calls), "failed": failed, "succeeded": len(calls) - failed,
+            "cited": [e.id for e in calls[:20]] + [e.id for e in cited],
+            "sigs": sorted({str(e.get("alert.signature")) for e in alerts})}
+
+
+def _join(events, tmp_path):
+    import tracemalloc
+    rule = ProcessNetworkLink()
+    rule.spill_dir = tmp_path
+    stage = {}
+    for start in range(0, len(events), 5000):
+        rule.consume(events[start:start + 5000])
+        stage.update({e.id: e for e in rule.drain_staged()})
+    rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    tracemalloc.start()
+    try:
+        out = rule.finalize()
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+        rule.release_state()
+    return out, peak
+
+
+def _check(match, want) -> None:
+    sigs = want["sigs"]
+    assert match.proposed_lane == "high"
+    assert [e.id for e in match.events] == want["cited"]
+    assert (f"made {want['calls']} connect() call(s) to 203.0.113.99 port 443" in match.claim
+            and f"{want['succeeded']} succeeded, {want['failed']} failed" in match.claim)
+    assert (f"{want['flows']} flow or session record(s) across {want['connections']} connection(s)" in match.claim
+            and f"{want['alerts']} IDS alert(s) on those connections: {'; '.join(sigs[:3])} and "
+                f"{len(sigs) - 3} more." in match.claim)
+    assert (f"{want['calls']} connect() record(s) and {want['flows'] + want['alerts']} network record(s) joined"
+            in " ".join(match.notes))
+
+
+@pytest.mark.slow
+def test_a_week_long_beacon_streams_one_huge_group_with_bounded_memory(tmp_path):
+    day = _beacon(24)
+    (small,), small_peak = _join(day, tmp_path / "day")
+    _check(small, _expected(day))
+    week = _beacon(24 * 7)
+    (large,), large_peak = _join(week, tmp_path / "week")
+    _check(large, _expected(week))
+    # seven times the records in the one group, but finalize holds only a bounded sample of it
+    assert large_peak < small_peak * 1.5 + 2_000_000, (small_peak, large_peak)
+
+
+def test_non_scalar_telemetry_values_are_bound_as_text(tmp_path):
+    rule = ProcessNetworkLink()
+    rule.spill_dir = tmp_path
+    call = sock(T0, [1, 2], "203.0.113.7", 4444, exe="/usr/bin/nc")
+    alert = flow(T0 + timedelta(seconds=1), "10.1.0.5", 45555, "203.0.113.7", 4444, family="net_alert",
+                 alert__severity=1, alert__signature=["ET a", "ET b"], alert__category={"name": "Trojan"})
+    rule.consume([call, alert])
+    stage = {e.id: e for e in rule.drain_staged()}
+    rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    (match,) = rule.finalize()
+    rule.release_state()
+    assert '["ET a", "ET b"]' in match.claim and rule.evaluated == 2
+
+
+def test_only_the_disk_budget_refuses_a_record(tmp_path):
+    rule = ProcessNetworkLink()
+    rule.spill_dir = tmp_path
+    rule.DISK_BUDGET = 2_000
+    events = [flow(T0 + timedelta(seconds=i), "10.1.0.5", 30000 + i, "198.51.100.1", 443) for i in range(40)]
+    rule.consume(events)
+    rule.release_state()
+    refused = rule.limits["disk"].records
+    assert 0 < refused < 40 and rule.capped == refused and rule.evaluated == 40 - refused
+    assert "disk budget" in rule.limit_reasons()[0]
+
+
 def test_the_sweep_closes_the_spill_on_a_failure_path(tmp_path):
     from romulus.hunt import sweep as sw
     rule = ProcessNetworkLink()
