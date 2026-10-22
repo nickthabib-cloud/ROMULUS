@@ -211,7 +211,7 @@ class _Series:
 
 class NonRootWriteRootExecutedFile(Playbook):
     id = "host.nonroot_write_root_executed_file"
-    version = "3"
+    version = "4"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -588,6 +588,7 @@ class NonRootWriteRootExecutedFile(Playbook):
 
     def finalize(self):
         out = []
+        own: dict[tuple[str, str], list[tuple[str, Match]]] = defaultdict(list)
         for key in sorted(set(self.writes) | set(self.kernel_writes)):
             by_account: dict[str, list[_Write]] = defaultdict(list)
             for write in (*self.writes.get(key, ()), *self.kernel_writes.get(key, ())):
@@ -596,9 +597,46 @@ class NonRootWriteRootExecutedFile(Playbook):
                 actors = sorted(by_account[account], key=lambda w: (w.ts, w.event_id))
                 match = self._finding(key[0], key[1], account, [w for w in actors if not w.kernel],
                                       [w for w in actors if w.kernel])
-                if match is not None:
+                if match is None:
+                    continue
+                if getattr(match, "own_path", None):
+                    own[(key[0], account)].append((match.own_path, match))
+                else:
                     out.append(match)
+        out += [self._own_group(host, account, own[(host, account)]) for host, account in sorted(own)]
         return out
+
+    def _own_group(self, host: str, account: str, items: list[tuple[str, Match]]) -> Match:
+        """Own-elevation-only leads of one writer on one host, as one lead (configuration management writes and
+        then runs many one-off files this way). Every per-file finding is kept: its path in the claim or notes,
+        its first record cited up to the cap, its total in the counts."""
+        items = sorted(items, key=lambda item: (item[1].ts, item[0]))
+        if len(items) == 1:
+            return items[0][1]
+        paths = [path for path, _m in items]
+        directories = sorted({posixpath.dirname(path) for path in paths})
+        cited: dict[str, TypedEvent] = {}
+        for _path, m in items:
+            first = min(m.events, key=lambda e: (e.ts, e.id))
+            if len(cited) < WRITE_CITE:
+                cited[first.id] = first
+        events = sorted(cited.values(), key=lambda e: (e.ts, e.id))
+        start, end = items[0][1].ts, max(m.ts for _p, m in items)
+        shown = paths[:WRITE_CITE]
+        claim = (f"On {host}, account '{account}' wrote {len(paths)} files in {len(directories)} director(ies) "
+                 f"from {start.isoformat()} to {end.isoformat()}, and each was then run as root only by the "
+                 f"account's own elevation (its own audit session or login uid): {'; '.join(shown)}"
+                 + (f"; and {len(paths) - len(shown)} more (every path is in the notes)" if len(paths) > len(shown)
+                    else "") + ". Configuration management that writes a module and runs it with privilege "
+                 "escalation looks like this; so does a sudo or su rule that runs files the account can edit, which "
+                 f"gives that account root. The first record of {len(events)} of the files is cited.")
+        notes = sorted({n for _p, m in items for n in m.notes if n.startswith("T")})
+        notes += [n for n in items[0][1].notes if n.startswith("own elevation")]
+        notes += [f"file: {path}" for path in paths]
+        match = Match(self.id, claim, self.claim_type, events, _predicate(events), events[0].ts, self.severity,
+                      "lead", "high", events[0].entities(), group_key=f"{host}|{account}|own-elevation")
+        match.notes = notes
+        return match
 
     def _finding(self, host: str, pkey: str, account: str, writes: list[_Write],
                  kernel: list[_Write] = ()) -> Match | None:
@@ -722,6 +760,8 @@ class NonRootWriteRootExecutedFile(Playbook):
                       self.severity, lane, confidence, writer_events[0].entities(),
                       group_key=f"{host}|{account}|{pkey}")
         match.notes = notes + sorted(techniques)
+        if own_only:
+            match.own_path = first.path
         return match
 
 

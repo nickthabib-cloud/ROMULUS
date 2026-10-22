@@ -459,7 +459,7 @@ class _Change:
 
 class PersistencePathChange(Playbook):
     id = "host.persistence_path_change"
-    version = "1"
+    version = "2"
     title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -604,10 +604,15 @@ class PersistencePathChange(Playbook):
         groups: dict[tuple, list[_Change]] = defaultdict(list)
         for change in self.changes:
             manager = self._manager(change) if change.uid == "0" else None
-            # package activity is batched per location; anything else is one finding per file and account, so
-            # no file is ever merged away among other changes in the same location
-            key = (("package", change.host, manager, change.location) if manager
-                   else ("account", change.host, change.path, change.uid))
+            # Package activity is batched per (host, manager). Anything else is one finding per writing process
+            # (host, uid, pid) and directory, so one editor run (file, swap and backup files) is one finding; without
+            # a pid it is one finding per file. Every file is named and its first record cited.
+            if manager:
+                key = ("package", change.host, manager)
+            elif isinstance(change.pid, int):
+                key = ("account", change.host, posixpath.dirname(change.path), change.uid, change.pid)
+            else:
+                key = ("account", change.host, change.path, change.uid, None)
             groups[key].append(change)
         out = []
         for key in sorted(groups, key=lambda k: tuple(str(part) for part in k)):
@@ -616,7 +621,12 @@ class PersistencePathChange(Playbook):
         return out
 
     def _cite(self, items: list[_Change]) -> tuple[list[TypedEvent], list]:
-        events = self._events([c.event_id for c in items[:CITE]])
+        """The first record of each distinct file, then the earliest others, up to the cap."""
+        firsts = list({c.path: c.event_id for c in reversed(items)}.values())
+        ordered = sorted(firsts, key=lambda i: next(n for n, c in enumerate(items) if c.event_id == i))
+        ids = ordered[:CITE]
+        ids += [c.event_id for c in items if c.event_id not in ids][:max(0, CITE - len(ids))]
+        events = self._events(ids)
         cited = sorted(events.values(), key=lambda e: (e.ts, e.id))
         predicate = [pf(e, name) for e in cited for name in ("file.path", "file.change", "process.uid",
                                                              "process.executable") if e.has(name)]
@@ -633,8 +643,9 @@ class PersistencePathChange(Playbook):
         return text + (f"; and {len(parts) - CITE} more" if len(parts) > CITE else "")
 
     def _finding(self, key: tuple, items: list[_Change]) -> Match:
-        _kind, host, path, uid = key
+        _kind, host, place, uid, pid = key
         first = items[0]
+        files = sorted({c.path for c in items})
         cited, predicate = self._cite(items)
         root = uid == "0"
         executables = sorted({c.exe for c in items if c.exe})
@@ -668,8 +679,10 @@ class PersistencePathChange(Playbook):
             claim += f" {setuid} of the calls ran with effective uid 0 (a setuid-root program)."
         claim += (" The records show the system call on the file, not the content written; the files here are "
                   "read or run by the system (scheduler, init, the login path or the loader).")
+        if len(files) > 1:
+            claim += f" The {len(files)} files were changed by one process (pid {pid})."
         if len(items) > len(cited):
-            claim += f" The earliest {len(cited)} records are cited."
+            claim += f" {len(cited)} records are cited (the first of each file first)."
         # A non-root account changing what the system or another account acts on is high; a web-service account
         # always is. An account changing its own per-account files, or a setuid-root helper writing the account's
         # own spool entry, is a lead: that is also routine use.
@@ -683,25 +696,28 @@ class PersistencePathChange(Playbook):
             notes.insert(0, "lead: every call was a setuid-root program on the account's own per-account entry")
         confidence = "high" if ok and all(c.outcome == Outcome.success for c in ok) else "medium"
         match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, lane,
-                      confidence, cited[0].entities(), group_key=f"{host}|{uid}|{path}")
-        match.notes = notes
+                      confidence, cited[0].entities(),
+                      group_key=f"{host}|{uid}|{place}" + (f"|pid {pid}" if pid is not None else ""))
+        match.notes = notes + [f"file: {path}" for path in files]
         return match
 
     def _package_finding(self, key: tuple, items: list[_Change]) -> Match:
-        _kind, host, manager, location = key
+        _kind, host, manager = key
         cited, predicate = self._cite(items)
         files = sorted({c.path for c in items})
-        claim = (f"On {host}, {len(items)} kernel file-change record(s) on {len(files)} file(s) "
-                 f"{_span(items[0].ts, items[-1].ts)} show package activity acting on {items[0].description} "
+        places = sorted({c.location for c in items})
+        claim = (f"On {host}, {len(items)} kernel file-change record(s) on {len(files)} file(s) in "
+                 f"{len(places)} location(s) ({', '.join(places)}) {_span(items[0].ts, items[-1].ts)} show package "
+                 f"activity acting on files the system runs or reads "
                  f"({self._changes_text(items)}). Each writing process is '{manager}' or a descendant of it in the "
                  f"kernel-recorded process lineage (executables {', '.join(sorted({c.exe for c in items}))}). "
                  f"This is how package installs and upgrades change these files; a malicious or tampered package "
                  f"would change them the same way. The {_tally(cited, 'calls')}.")
         if len(items) > len(cited):
-            claim += f" The earliest {len(cited)} records are cited."
+            claim += f" {len(cited)} records are cited (the first of each file first)."
         match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, "lead",
-                      "high", cited[0].entities(), group_key=f"{host}|package:{manager}|{location}")
-        match.notes = sorted({c.technique for c in items})
+                      "high", cited[0].entities(), group_key=f"{host}|package:{manager}")
+        match.notes = sorted({c.technique for c in items}) + [f"file: {path}" for path in files]
         return match
 
 
