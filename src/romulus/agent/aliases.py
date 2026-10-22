@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from romulus.decide.policy import LANE_ORDER
 from romulus.store.repo import Repo
 
 ALIAS_KINDS = frozenset({"F", "I", "E", "N", "L"})
@@ -38,15 +37,7 @@ class AliasBook:
             raise KeyError(hunt_id)
         self.repo = repo
         self.hunt_id = hunt_id
-        findings = sorted(
-            repo.candidates(hunt_id),
-            key=lambda row: (
-                LANE_ORDER.get(row["lane"], 99), -float(row["priority"]), row["ts"], row["id"],
-            ),
-        )
-        seeds = [("F", row["id"]) for row in findings]
-        seeds.extend(("N", row["id"]) for row in repo.entities(hunt_id))
-        repo.seed_agent_aliases(hunt_id, seeds)
+        repo.seed_agent_base_aliases(hunt_id)
 
     @staticmethod
     def _check_kind(kind: str) -> None:

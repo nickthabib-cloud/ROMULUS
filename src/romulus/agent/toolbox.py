@@ -7,11 +7,11 @@ under the result's ``data`` member.
 from __future__ import annotations
 
 import json
-from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -30,7 +30,6 @@ from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.typed import TypedEvent
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import coverage_for_hunt
-from romulus.store.db import digest
 from romulus.store.repo import Repo
 
 READ_PAGE_SIZE = 25
@@ -86,6 +85,7 @@ class GetIncidentArgs(_Args):
 class EntityProfileArgs(_Args):
     entity: AliasArg
     page: int = Field(default=1, ge=1)
+    cursor: str | None = Field(default=None, pattern=r"^R[0-9a-f]{20}$")
 
 
 class _WindowedArgs(_Args):
@@ -345,59 +345,57 @@ class Toolbox:
         }
 
     @staticmethod
-    def _coverage_entries(coverage: dict) -> list[dict]:
-        entries: list[dict] = []
+    def _coverage_entries(coverage: dict) -> Iterator[dict]:
 
         def text_parts(kind: str, base: dict, field: str, value: Any) -> None:
             text = str(value)
             chunks = [text[index:index + TOOL_TEXT_LIMIT]
                       for index in range(0, len(text), TOOL_TEXT_LIMIT)] or [""]
             for number, chunk in enumerate(chunks, 1):
-                entries.append({
+                yield {
                     "kind": kind, **base, "field": field, "text": chunk,
                     "part": number, "parts": len(chunks),
-                })
+                }
 
         for row in coverage["rules"]:
             base = {"rule_id": _bounded_text(row["rule_id"])}
-            entries.append({
+            yield {
                 "kind": "rule", **base, "states": _jsonable(row["states"]),
                 "records_evaluated": row["records_evaluated"],
-            })
-            text_parts("rule_text", base, "negative_claim", row["negative_claim"])
+            }
+            yield from text_parts("rule_text", base, "negative_claim", row["negative_claim"])
         for gap_number, gap in enumerate(coverage["gaps"], 1):
             base = {
                 "gap": gap_number, "target": _bounded_text(gap["target"]),
                 "partition": _bounded_text(gap["partition"]),
             }
-            entries.append({
+            yield {
                 "kind": "gap", **base, "every_rule_there": bool(gap.get("every_rule_there")),
                 "every_requested_rule_there": bool(gap.get("every_requested_rule_there")),
-            })
-            entries.extend({
+            }
+            yield from ({
                 "kind": "gap_rule", **base, "rule_id": _bounded_text(rule),
                 "state": _bounded_text(state),
             } for rule, state in sorted(gap["rules"].items()))
             for reason_number, reason in enumerate(gap.get("reasons", []), 1):
-                text_parts("gap_text", {**base, "reason": reason_number}, "reason", reason)
+                yield from text_parts("gap_text", {**base, "reason": reason_number}, "reason", reason)
         for item_number, row in enumerate(coverage["not_assessed"], 1):
             base = {"item": item_number, "records": row.get("records")}
             for field in ("target", "dataset", "count_scope", "reason"):
-                text_parts("not_assessed_text", base, field, row.get(field, ""))
-        return entries
+                yield from text_parts("not_assessed_text", base, field, row.get(field, ""))
 
     def _list_coverage(self, args: ListCoverageArgs) -> dict:
         identity = {"kind": "coverage"}
         cursor = args.cursor
         if cursor is not None:
-            plan = self.repo.agent_tool_page_plan(self.hunt_id, cursor)
+            plan = self.repo.agent_page_plan(self.hunt_id, cursor)
             if plan is None:
                 return self._semantic_refusal("unknown_cursor", "the coverage cursor is not valid for this hunt")
             if plan["identity"] != identity:
                 return self._semantic_refusal(
                     "cursor_request_mismatch", "the cursor belongs to a different tool request",
                 )
-            stored = plan["result"]
+            stored = plan["summary"]
         else:
             if args.page != 1:
                 return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
@@ -405,26 +403,27 @@ class Toolbox:
             rules = {str(item["id"]) for item in (manifest.get("pack") or {}).get("playbooks", [])
                      if isinstance(item, dict) and item.get("id")}
             coverage = self._coverage(rules)
-            entries = self._coverage_entries(coverage)
-            pages = [entries[index:index + COVERAGE_PAGE_SIZE]
-                     for index in range(0, len(entries), COVERAGE_PAGE_SIZE)] or [[]]
             counts = {
                 "rules": len(coverage["rules"]), "gaps": len(coverage["gaps"]),
                 "not_assessed": len(coverage["not_assessed"]),
             }
-            stored = {"pages": pages, "status": coverage["status"], "coverage_counts": counts}
-            cursor = "C" + digest({"hunt_id": self.hunt_id, "identity": identity, "result": stored})[:20]
-            self.repo.save_agent_tool_page_plan(self.hunt_id, cursor, identity, stored)
-        pages = stored["pages"]
-        entries = pages[args.page - 1] if args.page <= len(pages) else []
-        total = sum(len(page) for page in pages)
+            stored = {"status": coverage["status"], "coverage_counts": counts}
+            cursor = "C" + uuid4().hex[:20]
+            plan = self.repo.create_agent_page_plan(
+                self.hunt_id, cursor, identity, stored, self._coverage_entries(coverage),
+            )
+        total = int(plan["item_count"])
+        entries = self.repo.agent_page_items(
+            self.hunt_id, cursor, offset=(args.page - 1) * COVERAGE_PAGE_SIZE,
+            limit=COVERAGE_PAGE_SIZE,
+        )
         coverage = {
             "status": stored["status"], "counts": stored["coverage_counts"], "gaps": [],
         }
         return _result(
             stored["status"], coverage=coverage, counts={"returned": len(entries), "total": total},
             data={"entries": entries, "page": args.page, "cursor": cursor},
-            more=args.page < len(pages),
+            more=args.page * COVERAGE_PAGE_SIZE < total,
         )
 
     @staticmethod
@@ -466,58 +465,81 @@ class Toolbox:
         }
 
     def _list_findings(self, args: ListFindingsArgs) -> dict:
-        unfiltered = args.lane is None and args.rule is None and args.entity is None
-        if args.cursor is not None and not unfiltered:
-            return self._semantic_refusal(
-                "cursor_with_filters", "a dossier cursor cannot be combined with listing filters",
-            )
-        plan = self.repo.agent_dossier_page_plan(self.hunt_id, args.cursor) if args.cursor else None
-        if args.cursor is not None and plan is None:
-            return self._semantic_refusal("unknown_cursor", "the dossier cursor is not valid for this hunt")
-        if plan is not None:
-            page_aliases = plan[args.page - 1] if args.page <= len(plan) else []
-            page = []
-            for alias in page_aliases:
-                target = self.aliases.resolve(alias, {"F"})
-                row = self.repo.candidate(target)
-                if row is not None and row["hunt_id"] == self.hunt_id:
-                    page.append(row)
-            total = sum(len(item) for item in plan)
-            more = args.page < len(plan)
-        else:
-            start = (args.page - 1) * READ_PAGE_SIZE
-            if args.entity is None:
-                total = self.repo.candidate_count(self.hunt_id, lane=args.lane, rule_id=args.rule)
-                page = self.repo.candidate_page(
-                    self.hunt_id, offset=start, limit=READ_PAGE_SIZE,
-                    lane=args.lane, rule_id=args.rule,
+        identity = {"kind": "findings", "lane": args.lane, "rule": args.rule, "entity": args.entity}
+        stored = self.repo.agent_page_plan(self.hunt_id, args.cursor) if args.cursor else None
+        if args.cursor is not None and stored is None:
+            return self._semantic_refusal("unknown_cursor", "the findings cursor is not valid for this hunt")
+        if stored is not None:
+            if stored["identity"].get("kind") == "dossier":
+                rows = self.repo.agent_page_items(
+                    self.hunt_id, args.cursor, offset=args.page - 1, limit=1,
                 )
+                finding_items = (rows[0]["page"].get("findings", []) if rows else [])
+                page = []
+                for item in finding_items:
+                    target = self.aliases.resolve(item["alias"], {"F"})
+                    candidate = self.repo.candidate(target)
+                    if candidate is not None:
+                        page.append(candidate)
+                total = int(stored["summary"]["finding_count"])
+                more = args.page < int(stored["item_count"])
+                cursor = args.cursor
+                identity = {"kind": "findings", "lane": None, "rule": None, "entity": None}
             else:
+                requested = identity
+                if args.lane is None and args.rule is None and args.entity is None:
+                    requested = stored["identity"]
+                if stored["identity"] != requested:
+                    return self._semantic_refusal(
+                        "cursor_request_mismatch", "the cursor belongs to a different findings request",
+                    )
+                identity = stored["identity"]
+                rows = self.repo.agent_page_items(
+                    self.hunt_id, args.cursor, offset=(args.page - 1) * READ_PAGE_SIZE,
+                    limit=READ_PAGE_SIZE,
+                )
+                page = [candidate for item in rows
+                        if (candidate := self.repo.candidate(item["candidate_id"])) is not None]
+                total = int(stored["item_count"])
+                more = args.page * READ_PAGE_SIZE < total
+                cursor = args.cursor
+        else:
+            if args.page != 1:
+                return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
+            entity_key = None
+            if args.entity is not None:
                 entity_id = self.aliases.resolve(args.entity, {"N"})
                 entity = self.repo.entity(entity_id)
                 if entity is None or entity["hunt_id"] != self.hunt_id:
                     raise UnknownAlias(f"unknown entity alias {args.entity!r} in hunt {self.hunt_id}")
-                lanes = [args.lane] if args.lane is not None else None
-                candidates = sorted(self.repo.candidates(self.hunt_id, lanes=lanes), key=_candidate_key)
-                candidates = [row for row in candidates
-                              if (args.rule is None or row["rule_id"] == args.rule)
-                              and self._matches_entity(row, entity)]
-                total = len(candidates)
-                page = candidates[start:start + READ_PAGE_SIZE]
-            more = start + len(page) < total
-        rule_ids = {args.rule} if args.rule is not None else {
+                entity_key = (str(entity["kind"]), str(entity["value"]))
+            cursor = "D" + uuid4().hex[:16]
+            stored = self.repo.create_candidate_page_plan(
+                self.hunt_id, cursor, identity, {}, lane=args.lane, rule_id=args.rule,
+                entity=entity_key,
+            )
+            rows = self.repo.agent_page_items(
+                self.hunt_id, cursor, offset=0, limit=READ_PAGE_SIZE,
+            )
+            page = [candidate for item in rows
+                    if (candidate := self.repo.candidate(item["candidate_id"])) is not None]
+            total = int(stored["item_count"])
+            more = READ_PAGE_SIZE < total
+        selected_rule = identity.get("rule")
+        rule_ids = {selected_rule} if selected_rule is not None else {
             str(item["id"]) for item in ((self.repo.get_hunt(self.hunt_id) or {}).get("manifest") or {})
             .get("pack", {}).get("playbooks", []) if isinstance(item, dict) and item.get("id")
         }
         coverage = self._coverage(rule_ids)
         relevant_rules = {str(row["rule_id"]) for row in page}
-        if not relevant_rules and args.rule is not None:
-            relevant_rules.add(args.rule)
+        if not relevant_rules and selected_rule is not None:
+            relevant_rules.add(selected_rule)
         coverage_view = self._coverage_view(coverage, relevant_rules)
         return _result(
             coverage["status"], coverage=coverage_view,
             counts={"returned": len(page), "total": total},
-            data={"findings": [self._finding_summary(row) for row in page], "page": args.page},
+            data={"findings": [self._finding_summary(row) for row in page],
+                  "page": args.page, "cursor": cursor},
             more=more,
         )
 
@@ -592,14 +614,14 @@ class Toolbox:
         identity = {"kind": "incident", "incident_id": incident_id}
         cursor = args.cursor
         if cursor is not None:
-            plan = self.repo.agent_tool_page_plan(self.hunt_id, cursor)
+            plan = self.repo.agent_page_plan(self.hunt_id, cursor)
             if plan is None:
                 return self._semantic_refusal("unknown_cursor", "the incident cursor is not valid for this hunt")
             if plan["identity"] != identity:
                 return self._semantic_refusal(
                     "cursor_request_mismatch", "the cursor belongs to a different incident",
                 )
-            stored = plan["result"]
+            stored = plan["summary"]
         else:
             if args.page != 1:
                 return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
@@ -608,61 +630,72 @@ class Toolbox:
             if incident is None:
                 raise UnknownAlias(f"unknown incident alias {args.incident!r} in hunt {self.hunt_id}")
             links_by_id = {link["id"]: link for link in graph["links"]}
-            links = []
+            items = []
             for link_id in sorted(incident["link_ids"]):
                 link = links_by_id[link_id]
-                targets = [self.aliases.alias_for("F", target)
-                           for target in link["target_finding_ids"][:INCIDENT_TARGET_PREVIEW_LIMIT]]
-                item = {
-                    "alias": self.aliases.alias_for("L", link_id),
-                    "link_type": _bounded_text(link["link_type"]),
-                    "strength": _bounded_text(link["style"]), "status": _bounded_text(link["status"]),
-                    "anchor": self.aliases.alias_for("F", link["anchor_finding_id"]),
-                    "targets": targets, "target_count": len(link["target_finding_ids"]),
-                }
-                if len(link["target_finding_ids"]) > len(targets):
-                    item["targets_omitted"] = len(link["target_finding_ids"]) - len(targets)
-                    item["fetch"] = f"get_incident incident={args.incident} page={args.page}"
-                links.append(item)
+                targets = list(link["target_finding_ids"])
+                chunks = [targets[index:index + INCIDENT_TARGET_PREVIEW_LIMIT]
+                          for index in range(0, len(targets), INCIDENT_TARGET_PREVIEW_LIMIT)] or [[]]
+                for chunk_number, chunk in enumerate(chunks, 1):
+                    items.append({"kind": "link", "value": {
+                        "alias": self.aliases.alias_for("L", link_id),
+                        "link_type": _bounded_text(link["link_type"]),
+                        "strength": _bounded_text(link["style"]),
+                        "status": _bounded_text(link["status"]),
+                        "anchor": self.aliases.alias_for("F", link["anchor_finding_id"]),
+                        "targets": [self.aliases.alias_for("F", target) for target in chunk],
+                        "target_count": len(targets), "target_part": chunk_number,
+                        "target_parts": len(chunks),
+                        "targets_omitted": max(
+                            0, len(targets) - chunk_number * INCIDENT_TARGET_PREVIEW_LIMIT,
+                        ),
+                        "fetch": (f"get_incident incident={args.incident} with this cursor until "
+                                  "all target_parts are returned") if len(chunks) > 1 else None,
+                    }})
             members = [self.aliases.alias_for("F", target) for target in incident["finding_ids"]]
             rules = {candidate["rule_id"] for target in incident["finding_ids"]
                      if (candidate := self.repo.candidate(target)) is not None}
             coverage = self._coverage(rules)
-            page_count = max(
-                1, (len(members) + INCIDENT_PAGE_SIZE - 1) // INCIDENT_PAGE_SIZE,
-                (len(links) + INCIDENT_PAGE_SIZE - 1) // INCIDENT_PAGE_SIZE,
-            )
-            pages = [{
-                "members": members[index * INCIDENT_PAGE_SIZE:(index + 1) * INCIDENT_PAGE_SIZE],
-                "links": links[index * INCIDENT_PAGE_SIZE:(index + 1) * INCIDENT_PAGE_SIZE],
-            } for index in range(page_count)]
-
-            def bounded_values(values: list[Any]) -> dict:
-                shown = [_bounded_text(value) for value in values[:INCIDENT_PAGE_SIZE]]
-                return {"values": shown, "count": len(values), "omitted": len(values) - len(shown)}
-
+            items.extend({"kind": "member", "value": alias} for alias in members)
+            items.extend({"kind": "host", "value": _bounded_text(value)}
+                         for value in incident["hosts"])
+            items.extend({"kind": "account", "value": _bounded_text(value)}
+                         for value in incident["accounts"])
+            kind_counts = {kind: sum(item["kind"] == kind for item in items)
+                           for kind in ("link", "member", "host", "account")}
             stored = {
-                "pages": pages, "member_count": len(members), "link_count": len(links),
-                "hosts": bounded_values(incident["hosts"]),
-                "accounts": bounded_values(incident["accounts"]),
+                "member_count": len(members), "link_count": len(incident["link_ids"]),
+                "host_count": len(incident["hosts"]), "account_count": len(incident["accounts"]),
+                "kind_counts": kind_counts,
                 "coverage": self._coverage_view(coverage, rules), "status": coverage["status"],
             }
-            cursor = "G" + digest({"hunt_id": self.hunt_id, "identity": identity, "result": stored})[:20]
-            self.repo.save_agent_tool_page_plan(self.hunt_id, cursor, identity, stored)
-        pages = stored["pages"]
-        page = pages[args.page - 1] if args.page <= len(pages) else {"members": [], "links": []}
+            cursor = "G" + uuid4().hex[:20]
+            self.repo.create_agent_page_plan(self.hunt_id, cursor, identity, stored, items)
+        start = (args.page - 1) * INCIDENT_PAGE_SIZE
+        page = {kind: [item["value"] for item in self.repo.agent_page_items_by_kind(
+            self.hunt_id, cursor, kind, offset=start, limit=INCIDENT_PAGE_SIZE,
+        )] for kind in ("member", "link", "host", "account")}
+        page_count = max(1, *(
+            (int(count) + INCIDENT_PAGE_SIZE - 1) // INCIDENT_PAGE_SIZE
+            for count in stored["kind_counts"].values()
+        ))
         data = {
-            "alias": args.incident, "members": page["members"], "member_count": stored["member_count"],
-            "links": page["links"], "link_count": stored["link_count"],
-            "hosts": stored["hosts"]["values"], "host_count": stored["hosts"]["count"],
-            "hosts_omitted": stored["hosts"]["omitted"],
-            "accounts": stored["accounts"]["values"], "account_count": stored["accounts"]["count"],
-            "accounts_omitted": stored["accounts"]["omitted"], "page": args.page,
+            "alias": args.incident, "members": page["member"], "member_count": stored["member_count"],
+            "links": page["link"], "link_count": stored["link_count"],
+            "hosts": page["host"], "host_count": stored["host_count"],
+            "hosts_omitted": max(0, stored["host_count"] - start - len(page["host"])),
+            "accounts": page["account"], "account_count": stored["account_count"],
+            "accounts_omitted": max(0, stored["account_count"] - start - len(page["account"])),
+            "page": args.page,
         }
+        if data["hosts_omitted"]:
+            data["hosts_fetch"] = f"get_incident incident={args.incident} page={args.page + 1} cursor={cursor}"
+        if data["accounts_omitted"]:
+            data["accounts_fetch"] = f"get_incident incident={args.incident} page={args.page + 1} cursor={cursor}"
         return _result(
             stored["status"], coverage=stored["coverage"],
-            counts={"returned": len(page["links"]), "total": stored["link_count"]},
-            data={"cursor": cursor, "incident": data}, more=args.page < len(pages),
+            counts={"returned": len(page["link"]), "total": stored["kind_counts"]["link"]},
+            data={"cursor": cursor, "incident": data}, more=args.page < page_count,
         )
 
     def _entity_profile(self, args: EntityProfileArgs) -> dict:
@@ -670,16 +703,39 @@ class Toolbox:
         entity = self.repo.entity(entity_id)
         if entity is None or entity["hunt_id"] != self.hunt_id:
             raise UnknownAlias(f"unknown entity alias {args.entity!r} in hunt {self.hunt_id}")
-        events = self.repo.events_for_entity(entity_id)
+        identity = {"kind": "entity_profile", "entity_id": entity_id}
+        if args.cursor is not None:
+            plan = self.repo.agent_page_plan(self.hunt_id, args.cursor)
+            if plan is None:
+                return self._semantic_refusal("unknown_cursor", "the entity cursor is not valid for this hunt")
+            if plan["identity"] != identity:
+                return self._semantic_refusal(
+                    "cursor_request_mismatch", "the cursor belongs to a different entity",
+                )
+            cursor = args.cursor
+            total = int(plan["item_count"])
+            families = plan["summary"]["families"]
+        else:
+            if args.page != 1:
+                return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
+            total, families = self.repo.entity_event_counts(entity_id)
+            cursor = "R" + uuid4().hex[:20]
+            self.repo.create_entity_event_page_plan(
+                self.hunt_id, cursor, identity, {"families": families}, entity_id,
+            )
         start = (args.page - 1) * ENTITY_EVENT_LIMIT
-        exemplars = events[start:start + ENTITY_EVENT_LIMIT]
+        page_ids = [item["event_id"] for item in self.repo.agent_page_items(
+            self.hunt_id, cursor, offset=start, limit=ENTITY_EVENT_LIMIT,
+        )]
+        by_id = {row["id"]: row for row in self.repo.events_by_ids(page_ids)}
+        exemplars = [by_id[event_id] for event_id in page_ids if event_id in by_id]
         data = {
             "alias": args.entity, "kind": _bounded_text(entity["kind"]),
             "value": _bounded_text(entity["value"]),
             "first_seen": str(entity["first_seen"]) if entity["first_seen"] is not None else None,
             "last_seen": str(entity["last_seen"]) if entity["last_seen"] is not None else None,
             "page": args.page,
-            "families": dict(sorted(Counter(row["family"] for row in events).items())),
+            "families": families, "cursor": cursor,
             "events": [{
                 "alias": self.aliases.alias_for("E", row["id"]), "family": row["family"],
                 "time": str(row["ts"]), "host": row["host"], "event": _jsonable(row["event"]),
@@ -690,8 +746,8 @@ class Toolbox:
                  if isinstance(item, dict) and item.get("id")}
         coverage = self._coverage(rules)
         return _result(coverage["status"], coverage=self._coverage_view(coverage, set()),
-                       counts={"returned": len(exemplars), "total": len(events)}, data={"entity": data},
-                       more=start + len(exemplars) < len(events))
+                       counts={"returned": len(exemplars), "total": total}, data={"entity": data},
+                       more=start + len(exemplars) < total)
 
     @staticmethod
     def _utc(value: datetime) -> datetime:
@@ -733,15 +789,14 @@ class Toolbox:
             "request": request.model_dump(mode="json"),
         })
         if cursor is not None:
-            plan = self.repo.agent_tool_page_plan(self.hunt_id, cursor)
+            plan = self.repo.agent_page_plan(self.hunt_id, cursor)
             if plan is None:
                 return self._semantic_refusal("unknown_cursor", "the tool cursor is not valid for this hunt")
             if plan["identity"] != identity:
                 return self._semantic_refusal(
                     "cursor_request_mismatch", "the cursor belongs to a different tool request",
                 )
-            return self._pivot_result(PivotResult.model_validate(plan["result"]), page=page,
-                                      cursor=cursor, identity=identity, persist=False)
+            return self._pivot_plan_result(plan, page=page, cursor=cursor)
         if page != 1:
             return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
         if self.executor is None or self.session_id is None:
@@ -751,20 +806,6 @@ class Toolbox:
         anchor_ts = self._utc(anchor["ts"])
         result = self.executor.run(self.session_id, anchor["id"], request, anchor_ts=anchor_ts)
         return self._pivot_result(result, page=1, identity=identity)
-
-    @staticmethod
-    def _stored_pivot_result(result: PivotResult, event_ids: list[str]) -> dict:
-        return {
-            "status": result.status, "task_ids": list(result.task_ids),
-            "event_ids": event_ids, "reach_event_ids": event_ids,
-            "candidate_ids": list(result.candidate_ids),
-            "entities": [item.model_dump(mode="json") for item in result.entities],
-            "event_summaries": list(result.event_summaries),
-            "anchor_event_ids": list(result.anchor_event_ids),
-            "matched_event_count": result.matched_event_count,
-            "coverage": [item.model_dump(mode="json") for item in result.coverage],
-            "reasons": list(result.reasons), "duration_ms": result.duration_ms,
-        }
 
     @staticmethod
     def _persisted_event_summary(row: dict) -> dict:
@@ -780,18 +821,47 @@ class Toolbox:
                       cursor: str | None = None, persist: bool = True) -> dict:
         event_ids = list(dict.fromkeys(result.reach_event_ids or result.event_ids))
         if cursor is None:
-            cursor = "P" + digest({
-                "hunt_id": self.hunt_id, "session_id": self.session_id,
-                "identity": identity,
-                "result": self._stored_pivot_result(result, event_ids),
-            })[:20]
+            cursor = "P" + uuid4().hex[:20]
         if persist:
-            self.repo.save_agent_tool_page_plan(
-                self.hunt_id, cursor, identity, self._stored_pivot_result(result, event_ids),
+            counts = {
+                "event": len(event_ids), "candidate": len(result.candidate_ids),
+                "entity": len(result.entities), "coverage": len(result.coverage),
+                "reason": len(result.reasons),
+            }
+            summary = {
+                "status": result.status, "task_count": len(result.task_ids),
+                "duration_ms": result.duration_ms,
+                "matched_event_count": result.matched_event_count, "kind_counts": counts,
+            }
+
+            def items() -> Iterator[dict]:
+                yield from ({"kind": "event", "value": event_id} for event_id in event_ids)
+                yield from ({"kind": "candidate", "value": candidate_id}
+                            for candidate_id in result.candidate_ids)
+                yield from ({"kind": "entity", "value": item.model_dump(mode="json")}
+                            for item in result.entities)
+                yield from ({"kind": "coverage", "value": item.model_dump(mode="json")}
+                            for item in result.coverage)
+                yield from ({"kind": "reason", "value": _bounded_text(reason)}
+                            for reason in result.reasons)
+
+            plan = self.repo.create_agent_page_plan(
+                self.hunt_id, cursor, identity, summary, items(),
             )
+        else:
+            plan = self.repo.agent_page_plan(self.hunt_id, cursor)
+            if plan is None:
+                return self._semantic_refusal("unknown_cursor", "the tool cursor is not valid for this hunt")
+        return self._pivot_plan_result(plan, page=page, cursor=cursor)
+
+    def _pivot_plan_result(self, plan: dict, *, page: int, cursor: str) -> dict:
+        summary = plan["summary"]
         start = (page - 1) * ENTITY_EVENT_LIMIT
-        page_ids = event_ids[start:start + ENTITY_EVENT_LIMIT]
-        cells = [item.model_dump(mode="json") for item in result.coverage]
+        values = {kind: [item["value"] for item in self.repo.agent_page_items_by_kind(
+            self.hunt_id, cursor, kind, offset=start, limit=ENTITY_EVENT_LIMIT,
+        )] for kind in ("event", "candidate", "entity", "coverage", "reason")}
+        page_ids = values["event"]
+        cells = values["coverage"]
         control_cells = []
         for cell in cells:
             control_cells.append({
@@ -801,49 +871,57 @@ class Toolbox:
                 for key, value in cell.items() if key != "reasons"
             })
         gaps = [cell for cell in control_cells if cell["status"] != "complete"]
-        if not cells and result.status != "complete" and result.reasons:
+        if not cells and summary["status"] != "complete" and summary["kind_counts"]["reason"]:
             gaps = [{"status": "unresolved"}]
-        coverage = {"status": "complete" if result.status == "complete" else "partial",
-                    "cells": control_cells, "gaps": gaps}
+        coverage = {
+            "status": "complete" if summary["status"] == "complete" else "partial",
+            "cells": control_cells, "gaps": gaps,
+            "counts": {"returned": len(cells), "total": summary["kind_counts"]["coverage"]},
+        }
         evidence = []
         event_aliases = {}
         for event_id in page_ids:
             alias = self.aliases.alias_for("E", event_id)
             evidence.append(alias)
             event_aliases[event_id] = alias
-        candidates = [self.aliases.alias_for("F", candidate_id) for candidate_id in result.candidate_ids]
+        candidates = [self.aliases.alias_for("F", candidate_id) for candidate_id in values["candidate"]]
         entities = []
-        for item in result.entities:
-            entity = self.repo.entity_for(self.hunt_id, item.kind, item.value)
+        for item in values["entity"]:
+            entity = self.repo.entity_for(self.hunt_id, item["kind"], item["value"])
             entities.append({
                 "alias": self.aliases.alias_for("N", entity["id"]) if entity is not None else None,
-                "kind": item.kind, "value": item.value, "role": item.role,
+                "kind": _bounded_text(item["kind"]), "value": _bounded_text(item["value"]),
+                "role": _bounded_text(item["role"]),
             })
-        known_summaries = {str(item.get("id")): item for item in result.event_summaries if item.get("id")}
         persisted = {row["id"]: self._persisted_event_summary(row)
                      for row in self.repo.events_by_ids(page_ids)}
         summaries = []
         for event_id in page_ids:
-            summary = known_summaries.get(event_id) or persisted.get(event_id)
-            if summary is None:
+            event_summary = persisted.get(event_id)
+            if event_summary is None:
                 continue
-            item = _jsonable(summary)
+            item = _jsonable(event_summary)
             if item.get("id") in event_aliases:
                 item["alias"] = event_aliases[item.pop("id")]
             summaries.append(item)
         data = {
             "result": {
                 "evidence": evidence, "candidates": candidates, "entities": entities,
-                "event_summaries": summaries, "task_count": len(result.task_ids),
-                "coverage": cells, "reasons": list(result.reasons), "duration_ms": result.duration_ms,
+                "event_summaries": summaries, "task_count": summary["task_count"],
+                "coverage": cells, "reasons": values["reason"],
+                "duration_ms": summary["duration_ms"],
                 "page": page, "cursor": cursor,
             }
         }
-        total = max(result.matched_event_count, len(event_ids))
+        total = max(summary["matched_event_count"], summary["kind_counts"]["event"])
+        pages = max(1, *(
+            (int(count) + ENTITY_EVENT_LIMIT - 1) // ENTITY_EVENT_LIMIT
+            for count in summary["kind_counts"].values()
+        ))
         return _result(
-            result.status, coverage=coverage,
+            summary["status"], coverage=coverage,
             counts={"returned": len(evidence), "total": total}, data=data,
-            more=start + len(page_ids) < len(event_ids),
+            more=page < pages,
         )
 
     def _entity_timeline(self, args: EntityTimelineToolArgs) -> dict:
@@ -916,15 +994,14 @@ class Toolbox:
             "link_type": args.link_type, "window": args.window,
         })
         if args.cursor is not None:
-            plan = self.repo.agent_tool_page_plan(self.hunt_id, args.cursor)
+            plan = self.repo.agent_page_plan(self.hunt_id, args.cursor)
             if plan is None:
                 return self._semantic_refusal("unknown_cursor", "the tool cursor is not valid for this hunt")
             if plan["identity"] != identity:
                 return self._semantic_refusal(
                     "cursor_request_mismatch", "the cursor belongs to a different tool request",
                 )
-            return self._pivot_result(PivotResult.model_validate(plan["result"]), page=args.page,
-                                      cursor=args.cursor, identity=identity, persist=False)
+            return self._pivot_plan_result(plan, page=args.page, cursor=args.cursor)
         if args.page != 1:
             return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
         if self.executor is None or self.session_id is None:

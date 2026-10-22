@@ -128,6 +128,26 @@ agent_alias = Table(
 )
 Index("ix_agent_alias_hunt_kind", agent_alias.c.hunt_id, agent_alias.c.kind)
 
+agent_page_plan = Table(
+    "agent_page_plan", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
+    Column("cursor", String, primary_key=True),
+    Column("identity", JSON, nullable=False),
+    Column("summary", JSON, nullable=False),
+    Column("item_count", Integer, nullable=False, default=0),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+agent_page_item = Table(
+    "agent_page_item", metadata,
+    Column("hunt_id", String, nullable=False, primary_key=True),
+    Column("cursor", String, nullable=False, primary_key=True),
+    Column("ordinal", Integer, nullable=False, primary_key=True),
+    Column("payload", JSON, nullable=False),
+)
+Index("ix_agent_page_item_lookup", agent_page_item.c.hunt_id,
+      agent_page_item.c.cursor, agent_page_item.c.ordinal)
+
 event_entity = Table(
     "event_entity", metadata,
     Column("event_id", String, nullable=False),

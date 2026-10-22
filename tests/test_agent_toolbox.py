@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
-from romulus.agent.toolbox import READ_PAGE_SIZE, Toolbox
+from romulus.agent.toolbox import ENTITY_EVENT_LIMIT, READ_PAGE_SIZE, Toolbox
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.store import schema as t
 from romulus.store.db import make_engine, migrate
@@ -98,7 +98,10 @@ def test_list_findings_pages_and_filters_without_free_text_queries():
     toolbox = Toolbox(_repo(), "h1")
 
     first = toolbox.execute("list_findings", {"lane": None, "rule": RULE, "entity": None, "page": 1})
-    second = toolbox.execute("list_findings", {"lane": None, "rule": RULE, "entity": None, "page": 2})
+    second = toolbox.execute("list_findings", {
+        "lane": None, "rule": RULE, "entity": None, "page": 2,
+        "cursor": first["data"]["cursor"],
+    })
 
     assert first["status"] == "complete"
     assert first["counts"] == {"returned": READ_PAGE_SIZE, "total": READ_PAGE_SIZE + 2}
@@ -137,7 +140,9 @@ def test_entity_profile_has_retrievable_deterministic_continuation_pages():
     entity = toolbox.execute("get_finding", {"finding": "F1"})["data"]["finding"]["entities"][0]["alias"]
 
     first = toolbox.execute("entity_profile", {"entity": entity, "page": 1})
-    second = toolbox.execute("entity_profile", {"entity": entity, "page": 2})
+    second = toolbox.execute("entity_profile", {
+        "entity": entity, "page": 2, "cursor": first["data"]["entity"]["cursor"],
+    })
 
     assert first["counts"] == {"returned": 50, "total": 52}
     assert first["more"] is True
@@ -145,6 +150,37 @@ def test_entity_profile_has_retrievable_deterministic_continuation_pages():
     assert second["more"] is False
     assert not ({item["alias"] for item in first["data"]["entity"]["events"]}
                 & {item["alias"] for item in second["data"]["entity"]["events"]})
+
+
+def test_continuation_pages_require_cursor_and_ignore_later_rows():
+    repo = _repo(READ_PAGE_SIZE + 2)
+    toolbox = Toolbox(repo, "h1")
+    entity = toolbox.execute("get_finding", {"finding": "F1"})["data"]["finding"]["entities"][0]["alias"]
+    first_findings = toolbox.execute("list_findings", {"page": 1})
+    first_events = toolbox.execute("entity_profile", {"entity": entity, "page": 1})
+
+    later = {
+        "id": "finding-later", "hunt_id": "h1", "rule_id": RULE, "rule_version": "1",
+        "claim": "later urgent", "claim_type": "observed_action", "event_ids": ["event-0"],
+        "predicate_fields": [], "entities": [["host", "web01", "host"]], "ts": T,
+        "severity": "critical", "confidence": "high", "lane": "urgent", "priority": 999.0,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "group_key": "", "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+    }
+    repo.save_candidate(later)
+
+    finding_cursor = first_findings["data"]["cursor"]
+    event_cursor = first_events["data"]["entity"]["cursor"]
+    second_findings = toolbox.execute("list_findings", {"page": 2, "cursor": finding_cursor})
+    assert second_findings["counts"]["total"] == READ_PAGE_SIZE + 2
+    assert all(item["claim"] != "later urgent" for item in second_findings["data"]["findings"])
+    assert toolbox.execute("list_findings", {"page": 2})["data"]["error"]["code"] == "cursor_required"
+    assert toolbox.execute("entity_profile", {"entity": entity, "page": 2})["data"]["error"]["code"] == "cursor_required"
+    if first_events["counts"]["total"] > ENTITY_EVENT_LIMIT:
+        second_events = toolbox.execute("entity_profile", {
+            "entity": entity, "page": 2, "cursor": event_cursor,
+        })
+        assert second_events["counts"]["total"] == first_events["counts"]["total"]
 
 
 def test_list_findings_bounds_coverage_and_list_coverage_pages_a_stable_snapshot():
@@ -256,6 +292,31 @@ def test_get_incident_pages_links_with_a_stable_cursor_and_bounded_response():
     assert not any(item["link_type"] == "process_lineage_later" for item in links)
     assert first["more"] is second["more"] is True and third["more"] is False
     assert all(len(json.dumps(result, sort_keys=True)) < 20_000 for result in (first, second, third))
+
+
+def test_get_incident_pages_all_targets_instead_of_repeating_preview():
+    repo = _repo(20)
+    repo.save_expansion_link({
+        "id": "link-many-targets", "hunt_id": "h1", "anchor_id": "finding-00",
+        "link_type": "process_lineage_many", "window_label": "anchor +/- 5 min",
+        "window_start": T, "window_end": T + timedelta(minutes=5), "strength": "observed",
+        "key": {}, "status": "complete", "event_ids": [f"event-{index}" for index in range(1, 20)],
+        "evidence_ids": [], "task_ids": [], "coverage": [], "reasons": [], "duration_ms": 1,
+        "query_spend": 1, "evaluated": 19,
+    })
+    toolbox = Toolbox(repo, "h1")
+    first = toolbox.execute("get_incident", {"incident": "I1", "page": 1})
+    cursor = first["data"]["cursor"]
+    pages = [first]
+    number = 2
+    while pages[-1]["more"]:
+        pages.append(toolbox.execute("get_incident", {
+            "incident": "I1", "page": number, "cursor": cursor,
+        }))
+        number += 1
+    targets = [target for result in pages for link in result["data"]["incident"]["links"]
+               if link["link_type"] == "process_lineage_many" for target in link["targets"]]
+    assert len(targets) == len(set(targets)) == 19
 
 
 def test_wrong_kind_unknown_alias_extra_arguments_and_handler_failures_are_structured(monkeypatch):

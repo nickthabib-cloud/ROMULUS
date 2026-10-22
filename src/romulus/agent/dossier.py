@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,12 +65,46 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+class DossierPages(Sequence[dict[str, Any]]):
+    """Lazy sequence over bounded dossier page rows persisted in SQLite."""
+
+    def __init__(self, repo: Repo, hunt_id: str, cursor: str, count: int):
+        self.repo = repo
+        self.hunt_id = hunt_id
+        self.cursor = cursor
+        self.count = count
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[number] for number in range(*index.indices(self.count))]
+        if index < 0:
+            index += self.count
+        if index < 0 or index >= self.count:
+            raise IndexError(index)
+        rows = self.repo.agent_page_items(self.hunt_id, self.cursor, offset=index, limit=1)
+        if not rows:
+            raise IndexError(index)
+        return _page_payload(rows[0]["page"], index + 1, self.count, self.cursor)
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        for offset in range(0, self.count, 50):
+            rows = self.repo.agent_page_items(
+                self.hunt_id, self.cursor, offset=offset, limit=min(50, self.count - offset),
+            )
+            for relative, row in enumerate(rows):
+                index = offset + relative
+                yield _page_payload(row["page"], index + 1, self.count, self.cursor)
+
+
 @dataclass(frozen=True)
 class Dossier:
     """The first model page plus every deterministic findings-index page."""
 
     payload: dict[str, Any]
-    pages: tuple[dict[str, Any], ...]
+    pages: Sequence[dict[str, Any]]
 
     def page(self, number: int) -> dict[str, Any]:
         if number < 1 or number > len(self.pages):
@@ -103,23 +138,25 @@ def _claim(text: str, alias: str) -> str:
     return f"{text[:CLAIM_LIMIT]}…[+{len(text) - CLAIM_LIMIT} chars: get_finding {alias}]"
 
 
-def _findings(repo: Repo, hunt_id: str,
-              aliases: AliasBook) -> tuple[list[dict], Counter, list[dict]]:
+def _finding_row(row: dict, aliases: AliasBook) -> dict:
+    alias = row.get("_alias") or aliases.alias_for("F", row["id"])
+    return {
+        "alias": alias,
+        "lane": row["lane"],
+        "rule_id": row["rule_id"],
+        "claim": _claim(row["claim"], alias),
+        "host": _entity_value(row.get("entities") or [], "host"),
+        "account": _entity_value(row.get("entities") or [], "account"),
+        "time": str(row["ts"]),
+    }
+
+
+def _findings(repo: Repo, hunt_id: str) -> tuple[Counter, list[dict]]:
     counts = Counter(repo.lane_counts(hunt_id))
-    out = []
-    rows = sorted(repo.candidates(hunt_id, lanes=list(REPORTABLE_LANES)), key=_candidate_key)
-    for row in rows:
-        alias = aliases.alias_for("F", row["id"])
-        out.append({
-            "alias": alias,
-            "lane": row["lane"],
-            "rule_id": row["rule_id"],
-            "claim": _claim(row["claim"], alias),
-            "host": _entity_value(row.get("entities") or [], "host"),
-            "account": _entity_value(row.get("entities") or [], "account"),
-            "time": str(row["ts"]),
-        })
-    return out, counts, rows
+    rows = sorted(repo.candidates_with_finding_aliases(
+        hunt_id, list(REPORTABLE_LANES),
+    ), key=_candidate_key)
+    return counts, rows
 
 
 def _coverage(repo: Repo, hunt_id: str) -> dict:
@@ -305,11 +342,10 @@ def _append_detail(payload: dict, section: str, item: dict) -> None:
         raise ValueError(f"unknown dossier section {section}")
 
 
-def _paginate(base: dict, details: list[tuple[str, dict]], token_budget: int,
-              cursor: str) -> tuple[dict, ...]:
+def _paginate(base: dict, details: Iterator[tuple[str, dict]], token_budget: int,
+              cursor: str) -> Iterator[dict]:
     continuation = {"schema": base["schema"], "header": base["header"], "findings": []}
     current = _jsonable(base)
-    pages: list[dict] = []
     item_count = 0
 
     if estimate_tokens(_canonical(_page_payload(current, 999999, 999999, cursor))) > token_budget:
@@ -329,7 +365,7 @@ def _paginate(base: dict, details: list[tuple[str, dict]], token_budget: int,
             item_count += 1
             continue
         if item_count:
-            pages.append(current)
+            yield current
             current = _jsonable(continuation)
             item_count = 0
         trial = _jsonable(current)
@@ -342,21 +378,16 @@ def _paginate(base: dict, details: list[tuple[str, dict]], token_budget: int,
             trial = _jsonable(current)
             _append_detail(trial, section, omission)
             if estimate_tokens(_canonical(_page_payload(trial, 999999, 999999, cursor))) > token_budget:
-                pages.append({
+                yield {
                     "schema": base["schema"], "header": base["header"], "findings": [],
                     "omissions": [{"section": section, **omission}],
-                })
+                }
                 current = _jsonable(continuation)
                 item_count = 0
                 continue
         current = trial
         item_count = 1
-    pages.append(current)
-
-    total = len(pages)
-    output = tuple(_page_payload(payload, index, total, cursor)
-                   for index, payload in enumerate(pages, 1))
-    return output
+    yield current
 
 
 def _detail_fetch(section: str, item: dict) -> str:
@@ -379,7 +410,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
         raise KeyError(hunt_id)
     manifest = hunt.get("manifest") or {}
     aliases = AliasBook(repo, hunt_id)
-    finding_rows, lane_counts, reportable = _findings(repo, hunt_id, aliases)
+    lane_counts, reportable = _findings(repo, hunt_id)
     context_counts = repo.candidate_rule_counts(hunt_id, lane="context")
     profiles = manifest.get("source_profiles") or {}
     source_targets = sorted(set(manifest.get("targets") or []) | set(profiles))
@@ -412,29 +443,35 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
         "findings": [],
     }
     safety_flags = injection_flags({
-        "findings": finding_rows,
+        "findings": reportable,
         "scope": {"sources": sources, "coverage": coverage},
         "entities": entities,
         "incidents": incidents,
         "expansion": expansion,
     })
-    details: list[tuple[str, dict]] = [("findings", item) for item in finding_rows]
-    details.extend(("sources", item) for item in sources)
-    details.extend(("context_counts", item) for item in context_rows)
-    details.extend(("entities", item) for item in entities)
-    details.extend(("incidents", item) for item in incidents)
-    for key, values in expansion.items():
-        details.extend((f"expansion.{key}", item) for item in values)
-    details.extend(("coverage_rules", item) for item in coverage["rules"])
-    details.extend(("coverage_gaps", item) for item in coverage["gaps"])
-    details.extend(("coverage_not_assessed", item) for item in coverage["not_assessed"])
-    details.extend(("safety_flags", item) for item in safety_flags)
+    def details() -> Iterator[tuple[str, dict]]:
+        yield from (("findings", _finding_row(item, aliases)) for item in reportable)
+        yield from (("sources", item) for item in sources)
+        yield from (("context_counts", item) for item in context_rows)
+        yield from (("entities", item) for item in entities)
+        yield from (("incidents", item) for item in incidents)
+        for key, values in expansion.items():
+            yield from ((f"expansion.{key}", item) for item in values)
+        yield from (("coverage_rules", item) for item in coverage["rules"])
+        yield from (("coverage_gaps", item) for item in coverage["gaps"])
+        yield from (("coverage_not_assessed", item) for item in coverage["not_assessed"])
+        yield from (("safety_flags", item) for item in safety_flags)
     cursor = "D" + digest({
         "hunt_id": hunt_id, "token_budget": token_budget, "context": base,
-        "details": details,
+        "candidate_fingerprint": repo.candidate_fingerprint(hunt_id),
+        "coverage": coverage, "incidents": incidents, "expansion": expansion,
     })[:16]
-    pages = _paginate(base, details, token_budget, cursor)
-    repo.save_agent_dossier_page_plan(
-        hunt_id, cursor, [[finding["alias"] for finding in page["findings"]] for page in pages],
+    plan = repo.create_agent_page_plan(
+        hunt_id, cursor, {"kind": "dossier"}, {
+            "token_budget": token_budget,
+            "finding_count": sum(lane_counts[lane] for lane in REPORTABLE_LANES),
+        },
+        ({"page": page} for page in _paginate(base, details(), token_budget, cursor)),
     )
+    pages = DossierPages(repo, hunt_id, cursor, int(plan["item_count"]))
     return Dossier(payload=pages[0], pages=pages)
