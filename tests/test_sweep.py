@@ -232,7 +232,7 @@ def _shell_event(script=None, argv=None):
 def _run_shell_partition(monkeypatch, *, script=None, argv=None):
     record = {"_id": "raw", "_index": "romulus-host-x", "_source": {"fixture": True}}
     monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, [record]))
-    monkeypatch.setattr(sw, "normalize_hits", lambda records: ([_shell_event(script, argv)], {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots=None: ([_shell_event(script, argv)], {}, []))
     repo = _repo()
     sweep = sw.Sweep(
         repo, FakeClient(), "h1", Window(start=START, end=START + timedelta(minutes=5)),
