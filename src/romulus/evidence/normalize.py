@@ -1855,6 +1855,9 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
                       normalizer=NORMALIZER_VERSION, caveats=caveats)
 
 
+# Companion record types an exec or socket event holds at most once (EXECVE may repeat: continuation records)
+_SINGLE_COMPANIONS = (EXEC_COMPANIONS | SOCKET_COMPANIONS) - {"EXECVE"}
+
 SINGLE = {
     "systemd.journal": normalize_journal,
     "apache.access": normalize_apache_access,
@@ -1910,10 +1913,10 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         boot = _partner_boot(partners, host, ts, serial, members) if partners else {}
         if boot:
             boot_by_hit.update({hit["_id"]: boot for hit, _record in members})
-        types = {r.type for _, r in members}
+        counts = Counter(r.type for _, r in members)
+        types = set(counts)
         # EXECVE may legitimately repeat (long-argv continuation records; merged in normalize_exec_group)
-        dup = sorted(t for t in types if sum(1 for _, r in members if r.type == t) > 1
-                     and t in EXEC_COMPANIONS | SOCKET_COMPANIONS and t != "EXECVE")
+        dup = sorted(t for t, n in counts.items() if n > 1 and t in _SINGLE_COMPANIONS)
         if dup:
             errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
             continue
