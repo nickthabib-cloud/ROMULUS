@@ -194,6 +194,24 @@ def test_0013_backfills_snapshot_membership_and_downgrades_without_losing_snapsh
         assert conn.exec_driver_sql("SELECT count(*) FROM baseline_count").scalar_one() == 1
 
 
+def test_0013_refuses_a_frozen_snapshot_that_names_a_missing_segment(tmp_path):
+    engine = make_engine(tmp_path / "dangling-membership.db")
+    with engine.begin() as conn:
+        command.upgrade(_alembic_config(conn), "0012")
+        conn.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'planned')"
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO baseline_snapshot "
+            "(hunt_id, plan, store_cut, segment_ids, coverage, status, digest) VALUES "
+            "('h1', '{}', '{}', '[\"gone\"]', '{}', 'resolved', 'd')"
+        )
+    with (pytest.raises(Exception, match="baseline snapshot membership names 1 missing segment"),
+          engine.begin() as conn):
+        command.upgrade(_alembic_config(conn), "0013")
+
+
 def test_0013_round_trips_a_gap_shortened_snapshot(tmp_path):
     engine = make_engine(tmp_path / "gap-status.db")
     with engine.begin() as conn:

@@ -50,7 +50,15 @@ def upgrade() -> None:
         "ix_baseline_snapshot_segment_segment", "baseline_snapshot_segment", ["segment_id"],
     )
     # Existing 0009 snapshots remain authoritative. SQLite's JSON table function expands their frozen
-    # membership without materializing ids in application memory.
+    # membership without materializing ids in application memory. A frozen id with no segment row cannot be
+    # given a spec or target, so the upgrade stops rather than silently shrinking a frozen snapshot.
+    dangling = op.get_bind().execute(sa.text(
+        "SELECT count(*) FROM baseline_snapshot, json_each(baseline_snapshot.segment_ids) "
+        "LEFT JOIN baseline_segment ON baseline_segment.id = json_each.value "
+        "WHERE baseline_segment.id IS NULL"
+    )).scalar_one()
+    if dangling:
+        raise RuntimeError(f"baseline snapshot membership names {dangling} missing segment(s)")
     op.execute(sa.text(
         "INSERT INTO baseline_snapshot_segment (hunt_id, spec_id, segment_id, target) "
         "SELECT baseline_snapshot.hunt_id, baseline_segment.spec_id, baseline_segment.id, baseline_segment.target "
