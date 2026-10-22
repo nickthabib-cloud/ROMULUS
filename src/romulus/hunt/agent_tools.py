@@ -47,25 +47,12 @@ class HuntToolExecutor:
         return sorted((TypedEvent.model_validate(row["event"]) for row in rows),
                       key=lambda event: (event.ts, event.id))
 
-    def _ensure_anchor(self, candidate: dict, events: list[TypedEvent]) -> None:
-        if any(row["id"] == candidate["id"] for row in self.repo.expansion_anchors(self.hunt_id)):
-            return
-        self.repo.save_expansion_anchor({
-            "id": candidate["id"], "hunt_id": self.hunt_id, "candidate_id": candidate["id"],
-            "depth": 0, "parent_anchor_id": None, "host": ExpansionEngine._anchor_host(events),
-            "lane": candidate["lane"], "severity": candidate["severity"], "ts": candidate["ts"],
-            "status": "expanded_partial",
-            "reasons": ["agent evaluated a requested reach; the deterministic tier plan was not rerun"],
-        }, owner_token=self.owner_token)
-
     def _save_reach(self, candidate: dict, event_ids: list[str], *, link_id: str, link_type: str,
                     start: datetime, end: datetime, status: str, coverage: list,
                     reasons: list[str], task_ids: list[str], duration_ms: int,
                     query_spend: int, key: dict) -> None:
         if not event_ids:
             return
-        anchor_events = self._events(candidate["event_ids"])
-        self._ensure_anchor(candidate, anchor_events)
         self.repo.save_expansion_link({
             "id": link_id, "hunt_id": self.hunt_id, "anchor_id": candidate["id"],
             "link_type": link_type, "window_label": "agent requested",
@@ -144,7 +131,6 @@ class HuntToolExecutor:
         maximum = getattr(self.fetcher.executor, "source_query_budget", None)
         remaining = max(0, int(maximum) - used) if isinstance(maximum, int) else 12
         result = self.fetcher.fetch(anchor, link_type, window, query_cap=min(12, remaining))
-        self._ensure_anchor(candidate, anchor_events)
         self.repo.save_expansion_link({
             "id": result.id, "hunt_id": self.hunt_id, "anchor_id": candidate["id"],
             "link_type": result.link_type, "window_label": result.window.label,

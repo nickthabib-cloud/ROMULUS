@@ -10,7 +10,9 @@ from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings, load_settings
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt.agent_tools import HuntToolExecutor, build_agent_toolbox
+from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkResult
+from romulus.sources.models import Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -215,6 +217,19 @@ class FakeFetcher:
         )
 
 
+class RecordingExpansionFetcher(FakeFetcher):
+    def __init__(self, event_id: str):
+        super().__init__(event_id)
+        self.calls = []
+
+    def fetch(self, anchor, link_type, window, *, query_cap=None):
+        self.calls.append((anchor.finding_id, link_type, window.label))
+        result = super().fetch(anchor, link_type, window, query_cap=query_cap)
+        return result.model_copy(update={
+            "id": f"deterministic-{link_type}-{len(self.calls)}",
+        })
+
+
 class FakePivot:
     def __init__(self, event_id="attack"):
         self.event_id = event_id
@@ -252,6 +267,28 @@ def test_hunt_executor_persists_reach_reruns_context_and_direct_findings_keep_la
                if row["rule_id"] == "host.credential_store_read")
     assert repo.expansion_links("h1")
     assert all(row["evaluated"] for row in repo.expansion_links("h1"))
+
+
+def test_agent_reach_does_not_claim_anchor_ownership_before_resumed_expansion():
+    repo = _repo(linked_attack=True)
+    agent_fetcher = FakeFetcher("attack")
+    executor = HuntToolExecutor(repo, "h1", FakePivot(), agent_fetcher, T, END)
+
+    Toolbox(repo, "h1", executor=executor, session_id="session-7").execute(
+        "entity_timeline", _args(repo),
+    )
+
+    assert repo.expansion_links("h1")
+    assert repo.expansion_anchors("h1") == []
+
+    deterministic_fetcher = RecordingExpansionFetcher("anchor")
+    ExpansionEngine(
+        repo, "h1", Window(start=T, end=END), deterministic_fetcher, max_source_queries=4,
+    ).run()
+
+    assert deterministic_fetcher.calls
+    assert deterministic_fetcher.calls[0][0] == "anchor-finding"
+    assert repo.expansion_anchors("h1")[0]["candidate_id"] == "anchor-finding"
 
 
 def test_twin_hunt_executors_publish_identical_candidate_content():

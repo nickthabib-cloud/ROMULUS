@@ -202,7 +202,9 @@ expansion_link = Table(
     "expansion_link", metadata,
     Column("id", String, primary_key=True),
     Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
-    Column("anchor_id", String, ForeignKey("expansion_anchor.id"), nullable=False),
+    # A reach belongs to its candidate anchor even when the model requested it
+    # before the deterministic expansion scheduler has claimed that candidate.
+    Column("anchor_id", String, ForeignKey("candidate.id"), nullable=False),
     Column("link_type", String, nullable=False),
     Column("window_label", String, nullable=False),
     Column("window_start", DateTime(timezone=True), nullable=False),
