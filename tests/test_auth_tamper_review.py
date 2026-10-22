@@ -6,8 +6,11 @@ from datetime import timedelta
 
 import pytest
 
+from romulus.detect import auth as auth_module
+from romulus.detect import tamper as tamper_module
 from romulus.detect.auth import AccountOrGroupChange, SshPasswordGuessing, SshSuccessAfterFailures
 from romulus.detect.tamper import (
+    AuditRulesTamper,
     LogOrHistoryClearing,
     SecurityOrLoggingServiceStop,
     auditctl_requests,
@@ -28,6 +31,52 @@ def run(cls, *partitions):
     for part in partitions:
         assert pb.consume(list(part)) == []
     return pb, pb.finalize()
+
+
+@pytest.mark.parametrize(("cls", "relevant", "module", "parser"), [
+    (SecurityOrLoggingServiceStop, lambda: tex(["systemctl", "stop", "auditd"]), tamper_module, "_identity"),
+    (AuditRulesTamper, lambda: tex(["auditctl", "-D"]), tamper_module, "_identity"),
+    (LogOrHistoryClearing, lambda: tex(["truncate", "-s", "0", "/var/log/auth.log"]),
+     tamper_module, "_identity"),
+    (AccountOrGroupChange, lambda: acct_ex(["useradd", "alice"]), auth_module, "program"),
+])
+def test_program_prefilter_preserves_matches_and_avoids_irrelevant_parsing(
+    monkeypatch, cls, relevant, module, parser,
+):
+    factory = acct_ex if cls is AccountOrGroupChange else tex
+    events = [factory(["true"], exe="/usr/bin/true", pid=10_000 + index) for index in range(200)]
+    events.append(relevant())
+    baseline = cls()
+    baseline.program_prefilter = False
+    baseline.consume(events)
+    expected = baseline.finalize()
+
+    calls = 0
+    original = getattr(module, parser)
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, parser, counted)
+    optimized = cls()
+    optimized.consume(events)
+    actual = optimized.finalize()
+
+    assert actual == expected
+    assert (optimized.evaluated, optimized.missing_required) == (
+        baseline.evaluated, baseline.missing_required,
+    )
+    assert calls <= 4
+
+
+def test_program_prefilter_keeps_multiplexer_applets():
+    account = acct_ex(["busybox", "adduser", "alice"], exe="/usr/bin/busybox")
+    clearing = tex(["busybox", "rm", "/var/log/auth.log"], exe="/usr/bin/busybox")
+
+    assert len(run(AccountOrGroupChange, [account])[1]) == 1
+    assert len(run(LogOrHistoryClearing, [clearing])[1]) == 1
 
 
 # ---------------------------------------------------------------- I1, I2, M4: SSH

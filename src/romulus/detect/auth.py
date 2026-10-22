@@ -38,11 +38,14 @@ from romulus.detect.host import (
 from romulus.detect.linux_argv import (
     canonical,
     getopt_long,
+    is_editor,
     normalize_path,
     program,
+    program_name_hint,
     shell_segments,
     write_targets,
 )
+from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome, TypedEvent
 
 SSHD_ATTEMPT_PHASES = {"authentication", "user_lookup", "preauth_disconnect", "max_attempts"}
@@ -668,6 +671,10 @@ _TOOL_GRAMMAR = {"useradd": "useradd", "usermod": "usermod", "userdel": "userdel
                  "vipw": "vipw", "vigr": "vipw", "adduser": "debian-adduser", "addgroup": "debian-adduser",
                  "deluser": "debian-deluser", "delgroup": "debian-deluser"}
 ACCOUNT_TOOLS = frozenset(_TOOL_GRAMMAR)
+_ACCOUNT_WRITE_PROGRAMS = {
+    "sed", "perl", "tee", "sponge", "cp", "mv", "install", "ln", "truncate", "dd", "curl", "wget",
+    "scp", "rsync",
+}
 
 
 def _is_zero(value: str | None) -> bool:
@@ -1007,6 +1014,7 @@ class AccountOrGroupChange(Playbook):
     PRE_BOOT_SECONDS = 120.0        # before it: records buffered before the audit daemon logged the boot
     BOOT_CITE = 64                  # distinct changes of a boot group cited with a record each
     BOOTS_KEPT = 64                 # boot records kept per host for the join and the citation
+    program_prefilter = True
     card: ClassVar[dict] = {
         "behavior": "an account or group tool was run to create, delete or modify an account, group membership, "
                     "password or expiry; a command or shell text wrote /etc/passwd, /etc/shadow, /etc/group or "
@@ -1048,12 +1056,22 @@ class AccountOrGroupChange(Playbook):
         self.boots: dict[str | None, list[TypedEvent]] = defaultdict(list)
         self._seen: set[str] = set()
 
+    @staticmethod
+    def _process_relevant(event: TypedEvent) -> bool:
+        name = program_name_hint(event)
+        return (name is None or name in ACCOUNT_TOOLS or name in _ACCOUNT_WRITE_PROGRAMS
+                or name in SHELLS or is_editor(name))
+
     def consume(self, events):
         fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
         for e in sorted(fresh, key=lambda x: (x.ts, x.family != "process_exec", x.id)):
             self._seen.add(e.id)
             if e.family == "process_exec":
                 self.lineage.observe(e)
+                if self.program_prefilter and not self._process_relevant(e):
+                    self.evaluated += 1
+                    self.missing_required += int(argv_incomplete(e))
+                    continue
                 self._exec(e)
             elif e.family == "system_state":
                 # context only (where a change sits relative to a boot); never a change itself
