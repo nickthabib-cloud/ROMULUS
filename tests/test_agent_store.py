@@ -2,8 +2,11 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from romulus.evidence.typed import RawRef, TypedEvent, fv
+from romulus.store import schema as tables
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -23,6 +26,40 @@ def _case_row():
         "id": "case-1", "hunt_id": "h1", "seed_candidate_id": "cand-1", "title": "seed",
         "priority": 50.0, "entities": [["host", "video", "host"]], "hypotheses": [], "step_budget": 8,
     }
+
+
+def test_existing_evidence_skips_serialization_and_entity_extraction(monkeypatch):
+    repo = _repo()
+    for task_id in ("task-first", "task-repeat"):
+        repo.upsert_task(
+            task_id, "h1", "pivot", task_id, {"task": task_id}, task_id,
+        )
+    event = TypedEvent(
+        id="event-existing", family="process_exec", ts=T, host="video",
+        fields={"user.name": fv("alice", "raw:user.name")},
+        raw=[RawRef(target="host-x", native_id="raw-1", digest="digest")],
+        normalizer="test@1",
+    )
+    sources = {"host-x/raw-1": {"message": "retained"}}
+    repo.save_evidence("h1", [event], sources, "task-first")
+
+    def should_not_run(*_args, **_kwargs):
+        raise AssertionError("existing evidence was rebuilt")
+
+    monkeypatch.setattr(TypedEvent, "model_dump", should_not_run)
+    monkeypatch.setattr(TypedEvent, "entities", should_not_run)
+    repo.save_evidence("h1", [event], sources, "task-repeat")
+
+    stored = repo.events_by_ids([event.id])
+    raw = repo.raw_records(stored[0]["raw_ids"])
+    with repo.engine.connect() as connection:
+        links = connection.execute(select(tables.event_entity).where(
+            tables.event_entity.c.event_id == event.id,
+        )).mappings().all()
+    assert stored[0]["event"]["fields"]["user.name"]["value"] == "alice"
+    assert raw[0]["source"] == {"message": "retained"}
+    assert raw[0]["first_task_id"] == "task-first"
+    assert len(links) == 2
 
 
 def test_active_lease_refuses_resume_and_expired_lease_is_reclaimed():

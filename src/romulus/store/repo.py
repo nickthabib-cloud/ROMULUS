@@ -375,6 +375,9 @@ class Repo:
         events = list(events)
         with write_txn(self.engine) as c:
             self._fence_lease(c, hunt_id, owner_token)
+            existing_ids = set(c.execute(select(t.typed_event.c.id).where(
+                t.typed_event.c.id.in_([event.id for event in events]),
+            )).scalars()) if events else set()
             raw_rows, ev_rows, ent_rows, link_rows = [], [], {}, []
             for e in events:
                 for r in e.raw:
@@ -383,6 +386,8 @@ class Repo:
                         raw_rows.append({"id": raw_id(r.target, r.native_id), "target": r.target,
                                          "native_id": r.native_id, "digest": r.digest, "source": src,
                                          "first_task_id": task_id, "retrieved_at": utcnow()})
+                if e.id in existing_ids:
+                    continue
                 ev_rows.append({"id": e.id, "hunt_id": hunt_id, "family": e.family, "ts": e.ts, "host": e.host,
                                 "event": e.model_dump(mode="json"), "raw_ids": [raw_id(r.target, r.native_id)
                                                                                 for r in e.raw],
