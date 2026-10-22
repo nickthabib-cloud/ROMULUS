@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
+from .build import strength_for_rule
 from .models import Catalog, CoverageStrength, RuleMetadata, TechniqueCoverage
 
 
@@ -40,8 +41,8 @@ def _summary(catalog: Catalog) -> list[str]:
         "Counts include active parent techniques and sub-techniques in every tactic where ATT&CK places them.",
         "A technique is covered only by a rule that explicitly declares that ATT&CK id.",
         "",
-        "| Tactic | Name | Covered / total | Negative-capable | Positive-only | Context-only | Lead-capped | Not covered |",
-        "|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Tactic | Name | Covered / total | Negative-capable | Positive-only | Context-only | Not covered |",
+        "|---|---|---:|---:|---:|---:|---:|",
     ]
     for rollup in catalog.tactic_rollups:
         counts = rollup.strength_counts
@@ -49,8 +50,7 @@ def _summary(catalog: Catalog) -> list[str]:
         lines.append(
             f"| {rollup.tactic.id} | {_esc(rollup.tactic.name)} | {rollup.total - uncovered} / {rollup.total} "
             f"| {counts[CoverageStrength.NEGATIVE_CAPABLE]} | {counts[CoverageStrength.POSITIVE_ONLY]} "
-            f"| {counts[CoverageStrength.CONTEXT_ONLY]} | {counts[CoverageStrength.LEAD_CAPPED]} "
-            f"| {uncovered} |"
+            f"| {counts[CoverageStrength.CONTEXT_ONLY]} | {uncovered} |"
         )
     return lines + [""]
 
@@ -147,17 +147,7 @@ def _metadata_issues(catalog: Catalog) -> list[str]:
 
 def _rule_card(rule: RuleMetadata) -> list[str]:
     attack = ", ".join(_technique_link(attack_id) for attack_id in rule.attack_ids) or "—"
-    strength = (
-        CoverageStrength.CONTEXT_ONLY
-        if rule.kind == "context"
-        else (
-            CoverageStrength.LEAD_CAPPED
-            if rule.kind == "baseline"
-            else CoverageStrength.NEGATIVE_CAPABLE
-            if rule.assures_negative
-            else CoverageStrength.POSITIVE_ONLY
-        )
-    )
+    strength = strength_for_rule(rule)
     lines = [
         f'<a id="rule-{_slug(rule.id)}"></a>',
         f"### `{_esc(rule.id)}` — {_esc(rule.title)}",

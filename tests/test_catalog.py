@@ -48,21 +48,43 @@ def test_attack_loader_enforces_its_uncompressed_byte_bound(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("kind", "assures_negative", "expected"),
+    ("kind", "lane", "assures_negative", "expected"),
     [
-        ("direct", True, CoverageStrength.NEGATIVE_CAPABLE),
-        ("aggregate", False, CoverageStrength.POSITIVE_ONLY),
-        ("context", True, CoverageStrength.CONTEXT_ONLY),
-        ("baseline", True, CoverageStrength.LEAD_CAPPED),
+        ("direct", "high", True, CoverageStrength.NEGATIVE_CAPABLE),
+        ("aggregate", "lead", False, CoverageStrength.POSITIVE_ONLY),
+        ("aggregate", "context", True, CoverageStrength.CONTEXT_ONLY),
+        ("context", "high", True, CoverageStrength.CONTEXT_ONLY),
     ],
 )
-def test_coverage_strength_comes_only_from_typed_rule_properties(kind, assures_negative, expected):
+def test_coverage_strength_comes_only_from_typed_rule_properties(
+    kind, lane, assures_negative, expected
+):
     class Rule:
         pass
 
     Rule.kind = kind
+    Rule.lane = lane
     Rule.assures_negative = assures_negative
     assert strength_for_rule(Rule) is expected
+
+
+def test_context_lane_cannot_overclaim_negative_capability():
+    catalog = build_catalog()
+
+    rule = catalog.rule("net.rare_client_fingerprint")
+    assert rule.lane == "context"
+    assert rule.assures_negative is True
+    assert strength_for_rule(rule) is CoverageStrength.CONTEXT_ONLY
+    assert catalog.coverage("T1071.001").strength is CoverageStrength.CONTEXT_ONLY
+
+
+def test_catalog_exposes_only_strengths_supported_by_typed_metadata():
+    assert tuple(strength.value for strength in CoverageStrength) == (
+        "negative-capable",
+        "positive-only",
+        "context-only",
+        "none",
+    )
 
 
 def test_catalog_loads_sorted_rule_metadata_and_reports_unmapped_active_rules():

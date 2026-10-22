@@ -21,10 +21,9 @@ from .models import (
 
 _STRENGTH_RANK = {
     CoverageStrength.NONE: 0,
-    CoverageStrength.LEAD_CAPPED: 1,
-    CoverageStrength.CONTEXT_ONLY: 2,
-    CoverageStrength.POSITIVE_ONLY: 3,
-    CoverageStrength.NEGATIVE_CAPABLE: 4,
+    CoverageStrength.CONTEXT_ONLY: 1,
+    CoverageStrength.POSITIVE_ONLY: 2,
+    CoverageStrength.NEGATIVE_CAPABLE: 3,
 }
 
 _PUBLIC_INDICATOR_DIR = Path(__file__).resolve().parents[3] / "content" / "indicators"
@@ -54,10 +53,9 @@ def _public_version(playbook: type) -> str:
 def strength_for_rule(playbook: type) -> CoverageStrength:
     """Classify coverage only from the rule's declared execution and assurance properties."""
     kind = str(getattr(playbook, "kind", "direct"))
-    if kind == "context":
+    lane = str(getattr(playbook, "lane", "lead"))
+    if kind == "context" or lane == "context":
         return CoverageStrength.CONTEXT_ONLY
-    if kind == "baseline":
-        return CoverageStrength.LEAD_CAPPED
     if bool(getattr(playbook, "assures_negative", True)):
         return CoverageStrength.NEGATIVE_CAPABLE
     return CoverageStrength.POSITIVE_ONLY

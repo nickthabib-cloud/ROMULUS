@@ -54,6 +54,9 @@ def test_catalog_export_contains_sorted_rules_techniques_strengths_and_telemetry
     }
     net_socket = next(item for item in telemetry if item["family"] == "net_socket")
     assert {"destination.ip", "destination.port"} <= set(net_socket["required_fields"])
+    fingerprint = next(item for item in rules if item["id"] == "net.rare_client_fingerprint")
+    assert fingerprint["coverage_strength"] == "context-only"
+    assert "lead-capped" not in {item["coverage_strength"] for item in rules}
 
 
 def test_catalog_export_marks_every_uncovered_technique_as_a_gap():

@@ -13,7 +13,6 @@ class CoverageStrength(str, Enum):
     NEGATIVE_CAPABLE = "negative-capable"
     POSITIVE_ONLY = "positive-only"
     CONTEXT_ONLY = "context-only"
-    LEAD_CAPPED = "lead-capped"
     NONE = "none"
 
 

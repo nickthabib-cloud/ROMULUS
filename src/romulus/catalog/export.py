@@ -4,18 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from .build import build_catalog
+from .build import build_catalog, strength_for_rule
 from .models import Catalog, CoverageStrength, RuleMetadata
 
 
 def _rule_strength(rule: RuleMetadata) -> str:
-    if rule.kind == "context":
-        return CoverageStrength.CONTEXT_ONLY.value
-    if rule.kind == "baseline":
-        return CoverageStrength.LEAD_CAPPED.value
-    if rule.assures_negative:
-        return CoverageStrength.NEGATIVE_CAPABLE.value
-    return CoverageStrength.POSITIVE_ONLY.value
+    return strength_for_rule(rule).value
 
 
 def _rules(catalog: Catalog) -> list[dict[str, Any]]:

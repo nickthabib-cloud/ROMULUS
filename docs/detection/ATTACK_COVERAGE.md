@@ -15,23 +15,23 @@ Every collapsed id and name remains listed and is marked not covered.
 Counts include active parent techniques and sub-techniques in every tactic where ATT&CK places them.
 A technique is covered only by a rule that explicitly declares that ATT&CK id.
 
-| Tactic | Name | Covered / total | Negative-capable | Positive-only | Context-only | Lead-capped | Not covered |
-|---|---|---:|---:|---:|---:|---:|---:|
-| TA0001 | Initial Access | 2 / 22 | 0 | 2 | 0 | 0 | 20 |
-| TA0002 | Execution | 10 / 66 | 0 | 10 | 0 | 0 | 56 |
-| TA0003 | Persistence | 18 / 113 | 0 | 18 | 0 | 0 | 95 |
-| TA0004 | Privilege Escalation | 19 / 96 | 0 | 16 | 3 | 0 | 77 |
-| TA0005 | Stealth | 10 / 151 | 0 | 9 | 1 | 0 | 141 |
-| TA0006 | Credential Access | 11 / 68 | 0 | 5 | 6 | 0 | 57 |
-| TA0007 | Discovery | 16 / 49 | 2 | 0 | 14 | 0 | 33 |
-| TA0008 | Lateral Movement | 6 / 23 | 1 | 0 | 5 | 0 | 17 |
-| TA0009 | Collection | 2 / 41 | 0 | 0 | 2 | 0 | 39 |
-| TA0010 | Exfiltration | 5 / 20 | 2 | 3 | 0 | 0 | 15 |
-| TA0011 | Command and Control | 11 / 45 | 10 | 1 | 0 | 0 | 34 |
-| TA0040 | Impact | 2 / 33 | 0 | 2 | 0 | 0 | 31 |
-| TA0042 | Resource Development | 3 / 51 | 3 | 0 | 0 | 0 | 48 |
-| TA0043 | Reconnaissance | 4 / 46 | 4 | 0 | 0 | 0 | 42 |
-| TA0112 | Defense Impairment | 5 / 57 | 0 | 5 | 0 | 0 | 52 |
+| Tactic | Name | Covered / total | Negative-capable | Positive-only | Context-only | Not covered |
+|---|---|---:|---:|---:|---:|---:|
+| TA0001 | Initial Access | 2 / 22 | 0 | 2 | 0 | 20 |
+| TA0002 | Execution | 10 / 66 | 0 | 10 | 0 | 56 |
+| TA0003 | Persistence | 18 / 113 | 0 | 18 | 0 | 95 |
+| TA0004 | Privilege Escalation | 19 / 96 | 0 | 16 | 3 | 77 |
+| TA0005 | Stealth | 10 / 151 | 0 | 9 | 1 | 141 |
+| TA0006 | Credential Access | 11 / 68 | 0 | 5 | 6 | 57 |
+| TA0007 | Discovery | 16 / 49 | 2 | 0 | 14 | 33 |
+| TA0008 | Lateral Movement | 6 / 23 | 0 | 1 | 5 | 17 |
+| TA0009 | Collection | 2 / 41 | 0 | 0 | 2 | 39 |
+| TA0010 | Exfiltration | 5 / 20 | 2 | 3 | 0 | 15 |
+| TA0011 | Command and Control | 11 / 45 | 9 | 1 | 1 | 34 |
+| TA0040 | Impact | 2 / 33 | 0 | 2 | 0 | 31 |
+| TA0042 | Resource Development | 3 / 51 | 3 | 0 | 0 | 48 |
+| TA0043 | Reconnaissance | 4 / 46 | 4 | 0 | 0 | 42 |
+| TA0112 | Defense Impairment | 5 / 57 | 0 | 5 | 0 | 52 |
 
 ## Techniques by tactic
 
@@ -278,7 +278,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1021`](https://attack.mitre.org/techniques/T1021/) | Remote Services | [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/) Distributed Component Object Model — not covered<br>[`T1021.005`](https://attack.mitre.org/techniques/T1021/005/) VNC — not covered<br>[`T1021.007`](https://attack.mitre.org/techniques/T1021/007/) Cloud Services — not covered<br>[`T1021.008`](https://attack.mitre.org/techniques/T1021/008/) Direct Cloud VM Connections — not covered<br>4 covered sub-technique(s) listed separately: [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/), [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/) | context-only | [context.lateral_movement](#rule-context-lateral-movement) | net_socket<br>process_exec |
 | [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/) | Remote Desktop Protocol | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | context-only | [context.lateral_movement](#rule-context-lateral-movement) | net_socket<br>process_exec |
 | [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/) | SMB/Windows Admin Shares | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | context-only | [context.lateral_movement](#rule-context-lateral-movement) | net_socket<br>process_exec |
-| [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/) | SSH | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | negative-capable | [context.entry_point_promotion](#rule-context-entry-point-promotion)<br>[context.lateral_movement](#rule-context-lateral-movement)<br>[context.staging_and_transfer](#rule-context-staging-and-transfer)<br>[host.ssh_login_external_source](#rule-host-ssh-login-external-source)<br>[host.ssh_success_after_failures](#rule-host-ssh-success-after-failures)<br>[net.arkime_ssh_reverse_shell_tag](#rule-net-arkime-ssh-reverse-shell-tag)<br>[net.rare_client_fingerprint](#rule-net-rare-client-fingerprint) | auth<br>net_session<br>net_socket<br>process_exec<br>ssh_session<br>tls_session |
+| [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/) | SSH | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [context.entry_point_promotion](#rule-context-entry-point-promotion)<br>[context.lateral_movement](#rule-context-lateral-movement)<br>[context.staging_and_transfer](#rule-context-staging-and-transfer)<br>[host.ssh_login_external_source](#rule-host-ssh-login-external-source)<br>[host.ssh_success_after_failures](#rule-host-ssh-success-after-failures)<br>[net.arkime_ssh_reverse_shell_tag](#rule-net-arkime-ssh-reverse-shell-tag)<br>[net.rare_client_fingerprint](#rule-net-rare-client-fingerprint) | auth<br>net_session<br>net_socket<br>process_exec<br>ssh_session<br>tls_session |
 | [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/) | Windows Remote Management | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | context-only | [context.lateral_movement](#rule-context-lateral-movement) | net_socket<br>process_exec |
 | [`T1072`](https://attack.mitre.org/techniques/T1072/) | Software Deployment Tools | — | none | — | — |
 | [`T1080`](https://attack.mitre.org/techniques/T1080/) | Taint Shared Content | — | none | — | — |
@@ -336,7 +336,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1001`](https://attack.mitre.org/techniques/T1001/) | Data Obfuscation | [`T1001.001`](https://attack.mitre.org/techniques/T1001/001/) Junk Data — not covered<br>[`T1001.002`](https://attack.mitre.org/techniques/T1001/002/) Steganography — not covered<br>[`T1001.003`](https://attack.mitre.org/techniques/T1001/003/) Protocol or Service Impersonation — not covered | none | — | — |
 | [`T1008`](https://attack.mitre.org/techniques/T1008/) | Fallback Channels | — | none | — | — |
 | [`T1071`](https://attack.mitre.org/techniques/T1071/) | Application Layer Protocol | [`T1071.002`](https://attack.mitre.org/techniques/T1071/002/) File Transfer Protocols — not covered<br>[`T1071.003`](https://attack.mitre.org/techniques/T1071/003/) Mail Protocols — not covered<br>[`T1071.005`](https://attack.mitre.org/techniques/T1071/005/) Publish/Subscribe Protocols — not covered<br>2 covered sub-technique(s) listed separately: [`T1071.001`](https://attack.mitre.org/techniques/T1071/001/), [`T1071.004`](https://attack.mitre.org/techniques/T1071/004/) | negative-capable | [corr.process_network_link](#rule-corr-process-network-link)<br>[host.interpreter_external_connection](#rule-host-interpreter-external-connection)<br>[host.shell_spawned_by_connected_process](#rule-host-shell-spawned-by-connected-process)<br>[net.beaconing](#rule-net-beaconing)<br>[net.long_external_connection](#rule-net-long-external-connection) | file_transfer<br>http_tx<br>net_alert<br>net_flow<br>net_session<br>net_socket<br>process_exec<br>ssh_session<br>tls_session |
-| [`T1071.001`](https://attack.mitre.org/techniques/T1071/001/) | Web Protocols | sub-technique of [`T1071`](https://attack.mitre.org/techniques/T1071/) | negative-capable | [net.rare_client_fingerprint](#rule-net-rare-client-fingerprint) | net_session<br>ssh_session<br>tls_session |
+| [`T1071.001`](https://attack.mitre.org/techniques/T1071/001/) | Web Protocols | sub-technique of [`T1071`](https://attack.mitre.org/techniques/T1071/) | context-only | [net.rare_client_fingerprint](#rule-net-rare-client-fingerprint) | net_session<br>ssh_session<br>tls_session |
 | [`T1071.004`](https://attack.mitre.org/techniques/T1071/004/) | DNS | sub-technique of [`T1071`](https://attack.mitre.org/techniques/T1071/) | negative-capable | [net.dns_tunnel_shape](#rule-net-dns-tunnel-shape) | dns_query |
 | [`T1090`](https://attack.mitre.org/techniques/T1090/) | Proxy | [`T1090.001`](https://attack.mitre.org/techniques/T1090/001/) Internal Proxy — not covered<br>[`T1090.002`](https://attack.mitre.org/techniques/T1090/002/) External Proxy — not covered<br>[`T1090.003`](https://attack.mitre.org/techniques/T1090/003/) Multi-hop Proxy — not covered<br>[`T1090.004`](https://attack.mitre.org/techniques/T1090/004/) Domain Fronting — not covered | none | — | — |
 | [`T1092`](https://attack.mitre.org/techniques/T1092/) | Communication Through Removable Media | — | none | — | — |
@@ -950,7 +950,7 @@ Invalid mappings are excluded from coverage:
 
 - Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `context`; severity: `low`
-- Coverage strength: **negative-capable**
+- Coverage strength: **context-only**
 - ATT&CK: [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1071.001`](https://attack.mitre.org/techniques/T1071/001/), [`T1573`](https://attack.mitre.org/techniques/T1573/)
 - Telemetry families: net_session<br>ssh_session<br>tls_session
 - Required typed fields: destination.ip<br>source.ip

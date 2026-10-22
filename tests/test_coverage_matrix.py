@@ -39,6 +39,12 @@ def test_public_matrix_contains_versions_tactic_rollups_and_rule_card_links():
     assert "[host.ssh_password_guessing](#rule-host-ssh-password-guessing)" in text
     assert '<a id="rule-host-ssh-password-guessing"></a>' in text
     assert "## Rule card summaries" in text
+    assert "| Context-only | Not covered |" in text
+    assert "Lead-capped" not in text
+    fingerprint_card = text.split(
+        "### `net.rare_client_fingerprint`", maxsplit=1
+    )[1].split("\n### `", maxsplit=1)[0]
+    assert "Coverage strength: **context-only**" in fingerprint_card
 
 
 def test_public_matrix_keeps_every_active_technique_visible_when_subtechniques_collapse():
