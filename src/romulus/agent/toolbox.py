@@ -29,15 +29,13 @@ from romulus.decide.policy import LANE_ORDER
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.typed import TypedEvent
 from romulus.report.incidents import build_incident_graph
+from romulus.report.manifest import coverage_for_hunt
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 
 READ_PAGE_SIZE = 25
 ENTITY_EVENT_LIMIT = 50
 _RULE_IDS = frozenset(playbook.id for playbook in ALL_PLAYBOOKS)
-_PARTIAL_STATES = frozenset({
-    "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
-})
 _ALIAS_PATTERN = r"^[FIENL][1-9][0-9]*$"
 AliasArg = Annotated[str, Field(pattern=_ALIAS_PATTERN)]
 
@@ -274,32 +272,24 @@ class Toolbox:
             }})
 
     def _coverage(self, rule_ids: set[str]) -> dict:
-        hunt = self.repo.get_hunt(self.hunt_id) or {}
-        manifest = hunt.get("manifest") or {}
-        targets = sorted(str(target) for target in manifest.get("targets") or [])
-        cells = [row for row in self.repo.rule_cells(self.hunt_id) if row["rule_id"] in rule_ids]
-        gaps = [{
-            "rule_id": row["rule_id"], "target": row["target"], "partition": row["partition"],
-            "reason": f"rule cell state is {row['state']}",
-        } for row in cells if row["state"] in _PARTIAL_STATES]
-        assessed = {(row["rule_id"], row["target"]) for row in cells if row["target"] != "*"}
-        for rule_id in sorted(rule_ids):
-            for target in targets:
-                if (rule_id, target) not in assessed:
-                    gaps.append({
-                        "rule_id": rule_id, "target": target, "partition": "*",
-                        "reason": "no rule cell was recorded for this source",
-                    })
-        sweep = self.repo.latest_audit(self.hunt_id, "hunt.sweep_summary")
-        detail = (sweep or {}).get("detail") or {}
-        if not (detail.get("finished") or detail.get("complete")):
-            for rule_id in sorted(rule_ids):
-                gaps.append({
-                    "rule_id": rule_id, "target": "*", "partition": "*",
-                    "reason": "the deterministic sweep did not finish",
-                })
-        gaps.sort(key=lambda item: (item["rule_id"], item["target"], item["partition"], item["reason"]))
-        return {"status": "partial" if gaps else "complete", "gaps": gaps}
+        canonical = coverage_for_hunt(self.repo, self.hunt_id)
+        rules = [row for row in canonical["rules"] if row["rule_id"] in rule_ids]
+        gaps = []
+        for gap in canonical["gaps"]:
+            selected = {rule: state for rule, state in gap["rules"].items() if rule in rule_ids}
+            if selected:
+                gaps.append({**gap, "rules": selected,
+                             "every_rule_there": set(selected) == set(rule_ids)})
+        not_assessed = canonical["not_assessed"]
+        unresolved = any(
+            row["negative_claim"].startswith("unresolved:")
+            or "coverage incomplete:" in row["negative_claim"]
+            for row in rules
+        )
+        return {
+            "status": "partial" if gaps or not_assessed or unresolved else "complete",
+            "rules": rules, "gaps": gaps, "not_assessed": not_assessed,
+        }
 
     @staticmethod
     def _matches_entity(candidate: dict, entity: dict) -> bool:

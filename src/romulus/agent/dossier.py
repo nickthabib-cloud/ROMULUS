@@ -13,6 +13,7 @@ from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.expansion import TIER_PLAN
 from romulus.report.incidents import build_incident_graph
+from romulus.report.manifest import coverage_for_hunt
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 
@@ -21,9 +22,6 @@ REPORTABLE_LANES = ("urgent", "high", "lead")
 CLAIM_LIMIT = 180
 DATA_TEXT_LIMIT = 180
 DATA_COLLECTION_LIMIT = 50
-_GAP_STATES = frozenset({
-    "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
-})
 
 
 def _bounded_text(value: Any, limit: int = DATA_TEXT_LIMIT) -> str:
@@ -122,36 +120,19 @@ def _findings(repo: Repo, hunt_id: str, aliases: AliasBook) -> tuple[list[dict],
     return out, counts
 
 
-def _coverage(repo: Repo, hunt_id: str, manifest: dict) -> dict:
-    cells = sorted(repo.rule_cells(hunt_id), key=lambda row: (
-        row["rule_id"], row["target"], row["partition"], row["rule_version"],
-    ))
-    gaps = [{
-        "rule_id": row["rule_id"], "rule_version": row["rule_version"],
-        "target": row["target"], "partition": row["partition"], "status": "partial",
-        "state": row["state"], "detail": _bounded_data(row.get("detail") or {}),
-    } for row in cells if row["state"] in _GAP_STATES]
-    rules = sorted({str(item["id"]) for item in (manifest.get("pack") or {}).get("playbooks", [])
-                    if isinstance(item, dict) and item.get("id")})
-    targets = sorted(str(target) for target in manifest.get("targets") or [])
-    assessed = {(row["rule_id"], row["target"]) for row in cells if row["target"] != "*"}
-    for rule_id in rules:
-        for target in targets:
-            if (rule_id, target) not in assessed:
-                gaps.append({
-                    "rule_id": rule_id, "rule_version": None, "target": target, "partition": "*",
-                    "status": "unassessed", "state": "missing", "detail": {},
-                })
-    gaps.sort(key=lambda row: (row["rule_id"], row["target"], row["partition"], row["status"]))
-    return {
-        "summary": {
-            "recorded_cells": len(cells),
-            "partial_cells": sum(gap["status"] == "partial" for gap in gaps),
-            "unassessed_cells": sum(gap["status"] == "unassessed" for gap in gaps),
-            "gap_count": len(gaps),
-        },
-        "gaps": gaps,
+def _coverage(repo: Repo, hunt_id: str) -> dict:
+    canonical = coverage_for_hunt(repo, hunt_id)
+    coverage = {
+        key: [_bounded_data(item) for item in canonical[key]]
+        for key in ("rules", "gaps", "not_assessed")
     }
+    cells = repo.rule_cells(hunt_id)
+    coverage["summary"] = {
+        "recorded_cells": len(cells),
+        "gap_count": len(coverage["gaps"]),
+        "not_assessed_count": len(coverage["not_assessed"]),
+    }
+    return coverage
 
 
 def _budget(repo: Repo, hunt_id: str, manifest: dict) -> dict:
@@ -276,6 +257,12 @@ def _append_detail(payload: dict, section: str, item: dict) -> None:
         payload.setdefault("scope", {}).setdefault("sources", []).append(item)
     elif section == "coverage_gaps":
         payload.setdefault("scope", {}).setdefault("coverage", {}).setdefault("gaps", []).append(item)
+    elif section == "coverage_rules":
+        payload.setdefault("scope", {}).setdefault("coverage", {}).setdefault("rules", []).append(item)
+    elif section == "coverage_not_assessed":
+        payload.setdefault("scope", {}).setdefault("coverage", {}).setdefault(
+            "not_assessed", [],
+        ).append(item)
     elif section.startswith("expansion."):
         key = section.partition(".")[2]
         payload.setdefault("expansion", {}).setdefault(key, []).append(item)
@@ -339,7 +326,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
     context_counts = Counter(row["rule_id"] for row in repo.candidates(hunt_id) if row["lane"] == "context")
     profiles = manifest.get("source_profiles") or {}
     source_targets = sorted(set(manifest.get("targets") or []) | set(profiles))
-    coverage = _coverage(repo, hunt_id, manifest)
+    coverage = _coverage(repo, hunt_id)
     sources = [{"target": _bounded_text(target), "profile": _bounded_data(profiles.get(target) or {})}
                for target in source_targets]
     context_rows = [{"rule_id": _bounded_text(rule_id), "count": count}
@@ -356,7 +343,8 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
         "scope": {
             "window": {**_bounded_data(manifest.get("window") or {}), "semantics": "[start, end) UTC"},
             "sources": [],
-            "coverage": {"summary": coverage["summary"], "gaps": []},
+            "coverage": {"summary": coverage["summary"], "rules": [], "gaps": [],
+                         "not_assessed": []},
         },
         "context_counts": [],
         "entities": [],
@@ -380,7 +368,9 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
     details.extend(("incidents", item) for item in incidents)
     for key, values in expansion.items():
         details.extend((f"expansion.{key}", item) for item in values)
+    details.extend(("coverage_rules", item) for item in coverage["rules"])
     details.extend(("coverage_gaps", item) for item in coverage["gaps"])
+    details.extend(("coverage_not_assessed", item) for item in coverage["not_assessed"])
     details.extend(("safety_flags", item) for item in safety_flags)
     cursor = "D" + digest({
         "hunt_id": hunt_id, "token_budget": token_budget, "context": base,

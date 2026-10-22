@@ -167,11 +167,12 @@ def test_dossier_includes_exact_coverage_gaps_context_counts_and_remaining_budge
     first = build_dossier(_repo(), "h1", token_budget=50_000).payload
 
     assert first["scope"]["window"]["semantics"] == "[start, end) UTC"
-    assert {gap["status"] for gap in first["scope"]["coverage"]["gaps"]} == {"partial", "unassessed"}
-    assert {(gap["rule_id"], gap["target"]) for gap in first["scope"]["coverage"]["gaps"]} == {
-        ("host.test", "host-index"), ("host.test", "network-index"),
-        ("net.test", "host-index"),
-    }
+    assert first["scope"]["coverage"]["gaps"] == [{
+        "target": "host-index", "partition": "p0",
+        "rules": {"host.test": "evaluated_partial"},
+        "reasons": ["evaluated_partial: no reason recorded"], "every_rule_there": True,
+    }]
+    assert first["scope"]["coverage"]["not_assessed"] == []
     assert first["context_counts"] == [{"rule_id": "context.discovery", "count": 1}]
     assert first["agent_budget"]["remaining"]["calls"] == 10
     assert first["agent_budget"]["remaining"]["tokens"] == 10_000
@@ -257,3 +258,37 @@ def test_dossier_truncates_attacker_controlled_account_values_with_marker():
 
     assert len(finding["account"]) < 300
     assert "chars omitted" in finding["account"]
+
+
+def test_dossier_and_toolbox_use_canonical_packet_and_not_assessed_coverage():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("coverage", {
+        "window": {"start": T.isoformat(), "end": (T + timedelta(hours=1)).isoformat()},
+        "targets": ["packet-target"],
+        "source_profiles": {"packet-target": {"datasets": {
+            "arkime.sessions": 10, "unknown.dataset": 4,
+        }}},
+        "pack": {"playbooks": [{"id": "packet.test"}]},
+    }, "digest", "test")
+    repo.set_rule_cell(
+        "coverage", "packet.test", "1", "arkime-pcap:packet-target", "selection",
+        "no_match_complete", 0, 10, {},
+    )
+    repo.audit("system", "hunt.sweep_summary", "coverage", {
+        "finished": True,
+        "stats": {"dataset_filter": {"packet-target": ["arkime.sessions"]}},
+    })
+
+    coverage = build_dossier(repo, "coverage", token_budget=50_000).payload["scope"]["coverage"]
+    listed = Toolbox(repo, "coverage").execute("list_findings", {"page": 1})["coverage"]
+
+    assert not coverage["gaps"]
+    assert not listed["gaps"]
+    assert coverage["not_assessed"] == listed["not_assessed"]
+    assert coverage["not_assessed"] == [{
+        "target": "packet-target", "dataset": "unknown.dataset", "records": 4,
+        "count_scope": "whole index at source preflight, not only the hunt window",
+        "reason": ("not retrieved by the sweep: no normalizer reads this dataset, so no rule "
+                   "evaluates it"),
+    }]
