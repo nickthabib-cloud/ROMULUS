@@ -49,6 +49,7 @@ Coverage cells are written at every stage that can lose information (compile, ex
 | `store` | SQLite schema, Alembic migrations, repositories, the single-writer coordinator |
 | `sources` | Source profiles, field contracts, typed query compilation, read-only Elasticsearch/OpenSearch, Arkime and TShark adapters |
 | `evidence` | Raw references, typed normalization with field lineage, entities |
+| `baseline` | Pure versioned baseline specifications and canonical typed key extraction |
 | `detect` | Playbooks and typed evaluators: sweep rules, context rules, packet rules, indicator lists |
 | `decide` | Admission gates, lanes, priority, triage and suppressions |
 | `hunt` | Hunt orchestration: manifest, sweep, packet stage, deterministic expansion, pivots, resume |
@@ -65,6 +66,7 @@ Other top-level directories: `content/` (indicator lists, vendored ATT&CK), `tes
 - `web` and `cli` may import anything below them, but nothing imports `web` or `cli`.
 - `detect`, `decide`, and `report` never import `sources` adapters directly. They work on stored typed data.
 - `agent` emits validated typed pivots without importing any module under `romulus.sources`. The hunt-layer pivot executor converts them to `SearchIntent`s and owns source access.
+- `baseline` defines source-neutral typed keys and imports neither `hunt` orchestration nor `sources` adapters.
 - `store` imports no domain logic packages.
 
 Update this section and `LAYER_RULES` in `scripts/archmap.py` together.
