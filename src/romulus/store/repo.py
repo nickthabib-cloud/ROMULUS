@@ -54,6 +54,17 @@ def baseline_peer_scopes_query(scope_kind: str, segment_ids: list[str]):
     return select(func.count(c.scope.distinct())).where(c.scope_kind == scope_kind, c.segment_id.in_(segment_ids))
 
 
+def observation_citations_query(hunt_id: str):
+    """(event id, citing hunt) for every event `hunt_id` stored that another hunt's baseline observation cites
+    as its first event, the lowest citing hunt id when several do: one walk of the hunt's events in id order,
+    each probing ix_baseline_observation_first_event."""
+    obs, ev = t.baseline_observation.c, t.typed_event.c
+    return (select(ev.id, func.min(obs.hunt_id))
+            .join(t.baseline_observation, obs.first_event_id == ev.id)
+            .where(ev.hunt_id == hunt_id, obs.hunt_id != hunt_id)
+            .group_by(ev.id))
+
+
 def baseline_scope_series_query(scope_kind: str, scope: str, segment_ids: list[str]):
     """One scope's live hours and event totals across the segments (ix_baseline_scope_hour_lookup)."""
     c = t.baseline_scope_hour.c
@@ -371,6 +382,9 @@ class Repo:
                 for eid in [*(link_events or []), *(link_evidence or [])]:
                     if eid in mine:
                         cited_by.setdefault(eid, link_hunt)
+            # (e) other hunts' baseline observations cite their first window event
+            for eid, obs_hunt in c.execute(observation_citations_query(hunt_id)):
+                cited_by.setdefault(eid, obs_hunt)
             for eid, owner in cited_by.items():
                 c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(hunt_id=owner))
             drop_events = mine - set(cited_by)

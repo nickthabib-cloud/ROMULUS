@@ -7,10 +7,11 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import event, inspect, text
+from sqlalchemy import event, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
 from romulus.store import repo as repo_module
+from romulus.store import schema
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -516,3 +517,35 @@ def test_one_million_count_rows_stream_through_the_api_and_probes_stay_indexed(t
     print(f"wrote {total} baseline_count rows in {written:.1f}s; three probes in {probed * 1000:.1f}ms")
     assert prevalence == scopes and len(history) == 1 and peers == scopes
     assert written < 900 and probed < 2.0
+
+
+def test_delete_hunt_keeps_an_event_another_hunts_observation_cites_as_its_first_event():
+    repo = _repo()
+    for hunt_id in ("h1", "h2"):
+        repo.create_hunt(hunt_id, {}, "d", "test")
+        repo.set_hunt_state(hunt_id, "canceled")
+    with repo.engine.begin() as c:
+        c.execute(schema.typed_event.insert(), [
+            {"id": event_id, "hunt_id": "h1", "family": "process_exec", "ts": T0, "host": "web01",
+             "event": {}, "raw_ids": [], "normalizer": "fixture@1"}
+            for event_id in ("cited-by-h2", "only-h1")
+        ])
+    repo.upsert_baseline_observations([
+        _observation("h1", "key-a", first_event_id="only-h1"),
+        _observation("h2", "key-b", first_event_id="cited-by-h2"),
+    ])
+
+    repo.delete_hunt("h1", actor="test")
+
+    with repo.engine.connect() as c:
+        owners = dict(c.execute(select(schema.typed_event.c.id, schema.typed_event.c.hunt_id)).all())
+    assert owners == {"cited-by-h2": "h2"}
+    assert next(repo.baseline_observations("h2"))["first_event_id"] == "cited-by-h2"
+
+
+def test_delete_hunt_observation_citation_lookup_is_index_served(tmp_path):
+    engine = make_engine(tmp_path / "delete-plan.db")
+    migrate(engine)
+    plan = _plan(engine, repo_module.observation_citations_query("h1"))
+    assert "ix_baseline_observation_first_event" in plan and "TEMP B-TREE" not in plan
+    assert "SCAN baseline_observation" not in plan
