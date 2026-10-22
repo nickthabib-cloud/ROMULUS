@@ -12,6 +12,7 @@ from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt.agent_tools import HuntToolExecutor, build_agent_toolbox
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkResult
+from romulus.report.incidents import build_incident_graph
 from romulus.sources.models import Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -20,7 +21,8 @@ T = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 END = T + timedelta(hours=1)
 
 
-def _event(event_id: str, *, argv=None, pid=7, source_ip="198.51.100.7") -> TypedEvent:
+def _event(event_id: str, *, argv=None, pid=7, source_ip="198.51.100.7",
+           session_id=None) -> TypedEvent:
     fields = {
         "process.argv": fv(argv or ["/bin/true"], f"{event_id}:argv"),
         "source.ip": fv(source_ip, f"{event_id}:source.ip"),
@@ -28,6 +30,8 @@ def _event(event_id: str, *, argv=None, pid=7, source_ip="198.51.100.7") -> Type
     if pid is not None:
         fields["process.pid"] = fv(pid, f"{event_id}:pid")
         fields["process.ppid"] = fv(1, f"{event_id}:ppid")
+    if session_id is not None:
+        fields["process.session_id"] = fv(session_id, f"{event_id}:session")
     return TypedEvent(
         id=event_id, family="process_exec", ts=T + timedelta(minutes=10), host="web01",
         outcome=Outcome.success, fields=fields,
@@ -35,14 +39,14 @@ def _event(event_id: str, *, argv=None, pid=7, source_ip="198.51.100.7") -> Type
     )
 
 
-def _repo(*, linked_attack: bool = False) -> Repo:
+def _repo(*, linked_attack: bool = False, anchor_session=None) -> Repo:
     repo = Repo(make_engine(":memory:"))
     migrate(repo.engine)
     repo.create_hunt("h1", {
         "window": {"start": T.isoformat(), "end": END.isoformat()},
         "targets": ["host-index", "network-index"], "pack": {"playbooks": []},
     }, "digest", "test")
-    anchor = _event("anchor")
+    anchor = _event("anchor", session_id=anchor_session)
     no_pid = _event("no-pid", pid=None)
     events = [anchor, no_pid]
     if linked_attack:
@@ -163,6 +167,7 @@ def test_pivot_cursor_is_bound_to_its_originating_request():
 
 def test_pivot_alias_kinds_typed_fields_and_windows_are_refused_before_execution():
     repo = _repo()
+    repo.update_context_candidate("anchor-finding", {"event_ids": ["anchor", "no-pid"]})
     fake = FakeToolExecutor(_result("complete"))
     toolbox = Toolbox(repo, "h1", executor=fake, session_id="session-1")
     aliases = AliasBook(repo, "h1")
@@ -246,6 +251,22 @@ class FakePivot:
         )
 
 
+class ManyEventPivot(FakePivot):
+    def __init__(self, event_ids):
+        super().__init__(event_ids[0])
+        self.event_ids = event_ids
+
+    def run(self, session_id, request, *, anchor_ts=None):
+        return PivotResult(
+            status="complete", event_ids=list(self.event_ids), reach_event_ids=list(self.event_ids),
+            matched_event_count=len(self.event_ids),
+            coverage=[PivotCoverage(target="host-index", dataset="systemd.journal",
+                                    start=request.arguments.start, end=request.arguments.end,
+                                    status="complete", returned=len(self.event_ids),
+                                    total=len(self.event_ids))],
+        )
+
+
 def test_hunt_executor_persists_reach_reruns_context_and_direct_findings_keep_lane_and_session():
     repo = _repo(linked_attack=True)
     pivot = FakePivot()
@@ -289,6 +310,72 @@ def test_agent_reach_does_not_claim_anchor_ownership_before_resumed_expansion():
     assert deterministic_fetcher.calls
     assert deterministic_fetcher.calls[0][0] == "anchor-finding"
     assert repo.expansion_anchors("h1")[0]["candidate_id"] == "anchor-finding"
+
+
+def test_agent_auth_reach_is_anchor_session_scoped_and_never_becomes_context():
+    repo = _repo(anchor_session=303)
+    auth_events = []
+    for session_id in range(301, 306):
+        event_id = f"auth-{session_id}"
+        auth_events.append(TypedEvent(
+            id=event_id, family="auth", ts=T + timedelta(minutes=session_id - 300),
+            host="web01", outcome=Outcome.success,
+            fields={
+                "auth.service": fv("sshd", f"{event_id}:service"),
+                "auth.phase": fv("login", f"{event_id}:phase"),
+                "process.session_id": fv(session_id, f"{event_id}:session"),
+                "source.ip": fv(f"198.51.100.{session_id - 300}", f"{event_id}:source"),
+                "user.name": fv("www-data", f"{event_id}:user"),
+            },
+            raw=[RawRef(target="host-index", native_id=event_id, digest="digest")],
+            normalizer="test@1",
+        ))
+    repo.save_evidence("h1", auth_events, {}, None)
+    executor = HuntToolExecutor(
+        repo, "h1", ManyEventPivot([event.id for event in auth_events]),
+        FakeFetcher("anchor"), T, END,
+    )
+    aliases = AliasBook(repo, "h1")
+
+    response = Toolbox(repo, "h1", executor=executor, session_id="session-7").execute(
+        "auth_activity", {
+            "anchor": aliases.alias_for("F", "anchor-finding"),
+            "entity": aliases.alias_for("N", "h1:host:web01"),
+            "start": None, "end": None,
+        },
+    )
+
+    assert response["status"] == "complete"
+    link = repo.expansion_links("h1")[0]
+    assert link["event_ids"] == ["auth-303"]
+    assert link["link_type"] == "agent_auth_activity"
+    assert link["strength"] == "agent_hypothesis"
+    assert not [row for row in repo.candidates("h1") if row["rule_id"].startswith("context.")]
+    graph = build_incident_graph(repo, "h1", [{
+        "id": "anchor-finding", "lane": "high", "rule_id": "host.web_shell",
+        "observed_at": str(T), "entities": [], "event_ids": ["anchor"], "citations": [],
+    }])
+    assert graph["links"][0]["kind"] == "agent_hypothesis"
+
+
+def test_process_tree_evidence_must_belong_to_its_anchor():
+    repo = _repo()
+    unrelated = _event("unrelated-process", pid=99)
+    repo.save_evidence("h1", [unrelated], {}, None)
+    fake = FakeToolExecutor(_result("complete"))
+    aliases = AliasBook(repo, "h1")
+
+    response = Toolbox(repo, "h1", executor=fake, session_id="session-7").execute(
+        "process_tree", {
+            "anchor": aliases.alias_for("F", "anchor-finding"),
+            "process": aliases.alias_for("E", unrelated.id),
+            "start": None, "end": None,
+        },
+    )
+
+    assert response["status"] == "refused"
+    assert response["data"]["error"]["code"] == "evidence_not_in_anchor"
+    assert fake.calls == []
 
 
 def test_twin_hunt_executors_publish_identical_candidate_content():

@@ -665,6 +665,10 @@ class Toolbox:
     def _process_tree(self, args: ProcessTreeToolArgs) -> dict:
         anchor = self._anchor(args.anchor)
         event_id = self.aliases.resolve(args.process, {"E"})
+        if event_id not in set(anchor.get("event_ids") or []):
+            return self._semantic_refusal(
+                "evidence_not_in_anchor", "process_tree evidence must be cited by the anchor finding",
+            )
         rows = self.repo.events_by_ids([event_id])
         if not rows:
             raise UnknownAlias(f"unknown evidence alias {args.process!r} in hunt {self.hunt_id}")

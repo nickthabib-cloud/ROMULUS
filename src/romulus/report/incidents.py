@@ -91,7 +91,8 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
             "cites": list(members), "kind": "mapping",
         })
     inferred = sorted({(e["from"], e["to"], e["link_type"]) for e in edges
-                       if e["style"] == "inferred" and e["from"] in member_set})
+                       if e["style"] in {"inferred", "agent_hypothesis"}
+                       and e["from"] in member_set})
     if inferred:
         listed = "; ".join(f"{a} to {b} ({t.replace('_', ' ')})" for a, b, t in inferred[:8])
         more = f" and {len(inferred) - 8} more" if len(inferred) > 8 else ""
@@ -150,10 +151,11 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
             targets.update(findings_by_event.get(event_id, ()))
         targets.discard(row["anchor_id"])
         targets = sorted(targets)
+        link_kind = "agent_hypothesis" if row["strength"] == "agent_hypothesis" else "expansion"
         links.append({
             "id": row["id"], "anchor_finding_id": row["anchor_id"],
             "target_finding_ids": targets, "link_type": row["link_type"],
-            "style": row["strength"], "key": row["key"], "status": row["status"],
+            "style": row["strength"], "kind": link_kind, "key": row["key"], "status": row["status"],
             "window": {"label": row["window_label"], "start": str(row["window_start"]),
                        "end": str(row["window_end"])},
             "evidence_ids": row["evidence_ids"], "coverage": row["coverage"], "reasons": row["reasons"],
@@ -161,6 +163,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         edges.extend({
             "id": f"{row['id']}:{target}", "from": row["anchor_id"], "to": target,
             "link_id": row["id"], "link_type": row["link_type"], "style": row["strength"],
+            "kind": link_kind,
         } for target in targets if row["anchor_id"] in finding_by_id and target in finding_by_id)
 
     parent = {finding_id: finding_id for finding_id in finding_by_id}
@@ -228,7 +231,8 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
             "link_ids": [link["id"] for link in incident_links],
             "observed_edges": sum(edge["style"] == "observed" and edge["from"] in member_set
                                   for edge in edges),
-            "inferred_edges": sum(edge["style"] == "inferred" and edge["from"] in member_set
+            "inferred_edges": sum(edge["style"] in {"inferred", "agent_hypothesis"}
+                                  and edge["from"] in member_set
                                   for edge in edges),
             "open_ends": {"unexpanded_anchors": unexpanded, "pending_anchors": pending, "partial_anchors": partial,
                           "unresolved_links": unresolved},

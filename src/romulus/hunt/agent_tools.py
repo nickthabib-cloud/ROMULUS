@@ -18,11 +18,12 @@ from romulus.store.db import digest
 from romulus.store.repo import Repo
 
 _PIVOT_LINK_TYPES = {
-    "entity_timeline": "host_after_anchor",
-    "auth_activity": "login_session",
-    "process_tree": "process_lineage",
-    "ids_alerts": "source_ip",
+    "entity_timeline": "agent_entity_timeline",
+    "auth_activity": "agent_auth_activity",
+    "process_tree": "agent_process_tree",
+    "ids_alerts": "agent_ids_alerts",
 }
+_AGENT_HYPOTHESIS = "agent_hypothesis"
 _EVENT_DIGEST_LIMIT = 50
 
 
@@ -56,7 +57,7 @@ class HuntToolExecutor:
         self.repo.save_expansion_link({
             "id": link_id, "hunt_id": self.hunt_id, "anchor_id": candidate["id"],
             "link_type": link_type, "window_label": "agent requested",
-            "window_start": start, "window_end": end, "strength": "inferred", "key": key,
+            "window_start": start, "window_end": end, "strength": _AGENT_HYPOTHESIS, "key": key,
             "status": status, "event_ids": sorted(set(event_ids)),
             "evidence_ids": sorted(set(candidate["event_ids"] + event_ids)),
             "task_ids": task_ids, "coverage": [item.model_dump(mode="json") for item in coverage],
@@ -65,12 +66,50 @@ class HuntToolExecutor:
         }, owner_token=self.owner_token)
         self.repo.mark_expansion_link_evaluated(link_id, owner_token=self.owner_token)
 
+    def _anchor_session(self, candidate: dict) -> str | int | None:
+        sessions = {
+            event.get("process.session_id") for event in self._events(candidate["event_ids"])
+            if event.get("process.session_id") not in (None, "")
+        }
+        return next(iter(sessions)) if len(sessions) == 1 else None
+
+    def _scope_auth_result(self, result: PivotResult, session: str | int) -> PivotResult:
+        event_ids = list(getattr(result, "reach_event_ids", []) or result.event_ids)
+        kept_events = [event for event in self._events(event_ids)
+                       if event.get("process.session_id") == session]
+        kept_ids = {event.id for event in kept_events}
+        entities = {
+            (kind, value, role): EntityRef(kind=kind, value=value, role=role)
+            for event in kept_events for kind, value, role in event.entities()
+            if kind in {"host", "account", "ip", "domain"}
+        }
+        scoped = result.model_copy(update={
+            "event_ids": [event_id for event_id in result.event_ids if event_id in kept_ids],
+            "reach_event_ids": sorted(kept_ids),
+            "entities": list(entities.values()),
+            "event_summaries": [item for item in result.event_summaries if item.get("id") in kept_ids],
+            "matched_event_count": len(kept_ids),
+        })
+        return scoped
+
     def run(self, session_id: str, anchor_id: str, request, *, anchor_ts: datetime) -> PivotResult:
         candidate = self.repo.candidate(anchor_id)
         if candidate is None or candidate["hunt_id"] != self.hunt_id:
             return PivotResult(status="unsupported", reasons=["anchor finding is not in this hunt"])
         query_start = int(getattr(self.pivot, "source_queries", 0))
+        link_key = {"agent_tool": request.tool}
+        anchor_session = None
+        if request.tool == "auth_activity":
+            anchor_session = self._anchor_session(candidate)
+            if anchor_session is None:
+                return PivotResult(
+                    status="unsupported",
+                    reasons=["anchor has no single typed process.session_id for auth_activity"],
+                )
+            link_key["process.session_id"] = anchor_session
         result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
+        if anchor_session is not None:
+            result = self._scope_auth_result(result, anchor_session)
         reach_ids = list(getattr(result, "reach_event_ids", []) or result.event_ids)
         link_type = _PIVOT_LINK_TYPES[request.tool]
         link_id = "agent-link-" + digest({
@@ -83,7 +122,7 @@ class HuntToolExecutor:
             coverage=result.coverage, reasons=result.reasons, task_ids=result.task_ids,
             duration_ms=result.duration_ms,
             query_spend=max(0, int(getattr(self.pivot, "source_queries", query_start)) - query_start),
-            key={"agent_tool": request.tool},
+            key=link_key,
         )
         # Safe and idempotent: the finalizer recomputes context only from persisted, evaluated reaches.
         finalize_context(self.repo, self.hunt_id, owner_token=self.owner_token)
@@ -131,11 +170,21 @@ class HuntToolExecutor:
         maximum = getattr(self.fetcher.executor, "source_query_budget", None)
         remaining = max(0, int(maximum) - used) if isinstance(maximum, int) else 12
         result = self.fetcher.fetch(anchor, link_type, window, query_cap=min(12, remaining))
+        agent_link_id = "agent-link-" + digest({
+            "hunt_id": self.hunt_id, "anchor_id": candidate["id"], "source_link_id": result.id,
+        })[:20]
+        agent_result = result.model_copy(update={
+            "id": agent_link_id,
+            "link_type": f"agent_follow_{result.link_type}",
+            "strength": _AGENT_HYPOTHESIS,
+            "key": {"agent_tool": "follow_link", "requested_link_type": result.link_type,
+                    "source_key": result.key},
+        })
         self.repo.save_expansion_link({
-            "id": result.id, "hunt_id": self.hunt_id, "anchor_id": candidate["id"],
-            "link_type": result.link_type, "window_label": result.window.label,
+            "id": agent_result.id, "hunt_id": self.hunt_id, "anchor_id": candidate["id"],
+            "link_type": agent_result.link_type, "window_label": agent_result.window.label,
             "window_start": result.window.start, "window_end": result.window.end,
-            "strength": result.strength, "key": result.key, "status": result.status,
+            "strength": agent_result.strength, "key": agent_result.key, "status": result.status,
             "event_ids": result.event_ids, "evidence_ids": result.evidence_ids,
             "task_ids": result.task_ids,
             "coverage": [item.model_dump(mode="json") for item in result.coverage],
@@ -143,8 +192,8 @@ class HuntToolExecutor:
             "query_spend": result.query_spend, "evaluated": 0,
         }, owner_token=self.owner_token)
         events = self._events(result.event_ids)
-        candidate_ids = self._publish_direct(session_id, candidate, result, events)
-        self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
+        candidate_ids = self._publish_direct(session_id, candidate, agent_result, events)
+        self.repo.mark_expansion_link_evaluated(agent_result.id, owner_token=self.owner_token)
         finalize_context(self.repo, self.hunt_id, owner_token=self.owner_token)
         entities = {
             (kind, value, role): EntityRef(kind=kind, value=value, role=role)
