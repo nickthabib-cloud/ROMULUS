@@ -6,7 +6,7 @@ import json
 import posixpath
 import re
 from bisect import bisect_left, bisect_right
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -84,6 +84,16 @@ def _audit_boot_field(members: list[tuple[dict, AuditRecord]]) -> dict:
     return {}
 
 
+# The audit header's time of an audit event: the host's own clock when the kernel or the writing program made the
+# record. It places the event in a boot; the event's own time (`ts`) may be the shipper's.
+AUDIT_TIME = "audit.time"
+
+
+def _audit_time(native_id: str, ts: float) -> dict:
+    return {AUDIT_TIME: fv(datetime.fromtimestamp(ts, UTC).isoformat(),
+                           f"{native_id}:event.original#auditd:msg.timestamp")}
+
+
 # journald's boot id: 128 bits as 32 lower-case hex digits. journald sets it (an underscore field), not the writer.
 _BOOT_ID = re.compile(r"[0-9a-f]{32}")
 
@@ -159,12 +169,16 @@ def _partner_boot(partners: dict, host: str, ts: float, serial: int,
 BOOT_FILL_FAMILIES = frozenset({"process_exec", "net_socket", "file_change", "auth", "account_change",
                                 "service_change", "audit_config", "system_state"})
 # How far inside one boot's observed span, and away from every other boot's span and every boot record that names
-# no boot, an event's time must lie before the event is placed in that boot. It covers the difference between an
-# event's own time (the shipper's timestamp or the audit header) and the time an observation carries (journald's
-# receive time or the audit header), which is about a second. A larger clock step at a reboot puts records of two
-# boots at overlapping times, and a time inside two spans is never placed.
+# no boot, an event's time must lie before the event is placed in that boot. Every time compared is the host's own
+# clock (the audit header, journald's receive or source time), so the margin covers only the difference between
+# when a program made a record and when journald received it, which is about a second. A larger clock step at a
+# reboot puts records of two boots at overlapping times, and a time inside two spans is never placed.
 BOOT_EDGE_SKEW = timedelta(seconds=30)
 BOOT_INTERVAL_ORIGIN = "#derived:boot-interval"
+# Why an event without a boot id was not placed.
+UNPLACED_NO_CLOCK = "no host-clock time"
+UNPLACED_OUTSIDE = "not well inside exactly one boot"
+UNPLACED_STOPPED = "sweep placement stopped on this host"
 _US = timedelta(microseconds=1)
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -176,6 +190,19 @@ def _micros(when: datetime) -> int:
 
 def _iso(micros: int) -> str:
     return (_EPOCH + micros * _US).isoformat()
+
+
+def host_clock_us(event: TypedEvent) -> int | None:
+    """The time the event's host gave it by its own clock (the audit header), in µs; None when the event carries
+    none. The shipper's timestamp is never used: a shipper that stamps send or receive time can stamp an old boot's
+    record after a reboot."""
+    value = event.get(AUDIT_TIME)
+    if not isinstance(value, str):
+        return None
+    try:
+        return _micros(datetime.fromisoformat(value))
+    except ValueError:
+        return None
 
 
 def _without_zones(pieces: list[tuple[int, int, str]], centres: list[int], radius: int) -> list[tuple[int, int, str]]:
@@ -206,20 +233,37 @@ class _Span:
 
 class BootIntervals:
     """Per host, the span of time each boot was observed running, built from typed records that name a boot with
-    a time: every journald record (`_BOOT_ID`, at each time it states, see `_journal_observations`) and every audit
-    event whose boot came from the shipper or from a journald copy. Typed boot records (the kernel's boot banner, SYSTEM_BOOT) that name a
-    boot count as observations of it; one that names no boot (SYSTEM_BOOT or SYSTEM_SHUTDOWN) is a boundary.
+    a time by the host's own clock: every journald record (`_BOOT_ID`, at each host-clock time it states, see
+    `_journal_observations`) and every audit event whose boot came from the shipper or from a journald copy (at its
+    audit header time). Typed boot records (the kernel's boot banner, SYSTEM_BOOT) that name a boot count as
+    observations of it; one that names no boot (SYSTEM_BOOT or SYSTEM_SHUTDOWN) is a boundary. A record that names a
+    boot or bounds one without a host-clock time is counted per host, never placed in time by its shipper's stamp.
 
     A boot id belongs to one boot, and a host runs one boot at a time, so a time well inside one boot's span belongs
-    to that boot. An event without a boot id is placed only when its time is at least BOOT_EDGE_SKEW inside exactly
-    one span of its host, and at least that far from every other span and every boundary. Spans of two boots that
-    overlap place nothing anywhere inside them. A time in a gap between boots, near an edge, inside overlapping
-    spans, or on a host with no span stays unknown: never guessed."""
+    to that boot. An event without a boot id is placed only by its own host-clock time, and only when that is at
+    least BOOT_EDGE_SKEW inside exactly one span of its host, and at least that far from every other span and every
+    boundary. Spans of two boots that overlap place nothing anywhere inside them. A time in a gap between boots,
+    near an edge, inside overlapping spans, on a host with no span, or an event without a host-clock time stays
+    unknown: never guessed.
+
+    The sweep builds the map batch by batch and places each batch's events with what it has read so far
+    (`fill(..., incremental=True)`). A record read later can still refuse a time placed earlier: a boot record
+    naming no boot, or another boot's record at the same host-clock time, shipped late. Each incremental placement
+    is remembered per placeable range; when the map changes so that a remembered range no longer places in its boot,
+    the range is recorded as a sweep conflict and the sweep places nothing more on that host. Expansion and the
+    context pass use the whole map."""
 
     def __init__(self, skew: timedelta = BOOT_EDGE_SKEW):
         self.skew_us = skew // _US
         self.spans: dict[str, dict[str, _Span]] = {}
         self.boundaries: dict[str, set[tuple[int, str]]] = {}
+        # Per host: records that named a boot or bounded one but carried no host-clock time.
+        self.unclocked: dict[str, int] = {}
+        # Incremental (sweep) placement: why events were not placed; per host the placed times as
+        # {first µs of the placeable range they fell in: (boot, earliest, latest)}; ranges a later map refused.
+        self.unplaced: Counter[str] = Counter()
+        self._placed: dict[str, dict[int, tuple[str, int, int]]] = {}
+        self.conflicts: dict[str, list[tuple[str, int, int]]] = {}
         # Per host, until it is observed again: the times that place, as sorted disjoint closed ranges
         # (first µs, last µs, boot), and their first times for bisection.
         self._segments: dict[str, tuple[list[int], list[tuple[int, int, str]]]] = {}
@@ -242,17 +286,27 @@ class BootIntervals:
         self._segments.pop(host, None)
         self.boundaries.setdefault(host, set()).add((when_us, ref))
 
+    def observe_unclocked(self, host: str) -> None:
+        self.unclocked[host] = self.unclocked.get(host, 0) + 1
+
     def observe_event(self, event: TypedEvent) -> None:
-        """An audit event's own boot id (shipper or journald copy) is an observation; a boot or shutdown record
-        without one is a boundary. Boot ids this map derived are never observations."""
+        """An audit event's own boot id (shipper or journald copy) is an observation at its audit header time; a
+        boot or shutdown record without one is a boundary there. Boot ids this map derived are never
+        observations."""
         if not event.host or not event.raw:
             return
         state = event.get("system.event") if event.family == "system_state" else None
         boot = event.fields.get("host.boot.id")
-        if boot is not None and boot.value not in (None, "") and not boot.origin.endswith(BOOT_INTERVAL_ORIGIN):
-            self.observe(event.host, str(boot.value), _micros(event.ts), event.raw[0].native_id, state == "boot")
-        elif state in ("boot", "shutdown"):
-            self.boundary(event.host, _micros(event.ts), event.raw[0].native_id)
+        recorded = boot is not None and boot.value not in (None, "") and not boot.origin.endswith(BOOT_INTERVAL_ORIGIN)
+        if not recorded and state not in ("boot", "shutdown"):
+            return
+        when = host_clock_us(event)
+        if when is None:
+            self.observe_unclocked(event.host)
+        elif recorded:
+            self.observe(event.host, str(boot.value), when, event.raw[0].native_id, state == "boot")
+        else:
+            self.boundary(event.host, when, event.raw[0].native_id)
 
     def _intervals(self, host: str) -> list[tuple[int, int, list[str]]]:
         """The host's boot spans in time order as (start, end, boots). Spans that overlap are one interval naming
@@ -272,7 +326,7 @@ class BootIntervals:
         change to the host's observations: each single-boot interval shrunk by the skew at both ends, kept more
         than the skew from its neighbours, with every time within the skew of a boundary removed. Built in
         O((boots + boundaries) log) so that placing an event is one bisection, however many boots and boundaries
-        a host has."""
+        a host has. Rebuilding checks the sweep's earlier placements on the host against the new ranges."""
         cached = self._segments.get(host)
         if cached is not None:
             return cached
@@ -290,24 +344,54 @@ class BootIntervals:
                 pieces.append((lo, hi, boots[0]))
         segments = _without_zones(pieces, sorted({at for at, _ref in self.boundaries.get(host, ())}), skew)
         index = self._segments[host] = ([lo for lo, _hi, _boot in segments], segments)
+        self._recheck(host, index)
         return index
 
-    def boot_at(self, host: str, when_us: int) -> tuple[str, _Span] | None:
-        """The one boot this host's time falls in, with its span, or None (see the class)."""
+    def _recheck(self, host: str, index: tuple[list[int], list[tuple[int, int, str]]]) -> None:
+        """Each range of earlier incremental placements on the host must still lie in one placeable range of its
+        boot. One that does not is a sweep conflict: the whole map would not have placed some of it there."""
+        placed = self._placed.get(host)
+        if not placed:
+            return
+        starts, segments = index
+        kept: dict[int, tuple[str, int, int]] = {}
+        for boot, lo, hi in placed.values():
+            i = bisect_right(starts, lo) - 1
+            if i >= 0 and segments[i][2] == boot and hi <= segments[i][1]:
+                old = kept.get(starts[i])
+                kept[starts[i]] = (boot, lo, hi) if old is None else (boot, min(old[1], lo), max(old[2], hi))
+            else:
+                self.conflicts.setdefault(host, []).append((boot, lo, hi))
+        self._placed[host] = kept
+
+    def _segment_at(self, host: str, when_us: int) -> tuple[int, str] | None:
+        """(first µs of the placeable range, boot) the host's time falls in, or None."""
         starts, segments = self._index(host)
         i = bisect_right(starts, when_us) - 1
         if i < 0 or when_us > segments[i][1]:
             return None
-        boot = segments[i][2]
-        return boot, self.spans[host][boot]
+        return starts[i], segments[i][2]
 
-    def fill(self, events: list[TypedEvent], *, rederive: bool = False) -> None:
-        """Give each host-record event without a boot id the boot its time falls in, citing the span's first and
-        last records. With `rederive`, a boot id an earlier, smaller map derived is placed again by this one, and
-        removed when this one cannot place it. A boot id a record states is never changed. An empty map does
-        nothing."""
-        if not self.spans:
-            return
+    def boot_at(self, host: str, when_us: int) -> tuple[str, _Span] | None:
+        """The one boot this host's time falls in, with its span, or None (see the class)."""
+        found = self._segment_at(host, when_us)
+        return None if found is None else (found[1], self.spans[host][found[1]])
+
+    def settle(self) -> None:
+        """Check every host's earlier incremental placements against the map as it now stands."""
+        for host in list(self._placed):
+            self._index(host)
+
+    def fill(self, events: list[TypedEvent], *, rederive: bool = False, incremental: bool = False) -> Counter[str]:
+        """Give each host-record event without a boot id the boot its host-clock time falls in, citing the span's
+        first and last records, and return why the others were not placed. With `rederive`, a boot id an earlier,
+        smaller map derived is placed again by this one, and removed when this one cannot place it. A boot id a
+        record states is never changed. With `incremental` (the sweep, part way through its reading), placements
+        are remembered for checking against later records, and nothing is placed on a host where such a check has
+        failed. An empty map does nothing outside the sweep."""
+        reasons: Counter[str] = Counter()
+        if not self.spans and not incremental:
+            return reasons
         for event in events:
             if event.family not in BOOT_FILL_FAMILIES or not event.host:
                 continue
@@ -315,26 +399,55 @@ class BootIntervals:
             derived = current is not None and current.origin.endswith(BOOT_INTERVAL_ORIGIN)
             if current is not None and current.value not in (None, "") and not (rederive and derived):
                 continue
-            found = self.boot_at(event.host, _micros(event.ts))
+            when, found, reason = host_clock_us(event), None, UNPLACED_OUTSIDE
+            if incremental:
+                self._index(event.host)          # current, so the host's earlier placements have been rechecked
+            if when is None:
+                reason = UNPLACED_NO_CLOCK
+            elif incremental and event.host in self.conflicts:
+                reason = UNPLACED_STOPPED
+            else:
+                found = self._segment_at(event.host, when)
             if found is None:
+                reasons[reason] += 1
                 if derived:
                     del event.fields["host.boot.id"]
                 continue
-            boot, span = found
+            start, boot = found
+            span = self.spans[event.host][boot]
             event.fields["host.boot.id"] = fv(boot, f"{span.first[1]}..{span.last[1]}{BOOT_INTERVAL_ORIGIN}")
+            if incremental:
+                placed = self._placed.setdefault(event.host, {})
+                old = placed.get(start)
+                placed[start] = (boot, when, when) if old is None else (boot, min(old[1], when), max(old[2], when))
+        if incremental:
+            self.unplaced.update(reasons)
+        return reasons
+
+    def conflict_list(self) -> list[dict]:
+        """Every sweep conflict as {host, boot, from, to}, in host and time order."""
+        return [{"host": host, "boot": boot, "from": _iso(lo), "to": _iso(hi)}
+                for host in sorted(self.conflicts) for boot, lo, hi in sorted(self.conflicts[host], key=lambda c: c[1:])]
 
     def to_json(self) -> dict:
+        self.settle()
+
         def span_json(boot: str, span: _Span) -> dict:
             return {"boot": boot, "first": _iso(span.first[0]), "first_ref": span.first[1],
                     "last": _iso(span.last[0]), "last_ref": span.last[1], "observations": span.observations,
                     "marker": None if span.marker is None else _iso(span.marker[0]),
                     "marker_ref": None if span.marker is None else span.marker[1]}
         hosts = {}
-        for host in sorted(set(self.spans) | set(self.boundaries)):
+        for host in sorted(set(self.spans) | set(self.boundaries) | set(self.unclocked) | set(self.conflicts)):
             spans = sorted(self.spans.get(host, {}).items(), key=lambda item: (item[1].first, item[0]))
-            hosts[host] = {"boots": [span_json(boot, span) for boot, span in spans],
-                           "boundaries": [{"at": _iso(at), "ref": ref}
-                                          for at, ref in sorted(self.boundaries.get(host, ()))]}
+            entry = hosts[host] = {"boots": [span_json(boot, span) for boot, span in spans],
+                                   "boundaries": [{"at": _iso(at), "ref": ref}
+                                                  for at, ref in sorted(self.boundaries.get(host, ()))]}
+            if self.unclocked.get(host):
+                entry["unclocked_records"] = self.unclocked[host]
+            if self.conflicts.get(host):
+                entry["sweep_conflicts"] = [{"boot": boot, "from": _iso(lo), "to": _iso(hi)}
+                                            for boot, lo, hi in sorted(self.conflicts[host], key=lambda c: c[1:])]
         return {"skew_seconds": self.skew_us / 1_000_000, "hosts": hosts}
 
     @classmethod
@@ -350,32 +463,32 @@ class BootIntervals:
                     marker=None if marker is None else (_micros(datetime.fromisoformat(marker)), item["marker_ref"]))
             for item in entry.get("boundaries", []):
                 out.boundary(host, _micros(datetime.fromisoformat(item["at"])), item["ref"])
+            if entry.get("unclocked_records"):
+                out.unclocked[host] = int(entry["unclocked_records"])
+            for item in entry.get("sweep_conflicts", []):
+                out.conflicts.setdefault(host, []).append((item["boot"], _micros(datetime.fromisoformat(item["from"])),
+                                                           _micros(datetime.fromisoformat(item["to"]))))
         return out
 
 
-def _journal_observations(hit: dict, j: dict) -> list[tuple[str, str, int, str, bool]]:
-    """(host, boot id, time in µs, record id, kernel boot banner) for each distinct time a journald record states:
-    journald's receive time (`__REALTIME_TIMESTAMP`), the shipper's timestamp, and for a copy of an audit record its
-    audit time (`_SOURCE_REALTIME_TIMESTAMP`). The host is the shipper's, as for audit records. Every time a clock
-    gives one of the boot's records is a time the boot was observed: a shipper that stamps when it sent a record
-    late, after a reboot, widens the old boot's span over the new one's, and overlap places nothing. Empty without
+def _journal_observations(hit: dict, j: dict) -> list[tuple[str, str, int | None, str, bool]]:
+    """(host, boot id, time in µs, record id, kernel boot banner) for each distinct host-clock time a journald
+    record states: journald's receive time (`__REALTIME_TIMESTAMP`) and the time the record was made
+    (`_SOURCE_REALTIME_TIMESTAMP`; for a copy of an audit record, its audit time). Both are journald's own fields on
+    the host's clock. The shipper's timestamp is never used: a shipper that stamps when it sent a record late,
+    after a reboot, would widen the old boot's span over the new one's. A record with neither time is one entry
+    with time None (counted, never placed in time). The host is the shipper's, as for audit records. Empty without
     a well-formed boot id and host."""
     src = hit["_source"]
     boot, host = _journal_boot(j), _get(src, "host.name")
     if not boot or not isinstance(host, str) or not host:
         return []
-    times = {_decimal(j.get("__REALTIME_TIMESTAMP"))}
-    if j.get("_TRANSPORT") == "audit":
-        times.add(_decimal(j.get("_SOURCE_REALTIME_TIMESTAMP")))
-    try:
-        times.add(_micros(_ts(src["@timestamp"])))
-    except (KeyError, TypeError, ValueError):
-        pass
+    times = {_decimal(j.get("__REALTIME_TIMESTAMP")), _decimal(j.get("_SOURCE_REALTIME_TIMESTAMP"))} - {None}
     # The kernel's boot banner on the kernel transport. User space cannot write kernel-facility (0) messages.
     message = j.get("MESSAGE")
     banner = (j.get("_TRANSPORT") == "kernel" and str(j.get("SYSLOG_FACILITY")) == "0"
               and isinstance(message, str) and message.startswith("Linux version "))
-    return [(host, boot, when, hit["_id"], banner) for when in sorted(t for t in times if t is not None)]
+    return [(host, boot, when, hit["_id"], banner) for when in (sorted(times) or [None])]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -480,7 +593,7 @@ def normalize_audit_auth_group(host: str, members: list[tuple[dict, AuditRecord]
     fields = {
         "auth.method": fv(record.type.lower(), f"{origin}.type"),
         "auth.phase": fv(AUTH_PHASE[record.type], f"{origin}.type"),
-        **_audit_boot_field(members),
+        **_audit_boot_field(members), **_audit_time(native_id, record.ts),
     }
     executable = record.fields.get("exe")
     if executable:
@@ -589,7 +702,8 @@ def normalize_audit_admin_group(host: str, members: list[tuple[dict, AuditRecord
                               key=lambda item: item[0]["_id"]):
         origin = f"{hit['_id']}:event.original#auditd:{record.type}"
         refs = [_ref(hit)] + [_ref(item_hit) for item_hit, _record in companions]
-        fields = {"audit.record_type": fv(record.type, f"{origin}.type"), **_audit_boot_field(members)}
+        fields = {"audit.record_type": fv(record.type, f"{origin}.type"), **_audit_boot_field(members),
+                  **_audit_time(hit["_id"], record.ts)}
         fields.update(_header_process_fields(origin, record))
         outcome = _record_outcome(record)
         if record.type in AUDIT_ACCOUNT_TYPES:
@@ -658,7 +772,7 @@ def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], s
     refs = [_ref(h) for h, r in members if r.type in SOCKET_COMPANIONS]
     f = {"socket.syscall": fv(syscall, f"{sid}:event.original#auditd:SYSCALL.arch+syscall"),
          "audit.serial": fv(rs.serial, f"{sid}:event.original#auditd:msg.serial"),
-         **_audit_boot_field(members),
+         **_audit_boot_field(members), **_audit_time(sid, rs.ts),
          **_syscall_process_fields(sid, rs)}
     if rs.fields.get("key") not in (None, "(null)"):
         f["audit.key"] = fv(rs.fields["key"], f"{sid}:event.original#auditd:SYSCALL.key")
@@ -710,7 +824,7 @@ def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> 
         "process.argv": fv(argv, f"{nid}:event.original#auditd:EXECVE.a*"),
         "process.args_count": fv(len(argv), f"{nid}:event.original#auditd:EXECVE.argc"),
         "audit.serial": fv(r_exec.serial, f"{nid}:event.original#auditd:msg.serial"),
-        **_audit_boot_field(members),
+        **_audit_boot_field(members), **_audit_time(nid, r_exec.ts),
     }
     caveats = []
     if argv_problem:
@@ -914,7 +1028,7 @@ def normalize_file_group(host: str, members: list[tuple[dict, AuditRecord]], cal
     outcome = Outcome.success if succ == "yes" else Outcome.failure if succ == "no" else Outcome.unknown
     base = {"file.syscall": fv(call.name, f"{origin}.arch+syscall"),
             "audit.serial": fv(rs.serial, f"{sid}:event.original#auditd:msg.serial"),
-            **_audit_boot_field(members), **_syscall_process_fields(sid, rs)}
+            **_audit_boot_field(members), **_audit_time(sid, rs.ts), **_syscall_process_fields(sid, rs)}
     if rs.fields.get("key") not in (None, "(null)"):
         base["audit.key"] = fv(rs.fields["key"], f"{origin}.key")
     if rs.fields.get("exit"):
@@ -1687,11 +1801,12 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None
     An audit event's boot id (`host.boot.id`) comes from the shipper's own field, else from journald's copy of one
     of its records when that copy is in the same batch. With `boots` (a hunt's boot-interval map), the batch's boot
     observations are added to the map, and an audit event still without a boot id takes the boot the map places
-    its time in. Otherwise it stays unknown: never guessed."""
+    its audit header time in (an incremental placement, see `BootIntervals`). Otherwise it stays unknown: never
+    guessed."""
     events, skips, errors = [], defaultdict(int), []
     audit_hits = []
     audit_copies: list[tuple[tuple[str, int, int], str, str, str]] = []
-    journal_boots: list[tuple[str, str, int, str, bool]] = []
+    journal_boots: list[tuple[str, str, int | None, str, bool]] = []
     for h in hits:
         ds = _get(h["_source"], "event.dataset") or ""
         try:
@@ -1787,9 +1902,12 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None
         if boot and not event.has("host.boot.id"):
             event.fields.update(boot)
     if boots is not None:
-        for seen in journal_boots:
-            boots.observe(*seen)
+        for host, boot, when, ref, banner in journal_boots:
+            if when is None:
+                boots.observe_unclocked(host)
+            else:
+                boots.observe(host, boot, when, ref, banner)
         for event in events[audit_start:]:
             boots.observe_event(event)
-        boots.fill(events[audit_start:])
+        boots.fill(events[audit_start:], incremental=True)
     return events, dict(skips), errors

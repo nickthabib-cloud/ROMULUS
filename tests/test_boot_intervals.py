@@ -62,27 +62,28 @@ def us(seconds: float) -> int:
 
 
 # ---------------------------------------------------------------- raw records
-def hit(_id, dataset, original, seconds, host="host01"):
-    stamp = at(seconds).isoformat().replace("+00:00", "Z")
+def hit(_id, dataset, original, seconds, host="host01", sent=None):
+    """A raw record whose shipper timestamp is `sent` seconds (default: the record's own time)."""
+    stamp = at(seconds if sent is None else sent).isoformat().replace("+00:00", "Z")
     src = {"@timestamp": stamp, "message": original, "event": {"dataset": dataset, "original": original},
            "host": {"name": host}}
     return {"_id": _id, "_index": "host-logs-x", "_source": src}
 
 
-def exec_hits(seconds, serial, *, pid=700, ses=5, host="host01"):
+def exec_hits(seconds, serial, *, pid=700, ses=5, host="host01", sent=None):
     stamp = f"{EPOCH + seconds:.3f}"
     execve = f'type=EXECVE msg=audit({stamp}:{serial}): argc=1 a0="id"'
     syscall = (f'type=SYSCALL msg=audit({stamp}:{serial}): arch=c000003e syscall=59 success=yes exit=0 a0=1 a1=2 '
                f'a2=3 a3=0 items=1 ppid=1 pid={pid} auid=1000 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 '
                f'fsgid=0 tty=pts0 ses={ses} comm="id" exe="/usr/bin/id" subj=unconfined key=(null)')
-    return [hit(f"x{serial}", "linux.audit", execve, seconds, host),
-            hit(f"s{serial}", "linux.audit", syscall, seconds, host)]
+    return [hit(f"x{serial}", "linux.audit", execve, seconds, host, sent),
+            hit(f"s{serial}", "linux.audit", syscall, seconds, host, sent)]
 
 
-def journal(_id, seconds, boot, *, host="host01", ident="CRON", realtime=True, **fields):
+def journal(_id, seconds, boot, *, host="host01", ident="CRON", realtime=True, sent=None, **fields):
     record = {"SYSLOG_IDENTIFIER": ident, "_HOSTNAME": host, "_BOOT_ID": boot, "MESSAGE": "(root) CMD (true)",
               **({"__REALTIME_TIMESTAMP": str(us(seconds))} if realtime else {}), **fields}
-    return hit(_id, "systemd.journal", json.dumps(record), seconds, host)
+    return hit(_id, "systemd.journal", json.dumps(record), seconds, host, sent)
 
 
 def copy_of(_id, seconds, serial, kind, boot, host="host01"):
@@ -91,11 +92,16 @@ def copy_of(_id, seconds, serial, kind, boot, host="host01"):
                    _SOURCE_REALTIME_TIMESTAMP=str(us(seconds)), _AUDIT_TYPE_NAME=kind)
 
 
-def system_boot(seconds, serial, host="host01"):
+def system_boot(seconds, serial, host="host01", sent=None):
     raw = (f"type=SYSTEM_BOOT msg=audit({EPOCH + seconds:.3f}:{serial}): pid=1 uid=0 auid=4294967295 ses=4294967295 "
            "msg=' comm=\"systemd-update-utmp\" exe=\"/usr/lib/systemd/systemd-update-utmp\" hostname=? addr=? "
            "terminal=? res=success'")
-    return hit(f"b{serial}", "linux.audit", raw, seconds, host)
+    return hit(f"b{serial}", "linux.audit", raw, seconds, host, sent)
+
+
+def aev(family, when, **fields):
+    """A typed audit event whose audit header (the host's clock) gives `when`."""
+    return ev(family, when, audit__time=when.isoformat(), **fields)
 
 
 def execs(events):
@@ -123,7 +129,7 @@ def placed(boots, seconds, host="host01"):
 
 # ---------------------------------------------------------------- the map itself
 def test_a_time_inside_one_boots_span_takes_that_boot_and_cites_its_first_and_last_records():
-    event = ev("process_exec", at(500), process__pid=7)
+    event = aev("process_exec", at(500), process__pid=7)
     two_boots().fill([event])
     assert boot(event) == BOOT_A
     assert event.fields["host.boot.id"].origin == f"a0..a2{BOOT_INTERVAL_ORIGIN}"
@@ -133,7 +139,7 @@ def test_a_time_in_the_gap_between_boots_stays_unknown():
     boots = two_boots()
     for seconds in (1001, 1050, 1099):
         assert placed(boots, seconds) is None
-    event = ev("process_exec", at(1050), process__pid=7)
+    event = aev("process_exec", at(1050), process__pid=7)
     boots.fill([event])
     assert not event.has("host.boot.id")
     assert placed(boots, 1500) == BOOT_B
@@ -184,7 +190,7 @@ def test_another_host_and_a_single_record_place_nothing():
 
 
 def test_a_recorded_boot_is_never_changed_and_network_records_are_not_placed():
-    recorded = ev("process_exec", at(500), boot=BOOT_B, process__pid=7)
+    recorded = aev("process_exec", at(500), boot=BOOT_B, process__pid=7)
     flow = ev("net_flow", at(500), source__ip="192.0.2.1")
     two_boots().fill([recorded, flow])
     assert boot(recorded) == BOOT_B and recorded.fields["host.boot.id"].origin.endswith(":boot")
@@ -192,7 +198,7 @@ def test_a_recorded_boot_is_never_changed_and_network_records_are_not_placed():
 
 
 def test_rederive_places_a_derived_boot_again_with_the_whole_map():
-    event = ev("process_exec", at(500), process__pid=7)
+    event = aev("process_exec", at(500), process__pid=7)
     two_boots().fill([event])
     assert boot(event) == BOOT_A
     whole = two_boots()
@@ -244,19 +250,98 @@ def test_the_map_grows_across_batches_and_audit_copies_are_observations():
     assert [(b["boot"], b["first_ref"], b["last_ref"], b["observations"]) for b in span] == [(BOOT_A, "c0", "c1", 2)]
 
 
-def test_a_record_shipped_late_after_a_reboot_widens_the_old_boot_and_places_nothing_there():
-    # boot A's last record was received at 500 s but stamped by the shipper at 1500 s, inside boot B's records
-    late = journal("late", 1500, BOOT_A)
-    late_record = json.loads(late["_source"]["event"]["original"])
-    late_record["__REALTIME_TIMESTAMP"] = str(us(500))
-    late["_source"]["event"]["original"] = json.dumps(late_record)
+def test_a_record_shipped_late_after_a_reboot_stays_at_its_host_clock_time():
+    # boot A's last record was received at 500 s but stamped by the shipper at 1500 s, inside boot B's records:
+    # spans are built from the host's own clock, so boot A still ends at 500 s and nothing overlaps
     boots = BootIntervals()
-    normalize_hits([journal("j0", 0, BOOT_A), late, journal("j1", 1100, BOOT_B), journal("j2", 2000, BOOT_B)], boots)
-    entry = boots.to_json()["hosts"]["host01"]["boots"]
-    assert [(b["boot"], b["last"], b["observations"]) for b in entry] == [
-        (BOOT_A, at(1500).isoformat(), 3), (BOOT_B, at(2000).isoformat(), 2)]
-    for seconds in (300, 1200, 1700):                         # the two spans overlap from 1100 s to 1500 s
-        assert placed(boots, seconds) is None, seconds
+    normalize_hits([journal("j0", 0, BOOT_A), journal("late", 500, BOOT_A, sent=1500), journal("j1", 1100, BOOT_B),
+                    journal("j2", 2000, BOOT_B)], boots)
+    entry = boots.to_json()["hosts"]["host01"]
+    assert [(b["boot"], b["last"], b["observations"]) for b in entry["boots"]] == [
+        (BOOT_A, at(500).isoformat(), 2), (BOOT_B, at(2000).isoformat(), 2)]
+    assert "blind" not in entry
+    assert [placed(boots, seconds) for seconds in (300, 800, 1200, 1700)] == [BOOT_A, None, BOOT_B, BOOT_B]
+
+
+def test_an_exec_is_placed_by_its_audit_header_time_not_the_shipper_timestamp():
+    # the exec happened at 300 s by the host's clock; the shipper stamped it at 1500 s, inside boot B
+    batch = [journal("j0", 0, BOOT_A), journal("j1", 1000, BOOT_A), journal("j2", 1100, BOOT_B),
+             journal("j3", 2000, BOOT_B), *exec_hits(300, 4321, sent=1500)]
+    boots = BootIntervals()
+    event = execs(normalize_hits(batch, boots)[0])[0]
+    assert event.ts == at(1500)                                         # the event's own time is unchanged
+    assert event.get("audit.time") == at(300).isoformat()
+    assert event.fields["audit.time"].origin == "x4321:event.original#auditd:msg.timestamp"
+    assert boot(event) == BOOT_A
+
+
+def test_every_audit_event_carries_its_header_time():
+    batch = [*exec_hits(300, 4321, sent=900), system_boot(400, 77, sent=900)]
+    events, _s, errors = normalize_hits(batch)
+    assert errors == []
+    assert {(e.family, e.get("audit.time")) for e in events} == {("process_exec", at(300).isoformat()),
+                                                                 ("system_state", at(400).isoformat())}
+
+
+def test_an_event_without_a_host_clock_time_is_never_placed():
+    # a typed event that does not carry its host's clock (no audit header time) is not placed by its shipper time
+    boots = two_boots()
+    event = ev("process_exec", at(500), process__pid=7)
+    assert boots.fill([event]) == {"no host-clock time": 1}
+    assert not event.has("host.boot.id")
+
+
+def test_a_late_record_in_a_later_partition_changes_no_earlier_placement_and_no_overlap():
+    # The sweep reads partitions in shipper-time order. Partition 2 holds boot A's last record, written at 590 s
+    # by the host's clock but stamped with its send time (1500 s), after the reboot into boot B.
+    boots = BootIntervals()
+    first = execs(normalize_hits([journal("j0", 0, BOOT_A), *exec_hits(300, 4321), journal("j1", 600, BOOT_A)],
+                                 boots)[0])
+    assert boot(first[0]) == BOOT_A
+    second = execs(normalize_hits([journal("late", 590, BOOT_A, sent=1500), journal("j2", 1100, BOOT_B),
+                                   *exec_hits(1500, 4400), journal("j3", 2000, BOOT_B)], boots)[0])
+    assert boot(second[0]) == BOOT_B
+    entry = boots.to_json()["hosts"]["host01"]
+    assert "blind" not in entry and "sweep_conflicts" not in entry
+    # the whole map places the earlier exec exactly as the sweep did
+    again = first[0].model_copy(update={"fields": dict(first[0].fields)})
+    BootIntervals.from_json(boots.to_json()).fill([again], rederive=True)
+    assert boot(again) == BOOT_A and again.fields["host.boot.id"] == first[0].fields["host.boot.id"]
+
+
+def _late_contradiction(late):
+    """Partition 1 places an exec at 300 s in boot A; partition 2 brings `late` records (host-clock time near
+    300 s, shipped after the reboot) and an exec at 1500 s inside boot B."""
+    boots = BootIntervals()
+    first = execs(normalize_hits([journal("j0", 0, BOOT_A), *exec_hits(300, 4321), journal("j1", 600, BOOT_A)],
+                                 boots)[0])
+    assert boot(first[0]) == BOOT_A
+    second = execs(normalize_hits([*late, journal("j2", 1100, BOOT_B), *exec_hits(1500, 4400),
+                                   journal("j3", 2000, BOOT_B)], boots)[0])
+    return boots, first[0], second[0]
+
+
+@pytest.mark.parametrize("late", [
+    [system_boot(310, 90, sent=1400)],                                 # a boot record naming no boot, sent late
+    [journal("c0", 290, "c" * 32, sent=1400), journal("c1", 320, "c" * 32, sent=1400)],   # another boot, same times
+], ids=["nameless-boundary", "another-boot"])
+def test_a_late_record_that_contradicts_a_sweep_placement_stops_sweep_placement_on_that_host(late):
+    boots, earlier, later = _late_contradiction(late)
+    # the whole map refuses the earlier placement; the sweep records that, and places nothing more on the host
+    assert boots.boot_at("host01", us(300)) is None
+    assert boots.to_json()["hosts"]["host01"]["sweep_conflicts"] == [
+        {"boot": BOOT_A, "from": at(300).isoformat(), "to": at(300).isoformat()}]
+    assert not later.has("host.boot.id")
+    # the later exec, and the late boot record itself (a system_state event) when there is one
+    assert boots.unplaced["sweep placement stopped on this host"] == 1 + sum(h["_id"].startswith("b") for h in late)
+    # expansion and the context pass use the whole map, which still places the later exec in boot B
+    whole = BootIntervals.from_json(boots.to_json())
+    again = later.model_copy(update={"fields": dict(later.fields)})
+    whole.fill([again], rederive=True)
+    assert boot(again) == BOOT_B
+    stored = earlier.model_copy(update={"fields": dict(earlier.fields)})
+    whole.fill([stored], rederive=True)
+    assert not stored.has("host.boot.id")
 
 
 def test_a_copy_in_the_batch_still_wins_over_the_map():
@@ -266,14 +351,17 @@ def test_a_copy_in_the_batch_still_wins_over_the_map():
     assert boot(event) == BOOT_B and event.fields["host.boot.id"].origin == "c9:event.original#journal:_BOOT_ID"
 
 
-def test_journald_time_falls_back_to_the_shipper_timestamp_and_malformed_boots_are_ignored():
+def test_journald_records_without_a_host_clock_time_are_counted_not_spanned_and_malformed_boots_are_ignored():
     boots = BootIntervals()
     normalize_hits([journal("j0", 0, BOOT_A, realtime=False), journal("j1", 600, BOOT_A, realtime=False),
+                    journal("j2", 300, BOOT_A, realtime=False, _SOURCE_REALTIME_TIMESTAMP=str(us(250))),
                     journal("bad", 300, "not-a-boot-id"), journal("nohost", 300, BOOT_B, host=None)], boots)
     spans = boots.to_json()["hosts"]
     assert list(spans) == ["host01"]
+    # the shipper's timestamp never makes a span; journald's source time (any transport) does
     assert [(b["boot"], b["first"], b["last"]) for b in spans["host01"]["boots"]] == [
-        (BOOT_A, at(0).isoformat(), at(600).isoformat())]
+        (BOOT_A, at(250).isoformat(), at(250).isoformat())]
+    assert spans["host01"]["unclocked_records"] == 2
 
 
 def test_typed_boot_records_mark_a_boot_or_bound_it():
@@ -315,7 +403,9 @@ def test_the_map_and_its_placements_do_not_depend_on_record_order():
 
 # ---------------------------------------------------------------- single boot: the same findings as boot-blind
 def _placed_copy(events, boots):
-    out = [event.model_copy(update={"fields": dict(event.fields)}) for event in events]
+    """Copies of the records as audit events (their header time is their time), placed by the map."""
+    out = [event.model_copy(update={"fields": {**event.fields, "audit.time": fv(event.ts.isoformat(), "fx:time")}})
+           for event in events]
     boots.fill(out)
     return out
 
@@ -362,7 +452,9 @@ def test_single_boot_full_pack_over_raw_records_equals_boot_blind():
 
 # ---------------------------------------------------------------- link fetches
 def _session_record(event_id, seconds, boot_id=None):
+    when = CTX_T0 + timedelta(seconds=seconds)
     fields = {"process.pid": fv(100 + int(seconds), f"{event_id}:pid"), "process.session_id": fv(42, "x:ses"),
+              "audit.time": fv(when.isoformat(), f"{event_id}:time"),
               "process.auid": fv("1000", "x:auid"), "process.executable": fv("/usr/bin/id", "x:exe")}
     if boot_id:
         fields["host.boot.id"] = fv(boot_id, f"{event_id}:boot")
@@ -415,7 +507,8 @@ def _discovery(event_id, exe, argv, seconds):
                       outcome=Outcome.success,
                       fields={"process.executable": fv(exe, f"{event_id}:exe"),
                               "process.argv": fv(argv, f"{event_id}:argv"),
-                              "process.session_id": fv(42, f"{event_id}:ses")},
+                              "process.session_id": fv(42, f"{event_id}:ses"),
+                              "audit.time": fv((CTX_T0 + timedelta(seconds=seconds)).isoformat(), f"{event_id}:t")},
                       raw=[RawRef(target="host-x", native_id=event_id, digest="d")], normalizer="test@1")
 
 
@@ -482,7 +575,10 @@ def test_the_sweep_records_the_map_and_a_resumed_hunt_reads_the_same_one(monkeyp
     sweep.run_partition("host-logs-x", None, [], Window(start=at(600), end=at(1200)), est=10)
     sweep.finalize()
     # the exec 10 s before its batch's last journald record waits for the whole map
-    assert sweep.stats["boot"] == {"recorded": 0, "from_interval": 2, "unknown": 1}
+    assert sweep.stats["boot"] == {"recorded": 0, "from_interval": 2, "unknown": 1,
+                                   "unknown_reasons": {"not well inside exactly one boot": 1},
+                                   "sweep_conflicts": [], "sweep_conflicts_total": 0}
+    assert not [r for r in sweep.partial_reasons if r.startswith("boot placement:")]
     recorded = sweep.boots.to_json()
     assert recorded["hosts"]["host01"]["boots"][0]["last_ref"] == "j3"
 
@@ -512,7 +608,7 @@ def test_ten_thousand_boundaries_on_one_host_place_by_bisect():
             boots.observe(f"h{host}", f"{host:016x}{n:016x}", us(1000 * n), f"o{host}-{n}a")
             boots.observe(f"h{host}", f"{host:016x}{n:016x}", us(1000 * n + 900), f"o{host}-{n}b")
     times = [100 * k + offset for k in range(0, 10_000, 2) for offset in (0, 15, 19.5, 50, 80.5, 99)]
-    events = [ev("process_exec", at(seconds), process__pid=7) for seconds in times]
+    events = [aev("process_exec", at(seconds), process__pid=7) for seconds in times]
     started = time.perf_counter()
     boots.fill(events)
     elapsed = time.perf_counter() - started
@@ -555,10 +651,37 @@ def test_the_bisect_index_agrees_with_the_rule_stated_directly():
             assert (None if found is None else found[0]) == _reference(boots, "host01", when), (trial, when)
 
 
+def test_a_contradicted_sweep_placement_is_reported_with_the_sweep(monkeypatch):
+    batches = {
+        at(0): [journal("j0", 0, BOOT_A), *exec_hits(300, 4321), journal("j1", 600, BOOT_A)],
+        at(1200): [system_boot(310, 90, sent=1400), journal("j2", 1100, BOOT_B), *exec_hits(1500, 4400),
+                   journal("j3", 2000, BOOT_B)],
+    }
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent,
+                                                                                    batches[intent.window.start]))
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": ["host-logs-x"]}, "d", "t")
+    sweep = sw.Sweep(repo, _Client(), "h1", Window(start=at(0), end=at(2400)), {"host-logs-x": None})
+    sweep.run_partition("host-logs-x", None, [], Window(start=at(0), end=at(1200)), est=10)
+    sweep.run_partition("host-logs-x", None, [], Window(start=at(1200), end=at(2400)), est=10)
+    sweep.finalize()
+    assert sweep.stats["boot"]["sweep_conflicts"] == [
+        {"host": "host01", "boot": BOOT_A, "from": at(300).isoformat(), "to": at(300).isoformat()}]
+    assert sweep.stats["boot"]["unknown_reasons"]["sweep placement stopped on this host"] == 2
+    assert [r for r in sweep.partial_reasons if r.startswith("boot placement:")] == [
+        ("boot placement: 1 range on 1 host placed during the sweep was contradicted by records read later "
+         "(host01); a boot-keyed join there may have been refused (see the hunt's boot-interval map)")]
+    recorded = sw.stored_boot_intervals(repo, "h1").to_json()
+    assert recorded["hosts"]["host01"]["sweep_conflicts"] == [
+        {"boot": BOOT_A, "from": at(300).isoformat(), "to": at(300).isoformat()}]
+
+
 @pytest.mark.parametrize("seconds,expected", [(300, BOOT_A), (1050, None), (1500, BOOT_B)])
 def test_audit_events_of_every_host_family_are_placed(seconds, expected):
     boots = two_boots()
-    events = [ev(family, at(seconds), process__pid=7) for family in
+    events = [aev(family, at(seconds), process__pid=7) for family in
               ("process_exec", "net_socket", "file_change", "auth", "account_change", "service_change",
                "audit_config", "system_state")]
     boots.fill(events)

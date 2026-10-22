@@ -50,6 +50,8 @@ BUCKET_SECONDS = 300
 MIN_SPLIT = timedelta(seconds=5)
 # The audit action that holds a hunt's boot-interval map, written once when the sweep has read every partition.
 BOOT_INTERVALS_AUDIT = "hunt.boot_intervals"
+# How many boot-placement items the sweep summary lists by name; the boot-interval map record holds every one.
+BOOT_LISTED = 100
 
 
 def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
@@ -285,6 +287,26 @@ class Sweep:
             counts["unknown" if boot is None or boot.value in (None, "") else
                    "from_interval" if boot.origin.endswith(BOOT_INTERVAL_ORIGIN) else "recorded"] += 1
 
+    def _boot_summary(self) -> None:
+        """Why host records were left without a boot, and every range the sweep placed that records read later
+        contradict (listed up to BOOT_LISTED; the boot-interval map record holds them all). A contradicted range
+        makes the sweep partial: a boot-keyed join there may have been refused on a boot the whole map does not
+        support."""
+        counts = self.stats.setdefault("boot", {"recorded": 0, "from_interval": 0, "unknown": 0})
+        counts["unknown_reasons"] = dict(sorted(self.boots.unplaced.items()))
+        conflicts = self.boots.conflict_list()
+        counts["sweep_conflicts"] = conflicts[:BOOT_LISTED]
+        counts["sweep_conflicts_total"] = len(conflicts)
+        if conflicts:
+            hosts = sorted({item["host"] for item in conflicts})
+            named = ", ".join(hosts[:10]) + (f" and {len(hosts) - 10} more" if len(hosts) > 10 else "")
+            ranges = f"{len(conflicts)} range{'s' if len(conflicts) != 1 else ''}"
+            where = f"{len(hosts)} host{'s' if len(hosts) != 1 else ''}"
+            verb = "were" if len(conflicts) != 1 else "was"
+            self.partial_reasons.append(
+                f"boot placement: {ranges} on {where} placed during the sweep {verb} contradicted by records read "
+                f"later ({named}); a boot-keyed join there may have been refused (see the hunt's boot-interval map)")
+
     def _event_stage(self) -> EventStage:
         stage = getattr(self, "_stage", None)
         if stage is None:
@@ -304,6 +326,7 @@ class Sweep:
         self.heartbeat()
         # Every partition has been read: record the whole map once, for expansion, the context pass and resume.
         self.repo.audit("system", BOOT_INTERVALS_AUDIT, self.hunt_id, self.boots.to_json())
+        self._boot_summary()
         agg_raw = getattr(self, "_agg_raw", {})
         for pb in self.pack:
             if pb.kind != "aggregate":
