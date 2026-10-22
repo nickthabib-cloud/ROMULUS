@@ -206,6 +206,22 @@ def test_record_outside_the_join_window_is_its_own_finding():
     assert len(run([cmd, rec_in])[1]) == 1
 
 
+def test_cloud_init_run_by_its_python_interpreter_marks_the_lineage_of_its_password_tool():
+    agent = ex(["/usr/bin/python3", "/usr/bin/cloud-init", "modules", "--mode=config"], exe="/usr/bin/python3.12",
+               pid=500, ppid=1)
+    tool = ex(["chpasswd", "-e"], pid=501, ppid=500, ts=T0 + timedelta(seconds=3))
+    recs = [record("USER_CHAUTHTOK", "password_change", ts=T0 + timedelta(seconds=3, milliseconds=i), pid=501,
+                   account__op="PAM:chauthtok", account__name=name, process__executable="/usr/sbin/chpasswd")
+            for i, name in enumerate(("root", "ops"))]
+    out = run([agent, tool, *recs])[1]
+    assert [m.group_key for m in out] == ["lineage|app01|cloud-init"]
+    assert "made under cloud-init" in out[0].claim and out[0].proposed_lane == "lead"
+    # the same program name outside the system directories marks nothing
+    fake = ex(["/usr/bin/python3", "/tmp/cloud-init", "modules"], exe="/usr/bin/python3.12", pid=600, ppid=1)
+    out = run([fake, ex(["chpasswd"], pid=601, ppid=600, ts=T0 + timedelta(seconds=3))])[1]
+    assert [m.group_key.split("|")[0] for m in out] == ["actor"]
+
+
 # ---------------------------------------------------------------- boot-time provisioning (no exec lineage)
 def boot(ts=T0, host="app01"):
     return ev("system_state", ts, host=host, audit__record_type="SYSTEM_BOOT", system__event="boot")

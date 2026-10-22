@@ -409,7 +409,7 @@ def forwarded(count, clients, step=timedelta(seconds=5), start=T0):
 def test_resolver_burst_from_mixed_clients_says_so_and_names_the_clients_that_asked():
     clients = [f"10.20.1.{i}" for i in range(1, 7)]
     events = forwarded(60, clients) + pair(client="10.20.1.9", server=RESOLVER)
-    pb, out = run(dns.DnsNxdomainBurst, events)
+    _pb, out = run(dns.DnsNxdomainBurst, events)
     assert [m.group_key for m in out] == [RESOLVER]          # no single client reached the threshold
     m = out[0]
     assert m.proposed_lane == "lead" and m.severity == "high"
