@@ -494,13 +494,28 @@ class Repo:
             return [dict(r) for r in c.execute(select(t.raw_record).where(t.raw_record.c.id.in_(ids))).mappings()]
 
     # ---- candidates -------------------------------------------------------------------------
-    def save_candidate(self, row: dict, *, owner_token: str | None = None) -> bool:
-        """Insert once; returns True if new. Re-evaluation of the same evidence is idempotent."""
+    def save_candidate(self, row: dict, *, canonicalize_agent: bool = False,
+                       owner_token: str | None = None) -> bool:
+        """Insert once, except that a deterministic pass may canonicalize an agent-first duplicate."""
         with write_txn(self.engine) as c:
             self._fence_lease(c, row["hunt_id"], owner_token)
-            exists = c.execute(select(t.candidate.c.id).where(t.candidate.c.id == row["id"])).scalar()
-            if exists:
-                return False
+            existing = c.execute(select(t.candidate).where(
+                t.candidate.c.id == row["id"],
+            )).mappings().first()
+            if existing:
+                if not (canonicalize_agent and existing["source_case_id"] is not None
+                        and row.get("source_case_id") is None):
+                    return False
+                c.execute(t.candidate.update().where(t.candidate.c.id == row["id"]).values(**row))
+                c.execute(t.audit_event.insert().values(
+                    at=utcnow(), actor="system", action="candidate.canonicalize_agent_first",
+                    hunt_id=row["hunt_id"], detail={
+                        "candidate_id": row["id"], "old_source_case_id": existing["source_case_id"],
+                        "source_anchor_id": row.get("source_anchor_id"),
+                        "source_link_id": row.get("source_link_id"),
+                    },
+                ))
+                return True
             c.execute(t.candidate.insert().values(**row, created_at=utcnow()))
             c.execute(t.disposition_event.insert().values(candidate_id=row["id"], actor="romulus", at=utcnow(),
                                                           status="new", note="machine decision"))

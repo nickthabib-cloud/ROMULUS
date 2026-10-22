@@ -329,6 +329,32 @@ def test_agent_reach_does_not_claim_anchor_ownership_before_resumed_expansion():
     assert repo.expansion_anchors("h1")[0]["candidate_id"] == "anchor-finding"
 
 
+def test_deterministic_expansion_replaces_an_agent_first_direct_match_with_canonical_wording():
+    repo = _repo(linked_attack=True)
+    executor = HuntToolExecutor(repo, "h1", FakePivot(), FakeFetcher("attack"), T, END)
+    Toolbox(repo, "h1", executor=executor, session_id="session-7").execute("follow_link", {
+        "anchor": "F1", "link_type": "process_lineage", "window": "anchor ±5 min",
+    })
+    agent_first = next(row for row in repo.candidates("h1")
+                       if row["rule_id"] == "host.credential_store_read")
+    assert "agent-requested" in agent_first["claim"] and agent_first["source_case_id"] == "session-7"
+
+    ExpansionEngine(
+        repo, "h1", Window(start=T, end=END), RecordingExpansionFetcher("attack"),
+        max_source_queries=20,
+    ).run()
+
+    canonical = repo.candidate(agent_first["id"])
+    assert "agent-requested" not in canonical["claim"]
+    assert "hypothesis" not in canonical["claim"]
+    assert canonical["source_case_id"] is None
+    assert canonical["source_link_id"].startswith("deterministic-")
+    deterministic_link = repo.expansion_link(canonical["source_link_id"])
+    assert canonical["source_anchor_id"] == deterministic_link["anchor_id"]
+    assert deterministic_link["strength"] == "observed"
+    assert not any("agent-requested" in note for note in canonical["gate_results"]["_notes"])
+
+
 def test_agent_auth_reach_keeps_all_host_activity_across_sessions_and_never_becomes_context():
     repo = _repo(anchor_session=303)
     auth_events = []

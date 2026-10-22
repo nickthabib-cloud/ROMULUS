@@ -60,4 +60,6 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         "source_anchor_id": source_anchor_id,
         "source_link_id": source_link_id,
     }
-    return row if repo.save_candidate(row, owner_token=owner_token) else None
+    return row if repo.save_candidate(
+        row, canonicalize_agent=source_case_id is None, owner_token=owner_token,
+    ) else None
