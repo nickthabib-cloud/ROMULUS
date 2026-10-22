@@ -23,14 +23,13 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import os
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from romulus.detect.base import LANES, SEVERITIES, Match, Playbook, basename, pf
-from romulus.detect.bounded import HeldExamples
+from romulus.detect.bounded import HeldExamples, KeyedStore
 from romulus.detect.host import (
     AWK_INTERPRETERS,
     SCRIPT_FILE_INTERPRETERS,
@@ -153,7 +152,7 @@ _SET = load_indicators()
 class IndicatorMatch(Playbook):
     id = "ioc.indicator_match"
     anchor_class = "indicator"
-    version = f"3+{_SET.digest}"
+    version = f"4+{_SET.digest}"
     title = "Indicator list match in the field that gives it meaning"
     kind = "aggregate"
     claim_type = "observed_action"
@@ -188,40 +187,55 @@ class IndicatorMatch(Playbook):
                     self.domains[v.lower().rstrip(".")] = ind
                 else:
                     self.prints[(ind.kind, v.lower())] = ind
-        self.groups: dict[tuple, HeldExamples] = {}
-        self.counts: Counter = Counter()
-        self.meta: dict[tuple, dict] = {}
+        self.by_id = {ind.id: ind for ind in self.set.indicators}
+        # (indicator id, role, host, value) -> [count, matched field, cited records]
+        self.groups = KeyedStore(self, "ioc_groups", self.HOT, disk_budget=self.GROUPS_DISK)
+        # (indicator id, role, host, "*") -> [count, matched field, cited records, sample values]: matches of a new
+        # value once the per-value groups' disk budget is spent
+        self.overflow = KeyedStore(self, "ioc_overflow", self.HOT)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
+        self._refused = False
         self.load = lambda ids: []
 
     # Groups (indicator, role, host, value): the first 20 records cited (staged, held as ids) and a count. A listed
-    # domain's subdomains are each a value, so the groups are budgeted; a match of a new group beyond it is not
-    # evaluated and coverage says so.
+    # domain's subdomains are each a value, so there may be very many: HOT groups in memory, the rest on the rule's
+    # disk spill. Once the groups' disk budget is spent, a match of a new value is still found: it joins its
+    # (indicator, role, host) overflow group, whose claim counts the records with other values.
     staged = True
-    MAX_KEYS = 100_000
+    HOT = 20_000
+    GROUPS_DISK = 4 * 2**30
+    SAMPLE_VALUES = 10
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
         for store in self._fresh:
             store.staged()
         self._fresh = []
+        self.groups.trim()
+        self.overflow.trim()
         return out
 
     # ---- matching ---------------------------------------------------------------------------------
     def _keep(self, key: tuple, e: TypedEvent, meta: dict) -> None:
-        store = self.groups.get(key)
-        if store is None:
-            if len(self.groups) >= self.MAX_KEYS:
-                self.refuse("groups", f"indicator match groups reached {self.MAX_KEYS:,}; a match of a new group is "
-                                      f"not evaluated")
+        field_name = meta["field"]
+        state = self.groups.setdefault(key, lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT)])
+        if state is None:
+            state = self.overflow.setdefault(key[:3] + ("*",),
+                                             lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), []])
+            if state is None:
+                self._refused = True
+                self.refuse("groups_disk", "the indicator match groups' disk budget is spent; a later match is not "
+                                           "evaluated")
                 return
-            store = self.groups[key] = HeldExamples(EXAMPLE_LIMIT)
-        self.counts[key] += 1
-        self.meta.setdefault(key, meta)
-        if store.offer(e):
+            self.note_limit("groups_overflow", "the indicator match groups' disk budget is spent; later matches of "
+                                               "a new value are grouped per indicator, role and host")
+            if len(state[3]) < self.SAMPLE_VALUES and key[3] not in state[3]:
+                state[3].append(key[3])
+        state[0] += 1
+        if state[2].offer(e):
             self._pending.append(e)
-            self._fresh.append(store)
+            self._fresh.append(state[2])
 
     def _programs(self, e: TypedEvent) -> None:
         exe = e.get("process.executable")
@@ -308,6 +322,7 @@ class IndicatorMatch(Playbook):
             if e.family not in self.families:
                 continue
             self.evaluated += 1
+            self._refused = False
             if e.family == "process_exec":
                 self._programs(e)
             if self.ips or self.nets:
@@ -316,19 +331,26 @@ class IndicatorMatch(Playbook):
                 self._domains(e)
             if self.prints:
                 self._fingerprints(e)
+            if self._refused:
+                self.evaluated -= 1             # a refused record was not evaluated
         return []
 
     def retained_events(self) -> list[TypedEvent]:
-        return [item[1] for store in self.groups.values() for item in store.items if item[1] is not None]
+        return []                               # staged on disk instead
 
     # ---- publishing -------------------------------------------------------------------------------
     def finalize(self):
         out = []
-        for key in sorted(self.groups, key=str):
+        stores = ((self.groups, self.groups.keys()), (self.overflow, self.overflow.keys()))
+        groups = [(key, store) for store, keys in stores for key in keys]
+        for key, store in sorted(groups, key=lambda item: str(item[0])):
+            state = store.peek(key)
             _iid, role, host, value = key
-            evs = sorted(self.groups[key].events(self.load), key=lambda x: (x.ts, x.id))
-            meta, n = self.meta[key], self.counts[key]
-            ind: Indicator = meta["ind"]
+            evs = sorted(state[2].events(self.load), key=lambda x: (x.ts, x.id))
+            n, field_name = state[0], state[1]
+            ind: Indicator = self.by_id[key[0]]
+            if len(state) > 3:
+                value = state[3][0]             # an overflow group: worded by its first value, then the others
             e0 = evs[0]
             span = f"{evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}"
             listed = f"indicator {ind.id} ({ind.label}, list {ind.source})"
@@ -371,12 +393,18 @@ class IndicatorMatch(Playbook):
                 claim = (f"{n} session record(s) observed by {host} carry {role.upper()} client fingerprint {value}, "
                          f"matching {listed} ({span}).")
                 lane, claim_type = ind.lane, "network_observation"
-            m = Match(self.id, claim, claim_type, evs, [pf(e0, meta["field"])], e0.ts, ind.severity, lane, "medium",
+            m = Match(self.id, claim, claim_type, evs, [pf(e0, field_name)], e0.ts, ind.severity, lane, "medium",
                       e0.entities(), group_key="|".join(map(str, key)))
             if ind.attack:
                 m.notes.append(f"indicator ATT&CK context: {list(ind.attack)}")
             if n > len(evs):
                 m.notes.append(f"{n} matching records; {len(evs)} are cited")
+            if len(state) > 3:
+                others = state[3][1:]
+                m.claim += (f" These {n} record(s) are every match of {ind.id} by {host} in this role once the "
+                            f"per-value groups' disk budget was spent: '{value}' and "
+                            + (f"{len(others)} more value(s) ({', '.join(others)})" if others else "no other value")
+                            + (" or more; records of each value are not counted apart." if others else "."))
             out.append(m)
         return out
 

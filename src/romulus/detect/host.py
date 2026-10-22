@@ -7,11 +7,11 @@ import itertools
 import posixpath
 import re
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
-from romulus.detect.bounded import HeldExamples, KeyedStore, RecentIds
+from romulus.detect.bounded import HeldExamples, KeyedStore, RecentIds, SpillList
 from romulus.detect.linux_argv import canonical, read_operand_paths
 from romulus.evidence.shellparse import (
     SHELLS,
@@ -23,6 +23,10 @@ from romulus.evidence.shellparse import (
     shell_script_of,
 )
 from romulus.evidence.typed import Outcome, TypedEvent, raw_identity
+
+# The disk budget of a finalize-time table built from records already held within their own budgets: never spent,
+# so a finding is never lost while it is assembled.
+UNBUDGETED = 2**62
 
 WEB_SERVICE_USERS = {"www-data", "apache", "nginx", "httpd", "_www", "wwwrun"}
 INTERPRETERS = SHELLS | {"python", "python2", "python3", "perl", "ruby", "php", "lua", "nc", "ncat", "netcat",
@@ -276,7 +280,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     anchor_class = "web_shell"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "11"
+    version = "12"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -292,21 +296,18 @@ class WebServiceSpawnsInterpreter(Playbook):
     # hour holding more than half of its runs. A burst of the same command (an attacker looping a web shell), even
     # one that straddles hour boundaries, stays visible as a lead.
     ROUTINE_MIN_HOURS = 3
-    # Shapes (host, account, command shape, packaged script) of web-service interpreter runs: their first 20 runs
-    # are cited (staged, held as ids) and their runs per clock hour counted. An hour two hours behind the newest
-    # record is closed and folded into the shape's distinct-hour count and busiest hour, so a shape costs a few
-    # hundred bytes whatever the hunt's length; at most MAX_KEYS shapes are held and coverage says when more came.
+    # Shapes (host, account, command shape, packaged script) of web-service interpreter runs: their run count, their
+    # exact runs per clock hour (so a run read late, from a target read after its hour, is counted in its own hour)
+    # and their first 20 runs cited (staged, held as ids). Shapes live in a keyed store, HOT in memory and the rest
+    # on the rule's disk spill; only its disk budget refuses a new shape, and coverage says so.
     staged = True
-    MAX_KEYS = 50_000
-    HOUR_SETTLE = timedelta(hours=2)
+    HOT = 20_000
+    CITE = 20
 
     def __init__(self):
         super().__init__()
-        self.shapes: dict[tuple, HeldExamples] = {}
-        self.counts: dict[tuple, int] = defaultdict(int)
-        self.hours: dict[tuple, dict] = defaultdict(lambda: defaultdict(int))      # open hours only
-        self.closed: dict[tuple, list[int]] = {}         # key -> [closed distinct hours, busiest closed hour]
-        self.watermark: datetime | None = None
+        self.shapes = KeyedStore(self, "web_shapes", self.HOT)    # key -> [runs, cited runs, {clock hour: runs}]
+        self.order = SpillList(self, "web_shape_order", self.HOT)   # shapes in first-seen order
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
@@ -316,10 +317,12 @@ class WebServiceSpawnsInterpreter(Playbook):
         for store in self._fresh:
             store.staged()
         self._fresh = []
+        self.shapes.trim()
+        self.order.trim()
         return out
 
     def retained_events(self) -> list[TypedEvent]:
-        return [item[1] for store in self.shapes.values() for item in store.items if item[1] is not None]
+        return [item[1] for store in self._fresh for item in store.items if item[1] is not None]
 
     def consume(self, events):
         matches = []
@@ -336,48 +339,28 @@ class WebServiceSpawnsInterpreter(Playbook):
             # a packaged-script run is judged on the whole command line; an incomplete one is never routine
             packaged = None if argv_incomplete(e) else _packaged_script(argv, e.get("process.cwd"))
             key = (e.host, user, command_shape(argv), packaged)
-            if key not in self.shapes and len(self.shapes) >= self.MAX_KEYS:
-                self.evaluated -= 1
-                self.refuse("shapes", f"web-service interpreter shapes held reached {self.MAX_KEYS:,}; a run of a "
-                                      f"new shape is not evaluated")
-                continue
-            self.counts[key] += 1
-            self.watermark = e.ts if self.watermark is None else max(self.watermark, e.ts)
+            state = self.shapes.get(key)
+            if state is None:
+                state = [0, HeldExamples(self.CITE), {}]
+                if not self.shapes.put(key, state):
+                    self.evaluated -= 1
+                    self.refuse("shapes_disk", "the web-service interpreter shapes' disk budget is spent; a run of a "
+                                               "new shape is not evaluated")
+                    continue
+                self.order.append(key)
+            state[0] += 1
+            hours = state[2]
             hour = e.ts.replace(minute=0, second=0, microsecond=0)
-            if key in self.closed and hour not in self.hours[key] and hour < self.watermark - self.HOUR_SETTLE:
-                self.note_limit("late", "a run arrived for a clock hour already closed (a target read later); "
-                                        "its shape's distinct-hour count may count that hour twice")
-            self.hours[key][hour] += 1
-            store = self.shapes.get(key)
-            if store is None:
-                store = self.shapes[key] = HeldExamples(20)
-            if store.offer(e):
+            hours[hour] = hours.get(hour, 0) + 1
+            if state[1].offer(e):
                 self._pending.append(e)
-                self._fresh.append(store)
-        self._close_hours()
+                self._fresh.append(state[1])
         return matches
 
-    def _close_hours(self) -> None:
-        if self.watermark is None:
-            return
-        horizon = self.watermark - self.HOUR_SETTLE
-        for key in list(self.hours):
-            open_hours = self.hours[key]
-            done = [hour for hour in open_hours if hour < horizon]
-            if not done:
-                continue
-            closed = self.closed.setdefault(key, [0, 0])
-            for hour in done:
-                closed[0] += 1
-                closed[1] = max(closed[1], open_hours.pop(hour))
-            if not open_hours:
-                del self.hours[key]
-
-    def _hour_stats(self, key: tuple) -> tuple[int, int]:
+    @staticmethod
+    def _hour_stats(state: list) -> tuple[int, int]:
         """(distinct clock hours with a run, runs in the busiest hour)."""
-        closed = self.closed.get(key, [0, 0])
-        open_hours = self.hours.get(key, {})
-        return closed[0] + len(open_hours), max([closed[1], *open_hours.values()])
+        return len(state[2]), max(state[2].values())
 
     @property
     def groups(self):
@@ -401,10 +384,11 @@ class WebServiceSpawnsInterpreter(Playbook):
 
     def finalize(self):
         out = []
-        for key, store in self.shapes.items():
-            evs = store.events(self.load)
+        for key in self.order:
+            state = self.shapes.peek(key)
+            evs = state[1].events(self.load)
             host_, user, shape, packaged = key
-            n = self.counts[key]
+            n = state[0]
             if packaged and n <= self.RARE_MAX:
                 # Rare, no typed indicator, and the script sits where a web-service account cannot write: most
                 # likely the application's own helper (daemon start-up, maintenance), not code a request supplied.
@@ -415,7 +399,7 @@ class WebServiceSpawnsInterpreter(Playbook):
                                  evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
                                  group_key=f"packaged|{host_}|{user}|{shape}"))
                 continue
-            distinct_hours, busiest = self._hour_stats(key)
+            distinct_hours, busiest = self._hour_stats(state)
             scheduled = distinct_hours >= self.ROUTINE_MIN_HOURS and busiest * 2 <= n
             if n > self.RARE_MAX and not scheduled:
                 evs = sorted(evs, key=lambda e: (e.ts, e.id))
@@ -447,7 +431,7 @@ class DownloaderFeedsInterpreter(Playbook):
     id = "host.downloader_feeds_interpreter"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "2"
+    version = "3"
     title = "Downloader and stdin interpreter launched together by the same parent"
     kind = "aggregate"
     families = ("process_exec",)
@@ -459,21 +443,29 @@ class DownloaderFeedsInterpreter(Playbook):
                    "entity_timeline of the host after the event")
     MAX_GAP = 10.0
 
+    # Downloaders wait MAX_GAP for their interpreter; a parent's waiting list is released once the newest exec read
+    # is more than MAX_GAP past its latest downloader (an out-of-order batch within that gap still pairs). Every
+    # downloader is staged when read (a pair split by a partition boundary keeps its evidence), and so is each
+    # paired interpreter. Pairs are held on a list, HOT in memory and the rest on the rule's disk spill; only its
+    # disk budget refuses, and coverage says so.
+    staged = True
+    HOT = 20_000
+    FINALIZE_TRIM = 10_000
+
     def __init__(self):
         super().__init__()
         self.pending: dict[tuple, list[TypedEvent]] = defaultdict(list)
-        self.found: list[Match] = []
-        self.groups = {}
+        self.found = SpillList(self, "downloader_pairs", self.HOT)
+        self._pending: list[TypedEvent] = []
+        self.load = lambda ids: []
 
-    def retained_events(self):
-        # downloader events wait in `pending` across partitions until their interpreter arrives;
-        # their raw copies must be kept now, or a pair split by a partition boundary loses evidence
-        return super().retained_events() + [e for evs in self.pending.values() for e in evs]
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        self.found.trim()
+        return out
 
-    # Downloaders wait MAX_GAP for their interpreter; a parent's waiting list is released once the newest exec read
-    # is more than MAX_GAP past its latest downloader (an out-of-order batch within that gap still pairs). Pairs are
-    # findings' citations: at most MAX_FOUND are held, and coverage says when more came.
-    MAX_FOUND = 20_000
+    def retained_events(self) -> list[TypedEvent]:
+        return list(self._pending)                      # the rest are staged on disk
 
     def consume(self, events):
         newest = None
@@ -493,6 +485,7 @@ class DownloaderFeedsInterpreter(Playbook):
         if name in DOWNLOADERS and any("://" in a for a in argv[1:]):
             self.pending[key] = [p for p in self.pending[key] if (e.ts - p.ts).total_seconds() <= self.MAX_GAP]
             self.pending[key].append(e)
+            self._pending.append(e)
             return
         if name in INTERPRETERS and (len(argv) == 1 or argv[1:] in (["-"], ["-s"])):
             for d in self.pending.get(key, []):
@@ -508,24 +501,34 @@ class DownloaderFeedsInterpreter(Playbook):
                                pf(e, "process.ppid")], d.ts, self.severity, self.lane, "medium",
                               _exec_entities(d), group_key=f"{raw_identity(d)}|{raw_identity(e)}")
                     m.notes.append(f"download URL: {url}")
-                    if len(self.found) >= self.MAX_FOUND:
-                        self.refuse("found", f"downloader-interpreter pairs held reached {self.MAX_FOUND:,}; a "
-                                             f"later pair is not evaluated")
+                    if not self.found.append(m):
+                        self.evaluated -= 1
+                        self.refuse("pairs_disk", "the downloader-interpreter pairs' disk budget is spent; a later "
+                                                  "pair is not evaluated")
                         break
-                    self.found.append(m)
-                    self.groups[m.group_key] = [d, e]
+                    self._pending.append(e)
                     break
 
     def finalize(self):
         """Collapse repeats of the same (host, URL, interpreter) into one item; regular repetition is
         itself evidence of scheduled execution and is reported as such."""
-        grouped: dict[tuple, list[Match]] = defaultdict(list)
-        for m in self.found:
+        grouped = KeyedStore(self, "downloader_grouped", self.HOT, disk_budget=UNBUDGETED)
+        order = SpillList(self, "downloader_group_order", self.HOT, disk_budget=UNBUDGETED)
+        for i, m in enumerate(self.found):
             d, e = m.events
             url = next(a for a in d.get("process.argv")[1:] if "://" in a)
-            grouped[(d.host, url, basename(e.get("process.argv")[0]))].append(m)
+            key = (d.host, url, basename(e.get("process.argv")[0]))
+            ms = grouped.get(key)
+            if ms is None:
+                grouped.put(key, ms := [])              # a finalize table: no budget refuses it
+                order.append(key)
+            ms.append(m)
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                grouped.trim()
+                order.trim()
         out = []
-        for (host_, url, interp), ms in grouped.items():
+        for host_, url, interp in order:
+            ms = grouped.peek((host_, url, interp))
             ms.sort(key=lambda x: x.ts)
             if len(ms) == 1:
                 out.append(ms[0])
@@ -546,6 +549,8 @@ class DownloaderFeedsInterpreter(Playbook):
             m.notes = [f"download URL: {url}", f"occurrences: {len(ms)}"] + \
                       (["regular cadence suggests scheduled execution (e.g. cron)"] if regular else [])
             out.append(m)
+        grouped.clear()
+        order.clear()
         return out
 
 
@@ -729,7 +734,7 @@ class FirewallRuleChange(Playbook):
     id = "host.firewall_rule_change_command"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "6"
+    version = "7"
     title = "Firewall command blocking, unblocking or weakening"
     kind = "aggregate"
     families = ("process_exec",)
@@ -740,23 +745,30 @@ class FirewallRuleChange(Playbook):
     next_checks = ("auth_activity for who was logged in", "entity_timeline of the host around the change",
                    "host_network for traffic to/from the affected address afterwards")
 
-    # Specific-address block/unblock commands are published at finalize with their records held: about 8 KB each,
-    # so 160 MB at the budget. Weakening and routine groups hold at most 20 and 10 records per (host, tool, form).
-    MAX_DIRECT = 20_000
+    # Specific-address block/unblock commands are published at finalize: held on a list, HOT in memory and the rest
+    # on the rule's disk spill (only its disk budget refuses, and coverage says so). Weakening and routine groups
+    # hold at most 20 and 10 records per (host, tool, form). Every record a finding may cite is staged when kept.
+    staged = True
+    HOT = 20_000
 
     def __init__(self):
         super().__init__()
-        self.direct: list[Match] = []
+        self.direct = SpillList(self, "firewall_direct", self.HOT)
         self.weak: dict[tuple, list[TypedEvent]] = defaultdict(list)
         self.weak_n: dict[tuple, int] = defaultdict(int)
         self.routine: dict[tuple, list[TypedEvent]] = defaultdict(list)
         self.routine_n: dict[tuple, int] = defaultdict(int)
         self.groups = self.routine
+        self._pending: list[TypedEvent] = []
+        self.load = lambda ids: []
 
-    def retained_events(self):
-        # direct block/unblock matches are published at finalize too: their raw copies must be kept
-        return (super().retained_events() + [e for m in self.direct for e in m.events]
-                + [e for evs in self.weak.values() for e in evs])
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        self.direct.trim()
+        return out
+
+    def retained_events(self) -> list[TypedEvent]:
+        return list(self._pending)                      # the rest are staged on disk
 
     def consume(self, events):
         for e in self.applicable(events):
@@ -795,16 +807,18 @@ class FirewallRuleChange(Playbook):
                 m = Match(self.id, claim, self.claim_type, [e], [pf(e, "process.argv")], e.ts, self.severity,
                           self.lane, "high", _exec_entities(e))
                 m.entities.append(("ip", addr.split("/")[0], "subject"))
-                if len(self.direct) >= self.MAX_DIRECT:
-                    self.refuse("direct", f"specific-address firewall changes held reached {self.MAX_DIRECT:,}; "
-                                          f"a later one is not evaluated")
+                if not self.direct.append(m):
+                    self.evaluated -= 1
+                    self.refuse("direct_disk", "the specific-address firewall changes' disk budget is spent; a later "
+                                               "one is not evaluated")
                     continue
-                self.direct.append(m)
+                self._pending.append(e)
             else:
                 key = (e.host, name)
                 self.routine_n[key] += 1
                 if len(self.routine[key]) < 10:
                     self.routine[key].append(e)
+                    self._pending.append(e)
         return []
 
     def _weakening(self, e: TypedEvent, name: str, weakening: tuple[str, bool]) -> None:
@@ -814,6 +828,7 @@ class FirewallRuleChange(Playbook):
         self.weak_n[key] += 1
         if len(self.weak[key]) < 20:
             self.weak[key].append(e)
+            self._pending.append(e)
 
     def finalize(self):
         out = list(self.direct)
@@ -1014,7 +1029,7 @@ class SshLoginFromExternal(Playbook):
     anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "3"
+    version = "4"
     title = "Successful SSH login from a non-private source address"
     kind = "aggregate"
     families = ("auth",)
@@ -1027,14 +1042,16 @@ class SshLoginFromExternal(Playbook):
                    "entity_timeline for the host after login")
 
     # Per (host, account, source): the earliest 20 records cited (staged, held as ids) and the counts, so a group
-    # costs references, not every login; at most MAX_KEYS groups.
+    # costs references, not every login. Groups live in a keyed store, HOT in memory and the rest on the rule's
+    # disk spill; only its disk budget refuses a new group, and coverage says so.
     staged = True
-    MAX_KEYS = 100_000
+    HOT = 20_000
 
     def __init__(self):
         super().__init__()
-        self.groups: dict[tuple, HeldExamples] = {}
-        self.tally: dict[tuple, list] = {}           # [journal records, audit records, latest time]
+        # (host, account, source) -> [journal records, audit records, latest time, cited records]
+        self.groups = KeyedStore(self, "ssh_external_groups", self.HOT)
+        self.order = SpillList(self, "ssh_external_order", self.HOT)     # groups in first-seen order
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
@@ -1044,10 +1061,12 @@ class SshLoginFromExternal(Playbook):
         for store in self._fresh:
             store.staged()
         self._fresh = []
+        self.groups.trim()
+        self.order.trim()
         return out
 
     def retained_events(self) -> list[TypedEvent]:
-        return [item[1] for store in self.groups.values() for item in store.items if item[1] is not None]
+        return [item[1] for store in self._fresh for item in store.items if item[1] is not None]
 
     def consume(self, events):
         for e in self.applicable(events):
@@ -1062,18 +1081,18 @@ class SshLoginFromExternal(Playbook):
             if is_internal(ip):
                 continue
             key = (e.host, e.get("user.name"), str(ip))
-            if key not in self.groups and len(self.groups) >= self.MAX_KEYS:
-                self.evaluated -= 1
-                self.refuse("groups", f"(host, account, source) groups reached {self.MAX_KEYS:,}; a login of a new "
-                                      f"group is not evaluated")
-                continue
-            store = self.groups.get(key)
-            if store is None:
-                store = self.groups[key] = HeldExamples(20, earliest=True)
-                self.tally[key] = [0, 0, e.ts]
-            tally = self.tally[key]
+            tally = self.groups.get(key)
+            if tally is None:
+                tally = [0, 0, e.ts, HeldExamples(20, earliest=True)]
+                if not self.groups.put(key, tally):
+                    self.evaluated -= 1
+                    self.refuse("groups_disk", "the (host, account, source) groups' disk budget is spent; a login of "
+                                               "a new group is not evaluated")
+                    continue
+                self.order.append(key)
             tally[1 if e.get("auth.phase") == "login" else 0] += 1
             tally[2] = max(tally[2], e.ts)
+            store = tally[3]
             if store.offer(e):
                 self._pending.append(e)
                 self._fresh.append(store)
@@ -1081,11 +1100,11 @@ class SshLoginFromExternal(Playbook):
 
     def finalize(self):
         out = []
-        for (host, user, ip), store in self.groups.items():
+        for host, user, ip in self.order:
+            journal, audit, last, store = self.groups.peek((host, user, ip))
             evs = store.events(self.load)
             # Each login appears once per collected source (journal sshd "Accepted", audit USER_LOGIN), so the
             # login count is the larger per-source count, never their sum.
-            journal, audit, last = self.tally[(host, user, ip)]
             logins = max(journal, audit)
             sources = "; ".join(part for part in (
                 f"{journal} sshd 'Accepted' journal record(s)" if journal else "",
@@ -1132,7 +1151,7 @@ class UnbackedExecutable(Playbook):
     """A process whose kernel-recorded executable is memory-backed, deleted or in an in-memory runtime directory,
     seen on any audit record that carries the executable (exec, socket or file-change calls)."""
     id = "host.unbacked_or_deleted_executable"
-    version = "1"
+    version = "2"
     title = "Process running from a memory-backed, deleted or in-memory-directory executable"
     anchor_class = "execution"
     kind = "aggregate"
@@ -1171,20 +1190,20 @@ class UnbackedExecutable(Playbook):
                      "only), a superset of what this evaluator reads",
     }
 
-    # Per (host, executable): the first records cited (staged, held as ids), counts and span; at most MAX_KEYS.
+    # Per (host, executable): the first records cited (staged, held as ids), counts per family, span and uids. Groups
+    # live in a keyed store, HOT in memory and the rest on the rule's disk spill; only its disk budget refuses a new
+    # group, and coverage says so.
     staged = True
-    MAX_KEYS = 50_000
+    HOT = 20_000
 
     def __init__(self):
         super().__init__()
         self._seen = RecentIds()        # bounded re-read guard
-        self.groups: dict[tuple[str, str], HeldExamples] = {}
+        # (host, executable) -> [{family: records}, [first, last], {uid}, cited records]
+        self.groups = KeyedStore(self, "unbacked_groups", self.HOT)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
-        self.counts: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        self.spans: dict[tuple[str, str], list[float]] = {}
-        self.uids: dict[tuple[str, str], set[str]] = defaultdict(set)
 
     def consume(self, events):
         for e in sorted((e for e in events if e.family in self.families and e.id not in self._seen),
@@ -1198,20 +1217,18 @@ class UnbackedExecutable(Playbook):
             if unbacked_executable(str(exe)) is None:
                 continue
             key = (e.host or "", str(exe))
-            if key not in self.groups and len(self.groups) >= self.MAX_KEYS:
-                self.evaluated -= 1
-                self.refuse("groups", f"(host, executable) groups reached {self.MAX_KEYS:,}; a record of a new group "
-                                      f"is not evaluated")
-                continue
-            self.counts[key][e.family] += 1
             ts = e.ts.timestamp()
-            span = self.spans.setdefault(key, [ts, ts])
+            group = self.groups.setdefault(key, lambda ts=ts: [{}, [ts, ts], set(), HeldExamples(_UNBACKED_CITE)])
+            if group is None:
+                self.evaluated -= 1
+                self.refuse("groups_disk", "the (host, executable) groups' disk budget is spent; a record of a new "
+                                           "group is not evaluated")
+                continue
+            counts, span, uids, store = group
+            counts[e.family] = counts.get(e.family, 0) + 1
             span[0], span[1] = min(span[0], ts), max(span[1], ts)
             if e.get("process.uid") is not None:
-                self.uids[key].add(str(e.get("process.uid")))
-            store = self.groups.get(key)
-            if store is None:
-                store = self.groups[key] = HeldExamples(_UNBACKED_CITE)
+                uids.add(str(e.get("process.uid")))
             if store.offer(e):
                 self._pending.append(e)
                 self._fresh.append(store)
@@ -1222,26 +1239,26 @@ class UnbackedExecutable(Playbook):
         for store in self._fresh:
             store.staged()
         self._fresh = []
+        self.groups.trim()
         return out
 
     def retained_events(self) -> list[TypedEvent]:
-        return [item[1] for store in self.groups.values() for item in store.items if item[1] is not None]
+        return [item[1] for store in self._fresh for item in store.items if item[1] is not None]
 
     def finalize(self):
         out = []
         names = {"process_exec": "exec", "net_socket": "socket call", "file_change": "file-change call"}
-        for key in sorted(self.groups):
+        for key in sorted(self.groups.keys()):
             host, exe = key
             cls, meaning = unbacked_executable(exe)
-            evs = sorted(self.groups[key].events(self.load), key=lambda x: (x.ts, x.id))
-            counts = self.counts[key]
+            counts, (first, last), uids, store = self.groups.peek(key)
+            evs = sorted(store.events(self.load), key=lambda x: (x.ts, x.id))
             total = sum(counts.values())
-            first, last = self.spans[key]
             when = (f"at {evs[0].ts.isoformat()}" if first == last else
                     f"from {datetime.fromtimestamp(first, UTC).isoformat()} to "
                     f"{datetime.fromtimestamp(last, UTC).isoformat()}")
             kinds = ", ".join(f"{counts[f]} {names[f]} record(s)" for f in self.families if counts.get(f))
-            uids = sorted(self.uids[key])
+            uids = sorted(uids)
             claim = (f"On {host}, {total} audit record(s) {when} carry the kernel-recorded executable '{exe}' "
                      f"({kinds}; process uid(s) {', '.join(uids) or 'not recorded'}): {meaning}.")
             if total > len(evs):
