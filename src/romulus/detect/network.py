@@ -58,7 +58,7 @@ class _Grouped(Playbook):
         super().__init__()
         self.groups = KeyedStore(self, "net_groups", self.HOT, candidate=self.reportable)
         self._pending: list[TypedEvent] = []
-        self._fresh: set[tuple] = set()             # groups holding events not yet handed to the stage
+        self._fresh: list[tuple[_Group, int]] = []  # (group, place) of each example not yet handed to the stage
         self.load = lambda ids: []
 
     @property
@@ -72,10 +72,10 @@ class _Grouped(Playbook):
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
-        for key in self._fresh:
-            state = self.groups.hot.get(key)
-            if state is not None:
-                state.held = [x.id if isinstance(x, TypedEvent) else x for x in state.held]
+        for state, place in self._fresh:            # staged now: each held example becomes its id
+            held = state.held[place]
+            if isinstance(held, TypedEvent):
+                state.held[place] = held.id
         self._fresh.clear()
         self.trim()
         return out
@@ -103,7 +103,7 @@ class _Grouped(Playbook):
         state.count += 1
         if len(state.held) < EXAMPLE_LIMIT:
             state.held.append(e)
-            self._fresh.add(key)
+            self._fresh.append((state, len(state.held) - 1))
             self._pending.append(e)
         state.first, state.last = min(state.first, e.ts), max(state.last, e.ts)
         return state

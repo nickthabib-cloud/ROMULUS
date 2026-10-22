@@ -509,6 +509,9 @@ class KeyedStore:
         self.candidate = candidate
         self.group = group
         self.hot: OrderedDict = OrderedDict()
+        # Until the first eviction the hot set's own order is first-insertion order, and no recency is needed: the
+        # order numbers and the LRU order are kept only from then on (`_ordered`).
+        self._ordered = False
         self._seq: dict = {}
         self._next = 0
         self._filter: _KeyFilter | None = None
@@ -575,8 +578,11 @@ class KeyedStore:
         """The key's state, made hot (read back from disk when it was moved there)."""
         state = self.hot.get(key)
         if state is not None:
-            self.hot.move_to_end(key)
+            if self._ordered:
+                self.hot.move_to_end(key)
             return state
+        if not self.on_disk:
+            return default
         found = self._load(key, remove=True)
         if found is None:
             return default
@@ -603,7 +609,11 @@ class KeyedStore:
         (the caller refuses the record). Replacing a key held on disk is not a new key."""
         if key in self.hot:
             self.hot[key] = state
-            self.hot.move_to_end(key)
+            if self._ordered:
+                self.hot.move_to_end(key)
+            return True
+        if not self._ordered:                       # nothing has left memory: no disk, and the dict keeps order
+            self.hot[key] = state
             return True
         found = self._load(key, remove=True)
         if found is not None:
@@ -629,7 +639,8 @@ class KeyedStore:
     def pop(self, key, default=None):
         state = self.hot.pop(key, None)
         if state is not None:
-            self._seq.pop(key, None)
+            if self._ordered:
+                self._seq.pop(key, None)
             return state
         found = self._load(key, remove=True)
         return default if found is None else found[0]
@@ -651,6 +662,10 @@ class KeyedStore:
             return
         spill = self.owner.spill()
         self._db()
+        if not self._ordered:                       # the first eviction: number the keys in their order so far
+            self._seq = {key: i for i, key in enumerate(self.hot)}
+            self._next = len(self._seq)
+            self._ordered = True
         if self._filter is None:
             self._filter = _KeyFilter()
         evicted, rows, nbytes = [], [], 0
@@ -687,8 +702,11 @@ class KeyedStore:
 
     # ---- finalize -------------------------------------------------------------------------------------
     def _hot_ordered(self, candidates: bool):
-        return sorted(((self._seq[key], key, state) for key, state in self.hot.items()
-                       if not candidates or self.candidate is None or self.candidate(state)), key=_first)
+        wanted = ((key, state) for key, state in self.hot.items()
+                  if not candidates or self.candidate is None or self.candidate(state))
+        if not self._ordered:
+            return [(i, key, state) for i, (key, state) in enumerate(wanted)]
+        return sorted(((self._seq[key], key, state) for key, state in wanted), key=_first)
 
     def items(self, *, candidates: bool = False):
         """Every (key, state) in first-insertion order, from memory and disk a batch at a time (read only)."""
@@ -718,8 +736,8 @@ class KeyedStore:
         """Every (key, state) ordered by the group column, then first insertion, so a group's states arrive
         together. With anything on disk, all is moved there first and nothing is held but the group being read."""
         if self.owner is None or not self.on_disk:
-            for _order, key, state in sorted(((self.group(key), self._seq.get(key, 0)), key, state)
-                                             for key, state in self.hot.items()):
+            for _order, key, state in sorted((((self.group(key), seq), key, state)
+                                              for seq, key, state in self._hot_ordered(False)), key=_first):
                 yield key, state
             return
         self.trim(0)
@@ -728,7 +746,9 @@ class KeyedStore:
 
     def clear(self) -> None:
         self.hot.clear()
-        self._seq.clear()
+        self._seq = {}
+        self._next = 0
+        self._ordered = False
         if self.on_disk and self.owner is not None and self._ready and self.owner._spill is not None:
             self._db().execute(f"DELETE FROM {self.name}")
         self.on_disk = self.disk_bytes = 0
