@@ -52,6 +52,7 @@ MIN_SPLIT = timedelta(seconds=5)
 BOOT_INTERVALS_AUDIT = "hunt.boot_intervals"
 # How many boot-placement items the sweep summary lists by name; the boot-interval map record holds every one.
 BOOT_LISTED = 100
+BOOT_BLIND_LISTED = 20
 
 
 def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
@@ -292,11 +293,28 @@ class Sweep:
         contradict (listed up to BOOT_LISTED; the boot-interval map record holds them all). A contradicted range
         makes the sweep partial: a boot-keyed join there may have been refused on a boot the whole map does not
         support."""
+        boots = self.boots
         counts = self.stats.setdefault("boot", {"recorded": 0, "from_interval": 0, "unknown": 0})
-        counts["unknown_reasons"] = dict(sorted(self.boots.unplaced.items()))
-        conflicts = self.boots.conflict_list()
+        totals: dict[str, int] = {}
+        for reasons in boots.unplaced.values():
+            for reason, n in reasons.items():
+                totals[reason] = totals.get(reason, 0) + n
+        counts["unknown_reasons"] = dict(sorted(totals.items()))
+        conflicts = boots.conflict_list()
         counts["sweep_conflicts"] = conflicts[:BOOT_LISTED]
         counts["sweep_conflicts_total"] = len(conflicts)
+        # Each host with records left without a boot: why, and what on the host refuses placement.
+        hosts = sorted(boots.unplaced, key=lambda host: (-sum(boots.unplaced[host].values()), host))
+        listed = []
+        for host in hosts[:BOOT_LISTED]:
+            blind = boots.blind(host)
+            listed.append({"host": host, "unplaced": dict(sorted(boots.unplaced[host].items())),
+                           "blind": blind[:BOOT_BLIND_LISTED], "blind_total": len(blind),
+                           "nameless_boundaries": len(boots.boundaries.get(host, ())),
+                           "unclocked_records": boots.unclocked.get(host, 0),
+                           "sweep_conflicts": len(boots.conflicts.get(host, ()))})
+        counts["hosts"] = listed
+        counts["hosts_total"] = len(hosts)
         if conflicts:
             hosts = sorted({item["host"] for item in conflicts})
             named = ", ".join(hosts[:10]) + (f" and {len(hosts) - 10} more" if len(hosts) > 10 else "")

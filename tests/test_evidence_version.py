@@ -19,7 +19,7 @@ from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
 EVIDENCE_FILES = ("__init__.py", "auditd.py", "normalize.py", "typed.py")
-PINNED_EVIDENCE = {9: "f6c0eb49f89ab958524985f8ddee662e23ff1795bdb90d5efaf2f7f728d94c7e"}
+PINNED_EVIDENCE = {9: "c237143ecad39f04d5b3f996685ac55ed84fa7bee87828ae4fe075c5e2f6b33c"}
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).
 PACKET_FUNCTIONS = (packet_stage._body_event, packet_rules.analyze_body, packet_rules._text, packet_rules._shebang,

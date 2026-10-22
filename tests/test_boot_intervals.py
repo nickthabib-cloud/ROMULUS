@@ -51,6 +51,7 @@ from tests.test_expansion_links import FakePivot
 
 EPOCH = 1_900_000_000                    # 2030-03-17T17:46:40Z
 SKEW = int(BOOT_EDGE_SKEW.total_seconds())
+BOOT_C = "0c" * 16
 
 
 def at(seconds: float) -> datetime:
@@ -165,13 +166,61 @@ def test_a_reboot_shorter_than_the_skew_places_nothing_between_the_two_boots():
     assert placed(boots, 965) == BOOT_A and placed(boots, 1045) == BOOT_B
 
 
-def test_overlapping_spans_place_nothing_inside_them():
-    # records of two boots at the same times: a clock step at a reboot, or two hosts under one name
+def test_overlapping_spans_place_nothing_inside_the_overlap_and_place_outside_it():
+    # records of two boots at the same times (500 s to 1000 s): a clock step at a reboot, or two hosts under one
+    # name. Only the overlap, widened by the skew, is refused.
     boots = BootIntervals()
     for seconds, boot_id in ((0, BOOT_A), (1000, BOOT_A), (500, BOOT_B), (1500, BOOT_B)):
         boots.observe("host01", boot_id, us(seconds), f"r{seconds}")
-    for seconds in (100, 300, 700, 1200, 1400):
+    for seconds in (500 - SKEW, 700, 1000, 1000 + SKEW):
         assert placed(boots, seconds) is None, seconds
+    assert placed(boots, 100) == BOOT_A and placed(boots, 1200) == BOOT_B
+    assert boots.boot_at("host01", us(500 - SKEW) - 1)[0] == BOOT_A
+    assert boots.boot_at("host01", us(1000 + SKEW) + 1)[0] == BOOT_B
+    assert boots.to_json()["hosts"]["host01"]["blind"] == [
+        {"from": at(500 - SKEW).isoformat(), "to": at(1000 + SKEW).isoformat(), "reason": "overlapping boots",
+         "boots": sorted([BOOT_A, BOOT_B])}]
+
+
+def test_twenty_reboots_each_overlapping_the_next_still_place_everything_outside_the_overlaps():
+    # Twenty daily boots; the clock steps back at each reboot, so each boot's last records (10 s) share times with
+    # the next boot's first. Each overlap, widened by the skew, is refused; everything else places.
+    boots, day = BootIntervals(), 1000
+    ids = [f"{k:032x}" for k in range(20)]
+    for k, boot_id in enumerate(ids):
+        boots.observe("host01", boot_id, us(day * k), f"d{k}a")
+        boots.observe("host01", boot_id, us(day * k + 500), f"d{k}m")
+        boots.observe("host01", boot_id, us(day * (k + 1) + 10), f"d{k}z")
+    for k, boot_id in enumerate(ids):
+        for offset in (100, 500, 900):
+            assert placed(boots, day * k + offset) == boot_id, (k, offset)
+        start = day * k + (SKEW if k == 0 else 10 + SKEW)
+        end = day * (k + 1) - SKEW if k < 19 else day * 20 + 10 - SKEW
+        assert boots.boot_at("host01", us(start) + (0 if k == 0 else 1))[0] == boot_id
+        assert boots.boot_at("host01", us(end) - (0 if k == 19 else 1))[0] == boot_id
+        if k < 19:
+            for offset in (-SKEW, 0, 5, 10, 10 + SKEW):                # the overlap with the next boot, ± skew
+                assert placed(boots, day * (k + 1) + offset) is None, (k, offset)
+    blind = boots.to_json()["hosts"]["host01"]["blind"]
+    assert len(blind) == 19 and {item["reason"] for item in blind} == {"overlapping boots"}
+    assert blind[0] == {"from": at(day - SKEW).isoformat(), "to": at(day + 10 + SKEW).isoformat(),
+                        "reason": "overlapping boots", "boots": sorted(ids[:2])}
+
+
+def test_two_machines_under_one_host_name_place_nothing_in_their_interleaved_range():
+    boots = BootIntervals()
+    for n in range(21):
+        boots.observe("host01", BOOT_A, us(100 * n), f"a{n}")           # one machine: 0 s to 2000 s
+        boots.observe("host01", BOOT_B, us(100 * n + 50), f"b{n}")      # the other: 50 s to 2050 s
+    for seconds in range(-100, 2200, 5):
+        assert placed(boots, seconds) is None, seconds
+    # a short boot of a second machine inside a long one: nothing inside it, the long boot outside it
+    nested = BootIntervals()
+    for seconds, boot_id in ((0, BOOT_A), (10_000, BOOT_A), (4000, BOOT_B), (4500, BOOT_B), (5000, BOOT_B)):
+        nested.observe("host01", boot_id, us(seconds), f"r{seconds}")
+    for seconds in range(4000 - SKEW, 5000 + SKEW + 1, 10):
+        assert placed(nested, seconds) is None, seconds
+    assert placed(nested, 2000) == BOOT_A and placed(nested, 8000) == BOOT_A
 
 
 def test_a_boot_record_that_names_no_boot_is_a_boundary():
@@ -333,7 +382,8 @@ def test_a_late_record_that_contradicts_a_sweep_placement_stops_sweep_placement_
         {"boot": BOOT_A, "from": at(300).isoformat(), "to": at(300).isoformat()}]
     assert not later.has("host.boot.id")
     # the later exec, and the late boot record itself (a system_state event) when there is one
-    assert boots.unplaced["sweep placement stopped on this host"] == 1 + sum(h["_id"].startswith("b") for h in late)
+    assert boots.unplaced["host01"]["sweep placement stopped on this host"] == 1 + sum(
+        h["_id"].startswith("b") for h in late)
     # expansion and the context pass use the whole map, which still places the later exec in boot B
     whole = BootIntervals.from_json(boots.to_json())
     again = later.model_copy(update={"fields": dict(later.fields)})
@@ -575,9 +625,13 @@ def test_the_sweep_records_the_map_and_a_resumed_hunt_reads_the_same_one(monkeyp
     sweep.run_partition("host-logs-x", None, [], Window(start=at(600), end=at(1200)), est=10)
     sweep.finalize()
     # the exec 10 s before its batch's last journald record waits for the whole map
-    assert sweep.stats["boot"] == {"recorded": 0, "from_interval": 2, "unknown": 1,
-                                   "unknown_reasons": {"not well inside exactly one boot": 1},
-                                   "sweep_conflicts": [], "sweep_conflicts_total": 0}
+    edge = "between boots or near a boot's first or last record"
+    assert sweep.stats["boot"] == {"recorded": 0, "from_interval": 2, "unknown": 1, "unknown_reasons": {edge: 1},
+                                   "sweep_conflicts": [], "sweep_conflicts_total": 0,
+                                   "hosts": [{"host": "host01", "unplaced": {edge: 1}, "blind": [], "blind_total": 0,
+                                              "nameless_boundaries": 0, "unclocked_records": 0,
+                                              "sweep_conflicts": 0}],
+                                   "hosts_total": 1}
     assert not [r for r in sweep.partial_reasons if r.startswith("boot placement:")]
     recorded = sweep.boots.to_json()
     assert recorded["hosts"]["host01"]["boots"][0]["last_ref"] == "j3"
@@ -621,15 +675,16 @@ def test_ten_thousand_boundaries_on_one_host_place_by_bisect():
 
 
 def _reference(boots, host, when):
-    """The placement rule stated directly, one scan per time: inside exactly one merged interval of a single boot
-    by the skew, more than the skew from every other interval and every boundary."""
-    skew = boots.skew_us
-    near = [item for item in boots._intervals(host) if item[0] - skew <= when <= item[1] + skew]
-    if len(near) != 1 or len(near[0][2]) != 1 or not near[0][0] + skew <= when <= near[0][1] - skew:
+    """The placement rule stated directly, one scan per time: at least the skew inside one boot's span, more than
+    the skew from every other boot's span and every boundary."""
+    skew, spans = boots.skew_us, boots.spans.get(host, {})
+    inside = [boot for boot, span in spans.items() if span.first[0] + skew <= when <= span.last[0] - skew]
+    near = [boot for boot, span in spans.items() if span.first[0] - skew <= when <= span.last[0] + skew]
+    if len(inside) != 1 or near != inside:
         return None
     if any(abs(when - at) <= skew for at, _ref in boots.boundaries.get(host, ())):
         return None
-    return near[0][2][0]
+    return inside[0]
 
 
 def test_the_bisect_index_agrees_with_the_rule_stated_directly():
@@ -649,6 +704,50 @@ def test_the_bisect_index_agrees_with_the_rule_stated_directly():
         for when in probes:
             found = boots.boot_at("host01", when)
             assert (None if found is None else found[0]) == _reference(boots, "host01", when), (trial, when)
+
+
+def test_unplaced_events_say_why():
+    boots = two_boots()
+    boots.boundary("host01", us(600), "sb1")
+    boots.observe("host01", BOOT_C, us(1500), "c0")
+    boots.observe("host01", BOOT_C, us(1600), "c1")
+    events = [ev("process_exec", at(500), process__pid=7), aev("process_exec", at(500), host="host02"),
+              aev("process_exec", at(600)), aev("process_exec", at(1050)), aev("process_exec", at(1550)),
+              aev("process_exec", at(300))]
+    assert boots.fill(events) == {"no host-clock time": 1, "no boot observed on this host": 1,
+                                  "near a boot record that names no boot": 1,
+                                  "between boots or near a boot's first or last record": 1,
+                                  "overlapping boots": 1}
+    assert boot(events[-1]) == BOOT_A
+
+
+def _sweep_one(monkeypatch, records):
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, records))
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": ["host-logs-x"]}, "d", "t")
+    sweep = sw.Sweep(repo, _Client(), "h1", Window(start=at(0), end=at(2400)), {"host-logs-x": None})
+    sweep.run_partition("host-logs-x", None, [], Window(start=at(0), end=at(2400)), est=10)
+    sweep.finalize()
+    return sweep
+
+
+def test_the_sweep_names_each_boot_blind_host_its_ranges_and_reasons(monkeypatch):
+    sweep = _sweep_one(monkeypatch, [
+        journal("a0", 0, BOOT_A), journal("a1", 1010, BOOT_A), journal("b0", 1000, BOOT_B), journal("b1", 2000, BOOT_B),
+        *exec_hits(500, 1), *exec_hits(1005, 2, pid=701), system_boot(1500, 3),
+        journal("u0", 100, BOOT_A, host="host02", realtime=False), *exec_hits(100, 4, host="host02")])
+    overlap = {"from": at(1000 - SKEW).isoformat(), "to": at(1010 + SKEW).isoformat(), "reason": "overlapping boots",
+               "boots": sorted([BOOT_A, BOOT_B])}
+    assert sweep.stats["boot"]["hosts"] == [
+        {"host": "host01", "unplaced": {"near a boot record that names no boot": 1, "overlapping boots": 1},
+         "blind": [overlap], "blind_total": 1, "nameless_boundaries": 1, "unclocked_records": 0,
+         "sweep_conflicts": 0},
+        {"host": "host02", "unplaced": {"no boot observed on this host": 1}, "blind": [], "blind_total": 0,
+         "nameless_boundaries": 0, "unclocked_records": 1, "sweep_conflicts": 0}]
+    assert sweep.stats["boot"]["hosts_total"] == 2
+    assert sweep.stats["boot"]["from_interval"] == 1
 
 
 def test_a_contradicted_sweep_placement_is_reported_with_the_sweep(monkeypatch):

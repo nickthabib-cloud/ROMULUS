@@ -9,6 +9,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
 from romulus.evidence.auditd import (
     AT_FDCWD,
@@ -177,7 +178,10 @@ BOOT_EDGE_SKEW = timedelta(seconds=30)
 BOOT_INTERVAL_ORIGIN = "#derived:boot-interval"
 # Why an event without a boot id was not placed.
 UNPLACED_NO_CLOCK = "no host-clock time"
-UNPLACED_OUTSIDE = "not well inside exactly one boot"
+UNPLACED_NO_BOOT = "no boot observed on this host"
+UNPLACED_OVERLAP = "overlapping boots"
+UNPLACED_BOUNDARY = "near a boot record that names no boot"
+UNPLACED_EDGE = "between boots or near a boot's first or last record"
 UNPLACED_STOPPED = "sweep placement stopped on this host"
 _US = timedelta(microseconds=1)
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -221,6 +225,29 @@ def _without_zones(pieces: list[tuple[int, int, str]], centres: list[int], radiu
     return out
 
 
+def _merge_zones(zones: list[tuple[int, int, frozenset[str]]]) -> list[tuple[int, int, frozenset[str]]]:
+    """Closed ranges (first, last, boots) sorted by first, with ranges that meet or touch merged."""
+    out: list[tuple[int, int, frozenset[str]]] = []
+    for lo, hi, boots in zones:
+        if out and lo <= out[-1][1] + 1:
+            out[-1] = (out[-1][0], max(out[-1][1], hi), out[-1][2] | boots)
+        else:
+            out.append((lo, hi, boots))
+    return out
+
+
+@dataclass
+class _HostIndex:
+    """One host's placeable times as sorted disjoint closed ranges (first µs, last µs, boot) with their first
+    times for bisection; the overlaps of two or more boots' spans widened by the skew (first µs, last µs, boots),
+    sorted and merged; and the host's boundary times, sorted."""
+    starts: list[int]
+    segments: list[tuple[int, int, str]]
+    overlap_starts: list[int]
+    overlaps: list[tuple[int, int, frozenset[str]]]
+    boundaries: list[int]
+
+
 @dataclass
 class _Span:
     """One boot's observations on one host: the earliest and latest as (time in µs, record id), their count, and
@@ -242,9 +269,10 @@ class BootIntervals:
     A boot id belongs to one boot, and a host runs one boot at a time, so a time well inside one boot's span belongs
     to that boot. An event without a boot id is placed only by its own host-clock time, and only when that is at
     least BOOT_EDGE_SKEW inside exactly one span of its host, and at least that far from every other span and every
-    boundary. Spans of two boots that overlap place nothing anywhere inside them. A time in a gap between boots,
-    near an edge, inside overlapping spans, on a host with no span, or an event without a host-clock time stays
-    unknown: never guessed.
+    boundary. Where two boots' spans overlap (a clock step at a reboot, or two machines under one host name),
+    nothing places in the overlap widened by the skew; each boot still places outside it, and the overlap is
+    listed per host (`blind`). A time in a gap between boots, near an edge, inside an overlap, on a host with no
+    span, or an event without a host-clock time stays unknown: never guessed, and two recorded boots never merge.
 
     The sweep builds the map batch by batch and places each batch's events with what it has read so far
     (`fill(..., incremental=True)`). A record read later can still refuse a time placed earlier: a boot record
@@ -259,14 +287,13 @@ class BootIntervals:
         self.boundaries: dict[str, set[tuple[int, str]]] = {}
         # Per host: records that named a boot or bounded one but carried no host-clock time.
         self.unclocked: dict[str, int] = {}
-        # Incremental (sweep) placement: why events were not placed; per host the placed times as
+        # Incremental (sweep) placement: per host, why events were not placed; the placed times as
         # {first µs of the placeable range they fell in: (boot, earliest, latest)}; ranges a later map refused.
-        self.unplaced: Counter[str] = Counter()
+        self.unplaced: dict[str, Counter[str]] = {}
         self._placed: dict[str, dict[int, tuple[str, int, int]]] = {}
         self.conflicts: dict[str, list[tuple[str, int, int]]] = {}
-        # Per host, until it is observed again: the times that place, as sorted disjoint closed ranges
-        # (first µs, last µs, boot), and their first times for bisection.
-        self._segments: dict[str, tuple[list[int], list[tuple[int, int, str]]]] = {}
+        # Per host, until it is observed again: its placement index.
+        self._segments: dict[str, _HostIndex] = {}
 
     def __bool__(self) -> bool:
         return bool(self.spans)
@@ -308,69 +335,95 @@ class BootIntervals:
         else:
             self.boundary(event.host, when, event.raw[0].native_id)
 
-    def _intervals(self, host: str) -> list[tuple[int, int, list[str]]]:
-        """The host's boot spans in time order as (start, end, boots). Spans that overlap are one interval naming
-        every boot in it: records of two boots at the same times mean a clock step or two hosts under one name,
-        so no time inside it is placed."""
-        out: list[tuple[int, int, list[str]]] = []
-        for boot, span in sorted(self.spans.get(host, {}).items(), key=lambda item: (item[1].first, item[0])):
-            if out and span.first[0] <= out[-1][1]:
-                start, end, boots = out[-1]
-                out[-1] = (start, max(end, span.last[0]), [*boots, boot])
-            else:
-                out.append((span.first[0], span.last[0], [boot]))
-        return out
-
-    def _index(self, host: str) -> tuple[list[int], list[tuple[int, int, str]]]:
-        """The host's placeable times as sorted disjoint closed ranges (first µs, last µs, boot), built once per
-        change to the host's observations: each single-boot interval shrunk by the skew at both ends, kept more
-        than the skew from its neighbours, with every time within the skew of a boundary removed. Built in
-        O((boots + boundaries) log) so that placing an event is one bisection, however many boots and boundaries
-        a host has. Rebuilding checks the sweep's earlier placements on the host against the new ranges."""
+    def _index(self, host: str) -> _HostIndex:
+        """The host's placement index, built once per change to the host's observations in
+        O((boots + boundaries) log), so that placing an event is one bisection however many boots and boundaries
+        the host has. A time places in boot b when it is at least the skew inside b's span and more than the skew
+        from every other boot's span and every boundary: so two boots' spans that overlap refuse only their overlap
+        widened by the skew, and each boot still places outside it. Rebuilding checks the sweep's earlier
+        placements on the host against the new ranges."""
         cached = self._segments.get(host)
         if cached is not None:
             return cached
-        skew, intervals = self.skew_us, self._intervals(host)
+        skew, spans = self.skew_us, self.spans.get(host, {})
+        # Sweep the spans widened by the skew: a stretch covered by exactly one boot's widened span may place in
+        # that boot, inside its span shrunk by the skew. A stretch where two or more boots' own spans meet is an
+        # overlap.
+        points: dict[int, list[tuple[int, str]]] = defaultdict(list)
+        for boot, span in spans.items():
+            points[span.first[0] - skew].append((1, boot))
+            points[span.last[0] + skew + 1].append((-1, boot))
+            points[span.first[0]].append((2, boot))
+            points[span.last[0] + 1].append((-2, boot))
+        near: set[str] = set()
+        inside: set[str] = set()
         pieces: list[tuple[int, int, str]] = []
-        for i, (start, end, boots) in enumerate(intervals):
-            if len(boots) != 1:
-                continue
-            lo, hi = start + skew, end - skew
-            if i > 0:
-                lo = max(lo, intervals[i - 1][1] + skew + 1)
-            if i + 1 < len(intervals):
-                hi = min(hi, intervals[i + 1][0] - skew - 1)
-            if lo <= hi:
-                pieces.append((lo, hi, boots[0]))
-        segments = _without_zones(pieces, sorted({at for at, _ref in self.boundaries.get(host, ())}), skew)
-        index = self._segments[host] = ([lo for lo, _hi, _boot in segments], segments)
+        zones: list[tuple[int, int, frozenset[str]]] = []
+        xs = sorted(points)
+        for x, nxt in pairwise(xs):
+            for change, boot in points[x]:
+                group = near if abs(change) == 1 else inside
+                (group.add if change > 0 else group.discard)(boot)
+            if len(near) == 1:
+                boot = next(iter(near))
+                lo, hi = max(x, spans[boot].first[0] + skew), min(nxt - 1, spans[boot].last[0] - skew)
+                if lo <= hi:
+                    if pieces and pieces[-1][2] == boot and pieces[-1][1] + 1 == lo:
+                        pieces[-1] = (pieces[-1][0], hi, boot)
+                    else:
+                        pieces.append((lo, hi, boot))
+            if len(inside) > 1:
+                zones.append((x - skew, nxt - 1 + skew, frozenset(inside)))
+        centres = sorted({at for at, _ref in self.boundaries.get(host, ())})
+        segments = _without_zones(pieces, centres, skew)
+        overlaps = _merge_zones(zones)
+        index = self._segments[host] = _HostIndex([lo for lo, _hi, _boot in segments], segments,
+                                                  [lo for lo, _hi, _boots in overlaps], overlaps, centres)
         self._recheck(host, index)
         return index
 
-    def _recheck(self, host: str, index: tuple[list[int], list[tuple[int, int, str]]]) -> None:
+    def _recheck(self, host: str, index: _HostIndex) -> None:
         """Each range of earlier incremental placements on the host must still lie in one placeable range of its
         boot. One that does not is a sweep conflict: the whole map would not have placed some of it there."""
         placed = self._placed.get(host)
         if not placed:
             return
-        starts, segments = index
         kept: dict[int, tuple[str, int, int]] = {}
         for boot, lo, hi in placed.values():
-            i = bisect_right(starts, lo) - 1
-            if i >= 0 and segments[i][2] == boot and hi <= segments[i][1]:
-                old = kept.get(starts[i])
-                kept[starts[i]] = (boot, lo, hi) if old is None else (boot, min(old[1], lo), max(old[2], hi))
+            i = bisect_right(index.starts, lo) - 1
+            if i >= 0 and index.segments[i][2] == boot and hi <= index.segments[i][1]:
+                old = kept.get(index.starts[i])
+                kept[index.starts[i]] = (boot, lo, hi) if old is None else (boot, min(old[1], lo), max(old[2], hi))
             else:
                 self.conflicts.setdefault(host, []).append((boot, lo, hi))
         self._placed[host] = kept
 
     def _segment_at(self, host: str, when_us: int) -> tuple[int, str] | None:
         """(first µs of the placeable range, boot) the host's time falls in, or None."""
-        starts, segments = self._index(host)
-        i = bisect_right(starts, when_us) - 1
-        if i < 0 or when_us > segments[i][1]:
+        index = self._index(host)
+        i = bisect_right(index.starts, when_us) - 1
+        if i < 0 or when_us > index.segments[i][1]:
             return None
-        return starts[i], segments[i][2]
+        return index.starts[i], index.segments[i][2]
+
+    def why_not(self, host: str, when_us: int) -> str:
+        """Why the host's time places in no boot (for a time that does not)."""
+        index = self._index(host)
+        if not self.spans.get(host):
+            return UNPLACED_NO_BOOT
+        i = bisect_right(index.overlap_starts, when_us) - 1
+        if i >= 0 and when_us <= index.overlaps[i][1]:
+            return UNPLACED_OVERLAP
+        j = bisect_left(index.boundaries, when_us - self.skew_us)
+        if j < len(index.boundaries) and index.boundaries[j] <= when_us + self.skew_us:
+            return UNPLACED_BOUNDARY
+        return UNPLACED_EDGE
+
+    def blind(self, host: str) -> list[dict]:
+        """The host's ranges inside boot spans where nothing places because two or more boots overlap there
+        (a clock step at a reboot, or two machines under one host name), widened by the skew."""
+        return [{"from": _iso(lo), "to": _iso(hi), "reason": UNPLACED_OVERLAP, "boots": sorted(boots)}
+                for lo, hi, boots in self._index(host).overlaps]
 
     def boot_at(self, host: str, when_us: int) -> tuple[str, _Span] | None:
         """The one boot this host's time falls in, with its span, or None (see the class)."""
@@ -399,7 +452,7 @@ class BootIntervals:
             derived = current is not None and current.origin.endswith(BOOT_INTERVAL_ORIGIN)
             if current is not None and current.value not in (None, "") and not (rederive and derived):
                 continue
-            when, found, reason = host_clock_us(event), None, UNPLACED_OUTSIDE
+            when, found = host_clock_us(event), None
             if incremental:
                 self._index(event.host)          # current, so the host's earlier placements have been rechecked
             if when is None:
@@ -408,8 +461,11 @@ class BootIntervals:
                 reason = UNPLACED_STOPPED
             else:
                 found = self._segment_at(event.host, when)
+                reason = None if found is not None else self.why_not(event.host, when)
             if found is None:
                 reasons[reason] += 1
+                if incremental:
+                    self.unplaced.setdefault(event.host, Counter())[reason] += 1
                 if derived:
                     del event.fields["host.boot.id"]
                 continue
@@ -420,8 +476,6 @@ class BootIntervals:
                 placed = self._placed.setdefault(event.host, {})
                 old = placed.get(start)
                 placed[start] = (boot, when, when) if old is None else (boot, min(old[1], when), max(old[2], when))
-        if incremental:
-            self.unplaced.update(reasons)
         return reasons
 
     def conflict_list(self) -> list[dict]:
@@ -443,6 +497,9 @@ class BootIntervals:
             entry = hosts[host] = {"boots": [span_json(boot, span) for boot, span in spans],
                                    "boundaries": [{"at": _iso(at), "ref": ref}
                                                   for at, ref in sorted(self.boundaries.get(host, ()))]}
+            blind = self.blind(host)
+            if blind:
+                entry["blind"] = blind
             if self.unclocked.get(host):
                 entry["unclocked_records"] = self.unclocked[host]
             if self.conflicts.get(host):
