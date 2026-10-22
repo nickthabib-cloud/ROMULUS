@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.correlation import StageMissing, canon_ip, external
+from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
@@ -285,6 +285,7 @@ class ArkimeSshReverseShellTag(Playbook):
     shape of the encrypted session; ROMULUS does not reproduce or verify the heuristic. It is reported like an
     IDS alert: a vendor detection with its own false-positive rate, a lead to check, never proof."""
     id = "net.arkime_ssh_reverse_shell_tag"
+    version = "2"
     title = "Arkime's heuristic tagged an SSH session as a possible reverse shell"
     kind = "aggregate"
     anchor_class = "network_observation"
@@ -298,6 +299,7 @@ class ArkimeSshReverseShellTag(Playbook):
         "the rule reports a tag that Arkime's heuristic applies; sessions the heuristic does not recognise, and "
         "sensors where it is not enabled, carry no tag, so absence proves nothing")
     TAG = "ssh-reverse-shell"
+    PAIR_CONNS_CAP = 10_000      # SSH connections remembered per pair for the untagged count (a lower bound above it)
     benign = (("interactive SSH sessions whose traffic shape resembles the heuristic's pattern (port forwarding, "
                "tools that open a channel back to the client)"), "the heuristic's own false positives")
     next_checks = ("the SSH login and the commands run on both ends around the session (host audit records)",
@@ -306,7 +308,11 @@ class ArkimeSshReverseShellTag(Playbook):
         "behavior": "Arkime's capture tagged an SSH session 'ssh-reverse-shell'",
         "telemetry": "Arkime 6.x session tags (arkime.tags) as net_session; present in the lab profile",
         "fidelity": "vendor heuristic over encrypted-traffic shape; neither the shell nor its direction is observed",
-        "benign_and_cost": "the heuristic's false positives; one finding per (client, server, server port)",
+        "benign_and_cost": "the heuristic's false positives, notably interactive administration between internal "
+                           "hosts; one finding per (client, server, server port). The claim states the session's own "
+                           "context so the analyst can weigh the tag: whether each end is internal or public, the SSH "
+                           "software both ends announced and the HASSH values, the bytes each way, and how many other "
+                           "SSH connections between the same pair Arkime recorded without the tag",
         "query_cost": "none beyond the sweep",
         "next_pivot": "host audit records of the SSH login and the processes on both ends",
         "adds": "no other rule reads Arkime's tags; the session rules see only duration, timing and fingerprints",
@@ -320,6 +326,7 @@ class ArkimeSshReverseShellTag(Playbook):
         self._seen: set[str] = set()
         self.groups: dict[tuple, list[TypedEvent]] = defaultdict(list)
         self.info: dict[tuple, dict] = {}
+        self.ssh_conns: dict[tuple, set[str]] = defaultdict(set)    # every SSH connection of a pair, tagged or not
 
     def consume(self, events):
         for e in self.applicable([e for e in events if e.id not in self._seen]):
@@ -328,17 +335,77 @@ class ArkimeSshReverseShellTag(Playbook):
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
-            tags = e.get("arkime.tags")
-            if self.TAG not in (tags if isinstance(tags, list) else [tags]):
-                continue
             key = (str(e.get("source.ip")), str(e.get("destination.ip")), str(e.get("destination.port")))
-            g = self.info.setdefault(key, {"records": 0, "conns": set(), "first": e.ts, "last": e.ts})
+            protocols = e.get("network.protocols")
+            if "ssh" in (protocols if isinstance(protocols, list) else [protocols]):
+                conns = self.ssh_conns[key]
+                if len(conns) < self.PAIR_CONNS_CAP:
+                    conns.add(self._conn_key(e))
+            tags = e.get("arkime.tags")
+            tags = tags if isinstance(tags, list) else [tags]
+            if self.TAG not in tags:
+                continue
+            g = self.info.setdefault(key, {"records": 0, "conns": set(), "first": e.ts, "last": e.ts, "c2s": 0,
+                                           "s2c": 0, "versions": set(), "hassh": set(), "hassh_server": set(),
+                                           "tags": set(), "end": None})
             g["records"] += 1
             g["conns"].add(self._conn_key(e))
             g["first"], g["last"] = min(g["first"], e.ts), max(g["last"], e.ts)
+            end = _epoch(e.get("flow.end"))
+            if end is not None:
+                g["end"] = end if g["end"] is None else max(g["end"], end)
+            for name, side in (("source.bytes", "c2s"), ("destination.bytes", "s2c")):
+                value = e.get(name)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    g[side] += value
+            for name, bucket in (("ssh.version", "versions"), ("ssh.hassh", "hassh"),
+                                 ("ssh.hassh_server", "hassh_server")):
+                value = e.get(name)
+                g[bucket].update(v for v in (value if isinstance(value, list) else [value]) if isinstance(v, str))
+            g["tags"].update(t for t in tags if isinstance(t, str) and t != self.TAG)
             if len(self.groups[key]) < EXAMPLE_LIMIT:
                 self.groups[key].append(e)
         return []
+
+    @staticmethod
+    def _scope(src: str, dst: str) -> str:
+        """Where the two ends sit, by the configured internal ranges ('' when either is not a routable address)."""
+        client, server = canon_ip(src), canon_ip(dst)
+        if not (routable_remote(client) and routable_remote(server)):
+            return ""
+        if not external(client) and not external(server):
+            return " Both ends are internal addresses."
+        if external(client) and external(server):
+            return " Both ends are public addresses."
+        if external(server):
+            return f" The client {src} is internal and the server {dst} is a public address."
+        return f" The client {src} is a public address and the server {dst} is internal."
+
+    def _context(self, key: tuple, g: dict) -> str:
+        """The session's own context, stated beside the tag: address scope, bytes, announced software,
+        fingerprints, other tags, and the pair's untagged SSH connections (a denominator for the heuristic)."""
+        src, dst, port = key
+        text = self._scope(src, dst)
+        span = (g["end"] - g["first"].timestamp()) if g["end"] is not None else None
+        text += (f" The tagged record(s) carry {g['c2s']} bytes from the client and {g['s2c']} from the server"
+                 + (f" over {span:.0f} s." if span is not None else "."))
+        if g["versions"]:
+            text += (" SSH software the two ends announced (self-reported; Arkime does not say which end sent which): "
+                     + ", ".join(f"'{v}'" for v in sorted(g["versions"])) + ".")
+        prints = [f"client HASSH {', '.join(sorted(g['hassh']))}" if g["hassh"] else "",
+                  f"server HASSH {', '.join(sorted(g['hassh_server']))}" if g["hassh_server"] else ""]
+        if any(prints):
+            text += f" Fingerprints: {'; '.join(p for p in prints if p)}."
+        if g["tags"]:
+            text += f" Other Arkime tags on these records: {', '.join(sorted(g['tags']))}."
+        known = self.ssh_conns.get(key, set())
+        others = len(known - g["conns"])
+        at_least = "at least " if len(known) >= self.PAIR_CONNS_CAP else ""
+        text += (f" Arkime recorded {at_least}{others} other SSH connection(s) from {src} to {dst} port {port} without "
+                 "the tag "
+                 "in the window." if others else
+                 f" Arkime recorded no other SSH connection from {src} to {dst} port {port} in the window.")
+        return text
 
     @staticmethod
     def _conn_key(e: TypedEvent) -> str:
@@ -352,7 +419,7 @@ class ArkimeSshReverseShellTag(Playbook):
             claim = (f"Arkime's heuristic tagged {g['records']} session record(s) of {len(g['conns'])} connection(s) "
                      f"from {src} to {dst} port {port} '{self.TAG}' ({g['first'].isoformat()} – "
                      f"{g['last'].isoformat()}). This is Arkime's own detection from the traffic shape, like an IDS "
-                     f"alert; it does not show that a shell ran.")
+                     f"alert; it does not show that a shell ran.") + self._context(key, g)
             out.append(Match(self.id, claim, self.claim_type, evs,
                              [pf(evs[0], "arkime.tags"), pf(evs[0], "source.ip"), pf(evs[0], "destination.ip")],
                              evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
