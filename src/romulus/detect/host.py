@@ -1111,6 +1111,7 @@ PACKAGE_TOOLS = {"dpkg", "apt", "apt-get", "aptitude", "unattended-upgrade", "un
                  "dnf", "microdnf", "zypper", "apk", "pacman", "packagekitd", "snapd"}
 CLOUD_INIT_TOOLS = {"cloud-init"}
 LOG_ROTATORS = {"logrotate"}
+SYSTEM_BIN_DIRS = ("/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/usr/lib/", "/usr/libexec/")
 # Package maintainer scripts: Debian's /var/lib/dpkg/info/<package>.<phase> and the scriptlets rpm writes to
 # /var/tmp/rpm-tmp.XXXXXX.
 _MAINTAINER_SCRIPT = re.compile(r"^/var/lib/dpkg/info/[^/]+\.(?:preinst|postinst|prerm|postrm|config)$"
@@ -1150,12 +1151,17 @@ class ProcessLineage:
         argv = event.get("process.argv") or []
         executable = event.get("process.executable")
         name = canonical(basename(str(executable))) if executable else canonical(basename(str(argv[0]))) if argv else ""
+        # Only a program installed where the package manager puts it can mark a lineage: a copy named dpkg in
+        # /tmp is not package management. Without a recorded executable no marker is given.
+        located = str(executable or "")
         script = next((str(a) for a in argv[1:] if not str(a).startswith("-")), "")
         if name in SHELLS | SCRIPT_FILE_INTERPRETERS and script:
-            name = basename(script) or name
-        marker = ("package" if name in PACKAGE_TOOLS or any(_MAINTAINER_SCRIPT.match(str(a)) for a in argv[1:3])
-                  else "cloud-init" if name in CLOUD_INIT_TOOLS
-                  else "logrotate" if name in LOG_ROTATORS else "")
+            name, located = basename(script) or name, script
+        system = located.startswith(SYSTEM_BIN_DIRS)
+        marker = ("package" if (system and name in PACKAGE_TOOLS)
+                  or any(_MAINTAINER_SCRIPT.match(str(a)) for a in argv[1:3])
+                  else "cloud-init" if system and name in CLOUD_INIT_TOOLS
+                  else "logrotate" if system and name in LOG_ROTATORS else "")
         ppid = event.get("process.ppid")
         return Ancestor(event.ts.timestamp(), ppid if isinstance(ppid, int) else None, name,
                         event.get("process.user"), marker, event.id)

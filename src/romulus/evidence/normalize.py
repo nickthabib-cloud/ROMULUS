@@ -330,7 +330,8 @@ def normalize_audit_admin_group(host: str, members: list[tuple[dict, AuditRecord
                 fields["audit.config.setting"] = fv(setting, f"{origin}.{setting}")
                 fields["audit.config.value"] = fv(record.fields[setting], f"{origin}.{setting}")
                 if "old" in record.fields:
-                    fields["audit.config.old"] = fv(record.fields["old"], f"{origin}.old")
+                    # numeric: the parser's hex decoding of `old` (meant for other record types) must not apply
+                    fields["audit.config.old"] = fv(record.raw_fields["old"][0], f"{origin}.old")
             if record.fields.get("key") not in _PLACEHOLDERS:
                 fields["audit.key"] = fv(record.fields["key"], f"{origin}.key")
             if record.fields.get("list", "").isdigit():
@@ -708,6 +709,10 @@ _UNIT_JOB_IDS = {"9d1aaa27d60140bd96365438aad20286": ("stop", "done"),
 _UNIT_JOB_TEXT = re.compile(r"^(?P<verb>Stopped|Stopping|Started|Starting|Reached target|Stopped target) "
                             r"(?P<unit>[\w@:.\\-]+\.(?:service|socket|target|timer|path|mount|scope|slice))"
                             r"(?: - .*|\.\.\.|\.)?$")
+_UNIT_EXIT = re.compile(r"^(?P<unit>[\w@:.\\-]+): (?:Main process exited, code=(?P<code>killed|dumped), "
+                        r"status=\S+|Failed with result '(?P<result>signal|core-dump)')\.?$")
+# Process names sshd runs as (OpenSSH 9.8 splits per-session work into sshd-session and sshd-auth).
+_SSHD_COMMS = ("sshd",)
 _UNIT_JOB_VERBS = {"Stopped": ("stop", "done"), "Stopping": ("stop", "begun"), "Started": ("start", "done"),
                    "Starting": ("start", "begun"), "Reached target": ("start", "done"),
                    "Stopped target": ("stop", "done")}
@@ -738,6 +743,12 @@ def normalize_journal(hit: dict) -> TypedEvent:
     base = {"journal.identifier": fv(ident, f"{nid}:event.original#journal:SYSLOG_IDENTIFIER"),
             "journal.unit": fv(j.get("_SYSTEMD_UNIT"), f"{nid}:event.original#journal:_SYSTEMD_UNIT")}
     if ident == "sshd":
+        # SYSLOG_IDENTIFIER is chosen by the writer; journald's own _COMM/_EXE/_SYSTEMD_UNIT are not. When any of
+        # them is recorded, one must name sshd, or the line came from another program.
+        trusted = [str(v) for v in (j.get("_COMM"), basename_of(j.get("_EXE")), j.get("_SYSTEMD_UNIT")) if v]
+        if trusted and not any(v.startswith(_SSHD_COMMS) or v.startswith(("ssh.service", "ssh@", "sshd@"))
+                               for v in trusted):
+            raise Skip("sshd-identified journal line written by another program")
         for rx, outcome, phase in _SSH_FORMS:
             m = rx.match(msg)
             if m:
@@ -776,6 +787,10 @@ def normalize_journal(hit: dict) -> TypedEvent:
     raise Skip(f"journal identifier {ident!r} is not normalized")
 
 
+def basename_of(path) -> str:
+    return str(path).rsplit("/", 1)[-1] if path else ""
+
+
 def _unit_job(hit: dict, j: dict, msg: str, base: dict, host: str | None) -> TypedEvent:
     """A service manager's unit job message: which unit, which job (stop/start/...) and its phase (begun, done or
     another job result). The unit comes from the structured UNIT/USER_UNIT field, or from newer systemd's message
@@ -796,6 +811,12 @@ def _unit_job(hit: dict, j: dict, msg: str, base: dict, host: str | None) -> Typ
         (job, phase), job_origin = _UNIT_JOB_IDS[j["MESSAGE_ID"]], f"{o}:MESSAGE_ID"
     elif text and unit == text.group("unit"):
         (job, phase), job_origin = _UNIT_JOB_VERBS[text.group("verb")], f"{o}:MESSAGE~systemd"
+    else:
+        # The service manager's record of a unit's main process ending by signal or core dump (no job involved).
+        exited = _UNIT_EXIT.match(msg)
+        if unit and exited and exited.group("unit") == unit:
+            job, phase = "exit", exited.group("code") or exited.group("result")
+            job_origin = f"{o}:MESSAGE~systemd"
     if not unit or not job:
         raise Skip("systemd message is not a unit job record")
     fields = {**base,

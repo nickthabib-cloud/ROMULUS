@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import ClassVar
 
-from romulus.detect.base import Match, Playbook, basename, pf
+from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
 from romulus.detect.host import Lineage, ProcessLineage, _argv_summary, _outcome_tally, lineage_phrase
 from romulus.detect.linux_argv import (
     canonical,
@@ -144,7 +144,15 @@ class _ShutdownMarkers:
             ident = _identity(e)
             if ident is not None and e.outcome != Outcome.failure:
                 name, args, _ = ident
-                if name in SHUTDOWN_COMMANDS and not ({"-c", "-k", "--help", "--wall"} & set(args)):
+                if name == "shutdown" and "-c" in args:
+                    # a cancelled scheduled shutdown is not one: drop the host's earlier shutdown requests
+                    ts = e.ts.timestamp()
+                    self.marks[e.host] = [m for m in self.marks.get(e.host, [])
+                                          if not (m[2].family == "process_exec" and ts - SHUTDOWN_WINDOW <= m[0] <= ts)]
+                    return
+                # warnings only, help, or (poweroff/halt/reboot -w) writing the wtmp record without shutting down
+                not_a_shutdown = {"-k", "--help", "--wall", "-w", "--wtmp-only"} & set(args)
+                if name in SHUTDOWN_COMMANDS and not not_a_shutdown:
                     what = f"a '{name}' command"
                 elif name == "systemctl":
                     operands = operands_after_options(args, _SYSTEMCTL_VALUES)
@@ -187,6 +195,39 @@ def _terminating(signal: str | None) -> bool:
     if signal is None:
         return True                                    # the default is SIGTERM
     return signal.upper().removeprefix("SIG") not in {s.removeprefix("SIG") for s in NON_TERMINATING}
+
+
+def _pattern_targets(operand: str, exact: bool, whole: bool) -> list[str]:
+    """Watched daemon names a pkill/killall operand selects. killall names a process exactly unless -r; pkill's
+    operand is an extended regular expression searched in the process name (with -f, in the command line, whose
+    first word is the program), anchored whole with -x. A pattern that does not compile is read literally."""
+    if exact:
+        name = basename(operand)
+        return [service_name(name)] if service_category(name) else []
+    first = operand.split()[0] if operand.split() else ""
+    candidates = {operand, first, basename(first.removeprefix("^").removesuffix("$"))}
+    try:
+        compiled = [re.compile(c) for c in candidates if c]
+    except re.error:
+        compiled = [re.compile(re.escape(c)) for c in candidates if c]
+    out = []
+    for daemon in sorted(SERVICE_CATEGORIES):
+        if any((rx.fullmatch(daemon) if whole else rx.search(daemon)) for rx in compiled):
+            out.append(daemon)
+    return out
+
+
+def kill_targets(args: list[str]) -> tuple[list[int], str | None]:
+    """(process ids, signal) of a `kill` command line; job specs (%1) and process groups (negative ids) are not
+    process ids."""
+    signal = _signal_value(args)
+    pids: list[int] = []
+    for arg in args:
+        if arg.isdigit():
+            pids.append(int(arg))
+        elif arg.startswith("-") and len(arg) > 1 and arg not in {"-s", "-n", "--signal"} and signal is None:
+            signal = arg[1:]
+    return pids, signal
 
 
 def service_requests(name: str, args: list[str]) -> list[tuple[str, str, str]]:
@@ -245,13 +286,11 @@ def service_requests(name: str, args: list[str]) -> list[tuple[str, str, str]]:
                   "--older-than", "-y", "--younger-than", "-Z", "--context", "-n"} if name == "killall" else \
                  {"-u", "--euid", "-U", "--uid", "-g", "--pgroup", "-G", "--group", "-P", "--parent", "-t",
                   "--terminal", "-s", "--signal", "--session", "-F", "--pidfile", "--ns", "--nslist"}
+        exact = name == "killall" and not ({"-r", "--regexp"} & set(args))
+        whole = name == "pkill" and ({"-x", "--exact"} & set(args))
         for operand in operands_after_options(args, values):
-            # pkill -f matches the whole command line, so its pattern's first word is the program it names
-            words = operand.removeprefix("^").removesuffix("$").split()
-            pattern = basename(words[0]) if words else ""
-            if service_category(pattern):
-                out.append(("kill", service_name(pattern), f"'{name} {operand}'"
-                            + (f" with signal {signal}" if signal else "")))
+            for daemon in _pattern_targets(operand, exact=exact, whole=bool(whole)):
+                out.append(("kill", daemon, f"'{name} {operand}'" + (f" with signal {signal}" if signal else "")))
     elif name in SHELLS and args and is_under(normalize_path(args[0]) or args[0], ("/etc/init.d", "/etc/rc.d/init.d")):
         unit = basename(args[0])
         if len(args) >= 2 and args[1] in {"stop", "force-stop"} and service_category(unit):
@@ -397,9 +436,11 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                 return
             self.evaluated += 1
             name, args, from_exe = ident
-            found = self._requests(name, args)
+            # An incomplete argv cannot settle absent tokens (--user, a later -s HUP): only the shell text, a whole
+            # argument when present, is read.
+            found = [] if argv_incomplete(e) else self._requests(name, args) + self._kill_by_pid(e, name, args)
             segments, incomplete = shell_segments(name, args)
-            if incomplete:
+            if incomplete or argv_incomplete(e):
                 self.missing_required += 1
             text_found = [f for seg in segments if seg.argv
                           for f in self._requests(canonical(basename(seg.argv[0])), seg.argv[1:])]
@@ -417,12 +458,29 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                 return
             if e.get("service.source") == "journal" and e.has("process.pid") and e.get("process.pid") != 1:
                 return              # any process can write a journal entry shaped like the service manager's
-            if job == "stop" and e.get("service.job_phase") not in {"begun"}:
-                self.stops.append(e)
+            if (job == "stop" and e.get("service.job_phase") not in {"begun"}) or job == "exit":
+                self.stops.append(e)        # "exit": the main process ended by a signal or a core dump
             elif job == "start" and e.get("service.job_phase") == "done":
                 self.starts[(e.host, name)].append(e.ts.timestamp())
         else:
             self.evaluated += 1
+
+    def _kill_by_pid(self, e: TypedEvent, name: str, args: list[str]):
+        """`kill` of a process id whose latest exec record on the host is a watched daemon."""
+        if name != "kill":
+            return []
+        pids, signal = kill_targets(args)
+        if not _terminating(signal):
+            return []
+        out = []
+        for pid in pids:
+            daemon = self.lineage.parent(e.host, pid, e.ts.timestamp())
+            if daemon is not None and service_category(daemon.name):
+                unit = service_name(daemon.name)
+                how = (f"'kill {' '.join(args)}' (pid {pid} is '{daemon.name}' by its exec record; "
+                       f"{service_category(unit)} service)")
+                out.append((f"kill:{unit}", unit, how, "high"))
+        return out
 
     @staticmethod
     def _requests(name, args):
@@ -445,18 +503,24 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         for stop in sorted(self.stops, key=lambda e: (e.ts, e.id)):
             ts = stop.ts.timestamp()
             name = str(stop.get("service.name"))
-            later = [t for t in self.starts.get((stop.host, name), ()) if t >= ts]
-            gap = min(later) - ts if later else None
-            if gap is not None and gap <= RESTART_SECONDS:
-                restarts += 1
-                continue
+            gap = self._restart_gap(stop.host, name, ts)
+            # A record that follows a command naming the unit is that command's evidence, whatever came after it;
+            # the command's own restart gap is judged with the command.
             linked = [i for i in commands_by_unit.get((stop.host, name), ())
                       if -COMMAND_LINK_AFTER <= ts - i.ts <= COMMAND_LINK_BEFORE]
             if linked:
                 for item in linked:
                     item.linked.append(stop)
                 continue
-            if stop.outcome == Outcome.failure:
+            killed = stop.get("service.job") == "exit"
+            if gap is not None and gap <= RESTART_SECONDS and not killed:
+                restarts += 1
+                continue
+            if killed:
+                kind = "killed_restarted" if gap is not None and gap <= RESTART_WINDOW else "killed"
+                if kind == "killed" and self.markers.near(stop.host, ts):
+                    kind = "shutdown"
+            elif stop.outcome == Outcome.failure:
                 kind = "failed"
             elif gap is not None and gap <= RESTART_WINDOW:
                 kind = "restarted"
@@ -474,12 +538,18 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                                    "were restarts and are not reported")
         return out
 
+    def _restart_gap(self, host: str | None, name: str, ts: float) -> float | None:
+        later = [t for t in self.starts.get((host, name), ()) if t >= ts]
+        return min(later) - ts if later else None
+
     def _describe_commands(self, key, items: list[_Item]) -> Match:
         host, actor, _lineage_kind, form = key
         notes: list[str] = []
         commands = _unique(i.event for i in items)
         linked = sorted(_unique(e for i in items for e in i.linked), key=lambda e: (e.ts, e.id))
         first = items[0]
+        restart_gap = (self._restart_gap(host, first.target, first.ts)
+                       if form.split(":")[0] in {"stop", "kill", "disable", "mask"} else None)
         text = any(i.from_text for i in items)
         hows = list(dict.fromkeys(i.form for i in items))
         claim = (f"On {host}, account '{actor}' ran {len(commands)} command(s)"
@@ -492,8 +562,15 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                       "by unit name and time, not by process).")
         elif form.split(":")[0] in {"stop", "kill"}:
             claim += " No service manager record of the unit stopping was linked, so whether it stopped is not established."
+        if restart_gap is not None and restart_gap <= RESTART_WINDOW:
+            claim += (f" The service manager recorded '{first.target}' started again {restart_gap:.0f} s after the "
+                      "command (a short gap).")
         proposed = max((i.lane for i in items), key=lambda lane: lane == "high")
         lane = self._command_lane(items, proposed, notes)
+        if (restart_gap is not None and restart_gap <= RESTART_WINDOW and lane == "high"
+                and not any(i.lineage.kind == "web" for i in items)):
+            lane = "lead"
+            notes.append(f"lane lowered: the unit started again within {RESTART_WINDOW:.0f} s")
         marker = self.markers.near(host, first.ts)
         if marker and lane == "high" and next((i.lineage for i in items if i.lineage.kind == "web"), None) is None:
             lane = "lead"
@@ -527,7 +604,15 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                  f"least {count} time(s) ({stops[0].ts.isoformat()} – {stops[-1].ts.isoformat()}; {listed}); no "
                  f"command naming it was linked within {COMMAND_LINK_BEFORE:.0f} s before.")
         lane, notes, cited = "high", [], list(stops[:CITE])
-        if kind == "failed":
+        if kind in {"killed", "killed_restarted"}:
+            claim = claim.replace(" stopping at least", " ending at least")
+            claim += (" The records show its main process killed by a signal or ending in a core dump (not a "
+                      "requested stop); the sender of a signal is not recorded.")
+            if kind == "killed_restarted":
+                gap = min(g for _s, _k, g in entries if g is not None)
+                claim += f" It was started again {gap:.0f} s later."
+                lane = "lead"
+        elif kind == "failed":
             claim += (" The records report a result other than success (the unit failed, or the stop job did not "
                       "complete), so this may be a crash rather than a requested stop.")
             lane = "lead"
@@ -582,6 +667,9 @@ def auditctl_requests(args: list[str]) -> list[tuple[str, str, str]]:
             out.append(("delete_watch", f"remove the file watch on {value} (-W){lock}", "lead"))
         elif key == "--signal" and value and value.upper().removeprefix("SIG") in {"TERM", "STOP", "KILL", "QUIT"}:
             out.append(("stop_daemon", f"signal the audit daemon to stop (--signal {value})", "high"))
+        elif key in {"a", "A"} and value and "never" in value.split(","):
+            # a never-action rule ahead of the others stops the kernel recording whatever it matches
+            out.append(("suppress_rule", f"add a rule that suppresses auditing (-{key} {value})", "high"))
         elif key == "r" and value and value.isdigit() and int(value) > 0:
             out.append(("rate_limit", f"limit audit messages to {value} per second (-r)", "lead"))
     return out
@@ -640,8 +728,10 @@ class AuditRulesTamper(_TamperRule):
                 return
             self.evaluated += 1
             name, args, _from_exe = ident
-            found = self._requests(name, args, e.get("process.cwd"))
+            # an incomplete argv cannot settle absent tokens (a later -h, a lost operand); shell text is whole
+            found = [] if argv_incomplete(e) else self._requests(name, args, e.get("process.cwd"))
             segments, incomplete = shell_segments(name, args)
+            incomplete = incomplete or argv_incomplete(e)
             text_found = []
             for seg in segments:
                 if seg.argv:
@@ -1060,8 +1150,10 @@ class LogOrHistoryClearing(_TamperRule):
         self.evaluated += 1
         name, args, _from_exe = ident
         cwd = e.get("process.cwd")
-        found = log_requests(name, args, cwd)
+        # an incomplete argv cannot settle absent tokens (tee -a, find filters, truncate's size); shell text is whole
+        found = [] if argv_incomplete(e) else log_requests(name, args, cwd)
         segments, incomplete = shell_segments(name, args)
+        incomplete = incomplete or argv_incomplete(e)
         text_found = []
         for seg in segments:
             text_found += _history_assignments(seg.assignments)

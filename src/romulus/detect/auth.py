@@ -21,12 +21,13 @@ id) or a kernel file-change record shows the change.
 from __future__ import annotations
 
 import heapq
+import re
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
-from romulus.detect.base import Match, Playbook, basename, pf
+from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
 from romulus.detect.host import (
     Lineage,
     ProcessLineage,
@@ -46,6 +47,9 @@ from romulus.evidence.typed import Outcome, TypedEvent
 
 SSHD_ATTEMPT_PHASES = {"authentication", "user_lookup", "preauth_disconnect", "max_attempts"}
 SETTLE_SECONDS = 150.0          # sshd LoginGraceTime defaults to 120 s: every record of a connection is in by then
+GRACE_SECONDS = 120.0           # one connection spans at most sshd's login grace time ...
+MAX_TRIES = 6                   # ... and at most sshd's default MaxAuthTries failed lines; beyond either, a reused
+#                                 source port is a new connection
 CITE = 10                       # attempt records cited per finding; claims give exact totals
 PRUNE_EVERY = 300.0             # seconds of event time between sweeps of idle sliding windows
 
@@ -81,6 +85,7 @@ class _Attempt(NamedTuple):
 
 @dataclass
 class _Connection:
+    first_ts: float = 0.0
     failed_lines: int = 0
     success: bool = False
     counted: bool = False           # a connection without "Failed" lines already gave its one attempt
@@ -132,32 +137,51 @@ class _SshAttemptStream(Playbook):
                 continue
             self.evaluated += 1
             batch.append(e)
-        for e in sorted(batch, key=lambda x: (x.ts, x.id)):
-            conn = self._conns.setdefault(self._conn_key(e), _Connection())
+        for e in self._without_duplicate_lookups(sorted(batch, key=lambda x: (x.ts, x.id))):
+            key, ts = self._conn_key(e), e.ts.timestamp()
+            failed_line = e.outcome != Outcome.success and e.get("auth.phase") == "authentication"
+            conn = self._conns.get(key)
+            if conn is None or ts - conn.first_ts > GRACE_SECONDS or (failed_line and conn.failed_lines >= MAX_TRIES):
+                conn = self._conns[key] = _Connection(first_ts=ts)
             conn.open_records += 1
             if e.outcome == Outcome.success:
                 conn.success = True
-            elif e.get("auth.phase") == "authentication":
+            elif failed_line:
                 conn.failed_lines += 1
-            ts = e.ts.timestamp()
-            heapq.heappush(self._heap, (ts, e.id, e))
+            heapq.heappush(self._heap, (ts, e.id, e, conn))
             self._latest = max(self._latest, ts)
         self._drain(self._latest - SETTLE_SECONDS)
         return []
 
+    @staticmethod
+    def _without_duplicate_lookups(batch: list[TypedEvent]) -> list[TypedEvent]:
+        """Older sshd logs an "Invalid user NAME from IP" line without a port, followed by the same attempt's
+        "Failed ... for invalid user NAME from IP port N" line: the port-less lookup is not another attempt."""
+        with_port: dict[tuple, list[float]] = defaultdict(list)
+        for e in batch:
+            if isinstance(e.get("source.port"), int):
+                with_port[(e.host, e.get("source.ip"), e.get("user.name"))].append(e.ts.timestamp())
+        out = []
+        for e in batch:
+            if e.get("auth.phase") == "user_lookup" and not isinstance(e.get("source.port"), int):
+                ts = e.ts.timestamp()
+                if any(0 <= t - ts <= 10 for t in with_port.get((e.host, e.get("source.ip"), e.get("user.name")), ())):
+                    continue
+            out.append(e)
+        return out
+
     def _drain(self, limit: float) -> None:
         while self._heap and self._heap[0][0] <= limit:
-            ts, _id, e = heapq.heappop(self._heap)
-            self._settle(ts, e)
+            ts, _id, e, conn = heapq.heappop(self._heap)
+            self._settle(ts, e, conn)
             if ts - self._last_prune >= PRUNE_EVERY:
                 self._prune(ts)
                 self._last_prune = ts
 
-    def _settle(self, ts: float, e: TypedEvent) -> None:
+    def _settle(self, ts: float, e: TypedEvent, conn: _Connection) -> None:
         key = self._conn_key(e)
-        conn = self._conns[key]
         conn.open_records -= 1
-        if conn.open_records <= 0:
+        if conn.open_records <= 0 and self._conns.get(key) is conn:
             del self._conns[key]
         if e.outcome == Outcome.success:
             self._success(ts, e)
@@ -180,7 +204,7 @@ class _SshAttemptStream(Playbook):
         return self._findings()
 
     def retained_events(self):
-        return [e for _ts, _id, e in self._heap] + self._held()
+        return [item[2] for item in self._heap] + self._held()
 
     # subclass hooks
     def _attempt(self, a: _Attempt) -> None: ...
@@ -434,6 +458,7 @@ class _Followed:
     own: int = 0
     later: list[TypedEvent] = field(default_factory=list)
     repeats: int = 1
+    invalid: bool = False
 
 
 class SshSuccessAfterFailures(_SshAttemptStream):
@@ -446,6 +471,7 @@ class SshSuccessAfterFailures(_SshAttemptStream):
     WINDOW = 1800.0              # failures counted in this many seconds before the accepted login
     SOURCE_MIN = 5               # failed attempts from the login's own source address
     ACCOUNT_MIN = 10             # failed attempts against the login's account from other source addresses
+    SPRAY_NAMES = 3              # names among the source's failures that show spraying rather than one account
     LATER = 4
     benign = ("a user who mistyped several times before succeeding",
               ("an administrator's login to an account that internet scanners are guessing from other addresses "
@@ -507,7 +533,8 @@ class SshSuccessAfterFailures(_SshAttemptStream):
         found = self.found.get(key)
         if found is None:
             self.found[key] = _Followed(success, [x.event for x in failures][-CITE:], len(failures),
-                                        {x.account for x in failures if x.account}, {x.ip for x in failures}, own)
+                                        {x.account for x in failures if x.account}, {x.ip for x in failures}, own,
+                                        invalid=any(x.valid is False for x in failures))
             return
         found.repeats += 1
         if len(found.later) < self.LATER:
@@ -538,6 +565,12 @@ class SshSuccessAfterFailures(_SshAttemptStream):
                          "failures and the login share the source address; whether one actor made both is not "
                          "established by the records.")
                 lane, confidence = "high", "high"
+                spraying = len(f.accounts) >= self.SPRAY_NAMES or f.invalid
+                if account not in f.accounts and not spraying:
+                    # e.g. a bastion's automation failing for one account while a person logs in as another
+                    claim += (f" None of the failures named '{account}', and they show neither several names nor "
+                              "invalid users, so they need not belong to this login.")
+                    lane, confidence = "lead", "medium"
             else:
                 claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when}; in "
                          f"the preceding {self.WINDOW / 60:.0f} minutes sshd recorded {f.count} failed attempt(s) "
@@ -901,10 +934,22 @@ class _Change:
     records: list[TypedEvent] = field(default_factory=list)
 
 
+_GRANT_OPS = re.compile(r"(?:^|[-:_])add(?:$|[-:_])")
+
+
 def _record_privilege(e: TypedEvent) -> str:
+    """A grant only when the tool's own operation is an addition (or the record creates the account in the group);
+    a removal, or an operation that is absent or unclear, is not read as a grant (see _record_mention)."""
     group, op = e.get("account.group"), str(e.get("account.op") or "")
-    if group in PRIVILEGED_GROUPS and ("add" in op or e.get("account.action") in {"create_user", "modify_user"}):
+    if group in PRIVILEGED_GROUPS and (_GRANT_OPS.search(op) or e.get("account.action") == "create_user"):
         return f"membership of privileged group {group}"
+    return ""
+
+
+def _record_mention(e: TypedEvent) -> str:
+    group = e.get("account.group")
+    if group in PRIVILEGED_GROUPS and not _record_privilege(e):
+        return f"names privileged group {group}"
     return ""
 
 
@@ -983,7 +1028,8 @@ class AccountOrGroupChange(Playbook):
 
     def _exec(self, e: TypedEvent) -> None:
         argv = e.get("process.argv")
-        if not isinstance(argv, list) or not argv:
+        if not isinstance(argv, list) or not argv or argv_incomplete(e):
+            # an incomplete argv cannot settle read-only flags (passwd -S) or the last operand (the login)
             self.missing_required += 1
             return
         prog = program(e)
@@ -1092,6 +1138,10 @@ class AccountOrGroupChange(Playbook):
             claim += f" Recorded: {'; '.join(_record_text(r) for r in records[:4])}."
         if privileged:
             claim += f" It requests or reports {'; '.join(privileged)}."
+        mentions = sorted({m for c in items for m in map(_record_mention, c.records) if m})
+        if mentions:
+            claim += (f" The record {'; '.join(mentions)}, but its operation does not show a membership being "
+                      "granted.")
         lineage = web or first.lineage
         phrase = lineage_phrase(lineage)
         if phrase:
