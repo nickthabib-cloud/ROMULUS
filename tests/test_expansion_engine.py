@@ -201,7 +201,7 @@ def test_budget_exhaustion_lists_every_unworked_anchor():
         repo, "h1", WINDOW, ScriptedFetcher(repo), max_source_queries=0,
     ).run()
 
-    assert result["stop_reason"] == "budget"
+    assert result["stop_reason"].startswith("budget; anchors not fully expanded: 1 unexpanded")
     assert result["unexpanded"] == ["F-anchor"]
     anchor = repo.expansion_anchors("h1")[0]
     assert anchor["status"] == "unexpanded"
@@ -527,6 +527,120 @@ def test_resume_runs_expansion_before_optional_agent_without_rerunning_sweep(tmp
     hunt_run.resume_hunt(settings, "h1")
 
     assert order == ["expansion", "agent"]
+
+
+def test_rerun_keeps_a_budget_stopped_unexpanded_anchor_unexpanded_with_its_reason():
+    repo = repo_with_anchor()
+    ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo), max_source_queries=0).run()
+    recorded = repo.expansion_anchors("h1")[0]
+    assert recorded["status"] == "unexpanded"
+    assert "source query budget exhausted" in recorded["reasons"]
+
+    resumed = ScriptedFetcher(repo)
+    summary = ExpansionEngine(repo, "h1", WINDOW, resumed).run()
+
+    anchor = repo.expansion_anchors("h1")[0]
+    assert resumed.calls == []                     # left as recorded, not re-attempted
+    assert anchor["status"] == "unexpanded"
+    assert anchor["reasons"] == recorded["reasons"]
+    assert summary["unexpanded"] == ["F-anchor"] and summary["expanded_complete"] == 0
+    # the run itself reached a fixpoint, but the hunt's expansion is still incomplete, and says why
+    assert summary["status"] == "partial"
+    assert "fixpoint" not in summary["stop_reason"]
+    assert "source query budget exhausted" in summary["stop_reason"]
+
+
+def test_budget_stop_makes_the_expansion_summary_partial_with_the_recorded_reason():
+    repo = repo_with_anchor()
+
+    summary = ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo), max_source_queries=0).run()
+
+    assert summary["status"] == "partial"
+    assert summary["stop_reason"].startswith("budget")
+    assert "1 unexpanded" in summary["stop_reason"]
+    assert "source query budget exhausted" in summary["stop_reason"]
+
+
+def test_resumed_hunt_with_recorded_unexpanded_anchor_stays_partial(tmp_path, monkeypatch):
+    settings = __import__("romulus.config", fromlist=["Settings"]).Settings(home=tmp_path, agent_mode="off")
+    repo = hunt_run.open_repo(settings)
+    repo.create_hunt("h1", {
+        "window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
+        "targets": [], "source_profiles": {}, "agent_mode": "off", "expansion": {"enabled": True},
+        "budgets": {"wall_clock_minutes": 120},
+    }, "digest", "test")
+    add_anchor(repo, "F-anchor", "web1")
+    token = repo.claim_hunt("h1", 600)["lease_owner"]
+    sweep_summary = {"finished": True, "complete": True, "partial_reasons": [], "stats": {}}
+    repo.audit("system", "hunt.sweep_summary", "h1", sweep_summary, owner_token=token)
+    repo.audit("system", "hunt.packet_summary", "h1", {"finished": True}, owner_token=token)
+    # the first run's tail: expansion stops on budget, then the hunt finishes
+    first = ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo), max_source_queries=0,
+                            owner_token=token).run()
+    hunt_run._finish(repo, "h1", {"status": "disabled", "stop_reason": "agent off"}, sweep_summary,
+                     expansion_summary=first, owner_token=token)
+    assert repo.get_hunt("h1")["execution_state"] == "partial"
+
+    monkeypatch.setattr(hunt_run, "_contracts", lambda *_args: {})
+    monkeypatch.setattr(
+        hunt_run, "_run_expansion",
+        lambda _s, repo, _client, hunt, _contracts, window, owner_token: ExpansionEngine(
+            repo, hunt["id"], window, ScriptedFetcher(repo), owner_token=owner_token).run(),
+    )
+
+    result = hunt_run.resume_hunt(settings, "h1")
+
+    hunt = hunt_run.open_repo(settings).get_hunt("h1")
+    assert result["execution_state"] == "partial" and hunt["execution_state"] == "partial"
+    assert "source query budget exhausted" in hunt["stop_reason"]
+    assert hunt_run.open_repo(settings).expansion_anchors("h1")[0]["status"] == "unexpanded"
+
+
+def test_rerun_keeps_an_expanded_partial_anchor_partial_with_its_reasons():
+    repo = repo_with_anchor()
+    ExpansionEngine(repo, "h1", WINDOW, BudgetedFetcher(repo), max_source_queries=4).run()
+    recorded = repo.expansion_anchors("h1")[0]
+    assert recorded["status"] == "expanded_partial"
+    assert any("budget" in reason for reason in recorded["reasons"])
+
+    resumed = ScriptedFetcher(repo)
+    summary = ExpansionEngine(repo, "h1", WINDOW, resumed).run()
+
+    anchor = repo.expansion_anchors("h1")[0]
+    assert resumed.calls == []
+    assert anchor["status"] == "expanded_partial"
+    assert anchor["reasons"] == recorded["reasons"]
+    assert summary["expanded_partial"] == 1 and summary["expanded_complete"] == 0
+
+
+def test_rerun_still_completes_a_pending_anchor_beside_recorded_ones():
+    repo = repo_with_anchor()
+    ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo), max_source_queries=0).run()
+    add_anchor(repo, "F-two", "web2", ts=T0 + timedelta(seconds=1))
+
+    resumed = ScriptedFetcher(repo)
+    summary = ExpansionEngine(repo, "h1", WINDOW, resumed).run()
+
+    by_id = {row["id"]: row for row in repo.expansion_anchors("h1")}
+    assert {call[0] for call in resumed.calls} == {"F-two"}
+    assert by_id["F-two"]["status"] == "expanded_complete" and by_id["F-two"]["reasons"] == []
+    assert by_id["F-anchor"]["status"] == "unexpanded"
+    assert "source query budget exhausted" in by_id["F-anchor"]["reasons"]
+    assert summary["unexpanded"] == ["F-anchor"] and summary["expanded_complete"] == 1
+
+
+def test_rerun_over_recorded_anchors_is_deterministic():
+    outcomes = []
+    for _ in range(2):
+        repo = repo_with_anchor()
+        add_anchor(repo, "F-two", "web2", ts=T0 + timedelta(seconds=1))
+        ExpansionEngine(repo, "h1", WINDOW, BudgetedFetcher(repo), max_source_queries=4).run()
+        first = stable_state(repo)
+        summary = ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo)).run()
+        summary.pop("source_queries")
+        outcomes.append((stable_state(repo), summary))
+        assert outcomes[-1][0]["anchors"] == first["anchors"]
+    assert outcomes[0] == outcomes[1]
 
 
 def test_roots_use_half_the_reserve_only_while_no_discovered_anchor_waits():

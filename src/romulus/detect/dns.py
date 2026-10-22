@@ -632,9 +632,12 @@ class DnsReverseLookupSweep(_DnsAggregate):
 
 
 # ---------------------------------------------------------------------------------------- NXDOMAIN burst
+RESOLVER_PHRASE = "it acts as a DNS server for other addresses (a resolver or forwarder)"
+
+
 class DnsNxdomainBurst(_DnsAggregate):
     id = "net.dns_nxdomain_burst"
-    version = "2"
+    version = "3"
     title = "Many NXDOMAIN answers to one client within ten minutes"
     required_fields = ()
     severity, lane = "high", "lead"
@@ -650,6 +653,8 @@ class DnsNxdomainBurst(_DnsAggregate):
     WINDOW = timedelta(minutes=10)
     MIN_BURST = 50
     TIME_CAP = 2_000_000        # NXDOMAIN times kept per client; a peak above it is a lower bound
+    SENT_CAP = 2_000_000        # NXDOMAIN answer times kept per answering server, over all its clients
+    CLIENTS_LISTED = 12
     card: ClassVar[dict] = {
         "behavior": "one client received many NXDOMAIN (name does not exist) answers within a ten-minute "
                     "interval, the shape of algorithmically generated domain lookups",
@@ -659,7 +664,10 @@ class DnsNxdomainBurst(_DnsAggregate):
         "fidelity": "direct observation of the rcode the client was sent; a deviation in volume, not proof of "
                     "malware",
         "benign_and_cost": "search-domain suffixing, stale software, DNSBL lookups, forwarders; one grouped "
-                           "finding per client with the NXDOMAIN share as denominator",
+                           "finding per client with the NXDOMAIN share as denominator. A client that itself sent DNS "
+                           "answers to other addresses in the same data is said to act as a DNS server, and its finding "
+                           "lists the clients it sent NXDOMAIN answers to in the peak interval (the original askers), "
+                           "marking those with their own finding",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the names that did resolve for the client during the burst and the connections that "
                       "followed",
@@ -689,6 +697,11 @@ class DnsNxdomainBurst(_DnsAggregate):
         self.spans: dict[str, _Span] = defaultdict(_Span)
         # client -> aligned ten-minute bucket -> its earliest NXDOMAIN records
         self.buckets: dict[str, dict[int, _Examples]] = defaultdict(dict)
+        # answering server -> client -> answer records with a recorded rcode it sent that client
+        self.served: dict[str, Counter] = defaultdict(Counter)
+        # answering server -> client -> times of the NXDOMAIN answers it sent that client (capped per server)
+        self.nx_sent: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+        self.nx_sent_total: Counter = Counter()
 
     def retained_events(self) -> list[TypedEvent]:
         return [e for buckets in self.buckets.values() for store in buckets.values() for e in store.items.values()]
@@ -713,9 +726,14 @@ class DnsNxdomainBurst(_DnsAggregate):
                 continue
             self.evaluated += 1
             self.codes[client][code] += 1
+            if server and server != client:
+                self.served[server][client] += 1
             if code != "NXDOMAIN":
                 continue
             micros = _micros(event.ts)
+            if server and server != client and self.nx_sent_total[server] < self.SENT_CAP:
+                self.nx_sent_total[server] += 1
+                self.nx_sent[server][client].append(micros)
             if len(self.times[client]) < self.TIME_CAP:
                 self.times[client].append(micros)
             names = question_names(event)
@@ -754,11 +772,45 @@ class DnsNxdomainBurst(_DnsAggregate):
                 best, start = i - j + 1, times[j]
         return best, start
 
+    def _as_server(self, address: str, start: int, bursts: set[str]) -> str:
+        """Wording for a burst client that itself answered DNS for other addresses in the same data: it acts as a
+        resolver or forwarder, so NXDOMAIN answers it received can be its upstream lookups for the clients it
+        answered. Names those clients (the original askers) with the NXDOMAIN answers it sent each in the peak
+        interval; '' when the address answered no other address."""
+        served = self.served.get(address)
+        if not served:
+            return ""
+        window = self.WINDOW // _US
+        in_peak = Counter()
+        for asker, times in self.nx_sent.get(address, {}).items():
+            n = sum(1 for t in times if start <= t < start + window)
+            if n:
+                in_peak[asker] = n
+        text = (f" {address} also appears as the answering server: it sent {sum(served.values())} DNS answer "
+                f"record(s) to {len(served)} other address(es) in the same data, so {RESOLVER_PHRASE}; NXDOMAIN "
+                f"answers it received can be its upstream lookups on those clients' behalf.")
+        if in_peak:
+            ordered = sorted(in_peak, key=lambda a: (-in_peak[a], a))
+            listed = ", ".join(f"{a}: {in_peak[a]}" + (" (it has its own finding)" if a in bursts else "")
+                               for a in ordered[:self.CLIENTS_LISTED])
+            more = f" and {len(ordered) - self.CLIENTS_LISTED} more" if len(ordered) > self.CLIENTS_LISTED else ""
+            text += (f" In the peak interval it sent {sum(in_peak.values())} NXDOMAIN answer(s) to {len(in_peak)} "
+                     f"client(s) ({listed}{more}).")
+            if not bursts & set(in_peak):
+                text += " No client it answered reached the burst threshold on its own."
+        else:
+            text += " It sent no NXDOMAIN answer in the peak interval."
+        if self.nx_sent_total[address] >= self.SENT_CAP:
+            text += " (Its sent-answer times are capped: the per-client counts are lower bounds.)"
+        return text
+
     def finalize(self):
         out = []
+        peaks = {client: self._peak(times) for client, times in self.times.items()}
+        bursts = {client for client, (peak, _start) in peaks.items() if peak >= self.MIN_BURST}
         for client in sorted(self.times):
             times = self.times[client]
-            peak, start = self._peak(times)
+            peak, start = peaks[client]
             if peak < self.MIN_BURST:
                 continue
             codes = self.codes[client]
@@ -783,6 +835,7 @@ class DnsNxdomainBurst(_DnsAggregate):
             servers = self.servers.get(client)
             if servers:
                 claim += f" Answering server(s): {_tally(Counter(dict(servers.most_common(5))))}."
+            claim += self._as_server(client, start, bursts)
             claim += (" A burst of NXDOMAIN answers is the shape of algorithmically generated domain lookups and "
                       "also of search-domain suffixing, stale software and blocklist lookups.")
             claim += " The cited records are from the peak interval."
