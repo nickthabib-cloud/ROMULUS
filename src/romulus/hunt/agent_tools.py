@@ -65,50 +65,15 @@ class HuntToolExecutor:
         }, owner_token=self.owner_token)
         self.repo.mark_expansion_link_evaluated(link_id, owner_token=self.owner_token)
 
-    def _anchor_session(self, candidate: dict) -> str | int | None:
-        sessions = {
-            event.get("process.session_id") for event in self._events(candidate["event_ids"])
-            if event.get("process.session_id") not in (None, "")
-        }
-        return next(iter(sessions)) if len(sessions) == 1 else None
-
-    def _scope_auth_result(self, result: PivotResult, session: str | int) -> PivotResult:
-        event_ids = list(getattr(result, "reach_event_ids", []) or result.event_ids)
-        kept_events = [event for event in self._events(event_ids)
-                       if event.get("process.session_id") == session]
-        kept_ids = {event.id for event in kept_events}
-        entities = {
-            (kind, value, role): EntityRef(kind=kind, value=value, role=role)
-            for event in kept_events for kind, value, role in event.entities()
-            if kind in {"host", "account", "ip", "domain"}
-        }
-        scoped = result.model_copy(update={
-            "event_ids": [event_id for event_id in result.event_ids if event_id in kept_ids],
-            "reach_event_ids": sorted(kept_ids),
-            "entities": list(entities.values()),
-            "event_summaries": [item for item in result.event_summaries if item.get("id") in kept_ids],
-            "matched_event_count": len(kept_ids),
-        })
-        return scoped
-
     def run(self, session_id: str, anchor_id: str, request, *, anchor_ts: datetime) -> PivotResult:
         candidate = self.repo.candidate(anchor_id)
         if candidate is None or candidate["hunt_id"] != self.hunt_id:
             return PivotResult(status="unsupported", reasons=["anchor finding is not in this hunt"])
         query_start = int(getattr(self.pivot, "source_queries", 0))
         link_key = {"agent_tool": request.tool}
-        anchor_session = None
         if request.tool == "auth_activity":
-            anchor_session = self._anchor_session(candidate)
-            if anchor_session is None:
-                return PivotResult(
-                    status="unsupported",
-                    reasons=["anchor has no single typed process.session_id for auth_activity"],
-                )
-            link_key["process.session_id"] = anchor_session
+            link_key["entity"] = request.arguments.entity.model_dump(mode="json")
         result = self.pivot.run(session_id, request, anchor_ts=anchor_ts)
-        if anchor_session is not None:
-            result = self._scope_auth_result(result, anchor_session)
         reach_ids = list(getattr(result, "reach_event_ids", []) or result.event_ids)
         link_type = _PIVOT_LINK_TYPES[request.tool]
         link_id = "agent-link-" + digest({

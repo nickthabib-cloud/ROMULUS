@@ -63,6 +63,39 @@ def _process_event(argv=None, *, event_id="event-1", ts=START) -> TypedEvent:
     )
 
 
+def _auth_event(event_id: str, *, host: str, account: str, session: int, boot: str) -> TypedEvent:
+    return TypedEvent(
+        id=event_id, family="auth", ts=START, host=host, outcome=Outcome.success,
+        fields={
+            "user.name": fv(account, f"{event_id}:user"),
+            "process.session_id": fv(session, f"{event_id}:session"),
+            "host.boot_id": fv(boot, f"{event_id}:boot"),
+            "auth.phase": fv("login", f"{event_id}:phase"),
+        },
+        raw=[RawRef(target="romulus-host-x", native_id=event_id, digest="d")],
+        normalizer="test@1",
+    )
+
+
+def test_auth_activity_retains_account_or_host_across_sessions_and_boots():
+    account_request = AuthActivityRequest(tool="auth_activity", arguments=AuthActivityArgs(
+        entity=EntityRef(kind="account", value="alice", role="actor"), start=START, end=END,
+    ))
+    host_request = AuthActivityRequest(tool="auth_activity", arguments=AuthActivityArgs(
+        entity=EntityRef(kind="host", value="web01", role="host"), start=START, end=END,
+    ))
+    alice_first = _auth_event("alice-first", host="web01", account="alice", session=1, boot="boot-a")
+    alice_other = _auth_event("alice-other", host="web02", account="alice", session=2, boot="boot-b")
+    bob_same_host = _auth_event("bob", host="web01", account="bob", session=1, boot="boot-c")
+
+    assert PivotExecutor._retain(account_request, alice_first)
+    assert PivotExecutor._retain(account_request, alice_other)
+    assert not PivotExecutor._retain(account_request, bob_same_host)
+    assert PivotExecutor._retain(host_request, alice_first)
+    assert PivotExecutor._retain(host_request, bob_same_host)
+    assert not PivotExecutor._retain(host_request, alice_other)
+
+
 def test_executor_counts_and_stops_actual_source_queries(monkeypatch):
     calls = []
 

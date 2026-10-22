@@ -329,7 +329,7 @@ def test_agent_reach_does_not_claim_anchor_ownership_before_resumed_expansion():
     assert repo.expansion_anchors("h1")[0]["candidate_id"] == "anchor-finding"
 
 
-def test_agent_auth_reach_is_anchor_session_scoped_and_never_becomes_context():
+def test_agent_auth_reach_keeps_all_host_activity_across_sessions_and_never_becomes_context():
     repo = _repo(anchor_session=303)
     auth_events = []
     for session_id in range(301, 306):
@@ -364,7 +364,9 @@ def test_agent_auth_reach_is_anchor_session_scoped_and_never_becomes_context():
 
     assert response["status"] == "complete"
     link = repo.expansion_links("h1")[0]
-    assert link["event_ids"] == ["auth-303"]
+    assert link["event_ids"] == [f"auth-{session_id}" for session_id in range(301, 306)]
+    assert "process.session_id" not in link["key"]
+    assert link["key"]["entity"] == {"kind": "host", "value": "web01", "role": "host"}
     assert link["link_type"] == "agent_auth_activity"
     assert link["strength"] == "agent_hypothesis"
     assert not [row for row in repo.candidates("h1") if row["rule_id"].startswith("context.")]
