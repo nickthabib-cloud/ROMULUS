@@ -1,5 +1,6 @@
 """Pure baseline specifications and typed key extraction."""
 
+from romulus.baseline.carry import CarryInStore, ParentExec, PendingResolution, PendingResolver
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.protocol import HistoryFetch, HistoryPartition, HistorySource
 from romulus.baseline.spec import (
@@ -19,6 +20,7 @@ __all__ = [
     "SPEC_BY_ID",
     "BaselineKey",
     "BaselineSpec",
+    "CarryInStore",
     "HistoryFetch",
     "HistoryPartition",
     "HistorySource",
@@ -26,6 +28,9 @@ __all__ = [
     "KeyCounter",
     "Missing",
     "NotApplicable",
+    "ParentExec",
     "ParentLookup",
     "Pending",
+    "PendingResolution",
+    "PendingResolver",
 ]

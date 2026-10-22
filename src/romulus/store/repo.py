@@ -1136,6 +1136,82 @@ class Repo:
         with self.engine.connect() as c:
             return list(c.execute(query).scalars())
 
+    def baseline_parent_boot(self, hunt_id: str, host: str) -> tuple[str, datetime] | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.baseline_parent_host_boot).where(
+                t.baseline_parent_host_boot.c.hunt_id == hunt_id,
+                t.baseline_parent_host_boot.c.host == host,
+            )).mappings().first()
+        if row is None:
+            return None
+        return row["boot"], _stored_utc(row["latest_ts"])
+
+    def set_baseline_parent_boot(self, hunt_id: str, host: str, boot: str,
+                                 latest_ts: datetime) -> bool:
+        """Advance one host's carry state; an older different boot is rejected."""
+        latest_ts = _utc(latest_ts, "parent boot latest_ts")
+        table = t.baseline_parent_host_boot.c
+        with write_txn(self.engine) as c:
+            current = c.execute(select(t.baseline_parent_host_boot).where(
+                table.hunt_id == hunt_id, table.host == host,
+            )).mappings().first()
+            if current is not None:
+                current_ts = _stored_utc(current["latest_ts"])
+                if current["boot"] != boot and current_ts >= latest_ts:
+                    return False
+                if current["boot"] != boot:
+                    c.execute(t.baseline_parent_carry.delete().where(
+                        t.baseline_parent_carry.c.hunt_id == hunt_id,
+                        t.baseline_parent_carry.c.host == host,
+                    ))
+                elif current_ts > latest_ts:
+                    latest_ts = current_ts
+            stmt = insert(t.baseline_parent_host_boot).values(
+                hunt_id=hunt_id, host=host, boot=boot, latest_ts=latest_ts,
+            ).on_conflict_do_update(
+                index_elements=["hunt_id", "host"],
+                set_={"boot": boot, "latest_ts": latest_ts},
+            )
+            c.execute(stmt)
+            return True
+
+    def upsert_baseline_parents(self, rows: Iterable[dict]) -> None:
+        """Keep only the latest observed exec for each live (hunt, host, boot, pid)."""
+        stmt = insert(t.baseline_parent_carry)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["hunt_id", "host", "boot", "pid"],
+            set_={
+                "exec_ts": stmt.excluded.exec_ts, "executable": stmt.excluded.executable,
+                "parent_pid": stmt.excluded.parent_pid, "raw_id": stmt.excluded.raw_id,
+            },
+            where=stmt.excluded.exec_ts >= t.baseline_parent_carry.c.exec_ts,
+        )
+        for chunk in _chunks(rows, BASELINE_CHUNK):
+            with write_txn(self.engine) as c:
+                c.execute(stmt, chunk)
+
+    def baseline_parent_lookup(self, hunt_id: str, host: str, pid: int, ts: float,
+                               boot: str | None) -> tuple | None:
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid < 0:
+            return None
+        at = datetime.fromtimestamp(ts, UTC)
+        table = t.baseline_parent_carry.c
+        with self.engine.connect() as c:
+            row = c.execute(select(t.baseline_parent_carry).where(
+                table.hunt_id == hunt_id, table.host == host, table.boot == (boot or ""),
+                table.pid == pid, table.exec_ts <= at, table.executable != "",
+            )).mappings().first()
+        if row is None:
+            return None
+        exec_ts = _stored_utc(row["exec_ts"])
+        return exec_ts.timestamp(), row["executable"], row["parent_pid"], row["raw_id"], boot
+
+    def baseline_parent_count(self, hunt_id: str) -> int:
+        with self.engine.connect() as c:
+            return int(c.execute(select(func.count()).select_from(t.baseline_parent_carry).where(
+                t.baseline_parent_carry.c.hunt_id == hunt_id,
+            )).scalar_one())
+
     def upsert_baseline_observation(self, row: dict) -> None:
         self.upsert_baseline_observations([row])
 

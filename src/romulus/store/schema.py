@@ -424,6 +424,30 @@ baseline_snapshot_segment = Table(
 )
 Index("ix_baseline_snapshot_segment_segment", baseline_snapshot_segment.c.segment_id)
 
+baseline_parent_host_boot = Table(
+    "baseline_parent_host_boot", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("host", String, nullable=False),
+    Column("boot", String, nullable=False),
+    Column("latest_ts", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("hunt_id", "host", name="pk_baseline_parent_host_boot"),
+)
+
+baseline_parent_carry = Table(
+    "baseline_parent_carry", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("host", String, nullable=False),
+    Column("boot", String, nullable=False),
+    Column("pid", Integer, nullable=False),
+    Column("exec_ts", DateTime(timezone=True), nullable=False),
+    Column("executable", String, nullable=False),
+    Column("parent_pid", Integer),
+    Column("raw_id", String, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "host", "boot", "pid", name="pk_baseline_parent_carry"),
+    CheckConstraint("pid >= 0", name="ck_baseline_parent_carry_pid"),
+    CheckConstraint("executable <> ''", name="ck_baseline_parent_carry_executable"),
+)
+
 baseline_observation = Table(
     "baseline_observation", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),

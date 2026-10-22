@@ -48,9 +48,33 @@ def upgrade() -> None:
         "SELECT baseline_snapshot.hunt_id, json_each.value "
         "FROM baseline_snapshot, json_each(baseline_snapshot.segment_ids)"
     ))
+    op.create_table(
+        "baseline_parent_host_boot",
+        sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("host", sa.String(), nullable=False),
+        sa.Column("boot", sa.String(), nullable=False),
+        sa.Column("latest_ts", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("hunt_id", "host", name="pk_baseline_parent_host_boot"),
+    )
+    op.create_table(
+        "baseline_parent_carry",
+        sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("host", sa.String(), nullable=False),
+        sa.Column("boot", sa.String(), nullable=False),
+        sa.Column("pid", sa.Integer(), nullable=False),
+        sa.Column("exec_ts", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("executable", sa.String(), nullable=False),
+        sa.Column("parent_pid", sa.Integer(), nullable=True),
+        sa.Column("raw_id", sa.String(), nullable=False),
+        sa.PrimaryKeyConstraint("hunt_id", "host", "boot", "pid", name="pk_baseline_parent_carry"),
+        sa.CheckConstraint("pid >= 0", name="ck_baseline_parent_carry_pid"),
+        sa.CheckConstraint("executable <> ''", name="ck_baseline_parent_carry_executable"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("baseline_parent_carry")
+    op.drop_table("baseline_parent_host_boot")
     op.drop_index("ix_baseline_snapshot_segment_segment", table_name="baseline_snapshot_segment")
     op.drop_table("baseline_snapshot_segment")
     op.execute(sa.text("DELETE FROM baseline_segment WHERE status = 'building'"))

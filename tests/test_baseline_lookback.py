@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.baseline import HistoryFetch, HistoryPartition, KeyContext
+from romulus.baseline import CarryInStore, HistoryFetch, HistoryPartition, KeyContext
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.lookback import LookbackBudget, LookbackWriter, segment_content_id
 from romulus.baseline.spec import SPEC_BY_ID
@@ -165,6 +165,23 @@ def test_building_segment_is_invisible_and_stale_cleanup_removes_its_rows():
     ) == []
     assert repo.cleanup_baseline_building(before=START + timedelta(days=1)) == 1
     assert repo.baseline_segments() == [] and list(repo.baseline_counts(row["id"])) == []
+
+
+def test_complete_lookback_fetch_records_parent_carry_on_disk():
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    event = _event(1, START - timedelta(minutes=1))
+    event.fields.update({
+        "process.pid": fv(42, "fixture"), "process.ppid": fv(1, "fixture"),
+        "host.boot.id": fv("boot-a", "fixture"),
+    })
+    carry = CarryInStore(repo, "build")
+    writer = LookbackWriter(
+        repo, FakeHistory([event]), site="site", specs=[SPEC], normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=10, seconds=10), parent_carry=carry,
+    )
+    writer.fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=1), end=START)
+    assert carry.lookup("web01", 42, START.timestamp(), "boot-a")[1] == "/bin/tool1"
 
 
 @pytest.mark.slow

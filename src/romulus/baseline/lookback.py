@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+from romulus.baseline.carry import CarryInStore
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.protocol import HistorySource
 from romulus.baseline.spec import BaselineSpec, KeyContext
@@ -78,11 +79,13 @@ class LookbackWriter:
     def __init__(self, repo: Repo, source: HistorySource, *, site: str,
                  specs: list[BaselineSpec], normalizer: str, budget: LookbackBudget,
                  context: KeyContext | None = None,
+                 parent_carry: CarryInStore | None = None,
                  clock: Callable[[], float] = time.monotonic):
         self.repo, self.source, self.site = repo, source, site
         self.specs = tuple(sorted(specs, key=lambda item: item.id))
         self.normalizer, self.budget = normalizer, budget
         self.context, self.clock = context or KeyContext(), clock
+        self.parent_carry = parent_carry
 
     def segment_row(self, *, hunt_id: str, target: str, spec: BaselineSpec,
                     start: datetime, end: datetime, events_total: int,
@@ -171,6 +174,8 @@ class LookbackWriter:
                     break
                 records += fetched.record_count
                 events_total += len(fetched.events)
+                if self.parent_carry is not None:
+                    self.parent_carry.observe_events(fetched.events)
                 for event in sorted(fetched.events, key=lambda item: (item.ts, item.id)):
                     for counter in counters.values():
                         counter.consume(event, self.context)
