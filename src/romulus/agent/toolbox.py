@@ -22,6 +22,14 @@ from romulus.agent.aliases import (
     AliasKindMismatch,
     UnknownAlias,
 )
+from romulus.agent.dossier import (
+    MATERIALIZE_COVERAGE_LIMIT,
+    MATERIALIZE_ENTITY_LIMIT,
+    MATERIALIZE_FINDING_LIMIT,
+    MATERIALIZE_LINK_BYTES_LIMIT,
+    MATERIALIZE_LINK_LIMIT,
+    REPORTABLE_LANES,
+)
 from romulus.agent.models import EntityRef, PivotResult
 from romulus.agent.provider.base import Tool
 from romulus.agent.safety import injection_flags
@@ -29,7 +37,8 @@ from romulus.decide.policy import LANE_ORDER
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.typed import TypedEvent
 from romulus.report.incidents import build_incident_graph
-from romulus.report.manifest import coverage_for_hunt
+from romulus.report.manifest import coverage_for_rules
+from romulus.store.db import digest
 from romulus.store.repo import Repo
 
 READ_PAGE_SIZE = 25
@@ -39,6 +48,11 @@ COVERAGE_GAP_PREVIEW_LIMIT = 10
 INCIDENT_PAGE_SIZE = 25
 INCIDENT_TARGET_PREVIEW_LIMIT = 10
 TOOL_TEXT_LIMIT = 180
+# Fifty entity exemplars must each receive a non-empty chunk inside the shared
+# response budget. Metadata is outside this telemetry-text allowance.
+TELEMETRY_CHUNK_BYTES = 384
+TELEMETRY_RESPONSE_BYTES = 24_000
+RAW_RECORDS_PER_EVIDENCE_PAGE = 2
 _RULE_IDS = frozenset(playbook.id for playbook in ALL_PLAYBOOKS)
 _ALIAS_PATTERN = r"^[FIENL][1-9][0-9]*$"
 AliasArg = Annotated[str, Field(pattern=_ALIAS_PATTERN)]
@@ -74,6 +88,8 @@ class ListCoverageArgs(_Args):
 
 class GetEvidenceArgs(_Args):
     evidence: list[AliasArg] = Field(min_length=1, max_length=20)
+    chunk_index: int = Field(default=1, ge=1)
+    raw_page: int = Field(default=1, ge=1)
 
 
 class GetIncidentArgs(_Args):
@@ -82,10 +98,16 @@ class GetIncidentArgs(_Args):
     cursor: str | None = Field(default=None, pattern=r"^G[0-9a-f]{20}$")
 
 
+class ListIncidentsArgs(_Args):
+    page: int = Field(default=1, ge=1)
+    cursor: str | None = Field(default=None, pattern=r"^J[0-9a-f]{20}$")
+
+
 class EntityProfileArgs(_Args):
     entity: AliasArg
     page: int = Field(default=1, ge=1)
     cursor: str | None = Field(default=None, pattern=r"^R[0-9a-f]{20}$")
+    chunk_index: int = Field(default=1, ge=1)
 
 
 class _WindowedArgs(_Args):
@@ -186,6 +208,33 @@ def _bounded_text(value: Any, limit: int = TOOL_TEXT_LIMIT) -> str:
     return f"{text[:limit]}…[{len(text) - limit} chars omitted]"
 
 
+class _TelemetryBudget:
+    """Bound untrusted telemetry while keeping every omitted chunk explicitly retrievable."""
+
+    def __init__(self, chunk_index: int):
+        self.chunk_index = chunk_index
+        self.remaining = TELEMETRY_RESPONSE_BYTES
+
+    def project(self, value: Any, route: str) -> Any:
+        serialized = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        encoded = serialized.encode("utf-8")
+        if len(encoded) <= TELEMETRY_CHUNK_BYTES and len(encoded) <= self.remaining:
+            self.remaining -= len(encoded)
+            return _jsonable(value)
+        chunks = max(1, (len(encoded) + TELEMETRY_CHUNK_BYTES - 1) // TELEMETRY_CHUNK_BYTES)
+        start = (self.chunk_index - 1) * TELEMETRY_CHUNK_BYTES
+        take = min(TELEMETRY_CHUNK_BYTES, self.remaining)
+        text = (encoded[start:start + take].decode("utf-8", errors="replace")
+                if start < len(encoded) and take else "")
+        self.remaining = max(0, self.remaining - len(text.encode("utf-8")))
+        next_index = self.chunk_index + 1 if self.chunk_index < chunks else None
+        return {
+            "encoding": "json", "text": text, "chunk_index": self.chunk_index,
+            "chunk_count": chunks, "omitted": self.chunk_index < chunks,
+            "fetch": f"{route} chunk_index={next_index}" if next_index is not None else None,
+        }
+
+
 def _candidate_key(row: dict) -> tuple:
     return (LANE_ORDER.get(row["lane"], 99), -float(row["priority"]), row["ts"], row["id"])
 
@@ -234,6 +283,10 @@ class Toolbox:
                 RegisteredTool(
                     "get_evidence", "Read one to twenty retained evidence records by alias.",
                     GetEvidenceArgs, self._get_evidence,
+                ),
+                RegisteredTool(
+                    "list_incidents", "Page deterministic incident headers and aliases for follow-up.",
+                    ListIncidentsArgs, self._list_incidents,
                 ),
                 RegisteredTool(
                     "get_incident", "Read one deterministic incident and its observed or inferred links.",
@@ -295,8 +348,8 @@ class Toolbox:
             }})
 
     def _coverage(self, rule_ids: set[str]) -> dict:
-        canonical = coverage_for_hunt(self.repo, self.hunt_id)
-        rules = [row for row in canonical["rules"] if row["rule_id"] in rule_ids]
+        canonical = coverage_for_rules(self.repo, self.hunt_id, rule_ids)
+        rules = canonical["rules"]
         gaps = []
         for gap in canonical["gaps"]:
             selected = {rule: state for rule, state in gap["rules"].items() if rule in rule_ids}
@@ -408,7 +461,12 @@ class Toolbox:
                 "not_assessed": len(coverage["not_assessed"]),
             }
             stored = {"status": coverage["status"], "coverage_counts": counts}
-            cursor = "C" + uuid4().hex[:20]
+            cursor = "C" + digest({
+                "identity": identity,
+                "rule_cells": self.repo.rule_cell_fingerprint(self.hunt_id),
+                "manifest": manifest,
+                "sweep": self.repo.latest_audit(self.hunt_id, "hunt.sweep_summary"),
+            })[:20]
             plan = self.repo.create_agent_page_plan(
                 self.hunt_id, cursor, identity, stored, self._coverage_entries(coverage),
             )
@@ -487,12 +545,10 @@ class Toolbox:
                 identity = {"kind": "findings", "lane": None, "rule": None, "entity": None}
             elif stored["identity"].get("kind") == "dossier_large":
                 page_size = int(stored["summary"]["dossier_page_size"])
-                rows = self.repo.agent_page_items(
+                page = self.repo.candidate_page_plan_rows(
                     self.hunt_id, args.cursor, offset=(args.page - 1) * page_size,
                     limit=page_size,
                 )
-                page = [candidate for item in rows
-                        if (candidate := self.repo.candidate(item["candidate_id"])) is not None]
                 total = int(stored["item_count"])
                 more = args.page * page_size < total
                 cursor = args.cursor
@@ -506,12 +562,10 @@ class Toolbox:
                         "cursor_request_mismatch", "the cursor belongs to a different findings request",
                     )
                 identity = stored["identity"]
-                rows = self.repo.agent_page_items(
+                page = self.repo.candidate_page_plan_rows(
                     self.hunt_id, args.cursor, offset=(args.page - 1) * READ_PAGE_SIZE,
                     limit=READ_PAGE_SIZE,
                 )
-                page = [candidate for item in rows
-                        if (candidate := self.repo.candidate(item["candidate_id"])) is not None]
                 total = int(stored["item_count"])
                 more = args.page * READ_PAGE_SIZE < total
                 cursor = args.cursor
@@ -525,27 +579,23 @@ class Toolbox:
                 if entity is None or entity["hunt_id"] != self.hunt_id:
                     raise UnknownAlias(f"unknown entity alias {args.entity!r} in hunt {self.hunt_id}")
                 entity_key = (str(entity["kind"]), str(entity["value"]))
-            cursor = "D" + uuid4().hex[:16]
+            cursor = "D" + digest({
+                "identity": identity, "snapshot": self.repo.candidate_fingerprint(self.hunt_id),
+            })[:16]
             stored = self.repo.create_candidate_page_plan(
                 self.hunt_id, cursor, identity, {}, lane=args.lane, rule_id=args.rule,
                 entity=entity_key,
             )
-            rows = self.repo.agent_page_items(
+            page = self.repo.candidate_page_plan_rows(
                 self.hunt_id, cursor, offset=0, limit=READ_PAGE_SIZE,
             )
-            page = [candidate for item in rows
-                    if (candidate := self.repo.candidate(item["candidate_id"])) is not None]
             total = int(stored["item_count"])
             more = READ_PAGE_SIZE < total
         selected_rule = identity.get("rule")
-        rule_ids = {selected_rule} if selected_rule is not None else {
-            str(item["id"]) for item in ((self.repo.get_hunt(self.hunt_id) or {}).get("manifest") or {})
-            .get("pack", {}).get("playbooks", []) if isinstance(item, dict) and item.get("id")
-        }
-        coverage = self._coverage(rule_ids)
         relevant_rules = {str(row["rule_id"]) for row in page}
         if not relevant_rules and selected_rule is not None:
             relevant_rules.add(selected_rule)
+        coverage = self._coverage(relevant_rules)
         coverage_view = self._coverage_view(coverage, relevant_rules)
         return _result(
             coverage["status"], coverage=coverage_view,
@@ -581,19 +631,34 @@ class Toolbox:
         rows = {row["id"]: row for row in self.repo.events_by_ids([target for _alias, target in resolved])}
         data = []
         missing = []
+        budget = _TelemetryBudget(args.chunk_index)
         for alias, event_id in resolved:
             row = rows.get(event_id)
             if row is None:
                 missing.append(alias)
                 continue
-            raw_records = self.repo.raw_records(row.get("raw_ids") or [])
+            raw_ids = row.get("raw_ids") or []
+            raw_start = (args.raw_page - 1) * RAW_RECORDS_PER_EVIDENCE_PAGE
+            selected_raw_ids = raw_ids[raw_start:raw_start + RAW_RECORDS_PER_EVIDENCE_PAGE]
+            raw_by_id = {raw["id"]: raw for raw in self.repo.raw_records(selected_raw_ids)}
+            raw_records = [raw_by_id[raw_id] for raw_id in selected_raw_ids if raw_id in raw_by_id]
+            raw_more = raw_start + len(raw_records) < len(raw_ids)
             data.append({
                 "alias": alias, "family": row["family"], "time": str(row["ts"]), "host": row["host"],
-                "event": _jsonable(row["event"]),
+                "event": budget.project(row["event"], f"get_evidence evidence={alias}"),
                 "raw_records": [{
                     "target": raw["target"], "native_id": raw["native_id"],
-                    "digest": raw["digest"], "source": _jsonable(raw["source"]),
+                    "digest": raw["digest"], "source": budget.project(
+                        raw["source"],
+                        f"get_evidence evidence={alias} raw_page={args.raw_page}",
+                    ),
                 } for raw in raw_records],
+                "raw_records_count": len(raw_ids), "raw_records_page": args.raw_page,
+                "raw_records_more": raw_more,
+                "raw_records_fetch": (
+                    f"get_evidence evidence={alias} raw_page={args.raw_page + 1}"
+                    if raw_more else None
+                ),
             })
         coverage = {"status": "partial" if missing else "complete", "gaps": [
             {"evidence": alias, "reason": "the aliased typed event is no longer retained"} for alias in missing
@@ -620,8 +685,88 @@ class Toolbox:
             by_target[incident["id"]] = {**incident, "alias": alias}
         return graph, by_target
 
+    def _list_incidents(self, args: ListIncidentsArgs) -> dict:
+        identity = {"kind": "incident_index"}
+        if args.cursor is not None:
+            plan = self.repo.agent_page_plan(self.hunt_id, args.cursor)
+            if plan is None:
+                return self._semantic_refusal("unknown_cursor", "the incident cursor is not valid for this hunt")
+            if plan["identity"] != identity:
+                return self._semantic_refusal(
+                    "cursor_request_mismatch", "the cursor belongs to a different incident request",
+                )
+            cursor = args.cursor
+        else:
+            if args.page != 1:
+                return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
+            counts = {
+                "reportable_findings": self.repo.candidate_count_lanes(
+                    self.hunt_id, REPORTABLE_LANES,
+                ),
+                "expansion_links": self.repo.expansion_link_count(self.hunt_id),
+                "coverage_cells": self.repo.rule_cell_count(self.hunt_id),
+                "entities": self.repo.entity_count(self.hunt_id),
+                "expansion_link_payload_bytes": self.repo.expansion_link_payload_bytes(self.hunt_id),
+            }
+            over_cap = (
+                counts["reportable_findings"] > MATERIALIZE_FINDING_LIMIT
+                or counts["expansion_links"] > MATERIALIZE_LINK_LIMIT
+                or counts["coverage_cells"] > MATERIALIZE_COVERAGE_LIMIT
+                or counts["entities"] > MATERIALIZE_ENTITY_LIMIT
+                or counts["expansion_link_payload_bytes"] > MATERIALIZE_LINK_BYTES_LIMIT
+            )
+            if over_cap:
+                return _result(
+                    "partial", coverage={"status": "partial", "gaps": [{
+                        "reason": "incident correlation exceeded the bounded materialization cap",
+                    }]}, counts={"returned": 0, "total": None}, data={"incidents": [],
+                        "assessment": {
+                            "status": "unassessed_at_materialization_cap", "counts": counts,
+                            "omission": "incident membership and links were not materialized",
+                            "fetch": ("use list_findings page=1 for the complete finding index; "
+                                      "incident correlation remains explicitly unassessed"),
+                        }}, more=False,
+                )
+            graph, incidents = self._incident_graph()
+            links_by_id = {link["id"]: link for link in graph["links"]}
+            items = []
+            for incident in incidents.values():
+                header = {
+                    "alias": incident["alias"],
+                    "member_count": len(incident["finding_ids"]),
+                    "link_count": len(incident["link_ids"]),
+                    "host_count": len(incident["hosts"]),
+                    "account_count": len(incident["accounts"]),
+                    "open_end_count": sum(
+                        len(values) for values in incident.get("open_ends", {}).values()
+                    ),
+                    "fetch": f"get_incident incident={incident['alias']} page=1",
+                }
+                items.append({
+                    "header": header, "incident": incident,
+                    "links": [links_by_id[link_id] for link_id in incident["link_ids"]],
+                })
+            items.sort(key=lambda item: item["header"]["alias"])
+            cursor = "J" + digest({
+                "identity": identity, "items": items,
+            })[:20]
+            plan = self.repo.create_agent_page_plan(
+                self.hunt_id, cursor, identity, {"status": "complete"},
+                items,
+            )
+        total = int(plan["item_count"])
+        rows = self.repo.agent_page_items(
+            self.hunt_id, cursor, offset=(args.page - 1) * INCIDENT_PAGE_SIZE,
+            limit=INCIDENT_PAGE_SIZE,
+        )
+        headers = [row["header"] for row in rows]
+        return _result(
+            plan["summary"]["status"], counts={"returned": len(headers), "total": total},
+            data={"incidents": headers, "page": args.page, "cursor": cursor},
+            more=args.page * INCIDENT_PAGE_SIZE < total,
+        )
+
     def _get_incident(self, args: GetIncidentArgs) -> dict:
-        initial_graph = self._incident_graph() if args.cursor is None else None
         incident_id = self.aliases.resolve(args.incident, {"I"})
         identity = {"kind": "incident", "incident_id": incident_id}
         cursor = args.cursor
@@ -637,11 +782,14 @@ class Toolbox:
         else:
             if args.page != 1:
                 return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
-            graph, incidents = initial_graph
-            incident = incidents.get(incident_id)
-            if incident is None:
-                raise UnknownAlias(f"unknown incident alias {args.incident!r} in hunt {self.hunt_id}")
-            links_by_id = {link["id"]: link for link in graph["links"]}
+            indexed = self.repo.agent_incident_index_item(self.hunt_id, args.incident)
+            if indexed is None or indexed["incident"]["id"] != incident_id:
+                return self._semantic_refusal(
+                    "incident_index_required",
+                    "call list_incidents page=1 before reading this incident",
+                )
+            incident = indexed["incident"]
+            links_by_id = {link["id"]: link for link in indexed["links"]}
             items = []
             for link_id in sorted(incident["link_ids"]):
                 link = links_by_id[link_id]
@@ -665,8 +813,9 @@ class Toolbox:
                                   "all target_parts are returned") if len(chunks) > 1 else None,
                     }})
             members = [self.aliases.alias_for("F", target) for target in incident["finding_ids"]]
-            rules = {candidate["rule_id"] for target in incident["finding_ids"]
-                     if (candidate := self.repo.candidate(target)) is not None}
+            rules = {candidate["rule_id"] for candidate in self.repo.candidates_by_ids(
+                incident["finding_ids"],
+            )}
             coverage = self._coverage(rules)
             items.extend({"kind": "member", "value": alias} for alias in members)
             items.extend({"kind": "host", "value": _bounded_text(value)}
@@ -681,7 +830,9 @@ class Toolbox:
                 "kind_counts": kind_counts,
                 "coverage": self._coverage_view(coverage, rules), "status": coverage["status"],
             }
-            cursor = "G" + uuid4().hex[:20]
+            cursor = "G" + digest({
+                "identity": identity, "summary": stored, "items": items,
+            })[:20]
             self.repo.create_agent_page_plan(self.hunt_id, cursor, identity, stored, items)
         start = (args.page - 1) * INCIDENT_PAGE_SIZE
         page = {kind: [item["value"] for item in self.repo.agent_page_items_by_kind(
@@ -730,18 +881,21 @@ class Toolbox:
         else:
             if args.page != 1:
                 return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
-            cursor = "R" + uuid4().hex[:20]
+            cursor = "R" + digest({
+                "identity": identity, "snapshot": self.repo.entity_event_fingerprint(entity_id),
+            })[:20]
             plan = self.repo.create_entity_event_page_plan(
                 self.hunt_id, cursor, identity, entity_id,
             )
             total = int(plan["item_count"])
             families = plan["summary"]["families"]
         start = (args.page - 1) * ENTITY_EVENT_LIMIT
-        page_ids = [item["event_id"] for item in self.repo.agent_page_items(
+        page_ids = self.repo.entity_event_page_plan_ids(
             self.hunt_id, cursor, offset=start, limit=ENTITY_EVENT_LIMIT,
-        )]
+        )
         by_id = {row["id"]: row for row in self.repo.events_by_ids(page_ids)}
         exemplars = [by_id[event_id] for event_id in page_ids if event_id in by_id]
+        budget = _TelemetryBudget(args.chunk_index)
         data = {
             "alias": args.entity, "kind": _bounded_text(entity["kind"]),
             "value": _bounded_text(entity["value"]),
@@ -751,14 +905,42 @@ class Toolbox:
             "families": families, "cursor": cursor,
             "events": [{
                 "alias": self.aliases.alias_for("E", row["id"]), "family": row["family"],
-                "time": str(row["ts"]), "host": row["host"], "event": _jsonable(row["event"]),
+                "time": str(row["ts"]), "host": row["host"], "event": budget.project(
+                    row["event"],
+                    f"entity_profile entity={args.entity} page={args.page} cursor={cursor}",
+                ),
             } for row in exemplars],
         }
         manifest = ((self.repo.get_hunt(self.hunt_id) or {}).get("manifest") or {})
         rules = {str(item["id"]) for item in (manifest.get("pack") or {}).get("playbooks", [])
                  if isinstance(item, dict) and item.get("id")}
-        coverage = self._coverage(rules)
-        return _result(coverage["status"], coverage=self._coverage_view(coverage, set()),
+        targets = {str(target) for target in manifest.get("targets") or []}
+        counts = self.repo.rule_cell_coverage_counts(self.hunt_id, rules, targets)
+        counts["missing_rule_targets"] = max(
+            0, counts["expected_rule_targets"] - counts["present_rule_targets"],
+        )
+        sweep = self.repo.latest_audit(self.hunt_id, "hunt.sweep_summary")
+        detail = (sweep or {}).get("detail") or {}
+        finished = bool(sweep and detail.get("finished", detail.get("complete")))
+        stats = detail.get("stats") or {}
+        profiles = manifest.get("source_profiles") or {}
+        not_assessed = sum(1 for count in (stats.get("skips") or {}).values() if count)
+        for target, retrieved in (stats.get("dataset_filter") or {}).items():
+            inventory = (profiles.get(target) or {}).get("datasets")
+            if not isinstance(inventory, dict):
+                not_assessed += 1
+            else:
+                not_assessed += len(set(inventory) - set(retrieved))
+        counts["not_assessed"] = not_assessed
+        counts["sweep_finished"] = int(finished)
+        incomplete = counts["incomplete"] + counts["missing_rule_targets"] + not_assessed
+        coverage = {
+            "status": "partial" if incomplete or not finished else "complete",
+            "counts": counts,
+            "gaps": [], "more": bool(incomplete or not finished),
+            "fetch": "list_coverage page=1" if incomplete or not finished else None,
+        }
+        return _result(coverage["status"], coverage=coverage,
                        counts={"returned": len(exemplars), "total": total}, data={"entity": data},
                        more=start + len(exemplars) < total)
 

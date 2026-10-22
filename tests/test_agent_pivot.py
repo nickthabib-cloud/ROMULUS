@@ -200,6 +200,70 @@ def test_agent_link_fetch_uses_its_own_task_kind_and_never_counts_as_expansion(m
     assert repo.expansion_source_queries("h1") == 0
 
 
+@pytest.mark.parametrize("agent_first", [False, True])
+def test_agent_and_deterministic_link_fetches_have_separate_tasks_in_both_orders(
+        monkeypatch, agent_first):
+    repo = _repo()
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    intent = SearchIntent(
+        kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10,
+    )
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+    ))
+    deterministic = PivotExecutor(repo, FakeClient(), "h1", {"host-x": contract})
+    agent = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=5, source_query_scope="agent",
+    )
+
+    ordered = [agent, deterministic] if agent_first else [deterministic, agent]
+    results = [executor.fetch_intents(
+        "same-anchor", "same-link-window-and-key", [intent], lambda _event: True,
+    ) for executor in ordered]
+
+    assert all(result.status == "complete" for result in results)
+    tasks = {task["kind"]: task for task in repo.tasks("h1")}
+    assert set(tasks) == {"agent_follow_link", "expansion_link"}
+    assert tasks["agent_follow_link"]["id"] != tasks["expansion_link"]["id"]
+    assert tasks["agent_follow_link"]["source_queries"] == 1
+    assert tasks["expansion_link"]["source_queries"] == 1
+    assert repo.agent_source_queries("h1") == 1
+
+
+@pytest.mark.parametrize("agent_first", [False, True])
+def test_agent_and_deterministic_host_resolution_have_separate_tasks_in_both_orders(
+        monkeypatch, agent_first):
+    repo = _repo()
+    contract = contract_from_types("host-x", {
+        "@timestamp": "date", "host.ip": "ip", "host.name": "keyword",
+    })
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=1, total_relation="eq", returned=1,
+        buckets=[{"key": {"host.name": "victim"}, "count": 1}],
+    ))
+    deterministic = PivotExecutor(repo, FakeClient(), "h1", {"host-x": contract})
+    agent = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=5, source_query_scope="agent",
+    )
+
+    ordered = [agent, deterministic] if agent_first else [deterministic, agent]
+    outcomes = [executor.resolve_host_ip(
+        "same-anchor", "10.0.0.2", START, END,
+    ) for executor in ordered]
+
+    assert outcomes == [("victim", None), ("victim", None)]
+    tasks = {task["kind"]: task for task in repo.tasks("h1")}
+    assert set(tasks) == {"agent_follow_link", "expansion_link"}
+    assert tasks["agent_follow_link"]["id"] != tasks["expansion_link"]["id"]
+    assert tasks["agent_follow_link"]["source_queries"] == 1
+    assert tasks["expansion_link"]["source_queries"] == 1
+    assert repo.agent_source_queries("h1") == 1
+
+
 def test_fetch_query_cap_leaves_unattempted_ranges_unresolved(monkeypatch):
     calls = []
 

@@ -29,6 +29,8 @@ INCIDENT_TARGET_PREVIEW_LIMIT = 10
 MATERIALIZE_FINDING_LIMIT = 5_000
 MATERIALIZE_LINK_LIMIT = 10_000
 MATERIALIZE_COVERAGE_LIMIT = 10_000
+MATERIALIZE_ENTITY_LIMIT = 10_000
+MATERIALIZE_LINK_BYTES_LIMIT = 16_000_000
 LARGE_DOSSIER_PAGE_SIZE = 25
 
 
@@ -125,23 +127,42 @@ class LargeDossierPages(Sequence[dict[str, Any]]):
             index += len(self)
         if index < 0 or index >= len(self):
             raise IndexError(index)
-        snapshot = self.repo.agent_page_items(
+        rows = self.repo.candidate_page_plan_rows(
             self.hunt_id, self.cursor, offset=index * LARGE_DOSSIER_PAGE_SIZE,
             limit=LARGE_DOSSIER_PAGE_SIZE,
         )
-        ids = [item["candidate_id"] for item in snapshot]
-        by_id = {row["id"]: row for row in self.repo.candidates_by_ids(ids, finding_alias=True)}
-        findings = [_finding_row(by_id[candidate_id], self.aliases)
-                    for candidate_id in ids if candidate_id in by_id]
+        return self._payload(index, rows)
+
+    def _payload(self, index: int, rows: list[dict]) -> dict:
+        findings = [_finding_row(row, self.aliases) for row in rows]
         payload = _jsonable(self.base if index == 0 else {
             "schema": DOSSIER_SCHEMA, "header": self.base["header"], "findings": [],
         })
         payload["findings"] = findings
+        flags = injection_flags({"findings": findings}, "$.findings")
+        safety = payload.setdefault("safety", {})
+        safety["flags"] = flags[:DATA_COLLECTION_LIMIT]
+        safety["page_scan_status"] = "complete" if len(flags) <= DATA_COLLECTION_LIMIT else "partial"
+        if len(flags) > DATA_COLLECTION_LIMIT:
+            safety["flags_omitted"] = len(flags) - DATA_COLLECTION_LIMIT
+            safety["fetch"] = f"list_findings page={index + 1} cursor={self.cursor}"
         return _page_payload(payload, index + 1, len(self), self.cursor)
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
-        for index in range(len(self)):
-            yield self[index]
+        if self.total == 0:
+            yield self._payload(0, [])
+            return
+        # Fetch twenty dossier pages at a time. The response page remains fixed at
+        # 25 findings, while SQLite connection/query overhead does not scale per page.
+        batch_size = LARGE_DOSSIER_PAGE_SIZE * 20
+        for offset in range(0, self.total, batch_size):
+            rows = self.repo.candidate_page_plan_rows(
+                self.hunt_id, self.cursor, offset=offset,
+                limit=min(batch_size, self.total - offset),
+            )
+            for inner in range(0, len(rows), LARGE_DOSSIER_PAGE_SIZE):
+                index = (offset + inner) // LARGE_DOSSIER_PAGE_SIZE
+                yield self._payload(index, rows[inner:inner + LARGE_DOSSIER_PAGE_SIZE])
 
 
 @dataclass(frozen=True)
@@ -347,7 +368,7 @@ def _entity_refs(repo: Repo, candidates: list[dict], aliases: AliasBook) -> list
     return [{
         "alias": aliases.alias_for("N", row["id"]), "kind": _bounded_text(row["kind"]),
         "value": _bounded_text(row["value"]),
-    } for row in repo.entities(aliases.hunt_id) if (row["kind"], row["value"]) in wanted]
+    } for row in repo.entities_for_keys(aliases.hunt_id, wanted)]
 
 
 def _page_payload(payload: dict, page: int, pages: int, cursor: str) -> dict:
@@ -448,7 +469,7 @@ def _detail_fetch(section: str, item: dict) -> str:
 
 def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
                    aliases: AliasBook, *, reportable_count: int, link_count: int,
-                   rule_cell_count: int) -> Dossier:
+                   rule_cell_count: int, entity_count: int, link_payload_bytes: int) -> Dossier:
     """Build a bounded partial dossier without loading hunt-sized correlation inputs."""
     lane_counts = Counter(repo.lane_counts(hunt_id))
     profiles = manifest.get("source_profiles") or {}
@@ -467,9 +488,11 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
         "section": "incident_correlation",
         "reason": ("correlation inputs exceeded the fixed in-memory safety caps; the finding index "
                    "remains complete and disk-backed"),
-        "counts": {"reportable_findings": reportable_count, "expansion_links": link_count},
-        "fetch": ("render the technical report for its incident index, then use get_incident with "
-                  "the cited incident alias"),
+        "counts": {
+            "reportable_findings": reportable_count, "expansion_links": link_count,
+            "expansion_link_payload_bytes": link_payload_bytes,
+        },
+        "fetch": "call list_incidents page=1",
     }, {
         "section": "coverage_details",
         "reason": "coverage inputs exceeded the fixed in-memory safety cap",
@@ -478,6 +501,7 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
     }, {
         "section": "entity_index",
         "reason": "entity summaries are retrieved from bounded finding pages",
+        "counts": {"persisted_entities": entity_count},
         "fetch": "call list_findings page=1, then entity_profile for a returned entity alias",
     }]
     if source_omitted:
@@ -490,6 +514,15 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
             "section": "context_counts", "omitted": context_omitted,
             "reason": "context rule-count preview capped", "fetch": "use the technical report appendix",
         })
+    unassessed = "unassessed_at_materialization_cap"
+
+    def assessment(omission: str, fetch: str) -> dict:
+        return {"status": unassessed, "omission": omission, "fetch": fetch}
+
+    coverage_fetch = "call list_coverage page=1 and follow its stable cursor"
+    incident_fetch = "call list_incidents page=1, then get_incident for a returned alias"
+    entity_fetch = "call list_findings page=1, then entity_profile for a returned entity alias"
+    expansion_fetch = "call get_finding for a returned finding alias and follow its cited links"
     base = {
         "schema": DOSSIER_SCHEMA,
         "header": {"finding_counts": {
@@ -499,19 +532,49 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
         "scope": {
             "window": {**_bounded_data(manifest.get("window") or {}), "semantics": "[start, end) UTC"},
             "sources": sources,
-            "coverage": {"summary": {"recorded_cells": rule_cell_count}, "status": "partial",
-                         "rules": [], "gaps": [], "not_assessed": []},
+            "coverage": {
+                "summary": {"recorded_cells": rule_cell_count}, "status": "partial",
+                "rules": [], "gaps": [], "not_assessed": [],
+                "collections": {
+                    name: assessment("coverage collection not materialized at the dossier cap", coverage_fetch)
+                    for name in ("rules", "gaps", "not_assessed")
+                },
+            },
         },
-        "context_counts": context_rows, "entities": [], "incidents": [],
-        "expansion": {"summary": {"link_count": link_count}, "unfinished_anchors": [],
-                      "link_tiers_not_reached": [], "partial_links": []},
+        "context_counts": context_rows,
+        "context_counts_status": {
+            "status": "partial_at_preview_cap" if context_omitted else "complete",
+            "omission": context_omitted,
+            "fetch": "use the technical report appendix",
+        },
+        "entities": [],
+        "entities_status": assessment("entity collection not materialized at the dossier cap", entity_fetch),
+        "incidents": [],
+        "incidents_status": assessment(
+            "incident collection not materialized at the dossier cap", incident_fetch,
+        ),
+        "expansion": {
+            "summary": {"link_count": link_count}, "status": unassessed,
+            "unfinished_anchors": [], "link_tiers_not_reached": [], "partial_links": [],
+            "collections": {
+                name: assessment("expansion collection not materialized at the dossier cap", expansion_fetch)
+                for name in ("unfinished_anchors", "link_tiers_not_reached", "partial_links")
+            },
+        },
         "agent_budget": _budget(repo, hunt_id, manifest),
-        "safety": {"flags": [], "status": "unscanned_at_materialization_cap"},
+        "safety": {
+            "flags": [], "status": "unscanned_at_materialization_cap",
+            "flags_status": assessment(
+                "hostile-input scan not run over unmaterialized collections",
+                "inspect the bounded paged tool responses before citing telemetry text",
+            ),
+        },
         "findings": [], "omissions": omissions,
     }
     cursor = "D" + digest({
         "hunt_id": hunt_id, "token_budget": token_budget, "reportable_count": reportable_count,
         "link_count": link_count, "rule_cell_count": rule_cell_count,
+        "entity_count": entity_count, "link_payload_bytes": link_payload_bytes,
         "candidate_fingerprint": repo.candidate_fingerprint(hunt_id),
     })[:16]
     plan = repo.agent_page_plan(hunt_id, cursor)
@@ -525,13 +588,15 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
     pages = LargeDossierPages(repo, hunt_id, cursor, int(plan["item_count"]), aliases, base)
     payload = pages[0]
     if estimate_tokens(_canonical(payload)) > token_budget:
-        payload = _page_payload({
+        fallback = {
             "schema": DOSSIER_SCHEMA, "header": base["header"], "findings": [],
             "omissions": [{
                 "section": "fixed_summary", "reason": "fixed summary exceeded this page budget",
                 "fetch": "call list_findings page=1 and list_coverage page=1",
             }],
-        }, 1, len(pages), cursor)
+        }
+        pages = LargeDossierPages(repo, hunt_id, cursor, int(plan["item_count"]), aliases, fallback)
+        payload = pages[0]
     return Dossier(payload=payload, pages=pages)
 
 
@@ -546,14 +611,19 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
     reportable_count = repo.candidate_count_lanes(hunt_id, REPORTABLE_LANES)
     link_count = repo.expansion_link_count(hunt_id)
     rule_cell_count = repo.rule_cell_count(hunt_id)
+    entity_count = repo.entity_count(hunt_id)
+    link_payload_bytes = repo.expansion_link_payload_bytes(hunt_id)
     aliases = AliasBook(repo, hunt_id)
     if (reportable_count > MATERIALIZE_FINDING_LIMIT
             or link_count > MATERIALIZE_LINK_LIMIT
-            or rule_cell_count > MATERIALIZE_COVERAGE_LIMIT):
+            or rule_cell_count > MATERIALIZE_COVERAGE_LIMIT
+            or entity_count > MATERIALIZE_ENTITY_LIMIT
+            or link_payload_bytes > MATERIALIZE_LINK_BYTES_LIMIT):
         return _large_dossier(
             repo, hunt_id, manifest, token_budget, aliases,
             reportable_count=reportable_count, link_count=link_count,
-            rule_cell_count=rule_cell_count,
+            rule_cell_count=rule_cell_count, entity_count=entity_count,
+            link_payload_bytes=link_payload_bytes,
         )
     lane_counts, reportable = _findings(repo, hunt_id)
     context_counts = repo.candidate_rule_counts(hunt_id, lane="context")

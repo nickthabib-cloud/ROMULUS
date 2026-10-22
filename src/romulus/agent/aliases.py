@@ -49,7 +49,7 @@ class AliasBook:
 
     def alias_for(self, kind: str, target_id: str) -> str:
         self._check_kind(kind)
-        owners = self.repo.agent_alias_target_hunts(kind, target_id)
+        owners = self.repo.agent_alias_target_hunts(kind, target_id, hunt_id=self.hunt_id)
         if owners and self.hunt_id not in owners:
             raise AliasFromOtherHunt(
                 f"{kind} target {target_id!r} belongs to another hunt, not {self.hunt_id}",

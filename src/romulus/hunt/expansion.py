@@ -174,6 +174,10 @@ class ExpansionEngine:
         for candidate in self.repo.candidates(self.hunt_id, ["urgent", "high"]):
             if candidate["id"] in existing:
                 continue
+            # Agent-published discoveries remain case contributions. A resume must not silently
+            # promote them into deterministic expansion roots with a different reach contract.
+            if candidate.get("source_case_id") is not None:
+                continue
             # A context finding is already the product of a link from an anchor; expanding it again would
             # refetch the same session or lineage at depth + 1 and drain the reserve.
             if rule_kind(candidate["rule_id"]) == "context":

@@ -62,4 +62,23 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # The old schema required every link anchor to be a scheduler anchor. Preserve
+    # agent-created links by adding an explicit unexpanded scheduler row before
+    # restoring that foreign key; otherwise the table rebuild fails or loses data.
+    op.execute(sa.text("""
+        INSERT INTO expansion_anchor (
+            id, hunt_id, candidate_id, depth, parent_anchor_id, host, lane, severity,
+            ts, status, reasons, created_at, updated_at
+        )
+        SELECT DISTINCT
+            candidate.id, candidate.hunt_id, candidate.id, 0, NULL, NULL,
+            candidate.lane, candidate.severity, candidate.ts, 'unexpanded',
+            json_array('synthesized by 0011 downgrade for agent-created link'),
+            candidate.created_at, candidate.created_at
+        FROM candidate
+        JOIN expansion_link ON expansion_link.anchor_id = candidate.id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM expansion_anchor WHERE expansion_anchor.id = candidate.id
+        )
+    """))
     _rebuild("expansion_anchor")

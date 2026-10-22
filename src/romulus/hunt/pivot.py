@@ -630,8 +630,14 @@ class PivotExecutor:
                    and (contract.spec("host.name") is not None and contract.spec("host.name").aggregatable)]
         if not targets:
             return None, f"victim host unknown for {ip}: no host source has a searchable host.ip field"
-        fingerprint = digest({"hunt": self.hunt_id, "resolve_host_ip": ip, "start": start.isoformat(),
-                              "end": end.isoformat(), "targets": [target for target, _ in targets]})
+        fingerprint = digest({
+            "hunt": self.hunt_id,
+            "source_query_scope": getattr(self, "source_query_scope", None) or "expansion",
+            "resolve_host_ip": ip,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "targets": [target for target, _ in targets],
+        })
         task_id = "t-" + fingerprint[:20]
         prior = self.repo.task(task_id)
         if prior and prior["state"] == "evaluated" and isinstance(prior.get("outcome"), dict):
@@ -767,7 +773,11 @@ class PivotExecutor:
         incomplete = bool(coverage)
         fetch_query_start = self.source_queries
         for intent in intents:
-            fingerprint = digest({"fetch_key": fetch_key, "intent": intent.model_dump(mode="json")})
+            fingerprint = digest({
+                "source_query_scope": self.source_query_scope or "expansion",
+                "fetch_key": fetch_key,
+                "intent": intent.model_dump(mode="json"),
+            })
             task_id = "t-" + fingerprint[:20]
             task_ids.append(task_id)
             self.repo.upsert_task(

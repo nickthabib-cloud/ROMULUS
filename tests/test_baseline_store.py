@@ -153,6 +153,55 @@ def test_0009_upgrade_and_downgrade_preserve_existing_data(tmp_path):
     assert "baseline_segment" not in set(inspect(engine).get_table_names())
 
 
+def test_0010_through_0012_round_trip_agent_link_without_prior_scheduler_anchor(tmp_path):
+    engine = make_engine(tmp_path / "agent-migrations.db")
+    with engine.begin() as connection:
+        command.upgrade(_alembic_config(connection), "0012")
+        connection.execute(schema.hunt.insert().values(
+            id="h1", created_at=T0, created_by="test", manifest={}, manifest_digest="d",
+            execution_state="planned",
+        ))
+        connection.execute(schema.candidate.insert().values(
+            id="finding-agent", hunt_id="h1", rule_id="host.test", rule_version="1",
+            claim="agent-found direct match", claim_type="observed_action", event_ids=[],
+            predicate_fields=[], entities=[], ts=T0, severity="high", confidence="high",
+            lane="high", priority=80.0, priority_reasons=[], gate_results={},
+            benign_alternatives=[], next_checks=[], group_key="", source_case_id="case-1",
+            source_anchor_id=None, source_link_id="link-agent", created_at=T0,
+        ))
+        connection.execute(schema.expansion_link.insert().values(
+            id="link-agent", hunt_id="h1", anchor_id="finding-agent",
+            link_type="agent_process_lineage", window_label="case window",
+            window_start=T0, window_end=T0 + timedelta(minutes=5), strength="agent_hypothesis",
+            key={}, status="complete", event_ids=[], evidence_ids=[], task_ids=[], coverage=[],
+            reasons=[], duration_ms=1, query_spend=1, evaluated=1, created_at=T0, updated_at=T0,
+        ))
+        connection.execute(schema.agent_alias.insert().values(
+            hunt_id="h1", alias="F1", kind="F", target_id="finding-agent", created_at=T0,
+        ))
+        connection.execute(schema.agent_page_plan.insert().values(
+            hunt_id="h1", cursor="D0000000000000001", identity={"kind": "findings"},
+            summary={}, item_count=0, created_at=T0,
+        ))
+
+    with engine.begin() as connection:
+        command.downgrade(_alembic_config(connection), "0009")
+        assert connection.exec_driver_sql(
+            "SELECT candidate_id FROM expansion_anchor WHERE id='finding-agent'",
+        ).scalar_one() == "finding-agent"
+        assert connection.exec_driver_sql(
+            "SELECT anchor_id FROM expansion_link WHERE id='link-agent'",
+        ).scalar_one() == "finding-agent"
+    assert "agent_alias" not in set(inspect(engine).get_table_names())
+    assert "agent_page_plan" not in set(inspect(engine).get_table_names())
+
+    with engine.begin() as connection:
+        command.upgrade(_alembic_config(connection), "0012")
+        assert connection.exec_driver_sql(
+            "SELECT anchor_id FROM expansion_link WHERE id='link-agent'",
+        ).scalar_one() == "finding-agent"
+
+
 def test_segment_is_insert_only_except_for_status_and_children_are_stable():
     repo = _repo()
     assert repo.save_baseline_segment(_segment(), [_count()], [_scope_hour()]) is True

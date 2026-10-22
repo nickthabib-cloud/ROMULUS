@@ -9,7 +9,21 @@ from datetime import UTC, datetime, timedelta
 from itertools import islice
 from typing import Any, ClassVar
 
-from sqlalchemy import Engine, Integer, String, and_, case, cast, func, literal, or_, select, true, tuple_
+from sqlalchemy import (
+    Engine,
+    Integer,
+    String,
+    and_,
+    case,
+    cast,
+    func,
+    literal,
+    literal_column,
+    or_,
+    select,
+    true,
+    tuple_,
+)
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
@@ -28,6 +42,14 @@ def is_derived_boot(field: dict | None) -> bool:
 
 # Lanes an analyst may join with an asserted link (the report's reportable lanes).
 REPORTABLE_LANES = ("urgent", "high", "lead")
+LANE_STRENGTH = {"suppressed": 0, "context": 1, "lead": 2, "high": 3, "urgent": 4}
+SEVERITY_STRENGTH = {"informational": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+# Page plans are durable model state. These mission-scale ceilings bound repeated or
+# adversarial tool calls without constraining any one source result; hunt-sized indexes
+# use table high-water marks rather than copied item rows.
+AGENT_PAGE_PLAN_LIMIT = 256
+AGENT_PAGE_ITEM_LIMIT = 250_000
+CANDIDATE_FILTER_SNAPSHOT_LIMIT = 5_000
 
 
 def _upsert_ignore(conn, table, rows: list[dict], keys: list[str]):
@@ -486,7 +508,10 @@ class Repo:
                 t.agent_page_plan.c.cursor == cursor,
             )).mappings().first()
             if existing is not None:
+                if existing["identity"] != identity:
+                    raise ValueError("page cursor already belongs to a different request")
                 return dict(existing)
+            existing_items = self._check_agent_page_quota(connection, hunt_id, identity)
             connection.execute(t.agent_page_plan.insert().values(
                 hunt_id=hunt_id, cursor=cursor, identity=identity, summary=summary,
                 item_count=0, created_at=utcnow(),
@@ -499,6 +524,8 @@ class Repo:
                     "payload": payload,
                 })
                 count += 1
+                if existing_items + count > AGENT_PAGE_ITEM_LIMIT:
+                    raise ValueError("agent page item quota exceeded")
                 if len(batch) == 500:
                     connection.execute(t.agent_page_item.insert(), batch)
                     batch = []
@@ -510,6 +537,33 @@ class Repo:
             ).values(item_count=count))
         return {"hunt_id": hunt_id, "cursor": cursor, "identity": identity,
                 "summary": summary, "item_count": count}
+
+    @staticmethod
+    def _plan_session(identity: dict) -> str:
+        return str(identity.get("session_id") or "read-only")
+
+    def _check_agent_page_quota(self, connection, hunt_id: str, identity: dict) -> int:
+        session = self._plan_session(identity)
+        plans = int(connection.execute(select(func.count()).select_from(t.agent_page_plan).where(
+            t.agent_page_plan.c.hunt_id == hunt_id,
+            func.coalesce(func.json_extract(t.agent_page_plan.c.identity, "$.session_id"), "read-only") == session,
+        )).scalar_one())
+        items = int(connection.execute(select(func.count()).select_from(
+            t.agent_page_item.join(t.agent_page_plan, and_(
+                t.agent_page_plan.c.hunt_id == t.agent_page_item.c.hunt_id,
+                t.agent_page_plan.c.cursor == t.agent_page_item.c.cursor,
+            )),
+        ).where(
+            t.agent_page_plan.c.hunt_id == hunt_id,
+            func.coalesce(func.json_extract(
+                t.agent_page_plan.c.identity, "$.session_id",
+            ), "read-only") == session,
+        )).scalar_one())
+        if plans >= AGENT_PAGE_PLAN_LIMIT:
+            raise ValueError("agent page plan quota exceeded")
+        if items >= AGENT_PAGE_ITEM_LIMIT:
+            raise ValueError("agent page item quota exceeded")
+        return items
 
     def agent_page_plan(self, hunt_id: str, cursor: str) -> dict | None:
         query = select(t.agent_page_plan).where(
@@ -538,17 +592,26 @@ class Repo:
         with self.engine.connect() as connection:
             return [dict(payload) for payload in connection.execute(query).scalars()]
 
+    def agent_incident_index_item(self, hunt_id: str, alias: str) -> dict | None:
+        query = (select(t.agent_page_item.c.payload)
+                 .join(t.agent_page_plan, and_(
+                     t.agent_page_plan.c.hunt_id == t.agent_page_item.c.hunt_id,
+                     t.agent_page_plan.c.cursor == t.agent_page_item.c.cursor,
+                 )).where(
+                     t.agent_page_plan.c.hunt_id == hunt_id,
+                     func.json_extract(t.agent_page_plan.c.identity, "$.kind") == "incident_index",
+                     func.json_extract(t.agent_page_item.c.payload, "$.header.alias") == alias,
+                 ).order_by(t.agent_page_plan.c.created_at.desc()).limit(1))
+        with self.engine.connect() as connection:
+            payload = connection.execute(query).scalar()
+            return dict(payload) if payload is not None else None
+
     def create_candidate_page_plan(self, hunt_id: str, cursor: str, identity: dict,
                                    summary: dict, *, lane: str | None = None,
                                    rule_id: str | None = None,
                                    entity: tuple[str, str] | None = None,
                                    lanes: tuple[str, ...] | None = None) -> dict:
         """Snapshot matching candidate ids with a stable SQL sort and bounded Python batches."""
-        lane_order = case(
-            (t.candidate.c.lane == "urgent", 0), (t.candidate.c.lane == "high", 1),
-            (t.candidate.c.lane == "lead", 2), (t.candidate.c.lane == "context", 3),
-            (t.candidate.c.lane == "suppressed", 4), else_=99,
-        )
         where = [t.candidate.c.hunt_id == hunt_id]
         if lane is not None:
             where.append(t.candidate.c.lane == lane)
@@ -562,73 +625,195 @@ class Repo:
                 func.json_extract(values.c.value, "$[0]") == entity[0],
                 func.json_extract(values.c.value, "$[1]") == entity[1],
             ).exists())
-        ordering = (lane_order, t.candidate.c.priority.desc(),
-                    t.candidate.c.ts, t.candidate.c.id)
-        snapshot = select(
-            literal(hunt_id), literal(cursor),
-            func.row_number().over(order_by=ordering) - 1,
-            func.json_object("candidate_id", t.candidate.c.id),
-        ).where(*where)
         with write_txn(self.engine) as connection:
-            connection.execute(t.agent_page_plan.insert().values(
-                hunt_id=hunt_id, cursor=cursor, identity=identity, summary=summary,
-                item_count=0, created_at=utcnow(),
-            ))
-            connection.execute(t.agent_page_item.insert().from_select(
-                ["hunt_id", "cursor", "ordinal", "payload"], snapshot,
-            ))
-            count = int(connection.execute(select(func.count()).select_from(
-                t.agent_page_item).where(t.agent_page_item.c.hunt_id == hunt_id,
-                                         t.agent_page_item.c.cursor == cursor)).scalar_one())
-            connection.execute(t.agent_page_plan.update().where(
+            existing = connection.execute(select(t.agent_page_plan).where(
                 t.agent_page_plan.c.hunt_id == hunt_id,
                 t.agent_page_plan.c.cursor == cursor,
-            ).values(item_count=count))
+            )).mappings().first()
+            if existing is not None:
+                if existing["identity"] != identity:
+                    raise ValueError("page cursor already belongs to a different request")
+                return dict(existing)
+            high_water = int(connection.execute(select(func.coalesce(func.max(
+                literal_column("candidate.rowid"),
+            ), 0)).select_from(t.candidate).where(
+                t.candidate.c.hunt_id == hunt_id,
+            )).scalar_one())
+            where.append(literal_column("candidate.rowid") <= high_water)
+            count = int(connection.execute(select(func.count()).select_from(t.candidate).where(
+                *where,
+            )).scalar_one())
+            stored_membership = lane is not None or rule_id is not None or entity is not None
+            if stored_membership and count > CANDIDATE_FILTER_SNAPSHOT_LIMIT:
+                raise ValueError(
+                    "filtered candidate snapshot exceeds its bounded membership cap; "
+                    "page the unfiltered finding index instead",
+                )
+            existing_items = self._check_agent_page_quota(connection, hunt_id, identity)
+            if stored_membership and existing_items + count > AGENT_PAGE_ITEM_LIMIT:
+                raise ValueError("agent page item quota exceeded")
+            stored_summary = {**summary, "candidate_snapshot": {
+                "rowid_high_water": high_water,
+                "lane": lane, "rule_id": rule_id, "entity": list(entity) if entity else None,
+                "lanes": list(lanes) if lanes else None,
+                "membership": "persisted" if stored_membership else "live_keyset",
+            }}
+            connection.execute(t.agent_page_plan.insert().values(
+                hunt_id=hunt_id, cursor=cursor, identity=identity, summary=stored_summary,
+                item_count=count, created_at=utcnow(),
+            ))
+            if stored_membership:
+                batch = []
+                for ordinal, candidate_id in enumerate(connection.execute(
+                    select(t.candidate.c.id).where(*where).order_by(t.candidate.c.id),
+                ).scalars()):
+                    batch.append({
+                        "hunt_id": hunt_id, "cursor": cursor, "ordinal": ordinal,
+                        "payload": {"kind": "candidate_member", "id": candidate_id},
+                    })
+                    if len(batch) == 500:
+                        connection.execute(t.agent_page_item.insert(), batch)
+                        batch = []
+                if batch:
+                    connection.execute(t.agent_page_item.insert(), batch)
         return {"hunt_id": hunt_id, "cursor": cursor, "identity": identity,
-                "summary": summary, "item_count": count}
+                "summary": stored_summary, "item_count": count}
+
+    def candidate_page_plan_rows(self, hunt_id: str, cursor: str, *, offset: int,
+                                 limit: int) -> list[dict]:
+        plan = self.agent_page_plan(hunt_id, cursor)
+        if plan is None or "candidate_snapshot" not in plan["summary"]:
+            return []
+        snapshot = plan["summary"]["candidate_snapshot"]
+        if snapshot.get("membership") == "persisted":
+            items = self.agent_page_items(hunt_id, cursor, offset=offset, limit=limit)
+            ids = [str(item["id"]) for item in items]
+            if not ids:
+                return []
+            aliases = t.agent_alias.alias("candidate_page_alias")
+            query = (select(t.candidate, aliases.c.alias.label("_alias")).outerjoin(
+                aliases, and_(
+                    aliases.c.hunt_id == t.candidate.c.hunt_id,
+                    aliases.c.kind == "F", aliases.c.target_id == t.candidate.c.id,
+                ),
+            ).where(
+                t.candidate.c.hunt_id == hunt_id, t.candidate.c.id.in_(ids),
+            ))
+            with self.engine.connect() as connection:
+                by_id = {str(row["id"]): dict(row) for row in connection.execute(query).mappings()}
+            if len(by_id) != len(ids):
+                raise ValueError("candidate snapshot membership changed during paging")
+            return [by_id[candidate_id] for candidate_id in ids]
+        where = [
+            t.candidate.c.hunt_id == hunt_id,
+            literal_column("candidate.rowid") <= int(snapshot["rowid_high_water"]),
+        ]
+        if snapshot.get("lane") is not None:
+            where.append(t.candidate.c.lane == snapshot["lane"])
+        if snapshot.get("lanes") is not None:
+            where.append(t.candidate.c.lane.in_(snapshot["lanes"]))
+        if snapshot.get("rule_id") is not None:
+            where.append(t.candidate.c.rule_id == snapshot["rule_id"])
+        entity = snapshot.get("entity")
+        if entity is not None:
+            values = func.json_each(t.candidate.c.entities).table_valued("key", "value").alias("entities")
+            where.append(select(1).select_from(values).where(
+                func.json_extract(values.c.value, "$[0]") == entity[0],
+                func.json_extract(values.c.value, "$[1]") == entity[1],
+            ).exists())
+        # Candidate identifiers are immutable. Derive the page boundary once, then
+        # fetch with a keyset predicate so lane/priority updates cannot move an item
+        # across an OFFSET boundary. A deletion changes the snapshot cardinality and
+        # is reported instead of silently skipping a surviving finding.
+        with self.engine.connect() as connection:
+            current_count = int(connection.execute(
+                select(func.count()).select_from(t.candidate).where(*where),
+            ).scalar_one())
+            if current_count != int(plan["item_count"]):
+                raise ValueError("candidate snapshot membership changed during paging")
+            if offset:
+                boundary = connection.execute(
+                    select(t.candidate.c.id).where(*where).order_by(t.candidate.c.id)
+                    .offset(offset - 1).limit(1),
+                ).scalar()
+                if boundary is None:
+                    return []
+                where.append(t.candidate.c.id > boundary)
+            aliases = t.agent_alias.alias("candidate_page_alias")
+            query = (select(t.candidate, aliases.c.alias.label("_alias")).outerjoin(
+                aliases, and_(
+                    aliases.c.hunt_id == t.candidate.c.hunt_id,
+                    aliases.c.kind == "F", aliases.c.target_id == t.candidate.c.id,
+                ),
+            ).where(*where).order_by(t.candidate.c.id).limit(limit))
+            return [dict(row) for row in connection.execute(query).mappings()]
 
     def create_entity_event_page_plan(self, hunt_id: str, cursor: str, identity: dict,
                                       entity_id: str) -> dict:
-        ordering = (t.typed_event.c.ts, t.typed_event.c.id)
-        snapshot = (select(
-            literal(hunt_id), literal(cursor),
-            func.row_number().over(order_by=ordering) - 1,
-            func.json_object("event_id", t.typed_event.c.id),
-        ).join(t.event_entity, t.event_entity.c.event_id == t.typed_event.c.id)
-          .where(t.event_entity.c.entity_id == entity_id))
         with write_txn(self.engine) as connection:
+            existing = connection.execute(select(t.agent_page_plan).where(
+                t.agent_page_plan.c.hunt_id == hunt_id,
+                t.agent_page_plan.c.cursor == cursor,
+            )).mappings().first()
+            if existing is not None:
+                if existing["identity"] != identity:
+                    raise ValueError("page cursor already belongs to a different request")
+                return dict(existing)
             base = t.typed_event.join(
                 t.event_entity, t.event_entity.c.event_id == t.typed_event.c.id,
             )
+            high_water = int(connection.execute(select(func.coalesce(func.max(
+                literal_column("typed_event.rowid"),
+            ), 0)).select_from(base).where(
+                t.event_entity.c.entity_id == entity_id,
+            )).scalar_one())
             total = int(connection.execute(
                 select(func.count()).select_from(base).where(
                     t.event_entity.c.entity_id == entity_id,
+                    literal_column("typed_event.rowid") <= high_water,
                 ),
             ).scalar_one())
             families = {str(family): int(count) for family, count in connection.execute(
                 select(t.typed_event.c.family, func.count()).select_from(base)
-                .where(t.event_entity.c.entity_id == entity_id)
+                .where(t.event_entity.c.entity_id == entity_id,
+                       literal_column("typed_event.rowid") <= high_water)
                 .group_by(t.typed_event.c.family).order_by(t.typed_event.c.family),
             )}
-            summary = {"families": families}
+            self._check_agent_page_quota(connection, hunt_id, identity)
+            summary = {"families": families, "entity_snapshot": {
+                "entity_id": entity_id, "rowid_high_water": high_water,
+            }}
             connection.execute(t.agent_page_plan.insert().values(
                 hunt_id=hunt_id, cursor=cursor, identity=identity, summary=summary,
-                item_count=0, created_at=utcnow(),
+                item_count=total, created_at=utcnow(),
             ))
-            connection.execute(t.agent_page_item.insert().from_select(
-                ["hunt_id", "cursor", "ordinal", "payload"], snapshot,
-            ))
-            count = int(connection.execute(select(func.count()).select_from(
-                t.agent_page_item).where(t.agent_page_item.c.hunt_id == hunt_id,
-                                         t.agent_page_item.c.cursor == cursor)).scalar_one())
-            if count != total:  # pragma: no cover - one transaction makes this an invariant
-                raise RuntimeError("entity event snapshot count changed inside its transaction")
-            connection.execute(t.agent_page_plan.update().where(
-                t.agent_page_plan.c.hunt_id == hunt_id,
-                t.agent_page_plan.c.cursor == cursor,
-            ).values(item_count=count))
         return {"hunt_id": hunt_id, "cursor": cursor, "identity": identity,
-                "summary": summary, "item_count": count}
+                "summary": summary, "item_count": total}
+
+    def entity_event_page_plan_ids(self, hunt_id: str, cursor: str, *, offset: int,
+                                   limit: int) -> list[str]:
+        plan = self.agent_page_plan(hunt_id, cursor)
+        if plan is None or "entity_snapshot" not in plan["summary"]:
+            return []
+        snapshot = plan["summary"]["entity_snapshot"]
+        query = (select(t.typed_event.c.id)
+                 .join(t.event_entity, t.event_entity.c.event_id == t.typed_event.c.id)
+                 .where(t.event_entity.c.entity_id == snapshot["entity_id"],
+                        literal_column("typed_event.rowid") <= int(snapshot["rowid_high_water"]))
+                 .order_by(t.typed_event.c.ts, t.typed_event.c.id).offset(offset).limit(limit))
+        with self.engine.connect() as connection:
+            return [str(value) for value in connection.execute(query).scalars()]
+
+    def entity_event_fingerprint(self, entity_id: str) -> str:
+        query = (select(t.typed_event.c.id, t.typed_event.c.ts)
+                 .join(t.event_entity, t.event_entity.c.event_id == t.typed_event.c.id)
+                 .where(t.event_entity.c.entity_id == entity_id)
+                 .order_by(t.typed_event.c.ts, t.typed_event.c.id))
+        fingerprint = hashlib.sha256()
+        with self.engine.connect() as connection:
+            for event_id, event_ts in connection.execution_options(yield_per=500).execute(query):
+                fingerprint.update(f"{event_ts!s}\0{event_id}\n".encode())
+        return fingerprint.hexdigest()
 
     VALID: ClassVar = {
         "planned": {"running", "canceled"},
@@ -849,13 +1034,46 @@ class Repo:
                 if not (canonicalize_agent and existing["source_case_id"] is not None
                         and row.get("source_case_id") is None):
                     return False
-                c.execute(t.candidate.update().where(t.candidate.c.id == row["id"]).values(**row))
+                before = dict(existing)
+                existing_priority = float(existing["priority"])
+                incoming_priority = float(row["priority"])
+                lane = max(
+                    (str(existing["lane"]), str(row["lane"])),
+                    key=lambda value: LANE_STRENGTH.get(value, -1),
+                )
+                severity = max(
+                    (str(existing["severity"]), str(row["severity"])),
+                    key=lambda value: SEVERITY_STRENGTH.get(value, -1),
+                )
+                event_ids = sorted({*(existing["event_ids"] or []), *(row.get("event_ids") or [])})
+                values = {
+                    # The later deterministic pass owns canonical wording and provenance. It must
+                    # never weaken the machine decision or discard evidence already cited.
+                    "rule_version": row["rule_version"],
+                    "claim": row["claim"],
+                    "claim_type": row["claim_type"],
+                    "event_ids": event_ids,
+                    "lane": lane,
+                    "severity": severity,
+                    "priority": max(existing_priority, incoming_priority),
+                    "priority_reasons": (row["priority_reasons"] if incoming_priority > existing_priority
+                                         else existing["priority_reasons"]),
+                    "source_case_id": None,
+                    "source_anchor_id": row.get("source_anchor_id"),
+                    "source_link_id": row.get("source_link_id"),
+                }
+                c.execute(t.candidate.update().where(t.candidate.c.id == row["id"]).values(**values))
+                after = {**before, **values}
+                audit_fields = (
+                    "claim", "claim_type", "event_ids", "lane", "severity", "priority",
+                    "source_case_id", "source_anchor_id", "source_link_id",
+                )
                 c.execute(t.audit_event.insert().values(
                     at=utcnow(), actor="system", action="candidate.canonicalize_agent_first",
                     hunt_id=row["hunt_id"], detail={
-                        "candidate_id": row["id"], "old_source_case_id": existing["source_case_id"],
-                        "source_anchor_id": row.get("source_anchor_id"),
-                        "source_link_id": row.get("source_link_id"),
+                        "candidate_id": row["id"],
+                        "before": {field: before[field] for field in audit_fields},
+                        "after": {field: after[field] for field in audit_fields},
                     },
                 ))
                 return True
@@ -905,10 +1123,88 @@ class Repo:
         with self.engine.connect() as connection:
             return int(connection.execute(query).scalar_one())
 
+    def expansion_link_payload_bytes(self, hunt_id: str) -> int:
+        """Approximate persisted variable payload bytes before Python JSON materialization."""
+        payload = sum(
+            func.length(cast(column, String))
+            for column in (
+                t.expansion_link.c.key, t.expansion_link.c.event_ids,
+                t.expansion_link.c.evidence_ids, t.expansion_link.c.task_ids,
+                t.expansion_link.c.coverage, t.expansion_link.c.reasons,
+            )
+        )
+        query = select(func.coalesce(func.sum(payload), 0)).where(
+            t.expansion_link.c.hunt_id == hunt_id,
+        )
+        with self.engine.connect() as connection:
+            return int(connection.execute(query).scalar_one())
+
+    def entity_count(self, hunt_id: str) -> int:
+        with self.engine.connect() as connection:
+            return int(connection.execute(select(func.count()).select_from(t.entity).where(
+                t.entity.c.hunt_id == hunt_id,
+            )).scalar_one())
+
+    def entities_for_keys(self, hunt_id: str, keys: set[tuple[str, str]]) -> list[dict]:
+        """Fetch only entity identities cited by the bounded candidate materialization."""
+        if not keys:
+            return []
+        ordered = sorted(keys)
+        rows: list[dict] = []
+        with self.engine.connect() as connection:
+            for offset in range(0, len(ordered), 250):
+                batch = ordered[offset:offset + 250]
+                query = select(t.entity).where(
+                    t.entity.c.hunt_id == hunt_id,
+                    tuple_(t.entity.c.kind, t.entity.c.value).in_(batch),
+                ).order_by(t.entity.c.kind, t.entity.c.value, t.entity.c.id)
+                rows.extend(dict(row) for row in connection.execute(query).mappings())
+        return rows
+
     def rule_cell_count(self, hunt_id: str) -> int:
         query = select(func.count()).select_from(t.rule_run).where(t.rule_run.c.hunt_id == hunt_id)
         with self.engine.connect() as connection:
             return int(connection.execute(query).scalar_one())
+
+    def rule_cell_state_counts(self, hunt_id: str) -> dict[str, int]:
+        """Return bounded coverage health aggregates without materializing rule rows."""
+        query = (select(t.rule_run.c.state, func.count())
+                 .where(t.rule_run.c.hunt_id == hunt_id)
+                 .group_by(t.rule_run.c.state))
+        with self.engine.connect() as connection:
+            return {str(state): int(count) for state, count in connection.execute(query)}
+
+    def rule_cell_coverage_counts(self, hunt_id: str, rule_ids: set[str],
+                                  targets: set[str]) -> dict[str, int]:
+        """Aggregate expected rule/target coverage without loading individual cells."""
+        expected = len(rule_ids) * len(targets)
+        if not rule_ids or not targets:
+            return {"cells": 0, "expected_rule_targets": expected,
+                    "present_rule_targets": 0, "incomplete": 0}
+        target = func.replace(t.rule_run.c.target, "arkime-pcap:", "")
+        relevant = and_(
+            t.rule_run.c.hunt_id == hunt_id,
+            t.rule_run.c.state != "split",
+            t.rule_run.c.rule_id.in_(sorted(rule_ids)),
+            target.in_(sorted(targets)),
+        )
+        pair = t.rule_run.c.rule_id + literal_column("char(31)") + target
+        incomplete = case(
+            (or_(
+                t.rule_run.c.state.in_(("planned", "failed")),
+                t.rule_run.c.state.like("%partial%"),
+            ), 1),
+            else_=0,
+        )
+        query = select(
+            func.count(), func.count(func.distinct(pair)), func.coalesce(func.sum(incomplete), 0),
+        ).where(relevant)
+        with self.engine.connect() as connection:
+            cells, present, bad = connection.execute(query).one()
+        return {
+            "cells": int(cells), "expected_rule_targets": expected,
+            "present_rule_targets": int(present), "incomplete": int(bad),
+        }
 
     def candidate_page(self, hunt_id: str, *, offset: int, limit: int,
                        lane: str | None = None, rule_id: str | None = None) -> list[dict]:
@@ -963,7 +1259,7 @@ class Repo:
         if finding_alias:
             aliases = t.agent_alias.alias("candidate_alias")
             query = (select(t.candidate, aliases.c.alias.label("_alias"))
-                     .join(aliases, and_(
+                     .outerjoin(aliases, and_(
                          aliases.c.hunt_id == t.candidate.c.hunt_id,
                          aliases.c.kind == "F", aliases.c.target_id == t.candidate.c.id,
                      )).where(t.candidate.c.id.in_(ids)))
@@ -985,7 +1281,8 @@ class Repo:
             row = c.execute(query).mappings().first()
             return dict(row) if row else None
 
-    def agent_alias_target_hunts(self, kind: str, target_id: str) -> list[str]:
+    def agent_alias_target_hunts(self, kind: str, target_id: str,
+                                 *, hunt_id: str | None = None) -> list[str]:
         table = {"F": t.candidate, "E": t.typed_event, "N": t.entity, "L": t.expansion_link}.get(kind)
         if table is None:
             return []
@@ -994,19 +1291,42 @@ class Repo:
             # Typed events can be retained once and cited by more than one hunt. Those citing hunts
             # own an E alias even when the physical row remains attributed to its first hunt.
             if kind == "E":
-                owners.update(c.execute(
-                    select(t.entity.c.hunt_id)
-                    .join(t.event_entity, t.event_entity.c.entity_id == t.entity.c.id)
-                    .where(t.event_entity.c.event_id == target_id)
-                ).scalars())
-                for hunt_id, event_ids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)):
-                    if target_id in (event_ids or []):
-                        owners.add(hunt_id)
-                for hunt_id, event_ids, evidence_ids in c.execute(select(
-                        t.expansion_link.c.hunt_id, t.expansion_link.c.event_ids,
-                        t.expansion_link.c.evidence_ids)):
-                    if target_id in [*(event_ids or []), *(evidence_ids or [])]:
-                        owners.add(hunt_id)
+                scoped_hunts = [hunt_id] if hunt_id is not None else sorted(owners)
+                for scoped_hunt in scoped_hunts:
+                    associated = c.execute(select(1).select_from(t.entity).join(
+                        t.event_entity, t.event_entity.c.entity_id == t.entity.c.id,
+                    ).where(
+                        t.entity.c.hunt_id == scoped_hunt,
+                        t.event_entity.c.event_id == target_id,
+                    ).limit(1)).scalar()
+                    candidate_events = func.json_each(t.candidate.c.event_ids).table_valued(
+                        "key", "value",
+                    ).alias("candidate_events")
+                    cited_candidate = c.execute(select(1).select_from(t.candidate).where(
+                        t.candidate.c.hunt_id == scoped_hunt,
+                        select(1).select_from(candidate_events).where(
+                            candidate_events.c.value == target_id,
+                        ).exists(),
+                    ).limit(1)).scalar()
+                    link_events = func.json_each(t.expansion_link.c.event_ids).table_valued(
+                        "key", "value",
+                    ).alias("link_events")
+                    link_evidence = func.json_each(t.expansion_link.c.evidence_ids).table_valued(
+                        "key", "value",
+                    ).alias("link_evidence")
+                    cited_link = c.execute(select(1).select_from(t.expansion_link).where(
+                        t.expansion_link.c.hunt_id == scoped_hunt,
+                        or_(
+                            select(1).select_from(link_events).where(
+                                link_events.c.value == target_id,
+                            ).exists(),
+                            select(1).select_from(link_evidence).where(
+                                link_evidence.c.value == target_id,
+                            ).exists(),
+                        ),
+                    ).limit(1)).scalar()
+                    if associated or cited_candidate or cited_link:
+                        owners.add(scoped_hunt)
             return sorted(owners)
 
     def get_or_create_agent_alias(self, hunt_id: str, kind: str, target_id: str) -> dict:
@@ -1632,9 +1952,52 @@ class Repo:
                                                     "detail": detail or {}})
             c.execute(stmt)
 
-    def rule_cells(self, hunt_id: str) -> list[dict]:
+    def rule_cells(self, hunt_id: str, rule_ids: set[str] | None = None,
+                   *, max_id: int | None = None) -> list[dict]:
+        query = select(t.rule_run).where(t.rule_run.c.hunt_id == hunt_id)
+        if rule_ids is not None:
+            if not rule_ids:
+                return []
+            query = query.where(t.rule_run.c.rule_id.in_(sorted(rule_ids)))
+        if max_id is not None:
+            query = query.where(t.rule_run.c.id <= max_id)
         with self.engine.connect() as c:
-            return [dict(r) for r in c.execute(select(t.rule_run).where(t.rule_run.c.hunt_id == hunt_id)).mappings()]
+            return [dict(r) for r in c.execute(query).mappings()]
+
+    def rule_presence_counts(self, hunt_id: str,
+                             keys: set[tuple[str, str]]) -> dict[tuple[str, str], int]:
+        """Count all distinct rules at selected coverage cells without loading their rows."""
+        if not keys:
+            return {}
+        out: dict[tuple[str, str], int] = {}
+        ordered = sorted(keys)
+        with self.engine.connect() as connection:
+            for offset in range(0, len(ordered), 250):
+                batch = ordered[offset:offset + 250]
+                query = (select(
+                    t.rule_run.c.target, t.rule_run.c.partition,
+                    func.count(t.rule_run.c.rule_id.distinct()),
+                ).where(
+                    t.rule_run.c.hunt_id == hunt_id,
+                    tuple_(t.rule_run.c.target, t.rule_run.c.partition).in_(batch),
+                ).group_by(t.rule_run.c.target, t.rule_run.c.partition))
+                out.update({(str(target), str(partition)): int(count)
+                            for target, partition, count in connection.execute(query)})
+        return out
+
+    def rule_cell_fingerprint(self, hunt_id: str) -> str:
+        query = (select(
+            t.rule_run.c.id, t.rule_run.c.rule_id, t.rule_run.c.rule_version,
+            t.rule_run.c.target, t.rule_run.c.partition, t.rule_run.c.state,
+            t.rule_run.c.matched, t.rule_run.c.evaluated, t.rule_run.c.detail,
+        ).where(t.rule_run.c.hunt_id == hunt_id).order_by(t.rule_run.c.id))
+        fingerprint = hashlib.sha256()
+        with self.engine.connect() as connection:
+            for row in connection.execution_options(yield_per=500).execute(query).mappings():
+                fingerprint.update(json.dumps(dict(row), sort_keys=True, default=str,
+                                              separators=(",", ":")).encode())
+                fingerprint.update(b"\n")
+        return fingerprint.hexdigest()
 
     def lane_counts(self, hunt_id: str) -> dict[str, int]:
         with self.engine.connect() as c:

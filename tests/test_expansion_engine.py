@@ -119,6 +119,20 @@ def repo_with_aggregate_anchor(events, *, candidate_id="F-aggregate"):
     return repo
 
 
+def test_resume_seed_does_not_promote_agent_published_candidate_to_deterministic_anchor():
+    repo = repo_with_anchor()
+    add_anchor(repo, "F-agent-published", "web2")
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.candidate.update().where(
+            tables.candidate.c.id == "F-agent-published",
+        ).values(source_case_id="case-1", source_anchor_id="F-anchor", source_link_id="L-agent"))
+
+    ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo))._seed_anchors()
+
+    assert {row["candidate_id"] for row in repo.expansion_anchors("h1")} == {"F-anchor"}
+
+
 class KeyRecordingFetcher(ScriptedFetcher):
     def result_id(self, anchor, link_type, window):
         pid = anchor.events[0].get("process.pid") if anchor.events else None

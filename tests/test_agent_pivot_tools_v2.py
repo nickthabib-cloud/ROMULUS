@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import select
+
 from romulus.agent.aliases import AliasBook
 from romulus.agent.models import PivotCoverage, PivotResult
 from romulus.agent.toolbox import Toolbox
@@ -14,6 +16,7 @@ from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkResult
 from romulus.report.incidents import build_incident_graph
 from romulus.sources.models import Window
+from romulus.store import schema as store_schema
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -352,7 +355,7 @@ def test_deterministic_expansion_replaces_an_agent_first_direct_match_with_canon
     deterministic_link = repo.expansion_link(canonical["source_link_id"])
     assert canonical["source_anchor_id"] == deterministic_link["anchor_id"]
     assert deterministic_link["strength"] == "observed"
-    assert not any("agent-requested" in note for note in canonical["gate_results"]["_notes"])
+    assert any("agent-requested" in note for note in canonical["gate_results"]["_notes"])
 
 
 def test_agent_auth_reach_keeps_all_host_activity_across_sessions_and_never_becomes_context():
@@ -454,6 +457,58 @@ def test_agent_phase_never_lowers_or_withdraws_an_existing_candidate():
     }
     assert all(after[candidate_id] == state for candidate_id, state in before.items())
     assert all(not row["claim"].startswith("withdrawn:") for row in repo.candidates("h1"))
+
+
+def test_deterministic_canonicalization_preserves_stronger_agent_first_decision():
+    repo = _repo()
+    agent_first = {
+        "id": "same-candidate", "hunt_id": "h1", "rule_id": "host.test",
+        "rule_version": "1", "claim": "agent-path wording", "claim_type": "observed_action",
+        "event_ids": ["event-1", "event-2", "event-3"], "predicate_fields": [],
+        "entities": [["host", "web01", "host"]], "ts": T,
+        "severity": "critical", "confidence": "high", "lane": "urgent", "priority": 95.0,
+        "priority_reasons": ["agent aggregate"], "gate_results": {"source": "agent"},
+        "benign_alternatives": ["agent alternative"], "next_checks": ["agent next check"],
+        "group_key": "same-group",
+        "source_case_id": "case-1", "source_anchor_id": "anchor-finding",
+        "source_link_id": "agent-link",
+    }
+    deterministic = {
+        **agent_first,
+        "claim": "deterministic canonical wording",
+        "event_ids": ["event-4"],
+        "severity": "high", "lane": "high", "priority": 60.0,
+        "priority_reasons": ["deterministic weaker score"],
+        "gate_results": {"source": "deterministic"},
+        "benign_alternatives": ["deterministic alternative"],
+        "next_checks": ["deterministic next check"],
+        "source_case_id": None, "source_anchor_id": "deterministic-anchor",
+        "source_link_id": "deterministic-link",
+    }
+    repo.save_candidate(agent_first)
+
+    assert repo.save_candidate(deterministic, canonicalize_agent=True)
+
+    stored = repo.candidate("same-candidate")
+    assert stored["claim"] == "deterministic canonical wording"
+    assert stored["source_case_id"] is None
+    assert stored["source_anchor_id"] == "deterministic-anchor"
+    assert stored["source_link_id"] == "deterministic-link"
+    assert stored["lane"] == "urgent"
+    assert stored["severity"] == "critical"
+    assert stored["priority"] == 95.0
+    assert stored["priority_reasons"] == ["agent aggregate"]
+    assert stored["gate_results"] == {"source": "agent"}
+    assert stored["benign_alternatives"] == ["agent alternative"]
+    assert stored["next_checks"] == ["agent next check"]
+    assert stored["event_ids"] == ["event-1", "event-2", "event-3", "event-4"]
+    with repo.engine.connect() as connection:
+        detail = connection.execute(select(store_schema.audit_event.c.detail).where(
+            store_schema.audit_event.c.action == "candidate.canonicalize_agent_first",
+        )).scalar_one()
+    assert detail["before"]["lane"] == "urgent"
+    assert detail["after"]["claim"] == "deterministic canonical wording"
+    assert detail["after"]["event_ids"] == stored["event_ids"]
 
 
 def test_twin_hunt_executors_publish_identical_candidate_content():

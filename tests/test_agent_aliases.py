@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import event as sqlalchemy_event
 
 from romulus.agent.aliases import (
     AliasBook,
@@ -149,3 +150,39 @@ def test_shared_event_is_owned_by_each_hunt_with_an_event_entity_association():
     repo.save_evidence("h2", [event], {}, None)
 
     assert AliasBook(repo, "h2").alias_for("E", "shared-event") == "E1"
+
+
+def test_candidate_lookup_keeps_rows_inserted_after_alias_seeding():
+    repo = _repo()
+    _candidate(repo, "seeded", "high", 50.0, T)
+    AliasBook(repo, "h1")
+    _candidate(repo, "inserted-later", "high", 40.0, T + timedelta(seconds=1))
+
+    rows = repo.candidates_by_ids(["inserted-later"], finding_alias=True)
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == "inserted-later"
+    assert rows[0]["_alias"] is None
+
+
+def test_event_alias_ownership_uses_hunt_scoped_json_exists_queries():
+    repo = _repo()
+    _candidate(repo, "finding", "high", 50.0, T)
+    statements = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    sqlalchemy_event.listen(repo.engine, "before_cursor_execute", capture)
+    try:
+        owners = repo.agent_alias_target_hunts("E", "event-finding", hunt_id="h1")
+    finally:
+        sqlalchemy_event.remove(repo.engine, "before_cursor_execute", capture)
+
+    assert owners == ["h1"]
+    candidate_queries = [statement for statement in statements if "candidate" in statement]
+    assert candidate_queries
+    assert all("candidate.hunt_id" in statement and "json_each" in statement
+               for statement in candidate_queries)
+    assert all("candidate.event_ids" not in statement.partition("FROM")[0]
+               for statement in candidate_queries)
