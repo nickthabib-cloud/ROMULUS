@@ -46,7 +46,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, pf
-from romulus.detect.bounded import RecentIds
+from romulus.detect.bounded import ExecHistory, RecentIds
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict
 from romulus.detect.host import _FLAG_ONLY, SCRIPT_FILE_INTERPRETERS, WEB_SERVICE_USERS
 from romulus.detect.linux_argv import canonical, is_under, normalize_path, program, write_targets
@@ -201,14 +201,54 @@ class _Run:
     auth_id: str | None
 
 
+class _OkTimes:
+    """Start times of the runs whose exec did not fail: an exact count, the latest, and the latest KEPT times. How
+    many began after a time t is exact when t is at or after the earliest kept time (every later run is kept), and a
+    lower bound otherwise."""
+
+    KEPT = 64
+    __slots__ = ("count", "kept")
+
+    def __init__(self):
+        self.count = 0
+        self.kept: list[float] = []
+
+    def __len__(self) -> int:
+        return self.count
+
+    def add(self, ts: float) -> None:
+        self.count += 1
+        bisect.insort(self.kept, ts)
+        if len(self.kept) > self.KEPT:
+            del self.kept[0]
+
+    def last(self) -> float | None:
+        return self.kept[-1] if self.kept else None
+
+    def after(self, ts: float) -> tuple[int, bool]:
+        """(runs that began after `ts`, whether that number is exact)."""
+        n = len(self.kept) - bisect.bisect_right(self.kept, ts)
+        exact = self.count == len(self.kept) or (bool(self.kept) and ts >= self.kept[0])
+        return n, exact
+
+
 @dataclass
 class _Series:
     """Root runs of one file by one executor class."""
     detail: str
-    ok_ts: list[float] = field(default_factory=list)      # sorted; runs whose exec did not fail
+    ok_ts: _OkTimes = field(default_factory=_OkTimes)      # runs whose exec did not fail
     failed: int = 0
     first: list[_Run] = field(default_factory=list)
     after: dict[str, _Run] = field(default_factory=dict)  # writer record id -> first non-failed run after it
+    # writer record id -> [non-failed runs that began after it, whether that count is exact], kept as runs arrive
+    after_n: dict[str, list] = field(default_factory=dict)
+
+    def count_after(self, write: _Write) -> list:
+        counted = self.after_n.get(write.event_id)
+        if counted is None:
+            # the runs already held: exact unless some of them were released from the kept times
+            counted = self.after_n[write.event_id] = list(self.ok_ts.after(write.ts))
+        return counted
 
 
 class NonRootWriteRootExecutedFile(Playbook):
@@ -261,6 +301,16 @@ class NonRootWriteRootExecutedFile(Playbook):
                      "only), a superset of what this evaluator reads",
     }
 
+    # State per file: files written by a non-root account, changed per kernel records, and run by root, each up to
+    # MAX_KEYS (a few hundred bytes each, the root runs up to 64 start times: about 150 MB each at the budget); a
+    # record of a new file beyond it is not evaluated and coverage says so. Root execs outside any login are held as a
+    # bounded exec history for the service-manager walk. A scheduler session opened more than SESSION_HORIZON before
+    # the newest record read is released: a root run is attributed to its session when it is read, and a job that
+    # outlives the horizon is reported as started outside any login, not dropped.
+    MAX_KEYS = 300_000
+    DAEMON_CAPACITY = 300_000
+    SESSION_HORIZON = 12 * 3600.0
+
     def __init__(self):
         super().__init__()
         self._seen = RecentIds()        # bounded re-read guard
@@ -274,8 +324,10 @@ class NonRootWriteRootExecutedFile(Playbook):
         # (host, audit session id) and (host, pid) -> entries whose last element is the record's boot id
         self.sessions: dict[tuple, list[tuple[float, str, str, str | None]]] = defaultdict(list)
         self.session_pids: dict[tuple, list[tuple[float, str, str, str | None]]] = defaultdict(list)
+        self.watermark: float | None = None
+        self._pruned: float | None = None
         self.recent_auth: dict[str, OrderedDict[str, TypedEvent]] = defaultdict(OrderedDict)
-        self.daemons: dict[tuple, list[tuple[float, int | None, str | None]]] = defaultdict(list)
+        self.daemons = ExecHistory(self.DAEMON_CAPACITY, 16)    # root execs outside any login, per (host, pid)
         self.changes: dict[tuple[str, str], list[tuple[float, str, str, str]]] = defaultdict(list)
         self.kernel_writes: dict[tuple[str, str], list[_Write]] = defaultdict(list)
         self.file_change_records = 0
@@ -298,13 +350,43 @@ class NonRootWriteRootExecutedFile(Playbook):
         fresh = [e for e in events if e.family in _FAMILY_ORDER and e.id not in self._seen]
         for event in sorted(fresh, key=lambda e: (e.ts, _FAMILY_ORDER[e.family], e.id)):
             self._seen.add(event.id)            # re-reading a partition must not count a record twice
+            ts = event.ts.timestamp()
+            self.watermark = ts if self.watermark is None else max(self.watermark, ts)
             if event.family == "auth":
                 self._auth(event)
             elif event.family == "file_change":
                 self._file_change(event)
             else:
                 self._exec(event)
+        self._prune_sessions()
         return []
+
+    def _prune_sessions(self) -> None:
+        """At most hourly, release scheduler sessions opened more than SESSION_HORIZON before the newest record."""
+        if self.watermark is None or (self._pruned is not None and self.watermark - self._pruned < 3600):
+            return
+        self._pruned = self.watermark
+        horizon = self.watermark - self.SESSION_HORIZON
+        for table in (self.sessions, self.session_pids):
+            for key in list(table):
+                kept = [entry for entry in table[key] if entry[0] >= horizon]
+                if kept:
+                    table[key] = kept
+                else:
+                    del table[key]
+
+    def _room(self, what: str, *tables: dict) -> bool:
+        if all(len(table) < self.MAX_KEYS for table in tables):
+            return True
+        self.refuse("files", f"{what} held reached {self.MAX_KEYS:,}; a record of a new file is not evaluated")
+        return False
+
+    def limit_reasons(self) -> list[str]:
+        if self.daemons.evicted:
+            self.note_limit("lineage", f"root execs outside any login of {self.daemons.evicted} process(es) were "
+                                       f"released to hold at most {self.DAEMON_CAPACITY:,}; a service-manager walk "
+                                       f"through one stops early and the run is reported as a daemon's")
+        return super().limit_reasons()
 
     def _auth(self, event: TypedEvent) -> None:
         service = event.get("auth.service")
@@ -346,6 +428,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             return
         key = (event.host or "", path_key(normalize_path(str(path))))
         account = _account(event)
+        if key not in self.changes and not self._room("changed or written files", self.changes, self.writes):
+            return
         entries = self.changes[key]
         if sum(1 for item in entries if item[2] == account) >= WRITE_CITE:
             return
@@ -356,6 +440,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             event.ts.timestamp(), event.id, normalize_path(str(path)), f"a kernel file-change record ({change})",
             account, _uid(event), (boot_of(event), session) if session is not None else None,
             event.get("process.user") in WEB_SERVICE_USERS, False, kernel=True))
+        for series in self.runs.get(key, {}).values():
+            series.count_after(self.kernel_writes[key][-1])
 
     def _exec(self, event: TypedEvent) -> None:
         argv = event.get("process.argv")
@@ -373,8 +459,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             self.missing_required += 1          # some arguments were lost: never a clean evaluation
         if root:
             if _auid(event) is None and isinstance(event.get("process.pid"), int):
-                self.daemons[(event.host, event.get("process.pid"))].append(
-                    (event.ts.timestamp(), event.get("process.ppid"), boot_of(event)))
+                self.daemons.add((event.host, event.get("process.pid")),
+                                 (event.ts.timestamp(), event.get("process.ppid"), boot_of(event)))
             self._root_run(event, prog)
         elif str(event.get("process.euid", "")) != "0" and not incomplete:
             # a setuid-root program writes as root; a write target is often the last operand, which an incomplete
@@ -406,6 +492,8 @@ class NonRootWriteRootExecutedFile(Playbook):
         for pkey, items in by_key.items():
             key = (event.host or "", pkey)
             count_key = (key[0], pkey, account)
+            if count_key not in self.write_counts and not self._room("written files", self.write_counts):
+                continue
             self.write_counts[count_key] += 1
             if event.outcome != Outcome.failure:
                 self.write_ok[count_key] += 1
@@ -418,6 +506,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             self.writes[key].append(_Write(event.ts.timestamp(), event.id, items[0][0], " and ".join(forms),
                                            account, _uid(event), own_session,
                                            event.get("process.user") in WEB_SERVICE_USERS, assumed))
+            for series in self.runs.get(key, {}).values():
+                series.count_after(self.writes[key][-1])
 
     @staticmethod
     def _text_writes(script: str, cwd: str | None,
@@ -485,6 +575,8 @@ class NonRootWriteRootExecutedFile(Playbook):
                 by_key.setdefault(path_key(path), []).append((path, form))
         for pkey, items in by_key.items():
             key = (event.host or "", pkey)
+            if key not in self.runs and not self._room("files root ran", self.runs):
+                continue
             series = self.runs[key].setdefault(executor, _Series(detail=detail))
             forms = list(dict.fromkeys(form for _path, form in items))
             run = _Run(event.ts.timestamp(), event.id, items[0][0], " and ".join(forms), auth.id if auth else None)
@@ -492,11 +584,14 @@ class NonRootWriteRootExecutedFile(Playbook):
             if event.outcome == Outcome.failure:
                 series.failed += 1
             else:
-                bisect.insort(series.ok_ts, run.ts)
                 for write in (*self.writes.get(key, ()), *self.kernel_writes.get(key, ())):
-                    if write.ts < run.ts and write.event_id not in series.after:
-                        series.after[write.event_id] = run
-                        cite = True
+                    counted = series.count_after(write)
+                    if write.ts < run.ts:
+                        counted[0] += 1
+                        if write.event_id not in series.after:
+                            series.after[write.event_id] = run
+                            cite = True
+                series.ok_ts.add(run.ts)
             if len(series.first) < EXEC_FIRST:
                 series.first.append(run)
                 cite = True
@@ -584,7 +679,7 @@ class NonRootWriteRootExecutedFile(Playbook):
                 return True
             if not isinstance(ppid, int) or ppid <= 1:
                 return False
-            parent = self._latest(self.daemons.get((event.host, ppid), ()), ts, boot)
+            parent = self._latest(self.daemons.get((event.host, ppid), touch=True), ts, boot)
             if parent is None:
                 return False
             ts, ppid, parent_boot = parent
@@ -736,9 +831,9 @@ class NonRootWriteRootExecutedFile(Playbook):
                            else _EXECUTOR_TECHNIQUE[kind])
             if kind == "service":
                 techniques.add("T1543.002")
-            n_after = len(s.ok_ts) - bisect.bisect_right(s.ok_ts, first.ts)
+            n_after, exact = s.after_n.get(first.event_id) or s.ok_ts.after(first.ts)
             runs_after += n_after
-            if content_changes and s.ok_ts and s.ok_ts[-1] > content_changes[0][0]:
+            if content_changes and s.ok_ts and s.ok_ts.last() > content_changes[0][0]:
                 run_after_change = True
             after = s.after.get(first.event_id)
             cited_runs = list(s.first) + ([after] if after is not None else [])
@@ -750,6 +845,7 @@ class NonRootWriteRootExecutedFile(Playbook):
             line = (f"{len(s.ok_ts) + s.failed} root exec record(s) in the window execute {s.first[0].path} or name "
                     f"it as a command in a root shell's command text ({s.detail}; cited forms: {'; '.join(forms)})")
             if n_after:
+                n_after = n_after if exact else f"at least {n_after}"
                 line += (f"; {n_after} of them began after {since}, the first at "
                          f"{_iso(after.ts)}" if after is not None else
                          f"; {n_after} of them began after {since} (the record of the "
