@@ -722,3 +722,23 @@ def test_cleanup_of_a_million_row_crashed_build_never_holds_the_write_lock_for_a
     print(f"cleanup of a crashed million-row build {elapsed:.1f}s; concurrent max wait {max(waits):.3f}s")
     assert removed == 1 and list(repo.baseline_counts(row["id"])) == []
     assert waits and max(waits) < 1
+
+
+def test_work_beyond_the_target_hour_cap_is_returned_as_gaps(monkeypatch):
+    from romulus.baseline import lookback as module
+
+    monkeypatch.setattr(module, "MAX_WORK_ITEMS", 5)
+    repo, source = _repo(), FakeHistory()
+    result = _writer(repo, source).fill(
+        hunt_id="build", targets=["b", "a"], start=START - timedelta(hours=4), end=START,
+    )
+    # Whole newest-first rounds fit the cap (two hours of both targets); the older hours are explicit gaps.
+    assert result.complete == 4
+    assert sorted(source.plans) == sorted(
+        (target, START - timedelta(hours=offset)) for target in ("a", "b") for offset in (1, 2)
+    )
+    assert [(gap.target, gap.start, gap.end, gap.state) for gap in result.gaps] == [
+        ("a", START - timedelta(hours=4), START - timedelta(hours=2), "omitted_budget"),
+        ("b", START - timedelta(hours=4), START - timedelta(hours=2), "omitted_budget"),
+    ]
+    assert "target-hour cap 5" in result.gaps[0].reason

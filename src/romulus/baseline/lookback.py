@@ -131,12 +131,19 @@ class LookbackWriter:
         gaps: list[HistoryGap] = []
         hours = int((end - start) / _HOUR)
         ordered_targets = tuple(sorted(set(targets)))
-        if hours * len(ordered_targets) > MAX_WORK_ITEMS:
-            raise ValueError(f"lookback work exceeds {MAX_WORK_ITEMS} target-hours")
+        # Only whole newest-first rounds within the target-hour cap are worked. Older hours become one
+        # omitted gap per target, so the returned ledger stays bounded and nothing is dropped silently.
+        worked = min(hours, MAX_WORK_ITEMS // max(1, len(ordered_targets)))
+        omitted = [
+            HistoryGap(target, start, end - worked * _HOUR, "omitted_budget",
+                       f"lookback target-hour cap {MAX_WORK_ITEMS} exceeded",
+                       tuple(spec.id for spec in self.specs))
+            for target in ordered_targets
+        ] if worked < hours else []
         # One newest hour from every target before moving older: round-robin without target starvation.
         work = (
             (target, end - offset * _HOUR, end - (offset - 1) * _HOUR)
-            for offset in range(1, hours + 1) for target in ordered_targets
+            for offset in range(1, worked + 1) for target in ordered_targets
         )
         for target, hour_start, hour_end in work:
             missing = tuple(spec for spec in self.specs if not self._covered(target, spec, hour_start, hour_end))
@@ -298,4 +305,4 @@ class LookbackWriter:
                     ))
             if built == len(missing) and not partial:
                 complete += 1
-        return LookbackResult(complete, tuple(gaps), queries, records, longest)
+        return LookbackResult(complete, (*gaps, *omitted), queries, records, longest)
