@@ -6,7 +6,7 @@ import hashlib
 import json
 import ntpath
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from xml.etree import ElementTree
 
@@ -41,6 +41,62 @@ class WindowsRecord:
 
     def origin(self, name: str) -> str:
         return self.data[name].origin
+
+
+@dataclass
+class RecordIdContinuity:
+    """Streaming gap counter with one integer per (target, computer, channel), never one entry per record."""
+
+    last: dict[tuple[str, str, str], int] = field(default_factory=dict)
+
+    def observe(self, target: str, records: list[dict]) -> list[str]:
+        gaps: dict[tuple[str, str], int] = {}
+        unordered: set[tuple[str, str]] = set()
+        malformed: set[tuple[str, str]] = set()
+        for record in records:
+            source = record.get("_source") or {}
+            if not is_windows_source(source):
+                continue
+            winlog = source.get("winlog") or {}
+            computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+            channel = str(winlog.get("channel") or "").strip()
+            group = (computer or "<unknown-computer>", channel or "<unknown-channel>")
+            value = winlog.get("record_id")
+            if isinstance(value, bool):
+                malformed.add(group)
+                continue
+            try:
+                record_id = int(value)
+            except (TypeError, ValueError):
+                malformed.add(group)
+                continue
+            key = (target, *group)
+            prior = self.last.get(key)
+            if prior is None:
+                self.last[key] = record_id
+            elif record_id == prior:
+                continue
+            elif record_id > prior:
+                if record_id > prior + 1:
+                    gaps[group] = gaps.get(group, 0) + record_id - prior - 1
+                self.last[key] = record_id
+            else:
+                # Time-ordered source results are not record-id ordered for this group. Refuse completeness
+                # rather than retaining an event-count-sized set to reconstruct the sequence.
+                unordered.add(group)
+        reasons = [
+            f"shipper gaps: {count} records missing on {channel} for {computer}"
+            for (computer, channel), count in sorted(gaps.items())
+        ]
+        reasons += [
+            f"shipper gaps unresolved: record_id out of order on {channel} for {computer}"
+            for computer, channel in sorted(unordered)
+        ]
+        reasons += [
+            f"shipper gaps unresolved: non-numeric record_id on {channel} for {computer}"
+            for computer, channel in sorted(malformed)
+        ]
+        return reasons
 
 
 def _get(source: dict, path: str):

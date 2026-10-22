@@ -17,6 +17,10 @@ class WindowsEventClass:
     def key(self) -> tuple[str, str, int]:
         return (self.channel.casefold(), self.provider.casefold(), self.event_id)
 
+    @property
+    def token(self) -> str:
+        return f"{self.channel}|{self.provider}|{self.event_id}".casefold()
+
 
 SECURITY = "Microsoft-Windows-Security-Auditing"
 SYSMON = "Microsoft-Windows-Sysmon"
@@ -110,6 +114,51 @@ def datasets_for_families(families: set[str] | frozenset[str]) -> tuple[str, ...
         dataset for dataset in WINDOWS_HOST_DATASETS
         if WINDOWS_DATASET_FAMILIES.get(dataset, frozenset()).intersection(families)
     )
+
+
+def event_classes_for_families(families: set[str] | frozenset[str]) -> tuple[WindowsEventClass, ...]:
+    return tuple(event for event in EVENT_CLASSES if event.family in families)
+
+
+def collection_requirements(event: WindowsEventClass) -> tuple[tuple[str, dict, str], ...]:
+    """Site facts required before absence of this event class can support a negative."""
+    if event.provider == SYSMON:
+        return (("sysmon", {"event_id": event.event_id}, f"Sysmon event id {event.event_id}"),)
+    if event.event_id == 4688:
+        return (
+            ("audit_policy", {"subcategory": "Process Creation", "outcome": "success"},
+             "audit policy Process Creation success"),
+            ("security_4688_command_line", {}, "Security 4688 command-line inclusion"),
+        )
+    audit_subcategories = {
+        4689: ("Process Termination", "success"),
+        4624: ("Logon", "success"),
+        4625: ("Logon", "failure"),
+        4648: ("Logon", "success"),
+        4672: ("Special Logon", "success"),
+        4634: ("Logoff", "success"),
+        4647: ("Logoff", "success"),
+        4720: ("User Account Management", "success"),
+        4722: ("User Account Management", "success"),
+        4724: ("User Account Management", "success"),
+        4726: ("User Account Management", "success"),
+        4738: ("User Account Management", "success"),
+        4740: ("User Account Management", "success"),
+        4728: ("Security Group Management", "success"),
+        4732: ("Security Group Management", "success"),
+        4756: ("Security Group Management", "success"),
+        4697: ("Security System Extension", "success"),
+        4698: ("Other Object Access Events", "success"),
+        4702: ("Other Object Access Events", "success"),
+        1102: ("Audit Other System Events", "success"),
+        4719: ("Audit Policy Change", "success"),
+    }
+    if event.event_id in audit_subcategories:
+        subcategory, outcome = audit_subcategories[event.event_id]
+        return (("audit_policy", {"subcategory": subcategory, "outcome": outcome},
+                 f"audit policy {subcategory} {outcome}"),)
+    # System-channel boot/service/log-clear records still require an explicit matching collection group.
+    return (("host_group", {}, "host collection group"),)
 
 
 def lookup_event_class(channel: object, provider: object, event_id: object) -> WindowsEventClass | None:

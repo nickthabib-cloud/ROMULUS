@@ -91,6 +91,11 @@ class Playbook:
     version: ClassVar[str] = "1"
     title: ClassVar[str]
     families: ClassVar[tuple[str, ...]]
+    # Cross-platform by default. OS-specific rules narrow this without relying on dataset or target names.
+    os_families: ClassVar[tuple[str, ...]] = ("linux", "windows")
+    # An OS-specific rule may narrow the catalog classes needed for a complete Windows negative. Empty means
+    # every inventoried class that can produce one of `families`.
+    windows_event_classes: ClassVar[tuple[tuple[str, str, int], ...]] = ()
     required_fields: ClassVar[tuple[str, ...]] = ()
     claim_type: ClassVar[str] = "observed_action"
     severity: ClassVar[str] = "medium"
@@ -121,6 +126,9 @@ class Playbook:
         out = []
         for e in events:
             if e.family not in self.families:
+                continue
+            os_family = e.get("host.os.family") or ("windows" if e.normalizer.startswith("windows-") else "linux")
+            if os_family not in self.os_families:
                 continue
             if any(e.get(f) in (None, "", [], {}) for f in self.required_fields):
                 self.missing_required += 1

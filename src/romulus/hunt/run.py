@@ -291,7 +291,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     if hunt is None:
         raise KeyError(hunt_id)
     initial_manifest = hunt["manifest"]
-    ensure_site_unchanged(s.home, initial_manifest.get("site"))
+    site_facts = ensure_site_unchanged(s.home, initial_manifest.get("site"))
     if expand is not None and bool((initial_manifest.get("expansion") or {}).get("enabled", True)) != expand:
         raise ValueError("expansion mode is immutable after hunt creation")
     claimed = repo.claim_hunt(hunt_id, _lease_seconds(s))
@@ -320,6 +320,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     clear_stale_stages(stage_dir)
     sweep = Sweep(
         repo, client, hunt_id, window, contracts, on_candidate, heartbeat=heartbeat, stage_dir=stage_dir,
+        site_facts=site_facts,
     )
     try:
         for target in m["targets"]:

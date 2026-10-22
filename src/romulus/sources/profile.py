@@ -47,6 +47,7 @@ class FieldContract(BaseModel):
     time_field: str = "@timestamp"
     role: Literal["host", "network"] = "host"
     os_family: Literal["linux", "windows", "unknown"] = "linux"
+    hosts: tuple[str, ...] = ()
 
     def spec(self, typed: str) -> FieldSpec | None:
         return self.fields.get(typed)
@@ -96,6 +97,9 @@ ARKIME_SESSION_MARKERS = ("firstPacket", "lastPacket", "network.community_id")
 # A flattened Winlogbeat/Elastic Agent object does not expose child mappings, so aliases name the native leaf.
 # Forwarded events deliberately map host identity to the computer that wrote the event, not the collector.
 WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
+    "event.channel": ("winlog.channel",),
+    "event.provider": ("winlog.provider_name",),
+    "event.code": ("winlog.event_id",),
     "host.name": ("winlog.computer_name",),
     "process.command_line": ("winlog.event_data.CommandLine",),
     "process.executable": (
@@ -161,6 +165,7 @@ def contract_from_types(
     role: Literal["host", "network"] | None = None,
     os_family: Literal["linux", "windows", "unknown"] | None = None,
     field_mappings: dict[str, tuple[str, ...] | str] | None = None,
+    hosts: tuple[str, ...] = (),
 ) -> FieldContract:
     """Build a typed contract, adding explicit aliases for native schemas such as Windows event data."""
     fields = {
@@ -188,6 +193,7 @@ def contract_from_types(
     resolved_os = os_family or source_os_family(field_types, resolved_role)
     return FieldContract(
         target=target, fields=fields, time_field=time_field, role=resolved_role, os_family=resolved_os,
+        hosts=hosts,
     )
 
 
@@ -230,4 +236,4 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
     }
     pid = digest({k: v for k, v in prof.items() if k != "captured_at"})[:16]
     profile = SourceProfile(id=pid, **prof)
-    return profile, contract_from_types(target, field_types, role=role)
+    return profile, contract_from_types(target, field_types, role=role, hosts=tuple(sorted(profile.hosts)))

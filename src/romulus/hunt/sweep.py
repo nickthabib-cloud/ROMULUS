@@ -16,9 +16,17 @@ from romulus.evidence.normalize import (
     normalize_hits,
 )
 from romulus.evidence.typed import TypedEvent
-from romulus.evidence.windows_catalog import WINDOWS_DATASET_FAMILIES, WINDOWS_HOST_DATASETS
+from romulus.evidence.windows import RecordIdContinuity
+from romulus.evidence.windows_catalog import (
+    WINDOWS_DATASET_FAMILIES,
+    WINDOWS_HOST_DATASETS,
+    collection_requirements,
+    event_classes_for_families,
+    lookup_event_class,
+)
 from romulus.hunt.publish import publish_match
 from romulus.hunt.stage import EventStage
+from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.es import ElasticClient, fetch_limit
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, Window
@@ -107,7 +115,8 @@ def plan_partitions(client: ElasticClient, target: str, contract: FieldContract,
 class Sweep:
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
                  contracts: dict[str, FieldContract], on_candidate: Callable[[dict], None] | None = None,
-                 heartbeat: Callable[[], None] | None = None, stage_dir=None, prefetch: bool | None = None):
+                 heartbeat: Callable[[], None] | None = None, stage_dir=None, prefetch: bool | None = None,
+                 site_facts: SiteFacts | None = None):
         self.repo, self.client, self.hunt_id, self.window = repo, client, hunt_id, window
         # Fetch the next partition while this one is evaluated (the client's setting unless given). It changes
         # when a partition's records are read, never what is read or the order partitions are evaluated in.
@@ -117,6 +126,10 @@ class Sweep:
         self._ahead: tuple[str, Future] | None = None
         self._pool: ThreadPoolExecutor | None = None
         self.contracts = contracts
+        self.site_facts = site_facts or absent_site_facts()
+        self._windows_inventory: dict[str, set[str]] = {}
+        self._windows_inventory_reasons: dict[str, list[str]] = {}
+        self._windows_record_ids = RecordIdContinuity()
         self.on_candidate = on_candidate or (lambda c: None)
         self.heartbeat = heartbeat or (lambda: None)
         self.stage_dir = stage_dir
@@ -144,6 +157,114 @@ class Sweep:
             return [Predicate(field="event.dataset", op="in", value=list(datasets))]
         return []
 
+    def _prepare_windows_inventory(self, target: str, contract: FieldContract | None) -> None:
+        if contract is None or contract.os_family != "windows" or target in self._windows_inventory:
+            return
+        required = ("event.channel", "event.provider", "event.code")
+        if not all(contract.supports(field, "exists") for field in required):
+            self._windows_inventory[target] = set()
+            self._windows_inventory_reasons[target] = [
+                "event class inventory unavailable: channel/provider/event id fields are not searchable"
+            ]
+            return
+        outcome = execute(
+            self.client,
+            SearchIntent(
+                kind="aggregate",
+                target=target,
+                window=self.window,
+                filters=[Predicate(field=field, op="exists") for field in required],
+                group_by=list(required),
+                purpose="windows event class inventory",
+            ),
+            contract,
+        )
+        inventory = set()
+        for bucket in outcome.buckets:
+            key = bucket.get("key") or {}
+            event_class = lookup_event_class(
+                key.get("event.channel"), key.get("event.provider"), key.get("event.code")
+            )
+            if event_class is not None:
+                inventory.add(event_class.token)
+        reasons = []
+        if outcome.completeness != Completeness.complete:
+            reasons.append(
+                "event class inventory incomplete: " + ", ".join(outcome.reasons or [outcome.error or "unknown"])
+            )
+        self._windows_inventory[target] = inventory
+        self._windows_inventory_reasons[target] = reasons
+        self.stats.setdefault("windows_inventory", {})[target] = {
+            "cataloged_classes": len(inventory), "reasons": reasons,
+        }
+
+    @staticmethod
+    def _windows_hosts(contract: FieldContract, records: list[dict]) -> tuple[str, ...]:
+        hosts = {str(host).strip().rstrip(".").casefold() for host in contract.hosts if host}
+        for record in records:
+            winlog = (record.get("_source") or {}).get("winlog") or {}
+            computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+            if computer:
+                hosts.add(computer)
+        return tuple(sorted(hosts))
+
+    def _windows_rule_reasons(
+        self,
+        target: str,
+        contract: FieldContract | None,
+        playbook: Playbook,
+        records: list[dict],
+        gap_reasons: list[str],
+    ) -> list[str]:
+        if contract is None or contract.os_family != "windows" or "windows" not in playbook.os_families:
+            return []
+        catalog = event_classes_for_families(set(playbook.families))
+        if not catalog:
+            return []
+        inventory = self._windows_inventory.get(target, set())
+        reasons = list(self._windows_inventory_reasons.get(target, ()))
+        if playbook.windows_event_classes:
+            required = []
+            for channel, provider, event_id in playbook.windows_event_classes:
+                event_class = lookup_event_class(channel, provider, event_id)
+                if event_class is None:
+                    reasons.append(
+                        f"event class declaration is not cataloged: {channel}|{provider}|{event_id}"
+                    )
+                else:
+                    required.append(event_class)
+            for event_class in required:
+                if event_class.token not in inventory:
+                    reasons.append(
+                        "event class absent from source inventory: "
+                        f"{event_class.channel}|{event_class.provider}|{event_class.event_id}"
+                    )
+        else:
+            required = [event_class for event_class in catalog if event_class.token in inventory]
+            if not required:
+                reasons.append(
+                    "event class absent from source inventory for family/families: "
+                    + ", ".join(sorted(set(playbook.families)))
+                )
+        reasons.extend(gap_reasons)
+        hosts = self._windows_hosts(contract, records)
+        if not hosts:
+            reasons.append("collection not attested: source host inventory unavailable")
+        for host in hosts:
+            for event_class in required:
+                for fact, arguments, label in collection_requirements(event_class):
+                    if not self.site_facts.attests(host, fact, **arguments):
+                        reasons.append(f"collection not attested: {label} on {host}")
+        return sorted(set(reasons))
+
+    @staticmethod
+    def _unsupported_skips(skips: dict[str, int]) -> dict[str, int]:
+        """Only unmodeled source formats poison rules; cataloged-source event classes are not-assessed data."""
+        return {
+            reason: count for reason, count in skips.items()
+            if reason.startswith(("dataset:", "suricata event_type"))
+        }
+
     # -------------------------------------------------------------------------------------
     def _cell(self, pb: Playbook, target: str, pkey: str, state: str, matched: int = 0, evaluated: int = 0,
               detail: dict | None = None) -> dict:
@@ -167,6 +288,7 @@ class Sweep:
 
     def run_target(self, target: str):
         contract = self.contracts[target]
+        self._prepare_windows_inventory(target, contract)
         filters = self._filters_for(target, contract)
         try:
             self.heartbeat()
@@ -304,8 +426,14 @@ class Sweep:
         raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
         # records retrieved but of a dataset/event type no normalizer supports: we cannot say what
         # they contain, so no rule may claim a complete negative over this partition
-        unsupported = {k: v for k, v in skips.items()
-                       if k.startswith(("dataset:", "suricata event_type"))}
+        unsupported = self._unsupported_skips(skips)
+        gap_reasons = []
+        if contract is not None and contract.os_family == "windows":
+            record_id = contract.spec("winlog.record_id")
+            if record_id is None or record_id.type not in {"long", "integer", "short"}:
+                gap_reasons = ["shipper gaps unresolved: winlog.record_id mapping is not numeric"]
+            else:
+                gap_reasons = self._windows_record_ids.observe(target, out.records)
         partial = out.completeness != Completeness.complete or bool(errors) or bool(unsupported)
         if partial:
             self.partial_reasons.append(f"{target} {pkey}: {out.reasons or ''} normalization_errors={len(errors)}"
@@ -336,11 +464,17 @@ class Sweep:
                         + (f"; {', '.join(unmapped)} feeds no known event family, so every rule is partial"
                            if unmapped else "")) if errors else ""
         cells: list[dict] = []
+        windows_gate_reasons: set[str] = set()
         # events the joining aggregates may cite later, by id: several playbooks stage the same events, and each
         # is serialized to the stage once per partition (the first staged copy of an id is kept)
         staged: dict[str, TypedEvent] = {}
         for pb in self.pack:
-            rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
+            windows_reasons = self._windows_rule_reasons(
+                target, contract, pb, out.records, gap_reasons,
+            )
+            windows_gate_reasons.update(windows_reasons)
+            rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
+                            or bool(windows_reasons))
             before_eval, before_missing = pb.evaluated, pb.missing_required
             matches = pb.consume(events)
             for m in matches:
@@ -369,12 +503,17 @@ class Sweep:
             else:
                 state = "evaluated_partial" if (rule_partial or missing) else "no_match_complete"
             reasons = list(base_reasons)
+            reasons.extend(windows_reasons)
             if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
                 reasons.append(error_reason)
             if missing:
                 reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
             cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated,
                                     {"missing_required": missing, "reasons": reasons}))
+        if windows_gate_reasons:
+            self.partial_reasons.append(
+                f"{target} {pkey}: " + "; ".join(sorted(windows_gate_reasons))
+            )
         if any(pb.staged for pb in self.pack):
             self._event_stage().put(list(staged.values()), raw_sources)
         staged.clear()

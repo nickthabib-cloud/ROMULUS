@@ -208,7 +208,9 @@ class SiteFacts:
             return False
         values = []
         for group in groups:
-            if fact == "sysmon":
+            if fact == "host_group":
+                values.append(True)
+            elif fact == "sysmon":
                 values.append(bool(group.sysmon and group.sysmon.installed and event_id in group.sysmon.event_ids))
             elif fact == "audit_policy":
                 setting = group.audit_policy.get((subcategory or "").casefold())
@@ -237,6 +239,11 @@ def _digest(content: dict) -> str:
 
 def _absent() -> SiteFacts:
     return SiteFacts(False, "", {}, (), (), ())
+
+
+def absent_site_facts() -> SiteFacts:
+    """An explicit unattested value for callers that have no site file in scope."""
+    return _absent()
 
 
 def load_site_facts(home: Path) -> SiteFacts:

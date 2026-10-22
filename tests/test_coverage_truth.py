@@ -526,6 +526,23 @@ def test_unswept_datasets_and_unnormalized_records_are_listed_as_not_assessed(mo
     assert _coverage_row(manifest, NEGATIVE_RULE)["records_evaluated"] == 3
 
 
+def test_unknown_windows_event_classes_are_listed_but_do_not_poison_unrelated_rules(monkeypatch):
+    from romulus.evidence.normalize import normalize_hits
+
+    events, _skips, errors = normalize_hits([_access_doc(0, T0)])
+    reason = "Windows event class ('Security', 'Microsoft-Windows-Security-Auditing', 9999) is not normalized"
+    repo = _sweep_records(
+        monkeypatch,
+        [_access_doc(0, T0)],
+        normalized=(events, {reason: 1}, errors),
+    )[0]
+
+    manifest, _text = _report(repo)
+    assert _coverage_row(manifest, NEGATIVE_RULE)["negative_claim"] == "complete"
+    item = next(item for item in manifest["coverage"]["not_assessed"] if reason in item["reason"])
+    assert item["records"] == 1
+
+
 def test_a_target_without_a_dataset_inventory_still_says_what_was_not_retrieved(monkeypatch):
     repo = _sweep_records(monkeypatch, [_access_doc(0, T0)])[0]
     manifest, text = _report(repo)
