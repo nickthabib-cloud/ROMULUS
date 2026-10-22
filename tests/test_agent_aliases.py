@@ -7,7 +7,6 @@ import pytest
 
 from romulus.agent.aliases import (
     AliasBook,
-    AliasFromOtherHunt,
     AliasKindMismatch,
     UnknownAlias,
 )
@@ -95,7 +94,7 @@ def test_alias_book_seeds_all_existing_objects_in_one_write_transaction(monkeypa
     assert aliases.alias_for("F", "lead") == "F4"
 
 
-def test_alias_errors_distinguish_unknown_wrong_kind_and_other_hunt():
+def test_alias_errors_are_hunt_local_and_distinguish_unknown_from_wrong_kind():
     repo = _repo()
     _candidate(repo, "finding", "high", 50.0, T)
     book = AliasBook(repo, "h1")
@@ -109,7 +108,7 @@ def test_alias_errors_distinguish_unknown_wrong_kind_and_other_hunt():
     repo.create_hunt("h2", {"window": {}}, "digest-2", "test")
     other = AliasBook(repo, "h2")
     other.alias_for("I", "incident-only-in-h2")
-    with pytest.raises(AliasFromOtherHunt, match="I1"):
+    with pytest.raises(UnknownAlias, match="I1"):
         book.resolve("I1", {"I"})
 
 

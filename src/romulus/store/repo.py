@@ -501,12 +501,6 @@ class Repo:
             row = c.execute(query).mappings().first()
             return dict(row) if row else None
 
-    def agent_alias_hunts(self, alias: str) -> list[str]:
-        query = (select(t.agent_alias.c.hunt_id).where(t.agent_alias.c.alias == alias)
-                 .order_by(t.agent_alias.c.hunt_id))
-        with self.engine.connect() as c:
-            return list(c.execute(query).scalars())
-
     def agent_alias_target_hunts(self, kind: str, target_id: str) -> list[str]:
         table = {"F": t.candidate, "E": t.typed_event, "N": t.entity, "L": t.expansion_link}.get(kind)
         if table is None:

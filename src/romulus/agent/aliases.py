@@ -73,8 +73,6 @@ class AliasBook:
             self._check_kind(kind)
         row = self.repo.agent_alias(self.hunt_id, alias)
         if row is None:
-            if self.repo.agent_alias_hunts(alias):
-                raise AliasFromOtherHunt(f"alias {alias!r} belongs to another hunt")
             raise UnknownAlias(f"unknown alias {alias!r} in hunt {self.hunt_id}")
         if row["kind"] not in expected:
             raise AliasKindMismatch(
