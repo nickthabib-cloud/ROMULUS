@@ -28,6 +28,13 @@ carries a specific reverse-shell feature: the owner is a web-service account; th
 redirects to or from /dev/tcp|/dev/udp; or an interpreter owner's latest external call (not DNS, not
 port 0) was followed within `TIGHT_GAP` seconds by a shell reading commands from stdin.
 
+Grouping. A compiled program (not a shell, interpreter or relay tool) whose descendant shells are all
+leads without the reverse-shell timing (a stdin-reading shell within `TIGHT_GAP` seconds) is a service
+running its own helpers after network activity, or a compiled implant running tasked commands: its lead
+hits on one host form one finding per (host, program path), listing every pid, peer and gap. Interpreter
+owners are never grouped this way (one interpreter path serves many unrelated programs), and neither is a
+shell that replaced the connected process itself.
+
 Relationship to `host.interpreter_external_connection` (correlation.py): that rule reports the
 outbound connection itself. This rule reports the subsequent shell execution under the same lineage;
 the two reference each other rather than restating the connection.
@@ -152,6 +159,16 @@ class _Hit:
     window: list[_Socket] = field(default_factory=list)   # every external call of the owner in the window
 
     @property
+    def helper(self) -> bool:
+        """A lead hit grouped per (host, program): a compiled owner's descendant shell without the reverse-shell
+        timing. Interpreter and relay-tool owners, in-place re-execs and stdin shells within TIGHT_GAP are not."""
+        if self.high or self.relation != "descendant":
+            return False
+        if interpreter_name(basename(self.socket.exe)) in INTERPRETERS:
+            return False
+        return not (self.shell.shaped and self.gap <= TIGHT_GAP)
+
+    @property
     def high(self) -> bool:
         if self.socket.web or self.shell.devtcp:
             return True
@@ -163,7 +180,7 @@ class _Hit:
 class ReverseShellByLineage(Playbook):
     id = "host.shell_spawned_by_connected_process"
     anchor_class = "execution"
-    version = "3"
+    version = "4"
     title = "Shell or interpreter executed by a process holding an external connection (reverse shell by lineage)"
     kind = "aggregate"
     staged = True
@@ -198,8 +215,10 @@ class ReverseShellByLineage(Playbook):
                     "that PID in between",
         "benign_and_cost": "package managers, ACME clients, CI/deployment agents and accept-and-shell-out "
                            "services share the broad join and stay at lead. One grouped finding per (host, "
-                           "boot, connecting PID, latest peer); the system sshd's accepted logins are excluded "
-                           "by exact kernel path",
+                           "boot, connecting PID, latest peer); a compiled (non-interpreter) owner's descendant "
+                           "shells without the reverse-shell timing are one lead per (host, program path) listing "
+                           "every pid, peer and gap; the system sshd's accepted logins are excluded by exact kernel "
+                           "path",
         "query_cost": "none beyond the sweep: it reads the host partitions every host rule reads; joined events "
                       "are staged on disk",
         "next_pivot": "the shell's children and the session PCAP for cleartext commands",
@@ -339,12 +358,71 @@ class ReverseShellByLineage(Playbook):
                 latest = channels[-1] if channels else window[-1]
                 if latest.syscall in ACCEPT_SYSCALLS and latest.exe in SSHD_PATHS:
                     continue                            # the system sshd's accepted login: auth rules cover it
-                key = (shell.host, shell.boot, owner_pid, latest.peer_ip)
-                groups[key].append(_Hit(shell, latest, owner_pid, relation, shell.ts - latest.ts, window))
+                hit = _Hit(shell, latest, owner_pid, relation, shell.ts - latest.ts, window)
+                key = ((shell.host, latest.exe, "helpers") if hit.helper
+                       else (shell.host, shell.boot, owner_pid, latest.peer_ip))
+                groups[key].append(hit)
         out = []
         for key in sorted(groups, key=lambda k: tuple("" if part is None else str(part) for part in k)):
-            out.append(self._finding(key, groups[key]))
+            hits = groups[key]
+            out.append(self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits))
         return out
+
+    def _helpers(self, key: tuple, hits: list[_Hit]) -> Match:
+        """One compiled program's descendant shells on one host, none with the reverse-shell timing (see the
+        module notes). Every pid, peer and gap is stated; the shells are cited up to the cap."""
+        host, exe, _kind = key
+        hits = sorted(hits, key=lambda h: (h.shell.ts, h.shell.event_id))
+        shells = sorted({h.shell.event_id: h.shell for h in hits}.values(), key=lambda s: (s.ts, s.event_id))
+        pids = sorted({h.owner_pid for h in hits})
+        users = sorted({str(h.socket.user) for h in hits if h.socket.user not in (None, "")})
+        peers = sorted({f"{s.peer_ip}:{s.peer_port}" for h in hits for s in h.window})
+        gaps = [h.gap for h in hits]
+        stdin = sum(1 for s in shells if s.shaped)
+        names = sorted({interpreter_name(basename(s.exe)) for s in shells})
+        listed = ", ".join(peers[:PEERS_LISTED]) + (f" and {len(peers) - PEERS_LISTED} more"
+                                                     if len(peers) > PEERS_LISTED else "")
+        pid_text = ("pid " if len(pids) == 1 else "pids ") + ", ".join(str(p) for p in pids)
+        claim = (
+            f"On {host}, '{exe}' ({pid_text}"
+            + (f", account(s) {', '.join(repr(u) for u in users)}" if users else "")
+            + f") made external socket calls (peers: {listed}), and {len(shells)} shell/interpreter exec(s) "
+            f"({', '.join(names)}; pid(s) {', '.join(str(s.pid) for s in shells[:CITE_PER_GROUP])}"
+            + (f" and {len(shells) - CITE_PER_GROUP} more" if len(shells) > CITE_PER_GROUP else "")
+            + f") were later started as its descendants, {min(gaps):.0f}–{max(gaps):.0f} s after its latest "
+            f"external call before each exec, with no other exec recorded for {pid_text} in between. "
+            f"'{exe}' is not a shell, interpreter or relay tool; {stdin} of them read commands from stdin, the "
+            f"rest ran a -c script or a script file, and none read stdin within {TIGHT_GAP:.0f}s of a call. A "
+            f"service running its own helper scripts after network activity looks like this; a compiled implant "
+            f"running tasked commands looks the same. The connections and the executions are each directly "
+            f"recorded; that a shell's input and output use a connection is inferred from lineage and timing, "
+            f"not observed.")
+        latest = {h.socket.event_id: h.socket for h in hits}
+        cited_ids = sorted({s.event_id for s in shells[:CITE_PER_GROUP]}
+                           | {sid for sid in sorted(latest, key=lambda i: (latest[i].ts, i))[:CITE_PER_GROUP]})
+        events = self._events(cited_ids)
+        cited = sorted(events.values(), key=lambda e: (e.ts, e.id))
+        sock_event = events[hits[0].socket.event_id] if hits[0].socket.event_id in events else next(
+            e for e in cited if e.family == "net_socket")
+        preds = [pf(sock_event, name) for name in
+                 ("socket.syscall", "destination.ip", "destination.port", "source.ip", "source.port",
+                  "process.pid", "process.executable", "process.user") if sock_event.has(name)]
+        shell_event = events[shells[0].event_id]
+        preds += [pf(shell_event, name) for name in ("process.executable", "process.pid", "process.ppid",
+                                                     "process.argv") if shell_event.has(name)]
+        notes = sorted(self.attack)
+        notes.append("the outbound connection itself is reported by host.interpreter_external_connection")
+        notes.append("lane lead: a compiled owner with no web-service account, no /dev/tcp redirect and no "
+                     f"stdin-reading shell within {TIGHT_GAP:.0f}s of its call; grouped per (host, program path)")
+        notes.append(f"PID reuse by a forked process with no exec record cannot be excluded; the gap is bounded "
+                     f"by {MAX_GAP:.0f}s")
+        if len(shells) > CITE_PER_GROUP:
+            notes.append(f"{len(shells)} shell execs joined; the first {CITE_PER_GROUP} are cited")
+        match = Match(self.id, claim, self.claim_type, cited, preds, cited[0].ts, self.severity, "lead", "medium",
+                      list(dict.fromkeys(entity for e in cited for entity in e.entities())),
+                      group_key=f"{host}|{exe}|helpers")
+        match.notes = notes
+        return match
 
     def _finding(self, key: tuple, hits: list[_Hit]) -> Match:
         host, boot, owner_pid, peer_ip = key

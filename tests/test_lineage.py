@@ -260,6 +260,76 @@ def test_interpreter_then_stdin_shell_beyond_tight_gap_is_lead():
     assert len(out) == 1 and out[0].proposed_lane == "lead"
 
 
+# ---------------------------------------------------------------- a compiled service's own helpers: grouped
+STORE = "/usr/lib/pkgstore/pkgstored"        # an invented compiled package-store daemon
+
+
+def _daemon_helpers(host="app01", pid=300, start=T0, peers=(EXT, "198.51.100.40")):
+    """The daemon checks connectivity, and later runs its own shell helpers as children (a -c script and a
+    script file), once per peer, minutes after each check."""
+    out = [exc(STORE, pid, start, ppid=1, host=host)]
+    for i, peer in enumerate(peers):
+        t = start + timedelta(minutes=20 * i)
+        out.append(sock("connect", pid, t + timedelta(seconds=1), ip=peer, port=443, exe=STORE, host=host))
+        argv = ["sh", "-c", "udevadm settle"] if i % 2 == 0 else ["/bin/sh", "/usr/lib/pkgstore/helper.sh"]
+        out.append(exc("/bin/sh", pid + 1 + i, t + timedelta(seconds=45), ppid=pid, argv=argv, host=host))
+    return out
+
+
+def test_a_compiled_services_later_helper_shells_are_one_lead_per_host_and_program():
+    restarted = _daemon_helpers(pid=310, start=T0 + timedelta(hours=1), peers=("198.51.100.41",))
+    _pb, out = run(_daemon_helpers() + restarted)
+    assert len(out) == 1
+    m = out[0]
+    assert m.proposed_lane == "lead" and m.severity == "critical" and m.group_key == f"app01|{STORE}|helpers"
+    assert f"On app01, '{STORE}' (pids 300, 310) made external socket calls" in m.claim
+    assert f"{EXT}:443" in m.claim and "198.51.100.40:443" in m.claim and "198.51.100.41:443" in m.claim
+    assert "3 shell/interpreter exec(s)" in m.claim and "44–44 s after" in m.claim
+    assert "no other exec recorded for pids 300, 310 in between" in m.claim
+    assert "0 of them read commands from stdin" in m.claim
+    assert "a compiled implant running tasked commands looks the same" in m.claim
+    assert "inferred from lineage and timing" in m.claim
+    shells = [e for e in m.events if e.family == "process_exec" and e.get("process.executable") == "/bin/sh"]
+    assert len(shells) == 3 and any("PID reuse" in n for n in m.notes)
+
+
+def test_helpers_on_another_host_or_of_another_program_are_separate_leads():
+    other_host = _daemon_helpers(host="app02")
+    implant = [exc("/tmp/.x/agent", 900, T0, ppid=1),
+               sock("connect", 900, T0 + timedelta(seconds=1), ip="198.51.100.77", port=8443, exe="/tmp/.x/agent"),
+               exc("/bin/sh", 901, T0 + timedelta(seconds=300), ppid=900, argv=["sh", "-c", "id"])]
+    _pb, out = run(_daemon_helpers() + other_host + implant)
+    assert sorted(m.group_key for m in out) == ["app01|/tmp/.x/agent|helpers", f"app01|{STORE}|helpers",
+                                                f"app02|{STORE}|helpers"]
+    assert all(m.proposed_lane == "lead" for m in out)
+
+
+def test_reverse_shell_shapes_are_never_folded_into_a_helper_group():
+    # a stdin shell within seconds of a compiled owner's call, and a shell replacing the connected process itself
+    quick = [exc(STORE, 400, T0, ppid=1), sock("connect", 400, T0 + timedelta(seconds=1), exe=STORE),
+             exc("/bin/sh", 401, T0 + timedelta(seconds=2), ppid=400, argv=["sh", "-i"])]
+    in_place = [exc("/usr/sbin/myd", 410, T0, ppid=1), sock("connect", 410, T0 + timedelta(seconds=1),
+                                                            exe="/usr/sbin/myd"),
+                exc("/bin/sh", 410, T0 + timedelta(seconds=120), argv=["sh", "-c", "id"])]
+    _pb, out = run(quick + in_place + _daemon_helpers(pid=420))
+    assert {m.group_key for m in out} == {f"app01|None|400|{EXT}", f"app01|None|410|{EXT}", f"app01|{STORE}|helpers"}
+    assert len(out) == 3
+
+
+def test_python_implant_tasked_shell_long_after_connecting_keeps_its_own_lead():
+    # an interpreter owner holding a connection, tasked minutes later: never grouped with other programs
+    implant = [exc("/usr/bin/python3", 500, T0, ppid=1, user="deploy"),
+               sock("connect", 500, T0 + timedelta(seconds=1), port=8443, user="deploy"),
+               exc("/bin/sh", 501, T0 + timedelta(seconds=600), ppid=500, argv=["sh", "-c", "id"])]
+    agent = [exc("/usr/bin/python3", 600, T0, ppid=1), sock("connect", 600, T0 + timedelta(seconds=1),
+                                                            ip="198.51.100.40", port=443),
+             exc("/bin/sh", 601, T0 + timedelta(seconds=90), ppid=600, argv=["sh", "-c", "lsb_release -a"])]
+    _pb, out = run(implant + agent)
+    assert sorted(m.group_key for m in out) == [f"app01|None|500|{EXT}", "app01|None|600|198.51.100.40"]
+    implant_m = next(m for m in out if m.group_key.endswith(EXT))
+    assert implant_m.proposed_lane == "lead" and "pid 500 ('/usr/bin/python3', account 'deploy')" in implant_m.claim
+
+
 # ---------------------------------------------------------------- review fixes: peer naming
 def test_claim_names_the_latest_peer_and_lists_the_others():
     events = [
