@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.host import (
     Lineage,
     ProcessLineage,
@@ -118,7 +119,7 @@ class _SshAttemptStream(Playbook):
         super().__init__()
         self._heap: list[tuple[float, str, TypedEvent]] = []
         self._latest = float("-inf")
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
         self._conns: dict[tuple, _Connection] = {}
         self._last_prune = float("-inf")
         self.probe_failures = 0     # failures inside connections that then succeeded (not counted)
@@ -1055,7 +1056,7 @@ class AccountOrGroupChange(Playbook):
         self.by_pid: dict[tuple, list[_Change]] = defaultdict(list)
         self.records: list[TypedEvent] = []
         self.boots: dict[str | None, list[TypedEvent]] = defaultdict(list)
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
 
     @staticmethod
     def _process_relevant(event: TypedEvent) -> bool:

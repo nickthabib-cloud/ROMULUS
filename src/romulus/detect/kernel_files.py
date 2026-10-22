@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
 from romulus.detect.host import WEB_SERVICE_USERS
@@ -144,7 +145,7 @@ class RootExecNonRootModifiableFile(Playbook):
 
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
         self.files: dict[tuple[str, str, str], _ModifiableFile] = {}
         self.owner_sessions: dict[tuple[str, str], set[tuple]] = defaultdict(set)
 
@@ -517,8 +518,8 @@ class PersistencePathChange(Playbook):
 
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
-        self._staged: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
+        self._staged = RecentIds()      # bounded re-stage guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
         self.changes: list[_Change] = []

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from romulus.detect.base import Match, Playbook, basename, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
     INTERPRETERS,
     WEB_SERVICE_USERS,
@@ -435,7 +436,7 @@ class ProcessNetworkLink(Playbook):
         self.sockets: list[Sock] = []
         self.by_endpoint: dict[tuple[str, int], list[Net]] = defaultdict(list)
         self.by_community: dict[str, list[Net]] = defaultdict(list)
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
         self.heartbeat = lambda: None

@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.evidence.typed import TypedEvent
 
@@ -367,8 +368,8 @@ class _FlowRule(Playbook):
 
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
-        self._staged: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
+        self._staged = RecentIds()      # bounded re-stage guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
 
@@ -382,7 +383,7 @@ class _FlowRule(Playbook):
     def release_state(self) -> None:
         self.load = lambda ids: []
         for value in vars(self).values():
-            if isinstance(value, (dict, list, set)):
+            if isinstance(value, (dict, list, set, RecentIds)):
                 value.clear()
 
     def _stage(self, event: TypedEvent) -> None:
@@ -1027,6 +1028,7 @@ class _Piece:
     dst: str
     dport: int
     transport: str
+    staged: bool = False            # the record is on the stage, so it can be cited
 
 
 class LongUnidentifiedSession(_FlowRule):
@@ -1099,16 +1101,18 @@ class LongUnidentifiedSession(_FlowRule):
         if view.payload is None:
             return False
         capable = bool(expected & PARSERS[view.sensor])
-        piece = _Piece(view.start, view.end, view.sensor, bool(view.protocols), view.payload, view.failed, capable,
-                       event.id, view.src, view.dst, view.dport, view.transport)
-        self.pieces[view.key].append(piece)
-        if not piece.identified and piece.payload and not capable:
+        staged = False
+        if not view.protocols and view.payload and not capable:
             # the first few candidate records of an identity, and the first of any later connection that reuses it
             last = self.last_staged.get(view.key)
             if self.staged_per_key[view.key] < self.STAGE_PER_CONNECTION or abs(view.start - last) > STITCH_GAP:
                 self.staged_per_key[view.key] += 1
                 self.last_staged[view.key] = view.start
                 self._stage(event)
+                staged = True
+        self.pieces[view.key].append(_Piece(view.start, view.end, view.sensor, bool(view.protocols), view.payload,
+                                            view.failed, capable, event.id, view.src, view.dst, view.dport,
+                                            view.transport, staged))
         return True
 
     def _connections(self):
@@ -1161,8 +1165,8 @@ class LongUnidentifiedSession(_FlowRule):
                  + (f"; Suricata reported protocol detection 'failed' on {failed}" if failed else "") + "). "
                  f"{registration}. Times are as the sensors recorded them.")
         ids = [p.event_id for _span, c in sorted(long, key=lambda item: (-item[0], item[1][0].start))
-               for p in c if not p.identified and p.payload and p.event_id in self._staged]
-        ids += [p.event_id for c in connections for p in c if p.event_id in self._staged]
+               for p in c if not p.identified and p.payload and p.staged]
+        ids += [p.event_id for c in connections for p in c if p.staged]
         evs = self._events(list(dict.fromkeys(ids))[:EXAMPLE_LIMIT])
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "flow.start",

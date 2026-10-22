@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.linux_argv import canonical, read_operand_paths
 from romulus.evidence.shellparse import (
     SHELLS,
@@ -1053,7 +1054,7 @@ class UnbackedExecutable(Playbook):
 
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
         self.groups: dict[tuple[str, str], list[TypedEvent]] = defaultdict(list)
         self.counts: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.spans: dict[tuple[str, str], list[float]] = {}

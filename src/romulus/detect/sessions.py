@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.evidence.typed import TypedEvent
 
@@ -53,7 +54,7 @@ class _Stitched(Playbook):
     def __init__(self):
         super().__init__()
         self.conns: dict[str, dict] = {}
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
 
@@ -323,7 +324,7 @@ class ArkimeSshReverseShellTag(Playbook):
 
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
         self.groups: dict[tuple, list[TypedEvent]] = defaultdict(list)
         self.info: dict[tuple, dict] = {}
         self.ssh_conns: dict[tuple, set[str]] = defaultdict(set)    # every SSH connection of a pair, tagged or not

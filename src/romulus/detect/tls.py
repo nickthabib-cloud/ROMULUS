@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.correlation import canon_ip, external
 from romulus.evidence.typed import TypedEvent
 
@@ -100,7 +101,7 @@ class _CertificateRule(Playbook):
 
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
         self.groups: dict[tuple, list[TypedEvent]] = defaultdict(list)
         self.info: dict[tuple, dict] = {}
 

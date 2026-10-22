@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.host import (
     Lineage,
     ProcessLineage,
@@ -367,7 +368,7 @@ class _TamperRule(Playbook):
         self.lineage = ProcessLineage()
         self.markers = _ShutdownMarkers()
         self.items: list[_Item] = []
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
 
     def consume(self, events):
         order = {"process_exec": 0, "system_state": 1, "service_change": 2, "audit_config": 3}

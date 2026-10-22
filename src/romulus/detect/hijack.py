@@ -46,6 +46,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict
 from romulus.detect.host import _FLAG_ONLY, SCRIPT_FILE_INTERPRETERS, WEB_SERVICE_USERS
 from romulus.detect.linux_argv import canonical, is_under, normalize_path, program, write_targets
@@ -262,8 +263,8 @@ class NonRootWriteRootExecutedFile(Playbook):
 
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
-        self._staged: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
+        self._staged = RecentIds()      # bounded re-stage guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
         self.writes: dict[tuple[str, str], list[_Write]] = defaultdict(list)

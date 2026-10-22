@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
+from romulus.detect.bounded import RecentIds
 from romulus.detect.correlation import (
     PidTable,
     StageMissing,
@@ -271,8 +272,8 @@ class ReverseShellByLineage(Playbook):
         self.pids = PidTable()
         self.shells: list[_Shell] = []
         self.sockets: dict[tuple, list[_Socket]] = defaultdict(list)
-        self._seen: set[str] = set()
-        self._staged: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
+        self._staged = RecentIds()      # bounded re-stage guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
 
