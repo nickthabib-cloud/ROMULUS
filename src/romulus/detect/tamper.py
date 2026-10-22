@@ -45,6 +45,7 @@ from romulus.detect.linux_argv import (
     normalize_path,
     operands_after_options,
     program,
+    program_name_hint,
     shell_segments,
     write_targets,
 )
@@ -58,6 +59,10 @@ RESTART_WINDOW = 300.0           # a start within this long after a stop is repo
 COMMAND_LINK_BEFORE = 120.0      # a typed stop this soon after a command naming the unit is shown with it
 COMMAND_LINK_AFTER = 5.0
 CITE = 10
+_WRITE_PROGRAMS = {
+    "sed", "perl", "tee", "sponge", "cp", "mv", "install", "ln", "chmod", "chown", "chgrp",
+    "truncate", "dd", "curl", "wget", "scp", "rsync",
+}
 
 # Units and daemons whose stop removes logging, auditing or security monitoring. Matched on the service name
 # (lower case, without the .service/.socket suffix or a template instance) or on a process name.
@@ -162,6 +167,10 @@ class _ShutdownMarkers:
                     and e.get("service.scope") == "system" and e.get("process.pid") == 1):
                 what = f"the service manager starting {e.get('service.unit')}"
         elif e.family == "process_exec":
+            name_hint = program_name_hint(e)
+            marker_programs = SHUTDOWN_COMMANDS | {"systemctl", "init", "telinit"} | SHELLS
+            if name_hint is not None and name_hint not in marker_programs:
+                return
             ident = _identity(e)
             if ident is not None and e.outcome != Outcome.failure:
                 name, args, _ = ident
@@ -350,6 +359,8 @@ class _TamperRule(Playbook):
     claim_type = "aggregate_observation"
     assures_negative = False
     anchor_class = "execution"
+    process_programs: ClassVar[set[str]] = set()
+    process_editors: ClassVar[bool] = False
 
     def __init__(self):
         super().__init__()
@@ -366,8 +377,19 @@ class _TamperRule(Playbook):
             self.markers.observe(e)
             if e.family == "process_exec":
                 self.lineage.observe(e)
+                if self.program_prefilter and not self._process_relevant(e):
+                    self.evaluated += 1
+                    self.missing_required += int(argv_incomplete(e))
+                    continue
             self._event(e)
         return []
+
+    program_prefilter = True
+
+    def _process_relevant(self, event: TypedEvent) -> bool:
+        name = program_name_hint(event)
+        return (name is None or name in self.process_programs or name in SHELLS
+                or (self.process_editors and is_editor(name)))
 
     def _event(self, e: TypedEvent) -> None: ...
 
@@ -414,6 +436,11 @@ class SecurityOrLoggingServiceStop(_TamperRule):
     families = ("process_exec", "service_change", "system_state")
     severity, lane = "high", "high"
     attack = ("T1685", "T1685.004")
+    process_programs: ClassVar[set[str]] = {
+        "systemctl", "deb-systemd-invoke", "deb-systemd-helper", "service", "invoke-rc.d", "rc-service",
+        "update-rc.d", "chkconfig", "rc-update", "sv", "pkill", "killall", "kill",
+        "setenforce", "aa-teardown", "aa-disable", "aa-complain", "apparmor_parser",
+    }
     positive_only_reason = (
         "stop commands are recognised from argv and shell text, and the service manager records only the units it "
         "manages; a daemon can be stopped in ways neither shows (a kill by process id, a crash, a changed unit file), "
@@ -454,6 +481,11 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         self.stops: list[TypedEvent] = []
         self.starts: dict[tuple, list[float]] = defaultdict(list)
         self.ran: dict[tuple, list[float]] = defaultdict(list)   # watched daemons' exec records per host
+
+    def _process_relevant(self, event: TypedEvent) -> bool:
+        name = program_name_hint(event)
+        return (name is None or name in self.process_programs or name in SHELLS
+                or bool(service_category(name)))
 
     def _event(self, e):
         if e.family == "process_exec":
@@ -763,6 +795,8 @@ class AuditRulesTamper(_TamperRule):
     families = ("process_exec", "audit_config", "service_change", "system_state")
     severity, lane = "high", "high"
     attack = ("T1685.004",)
+    process_programs = _WRITE_PROGRAMS | {"auditctl", "rm", "unlink", "shred"}
+    process_editors = True
     positive_only_reason = (
         "auditctl and configuration-file writes are recognised from argv and shell text; the kernel records "
         "configuration changes only while auditing runs, so a window without matches proves nothing")
@@ -1188,6 +1222,10 @@ class LogOrHistoryClearing(_TamperRule):
     families = ("process_exec",)
     severity, lane = "high", "high"
     attack = ("T1685.006", "T1070.003", "T1690")
+    process_programs = _WRITE_PROGRAMS | {
+        "journalctl", "rm", "unlink", "srm", "wipe", "shred", "find", "history", "unset", "export", "set",
+    }
+    process_editors = True
     positive_only_reason = (
         "the deleting or truncating command and its target are read from argv and shell command text; files can "
         "be removed in ways exec records do not show (shell built-ins in an interactive shell, programs deleting "

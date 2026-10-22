@@ -71,6 +71,23 @@ def program(event: TypedEvent) -> Program | None:
     return Program(canonical(name), rest, from_argv0)
 
 
+def program_name_hint(event: TypedEvent) -> str | None:
+    """Cheap exact program identity for rejecting irrelevant execs before option/script parsing."""
+    argv = event.get("process.argv")
+    if not isinstance(argv, list) or not argv:
+        return None
+    executable = event.get("process.executable")
+    if not executable:
+        return canonical(basename(str(argv[0])))
+    name = basename(str(executable))
+    if name not in MULTIPLEXERS:
+        return canonical(name)
+    applet = basename(str(argv[0]))
+    if applet in MULTIPLEXERS:
+        return canonical(basename(str(argv[1]))) if len(argv) > 1 else None
+    return canonical(applet)
+
+
 def split_flags(args: list[str]) -> tuple[set[str], list[str]]:
     """Short flags (grouped letters split: `-lvnp` -> l, v, n, p), long flags (with any `=value` removed) and
     operands. `--` ends option parsing."""

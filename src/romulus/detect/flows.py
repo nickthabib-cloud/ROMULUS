@@ -379,6 +379,12 @@ class _FlowRule(Playbook):
     def retained_events(self) -> list[TypedEvent]:
         return []                                   # staged on disk instead
 
+    def release_state(self) -> None:
+        self.load = lambda ids: []
+        for value in vars(self).values():
+            if isinstance(value, (dict, list, set)):
+                value.clear()
+
     def _stage(self, event: TypedEvent) -> None:
         if event.id not in self._staged:
             self._staged.add(event.id)
