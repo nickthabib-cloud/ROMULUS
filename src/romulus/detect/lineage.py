@@ -18,7 +18,8 @@ What the evidence shows, and what it does not:
 - PID identity rests on "no other exec recorded for that PID in between". A PID that is reused by a
   forked process with no exec of its own is invisible to exec records, so reuse cannot be ruled out.
   `MAX_GAP` bounds how far apart the two facts may be, which limits the exposure to PID reuse; it
-  does not guard against it. Boot identity is part of every key when the source records it.
+  does not guard against it. Boot identity separates every join when both records carry it (pids restart at
+  a reboot); a record without a recorded boot id joins as if boot identity did not exist.
 - That the shell's input and output actually use that connection is inferred, never observed, so the
   claim says so and the rule is positive-only.
 
@@ -43,7 +44,15 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.correlation import PidTable, StageMissing, canon_ip, external
+from romulus.detect.correlation import (
+    PidTable,
+    StageMissing,
+    boot_of,
+    boots_conflict,
+    canon_ip,
+    external,
+    merge_unknown_boot,
+)
 from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS, _py_pty_spawn, interpreter_name
 from romulus.evidence.shellparse import (
     SHELLS,
@@ -140,6 +149,7 @@ class _Socket:
     user: object
     web: bool
     event_id: str
+    boot: str | None = None
 
 
 @dataclass
@@ -270,7 +280,7 @@ class ReverseShellByLineage(Playbook):
         else:
             devtcp, shaped = _devtcp_redirect(argv, exe), _reverse_shell_shaped(argv, exe)
         self.shells.append(_Shell(
-            ts=event.ts.timestamp(), host=event.host or "", boot=event.get("host.boot.id"), pid=pid,
+            ts=event.ts.timestamp(), host=event.host or "", boot=boot_of(event), pid=pid,
             ppid=event.get("process.ppid"), exe=str(exe), event_id=event.id, devtcp=devtcp, shaped=shaped))
         self._stage(event)
 
@@ -296,9 +306,9 @@ class ReverseShellByLineage(Playbook):
         self.evaluated += 1
         user = event.get("process.user")
         web = user in WEB_SERVICE_USERS or event.get("process.effective_user") in WEB_SERVICE_USERS
-        self.sockets[(event.host or "", event.get("host.boot.id"), pid)].append(_Socket(
+        self.sockets[(event.host or "", pid)].append(_Socket(
             ts=event.ts.timestamp(), syscall=str(syscall), peer_ip=ip, peer_port=port, exe=str(exe), user=user,
-            web=web, event_id=event.id))
+            web=web, event_id=event.id, boot=boot_of(event)))
         self._stage(event)
 
     # ---------------------------------------------------------------- finalize
@@ -307,11 +317,12 @@ class ReverseShellByLineage(Playbook):
         ancestor. An ancestor's window ends at the exec of its child on the chain: a socket it opened later
         was not inherited down that chain."""
         owners = []
-        prior = self.pids.exec_before(shell.host, shell.pid, shell.ts)
+        prior = self.pids.exec_before(shell.host, shell.pid, shell.ts, shell.boot)
         if prior is not None:
             owners.append((shell.pid, prior[0], shell.ts, "own process re-exec"))
         child_ts = shell.ts
-        for pid, exec_ts, _exe, _raw in self.pids.lineage_entries(shell.host, shell.ppid, shell.ts):
+        for pid, exec_ts, _exe, _raw in self.pids.lineage_entries(shell.host, shell.ppid, shell.ts,
+                                                                   boot=shell.boot):
             owners.append((pid, exec_ts, child_ts, "descendant"))
             child_ts = exec_ts
         return owners
@@ -327,8 +338,9 @@ class ReverseShellByLineage(Playbook):
         groups: dict[tuple, list[_Hit]] = defaultdict(list)
         for shell in sorted(self.shells, key=lambda s: (s.ts, s.event_id)):
             for owner_pid, start, end, relation in self._owners(shell):
-                window = sorted((s for s in self.sockets.get((shell.host, shell.boot, owner_pid), ())
-                                 if start <= s.ts < end and shell.ts - s.ts <= MAX_GAP),
+                window = sorted((s for s in self.sockets.get((shell.host, owner_pid), ())
+                                 if start <= s.ts < end and shell.ts - s.ts <= MAX_GAP
+                                 and not boots_conflict(shell.boot, s.boot)),
                                 key=lambda s: (s.ts, s.event_id))
                 if not window:
                     continue
@@ -339,8 +351,10 @@ class ReverseShellByLineage(Playbook):
                 latest = channels[-1] if channels else window[-1]
                 if latest.syscall in ACCEPT_SYSCALLS and latest.exe in SSHD_PATHS:
                     continue                            # the system sshd's accepted login: auth rules cover it
-                key = (shell.host, shell.boot, owner_pid, latest.peer_ip)
+                boot = shell.boot if shell.boot is not None else latest.boot
+                key = (shell.host, boot, owner_pid, latest.peer_ip)
                 groups[key].append(_Hit(shell, latest, owner_pid, relation, shell.ts - latest.ts, window))
+        groups = merge_unknown_boot(groups, 1)
         out = []
         for key in sorted(groups, key=lambda k: tuple("" if part is None else str(part) for part in k)):
             out.append(self._finding(key, groups[key]))

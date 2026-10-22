@@ -79,12 +79,16 @@ def _context_suffix(anchor: ContextAnchor, link: ContextLink) -> str:
 
 
 def _session_key(event: TypedEvent, anchor: ContextAnchor) -> tuple:
-    """Group key for one session/lineage: host, boot id (when typed) and audit session id. When no session id
+    """Group key for one session/lineage: host, a boot slot and audit session id. When no session id
     is typed (a lineage link), the anchor's content identity keeps lineages on one host apart; its id would differ
-    between identical hunts."""
+    between identical hunts.
+
+    The boot slot is always None. Records reached by expansion links are retrieved without the journald copies
+    that carry an audit record's boot id, while the sweep's own records carry it, so keying on it would split one
+    session between the two. The links drop records whose recorded boot differs from the anchor's; a session id
+    reused after a reboot inside one link window can still join two logins here."""
     session = event.get("process.session_id")
-    boot = event.get("host.boot.id")
-    return (event.host, boot, session if session is not None else f"lin:{anchor.identity}")
+    return (event.host, None, session if session is not None else f"lin:{anchor.identity}")
 
 
 def _group_id(key: tuple) -> str:
@@ -522,7 +526,7 @@ class PrivilegeProbing(_HostContextRule):
                     continue
                 if _is_real_root(parent):
                     continue                        # inherited root, not a transition
-                tkey = (event.host, event.get("host.boot.id"), key[2], event.get("process.pid"),
+                tkey = (event.host, key[1], key[2], event.get("process.pid"),
                         event.get("process.executable"))
                 if tkey in seen_transition:
                     continue
@@ -588,7 +592,7 @@ class PrivilegeProbing(_HostContextRule):
                           _predicate_all(cited, field, "process.uid", "process.euid", "process.auid",
                                          "process.executable", "process.ppid"),
                           event.ts, "high" if lane == "high" else "medium", lane, "medium", event.entities(),
-                          group_key=f"euid0|{event.host}|{event.get('host.boot.id')}|{key[2]}|{pid}|"
+                          group_key=f"euid0|{event.host}|{key[1]}|{key[2]}|{pid}|"
                                     f"{event.get('process.executable')}")
             match.notes.extend(techniques)
             out.append(self._finish(match, [event]))
@@ -1247,8 +1251,9 @@ class EntryPointPromotion(ContextPlaybook):
     _PHASE_RANK: ClassVar[dict[str, int]] = {"login": 0, "authentication": 0, "session_open": 2}
 
     def match_linked(self, anchor, link, events):
-        # Group the session's own sshd success records by (host, boot, session id). The external-vs-internal
-        # test uses only a session's own records, so another session can never affect it.
+        # Group the session's own sshd success records by (host, boot slot, session id); the boot slot is None, as
+        # in `_session_key`. The external-vs-internal test uses only a session's own records, so another session
+        # can never affect it.
         sessions: dict[tuple, list[TypedEvent]] = defaultdict(list)
         for event in self.eligible_records(events):
             if event.get("auth.service") != "sshd" or event.outcome != Outcome.success:
@@ -1260,8 +1265,7 @@ class EntryPointPromotion(ContextPlaybook):
                 except ValueError:
                     self.missing_required += 1       # a present-but-unparseable source is not a clean field
                     continue
-            key = (event.host, event.get("host.boot.id"),
-                   event.get("process.session_id") or link.key.get("process.session_id"))
+            key = (event.host, None, event.get("process.session_id") or link.key.get("process.session_id"))
             sessions[key].append(event)
 
         out = []

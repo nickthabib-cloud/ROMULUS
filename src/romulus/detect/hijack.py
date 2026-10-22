@@ -46,7 +46,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, pf
-from romulus.detect.correlation import StageMissing
+from romulus.detect.correlation import StageMissing, boot_of, boots_conflict
 from romulus.detect.host import _FLAG_ONLY, SCRIPT_FILE_INTERPRETERS, WEB_SERVICE_USERS
 from romulus.detect.linux_argv import canonical, is_under, normalize_path, program, write_targets
 from romulus.evidence.shellparse import (
@@ -267,10 +267,11 @@ class NonRootWriteRootExecutedFile(Playbook):
         self.write_counts: dict[tuple[str, str, str], int] = defaultdict(int)
         self.write_ok: dict[tuple[str, str, str], int] = defaultdict(int)     # writer execs that did not fail
         self.runs: dict[tuple[str, str], dict[tuple, _Series]] = defaultdict(dict)
-        self.sessions: dict[tuple, list[tuple[float, str, str]]] = defaultdict(list)
-        self.session_pids: dict[tuple, list[tuple[float, str, str]]] = defaultdict(list)
+        # (host, audit session id) and (host, pid) -> entries whose last element is the record's boot id
+        self.sessions: dict[tuple, list[tuple[float, str, str, str | None]]] = defaultdict(list)
+        self.session_pids: dict[tuple, list[tuple[float, str, str, str | None]]] = defaultdict(list)
         self.recent_auth: dict[str, OrderedDict[str, TypedEvent]] = defaultdict(OrderedDict)
-        self.daemons: dict[tuple, list[tuple[float, int | None]]] = defaultdict(list)
+        self.daemons: dict[tuple, list[tuple[float, int | None, str | None]]] = defaultdict(list)
         self.changes: dict[tuple[str, str], list[tuple[float, str, str, str]]] = defaultdict(list)
         self.kernel_writes: dict[tuple[str, str], list[_Write]] = defaultdict(list)
         self.file_change_records = 0
@@ -311,10 +312,10 @@ class NonRootWriteRootExecutedFile(Playbook):
             return
         if event.outcome == Outcome.failure:
             return
-        entry = (event.ts.timestamp(), str(service), event.id)
+        entry = (event.ts.timestamp(), str(service), event.id, boot_of(event))
         session, pid = event.get("process.session_id"), event.get("process.pid")
         if session is not None:
-            self.sessions[(event.host, event.get("host.boot.id"), session)].append(entry)
+            self.sessions[(event.host, session)].append(entry)
         if isinstance(pid, int):
             self.session_pids[(event.host, pid)].append(entry)
         recent = self.recent_auth[event.host or ""]
@@ -349,7 +350,7 @@ class NonRootWriteRootExecutedFile(Playbook):
         session = event.get("process.session_id")
         self.kernel_writes[key].append(_Write(
             event.ts.timestamp(), event.id, normalize_path(str(path)), f"a kernel file-change record ({change})",
-            account, _uid(event), (event.get("host.boot.id"), session) if session is not None else None,
+            account, _uid(event), (boot_of(event), session) if session is not None else None,
             event.get("process.user") in WEB_SERVICE_USERS, False, kernel=True))
 
     def _exec(self, event: TypedEvent) -> None:
@@ -369,7 +370,7 @@ class NonRootWriteRootExecutedFile(Playbook):
         if root:
             if _auid(event) is None and isinstance(event.get("process.pid"), int):
                 self.daemons[(event.host, event.get("process.pid"))].append(
-                    (event.ts.timestamp(), event.get("process.ppid")))
+                    (event.ts.timestamp(), event.get("process.ppid"), boot_of(event)))
             self._root_run(event, prog)
         elif str(event.get("process.euid", "")) != "0" and not incomplete:
             # a setuid-root program writes as root; a write target is often the last operand, which an incomplete
@@ -397,7 +398,7 @@ class NonRootWriteRootExecutedFile(Playbook):
             by_key.setdefault(path_key(path), []).append((path, form, assumed))
         account = _account(event)
         session = event.get("process.session_id")
-        own_session = (event.get("host.boot.id"), session) if session is not None else None
+        own_session = (boot_of(event), session) if session is not None else None
         for pkey, items in by_key.items():
             key = (event.host or "", pkey)
             count_key = (key[0], pkey, account)
@@ -537,14 +538,14 @@ class NonRootWriteRootExecutedFile(Playbook):
         """(executor key, description, scheduler session record) for a root exec record."""
         ts = event.ts.timestamp()
         auid = _auid(event)
-        session = event.get("process.session_id")
+        session, boot = event.get("process.session_id"), boot_of(event)
         found = None
         if session is not None:
-            found = self._latest(self.sessions.get((event.host, event.get("host.boot.id"), session), ()), ts)
+            found = self._latest(self.sessions.get((event.host, session), ()), ts, boot)
         if found is None and isinstance(event.get("process.ppid"), int):
-            found = self._latest(self.session_pids.get((event.host, event.get("process.ppid")), ()), ts)
+            found = self._latest(self.session_pids.get((event.host, event.get("process.ppid")), ()), ts, boot)
         if found is not None:
-            _when, service, auth_id = found
+            _when, service, auth_id, _boot = found
             return (("scheduler", service, auid),
                     f"in sessions the scheduler '{service}' opened, joined by audit session id or parent pid",
                     self.recent_auth[event.host or ""].get(auth_id))
@@ -557,30 +558,33 @@ class NonRootWriteRootExecutedFile(Playbook):
             return (("daemon", None, None),
                     ("outside any login session (no audit login uid), launched by a process whose exec is not in "
                      "the retrieved records, such as a scheduler or daemon"), None)
-        tag = (event.get("host.boot.id"), session) if session is not None else None
+        tag = (boot, session) if session is not None else None
         where = f" (audit session {session})" if session is not None else ""
         return (("login", tag, auid), f"in a login session{where} of audit login uid {auid}", None)
 
     @staticmethod
-    def _latest(entries, ts: float):
+    def _latest(entries, ts: float, boot: str | None = None):
+        """The latest entry at or before `ts`, unless it is in a boot other than `boot` (its last element): pids
+        and audit session ids restart at a reboot, so an earlier entry is in that other boot or an earlier one."""
         best = None
         for entry in entries:
             if entry[0] <= ts and (best is None or entry[0] >= best[0]):
                 best = entry
-        return best
+        return None if best is not None and boots_conflict(boot, best[-1]) else best
 
     def _service_lineage(self, event: TypedEvent) -> bool:
         """True when the ppid chain, through root exec records outside any login session, reaches pid 1."""
-        ppid, ts = event.get("process.ppid"), event.ts.timestamp()
+        ppid, ts, boot = event.get("process.ppid"), event.ts.timestamp(), boot_of(event)
         for _ in range(LINEAGE_DEPTH):
             if ppid == 1:
                 return True
             if not isinstance(ppid, int) or ppid <= 1:
                 return False
-            parent = self._latest(self.daemons.get((event.host, ppid), ()), ts)
+            parent = self._latest(self.daemons.get((event.host, ppid), ()), ts, boot)
             if parent is None:
                 return False
-            ts, ppid = parent
+            ts, ppid, parent_boot = parent
+            boot = boot if boot is not None else parent_boot
         return False
 
     # ---------------------------------------------------------------- finalize
@@ -783,9 +787,14 @@ def _own_elevation(executor: tuple, writes: list[_Write]) -> bool:
     if kind == "scheduler":
         return auid is not None and auid in own_uids
     if kind == "login":
-        own_sessions = {w.session for w in writes if w.session is not None}
-        return (tag is not None and tag in own_sessions) or auid in own_uids
+        return any(_same_session(tag, w.session) for w in writes) or auid in own_uids
     return False
+
+
+def _same_session(a: tuple | None, b: tuple | None) -> bool:
+    """Two (boot id, audit session id) tags name one login session: the same session id, and boots that are not
+    known to differ (a session id restarts at a reboot; see `boots_conflict`)."""
+    return a is not None and b is not None and a[1] == b[1] and not boots_conflict(a[0], b[0])
 
 
 def _listed(items: list[str], limit: int = 6) -> str:
