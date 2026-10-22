@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from romulus.baseline.spec import (
+    ARGV_SHAPE_MAX_CHARS,
+    ARGV_SHAPE_MAX_TOKENS,
     BASELINE_SPECS,
     SPEC_BY_ID,
     KeyContext,
@@ -15,6 +17,7 @@ from romulus.baseline.spec import (
     NotApplicable,
     ParentLookup,
     Pending,
+    canonical_json,
 )
 from romulus.detect.correlation import PidTable
 from romulus.evidence.typed import Outcome, TypedEvent, fv
@@ -590,3 +593,138 @@ def test_key_digests_are_deterministic_across_repeated_extraction():
     first = SPEC_BY_ID["bl.cmd_shape"].keys(event, _ctx())[0]
     second = SPEC_BY_ID["bl.cmd_shape"].keys(event.model_copy(deep=True), _ctx())[0]
     assert first == second
+
+
+def test_ipv6_zone_ids_are_stripped_before_canonicalization():
+    ssh = SPEC_BY_ID["bl.ssh_tuple"].keys(
+        _event("auth", outcome=Outcome.success, **{**SSH, "source.ip": "FE80::1%eth0"}), _ctx(),
+    )
+    assert _kinds(ssh)["source_ip"] == {"kind": "source_ip", "source_ip": "fe80::1"}
+    flow = SPEC_BY_ID["bl.ext_dest"].keys(
+        _event("net_flow", **{"source.ip": "fe80::10%2", "destination.ip": "2001:db8::9%eth1"}), _ctx(),
+    )
+    assert {key.scope for key in flow} == {"internal_ip:fe80::10"}
+    assert _kinds(flow)["dest_ip"] == {"kind": "dest_ip", "dest_ip": "2001:db8::9"}
+
+
+def test_internationalized_names_become_punycode():
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event("tls_session", **{
+        "source.ip": "10.0.0.4", "destination.ip": "198.51.100.9", "tls.client.server_name": "Bücher.Example.",
+    }), _ctx())
+    assert _kinds(keys)["sni"]["sni"] == "xn--bcher-kva.example"
+    assert _kinds(keys)["registered_domain"]["registered_domain"] == "xn--bcher-kva.example"
+    dns = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
+        "dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
+        "dns.question.name": "www.bücher.example",
+    }), _ctx())
+    assert [key.key["registered_domain"] for key in dns] == ["xn--bcher-kva.example"]
+
+
+def test_an_unencodable_internationalized_name_is_missing():
+    result = SPEC_BY_ID["bl.ext_dest"].keys(_event("tls_session", **{
+        "source.ip": "10.0.0.4", "destination.ip": "198.51.100.9",
+        "tls.client.server_name": "ü" * 70 + ".example",
+    }), _ctx())
+    assert isinstance(result, Missing) and result.fields == ("tls.client.server_name",)
+
+
+def test_host_names_in_scopes_are_lower_case():
+    exec_keys = SPEC_BY_ID["bl.exec_path"].keys(
+        _event("process_exec", host="WEB01.Corp", outcome=Outcome.success, **EXEC), _ctx(),
+    )
+    assert exec_keys[0].scope == "host:web01.corp"
+    rate = SPEC_BY_ID["bl.svc_exec_rate"].keys(
+        _event("process_exec", host="DB01", **{"process.user": "postgres", "process.uid": "114"}), _ctx(),
+    )
+    assert rate[0].scope == 'host_account:{"account":"postgres","host":"db01"}'
+    ssh = SPEC_BY_ID["bl.ssh_tuple"].keys(_event("auth", host="Web01", outcome=Outcome.success, **SSH), _ctx())
+    assert _kinds(ssh)["host"] == {"kind": "host", "host": "web01"}
+
+
+@pytest.mark.parametrize("sni", ["203.0.113.7", "2001:db8::7", "[2001:db8::7]"])
+def test_an_ip_literal_sni_has_no_registered_domain(sni):
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event("tls_session", **{
+        "source.ip": "10.0.0.4", "destination.ip": "198.51.100.9", "tls.client.server_name": sni,
+    }), _ctx())
+    assert set(_kinds(keys)) == {"dest_ip", "dest_network", "sni"}
+
+
+@pytest.mark.parametrize("name", ["192.0.2.10", ".", "<root>"])
+def test_a_dns_question_naming_no_domain_is_not_applicable(name):
+    result = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
+        "dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53", "dns.question.name": name,
+    }), _ctx())
+    assert isinstance(result, NotApplicable)
+
+
+def test_identical_keys_within_one_event_are_counted_once():
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
+        "dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
+        "dns.question.names": ["a.example.com", "B.example.com.", "a.example.com"],
+    }), _ctx())
+    assert [key.key for key in keys] == [{"kind": "registered_domain", "registered_domain": "example.com"}]
+
+
+def _dns(role: str, flow, **extra) -> TypedEvent:
+    client, resolver = "10.0.0.4", "10.0.0.53"
+    source, destination = (resolver, client) if role == "answer" else (client, resolver)
+    fields = {"dns.type": role, "source.ip": source, "destination.ip": destination,
+              "dns.question.name": "www.example.com", **extra}
+    if flow is not None:
+        fields["suricata.flow_id"] = flow
+    return _event("dns_query", **fields)
+
+
+def test_query_and_answer_of_one_dns_transaction_share_a_dedup_token():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    query, answer = spec.keys(_dns("query", 77), _ctx()), spec.keys(_dns("answer", 77), _ctx())
+    assert [key.key_digest for key in query] == [key.key_digest for key in answer]
+    assert [key.dedup_token for key in query] == [key.dedup_token for key in answer]
+    assert query[0].dedup_token is not None
+    other_flow = spec.keys(_dns("query", 78), _ctx())
+    assert other_flow[0].dedup_token != query[0].dedup_token
+    # a typed DNS id separates two transactions in one flow
+    first_id = spec.keys(_dns("query", 77, **{"dns.id": 1}), _ctx())[0]
+    second_id = spec.keys(_dns("query", 77, **{"dns.id": 2}), _ctx())[0]
+    assert first_id.dedup_token != second_id.dedup_token
+    # without a flow identity a query and an answer cannot be proven one transaction: each counts
+    assert spec.keys(_dns("query", None), _ctx())[0].dedup_token is None
+
+
+def test_records_of_one_flow_share_a_dedup_token_across_families():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    fields = {"source.ip": "10.0.0.4", "destination.ip": "198.51.100.9", "suricata.flow_id": 5}
+    flow = spec.keys(_event("net_flow", **fields), _ctx())
+    tls = spec.keys(_event("tls_session", **fields, **{"tls.client.server_name": "a.example.com"}), _ctx())
+    assert _kinds(flow)["dest_ip"] == _kinds(tls)["dest_ip"]
+    assert {key.dedup_token for key in flow} == {key.dedup_token for key in tls} != {None}
+    community = spec.keys(_event("net_session", **{
+        "source.ip": "10.0.0.4", "destination.ip": "198.51.100.9", "network.community_id": "1:abc=",
+    }), _ctx())
+    assert community[0].dedup_token is not None and community[0].dedup_token != flow[0].dedup_token
+
+
+def test_argv_shape_is_bounded_and_the_overflow_is_hashed_and_marked():
+    spec = SPEC_BY_ID["bl.cmd_shape"]
+
+    def shape(argv):
+        event = _event("process_exec", **{"process.executable": "/bin/tool", "process.argv": argv})
+        return spec.keys(event, _ctx())[0]
+
+    long_argv = ["tool", *[f"--opt-{index:04d}x" for index in range(1000)]]
+    bounded = shape(long_argv)
+    assert len(bounded.key["argv_shape"]) <= ARGV_SHAPE_MAX_TOKENS
+    assert len(canonical_json(bounded.key)) < 2 * ARGV_SHAPE_MAX_CHARS
+    kept = len(bounded.key["argv_shape"])
+    assert bounded.key["argv_overflow"]["tokens"] == len(long_argv) - kept
+    changed_tail = shape([*long_argv[:-1], "--different"])
+    assert changed_tail.key_digest != bounded.key_digest
+    assert changed_tail.key["argv_shape"] == bounded.key["argv_shape"]
+    assert shape(list(long_argv)).key_digest == bounded.key_digest
+
+    giant = shape(["python3", "-c", "x" * 100_000, "--flag"])
+    assert giant.key["argv_shape"] == ["python3", "-c"]
+    assert giant.key["argv_overflow"]["tokens"] == 2
+    assert len(canonical_json(giant.key)) < 2 * ARGV_SHAPE_MAX_CHARS
+
+    assert "argv_overflow" not in shape(["tool", "--port=1"]).key

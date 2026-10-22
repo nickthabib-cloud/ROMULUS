@@ -19,12 +19,12 @@ import ipaddress
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
-from romulus.detect.dns import qname, registered_domain
+from romulus.detect.dns import registered_domain
 from romulus.detect.dns import role as dns_role
 from romulus.detect.host import is_internal
 from romulus.evidence.typed import Outcome, TypedEvent
@@ -46,13 +46,21 @@ class BaselineKey:
 
     `key_digest` identifies the key within its scope (sha256 of spec, key version, scope and key); `key_id`
     identifies the key regardless of scope (sha256 of spec, key version and key), so prevalence counts the
-    distinct scopes of one `scope_kind` that hold a `key_id` without parsing scope strings."""
+    distinct scopes of one `scope_kind` that hold a `key_id` without parsing scope strings.
+
+    `dedup_token` is the counting rule: a counter counts a key once per distinct non-None token, and once per
+    record when the token is None. Records of one network flow share a token (a flow record and the TLS record
+    of the same connection count once), and the query and answer records of one DNS transaction share one
+    (flow, question names and the DNS id when typed), so a transaction logged as both counts once. A record
+    without a typed flow identity cannot be proven part of another record's flow and counts on its own.
+    Tokens are only shared between records of one flow, so a counter can expire them after the flow timeout."""
 
     scope_kind: Scope
     scope: str
     key: dict[str, Any]
     key_digest: str
     key_id: str
+    dedup_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +229,8 @@ def _text(event: TypedEvent, name: str) -> str | Missing:
 def _parse_ip(value: Any) -> IPAddress | None:
     if isinstance(value, bool) or not isinstance(value, str) or not value:
         return None
+    # An IPv6 zone id (fe80::1%eth0) names the observer's interface, not the address.
+    value = value.split("%", 1)[0]
     try:
         address = ipaddress.ip_address(value)
     except ValueError:
@@ -253,11 +263,45 @@ def _network(address: IPAddress) -> str:
     return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
 
 
-def _canon_dns(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    name = value.strip().lower().rstrip(".")
+def _dns_name(value: str) -> str | None:
+    """Canonical DNS name: trimmed, lower-case, no trailing dot, internationalized labels as punycode
+    A-labels; '.' for the root; None when empty. Raises ValueError for a name IDNA cannot encode."""
+    text = value.strip()
+    if text in ("<root>", "."):
+        return "."
+    name = text.rstrip(".").lower()
+    if name and not name.isascii():
+        try:
+            name = name.encode("idna").decode("ascii").lower()
+        except UnicodeError as error:
+            raise ValueError(f"{value!r} is not an encodable internationalized name") from error
     return name or None
+
+
+def _registrable(name: str) -> str | None:
+    """The registered domain of a canonical name, or None for the root and for an address literal."""
+    if name == "." or _parse_ip(name.removeprefix("[").removesuffix("]")) is not None:
+        return None
+    return registered_domain(name)
+
+
+def _unique(keys: list[BaselineKey]) -> list[BaselineKey]:
+    """Identical keys from one event count once (two question names in one registered domain, say)."""
+    seen: set[str] = set()
+    return [key for key in keys if not (key.key_digest in seen or seen.add(key.key_digest))]
+
+
+def _flow_identity(event: TypedEvent) -> list[str] | None:
+    """The record's flow: the sensor's flow id, else the community id; None when neither is typed."""
+    for name in ("suricata.flow_id", "network.community_id"):
+        value = event.get(name)
+        if value not in (None, "") and not isinstance(value, (bool, list, dict)):
+            return [name, str(value)]
+    return None
+
+
+def _with_token(keys: list[BaselineKey], token: str | None) -> list[BaselineKey]:
+    return [replace(key, dedup_token=token) for key in keys]
 
 
 def _outcome_success(event: TypedEvent, action: str) -> NotApplicable | Missing | None:
@@ -331,6 +375,11 @@ def _exec_pair(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> Ke
     })]
 
 
+# A key is stored once per scope and bucket, so its size is bounded: the masked shape keeps at most this many
+# leading tokens and characters, and the rest is kept as its token count and a digest of its masked tokens.
+ARGV_SHAPE_MAX_TOKENS = 64
+ARGV_SHAPE_MAX_CHARS = 2048
+
 _UUID = re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![0-9a-f])")
 _IPV4 = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])")
 _BRACKETED_IP = re.compile(r"\[([0-9a-fA-F:.]+)\]")
@@ -368,6 +417,23 @@ def mask_argv_token(value: str) -> str:
     return _NUMBER.sub("<num>", token)
 
 
+def argv_shape(argv: list[str]) -> dict[str, Any]:
+    """`argv_shape`: the masked leading tokens within the size bound; `argv_overflow` (present only when the
+    bound was hit): how many masked tokens did not fit and the sha256 of their canonical JSON, so two commands
+    that differ only past the bound still get different keys and the truncation is visible in the key."""
+    masked = [mask_argv_token(token) for token in argv]
+    kept, size = 0, 0
+    for token in masked:
+        if kept == ARGV_SHAPE_MAX_TOKENS or size + len(token) > ARGV_SHAPE_MAX_CHARS:
+            break
+        kept, size = kept + 1, size + len(token)
+    shape: dict[str, Any] = {"argv_shape": masked[:kept]}
+    if kept < len(masked):
+        rest = masked[kept:]
+        shape["argv_overflow"] = {"tokens": len(rest), "sha256": _sha256(canonical_json(rest))}
+    return shape
+
+
 def _cmd_shape(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
     host, executable = _host(event), _text(event, "process.executable")
     for value in (host, executable):
@@ -378,9 +444,7 @@ def _cmd_shape(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> K
         return Missing("the argument vector is incomplete", ("process.argv",))
     if not isinstance(argv, list) or not argv or not all(isinstance(token, str) for token in argv):
         return Missing("process.argv is not a non-empty list of strings", ("process.argv",))
-    return [_key(spec, _scope("host", host=host), {
-        "executable": executable, "argv_shape": [mask_argv_token(token) for token in argv],
-    })]
+    return [_key(spec, _scope("host", host=host), {"executable": executable, **argv_shape(argv)})]
 
 
 def _external_unicast(address: IPAddress, context: KeyContext) -> bool:
@@ -390,19 +454,25 @@ def _external_unicast(address: IPAddress, context: KeyContext) -> bool:
 
 
 def _question_names(event: TypedEvent) -> list[str] | Missing:
-    """Every question name of a DNS record, canonical; a malformed list or name is Missing, never skipped."""
+    """Every question name of a DNS record, canonical and distinct; a malformed list or name is Missing,
+    never skipped."""
     names = event.get("dns.question.names")
     if names is not None:
+        field_name = "dns.question.names"
         if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
-            return Missing("dns.question.names is not a list of names", ("dns.question.names",))
-        found = sorted({name for name in (qname(value) for value in names) if name})
+            return Missing("dns.question.names is not a list of names", (field_name,))
     else:
-        name = event.get("dns.question.name")
+        field_name = "dns.question.name"
+        name = event.get(field_name)
         if name is None or name == "":
             return Missing("no DNS question name", ("dns.question.names", "dns.question.name"))
         if not isinstance(name, str):
-            return Missing("dns.question.name is not a single string", ("dns.question.name",))
-        found = [qname(name)] if qname(name) else []
+            return Missing("dns.question.name is not a single string", (field_name,))
+        names = [name]
+    try:
+        found = sorted({canonical for canonical in (_dns_name(value) for value in names) if canonical})
+    except ValueError as error:
+        return Missing(str(error), (field_name,))
     if not found:
         return Missing("no DNS question name", ("dns.question.names", "dns.question.name"))
     return found
@@ -425,10 +495,19 @@ def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec)
     for value in (client, resolver, names):
         if isinstance(value, Missing):
             return value
+    domains = sorted({domain for domain in (_registrable(name) for name in names) if domain})
+    if not domains:
+        return NotApplicable("the question names an address or the root, not a domain")
     # A lookup's destination is the name asked, never the resolver that answered it.
     scope = _scope("internal_ip", address=str(client))
-    return [_key(spec, scope, {"kind": "registered_domain", "registered_domain": registered_domain(name)})
-            for name in names]
+    keys = _unique([_key(spec, scope, {"kind": "registered_domain", "registered_domain": domain})
+                    for domain in domains])
+    flow = _flow_identity(event)
+    dns_id = event.get("dns.id")
+    if isinstance(dns_id, (bool, list, dict)):
+        dns_id = None
+    token = None if flow is None else _sha256(canonical_json(["dns", flow, names, dns_id]))
+    return _with_token(keys, token)
 
 
 def _destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
@@ -443,18 +522,25 @@ def _destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> 
         if isinstance(value, Missing):
             return value
     sni_value = event.get("tls.client.server_name")
-    if sni_value is not None and not isinstance(sni_value, str):
-        return Missing("tls.client.server_name is not a single string", ("tls.client.server_name",))
+    sni = None
+    if sni_value is not None:
+        if not isinstance(sni_value, str):
+            return Missing("tls.client.server_name is not a single string", ("tls.client.server_name",))
+        try:
+            sni = _dns_name(sni_value)
+        except ValueError as error:
+            return Missing(str(error), ("tls.client.server_name",))
     scope = _scope("internal_ip", address=str(source))
     keys = [
         _key(spec, scope, {"kind": "dest_ip", "dest_ip": str(destination)}),
         _key(spec, scope, {"kind": "dest_network", "dest_network": _network(destination)}),
     ]
-    sni = _canon_dns(sni_value)
-    if sni is not None:
+    if sni is not None and sni != ".":
         keys.append(_key(spec, scope, {"kind": "sni", "sni": sni}))
-        keys.append(_key(spec, scope, {"kind": "registered_domain", "registered_domain": registered_domain(sni)}))
-    return keys
+        if (domain := _registrable(sni)) is not None:
+            keys.append(_key(spec, scope, {"kind": "registered_domain", "registered_domain": domain}))
+    flow = _flow_identity(event)
+    return _with_token(_unique(keys), None if flow is None else _sha256(canonical_json(["flow", flow])))
 
 
 def _uid(event: TypedEvent) -> int | Missing:
