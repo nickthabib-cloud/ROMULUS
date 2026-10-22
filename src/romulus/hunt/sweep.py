@@ -8,7 +8,12 @@ from datetime import datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
 from romulus.detect.registry import fresh_pack
-from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.normalize import (
+    BOOT_FILL_FAMILIES,
+    BOOT_INTERVAL_ORIGIN,
+    BootIntervals,
+    normalize_hits,
+)
 from romulus.hunt.publish import publish_match
 from romulus.hunt.stage import EventStage
 from romulus.sources.es import ElasticClient
@@ -43,6 +48,19 @@ WINDOW_ROLLUP_PARTIAL = ("whole-window result over partitions of which one or mo
 
 BUCKET_SECONDS = 300
 MIN_SPLIT = timedelta(seconds=5)
+# The audit action that holds a hunt's boot-interval map, written once when the sweep has read every partition.
+BOOT_INTERVALS_AUDIT = "hunt.boot_intervals"
+# How many boot-placement items the sweep summary lists by name; the boot-interval map record holds every one.
+BOOT_LISTED = 100
+BOOT_BLIND_LISTED = 20
+# A rule-coverage cell recording that sweep-time boot placement was contradicted on some host
+BOOT_PLACEMENT_PARTITION = "boot-placement"
+
+
+def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
+    """The boot-interval map the hunt's sweep recorded; empty (it places nothing) when there is none."""
+    row = repo.latest_audit(hunt_id, BOOT_INTERVALS_AUDIT) if hasattr(repo, "latest_audit") else None
+    return BootIntervals.from_json((row or {}).get("detail") or {})
 
 
 def plan_partitions(client: ElasticClient, target: str, contract: FieldContract, window: Window,
@@ -85,7 +103,11 @@ class Sweep:
         self.stage_dir = stage_dir
         self.pack: list[Playbook] = fresh_pack()
         self.partial_reasons: list[str] = []
-        self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0}
+        # Built as partitions are read, in time order per target: each batch's events are placed with what has
+        # been observed so far. Expansion and the context pass use the whole map, recorded at finalize.
+        self.boots = BootIntervals()
+        self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0,
+                      "boot": {"recorded": 0, "from_interval": 0, "unknown": 0}}
 
     # -------------------------------------------------------------------------------------
     def _publish(self, m: Match, task_id: str | None, raw_sources: dict[str, dict]):
@@ -181,8 +203,9 @@ class Sweep:
                                         {"error": out.error})
             self.repo.update_task(tid, "failed", error=out.error)
             return
-        events, skips, errors = normalize_hits(out.records)
+        events, skips, errors = normalize_hits(out.records, self.boots)
         self.stats["events"] += len(events)
+        self._count_boots(events)
         self.stats["errors"] += len(errors)
         for k, v in skips.items():
             self.stats["skips"][k] = self.stats["skips"].get(k, 0) + v
@@ -257,6 +280,59 @@ class Sweep:
                                     {"missing_required": missing, "reasons": reasons})
         self.repo.update_task(tid, "evaluated")
 
+    def _count_boots(self, events) -> None:
+        """Host-record events by where their boot id came from: a record, the boot-interval map, or nowhere."""
+        counts = self.stats.setdefault("boot", {"recorded": 0, "from_interval": 0, "unknown": 0})
+        for event in events:
+            if event.family not in BOOT_FILL_FAMILIES or not event.host:
+                continue
+            boot = event.fields.get("host.boot.id")
+            counts["unknown" if boot is None or boot.value in (None, "") else
+                   "from_interval" if boot.origin.endswith(BOOT_INTERVAL_ORIGIN) else "recorded"] += 1
+
+    def _boot_summary(self) -> None:
+        """Why host records were left without a boot, and every range the sweep placed that records read later
+        contradict (listed up to BOOT_LISTED; the boot-interval map record holds them all). A contradicted range
+        makes the sweep partial: a boot-keyed join there may have been refused on a boot the whole map does not
+        support."""
+        boots = self.boots
+        counts = self.stats.setdefault("boot", {"recorded": 0, "from_interval": 0, "unknown": 0})
+        totals: dict[str, int] = {}
+        for reasons in boots.unplaced.values():
+            for reason, n in reasons.items():
+                totals[reason] = totals.get(reason, 0) + n
+        counts["unknown_reasons"] = dict(sorted(totals.items()))
+        conflicts = boots.conflict_list()
+        counts["sweep_conflicts"] = conflicts[:BOOT_LISTED]
+        counts["sweep_conflicts_total"] = len(conflicts)
+        # Each host with records left without a boot: why, and what on the host refuses placement.
+        hosts = sorted(boots.unplaced, key=lambda host: (-sum(boots.unplaced[host].values()), host))
+        listed = []
+        for host in hosts[:BOOT_LISTED]:
+            blind = boots.blind(host)
+            listed.append({"host": host, "unplaced": dict(sorted(boots.unplaced[host].items())),
+                           "blind": blind[:BOOT_BLIND_LISTED], "blind_total": len(blind),
+                           "nameless_boundaries": len(boots.boundaries.get(host, ())),
+                           "unclocked_records": boots.unclocked.get(host, 0),
+                           "sweep_conflicts": len(boots.conflicts.get(host, ()))})
+        counts["hosts"] = listed
+        counts["hosts_total"] = len(hosts)
+        if conflicts:
+            hosts = sorted({item["host"] for item in conflicts})
+            named = ", ".join(hosts[:10]) + (f" and {len(hosts) - 10} more" if len(hosts) > 10 else "")
+            ranges = f"{len(conflicts)} range{'s' if len(conflicts) != 1 else ''}"
+            where = f"{len(hosts)} host{'s' if len(hosts) != 1 else ''}"
+            verb = "were" if len(conflicts) != 1 else "was"
+            reason = (f"boot placement: {ranges} on {where} placed during the sweep {verb} contradicted by records "
+                      f"read later ({named}); a boot-keyed join there may have been refused (see the hunt's "
+                      f"boot-interval map)")
+            self.partial_reasons.append(reason)
+            # each rule that reads boot-placed families cannot claim a complete negative over those ranges
+            for pb in self.pack:
+                if set(pb.families) & BOOT_FILL_FAMILIES:
+                    self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", BOOT_PLACEMENT_PARTITION,
+                                            "evaluated_partial", 0, 0, {"reasons": [reason]})
+
     def _event_stage(self) -> EventStage:
         stage = getattr(self, "_stage", None)
         if stage is None:
@@ -274,6 +350,9 @@ class Sweep:
 
     def finalize(self):
         self.heartbeat()
+        # Every partition has been read: record the whole map once, for expansion, the context pass and resume.
+        self.repo.audit("system", BOOT_INTERVALS_AUDIT, self.hunt_id, self.boots.to_json())
+        self._boot_summary()
         agg_raw = getattr(self, "_agg_raw", {})
         for pb in self.pack:
             if pb.kind != "aggregate":

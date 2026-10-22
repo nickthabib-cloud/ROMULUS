@@ -2,16 +2,29 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime, timedelta
+from itertools import islice
 from typing import Any, ClassVar
 
-from sqlalchemy import Engine, and_, case, func, or_, select, true
+from sqlalchemy import Engine, and_, case, func, or_, select, true, tuple_
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
 from romulus.store.db import utcnow, write_txn
+
+# The origin suffix of a boot id a hunt's boot-interval map placed (the normalizer's BOOT_INTERVAL_ORIGIN; the
+# store does not import the evidence layer, and a test keeps the two equal).
+DERIVED_BOOT_SUFFIX = "#derived:boot-interval"
+
+
+def is_derived_boot(field: dict | None) -> bool:
+    """Whether a stored boot id field was placed by a boot-interval map rather than stated by a record."""
+    origin = (field or {}).get("origin")
+    return isinstance(origin, str) and origin.endswith(DERIVED_BOOT_SUFFIX)
+
 
 # Lanes an analyst may join with an asserted link (the report's reportable lanes).
 REPORTABLE_LANES = ("urgent", "high", "lead")
@@ -26,6 +39,192 @@ def _upsert_ignore(conn, table, rows: list[dict], keys: list[str]):
 
 def raw_id(target: str, native_id: str) -> str:
     return hashlib.sha256(f"{target}/{native_id}".encode()).hexdigest()[:32]
+
+
+# ---- baseline probes ------------------------------------------------------------------------
+# Each probe is one range search on an index (tests hold the query plans). Segment lists come from a frozen
+# snapshot, so their length is bounded by the snapshot span.
+def baseline_prevalence_query(key_id: str, scope_kind: str, segment_ids: list[str]):
+    """Distinct scopes of `scope_kind` holding `key_id` in the segments (ix_baseline_count_key, covering)."""
+    c = t.baseline_count.c
+    return select(func.count(c.scope.distinct())).where(
+        c.key_id == key_id, c.scope_kind == scope_kind, c.segment_id.in_(segment_ids))
+
+
+def baseline_key_history_query(key_id: str, scope_kind: str, scope: str, segment_ids: list[str]):
+    """Every count row of one key in one scope across the segments (ix_baseline_count_key)."""
+    c = t.baseline_count.c
+    return (select(c.segment_id, c.bucket, c.count, c.first_ts, c.last_ts)
+            .where(c.key_id == key_id, c.scope_kind == scope_kind, c.scope == scope, c.segment_id.in_(segment_ids))
+            .order_by(c.key_id, c.scope_kind, c.scope, c.segment_id))
+
+
+def baseline_peer_scopes_query(scope_kind: str, segment_ids: list[str]):
+    """Distinct live scopes of `scope_kind` in the segments (ix_baseline_scope_hour_lookup, covering)."""
+    c = t.baseline_scope_hour.c
+    return select(func.count(c.scope.distinct())).where(c.scope_kind == scope_kind, c.segment_id.in_(segment_ids))
+
+
+def observation_citations_query(hunt_id: str):
+    """(event id, citing hunt) for every event `hunt_id` stored that another hunt's baseline observation cites
+    as its first event, the lowest citing hunt id when several do: one walk of the hunt's events in id order,
+    each probing ix_baseline_observation_first_event."""
+    obs, ev = t.baseline_observation.c, t.typed_event.c
+    return (select(ev.id, func.min(obs.hunt_id))
+            .join(t.baseline_observation, obs.first_event_id == ev.id)
+            .where(ev.hunt_id == hunt_id, obs.hunt_id != hunt_id)
+            .group_by(ev.id))
+
+
+def baseline_scope_series_query(scope_kind: str, scope: str, segment_ids: list[str]):
+    """One scope's live hours and event totals across the segments (ix_baseline_scope_hour_lookup)."""
+    c = t.baseline_scope_hour.c
+    return (select(c.segment_id, c.hour, c.events)
+            .where(c.scope_kind == scope_kind, c.scope == scope, c.segment_id.in_(segment_ids))
+            .order_by(c.scope_kind, c.scope, c.segment_id, c.hour))
+
+
+# ---- baseline rows ---------------------------------------------------------------------------
+BASELINE_CHUNK = 5000      # rows per executemany batch while streaming a segment or observations
+BASELINE_PAGE = 5000       # rows per keyset page on reads
+_BUCKET_WIDTH = {"day": timedelta(days=1), "hour": timedelta(hours=1)}
+_SEGMENT_COLUMNS = frozenset(column.name for column in t.baseline_segment.columns) - {"rows_digest"}
+_SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id"})
+# What makes two writes of one segment id the same segment: everything but its lifecycle status and the time
+# this copy was written (the rows are compared through rows_digest).
+_SEGMENT_IDENTITY = tuple(sorted(_SEGMENT_COLUMNS - {"status", "created_at"}))
+_COUNT_COLUMNS = tuple(column.name for column in t.baseline_count.columns)
+_HOUR_COLUMNS = tuple(column.name for column in t.baseline_scope_hour.columns)
+_OBSERVATION_COLUMNS = tuple(column.name for column in t.baseline_observation.columns)
+_OBSERVATION_KEY = ("hunt_id", "spec_id", "spec_version", "scope", "key_digest")
+_OBSERVATION_REQUIRED = frozenset({*_OBSERVATION_KEY, "scope_kind", "key_id", "key", "window_count", "verdict"})
+
+
+def _utc(value: Any, name: str) -> datetime:
+    """A timezone-aware time as UTC; a naive time is refused, never assumed to be UTC."""
+    if not isinstance(value, datetime):
+        # every invalid baseline row is one error type, so a writer handles a refusal in one place
+        raise ValueError(f"baseline {name} must be a datetime, not {type(value).__name__}")  # noqa: TRY004
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"baseline {name} must carry a timezone (naive time refused)")
+    return value.astimezone(UTC)
+
+
+def _stored_utc(value: datetime | None) -> datetime | None:
+    """SQLite returns naive values; every baseline time was stored as UTC."""
+    return value.replace(tzinfo=UTC) if value is not None and value.tzinfo is None else value
+
+
+def _with_utc(row, columns: tuple[str, ...]) -> dict:
+    out = dict(row)
+    for name in columns:
+        out[name] = _stored_utc(out.get(name))
+    return out
+
+
+def _columns(row: dict, allowed: frozenset[str] | tuple[str, ...], optional: frozenset[str], what: str) -> None:
+    allowed = frozenset(allowed)
+    unknown, missing = set(row) - allowed, allowed - optional - set(row)
+    if unknown or missing:
+        raise ValueError(f"baseline {what} column mismatch: unknown {sorted(unknown)}, missing {sorted(missing)}")
+
+
+def _text_value(row: dict, name: str, what: str) -> None:
+    if not isinstance(row.get(name), str) or not row[name]:
+        raise ValueError(f"baseline {what} {name} must be a non-empty string")
+
+
+def _aligned(value: datetime, width: timedelta) -> bool:
+    if (value.minute, value.second, value.microsecond) != (0, 0, 0):
+        return False
+    return width == _BUCKET_WIDTH["hour"] or value.hour == 0
+
+
+def _baseline_segment_row(row: dict) -> dict:
+    _columns(row, _SEGMENT_COLUMNS, _SEGMENT_OPTIONAL, "segment")
+    out = {name: row.get(name) for name in _SEGMENT_COLUMNS}
+    for name in ("start", "end", "created_at"):
+        out[name] = _utc(row[name], name)
+    if not (_aligned(out["start"], _BUCKET_WIDTH["hour"]) and _aligned(out["end"], _BUCKET_WIDTH["hour"])):
+        raise ValueError("baseline segment span must be hour-aligned")
+    if out["start"] >= out["end"]:
+        raise ValueError("baseline segment start before end is required")
+    if out["bucket"] not in _BUCKET_WIDTH:
+        raise ValueError(f"baseline segment bucket must be day or hour, not {out['bucket']!r}")
+    return out
+
+
+def _baseline_count_row(row: dict, segment: dict) -> dict:
+    _columns(row, _COUNT_COLUMNS, frozenset(), "count")
+    if row["segment_id"] != segment["id"]:
+        raise ValueError("baseline child row belongs to a different segment")
+    for name in ("scope_kind", "scope", "key_id", "key_digest"):
+        _text_value(row, name, "count")
+    if not isinstance(row["key"], dict):
+        raise ValueError("baseline count key must be a JSON object")  # noqa: TRY004
+    if isinstance(row["count"], bool) or not isinstance(row["count"], int) or row["count"] < 1:
+        raise ValueError("baseline count must be a positive integer")
+    out = dict(row)
+    for name in ("bucket", "first_ts", "last_ts"):
+        out[name] = _utc(row[name], name)
+    width, start, end = _BUCKET_WIDTH[segment["bucket"]], segment["start"], segment["end"]
+    bucket = out["bucket"]
+    if not _aligned(bucket, width) or not (bucket < end and bucket + width > start):
+        raise ValueError(f"baseline count bucket {bucket.isoformat()} is not a {segment['bucket']} bucket "
+                         f"overlapping the segment span")
+    if not (max(start, bucket) <= out["first_ts"]):
+        raise ValueError("baseline count first_ts is before its bucket or the segment span")
+    if out["first_ts"] > out["last_ts"]:
+        raise ValueError("baseline count first_ts is after last_ts")
+    if not (out["last_ts"] < min(end, bucket + width)):
+        raise ValueError("baseline count last_ts is not inside its bucket and the segment span")
+    return out
+
+
+def _baseline_hour_row(row: dict, segment: dict) -> dict:
+    _columns(row, _HOUR_COLUMNS, frozenset(), "scope hour")
+    if row["segment_id"] != segment["id"]:
+        raise ValueError("baseline child row belongs to a different segment")
+    for name in ("scope_kind", "scope"):
+        _text_value(row, name, "scope hour")
+    if isinstance(row["events"], bool) or not isinstance(row["events"], int) or row["events"] < 0:
+        raise ValueError("baseline scope hour events must be a non-negative integer")
+    out = dict(row)
+    out["hour"] = hour = _utc(row["hour"], "hour")
+    if not _aligned(hour, _BUCKET_WIDTH["hour"]):
+        raise ValueError("baseline scope hour must be hour-aligned")
+    if not segment["start"] <= hour < segment["end"]:
+        raise ValueError("baseline scope hour must be inside the segment span")
+    return out
+
+
+def _jsonable(value: Any) -> Any:
+    return value.isoformat() if isinstance(value, datetime) else value
+
+
+class _RowsDigest:
+    """Order-independent digest of a segment's child rows: a sum of per-row hashes, plus the row counts."""
+
+    def __init__(self) -> None:
+        self.total, self.rows = 0, {"count": 0, "hour": 0}
+
+    def add(self, kind: str, columns: tuple[str, ...], rows: list[dict]) -> None:
+        for row in rows:
+            material = json.dumps([kind, *(_jsonable(row[name]) for name in columns)], sort_keys=True,
+                                  separators=(",", ":"), ensure_ascii=False)
+            self.total = (self.total + int.from_bytes(hashlib.sha256(material.encode()).digest())) % (1 << 256)
+        self.rows[kind] += len(rows)
+
+    def hexdigest(self) -> str:
+        return hashlib.sha256(f"{self.rows['count']}|{self.rows['hour']}|{self.total:064x}".encode()).hexdigest()
+
+
+def _chunks(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:
+    if size < 1:
+        raise ValueError("chunk size must be positive")
+    iterator = iter(rows)
+    while chunk := list(islice(iterator, size)):
+        yield chunk
 
 
 class Repo:
@@ -194,6 +393,9 @@ class Repo:
                 for eid in [*(link_events or []), *(link_evidence or [])]:
                     if eid in mine:
                         cited_by.setdefault(eid, link_hunt)
+            # (e) other hunts' baseline observations cite their first window event
+            for eid, obs_hunt in c.execute(observation_citations_query(hunt_id)):
+                cited_by.setdefault(eid, obs_hunt)
             for eid, owner in cited_by.items():
                 c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(hunt_id=owner))
             drop_events = mine - set(cited_by)
@@ -226,6 +428,14 @@ class Repo:
             rm("agent_aliases", t.agent_alias.delete().where(t.agent_alias.c.hunt_id == hunt_id))
             rm("expansion_links", t.expansion_link.delete().where(t.expansion_link.c.hunt_id == hunt_id))
             rm("expansion_anchors", t.expansion_anchor.delete().where(t.expansion_anchor.c.hunt_id == hunt_id))
+            rm("baseline_observations", t.baseline_observation.delete().where(
+                t.baseline_observation.c.hunt_id == hunt_id,
+            ))
+            rm("baseline_snapshots", t.baseline_snapshot.delete().where(t.baseline_snapshot.c.hunt_id == hunt_id))
+            rm("baseline_segments_revoked", t.baseline_segment.update().where(or_(
+                t.baseline_segment.c.source_hunt_id == hunt_id,
+                t.baseline_segment.c.built_by_hunt_id == hunt_id,
+            )).values(status="revoked"))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
             rm("candidates", t.candidate.delete().where(t.candidate.c.hunt_id == hunt_id))
             rm("case_steps", t.case_step.delete().where(t.case_step.c.case_id.in_(case_ids)))
@@ -469,10 +679,13 @@ class Repo:
     @staticmethod
     def _fill_boot(c, events: list) -> None:
         """An audit event's boot id depends on its journald copy being in the same retrieval batch, so one event id
-        can be stored first without it (a link fetch) and seen later with it (the sweep). Fill a missing boot id
-        forward onto the stored row; a recorded one is never overwritten. Nothing else about the row changes."""
-        booted = {e.id: e.fields["host.boot.id"].model_dump(mode="json") for e in events
+        can be stored first without it (a link fetch) and seen later with it (the sweep). Fill a recorded boot id
+        forward onto the stored row when the row has none, or only one a boot-interval map placed (a hunt's
+        inference, see `is_derived_boot`); a map-placed boot id is never written forward, and a recorded one is
+        never overwritten. Nothing else about the row changes."""
+        dumped = {e.id: e.fields["host.boot.id"].model_dump(mode="json") for e in events
                   if e.has("host.boot.id") and e.fields["host.boot.id"].value != ""}
+        booted = {event_id: field for event_id, field in dumped.items() if not is_derived_boot(field)}
         ids = sorted(booted)
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
@@ -480,7 +693,8 @@ class Repo:
                                  .where(t.typed_event.c.id.in_(chunk))).mappings():
                 stored = row["event"]
                 fields = stored.get("fields") or {}
-                if (fields.get("host.boot.id") or {}).get("value") not in (None, ""):
+                current = fields.get("host.boot.id") or {}
+                if current.get("value") not in (None, "") and not is_derived_boot(current):
                     continue
                 stored = {**stored, "fields": {**fields, "host.boot.id": booted[row["id"]]}}
                 c.execute(t.typed_event.update().where(t.typed_event.c.id == row["id"]).values(event=stored))
@@ -855,6 +1069,182 @@ class Repo:
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(select(t.disposition_event).where(
                 t.disposition_event.c.candidate_id == cid).order_by(t.disposition_event.c.id)).mappings()]
+
+    # ---- baseline store --------------------------------------------------------------------
+    def save_baseline_segment(self, row: dict, counts: Iterable[dict], scope_hours: Iterable[dict], *,
+                              chunk_size: int = BASELINE_CHUNK) -> bool:
+        """Insert one immutable, complete segment and its rows in one atomic transaction.
+
+        Rows stream from the iterables in chunks and are never collected whole. Every time must be
+        timezone-aware (stored as UTC); child buckets, timestamps and scope hours must sit inside the span.
+        Any invalid row rolls the whole segment back. Writing an existing id again is a no-op when the content
+        is identical (status and created_at aside) and a ValueError when it differs."""
+        segment = _baseline_segment_row(row)
+        digest = _RowsDigest()
+        with write_txn(self.engine) as c:
+            existing = c.execute(select(t.baseline_segment).where(
+                t.baseline_segment.c.id == segment["id"])).mappings().first()
+            if existing is not None:
+                stored = _with_utc(existing, ("start", "end", "created_at"))
+                if any(stored[name] != segment[name] for name in _SEGMENT_IDENTITY):
+                    raise ValueError(f"baseline segment {segment['id']} exists with different content")
+            else:
+                c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
+            for table, kind, columns, rows, check in (
+                    (t.baseline_count, "count", _COUNT_COLUMNS, counts, _baseline_count_row),
+                    (t.baseline_scope_hour, "hour", _HOUR_COLUMNS, scope_hours, _baseline_hour_row)):
+                for chunk in _chunks((check(item, segment) for item in rows), chunk_size):
+                    digest.add(kind, columns, chunk)
+                    if existing is None:
+                        c.execute(table.insert(), chunk)
+            if existing is not None:
+                if existing["rows_digest"] != digest.hexdigest():
+                    raise ValueError(f"baseline segment {segment['id']} exists with different content")
+                return False
+            c.execute(t.baseline_segment.update().where(t.baseline_segment.c.id == segment["id"])
+                      .values(rows_digest=digest.hexdigest()))
+            return True
+
+    def set_baseline_segment_status(self, segment_id: str, status: str) -> bool:
+        if status not in {"active", "stale", "revoked"}:
+            raise ValueError(f"invalid baseline segment status: {status}")
+        with write_txn(self.engine) as c:
+            result = c.execute(t.baseline_segment.update().where(
+                t.baseline_segment.c.id == segment_id,
+            ).values(status=status))
+            return bool(result.rowcount)
+
+    def baseline_segments(self, *, site: str | None = None, target: str | None = None,
+                          spec_id: str | None = None, statuses: Iterable[str] | None = None) -> list[dict]:
+        query = select(t.baseline_segment)
+        if site is not None:
+            query = query.where(t.baseline_segment.c.site == site)
+        if target is not None:
+            query = query.where(t.baseline_segment.c.target == target)
+        if spec_id is not None:
+            query = query.where(t.baseline_segment.c.spec_id == spec_id)
+        if statuses is not None:
+            query = query.where(t.baseline_segment.c.status.in_(list(statuses)))
+        query = query.order_by(
+            t.baseline_segment.c.site, t.baseline_segment.c.target, t.baseline_segment.c.spec_id,
+            t.baseline_segment.c.start, t.baseline_segment.c.end, t.baseline_segment.c.id,
+        )
+        with self.engine.connect() as c:
+            return [_with_utc(item, ("start", "end", "created_at")) for item in c.execute(query).mappings()]
+
+    def _keyset(self, table, where, order: tuple[str, ...], times: tuple[str, ...], page_size: int) -> Iterator[dict]:
+        """Rows in `order` (a unique key), one page per short-lived read: nothing holds a cursor open."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        columns = [table.c[name] for name in order]
+        after = None
+        while True:
+            query = select(table).where(*where)
+            if after is not None:
+                query = query.where(tuple_(*columns) > tuple_(*after))
+            query = query.order_by(*columns).limit(page_size)
+            with self.engine.connect() as c:
+                page = [_with_utc(item, times) for item in c.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = [page[-1][name] for name in order]
+
+    def baseline_counts(self, segment_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """A segment's count rows in primary-key order (scope, key_digest, bucket), paged."""
+        return self._keyset(t.baseline_count, [t.baseline_count.c.segment_id == segment_id],
+                            ("scope", "key_digest", "bucket"), ("bucket", "first_ts", "last_ts"), page_size)
+
+    def baseline_scope_hours(self, segment_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """A segment's scope hours in primary-key order (scope, hour), paged."""
+        return self._keyset(t.baseline_scope_hour, [t.baseline_scope_hour.c.segment_id == segment_id],
+                            ("scope", "hour"), ("hour",), page_size)
+
+    def baseline_key_prevalence(self, key_id: str, scope_kind: str, segment_ids: Iterable[str]) -> int:
+        """How many distinct scopes of `scope_kind` hold `key_id` in the segments."""
+        segments = sorted(set(segment_ids))
+        if not segments:
+            return 0
+        with self.engine.connect() as c:
+            return int(c.execute(baseline_prevalence_query(key_id, scope_kind, segments)).scalar_one())
+
+    def baseline_peer_scopes(self, scope_kind: str, segment_ids: Iterable[str]) -> int:
+        """How many distinct scopes of `scope_kind` were live in the segments (the prevalence denominator)."""
+        segments = sorted(set(segment_ids))
+        if not segments:
+            return 0
+        with self.engine.connect() as c:
+            return int(c.execute(baseline_peer_scopes_query(scope_kind, segments)).scalar_one())
+
+    def baseline_key_history(self, key_id: str, scope_kind: str, scope: str,
+                             segment_ids: Iterable[str]) -> list[dict]:
+        """One key's count rows in one scope; at most one row per segment bucket of the snapshot span."""
+        segments = sorted(set(segment_ids))
+        if not segments:
+            return []
+        with self.engine.connect() as c:
+            return [_with_utc(row, ("bucket", "first_ts", "last_ts")) for row in c.execute(
+                baseline_key_history_query(key_id, scope_kind, scope, segments)).mappings()]
+
+    def baseline_scope_series(self, scope_kind: str, scope: str, segment_ids: Iterable[str]) -> list[dict]:
+        """One scope's live hours; at most one row per hour of the snapshot span."""
+        segments = sorted(set(segment_ids))
+        if not segments:
+            return []
+        with self.engine.connect() as c:
+            return [_with_utc(row, ("hour",)) for row in c.execute(
+                baseline_scope_series_query(scope_kind, scope, segments)).mappings()]
+
+    def save_baseline_snapshot(self, row: dict) -> bool:
+        """Freeze the first snapshot for a hunt; resume observes but never replaces it."""
+        with write_txn(self.engine) as c:
+            result = c.execute(insert(t.baseline_snapshot).values(**row).on_conflict_do_nothing(
+                index_elements=["hunt_id"],
+            ))
+            return bool(result.rowcount)
+
+    def baseline_snapshot(self, hunt_id: str) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.baseline_snapshot).where(
+                t.baseline_snapshot.c.hunt_id == hunt_id,
+            )).mappings().first()
+            return dict(row) if row else None
+
+    def upsert_baseline_observation(self, row: dict) -> None:
+        self.upsert_baseline_observations([row])
+
+    def upsert_baseline_observations(self, rows: Iterable[dict], *, chunk_size: int = BASELINE_CHUNK) -> int:
+        """Insert or replace window observations in one transaction, streaming in chunks.
+
+        A replacement rewrites every column except `candidate_id`, which a None never clears: once an
+        observation is tied to a published candidate, a later pass without one keeps the tie."""
+        stmt = insert(t.baseline_observation)
+        table = t.baseline_observation.c
+        values = {name: stmt.excluded[name] for name in _OBSERVATION_COLUMNS if name not in _OBSERVATION_KEY}
+        values["candidate_id"] = func.coalesce(stmt.excluded.candidate_id, table.candidate_id)
+        stmt = stmt.on_conflict_do_update(index_elements=list(_OBSERVATION_KEY), set_=values)
+
+        def normalized(row: dict) -> dict:
+            _columns(row, _OBSERVATION_COLUMNS, frozenset(_OBSERVATION_COLUMNS) - _OBSERVATION_REQUIRED,
+                     "observation")
+            out = {name: row.get(name) for name in _OBSERVATION_COLUMNS}
+            for name in ("first_ts", "last_ts"):
+                if out[name] is not None:
+                    out[name] = _utc(out[name], name)
+            return out
+
+        written = 0
+        with write_txn(self.engine) as c:
+            for chunk in _chunks((normalized(row) for row in rows), chunk_size):
+                c.execute(stmt, chunk)
+                written += len(chunk)
+        return written
+
+    def baseline_observations(self, hunt_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """A hunt's observations in key order (spec, version, scope, key digest), paged."""
+        return self._keyset(t.baseline_observation, [t.baseline_observation.c.hunt_id == hunt_id],
+                            ("spec_id", "spec_version", "scope", "key_digest"), ("first_ts", "last_ts"),
+                            page_size)
 
     # ---- investigator state ----------------------------------------------------------------
     def create_case(self, row: dict, *, owner_token: str | None = None) -> bool:

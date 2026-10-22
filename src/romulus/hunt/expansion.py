@@ -26,6 +26,7 @@ from romulus.hunt.links import (
     usable_key,
 )
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
+from romulus.hunt.sweep import stored_boot_intervals
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
@@ -72,10 +73,19 @@ class ExpansionEngine:
         self.wall_clock_seconds, self.owner_token = wall_clock_seconds, owner_token
         self.clock, self.heartbeat, self.after_link = clock, heartbeat, after_link
         self.started = clock()
+        # The sweep's boot-interval map (recorded with the hunt, so a resumed run uses the same one), shared with
+        # the fetcher unless it was given its own.
+        given = getattr(fetcher, "boots", None)
+        self.boots = given if given else stored_boot_intervals(repo, hunt_id)
+        if given is not None and not given:
+            fetcher.boots = self.boots
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
+        """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
+        near its partition's end, before later observations, may have been stored without one)."""
         rows = self.repo.events_by_ids(ids)
         events = [TypedEvent.model_validate(row["event"]) for row in rows]
+        self.boots.fill(events, rederive=True)
         return sorted(events, key=lambda event: (event.ts, event.id))
 
     @staticmethod

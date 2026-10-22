@@ -11,6 +11,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    PrimaryKeyConstraint,
     String,
     Table,
     Text,
@@ -339,3 +340,129 @@ audit_event = Table(
     Column("hunt_id", String),
     Column("detail", JSON),
 )
+
+baseline_segment = Table(
+    "baseline_segment", metadata,
+    Column("id", String, primary_key=True),
+    Column("site", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("spec_version", String, nullable=False),
+    Column("key_version", String, nullable=False),
+    Column("normalizer", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    Column("bucket", String, nullable=False),
+    Column("origin", String, nullable=False),
+    Column("source_hunt_id", String),
+    Column("built_by_hunt_id", String),
+    Column("exclusion_digest", String, nullable=False),
+    Column("excluded_keys", JSON, nullable=False),
+    Column("hunted", Integer, nullable=False),
+    Column("events_total", Integer, nullable=False),
+    # order-independent digest of the segment's count and scope-hour rows, so a rewrite of the same id with
+    # other content is refused without reading the stored rows back
+    Column("rows_digest", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("origin IN ('lookback', 'hunt')", name="ck_baseline_segment_origin"),
+    CheckConstraint("bucket IN ('day', 'hour')", name="ck_baseline_segment_bucket"),
+    CheckConstraint("status IN ('active', 'stale', 'revoked')", name="ck_baseline_segment_status"),
+    CheckConstraint("hunted IN (0, 1)", name="ck_baseline_segment_hunted"),
+    CheckConstraint("events_total >= 0", name="ck_baseline_segment_events"),
+)
+Index(
+    "ix_baseline_segment_cover", baseline_segment.c.site, baseline_segment.c.target,
+    baseline_segment.c.spec_id, baseline_segment.c.status, baseline_segment.c.start, baseline_segment.c.end,
+)
+Index("ix_baseline_segment_source_hunt", baseline_segment.c.source_hunt_id)
+Index("ix_baseline_segment_built_hunt", baseline_segment.c.built_by_hunt_id)
+
+baseline_count = Table(
+    "baseline_count", metadata,
+    Column("segment_id", String, ForeignKey("baseline_segment.id", ondelete="CASCADE"), nullable=False),
+    Column("scope_kind", String, nullable=False),
+    Column("scope", String, nullable=False),
+    Column("key_id", String, nullable=False),
+    Column("key_digest", String, nullable=False),
+    Column("key", JSON, nullable=False),
+    Column("bucket", DateTime(timezone=True), nullable=False),
+    Column("count", Integer, nullable=False),
+    Column("first_ts", DateTime(timezone=True), nullable=False),
+    Column("last_ts", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("segment_id", "scope", "key_digest", "bucket", name="pk_baseline_count"),
+    CheckConstraint("count >= 1", name="ck_baseline_count_count"),
+)
+# Prevalence ("how many scopes of one kind hold this key in these segments") and the scoped history probe are
+# both one range search on this index; the primary key serves per-segment reads.
+Index(
+    "ix_baseline_count_key", baseline_count.c.key_id, baseline_count.c.scope_kind, baseline_count.c.scope,
+    baseline_count.c.segment_id,
+)
+
+baseline_scope_hour = Table(
+    "baseline_scope_hour", metadata,
+    Column("segment_id", String, ForeignKey("baseline_segment.id", ondelete="CASCADE"), nullable=False),
+    Column("scope_kind", String, nullable=False),
+    Column("scope", String, nullable=False),
+    Column("hour", DateTime(timezone=True), nullable=False),
+    Column("events", Integer, nullable=False),
+    PrimaryKeyConstraint("segment_id", "scope", "hour", name="pk_baseline_scope_hour"),
+    CheckConstraint("events >= 0", name="ck_baseline_scope_hour_events"),
+)
+Index(
+    "ix_baseline_scope_hour_lookup", baseline_scope_hour.c.scope_kind, baseline_scope_hour.c.scope,
+    baseline_scope_hour.c.segment_id, baseline_scope_hour.c.hour,
+)
+
+baseline_snapshot = Table(
+    "baseline_snapshot", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
+    Column("plan", JSON, nullable=False),
+    Column("store_cut", JSON, nullable=False),
+    Column("segment_ids", JSON, nullable=False),
+    Column("coverage", JSON, nullable=False),
+    Column("status", String, nullable=False),
+    Column("digest", String, nullable=False),
+    CheckConstraint(
+        "status IN ('resolved', 'shortened', 'unresolved')", name="ck_baseline_snapshot_status",
+    ),
+)
+
+baseline_observation = Table(
+    "baseline_observation", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("spec_version", String, nullable=False),
+    Column("scope_kind", String, nullable=False),
+    Column("scope", String, nullable=False),
+    Column("key_id", String, nullable=False),
+    Column("key_digest", String, nullable=False),
+    Column("key", JSON, nullable=False),
+    Column("window_count", Integer, nullable=False),
+    Column("first_ts", DateTime(timezone=True)),
+    Column("last_ts", DateTime(timezone=True)),
+    Column("first_event_id", String),
+    Column("history_count", Integer),
+    Column("history_decayed", Float),
+    Column("peer_scopes_with_key", Integer),
+    Column("peer_scopes", Integer),
+    Column("threshold", Float),
+    Column("mean", Float),
+    Column("sigma", Float),
+    Column("n_hours", Integer),
+    Column("verdict", String, nullable=False),
+    Column("reason", Text),
+    Column("candidate_id", String),
+    PrimaryKeyConstraint(
+        "hunt_id", "spec_id", "spec_version", "scope", "key_digest",
+        name="pk_baseline_observation",
+    ),
+    CheckConstraint("window_count >= 0", name="ck_baseline_observation_window_count"),
+    CheckConstraint(
+        "verdict IN ('first_seen', 'rare', 'common', 'over_threshold', 'within_threshold', 'unresolved')",
+        name="ck_baseline_observation_verdict",
+    ),
+)
+# Deleting a hunt keeps every typed event another hunt's observation cites as its first event.
+Index("ix_baseline_observation_first_event", baseline_observation.c.first_event_id)

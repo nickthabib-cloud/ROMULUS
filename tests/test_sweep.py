@@ -3,8 +3,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.hunt import sweep as sw
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
+from romulus.hunt import sweep as sw
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -15,7 +15,7 @@ START = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 class FakeClient:
     version = "test"
 
-    class settings:  # noqa: N801
+    class settings:
         es_flavor = "elasticsearch"
 
 
@@ -131,13 +131,13 @@ def test_report_coverage_never_complete_with_unexecuted_or_missing_work():
     done = {"rule_id": "r", "target": "a", "partition": "p1", "state": "no_match_complete", "evaluated": 10}
     planned = {"rule_id": "r", "target": "a", "partition": "p2", "state": "planned", "evaluated": 0}
     split = {"rule_id": "r", "target": "a", "partition": "p0", "state": "split", "evaluated": 0}
-    claim = lambda cells, **kw: _coverage(cells, **kw)["rules"][0]["negative_claim"]  # noqa: E731
+    claim = lambda cells, **kw: _coverage(cells, **kw)["rules"][0]["negative_claim"]
     assert claim([done, split], targets=["a"]) == "complete"
     assert claim([done, planned], targets=["a"]).startswith("unresolved")
     assert "target(s) ['b']" in claim([done], targets=["a", "b"])
     assert "sweep did not finish" in claim([done], targets=["a"], sweep_finished=False)
     never = _coverage([done], targets=["a"], rule_ids=["r", "other"])["rules"]
-    assert [r["negative_claim"] for r in never if r["rule_id"] == "other"][0].startswith("unresolved")
+    assert next(r["negative_claim"] for r in never if r["rule_id"] == "other").startswith("unresolved")
 
 
 def test_positive_only_and_matched_claims_retain_all_coverage_caveats():
@@ -232,7 +232,7 @@ def _shell_event(script=None, argv=None):
 def _run_shell_partition(monkeypatch, *, script=None, argv=None):
     record = {"_id": "raw", "_index": "romulus-host-x", "_source": {"fixture": True}}
     monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, [record]))
-    monkeypatch.setattr(sw, "normalize_hits", lambda records: ([_shell_event(script, argv)], {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots=None: ([_shell_event(script, argv)], {}, []))
     repo = _repo()
     sweep = sw.Sweep(
         repo, FakeClient(), "h1", Window(start=START, end=START + timedelta(minutes=5)),
@@ -452,5 +452,5 @@ def test_malformed_suricata_records_are_errors_not_crashes():
     hits = [{"_id": f"m{i}", "_index": "net", "_source": {"@timestamp": "2024-11-18T14:00:00Z",
              "event": {"dataset": "suricata.eve.alert", "original": raw}, "host": {"name": "sensor"}}}
             for i, raw in enumerate(bad)]
-    events, skips, errors = normalize_hits(hits)
+    events, _skips, errors = normalize_hits(hits)
     assert events == [] and len(errors) == len(bad)

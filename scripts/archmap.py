@@ -23,6 +23,7 @@ LAYER_RULES: dict[str, set[str]] = {
     "correlate": {"sources"},
     "report": {"sources"},
     "agent": {"sources"},
+    "baseline": {"hunt", "sources"},
     "store": {"mission", "sources", "evidence", "detect", "decide", "agent", "correlate", "report", "worker"},
 }
 TRANSITIVE_LAYER_RULES: dict[str, set[str]] = {
