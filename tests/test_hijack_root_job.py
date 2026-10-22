@@ -375,6 +375,60 @@ def test_own_elevation_only_leads_are_one_lead_per_host_and_writer():
     assert len({e.id for e in m.events}) == 10 and all(e.get("process.uid") == "1001" for e in m.events)
 
 
+def _managed(host, n, start=T0, pid=700, base="/home/deploy/.ansible/tmp"):
+    """Configuration management on one host: the remote account writes one-off modules into per-run directories
+    and runs each through its own privilege escalation."""
+    records = []
+    for i in range(n):
+        ts = start + timedelta(minutes=i)
+        path = f"{base}/run-{host}-{i}/mod_{i}.py"
+        records.append(ex(["cp", "/tmp/m", path], "/usr/bin/cp", 1001, ts, user="deploy", auid=1001, ses=5,
+                          pid=pid + i, ppid=pid - 1, host=host))
+        records.append(ex(["/usr/bin/python3", path], "/usr/bin/python3.11", 0, ts + timedelta(seconds=2), auid=1001,
+                          ses=5, pid=pid + 100 + i, ppid=pid + 99, host=host))
+    return records
+
+
+def test_own_elevation_leads_of_one_account_and_layout_on_several_hosts_are_one_lead():
+    hosts = ("app01", "app02", "db01")
+    records = [r for k, host in enumerate(hosts) for r in _managed(host, 4, start=T0 + timedelta(hours=k))]
+    _pb, out = run(records)
+    assert len(out) == 1
+    m = out[0]
+    assert m.proposed_lane == "lead" and m.severity == "high"
+    assert m.group_key == "app01+app02+db01|deploy|own-elevation"
+    assert m.claim.startswith(
+        "Across 3 hosts, account 'deploy' (an account of that name on each host) ran write-capable commands on, or "
+        "changed (per kernel records), 12 files (app01: 4, app02: 4, db01: 4), all in per-run directories under "
+        "/home/deploy/.ansible/tmp")
+    assert "under /home/deploy/.ansible/tmp" in m.claim and "on its own host" in m.claim
+    assert {e.host for e in m.events} == set(hosts) and len(m.events) == 10
+    assert {f"file: {h}:/home/deploy/.ansible/tmp/run-{h}-{i}/mod_{i}.py" for h in hosts for i in range(4)} <= set(
+        m.notes)
+    assert {("host", h, "host") for h in hosts} <= set(m.entities) and "T1548.003" in m.notes
+
+
+def test_a_cross_host_lead_cites_and_names_every_host_beyond_the_citation_cap():
+    hosts = [f"node{i:02d}" for i in range(14)]
+    records = [r for k, host in enumerate(hosts) for r in _managed(host, 2, start=T0 + timedelta(minutes=5 * k))]
+    [m] = run(records)[1]
+    assert {e.host for e in m.events} == set(hosts)
+    assert {("host", h, "host") for h in hosts} <= set(m.entities)
+    assert "28 files" in m.claim and "and 18 more (every host and path is in the notes)" in m.claim
+
+
+def test_a_different_layout_or_account_on_another_host_stays_its_own_lead():
+    records = _managed("app01", 3) + _managed("app02", 3)
+    records += _managed("db01", 2, base="/opt/jobs")                 # the same account, another layout
+    alice = [ex(["vi", "/home/alice/fix.sh"], "/usr/bin/vim.basic", 1000, T0, auid=1000, ses=3, host="app03"),
+             ex(["/bin/bash", "/home/alice/fix.sh"], "/usr/bin/bash", 0, T0 + timedelta(minutes=1), auid=1000, ses=3,
+                pid=990, ppid=989, host="app03")]
+    _pb, out = run([*records, *alice])
+    assert sorted(m.group_key for m in out) == ["app01+app02|deploy|own-elevation", "app03|alice|/home/alice/fix.sh",
+                                                "db01|deploy|own-elevation"]
+    assert all(m.proposed_lane == "lead" for m in out)
+
+
 def test_another_hosts_root_job_does_not_join():
     writer = web(*VI)
     assert run([writer, *cron_runs(T0 + timedelta(minutes=10), host="db01")])[1] == []
