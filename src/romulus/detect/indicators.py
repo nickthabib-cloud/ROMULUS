@@ -198,24 +198,33 @@ class IndicatorMatch(Playbook):
         if len(self.groups[key]) < EXAMPLE_LIMIT:
             self.groups[key].append(e)
 
+    @staticmethod
+    def _program_basename(event: TypedEvent, path: str) -> str:
+        if event.get("host.os.family") == "windows" or event.normalizer.startswith("windows-"):
+            path = path.replace("\\", "/")
+        return basename(path)
+
     def _programs(self, e: TypedEvent) -> None:
         exe = e.get("process.executable")
-        if exe and basename(str(exe)).lower() in self.names:
-            ind = self.names[basename(str(exe)).lower()]
-            self._keep((ind.id, "executed", e.host, basename(str(exe))), e, {"ind": ind, "field": "process.executable"})
+        exe_name = self._program_basename(e, str(exe)) if exe else ""
+        if exe_name.lower() in self.names:
+            ind = self.names[exe_name.lower()]
+            self._keep((ind.id, "executed", e.host, exe_name), e, {"ind": ind, "field": "process.executable"})
         argv = e.get("process.argv")
         if not isinstance(argv, list) or not argv:
             return
         script = script_operand(argv)
-        script_name = basename(script).lower() if script else None
+        script_base = self._program_basename(e, script) if script else ""
+        script_name = script_base.lower() if script_base else None
         if script_name in self.names:
             ind = self.names[script_name]
-            self._keep((ind.id, "script", e.host, basename(script)), e, {"ind": ind, "field": "process.argv"})
+            self._keep((ind.id, "script", e.host, script_base), e, {"ind": ind, "field": "process.argv"})
         for token in argv[1:]:
-            name = basename(token).lower()
+            token_base = self._program_basename(e, token)
+            name = token_base.lower()
             if name in self.names and name != script_name:
                 ind = self.names[name]
-                self._keep((ind.id, "argument", e.host, basename(token)), e, {"ind": ind, "field": "process.argv"})
+                self._keep((ind.id, "argument", e.host, token_base), e, {"ind": ind, "field": "process.argv"})
                 break
 
     def _addresses(self, e: TypedEvent) -> None:
@@ -307,10 +316,15 @@ class IndicatorMatch(Playbook):
             e0 = evs[0]
             span = f"{evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}"
             listed = f"indicator {ind.id} ({ind.label}, list {ind.source})"
-            process_record = ("Windows process-creation" if e0.get("host.os.family") == "windows"
-                              else "auditd exec")
-            executable_source = ("recorded executable" if e0.get("host.os.family") == "windows"
-                                 else "kernel-recorded executable")
+            operating_systems = {
+                "windows" if event.get("host.os.family") == "windows"
+                or event.normalizer.startswith("windows-") else "linux"
+                for event in evs
+            }
+            process_record = ("Windows process-creation" if operating_systems == {"windows"} else
+                              "auditd exec" if operating_systems == {"linux"} else "process-execution")
+            executable_source = ("kernel-recorded executable" if operating_systems == {"linux"}
+                                 else "recorded executable")
             if role == "executed":
                 claim = (f"{n} {process_record} record(s) on {host} show a program whose {executable_source} is named "
                          f"'{value}' ({e0.get('process.executable')}), matching {listed} ({span}). The name matches; "

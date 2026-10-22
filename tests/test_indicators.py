@@ -98,6 +98,24 @@ def test_windows_executable_basename_matches_and_claim_does_not_call_it_auditd(r
     assert "auditd" not in match.claim
 
 
+def test_linux_backslash_is_a_legal_filename_character_not_a_path_separator(rule):
+    indicator = next(item for item in rule.set.indicators if item.id == "t.linpeas")
+    rule.names = {"linpeas.exe": indicator}
+
+    assert run(rule, exec_event([], r"/tmp/prefix\linpeas.exe")) == []
+
+
+def test_mixed_os_program_group_uses_os_neutral_record_wording(rule):
+    linux = exec_event([], "/tmp/linpeas", "linux", host="shared")
+    windows = exec_event([], r"C:\Tools\linpeas", "windows", host="shared")
+    windows.fields["host.os.family"] = fv("windows", "fixture:os")
+
+    [match] = run(rule, linux, windows)
+
+    assert match.claim.startswith("2 process-execution record(s)")
+    assert "auditd" not in match.claim and "Windows process-creation" not in match.claim
+
+
 # ---- network indicators ------------------------------------------------------------------------
 
 def test_address_and_range_match_typed_address_fields(rule):

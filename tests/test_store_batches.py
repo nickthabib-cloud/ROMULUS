@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from romulus.detect.base import Match
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import stage as stage_mod
 from romulus.hunt import sweep as sw
@@ -106,6 +107,26 @@ def test_same_event_seen_by_another_hunt_merges_raw_provenance_without_reownersh
     raw_ids = {raw_id("a", "1"), raw_id("b", "2")}
     assert set(stored["raw_ids"]) == raw_ids
     assert {raw["id"] for raw in repo.raw_records(sorted(raw_ids))} == raw_ids
+
+
+def test_non_staged_aggregate_match_receives_later_partition_raw_provenance(tmp_path):
+    sweep = object.__new__(sw.Sweep)
+    sweep.stage_dir = tmp_path
+    first = _event(3).model_copy(update={"raw": [RawRef(target="a", native_id="1", digest="a")]})
+    later = first.model_copy(update={"raw": [RawRef(target="b", native_id="2", digest="b")]})
+    stage = sweep._event_stage()
+    stage.unique([first], {"a/1": {"copy": 1}})
+    stage.unique([later], {"b/2": {"copy": 2}})
+    match = Match(
+        "aggregate", "claim", "aggregate_observation", [first], [], T0,
+        "medium", "lead", "medium",
+    )
+
+    raw_sources = sweep._merge_staged_match_raw(match)
+
+    assert {raw.key for raw in match.events[0].raw} == {"a/1", "b/2"}
+    assert raw_sources == {"a/1": {"copy": 1}, "b/2": {"copy": 2}}
+    sweep.close_stage()
 
 
 def test_rule_cells_written_together_match_cells_written_one_by_one():

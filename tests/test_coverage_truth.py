@@ -559,6 +559,26 @@ def test_scoped_windows_skips_do_not_hide_unscoped_linux_skips_in_mixed_hunts():
     }
 
 
+def test_bounded_global_skip_overflow_does_not_double_count_target_scoped_windows_records():
+    sweep = object.__new__(Sweep)
+    sweep.stats = {"skips": {}}
+    linux = {f"linux reason {number}": 1 for number in range(256)}
+    Sweep._record_skips(sweep, "linux-target", linux)
+    Sweep._record_skips(sweep, "windows-a", {"Windows event class unknown-a": 2})
+    Sweep._record_skips(sweep, "windows-b", {"Windows event class unknown-b": 3})
+
+    rows = _not_assessed({}, {"stats": sweep.stats})
+
+    assert sum(row["records"] for row in rows) == sum(sweep.stats["skips"].values())
+    assert {(row["target"], row["records"]) for row in rows if row["target"].startswith("windows-")} == {
+        ("windows-a", 2), ("windows-b", 3),
+    }
+    assert not any(
+        row["target"] == "all sweep targets" and "additional skip reasons" in row["reason"]
+        for row in rows
+    )
+
+
 def test_a_target_without_a_dataset_inventory_still_says_what_was_not_retrieved(monkeypatch):
     repo = _sweep_records(monkeypatch, [_access_doc(0, T0)])[0]
     manifest, text = _report(repo)

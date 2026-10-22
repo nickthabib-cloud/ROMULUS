@@ -194,6 +194,9 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                 out.append({"target": target, "dataset": None, "records": count,
                             "count_scope": "records retrieved in the hunt window",
                             "reason": f"retrieved but not turned into a typed event: {reason}"})
+        global_scoped = stats.get("skips_scoped_global")
+        if isinstance(global_scoped, dict):
+            scoped_totals = Counter(global_scoped)
         for reason, count in sorted((stats.get("skips") or {}).items()):
             remainder = count - scoped_totals[reason]
             if remainder > 0:

@@ -282,14 +282,17 @@ class Sweep:
         }
 
     @staticmethod
-    def _bounded_counts(target: dict[str, int], additions: dict[str, int]) -> None:
+    def _bounded_counts(target: dict[str, int], additions: dict[str, int]) -> dict[str, str]:
+        applied = {}
         for reason, count in additions.items():
             key = reason if reason in target or len(target) < MAX_SKIP_REASONS else SKIP_REASON_OVERFLOW
             target[key] = target.get(key, 0) + count
+            applied[reason] = key
+        return applied
 
     def _record_skips(self, target: str, skips: dict[str, int]) -> None:
         """Keep exact totals with a bounded number of telemetry-controlled reason strings, scoped by target."""
-        self._bounded_counts(self.stats["skips"], skips)
+        global_keys = self._bounded_counts(self.stats["skips"], skips)
         windows_skips = {
             reason: count for reason, count in skips.items()
             if reason.startswith(("Windows event class", "duplicate Windows event copy"))
@@ -297,6 +300,10 @@ class Sweep:
         if windows_skips:
             by_target = self.stats.setdefault("skips_by_target", {}).setdefault(target, {})
             self._bounded_counts(by_target, windows_skips)
+            scoped_global = self.stats.setdefault("skips_scoped_global", {})
+            for reason, count in windows_skips.items():
+                key = global_keys[reason]
+                scoped_global[key] = scoped_global.get(key, 0) + count
 
     # -------------------------------------------------------------------------------------
     def _cell(self, pb: Playbook, target: str, pkey: str, state: str, matched: int = 0, evaluated: int = 0,
@@ -634,6 +641,13 @@ class Sweep:
                 if r.key in raw_sources and r.key not in keep:
                     keep[r.key] = raw_sources[r.key]
 
+    def _merge_staged_match_raw(self, match: Match) -> dict[str, dict]:
+        """Reload a final match from the sweep stage so later source copies remain cited."""
+        stage = self._event_stage()
+        loaded = {event.id: event for event in stage.load([event.id for event in match.events])}
+        match.events = [loaded.get(event.id, event) for event in match.events]
+        return stage.raw_sources(match.events)
+
     def finalize(self):
         self.heartbeat()
         # Every partition has been read: record the whole map once, for expansion, the context pass and resume.
@@ -648,13 +662,9 @@ class Sweep:
                 stage = self._event_stage()
                 pb.bind_loader(stage.load)
                 pb.heartbeat = self.heartbeat
-                ms = pb.finalize()
-                for m in ms:
-                    self._publish(m, None, {**agg_raw, **stage.raw_sources(m.events)})
-            else:
-                ms = pb.finalize()
-                for m in ms:
-                    self._publish(m, None, agg_raw)
+            ms = pb.finalize()
+            for m in ms:
+                self._publish(m, None, {**agg_raw, **self._merge_staged_match_raw(m)})
             cells = [c for c in self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
                      if c["target"] != "*" and c["state"] != "split"]
             any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")

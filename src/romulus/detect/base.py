@@ -252,4 +252,4 @@ def outcome_phrase(e: TypedEvent) -> str:
 
 
 def basename(path: str) -> str:
-    return path.replace("\\", "/").rsplit("/", 1)[-1] if path else ""
+    return path.rsplit("/", 1)[-1] if path else ""
