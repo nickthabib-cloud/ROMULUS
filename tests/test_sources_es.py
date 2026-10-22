@@ -231,7 +231,7 @@ def test_raw_retrieval_stops_at_physical_page_and_deadline_budgets():
 
     def reserve():
         nonlocal spent
-        if spent >= 1:
+        if spent >= 3:
             return False
         spent += 1
         return True
@@ -240,7 +240,8 @@ def test_raw_retrieval_stops_at_physical_page_and_deadline_budgets():
         client, SearchIntent(kind="raw", target="idx", window=W, max_records=3000), C,
         on_query=reserve,
     )
-    assert spent == 1 and out.returned == 2000
+    # PIT open and close are two of the three physical requests; one page fits.
+    assert spent == 3 and out.returned == 2000
     assert out.completeness == Completeness.partial
     assert "source query budget exhausted" in out.reasons
 
@@ -252,6 +253,37 @@ def test_raw_retrieval_stops_at_physical_page_and_deadline_budgets():
     )
     assert timed.completeness == Completeness.partial
     assert "source wall-clock budget exhausted" in timed.reasons
+
+
+def test_pit_open_and_close_are_physical_requests_in_the_budget():
+    requests: list[str] = []
+    inner = _pit_transport([[1, 2, 3]], 3)
+
+    def handler(request: httpx.Request):
+        if request.url.path != "/":
+            requests.append(f"{request.method} {request.url.path}")
+        return inner.handle_request(request)
+
+    spent = 0
+
+    def reserve():
+        nonlocal spent
+        spent += 1
+        return True
+
+    client = ElasticClient(Settings(es_url="http://es"), transport=httpx.MockTransport(handler))
+    out = execute(client, SearchIntent(kind="raw", target="idx", window=W, max_records=10), C, on_query=reserve)
+    assert out.completeness == Completeness.complete
+    assert spent == len(requests) == 3
+
+    requests.clear()
+    starved = execute(
+        ElasticClient(Settings(es_url="http://es"), transport=httpx.MockTransport(handler)),
+        SearchIntent(kind="raw", target="idx", window=W, max_records=10), C, on_query=lambda: False,
+    )
+    # Without budget for the PIT itself nothing is sent at all.
+    assert requests == [] and starved.completeness == Completeness.partial
+    assert "source query budget exhausted" in starved.reasons
 
 
 def test_shard_failure_and_lower_bound_totals_are_partial():

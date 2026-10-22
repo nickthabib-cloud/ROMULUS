@@ -220,6 +220,10 @@ class ElasticClient:
         Raises SourceError on failure; the caller records partial coverage.
         """
         owned = pit is None
+        # Opening and closing an owned PIT are physical requests too. Both are reserved before the open, so the
+        # close that must follow is always inside the caller's budget.
+        if owned and on_query is not None and not (on_query() and on_query()):
+            raise SourceBudgetExhausted("source query budget exhausted")
         session = pit or PitSession(self._open_pit(q.target))
         try:
             body = dict(q.body)
