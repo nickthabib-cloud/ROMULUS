@@ -59,7 +59,7 @@ class SiteNetworks:
     `internal` holds the ranges the definition names (the configured list, or the default list); `external`
     the carve-outs. The effective internal set also holds `ALWAYS_INTERNAL`."""
 
-    __slots__ = ("source", "internal", "external", "digest", "_tables", "_lookup")
+    __slots__ = ("_lookup", "_tables", "digest", "external", "internal", "source")
 
     def __init__(self, source: Literal["configured", "default"], internal: Iterable[IPNetwork],
                  external: Iterable[IPNetwork] = ()):

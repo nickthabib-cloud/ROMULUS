@@ -184,6 +184,7 @@ class _CertificateRule(Playbook):
 
 class SelfSignedCertificateOutbound(_CertificateRule):
     id = "net.tls_self_signed_certificate_outbound"
+    version = "2"
     title = "Public server presented a certificate whose subject name equals its issuer name"
     attack = ("T1573.002", "T1587.003", "T1608.003")
     benign = (("appliances, VPN concentrators and management interfaces reached over the internet with their "
@@ -243,6 +244,7 @@ class SelfSignedCertificateOutbound(_CertificateRule):
 
 class ShortLivedOrNewCertificateOutbound(_CertificateRule):
     id = "net.tls_short_lived_or_new_certificate_outbound"
+    version = "2"
     title = "Public server presented a short-lived or recently issued certificate"
     attack = ("T1573.002", "T1588.004", "T1608.003")
     # Public CA default profiles issue for 45 days or more (the CA/Browser Forum schedule bottoms out at 47 days);

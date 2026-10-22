@@ -67,6 +67,13 @@ def test_the_direction_dependent_rules_are_exactly_these():
     assert all(pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id in AFFECTED)
 
 
+def test_each_affected_rule_carries_a_new_version_for_its_changed_coverage():
+    versions = {pb.id: pb.version for pb in ALL_PLAYBOOKS if pb.id in AFFECTED}
+    assert versions == {"net.horizontal_sweep": "3", "net.long_external_connection": "2", "net.beaconing": "2",
+                        "net.rare_client_fingerprint": "3", "net.tls_self_signed_certificate_outbound": "2",
+                        "net.tls_short_lived_or_new_certificate_outbound": "2"}
+
+
 def test_bl_ext_dest_requires_a_configured_internal_network():
     assert SPEC_BY_ID["bl.ext_dest"].requires_configured_networks is True
     assert {spec.id for spec in BASELINE_SPECS if spec.requires_configured_networks} == {"bl.ext_dest"}

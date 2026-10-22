@@ -23,10 +23,10 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from romulus.detect import netdef
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
 from romulus.detect.dns import registered_domain
 from romulus.detect.dns import role as dns_role
-from romulus.detect import netdef
 from romulus.evidence.typed import Outcome, TypedEvent
 
 type Scope = Literal["host", "account", "host_account", "internal_ip", "site"]
