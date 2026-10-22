@@ -410,14 +410,22 @@ def test_agent_phase_never_lowers_or_withdraws_an_existing_candidate():
         "source_case_id": None, "source_anchor_id": "anchor-finding",
         "source_link_id": "deterministic-link",
     })
-    before = {row["id"]: (row["lane"], row["claim"]) for row in repo.candidates("h1")}
+    before = {
+        row["id"]: (row["lane"], row["claim"], row["source_anchor_id"], row["source_link_id"])
+        for row in repo.candidates("h1")
+    }
     executor = HuntToolExecutor(repo, "h1", FakePivot(), FakeFetcher("attack"), T, END)
+    toolbox = Toolbox(repo, "h1", executor=executor, session_id="session-7")
 
-    Toolbox(repo, "h1", executor=executor, session_id="session-7").execute(
-        "entity_timeline", _args(repo),
-    )
+    toolbox.execute("entity_timeline", _args(repo))
+    toolbox.execute("follow_link", {
+        "anchor": "F1", "link_type": "process_lineage", "window": "anchor ±5 min",
+    })
 
-    after = {row["id"]: (row["lane"], row["claim"]) for row in repo.candidates("h1")}
+    after = {
+        row["id"]: (row["lane"], row["claim"], row["source_anchor_id"], row["source_link_id"])
+        for row in repo.candidates("h1")
+    }
     assert all(after[candidate_id] == state for candidate_id, state in before.items())
     assert all(not row["claim"].startswith("withdrawn:") for row in repo.candidates("h1"))
 

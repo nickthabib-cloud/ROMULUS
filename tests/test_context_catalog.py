@@ -651,9 +651,17 @@ def test_finalize_resume_is_idempotent():
     finalize_context(repo, "h1")
     before = _discovery(repo.candidates("h1"))[0]
     audits = _audit_count(repo, "context.finalize")
+    _seed_link(
+        repo, "h1", "L-agent", "F-A",
+        [exec_event("agent-ps", ["ps", "aux"], executable="/usr/bin/ps")],
+        link_type="agent_follow_process_lineage", strength="agent_hypothesis",
+    )
     finalize_context(repo, "h1")
     after = _discovery(repo.candidates("h1"))[0]
     assert before == after and _audit_count(repo, "context.finalize") == audits
+    assert (after["source_anchor_id"], after["source_link_id"]) == (
+        before["source_anchor_id"], before["source_link_id"],
+    )
 
 
 def test_resumed_run_that_adds_a_link_writes_one_audited_update():
