@@ -10,7 +10,6 @@ from romulus.sources.compile import CompileError, compile_es
 from romulus.sources.es import (
     FIELD_CAPS_FILTER_PATH,
     MAPPING_FILTER_PATH,
-    NORMALIZER_SOURCE_INCLUDES,
     PIT_CLOSE_FILTER_PATH,
     PIT_OPEN_FILTER_PATH,
     SEARCH_FILTER_PATH,
@@ -192,27 +191,9 @@ def test_raw_search_limits_source_and_every_transport_envelope():
     assert pit_open.url.params["filter_path"] == PIT_OPEN_FILTER_PATH
     search = by_path[("POST", "/_search")]
     assert search.url.params["filter_path"] == SEARCH_FILTER_PATH
-    assert json.loads(search.content)["_source"] == {"includes": list(NORMALIZER_SOURCE_INCLUDES)}
+    # the raw copy and its digest are the whole _source: trimming it would change citation identity
+    assert "_source" not in json.loads(search.content)
     assert by_path[("DELETE", "/_pit")].url.params["filter_path"] == PIT_CLOSE_FILTER_PATH
-
-
-def test_source_includes_cover_every_native_normalizer_input():
-    required = {
-        "@timestamp", "event.dataset", "event.original", "event.timezone", "message",
-        "host.name", "host.boot.id", "system.boot.id", "source.ip",
-        "http.request.method", "http.response.status_code", "url.original", "user_agent.original",
-        "firstPacket", "lastPacket", "source.port", "source.bytes", "source.packets",
-        "destination.ip", "destination.port", "destination.bytes", "destination.packets",
-        "network.community_id", "client.bytes", "server.bytes", "http.host", "http.uri",
-        "http.useragent", "http.method", "http.statuscode", "http.bodyMagic", "protocol",
-        "tls.ja3", "tls.ja3s", "tls.ja4", "tls.version", "ssh.hassh", "ssh.hasshServer",
-        "ssh.version", "tags", "tcpflags", "rootId", "cert", "dns", "ipProtocol", "node",
-    }
-
-    def retrieved(path):
-        return any(path == included or path.startswith(included + ".") for included in NORMALIZER_SOURCE_INCLUDES)
-
-    assert not sorted(path for path in required if not retrieved(path))
 
 
 def _pit_transport(pages, total, relation="eq", shard_fail=False):

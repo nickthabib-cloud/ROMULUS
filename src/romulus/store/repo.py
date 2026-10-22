@@ -375,9 +375,14 @@ class Repo:
         events = list(events)
         with write_txn(self.engine) as c:
             self._fence_lease(c, hunt_id, owner_token)
-            existing_ids = set(c.execute(select(t.typed_event.c.id).where(
-                t.typed_event.c.id.in_([event.id for event in events]),
-            )).scalars()) if events else set()
+            # rows this hunt already stored (with their entity rows) need no rebuild; another hunt's rows still
+            # get this hunt's entity rows, which deletion relies on to keep events another hunt uses
+            ids = sorted({event.id for event in events})
+            own_ids: set[str] = set()
+            for start in range(0, len(ids), 500):
+                own_ids.update(c.execute(select(t.typed_event.c.id).where(
+                    t.typed_event.c.id.in_(ids[start:start + 500]), t.typed_event.c.hunt_id == hunt_id,
+                )).scalars())
             raw_rows, ev_rows, ent_rows, link_rows = [], [], {}, []
             for e in events:
                 for r in e.raw:
@@ -386,7 +391,7 @@ class Repo:
                         raw_rows.append({"id": raw_id(r.target, r.native_id), "target": r.target,
                                          "native_id": r.native_id, "digest": r.digest, "source": src,
                                          "first_task_id": task_id, "retrieved_at": utcnow()})
-                if e.id in existing_ids:
+                if e.id in own_ids:
                     continue
                 ev_rows.append({"id": e.id, "hunt_id": hunt_id, "family": e.family, "ts": e.ts, "host": e.host,
                                 "event": e.model_dump(mode="json"), "raw_ids": [raw_id(r.target, r.native_id)
@@ -399,8 +404,28 @@ class Repo:
                     link_rows.append({"event_id": e.id, "entity_id": eid, "role": role})
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
             _upsert_ignore(c, t.typed_event, ev_rows, ["id"])
+            self._fill_boot(c, events)
             _upsert_ignore(c, t.entity, list(ent_rows.values()), ["id"])
             _upsert_ignore(c, t.event_entity, link_rows, ["event_id", "entity_id", "role"])
+
+    @staticmethod
+    def _fill_boot(c, events: list) -> None:
+        """An audit event's boot id depends on its journald copy being in the same retrieval batch, so one event id
+        can be stored first without it (a link fetch) and seen later with it (the sweep). Fill a missing boot id
+        forward onto the stored row; a recorded one is never overwritten. Nothing else about the row changes."""
+        booted = {e.id: e.fields["host.boot.id"].model_dump(mode="json") for e in events
+                  if e.has("host.boot.id") and e.fields["host.boot.id"].value != ""}
+        ids = sorted(booted)
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            for row in c.execute(select(t.typed_event.c.id, t.typed_event.c.event)
+                                 .where(t.typed_event.c.id.in_(chunk))).mappings():
+                stored = row["event"]
+                fields = stored.get("fields") or {}
+                if (fields.get("host.boot.id") or {}).get("value") not in (None, ""):
+                    continue
+                stored = {**stored, "fields": {**fields, "host.boot.id": booted[row["id"]]}}
+                c.execute(t.typed_event.update().where(t.typed_event.c.id == row["id"]).values(event=stored))
 
     def events_by_ids(self, ids: list[str]) -> list[dict]:
         with self.engine.connect() as c:

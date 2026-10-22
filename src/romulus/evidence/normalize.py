@@ -42,6 +42,14 @@ class Skip(Exception):
         self.reason = reason
 
 
+class AuditCopy(Skip):
+    """A journald copy of an audit record: a duplicate, but its journald fields name the boot it was written in."""
+
+    def __init__(self, record: dict):
+        super().__init__("journal copy of an audit record (normalized from linux.audit)")
+        self.record = record
+
+
 def raw_digest(source: dict) -> str:
     return hashlib.sha256(json.dumps(source, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -72,6 +80,73 @@ def _audit_boot_field(members: list[tuple[dict, AuditRecord]]) -> dict:
             if value not in (None, ""):
                 return {"host.boot.id": fv(value, f"{hit['_id']}:{path}")}
     return {}
+
+
+# journald's boot id: 128 bits as 32 lower-case hex digits. journald sets it (an underscore field), not the writer.
+_BOOT_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _journal_boot(j: dict) -> str | None:
+    value = j.get("_BOOT_ID")
+    return value if isinstance(value, str) and _BOOT_ID.fullmatch(value) else None
+
+
+# Audit record type numbers (linux/audit.h, libaudit) of the records the audit normalizers group, for journald
+# copies that carry only the number (_AUDIT_TYPE) and not its name (_AUDIT_TYPE_NAME).
+AUDIT_TYPE_NUMBERS = {
+    "1100": "USER_AUTH", "1101": "USER_ACCT", "1102": "USER_MGMT", "1103": "CRED_ACQ", "1104": "CRED_DISP",
+    "1105": "USER_START", "1106": "USER_END", "1108": "USER_CHAUTHTOK", "1110": "CRED_REFR", "1112": "USER_LOGIN",
+    "1113": "USER_LOGOUT", "1114": "ADD_USER", "1115": "DEL_USER", "1116": "ADD_GROUP", "1117": "DEL_GROUP",
+    "1127": "SYSTEM_BOOT", "1128": "SYSTEM_SHUTDOWN", "1129": "SYSTEM_RUNLEVEL", "1130": "SERVICE_START",
+    "1131": "SERVICE_STOP", "1132": "GRP_MGMT", "1133": "GRP_CHAUTHTOK", "1135": "ACCT_LOCK", "1136": "ACCT_UNLOCK",
+    "1300": "SYSCALL", "1302": "PATH", "1305": "CONFIG_CHANGE", "1306": "SOCKADDR", "1307": "CWD", "1309": "EXECVE",
+    "1327": "PROCTITLE",
+}
+
+
+def _decimal(value) -> int | None:
+    """A non-negative decimal integer written in ASCII digits, else None (str.isdigit also accepts '²')."""
+    return int(value) if isinstance(value, str) and value.isascii() and value.isdigit() else None
+
+
+def _audit_copy_key(hit: dict, j: dict) -> tuple[tuple[str, int, int], str, str] | None:
+    """((host, audit time in ms, audit serial), audit record type, boot id) of a journald copy of an audit record,
+    from journald's own fields: _AUDIT_ID is the record's serial and _SOURCE_REALTIME_TIMESTAMP its audit
+    timestamp (whole milliseconds, in microseconds); the type is _AUDIT_TYPE_NAME, else the name of the number in
+    _AUDIT_TYPE. None when any of them, or the shipper's host name, is missing or malformed."""
+    serial, micros, boot = _decimal(j.get("_AUDIT_ID")), _decimal(j.get("_SOURCE_REALTIME_TIMESTAMP")), _journal_boot(j)
+    kind = j.get("_AUDIT_TYPE_NAME")
+    if not (isinstance(kind, str) and kind):
+        kind = AUDIT_TYPE_NUMBERS.get(j.get("_AUDIT_TYPE")) if isinstance(j.get("_AUDIT_TYPE"), str) else None
+    host = _get(hit["_source"], "host.name") or ""
+    if serial is None or micros is None or micros % 1000 or not boot or not kind or not isinstance(host, str):
+        return None
+    return (host, micros // 1000, serial), kind, boot
+
+
+def _boot_partners(copies: list[tuple[tuple[str, int, int], str, str, str]]
+                   ) -> dict[tuple[str, int, int], dict[str, tuple[set[str], str]]]:
+    """(host, audit ms, serial) -> {boot id: (audit record types, first journald copy id)} from journald copies
+    given as (key, record type, boot id, copy id)."""
+    partners: dict[tuple[str, int, int], dict[str, tuple[set[str], str]]] = defaultdict(dict)
+    for key, kind, boot, copy_id in copies:
+        types, first = partners[key].get(boot, (set(), copy_id))
+        types.add(kind)
+        partners[key][boot] = (types, min(first, copy_id))
+    return partners
+
+
+def _partner_boot(partners: dict, host: str, ts: float, serial: int,
+                  members: list[tuple[dict, AuditRecord]]) -> dict:
+    """The boot id of an audit event from journald's copy of one of its records, joined on (host, audit timestamp,
+    serial) and a matching record type. No copy in the batch, or copies naming two boots, leaves it unknown."""
+    types = {record.type for _hit, record in members}
+    boots = [(boot, first) for boot, (kinds, first) in partners.get((host, round(ts * 1000), serial), {}).items()
+             if kinds & types]
+    if len(boots) != 1:
+        return {}
+    boot, first = boots[0]
+    return {"host.boot.id": fv(boot, f"{first}:event.original#journal:_BOOT_ID")}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -742,7 +817,7 @@ def normalize_journal(hit: dict) -> TypedEvent:
     if not isinstance(j, dict):
         raise TypeError("journal event.original is not a JSON object")
     if j.get("_TRANSPORT") == "audit" or j.get("SYSLOG_IDENTIFIER") == "audit":
-        raise Skip("journal copy of an audit record (normalized from linux.audit)")
+        raise AuditCopy(j)
     ident = j.get("SYSLOG_IDENTIFIER") or j.get("_COMM")
     msg = j.get("MESSAGE") or src.get("message") or ""
     nid = hit["_id"]
@@ -750,6 +825,8 @@ def normalize_journal(hit: dict) -> TypedEvent:
     host = j.get("_HOSTNAME") or _get(src, "host.name")
     base = {"journal.identifier": fv(ident, f"{nid}:event.original#journal:SYSLOG_IDENTIFIER"),
             "journal.unit": fv(j.get("_SYSTEMD_UNIT"), f"{nid}:event.original#journal:_SYSTEMD_UNIT")}
+    if _journal_boot(j):
+        base["host.boot.id"] = fv(_journal_boot(j), f"{nid}:event.original#journal:_BOOT_ID")
     if ident == "sshd":
         # SYSLOG_IDENTIFIER is chosen by the writer; journald's own _COMM/_EXE/_SYSTEMD_UNIT are not. When any of
         # them is recorded, one must name sshd, or the line came from another program.
@@ -1379,9 +1456,13 @@ SINGLE = {
 
 
 def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
-    """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)])."""
+    """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]).
+
+    An audit event's boot id (`host.boot.id`) comes from the shipper's own field, else from journald's copy of one
+    of its records when that copy is in the same batch. Without either it stays unknown: never guessed."""
     events, skips, errors = [], defaultdict(int), []
     audit_hits = []
+    audit_copies: list[tuple[tuple[str, int, int], str, str, str]] = []
     for h in hits:
         ds = _get(h["_source"], "event.dataset") or ""
         try:
@@ -1396,13 +1477,23 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
                 events.append(SINGLE[ds](h))
             else:
                 skips[f"dataset:{ds} is not normalized"] += 1
+        except AuditCopy as copy:
+            skips[copy.reason] += 1
+            found = _audit_copy_key(h, copy.record)
+            if found is not None:
+                audit_copies.append((*found, h["_id"]))
         except Skip as s:
             skips[s.reason] += 1
         except (ValueError, KeyError, TypeError, AttributeError) as e:   # malformed telemetry: an error, never a crash
             errors.append((h["_id"], f"{ds}: {e}"))
     groups, audit_errors = group_audit(audit_hits)
     errors.extend(audit_errors)
-    for (host, _ts, _serial), members in groups.items():
+    partners = _boot_partners(audit_copies)
+    audit_start, boot_by_hit = len(events), {}
+    for (host, ts, serial), members in groups.items():
+        boot = _partner_boot(partners, host, ts, serial, members) if partners else {}
+        if boot:
+            boot_by_hit.update({hit["_id"]: boot for hit, _record in members})
         types = {r.type for _, r in members}
         # EXECVE may legitimately repeat (long-argv continuation records; merged in normalize_exec_group)
         dup = sorted(t for t in types if sum(1 for _, r in members if r.type == t) > 1
@@ -1459,4 +1550,9 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
             skips[s.reason] += 1
         except (AuditParseError, ValueError, KeyError) as e:
             errors.append((members[0][0]["_id"], f"linux.audit: {e}"))
+    # Every audit event cites records of its own group only, so its first record names the group.
+    for event in events[audit_start:]:
+        boot = boot_by_hit.get(event.raw[0].native_id) if event.raw else None
+        if boot and not event.has("host.boot.id"):
+            event.fields.update(boot)
     return events, dict(skips), errors

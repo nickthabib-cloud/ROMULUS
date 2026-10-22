@@ -98,12 +98,31 @@ def test_dns_examples_stage_whole_events_and_release_compact_state():
     assert rule.staged is True
     assert rule.retained_events() == []
     assert rule.drain_staged() == [event]
-    assert all(not isinstance(value, TypedEvent)
-               for store in rule.examples.values() for value in store.items.values())
+    assert all(isinstance(event_id, str) for store in rule.examples.values() for event_id in store.ids())
     rule.release_state()
     assert rule.examples == {}
     assert rule.names == {}
-    assert rule._staged == set()
+    assert rule._pending == {}
+
+
+@pytest.mark.parametrize("shuffled", [False, True])
+def test_dns_staging_grows_with_cite_limits_not_with_dns_volume(shuffled):
+    """A long hunt sends millions of questions per (client, domain); only records that can still be cited are
+    staged, so the stage is bounded by the groups' cite limits whatever the volume or arrival order."""
+    import random
+    volume = 20_000
+    events = [rec(name=f"q{i:05d}.example.test", ts=T0 + timedelta(seconds=i)) for i in range(volume)]
+    if shuffled:
+        random.Random(7).shuffle(events)
+    rule = dns.DnsTunnelShape()
+    staged = set()
+    for start in range(0, volume, 1000):
+        rule.consume(events[start:start + 1000])
+        staged |= {event.id for event in rule.drain_staged()}
+    earliest = {event.id for event in sorted(events, key=lambda e: (e.ts, e.id))[:dns.EXAMPLE_LIMIT]}
+    assert earliest <= staged
+    # in time order exactly the cite limit; in random order each record enters with probability limit/rank
+    assert len(staged) <= (dns.EXAMPLE_LIMIT if not shuffled else dns.EXAMPLE_LIMIT * 12)
 
 
 @pytest.mark.parametrize("raw, expected", [

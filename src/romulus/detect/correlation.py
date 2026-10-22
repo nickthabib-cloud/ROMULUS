@@ -15,7 +15,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from romulus.detect.base import Match, Playbook, basename, pf
-from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS, interpreter_name, is_internal
+from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
+    INTERPRETERS,
+    WEB_SERVICE_USERS,
+    boot_of,
+    boots_conflict,
+    interpreter_name,
+    is_internal,
+)
 from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome, TypedEvent
 
@@ -94,12 +101,35 @@ SERVICE_MANAGERS = {"systemd", "init"}
 LINEAGE_DEPTH = 6
 
 
+def merge_unknown_boot(groups: dict[tuple, list], index: int) -> dict[tuple, list]:
+    """Groups whose keys carry a boot id at `key[index]`. A group with an unrecorded boot (None) joins the group that
+    differs from it only by a recorded boot when there is exactly one such group: nothing shows a second boot, so
+    the records stay together as they did without boot identity. With two or more recorded boots it stays apart:
+    it cannot be placed in either boot, so it is never merged."""
+    known: dict[tuple, list[tuple]] = defaultdict(list)
+    for key in groups:
+        if key[index] is not None:
+            known[key[:index] + key[index + 1:]].append(key)
+    out: dict[tuple, list] = {}
+    for key in sorted(groups, key=lambda k: tuple("" if part is None else str(part) for part in k)):
+        if key[index] is None:
+            others = known.get(key[:index] + key[index + 1:], [])
+            if len(others) == 1:
+                out.setdefault(others[0], []).extend(groups[key])
+                continue
+        out.setdefault(key, []).extend(groups[key])
+    return out
+
+
 class PidTable:
     """Kernel-recorded exec history per (host, pid), for lineage questions about a socket's process. Holds
-    compact tuples only; a pid's meaning at time t is its latest exec at or before t (pids are reused)."""
+    compact tuples `(exec_ts, exe, parent_pid, raw_id, boot)`; a pid's meaning at time t is its latest exec at or
+    before t (pids are reused). A lookup in a recorded boot never returns an exec recorded in a different boot: the
+    pid restarted at the reboot, and its exec in the new boot is not in the window. An exec or a lookup without a
+    recorded boot is boot-blind (see `boots_conflict`)."""
 
     def __init__(self):
-        self.execs: dict[tuple[str, int], list[tuple[float, str, int | None, str]]] = defaultdict(list)
+        self.execs: dict[tuple[str, int], list[tuple[float, str, int | None, str, str | None]]] = defaultdict(list)
         self._sorted = True
 
     def add(self, e: TypedEvent) -> None:
@@ -108,60 +138,59 @@ class PidTable:
             return
         ppid = e.get("process.ppid")
         self.execs[(e.host, pid)].append((e.ts.timestamp(), str(exe), ppid if isinstance(ppid, int) else None,
-                                          e.raw[0].native_id if e.raw else ""))
+                                          e.raw[0].native_id if e.raw else "", boot_of(e)))
         self._sorted = False
 
-    def _lookup(self, host: str, pid: int, ts: float):
+    def _entries(self, host: str, pid: int):
         if not self._sorted:
             for entries in self.execs.values():
                 entries.sort(key=lambda entry: entry[0])
             self._sorted = True
-        entries = self.execs.get((host, pid), [])
+        return self.execs.get((host, pid), ())
+
+    def _lookup(self, host: str, pid: int, ts: float, boot: str | None = None, *, strict: bool = False):
         latest = None
-        for entry in entries:                      # one pid rarely has more than a few execs in a window
-            if entry[0] <= ts:
+        for entry in self._entries(host, pid):     # one pid rarely has more than a few execs in a window
+            if entry[0] < ts or (entry[0] == ts and not strict):
                 latest = entry
             else:
                 break
+        # The latest exec of this pid before `ts` is in another boot: every earlier one is too (boots follow each
+        # other in time), so this pid has no recorded exec in `boot` before `ts`.
+        if latest is not None and boots_conflict(boot, latest[4]):
+            return None
         return latest
 
-    def lookup(self, host: str, pid: int, ts: float):
-        """Latest exec identity for a PID at or before `ts`; public for expansion lineage links."""
-        return self._lookup(host, pid, ts)
+    def lookup(self, host: str, pid: int, ts: float, boot: str | None = None):
+        """Latest exec identity for a PID at or before `ts` in `boot`; public for expansion lineage links."""
+        return self._lookup(host, pid, ts, boot)
 
-    def exec_before(self, host: str, pid: int, ts: float):
-        """The exec identity a PID held strictly before `ts` — the program it ran before a later exec
-        on the same PID replaced it. Returns `(exec_ts, exe, parent_pid, raw_id)` or None."""
-        if not self._sorted:
-            self._lookup(host, pid, ts)                 # triggers the lazy per-pid sort
-        prior = None
-        for entry in self.execs.get((host, pid), ()):
-            if entry[0] < ts:
-                prior = entry
-            else:
-                break
-        return prior
+    def exec_before(self, host: str, pid: int, ts: float, boot: str | None = None):
+        """The exec identity a PID held strictly before `ts` in `boot` — the program it ran before a later exec
+        on the same PID replaced it. Returns `(exec_ts, exe, parent_pid, raw_id, boot)` or None."""
+        return self._lookup(host, pid, ts, boot, strict=True)
 
-    def lineage_entries(self, host: str, ppid, ts: float, depth: int = LINEAGE_DEPTH):
-        """Walk up the recorded parent chain from `ppid` as of `ts`. Returns a list of
+    def lineage_entries(self, host: str, ppid, ts: float, depth: int = LINEAGE_DEPTH, boot: str | None = None):
+        """Walk up the recorded parent chain from `ppid` as of `ts` in `boot`. Returns a list of
         `(pid, exec_ts, exe, raw_id)`, nearest ancestor first, stopping at an ancestor whose exec is
-        not in the window (so the chain never invents a link)."""
+        not in the window (so the chain never invents a link). A parent is in its child's boot, so an
+        ancestor's recorded boot carries up the chain when the start had none."""
         entries = []
         pid = ppid
         for _ in range(depth):
             if not isinstance(pid, int) or pid in (0, 1):
                 break
-            entry = self._lookup(host, pid, ts)
+            entry = self._lookup(host, pid, ts, boot)
             if entry is None:
                 break
-            exec_ts, exe, parent, raw_id = entry
+            exec_ts, exe, parent, raw_id, entry_boot = entry
             entries.append((pid, exec_ts, exe, raw_id))
-            pid, ts = parent, exec_ts
+            pid, ts, boot = parent, exec_ts, boot if boot is not None else entry_boot
         return entries
 
-    def ancestry(self, host: str, ppid, ts: float) -> tuple[str, list[tuple[str, str]]]:
-        """Walk up from a parent pid. Returns (verdict, [(exe, raw id)]) with verdict 'web_server' when a web
-        server is an ancestor, 'service_manager' when the chain provably reaches pid 1 or systemd/init without
+    def ancestry(self, host: str, ppid, ts: float, boot: str | None = None) -> tuple[str, list[tuple[str, str]]]:
+        """Walk up from a parent pid in `boot`. Returns (verdict, [(exe, raw id)]) with verdict 'web_server' when a
+        web server is an ancestor, 'service_manager' when the chain provably reaches pid 1 or systemd/init without
         one, and 'unknown' when an ancestor's exec is not in the window."""
         chain: list[tuple[str, str]] = []
         pid = ppid
@@ -170,17 +199,17 @@ class PidTable:
                 return "service_manager", chain
             if not isinstance(pid, int):
                 return "unknown", chain
-            entry = self._lookup(host, pid, ts)
+            entry = self._lookup(host, pid, ts, boot)
             if entry is None:
                 return "unknown", chain
-            t, exe, parent, raw_id = entry
+            t, exe, parent, raw_id, entry_boot = entry
             name = basename(exe)
             chain.append((exe, raw_id))
             if name.startswith(WEB_SERVER_PREFIXES):
                 return "web_server", chain
             if name in SERVICE_MANAGERS:
                 return "service_manager", chain
-            pid, ts = parent, t
+            pid, ts, boot = parent, t, boot if boot is not None else entry_boot
         return "unknown", chain
 
 
@@ -255,7 +284,7 @@ class InterpreterExternalConnection(Playbook):
         for key in sorted(self.groups):
             evs = sorted(self.groups[key], key=lambda x: (x.ts, x.id))
             info, e0 = self.info[key], evs[0]
-            verdict, chain = self.pids.ancestry(e0.host, e0.get("process.ppid"), e0.ts.timestamp())
+            verdict, chain = self.pids.ancestry(e0.host, e0.get("process.ppid"), e0.ts.timestamp(), boot_of(e0))
             lane, notes = lineage_lane(info["reason"], info["lane"], verdict, chain)
             if lane == "high" and all(o == Outcome.failure for o in info["outcomes"]):
                 lane = "lead"

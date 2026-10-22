@@ -46,13 +46,6 @@ ALLOWLIST: list[tuple[str, re.Pattern]] = [
 ]
 FORBIDDEN_QUERY_KEYS = {"script", "script_fields", "runtime_mappings", "stored_fields"}
 
-# Raw searches feed only evidence.normalize. Object roots are intentional: they are a stable superset of every
-# nested native field the normalizers read, while excluding unrelated payloads that can dominate ES responses.
-NORMALIZER_SOURCE_INCLUDES = (
-    "@timestamp", "event", "message", "host", "system", "source", "destination", "network", "http", "url",
-    "user_agent", "firstPacket", "lastPacket", "client", "server", "protocol", "tls", "ssh", "tags",
-    "tcpflags", "rootId", "cert", "dns", "ipProtocol", "node",
-)
 SEARCH_FILTER_PATH = (
     "pit_id,timed_out,terminated_early,_shards.failed,hits.total.value,hits.total.relation,"
     "hits.hits._id,hits.hits._index,hits.hits._source,hits.hits.sort,aggregations"
@@ -212,7 +205,6 @@ class ElasticClient:
         session = pit or PitSession(self._open_pit(q.target))
         try:
             body = dict(q.body)
-            body["_source"] = {"includes": list(NORMALIZER_SOURCE_INCLUDES)}
             body["size"] = min(page_size, max_records)
             body["pit"] = {"id": session.id, "keep_alive": "2m"}
             body.setdefault(
@@ -248,8 +240,7 @@ class ElasticClient:
                     pass
 
     def search_raw(self, q: CompiledQuery) -> dict:
-        body = {**q.body, "_source": {"includes": list(NORMALIZER_SOURCE_INCLUDES)}}
-        return self.search(q.target, body)
+        return self.search(q.target, q.body)
 
 
 def _response_problems(d: dict) -> list[str]:

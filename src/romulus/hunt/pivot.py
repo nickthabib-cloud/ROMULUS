@@ -377,29 +377,16 @@ class PivotExecutor:
         }
         self.optimize_normalization = optimize_normalization
         self.raw_family_prefilter = optimize_normalization
-        self._normalization_cache: dict[
-            tuple[tuple[str, str], ...], tuple[list[TypedEvent], list[tuple[str, str]]]
-        ] = {}
 
     def _normalize_pivot_records(
         self, records: list[dict], raw_families: set[str] | None,
     ) -> tuple[list[TypedEvent], list[tuple[str, str]]]:
-        if not self.optimize_normalization:
-            events, _skips, errors = normalize_hits(records)
-            return events, errors
-        selected = _prefilter_raw(records, raw_families) if raw_families else records
-        events: dict[str, TypedEvent] = {}
-        errors: set[tuple[str, str]] = set()
-        for group in _normalization_groups(selected):
-            cache_key = tuple(sorted(_raw_identity(record) for record in group))
-            cached = self._normalization_cache.get(cache_key)
-            if cached is None:
-                normalized, _skips, group_errors = normalize_hits(group)
-                cached = (normalized, group_errors)
-                self._normalization_cache[cache_key] = cached
-            events.update((event.id, event) for event in cached[0])
-            errors.update(cached[1])
-        return sorted(events.values(), key=lambda event: (event.ts, event.id)), sorted(errors)
+        prefilter = self.optimize_normalization and raw_families
+        selected = _prefilter_raw(records, raw_families) if prefilter else records
+        # one call per leaf: an audit event takes its boot id from a journald copy in the same batch, and nothing
+        # outlives the leaf, so memory stays bounded by the per-leaf record cap
+        events, _skips, errors = normalize_hits(selected)
+        return events, errors
 
     def _execute(
         self, intent: SearchIntent, contract: FieldContract, *, pit=None,

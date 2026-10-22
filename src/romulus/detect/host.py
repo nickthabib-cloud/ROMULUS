@@ -1122,6 +1122,21 @@ _MAINTAINER_SCRIPT = re.compile(r"^/var/lib/dpkg/info/[^/]+\.(?:preinst|postinst
                                 r"|^/var/tmp/rpm-tmp\.\w+$")
 
 
+def boot_of(e: TypedEvent) -> str | None:
+    """The boot id a record carries (`host.boot.id`), or None when the source did not record it."""
+    value = e.get("host.boot.id")
+    return None if value in (None, "") else str(value)
+
+
+def boots_conflict(a: str | None, b: str | None) -> bool:
+    """Whether two records are known to come from different boots of a host. Process ids and audit session ids
+    restart at every boot, so a pid or session join across a boot boundary is false. Only two recorded boot ids that
+    differ prove a boundary: an unrecorded boot id (None) is compatible with any boot, so such a record keeps the
+    boot-blind join it had before boot identity was recorded (and a pid or session id reused after a reboot can
+    still join it)."""
+    return a is not None and b is not None and a != b
+
+
 class Ancestor(NamedTuple):
     ts: float
     ppid: int | None
@@ -1129,6 +1144,7 @@ class Ancestor(NamedTuple):
     user: str | None
     marker: str            # "package" | "cloud-init" | "logrotate" | ""
     event_id: str
+    boot: str | None = None
 
 
 class Lineage(NamedTuple):
@@ -1168,7 +1184,7 @@ class ProcessLineage:
                   else "logrotate" if system and name in LOG_ROTATORS else "")
         ppid = event.get("process.ppid")
         return Ancestor(event.ts.timestamp(), ppid if isinstance(ppid, int) else None, name,
-                        event.get("process.user"), marker, event.id)
+                        event.get("process.user"), marker, event.id, boot_of(event))
 
     def observe(self, event: TypedEvent) -> None:
         pid = event.get("process.pid")
@@ -1181,34 +1197,37 @@ class ProcessLineage:
         while len(self.records) > self.CAPACITY:
             self.records.popitem(last=False)
 
-    def parent(self, host: str | None, ppid: int | None, ts: float) -> Ancestor | None:
+    def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None) -> Ancestor | None:
+        """The latest exec of `ppid` no later than `ts`, unless it was recorded in a boot other than `boot`: the
+        pid restarted at the reboot, and every earlier exec of it is in that boot or an earlier one."""
         if ppid is None or ppid <= 1:
             return None
         best = None
         for entry in self.records.get((host, ppid), ()):
             if entry.ts <= ts:
                 best = entry
-        return best
+        return None if best is not None and boots_conflict(boot, best.boot) else best
 
     def classify(self, event: TypedEvent) -> Lineage:
         """The record's own account or nearest exec ancestor that is a web-service account (which wins at any
         depth), else the nearest package-manager, cloud-init or log-rotation ancestor."""
         return self._walk(event.host, self.entry(event))
 
-    def classify_pid(self, host: str | None, pid: int | None, ts: float) -> Lineage:
-        """Lineage of the process with this pid at this time (its latest exec record no later than ts), for records
-        that name a process but are not exec records themselves."""
-        start = self.parent(host, pid, ts) if isinstance(pid, int) else None
-        return self._walk(host, start) if start is not None else Lineage("", None, 0)
+    def classify_pid(self, host: str | None, pid: int | None, ts: float, boot: str | None = None) -> Lineage:
+        """Lineage of the process with this pid at this time in `boot` (its latest exec record no later than ts),
+        for records that name a process but are not exec records themselves."""
+        start = self.parent(host, pid, ts, boot) if isinstance(pid, int) else None
+        return self._walk(host, start, boot) if start is not None else Lineage("", None, 0)
 
-    def _walk(self, host: str | None, current: Ancestor) -> Lineage:
+    def _walk(self, host: str | None, current: Ancestor, boot: str | None = None) -> Lineage:
         nearest: Lineage | None = None
         for depth in range(self.DEPTH + 1):
             if current.user in WEB_SERVICE_USERS:
                 return Lineage("web", current, depth)
             if current.marker and nearest is None:
                 nearest = Lineage(current.marker, current, depth)
-            found = self.parent(host, current.ppid, current.ts)
+            boot = boot if boot is not None else current.boot      # a parent is in its child's boot
+            found = self.parent(host, current.ppid, current.ts, boot)
             if found is None or found.event_id == current.event_id:
                 break
             current = found

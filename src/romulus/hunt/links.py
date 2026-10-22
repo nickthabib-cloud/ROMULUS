@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from romulus.agent.models import PivotCoverage
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
-from romulus.detect.correlation import PidTable
+from romulus.detect.correlation import PidTable, boot_of, boots_conflict
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.pivot import (
     HOST_LOOKUP_BUDGET,
@@ -105,6 +105,12 @@ def _value(anchor: LinkAnchor, field: str):
         if event.has(field):
             return event.get(field)
     return None
+
+
+def _boot(anchor: LinkAnchor) -> str | None:
+    """The anchor's recorded boot id (its earliest record that carries one), or None."""
+    value = _value(anchor, "host.boot.id")
+    return None if value in (None, "") else str(value)
 
 
 def _victim(anchor: LinkAnchor) -> dict:
@@ -291,24 +297,28 @@ class LinkFetcher:
 
     def _lineage(self, anchor: LinkAnchor, window: LinkWindow):
         pid = _value(anchor, "process.pid")
-        boot_id = _value(anchor, "host.boot.id")
+        boot_id = _boot(anchor)
         key = {"host": anchor.host, "pid": pid, "host.boot.id": boot_id, **_victim(anchor)}
         intents = self._host_intents(window, ("linux.audit",), anchor.host) if isinstance(pid, int) else []
 
         def select(events):
+            # A record of another recorded boot is another process. One without a recorded boot is kept: the
+            # link retrieves audit records without their journald copies, so its own records carry no boot id and
+            # a pid reused after a reboot inside the window cannot be excluded.
             all_events = {event.id: event for event in anchor.events + events
                           if event.family == "process_exec" and event.host == anchor.host
-                          and (boot_id is None or event.get("host.boot.id") == boot_id)}
+                          and not boots_conflict(boot_id, boot_of(event))}
             root = next((event for event in anchor.events if event.get("process.pid") == pid), None)
             if root is None:
                 return []
+            root_boot = boot_of(root) or boot_id
             table = PidTable()
             by_raw = {}
             for event in all_events.values():
                 table.add(event)
                 for raw in event.raw:
                     by_raw[raw.native_id] = event
-            root_entry = table.lookup(anchor.host or "", pid, root.ts.timestamp())
+            root_entry = table.lookup(anchor.host or "", pid, root.ts.timestamp(), root_boot)
             if root_entry is None:
                 return []
             root_raws = {root_entry[3]}
@@ -325,15 +335,15 @@ class LinkFetcher:
                         or (root_session is not None
                             and candidate.get("process.session_id") != root_session)):
                     continue
-                continuation = table.lookup(anchor.host or "", pid, candidate.ts.timestamp())
+                continuation = table.lookup(anchor.host or "", pid, candidate.ts.timestamp(), root_boot)
                 if continuation is not None:
                     root_raws.add(continuation[3])
                     related[candidate.id] = candidate
-            parent, when = root.get("process.ppid"), root.ts.timestamp()
+            parent, when, boot = root.get("process.ppid"), root.ts.timestamp(), root_boot
             for _ in range(32):
                 if not isinstance(parent, int) or parent in (0, 1):
                     break
-                entry = table.lookup(anchor.host or "", parent, when)
+                entry = table.lookup(anchor.host or "", parent, when, boot)
                 if entry is None:
                     break
                 ancestor = by_raw.get(entry[3])
@@ -341,14 +351,15 @@ class LinkFetcher:
                     break
                 related[ancestor.id] = ancestor
                 parent, when = ancestor.get("process.ppid"), ancestor.ts.timestamp()
+                boot = boot or entry[4]
             for candidate in sorted(all_events.values(), key=lambda item: (item.ts, item.id)):
                 if candidate.ts < root.ts or candidate.id == root.id:
                     continue
-                parent, when = candidate.get("process.ppid"), candidate.ts.timestamp()
+                parent, when, boot = candidate.get("process.ppid"), candidate.ts.timestamp(), boot_of(candidate)
                 for _ in range(32):
                     if not isinstance(parent, int) or parent in (0, 1):
                         break
-                    entry = table.lookup(anchor.host or "", parent, when)
+                    entry = table.lookup(anchor.host or "", parent, when, boot)
                     if entry is None:
                         break
                     if entry[3] in root_raws:
@@ -358,6 +369,7 @@ class LinkFetcher:
                     if ancestor is None:
                         break
                     parent, when = ancestor.get("process.ppid"), ancestor.ts.timestamp()
+                    boot = boot or entry[4]
             return list(related.values())
 
         reason = _host_reason(anchor) or (None if usable_key(pid) else "required typed key is unusable")
@@ -366,7 +378,7 @@ class LinkFetcher:
 
     def _session(self, anchor: LinkAnchor, window: LinkWindow):
         session_id, auid = _value(anchor, "process.session_id"), _value(anchor, "process.auid")
-        boot_id = _value(anchor, "host.boot.id")
+        boot_id = _boot(anchor)
         key = {"host": anchor.host, "process.session_id": session_id, "process.auid": auid,
                "host.boot.id": boot_id, **_victim(anchor)}
         reason = _host_reason(anchor) or (None if usable_key(session_id) else "required typed key is unusable")
@@ -375,7 +387,7 @@ class LinkFetcher:
         def matches(event):
             return (event.host == anchor.host and event.get("process.session_id") == session_id
                     and (auid is None or event.get("process.auid") == auid)
-                    and (boot_id is None or event.get("host.boot.id") == boot_id))
+                    and not boots_conflict(boot_id, boot_of(event)))
 
         return (key, "observed", intents, matches,
                 lambda events: [event for event in events if matches(event)], reason, [])

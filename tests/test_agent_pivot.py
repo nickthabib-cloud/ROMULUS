@@ -171,21 +171,39 @@ def test_fetch_raw_prefilter_and_normalize_cache_preserve_results(monkeypatch):
         "F1", "optimized", [intent], retain,
         raw_families={"net_flow", "net_alert", "net_session"},
     )
-    cached = optimized_executor.fetch_intents(
-        "F1", "cached", [intent], retain,
+    repeated = optimized_executor.fetch_intents(
+        "F1", "repeated", [intent], retain,
         raw_families={"net_flow", "net_alert", "net_session"},
     )
 
-    assert normalized_sizes == [1]
+    # no cross-leaf cache: a repeated fetch normalizes again, so memory never grows with expansion length
+    assert normalized_sizes == [1, 1]
     assert [event.model_dump(mode="json") for event in optimized.events] == [
         event.model_dump(mode="json") for event in baseline.events
     ]
     assert [cell.model_dump(mode="json") for cell in optimized.coverage] == [
         cell.model_dump(mode="json") for cell in baseline.coverage
     ]
-    assert [event.model_dump(mode="json") for event in cached.events] == [
+    assert [event.model_dump(mode="json") for event in repeated.events] == [
         event.model_dump(mode="json") for event in optimized.events
     ]
+
+
+def test_prefiltered_leaf_keeps_the_journald_boot_join(monkeypatch):
+    from tests.test_boot_identity import BOOT_A, exec_records, journal_copy
+    records = [*exec_records(), journal_copy("j1")]
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=3, total_relation="eq", returned=3, records=records,
+    ))
+    contract = contract_from_types("host-x", {"@timestamp": "date", "event.dataset": "keyword"})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+
+    batch = PivotExecutor(_repo(), FakeClient(), "h1", {"host-x": contract}).fetch_intents(
+        "F1", "lineage", [intent], lambda event: event.family == "process_exec", raw_families={"process_exec"},
+    )
+
+    assert [event.get("host.boot.id") for event in batch.events] == [BOOT_A]
 
 
 def test_shared_publication_sets_source_case_and_keeps_machine_policy():

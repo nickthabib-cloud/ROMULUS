@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
@@ -224,24 +225,30 @@ def _short(name: str, limit: int = 80) -> str:
 
 
 class _Examples:
-    """Compact identities of the earliest records of a group, whatever order they arrive in."""
+    """The earliest `limit` records of a group by (time, id), whatever order they arrive in, as identities."""
 
-    __slots__ = ("items", "limit")
+    __slots__ = ("limit", "sorted_refs")
 
     def __init__(self, limit: int = EXAMPLE_LIMIT):
         self.limit = limit
-        self.items: dict[str, datetime] = {}
+        self.sorted_refs: list[tuple[datetime, str]] = []
 
-    def add(self, event: TypedEvent) -> None:
-        self.items[event.id] = event.ts
-        if len(self.items) > self.limit * 4:
-            self.items = dict(self.refs())
+    def add(self, event: TypedEvent) -> bool:
+        """Keep the record if it is among the earliest so far; True when it entered (and so may be cited). The
+        earliest set only gets earlier, so a record that does not enter now can never be cited later."""
+        ref = (event.ts, event.id)
+        at = bisect_left(self.sorted_refs, ref)
+        if at >= self.limit or (at < len(self.sorted_refs) and self.sorted_refs[at] == ref):
+            return False
+        self.sorted_refs.insert(at, ref)
+        del self.sorted_refs[self.limit:]
+        return True
 
     def refs(self) -> list[tuple[str, datetime]]:
-        return sorted(self.items.items(), key=lambda item: (item[1], item[0]))[: self.limit]
+        return [(event_id, ts) for ts, event_id in self.sorted_refs]
 
     def ids(self) -> list[str]:
-        return [event_id for event_id, _ts in self.refs()]
+        return [event_id for _ts, event_id in self.sorted_refs]
 
 
 def _fill(first: list[TypedEvent], rest: list[TypedEvent], limit: int = EXAMPLE_LIMIT) -> list[TypedEvent]:
@@ -281,25 +288,24 @@ class _DnsAggregate(Playbook):
         super().__init__()
         self._prev_query_flows: set = set()
         self.examples: dict[tuple, _Examples] = defaultdict(_Examples)
-        self._staged: set[str] = set()
-        self._pending: list[TypedEvent] = []
+        self._pending: dict[str, TypedEvent] = {}
         self.load = lambda ids: []
 
     def retained_events(self) -> list[TypedEvent]:
         return []
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = list(self._pending.values()), {}
         return out
 
     def _stage(self, event: TypedEvent) -> None:
-        if event.id not in self._staged:
-            self._staged.add(event.id)
-            self._pending.append(event)
+        # only records that can still be cited reach the stage, so it grows with groups x cite limits, not with
+        # DNS volume; the stage's primary key drops a record staged again in a later batch
+        self._pending.setdefault(event.id, event)
 
     def _remember(self, store: _Examples, event: TypedEvent) -> None:
-        store.add(event)
-        self._stage(event)
+        if store.add(event):
+            self._stage(event)
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         wanted = list(dict.fromkeys(ids))
@@ -771,7 +777,8 @@ class DnsNxdomainBurst(_DnsAggregate):
             if server and server != client and self.nx_sent_total[server] < self.SENT_CAP:
                 self.nx_sent_total[server] += 1
                 self.nx_sent[server][client].append(micros)
-            if len(self.times[client]) < self.TIME_CAP:
+            timed = len(self.times[client]) < self.TIME_CAP
+            if timed:
                 self.times[client].append(micros)
             names = question_names(event)
             if names is None:
@@ -783,8 +790,10 @@ class DnsNxdomainBurst(_DnsAggregate):
             if server:
                 self.servers[client][server] += 1
             self.spans[client].add(event.ts)
-            bucket = micros // (self.WINDOW // _US)
-            self._remember(self.buckets[client].setdefault(bucket, _Examples()), event)
+            if timed:
+                # the peak is found among the kept times only, so only their buckets can be cited
+                bucket = micros // (self.WINDOW // _US)
+                self._remember(self.buckets[client].setdefault(bucket, _Examples()), event)
         return []
 
     def _peak_records(self, client: str, start: int) -> list[TypedEvent]:
