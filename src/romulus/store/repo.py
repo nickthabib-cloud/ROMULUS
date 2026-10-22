@@ -6,6 +6,7 @@ import json
 import uuid
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from itertools import islice
 from typing import Any, ClassVar
 
@@ -52,11 +53,35 @@ AGENT_PAGE_ITEM_LIMIT = 250_000
 CANDIDATE_FILTER_SNAPSHOT_LIMIT = 5_000
 
 
+# Rows per executemany call: one compiled single-row statement runs over each chunk, so a batch of any size never
+# meets SQLite's limit on bind parameters per statement, and the parameter lists stay bounded.
+INSERT_CHUNK = 5000
+
+
+@lru_cache(maxsize=64)          # one entry per (table, key) the store writes
+def _insert_ignore(table, keys: tuple[str, ...]):
+    """INSERT ... ON CONFLICT DO NOTHING for one row; built once per (table, keys) so SQLAlchemy compiles it once."""
+    return insert(table).on_conflict_do_nothing(index_elements=list(keys))
+
+
 def _upsert_ignore(conn, table, rows: list[dict], keys: list[str]):
+    """Insert rows that are not stored yet. A row whose key is stored, or repeats an earlier row of the batch,
+    is skipped: the first written wins."""
     if not rows:
         return
-    stmt = insert(table).values(rows).on_conflict_do_nothing(index_elements=keys)
-    conn.execute(stmt)
+    stmt = _insert_ignore(table, tuple(keys))
+    for start in range(0, len(rows), INSERT_CHUNK):
+        conn.execute(stmt, rows[start:start + INSERT_CHUNK])
+
+
+def _rule_cell_upsert():
+    stmt = insert(t.rule_run)
+    return stmt.on_conflict_do_update(
+        index_elements=["hunt_id", "rule_id", "rule_version", "target", "partition"],
+        set_={name: stmt.excluded[name] for name in ("state", "matched", "evaluated", "detail")})
+
+
+_RULE_CELL_UPSERT = _rule_cell_upsert()
 
 
 def raw_id(target: str, native_id: str) -> str:
@@ -1941,19 +1966,31 @@ class Repo:
     def set_rule_cell(self, hunt_id: str, rule_id: str, version: str, target: str, partition: str, state: str,
                       matched: int, evaluated: int, detail: dict | None = None,
                       *, owner_token: str | None = None):
+        self.set_rule_cells(hunt_id, [{"rule_id": rule_id, "version": version, "target": target,
+                                       "partition": partition, "state": state, "matched": matched,
+                                       "evaluated": evaluated, "detail": detail}], owner_token=owner_token)
+
+    def set_rule_cells(self, hunt_id: str, cells: list[dict], *, owner_token: str | None = None) -> None:
+        """Write coverage cells in order, in one transaction. Each cell is (rule_id, version, target, partition,
+        state, matched, evaluated, detail); an existing cell keeps its row and takes the new state, counts and
+        detail."""
+        if not cells:
+            return
+        rows = [{"hunt_id": hunt_id, "rule_id": cell["rule_id"], "rule_version": cell["version"],
+                 "target": cell["target"], "partition": cell["partition"], "state": cell["state"],
+                 "matched": cell["matched"], "evaluated": cell["evaluated"], "detail": cell.get("detail") or {}}
+                for cell in cells]
         with write_txn(self.engine) as c:
             self._fence_lease(c, hunt_id, owner_token)
-            stmt = insert(t.rule_run).values(hunt_id=hunt_id, rule_id=rule_id, rule_version=version, target=target,
-                                             partition=partition, state=state, matched=matched, evaluated=evaluated,
-                                             detail=detail or {})
-            stmt = stmt.on_conflict_do_update(index_elements=["hunt_id", "rule_id", "rule_version", "target",
-                                                              "partition"],
-                                              set_={"state": state, "matched": matched, "evaluated": evaluated,
-                                                    "detail": detail or {}})
-            c.execute(stmt)
+            for start in range(0, len(rows), INSERT_CHUNK):
+                c.execute(_RULE_CELL_UPSERT, rows[start:start + INSERT_CHUNK])
 
     def rule_cells(self, hunt_id: str, rule_ids: set[str] | None = None,
-                   *, max_id: int | None = None) -> list[dict]:
+                   *, rule_id: str | None = None, max_id: int | None = None) -> list[dict]:
+        if rule_ids is not None and rule_id is not None:
+            raise ValueError("give rule_ids or rule_id, not both")
+        if rule_id is not None:
+            rule_ids = {rule_id}
         query = select(t.rule_run).where(t.rule_run.c.hunt_id == hunt_id)
         if rule_ids is not None:
             if not rule_ids:

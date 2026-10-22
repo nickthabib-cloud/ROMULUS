@@ -57,7 +57,8 @@ def test_presplit_uses_exact_histogram_count(monkeypatch):
     seen = []
 
     def fake_execute(client, intent, contract):
-        seen.append(intent.window)
+        if intent.kind == "raw":                # a split half is also counted (a histogram) before its fetch
+            seen.append(intent.window)
         now = datetime.now(UTC)
         return SearchOutcome(target=intent.target, fingerprint="f", started_at=now, ended_at=now,
                              completeness=Completeness.complete, total=0, total_relation="eq", returned=0, records=[])

@@ -62,6 +62,11 @@ class Settings(BaseModel):
     es_ca_cert: str = ""
     es_verify_tls: bool = True
     es_index_patterns: list[str] = []
+    # gzip responses (the client's default); false asks for uncompressed ones, cheaper to read on a fast link
+    es_compression: bool = True
+    # fetch the sweep's next partition on one background thread while the current one is evaluated; off by
+    # default because it holds a second partition's decoded records in memory
+    sweep_prefetch: bool = False
 
     arkime_url: str = "http://127.0.0.1:8005"
     arkime_username: str = ""
@@ -167,7 +172,8 @@ ENV_MAP = {
     "OLLAMA_THINK": "ollama_think",
     "ES_URL": "es_url", "ES_FLAVOR": "es_flavor", "ES_USERNAME": "es_username", "ES_PASSWORD": "es_password",
     "ES_API_KEY": "es_api_key", "ES_CA_CERT": "es_ca_cert", "ES_VERIFY_TLS": "es_verify_tls",
-    "ES_INDEX_PATTERNS": "es_index_patterns",
+    "ES_INDEX_PATTERNS": "es_index_patterns", "ES_COMPRESSION": "es_compression",
+    "ROMULUS_SWEEP_PREFETCH": "sweep_prefetch",
     "ARKIME_URL": "arkime_url", "ARKIME_USERNAME": "arkime_username", "ARKIME_PASSWORD": "arkime_password",
     "ARKIME_VERIFY_TLS": "arkime_verify_tls",
     "PCAP_ALLOWED_DIRS": "pcap_allowed_dirs", "TSHARK_BIN": "tshark_bin", "MISSION_TIMEZONE": "mission_timezone",

@@ -322,9 +322,9 @@ def test_fetch_raw_prefilter_and_normalize_cache_preserve_results(monkeypatch):
     normalized_sizes = []
     real_normalize = pivot_module.normalize_hits
 
-    def counted(items):
+    def counted(items, **kwargs):
         normalized_sizes.append(len(items))
-        return real_normalize(items)
+        return real_normalize(items, **kwargs)
 
     monkeypatch.setattr(pivot_module, "normalize_hits", counted)
     contract = contract_from_types("network-x", {

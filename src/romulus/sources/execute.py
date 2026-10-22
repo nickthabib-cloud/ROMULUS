@@ -9,6 +9,16 @@ from romulus.sources.models import Completeness, SearchIntent, SearchOutcome
 from romulus.sources.profile import FieldContract
 
 MAX_COMPOSITE_PAGES = 500
+_HIT_KEYS = frozenset({"_id", "_index", "_source", "sort"})
+
+
+def _record(hit: dict) -> dict:
+    """A raw record ({_id, _index, _source, _sort}) from one search hit. The search's filter_path returns exactly
+    these keys, so the hit itself becomes the record (its sort values renamed); a hit with other keys is copied."""
+    if hit.keys() <= _HIT_KEYS and "_id" in hit and "_index" in hit and "_source" in hit:
+        hit["_sort"] = hit.pop("sort", None)
+        return hit
+    return {"_id": hit["_id"], "_index": hit["_index"], "_source": hit["_source"], "_sort": hit.get("sort")}
 
 
 def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract, *, pit=None) -> SearchOutcome:
@@ -25,17 +35,15 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
             for hits, meta in client.iterate(q, intent.max_records, pit=pit):
                 reasons += meta["problems"]
                 total, rel = meta["total"], meta["total_relation"]
-                records += [{
-                    "_id": h["_id"], "_index": h["_index"], "_source": h["_source"],
-                    "_sort": h.get("sort"),
-                } for h in hits]
+                records += [_record(h) for h in hits]
             if total is not None and len(records) < total:
                 reasons.append(f"cap:{intent.max_records}<total:{total}")
             if rel != "eq":
                 reasons.append(f"total_relation:{rel}")
+            # the records join the outcome as they are: validating the outcome would copy every record dict
             return outcome(completeness=Completeness.partial if reasons else Completeness.complete,
                            reasons=sorted(set(reasons)), total=total, total_relation=rel,
-                           returned=len(records), records=records)
+                           returned=len(records)).model_copy(update={"records": records})
 
         if intent.kind == "aggregate":
             buckets, reasons, total, rel = [], [], None, "unknown"

@@ -95,5 +95,49 @@ def raw_identity(event: TypedEvent) -> str:
     return "+".join(sorted(r.key for r in event.raw))
 
 
+# A FieldValue's instance state, as pydantic's validating constructor leaves it: the field dict, the set of fields
+# given, and no extra or private attributes (BaseModel keeps the last three in slots).
+_new = object.__new__
+_set_attr = object.__setattr__
+try:
+    _set_fields_set = BaseModel.__dict__["__pydantic_fields_set__"].__set__
+    _set_extra = BaseModel.__dict__["__pydantic_extra__"].__set__
+    _set_private = BaseModel.__dict__["__pydantic_private__"].__set__
+    _SLOTS = True
+except (KeyError, AttributeError):   # a pydantic release without these slots: use the validating constructor
+    _SLOTS = False
+
+
+# Every field sets both of its fields, so all fields share one fields-set: pydantic only adds a name to it when that
+# field is assigned, and both names are already in it (it would otherwise be a 200-byte set per field).
+_BOTH_SET = {"value", "origin"}
+
+
+def _laid_out(value, origin: str) -> FieldValue:
+    field = _new(FieldValue)
+    _set_attr(field, "__dict__", {"value": value, "origin": origin})
+    _set_fields_set(field, _BOTH_SET)
+    _set_extra(field, None)
+    _set_private(field, None)
+    return field
+
+
+def _same_layout() -> bool:
+    built, checked = _laid_out([1, "x"], "o"), FieldValue(value=[1, "x"], origin="o")
+    return (built.__dict__ == checked.__dict__ and built.model_fields_set == checked.model_fields_set
+            and built.__pydantic_extra__ == checked.__pydantic_extra__
+            and built.__pydantic_private__ == checked.__pydantic_private__
+            and built.model_dump_json() == checked.model_dump_json() and built == checked)
+
+
+# Checked once at import: a pydantic release that lays instances out differently gets the validating constructor.
+_FAST = _SLOTS and _same_layout()
+
+
 def fv(value, origin: str) -> FieldValue:
+    """A typed field. Normalizers build millions, so with a str origin the instance is laid out directly instead
+    of validated: `value` is Any (validation stores it as given) and `origin` is already a str. Any other origin
+    goes through the validating constructor, which refuses or converts it as it always did."""
+    if _FAST and type(origin) is str:
+        return _laid_out(value, origin)
     return FieldValue(value=value, origin=origin)
