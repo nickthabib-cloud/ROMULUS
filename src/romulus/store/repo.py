@@ -46,6 +46,8 @@ def is_derived_boot(field: dict | None) -> bool:
 
 # Lanes an analyst may join with an asserted link (the report's reportable lanes).
 REPORTABLE_LANES = ("urgent", "high", "lead")
+# The actor of records the hunt machinery writes about its own work (summaries, maps), as opposed to people.
+SYSTEM_ACTOR = "system"
 LANE_STRENGTH = {"suppressed": 0, "context": 1, "lead": 2, "high": 3, "urgent": 4}
 SEVERITY_STRENGTH = {"informational": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 # Page plans are durable model state. These mission-scale ceilings bound repeated or
@@ -401,7 +403,8 @@ class Repo:
     def delete_hunt(self, hunt_id: str, actor: str, now: datetime | None = None) -> dict[str, int]:
         """Permanently delete one hunt and everything only it owns. Evidence that another hunt still
         cites is kept and handed to that hunt; shared raw copies are kept while any event cites them.
-        Refuses a hunt that may still be executing. An audit record of the deletion is kept."""
+        Refuses a hunt that may still be executing. The system's own per-hunt records (summaries, maps) go with
+        the hunt; records of what people did, and an audit record of the deletion, are kept."""
         now = now or utcnow()
         with write_txn(self.engine) as c:
             # Take SQLite's write lock *before* reading liveness or citations. pysqlite defers BEGIN
@@ -521,12 +524,35 @@ class Repo:
             rm("tasks", t.task.delete().where(t.task.c.hunt_id == hunt_id))
             rm("report_revisions", t.report_manifest.delete().where(t.report_manifest.c.hunt_id == hunt_id))
             rm("source_profiles", t.source_profile.delete().where(t.source_profile.c.hunt_id == hunt_id))
+            rm("audit_records", t.audit_event.delete().where(t.audit_event.c.hunt_id == hunt_id,
+                                                             t.audit_event.c.actor == SYSTEM_ACTOR))
             c.execute(t.hunt.delete().where(t.hunt.c.id == hunt_id))
             counts["events_kept_for_other_hunts"] = len(cited_by)
             # the deletion itself stays auditable (audit_event has no foreign key to hunt)
             c.execute(t.audit_event.insert().values(at=now, actor=actor, action="hunt.delete", hunt_id=hunt_id,
                                                     detail={k: str(v) for k, v in counts.items()}))
             return counts
+
+    def purge_orphan_audit(self) -> int:
+        """Remove the system's per-hunt records whose hunt no longer exists (left by deletions made before
+        deletion removed them); records of what people did are kept. Returns how many were removed."""
+        with write_txn(self.engine) as c:
+            return c.execute(t.audit_event.delete().where(
+                t.audit_event.c.actor == SYSTEM_ACTOR, t.audit_event.c.hunt_id.is_not(None),
+                t.audit_event.c.hunt_id.not_in(select(t.hunt.c.id)),
+            )).rowcount or 0
+
+    def hunts_with_live_lease(self, now: datetime | None = None) -> list[str]:
+        """Hunts a worker may still be writing: unfinished, with a lease that has not expired. A hunt left
+        'running' by a killed worker has an expired lease and is not live."""
+        now = (now or utcnow()).replace(tzinfo=None)
+        live = []
+        for h in self.list_hunts():
+            lease = h.get("lease_until")
+            unfinished = h.get("execution_state") not in self.FINISHED_STATES
+            if unfinished and lease is not None and lease.replace(tzinfo=None) > now:
+                live.append(h["id"])
+        return sorted(live)
 
     def deletion_preview(self, hunt_id: str) -> dict[str, int]:
         with self.engine.connect() as c:
