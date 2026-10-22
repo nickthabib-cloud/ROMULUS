@@ -169,3 +169,28 @@ def test_flush_writes_only_the_host_markers_that_changed():
     store.observe_rows([ParentExec("host1", "boot-a", 201, START + timedelta(seconds=4), "/bin/z", 1, "r")])
     assert writes == ["host1"], "an exec that does not advance the marker writes no marker"
     assert elapsed < 0.5
+
+
+def test_resolved_pending_key_is_the_spec_extractor_key_under_its_own_key_version():
+    from dataclasses import replace
+
+    from romulus.baseline.spec import SPEC_BY_ID, KeyContext
+    from romulus.evidence.typed import Outcome, TypedEvent, fv
+
+    _repo, store = _store()
+    store.observe_rows([_row(10, 1, "/parent")])
+    spec = replace(SPEC_BY_ID["bl.exec_pair"], key_version="7")
+    child_ts = START + timedelta(seconds=2)
+    resolved = PendingResolver(store, spec).resolve(Pending("host", "boot-a", 10, child_ts, "child", "/bin/sh"))
+    child = TypedEvent(
+        id="child", family="process_exec", ts=child_ts, host="host", outcome=Outcome.success,
+        fields={"process.executable": fv("/bin/sh", "f"), "process.ppid": fv(10, "f"),
+                "host.boot.id": fv("boot-a", "f")}, raw=[], normalizer="f@1",
+    )
+
+    class Parents:
+        def lookup(self, host, pid, ts, boot=None):
+            return (0.0, "/parent", 1, "r", boot)
+
+    direct = spec.keys(child, KeyContext(pid_table=Parents()))
+    assert resolved.keys == tuple(direct)

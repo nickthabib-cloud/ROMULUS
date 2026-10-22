@@ -370,9 +370,14 @@ def _exec_pair(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> Ke
     parent = context.pid_table.lookup(event.host, ppid, event.ts.timestamp(), boot)
     if parent is None or boots_conflict(boot, parent[4]):
         return Pending(event.host, boot, ppid, event.ts, event.id, executable)
-    return [_key(spec, _scope("host", host=host), {
-        "parent_executable": parent[1], "child_executable": executable,
-    })]
+    return [exec_pair_key(spec, host, parent[1], executable)]
+
+
+def exec_pair_key(spec: BaselineSpec, host: str, parent_executable: str, child_executable: str) -> BaselineKey:
+    """The exec-pair key under `spec`'s id and key version; a Pending resolved later builds the same key."""
+    return _key(spec, _scope("host", host=host.strip().lower()), {
+        "parent_executable": parent_executable, "child_executable": child_executable,
+    })
 
 
 # A key is stored once per scope and bucket, so its size is bounded: the masked shape keeps at most this many

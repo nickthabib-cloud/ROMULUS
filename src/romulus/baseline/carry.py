@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from romulus.baseline.spec import BaselineKey, Pending, key_digest_of, key_id_of
+from romulus.baseline.spec import SPEC_BY_ID, BaselineKey, BaselineSpec, Pending, exec_pair_key
 from romulus.detect.correlation import boot_of
 from romulus.evidence.typed import Outcome, TypedEvent
 from romulus.store.repo import Repo
@@ -204,8 +204,8 @@ class CarryInStore:
 class PendingResolver:
     """Resolve compact pending children without silently dropping an unresolvable one."""
 
-    def __init__(self, parents):
-        self.parents = parents
+    def __init__(self, parents, spec: BaselineSpec = SPEC_BY_ID["bl.exec_pair"]):
+        self.parents, self.spec = parents, spec
 
     def resolve(self, pending: Pending) -> PendingResolution:
         if pending.ppid in (1, 2):
@@ -217,13 +217,7 @@ class PendingResolver:
             reason = None
         if parent is None or not isinstance(parent[1], str) or not parent[1]:
             return PendingResolution(pending.event_id, (), reason or BEFORE_HISTORY)
-        key = {"child_executable": pending.child_executable, "parent_executable": parent[1]}
-        scope = f"host:{pending.host.lower()}"
-        resolved = BaselineKey(
-            scope_kind="host", scope=scope, key=key,
-            key_digest=key_digest_of("bl.exec_pair", "1", scope, key),
-            key_id=key_id_of("bl.exec_pair", "1", key),
-        )
+        resolved = exec_pair_key(self.spec, pending.host, parent[1], pending.child_executable)
         return PendingResolution(pending.event_id, (resolved,), None)
 
     def resolve_all(self, pendings: Iterable[Pending]) -> tuple[PendingResolution, ...]:

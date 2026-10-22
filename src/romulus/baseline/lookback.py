@@ -242,11 +242,11 @@ class LookbackWriter:
             # Every partition of the hour was fetched completely and fed to the carry, so the hour joins the
             # carry's continuity ledger before its children are resolved against it. Failed, partial,
             # budget-omitted and skipped (already covered) hours never do, and so break parent continuity.
-            resolver = None
             if carry is not None:
                 carry.mark_observed(hour_start, hour_end)
-                resolver = PendingResolver(carry)
             for counter in counters.values():
+                # A resolved child gets its counter's own spec key (id and key version).
+                resolver = PendingResolver(carry, counter.spec) if carry is not None else None
                 for pending in counter.take_pendings():
                     if resolver is None:
                         counter.mark_partial("parent exec before history")
