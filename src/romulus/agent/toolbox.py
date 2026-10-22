@@ -485,6 +485,18 @@ class Toolbox:
                 more = args.page < int(stored["item_count"])
                 cursor = args.cursor
                 identity = {"kind": "findings", "lane": None, "rule": None, "entity": None}
+            elif stored["identity"].get("kind") == "dossier_large":
+                page_size = int(stored["summary"]["dossier_page_size"])
+                rows = self.repo.agent_page_items(
+                    self.hunt_id, args.cursor, offset=(args.page - 1) * page_size,
+                    limit=page_size,
+                )
+                page = [candidate for item in rows
+                        if (candidate := self.repo.candidate(item["candidate_id"])) is not None]
+                total = int(stored["item_count"])
+                more = args.page * page_size < total
+                cursor = args.cursor
+                identity = {"kind": "findings", "lane": None, "rule": None, "entity": None}
             else:
                 requested = identity
                 if args.lane is None and args.rule is None and args.entity is None:

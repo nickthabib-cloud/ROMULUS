@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import insert
 
+import romulus.agent.dossier as dossier_module
 from romulus.agent.dossier import CLAIM_LIMIT, build_dossier
 from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.toolbox import Toolbox
@@ -429,25 +430,62 @@ def test_mission_scale_dossier_is_bounded_for_50k_findings_and_500_linked_incide
     repo = _mission_scale_repo()
     dossier = build_dossier(repo, "mission", token_budget=8_000)
 
-    incidents = [item for page in dossier.pages for item in page.get("incidents", [])]
-    context = [item for page in dossier.pages for item in page.get("context_counts", [])]
+    aliases = [item["alias"] for page in dossier.pages for item in page.get("findings", [])]
     item_tokens = [estimate_tokens(json.dumps(item, sort_keys=True, separators=(",", ":")))
                    for page in dossier.pages for value in page.values() if isinstance(value, list)
                    for item in value]
 
     assert dossier.payload["header"]["finding_counts"]["total"] == 50_000
-    assert context == []
-    assert len(incidents) == 500
-    assert all(item["link_count"] == 200 and len(item["links"]) < 200 for item in incidents)
+    assert len(aliases) == len(set(aliases)) == 50_000
+    incident_omission = next(item for item in dossier.payload["omissions"]
+                             if item["section"] == "incident_correlation")
+    assert incident_omission["counts"] == {
+        "reportable_findings": 50_000, "expansion_links": 100_000,
+    }
+    assert "technical report" in incident_omission["fetch"]
     assert max(item_tokens) < 2_000
     assert all(estimate_tokens(json.dumps(page, sort_keys=True, separators=(",", ":"))) <= 8_000
                for page in dossier.pages)
     toolbox = Toolbox(repo, "mission")
-    tool_results = [
-        toolbox.execute("list_findings", {
-            "lane": None, "rule": None, "entity": None, "page": 1, "cursor": None,
-        }),
-        toolbox.execute("get_incident", {"incident": "I1", "page": 1, "cursor": None}),
-    ]
+    tool_results = [toolbox.execute("list_findings", {
+        "lane": None, "rule": None, "entity": None, "page": 1,
+        "cursor": dossier.payload["header"]["index"]["cursor"],
+    })]
     assert max(estimate_tokens(json.dumps(result, sort_keys=True, separators=(",", ":")))
                for result in tool_results) < 8_000
+
+
+def test_materialization_cap_switches_before_unbounded_graph_and_coverage_reads(monkeypatch):
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("capped", {
+        "window": {"start": T.isoformat(), "end": (T + timedelta(hours=1)).isoformat()},
+        "targets": ["host-index"], "pack": {"playbooks": []},
+    }, "digest", "test")
+    now = utcnow()
+    with repo.engine.begin() as connection:
+        connection.execute(insert(t.candidate), [{
+            "id": f"finding-{index:05d}", "hunt_id": "capped", "rule_id": "host.test",
+            "rule_version": "1", "claim": f"finding {index}", "claim_type": "observed_action",
+            "event_ids": [], "predicate_fields": [], "entities": [], "ts": T,
+            "severity": "high", "confidence": "high", "lane": "high",
+            "priority": float(5_001 - index), "priority_reasons": [], "gate_results": {},
+            "benign_alternatives": [], "next_checks": [], "group_key": "",
+            "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+            "created_at": now,
+        } for index in range(5_001)])
+
+    def unbounded_read(*_args, **_kwargs):
+        raise AssertionError("large dossier entered an unbounded materialization path")
+
+    monkeypatch.setattr(dossier_module, "coverage_for_hunt", unbounded_read)
+    monkeypatch.setattr(dossier_module, "build_incident_graph", unbounded_read)
+    monkeypatch.setattr(repo, "candidates_with_finding_aliases", unbounded_read)
+    monkeypatch.setattr(repo, "expansion_links", unbounded_read)
+    monkeypatch.setattr(repo, "entities", unbounded_read)
+
+    dossier = build_dossier(repo, "capped", token_budget=8_000)
+
+    assert dossier.payload["header"]["status"] == "partial_at_materialization_cap"
+    assert dossier.payload["header"]["finding_counts"]["total"] == 5_001
+    assert len(dossier.pages) == 201

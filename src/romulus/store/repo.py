@@ -541,7 +541,8 @@ class Repo:
     def create_candidate_page_plan(self, hunt_id: str, cursor: str, identity: dict,
                                    summary: dict, *, lane: str | None = None,
                                    rule_id: str | None = None,
-                                   entity: tuple[str, str] | None = None) -> dict:
+                                   entity: tuple[str, str] | None = None,
+                                   lanes: tuple[str, ...] | None = None) -> dict:
         """Snapshot matching candidate ids with a stable SQL sort and bounded Python batches."""
         lane_order = case(
             (t.candidate.c.lane == "urgent", 0), (t.candidate.c.lane == "high", 1),
@@ -551,6 +552,8 @@ class Repo:
         where = [t.candidate.c.hunt_id == hunt_id]
         if lane is not None:
             where.append(t.candidate.c.lane == lane)
+        if lanes is not None:
+            where.append(t.candidate.c.lane.in_(lanes))
         if rule_id is not None:
             where.append(t.candidate.c.rule_id == rule_id)
         if entity is not None:
@@ -888,6 +891,25 @@ class Repo:
         with self.engine.connect() as connection:
             return int(connection.execute(query).scalar_one())
 
+    def candidate_count_lanes(self, hunt_id: str, lanes: tuple[str, ...]) -> int:
+        query = select(func.count()).select_from(t.candidate).where(
+            t.candidate.c.hunt_id == hunt_id, t.candidate.c.lane.in_(lanes),
+        )
+        with self.engine.connect() as connection:
+            return int(connection.execute(query).scalar_one())
+
+    def expansion_link_count(self, hunt_id: str) -> int:
+        query = select(func.count()).select_from(t.expansion_link).where(
+            t.expansion_link.c.hunt_id == hunt_id,
+        )
+        with self.engine.connect() as connection:
+            return int(connection.execute(query).scalar_one())
+
+    def rule_cell_count(self, hunt_id: str) -> int:
+        query = select(func.count()).select_from(t.rule_run).where(t.rule_run.c.hunt_id == hunt_id)
+        with self.engine.connect() as connection:
+            return int(connection.execute(query).scalar_one())
+
     def candidate_page(self, hunt_id: str, *, offset: int, limit: int,
                        lane: str | None = None, rule_id: str | None = None) -> list[dict]:
         """Return one stable finding page without materializing the hunt's candidate table."""
@@ -933,6 +955,20 @@ class Repo:
         with self.engine.connect() as c:
             r = c.execute(select(t.candidate).where(t.candidate.c.id == cid)).mappings().first()
             return dict(r) if r else None
+
+    def candidates_by_ids(self, ids: list[str], *, finding_alias: bool = False) -> list[dict]:
+        if not ids:
+            return []
+        query = select(t.candidate).where(t.candidate.c.id.in_(ids))
+        if finding_alias:
+            aliases = t.agent_alias.alias("candidate_alias")
+            query = (select(t.candidate, aliases.c.alias.label("_alias"))
+                     .join(aliases, and_(
+                         aliases.c.hunt_id == t.candidate.c.hunt_id,
+                         aliases.c.kind == "F", aliases.c.target_id == t.candidate.c.id,
+                     )).where(t.candidate.c.id.in_(ids)))
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings()]
 
     # ---- durable per-hunt aliases -----------------------------------------------------------
     def agent_aliases(self, hunt_id: str) -> list[dict]:

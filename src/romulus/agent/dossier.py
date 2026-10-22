@@ -26,6 +26,10 @@ DATA_COLLECTION_LIMIT = 50
 INCIDENT_MEMBER_PREVIEW_LIMIT = 25
 INCIDENT_LINK_PREVIEW_LIMIT = 8
 INCIDENT_TARGET_PREVIEW_LIMIT = 10
+MATERIALIZE_FINDING_LIMIT = 5_000
+MATERIALIZE_LINK_LIMIT = 10_000
+MATERIALIZE_COVERAGE_LIMIT = 10_000
+LARGE_DOSSIER_PAGE_SIZE = 25
 
 
 def _bounded_text(value: Any, limit: int = DATA_TEXT_LIMIT) -> str:
@@ -99,6 +103,47 @@ class DossierPages(Sequence[dict[str, Any]]):
                 yield _page_payload(row["page"], index + 1, self.count, self.cursor)
 
 
+class LargeDossierPages(Sequence[dict[str, Any]]):
+    """Virtual pages over a SQL candidate snapshot for hunts above materialization caps."""
+
+    def __init__(self, repo: Repo, hunt_id: str, cursor: str, total: int,
+                 aliases: AliasBook, base: dict):
+        self.repo = repo
+        self.hunt_id = hunt_id
+        self.cursor = cursor
+        self.total = total
+        self.aliases = aliases
+        self.base = base
+
+    def __len__(self) -> int:
+        return max(1, (self.total + LARGE_DOSSIER_PAGE_SIZE - 1) // LARGE_DOSSIER_PAGE_SIZE)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[number] for number in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        snapshot = self.repo.agent_page_items(
+            self.hunt_id, self.cursor, offset=index * LARGE_DOSSIER_PAGE_SIZE,
+            limit=LARGE_DOSSIER_PAGE_SIZE,
+        )
+        ids = [item["candidate_id"] for item in snapshot]
+        by_id = {row["id"]: row for row in self.repo.candidates_by_ids(ids, finding_alias=True)}
+        findings = [_finding_row(by_id[candidate_id], self.aliases)
+                    for candidate_id in ids if candidate_id in by_id]
+        payload = _jsonable(self.base if index == 0 else {
+            "schema": DOSSIER_SCHEMA, "header": self.base["header"], "findings": [],
+        })
+        payload["findings"] = findings
+        return _page_payload(payload, index + 1, len(self), self.cursor)
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        for index in range(len(self)):
+            yield self[index]
+
+
 @dataclass(frozen=True)
 class Dossier:
     """The first model page plus every deterministic findings-index page."""
@@ -143,7 +188,7 @@ def _finding_row(row: dict, aliases: AliasBook) -> dict:
     return {
         "alias": alias,
         "lane": row["lane"],
-        "rule_id": row["rule_id"],
+        "rule_id": _bounded_text(row["rule_id"]),
         "claim": _claim(row["claim"], alias),
         "host": _entity_value(row.get("entities") or [], "host"),
         "account": _entity_value(row.get("entities") or [], "account"),
@@ -401,6 +446,95 @@ def _detail_fetch(section: str, item: dict) -> str:
     return "use the corresponding paged toolbox read with a narrower page"
 
 
+def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
+                   aliases: AliasBook, *, reportable_count: int, link_count: int,
+                   rule_cell_count: int) -> Dossier:
+    """Build a bounded partial dossier without loading hunt-sized correlation inputs."""
+    lane_counts = Counter(repo.lane_counts(hunt_id))
+    profiles = manifest.get("source_profiles") or {}
+    targets = list(manifest.get("targets") or [])
+    source_names = sorted(set(targets[:DATA_COLLECTION_LIMIT]) |
+                          set(list(profiles)[:DATA_COLLECTION_LIMIT]))
+    sources = [{"target": _bounded_text(target),
+                "profile": _bounded_data(profiles.get(target) or {})}
+               for target in source_names]
+    source_omitted = max(0, len(targets) + len(profiles) - len(source_names))
+    context_counts = repo.candidate_rule_counts(hunt_id, lane="context")
+    context_rows = [{"rule_id": _bounded_text(rule_id), "count": count}
+                    for rule_id, count in sorted(context_counts.items())[:DATA_COLLECTION_LIMIT]]
+    context_omitted = max(0, len(context_counts) - len(context_rows))
+    omissions = [{
+        "section": "incident_correlation",
+        "reason": ("correlation inputs exceeded the fixed in-memory safety caps; the finding index "
+                   "remains complete and disk-backed"),
+        "counts": {"reportable_findings": reportable_count, "expansion_links": link_count},
+        "fetch": ("render the technical report for its incident index, then use get_incident with "
+                  "the cited incident alias"),
+    }, {
+        "section": "coverage_details",
+        "reason": "coverage inputs exceeded the fixed in-memory safety cap",
+        "counts": {"recorded_cells": rule_cell_count},
+        "fetch": "call list_coverage page=1 and follow its stable cursor",
+    }, {
+        "section": "entity_index",
+        "reason": "entity summaries are retrieved from bounded finding pages",
+        "fetch": "call list_findings page=1, then entity_profile for a returned entity alias",
+    }]
+    if source_omitted:
+        omissions.append({
+            "section": "sources", "omitted": source_omitted,
+            "reason": "source manifest preview capped", "fetch": "read the persisted hunt manifest",
+        })
+    if context_omitted:
+        omissions.append({
+            "section": "context_counts", "omitted": context_omitted,
+            "reason": "context rule-count preview capped", "fetch": "use the technical report appendix",
+        })
+    base = {
+        "schema": DOSSIER_SCHEMA,
+        "header": {"finding_counts": {
+            "urgent": lane_counts["urgent"], "high": lane_counts["high"],
+            "lead": lane_counts["lead"], "total": reportable_count,
+        }, "status": "partial_at_materialization_cap"},
+        "scope": {
+            "window": {**_bounded_data(manifest.get("window") or {}), "semantics": "[start, end) UTC"},
+            "sources": sources,
+            "coverage": {"summary": {"recorded_cells": rule_cell_count}, "status": "partial",
+                         "rules": [], "gaps": [], "not_assessed": []},
+        },
+        "context_counts": context_rows, "entities": [], "incidents": [],
+        "expansion": {"summary": {"link_count": link_count}, "unfinished_anchors": [],
+                      "link_tiers_not_reached": [], "partial_links": []},
+        "agent_budget": _budget(repo, hunt_id, manifest),
+        "safety": {"flags": [], "status": "unscanned_at_materialization_cap"},
+        "findings": [], "omissions": omissions,
+    }
+    cursor = "D" + digest({
+        "hunt_id": hunt_id, "token_budget": token_budget, "reportable_count": reportable_count,
+        "link_count": link_count, "rule_cell_count": rule_cell_count,
+        "candidate_fingerprint": repo.candidate_fingerprint(hunt_id),
+    })[:16]
+    plan = repo.agent_page_plan(hunt_id, cursor)
+    if plan is None:
+        plan = repo.create_candidate_page_plan(
+            hunt_id, cursor, {"kind": "dossier_large"}, {
+                "finding_count": reportable_count, "dossier_page_size": LARGE_DOSSIER_PAGE_SIZE,
+                "status": "partial_at_materialization_cap",
+            }, lanes=REPORTABLE_LANES,
+        )
+    pages = LargeDossierPages(repo, hunt_id, cursor, int(plan["item_count"]), aliases, base)
+    payload = pages[0]
+    if estimate_tokens(_canonical(payload)) > token_budget:
+        payload = _page_payload({
+            "schema": DOSSIER_SCHEMA, "header": base["header"], "findings": [],
+            "omissions": [{
+                "section": "fixed_summary", "reason": "fixed summary exceeded this page budget",
+                "fetch": "call list_findings page=1 and list_coverage page=1",
+            }],
+        }, 1, len(pages), cursor)
+    return Dossier(payload=payload, pages=pages)
+
+
 def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
     """Build a canonical JSON dossier without querying a source or calling a model."""
     if token_budget < 1:
@@ -409,7 +543,18 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
     if hunt is None:
         raise KeyError(hunt_id)
     manifest = hunt.get("manifest") or {}
+    reportable_count = repo.candidate_count_lanes(hunt_id, REPORTABLE_LANES)
+    link_count = repo.expansion_link_count(hunt_id)
+    rule_cell_count = repo.rule_cell_count(hunt_id)
     aliases = AliasBook(repo, hunt_id)
+    if (reportable_count > MATERIALIZE_FINDING_LIMIT
+            or link_count > MATERIALIZE_LINK_LIMIT
+            or rule_cell_count > MATERIALIZE_COVERAGE_LIMIT):
+        return _large_dossier(
+            repo, hunt_id, manifest, token_budget, aliases,
+            reportable_count=reportable_count, link_count=link_count,
+            rule_cell_count=rule_cell_count,
+        )
     lane_counts, reportable = _findings(repo, hunt_id)
     context_counts = repo.candidate_rule_counts(hunt_id, lane="context")
     profiles = manifest.get("source_profiles") or {}
