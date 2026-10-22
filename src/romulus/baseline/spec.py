@@ -1,4 +1,17 @@
-"""Pure baseline specifications, canonical keys, and unresolved process-parent carry-in."""
+"""Pure baseline specifications, canonical keys, and unresolved process-parent carry-in.
+
+An extractor answers one of four ways for an event of one of its families:
+
+- a non-empty list of `BaselineKey`: the event is counted under every key;
+- `Pending`: an exec whose parent exec may sit before the window; a later stage resolves it from carry-in;
+- `NotApplicable(reason)`: the event is outside the spec's behavior (a failed login, another service, an
+  east-west flow). It is decided from typed values that are present and is never a coverage gap;
+- `Missing(reason, fields)`: a value the spec needs is absent, malformed or not a scalar, so the event could
+  not be evaluated. A missing value never becomes a key, and a stage counting `Missing` results can never
+  report a complete negative for the scope.
+
+When a present value already proves the event is not applicable, that answer wins over a missing value.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -8,18 +21,23 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
-from romulus.detect.dns import endpoints as dns_endpoints
-from romulus.detect.dns import question_names, registered_domain
+from romulus.detect.dns import qname, registered_domain
 from romulus.detect.dns import role as dns_role
-from romulus.detect.host import WEB_SERVICE_USERS
+from romulus.detect.host import is_internal
 from romulus.evidence.typed import Outcome, TypedEvent
 
 type Scope = Literal["host", "account", "host_account", "internal_ip", "site"]
+# "prevalence" specs are judged on presence in their own scope and on how many peer scopes of the same kind
+# hold the key; "presence" specs only on their own scope; "rate" specs on an hourly count series.
 type Measure = Literal["presence", "prevalence", "rate"]
 type Bucket = Literal["day", "hour"]
+type IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+# A required-field entry is one typed field, or a tuple of alternatives of which any one suffices.
+type FieldRequirement = str | tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -39,28 +57,80 @@ class BaselineKey:
 
 @dataclass(frozen=True)
 class Pending:
-    """A process parent whose latest exec may exist only in pre-window carry-in."""
+    """An exec whose parent's exec is not in the supplied pid table: it may exist only in pre-window carry-in.
+
+    Compact by design, so a later stage can stage pendings to disk instead of holding child events: the
+    recorded host (the pid-table key), boot, parent pid and child time to look the parent up, the child's
+    event id to cite, and the child executable that completes the key."""
 
     host: str
     boot: str | None
     ppid: int
     ts: datetime
+    event_id: str
+    child_executable: str
 
 
-type KeyResult = list[BaselineKey] | Pending | None
+@dataclass(frozen=True)
+class NotApplicable:
+    """The event is outside the spec's behavior, decided from typed values that are present."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class Missing:
+    """A value the spec needs is absent, malformed or not a scalar; the event was not evaluated."""
+
+    reason: str
+    fields: tuple[str, ...]
+
+
+type KeyResult = list[BaselineKey] | Pending | NotApplicable | Missing
+
+
+@runtime_checkable
+class ParentLookup(Protocol):
+    """The only pid-table operation extractors use, so a bounded or disk-backed table can stand in.
+
+    Returns `(exec_ts, executable, parent_pid, raw_id, boot)` for the latest exec of `pid` on `host` at or
+    before `ts` in `boot`, or None."""
+
+    def lookup(self, host: str, pid: int, ts: float, boot: str | None = None) -> tuple | None: ...
+
+
+# Accounts whose uid falls in this range are system (service) accounts: 1-999 is the default SYS_UID_MIN to
+# SYS_UID_MAX of login.defs on common Linux distributions, where package-created daemons (postgres, jenkins,
+# www-data) get their uids. uid 0 (root) is never a service account here: root's activity is every
+# administrator's and every boot's, so an hourly root rate says nothing about one service.
+DEFAULT_SYSTEM_UID_RANGE = (1, 999)
 
 
 @dataclass(frozen=True)
 class KeyContext:
-    """State supplied to otherwise-pure extractors; no source adapter is reachable here."""
+    """State supplied to otherwise-pure extractors; no source adapter is reachable here.
 
-    pid_table: PidTable = field(default_factory=PidTable)
-    service_accounts: frozenset[str] = field(default_factory=lambda: frozenset(WEB_SERVICE_USERS))
+    - `pid_table`: parent exec lookups for `bl.exec_pair`;
+    - `service_accounts`: account names configured as service accounts, keyed by `bl.svc_exec_rate`
+      whatever their uid (empty by default: the uid range does the work);
+    - `system_uid_range`: inclusive uid range of system accounts;
+    - `is_internal`: whether an address belongs to the site. The default is the RFC 1918 / ULA / loopback /
+      link-local / CGNAT test; a per-site internal-network setting replaces it here."""
+
+    pid_table: ParentLookup = field(default_factory=PidTable)
+    service_accounts: frozenset[str] = frozenset()
+    system_uid_range: tuple[int, int] = DEFAULT_SYSTEM_UID_RANGE
+    is_internal: Callable[[IPAddress], bool] = is_internal
 
 
 @dataclass(frozen=True)
 class BaselineSpec:
-    """Versioned typed-field contract and key extractor for one baseline behavior."""
+    """Versioned typed-field contract and key extractor for one baseline behavior.
+
+    `required_fields` names, per family, the typed fields without which an event of that family is `Missing`
+    (a tuple entry is a group of alternatives). Every spec also needs the event's host, and specs that
+    judge an outcome need a known outcome. `optional_fields` are read when present. Both drive source-profile
+    applicability and retrieval projection before any event is read; `Missing` reports the per-event result."""
 
     id: str
     version: str
@@ -70,12 +140,13 @@ class BaselineSpec:
     scope: Scope | tuple[Scope, ...]
     measure: Measure
     bucket: Bucket
-    required_fields: dict[str, tuple[str, ...]]
+    required_fields: dict[str, tuple[FieldRequirement, ...]]
+    optional_fields: dict[str, tuple[str, ...]]
     _extract: Callable[[TypedEvent, KeyContext, BaselineSpec], KeyResult] = field(repr=False, compare=False)
 
     def keys(self, event: TypedEvent, context: KeyContext) -> KeyResult:
         if event.family not in self.families:
-            return None
+            return NotApplicable(f"family {event.family} is not one of {', '.join(self.families)}")
         return self._extract(event, context, self)
 
 
@@ -129,17 +200,57 @@ def _scope(kind: Scope, **values: str) -> tuple[Scope, str]:
     return kind, f"host_account:{canonical_json(values)}"
 
 
-def _canon_ip(value: Any) -> tuple[str, str] | None:
-    if value in (None, ""):
+def _host(event: TypedEvent) -> str | Missing:
+    """The event's host for a scope: lower-cased, since host names are case-insensitive."""
+    host = event.host
+    if not isinstance(host, str) or not host.strip():
+        return Missing("no host recorded", ("host",))
+    return host.strip().lower()
+
+
+def _text(event: TypedEvent, name: str) -> str | Missing:
+    """A required non-empty string value, verbatim."""
+    value = event.get(name)
+    if value is None or value == "":
+        return Missing(f"{name} is absent", (name,))
+    if not isinstance(value, str):
+        return Missing(f"{name} is a {type(value).__name__}, not a single string", (name,))
+    return value
+
+
+def _parse_ip(value: Any) -> IPAddress | None:
+    if isinstance(value, bool) or not isinstance(value, str) or not value:
         return None
     try:
-        address = ipaddress.ip_address(str(value))
+        address = ipaddress.ip_address(value)
     except ValueError:
         return None
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
+        return address.ipv4_mapped
+    return address
+
+
+def _canon_ip(value: Any) -> tuple[str, str] | None:
+    address = _parse_ip(value)
+    if address is None:
+        return None
     prefix = 24 if address.version == 4 else 48
     return str(address), str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
+
+
+def _ip(event: TypedEvent, name: str) -> IPAddress | Missing:
+    value = event.get(name)
+    if value is None or value == "":
+        return Missing(f"{name} is absent", (name,))
+    address = _parse_ip(value)
+    if address is None:
+        return Missing(f"{name} is not an IP address", (name,))
+    return address
+
+
+def _network(address: IPAddress) -> str:
+    prefix = 24 if address.version == 4 else 48
+    return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
 
 
 def _canon_dns(value: Any) -> str | None:
@@ -149,14 +260,30 @@ def _canon_dns(value: Any) -> str | None:
     return name or None
 
 
+def _outcome_success(event: TypedEvent, action: str) -> NotApplicable | Missing | None:
+    if event.outcome == Outcome.failure:
+        return NotApplicable(f"the {action} failed")
+    if event.outcome != Outcome.success:
+        return Missing(f"the {action} outcome is not recorded", ("outcome",))
+    return None
+
+
 def _ssh_tuple(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
-    host, account = event.host, event.get("user.name")
-    address = _canon_ip(event.get("source.ip"))
-    if (event.outcome != Outcome.success or event.get("auth.service") != "sshd" or not host
-            or account in (None, "") or address is None):
-        return None
-    ip, network = address
-    account = str(account)
+    service = event.get("auth.service")
+    if event.outcome == Outcome.failure:
+        return NotApplicable("the authentication failed")
+    if isinstance(service, str) and service and service != "sshd":
+        return NotApplicable(f"service {service} is not sshd")
+    service = _text(event, "auth.service")
+    if isinstance(service, Missing):
+        return service
+    if (outcome := _outcome_success(event, "authentication")) is not None:
+        return outcome
+    host, address, account = _host(event), _ip(event, "source.ip"), _text(event, "user.name")
+    for value in (host, address, account):
+        if isinstance(value, Missing):
+            return value
+    ip, network = str(address), _network(address)
     site = _scope("site")
     return [
         _key(spec, site, {
@@ -170,29 +297,37 @@ def _ssh_tuple(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> K
 
 
 def _exec_path(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
-    executable = event.get("process.executable")
-    path = event.get("process.exec_file.path")
-    account = event.get("process.user")
-    if (event.outcome != Outcome.success or not event.host or executable in (None, "")
-            or path in (None, "") or account in (None, "")):
-        return None
-    key = {"executable": str(executable), "exec_file_path": str(path)}
+    if (outcome := _outcome_success(event, "exec")) is not None:
+        return outcome
+    host = _host(event)
+    executable, path = _text(event, "process.executable"), _text(event, "process.exec_file.path")
+    account = _text(event, "process.user")
+    for value in (host, executable, path, account):
+        if isinstance(value, Missing):
+            return value
+    key = {"executable": executable, "exec_file_path": path}
     return [
-        _key(spec, _scope("host", host=event.host), key),
-        _key(spec, _scope("account", account=str(account)), key),
+        _key(spec, _scope("host", host=host), key),
+        _key(spec, _scope("account", account=account), key),
     ]
 
 
 def _exec_pair(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
-    executable, ppid = event.get("process.executable"), event.get("process.ppid")
-    if not event.host or executable in (None, "") or not isinstance(ppid, int):
-        return None
+    host, executable = _host(event), _text(event, "process.executable")
+    ppid = event.get("process.ppid")
+    for value in (host, executable):
+        if isinstance(value, Missing):
+            return value
+    if ppid is None:
+        return Missing("process.ppid is absent", ("process.ppid",))
+    if isinstance(ppid, bool) or not isinstance(ppid, int) or ppid < 0:
+        return Missing("process.ppid is not a process id", ("process.ppid",))
     boot = boot_of(event)
     parent = context.pid_table.lookup(event.host, ppid, event.ts.timestamp(), boot)
     if parent is None or boots_conflict(boot, parent[4]):
-        return Pending(event.host, boot, ppid, event.ts)
-    return [_key(spec, _scope("host", host=event.host), {
-        "parent_executable": parent[1], "child_executable": str(executable),
+        return Pending(event.host, boot, ppid, event.ts, event.id, executable)
+    return [_key(spec, _scope("host", host=host), {
+        "parent_executable": parent[1], "child_executable": executable,
     })]
 
 
@@ -234,73 +369,159 @@ def mask_argv_token(value: str) -> str:
 
 
 def _cmd_shape(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
-    executable, argv = event.get("process.executable"), event.get("process.argv")
-    if (not event.host or executable in (None, "") or event.get("process.argv_complete") is False
-            or not isinstance(argv, list) or not argv or not all(isinstance(token, str) for token in argv)):
-        return None
-    return [_key(spec, _scope("host", host=event.host), {
-        "executable": str(executable), "argv_shape": [mask_argv_token(token) for token in argv],
+    host, executable = _host(event), _text(event, "process.executable")
+    for value in (host, executable):
+        if isinstance(value, Missing):
+            return value
+    argv = event.get("process.argv")
+    if event.get("process.argv_complete") is False:
+        return Missing("the argument vector is incomplete", ("process.argv",))
+    if not isinstance(argv, list) or not argv or not all(isinstance(token, str) for token in argv):
+        return Missing("process.argv is not a non-empty list of strings", ("process.argv",))
+    return [_key(spec, _scope("host", host=host), {
+        "executable": executable, "argv_shape": [mask_argv_token(token) for token in argv],
     })]
 
 
-def _destination(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
+def _external_unicast(address: IPAddress, context: KeyContext) -> bool:
+    """An address outside the site that names one remote host (not multicast, broadcast or unspecified)."""
+    return not (context.is_internal(address) or address.is_multicast or address.is_unspecified
+                or address.is_reserved)
+
+
+def _question_names(event: TypedEvent) -> list[str] | Missing:
+    """Every question name of a DNS record, canonical; a malformed list or name is Missing, never skipped."""
+    names = event.get("dns.question.names")
+    if names is not None:
+        if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
+            return Missing("dns.question.names is not a list of names", ("dns.question.names",))
+        found = sorted({name for name in (qname(value) for value in names) if name})
+    else:
+        name = event.get("dns.question.name")
+        if name is None or name == "":
+            return Missing("no DNS question name", ("dns.question.names", "dns.question.name"))
+        if not isinstance(name, str):
+            return Missing("dns.question.name is not a single string", ("dns.question.name",))
+        found = [qname(name)] if qname(name) else []
+    if not found:
+        return Missing("no DNS question name", ("dns.question.names", "dns.question.name"))
+    return found
+
+
+def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    record_role = dns_role(event)
+    if record_role is None:
+        return NotApplicable(f"DNS record role {event.get('dns.type')} is neither a question nor an answer")
+    client_field = "destination.ip" if record_role == "answer" else "source.ip"
+    resolver_field = "source.ip" if record_role == "answer" else "destination.ip"
+    client = _ip(event, client_field)
+    if not isinstance(client, Missing) and not context.is_internal(client):
+        return NotApplicable("the DNS client is outside the site")
+    if (record_role == "answer" and event.get("dns.question.names") is None
+            and event.get("dns.question.name") is None):
+        return NotApplicable("an answer resource record without its question; the query record carries it")
+    resolver = _ip(event, resolver_field)
+    names = _question_names(event)
+    for value in (client, resolver, names):
+        if isinstance(value, Missing):
+            return value
+    # A lookup's destination is the name asked, never the resolver that answered it.
+    scope = _scope("internal_ip", address=str(client))
+    return [_key(spec, scope, {"kind": "registered_domain", "registered_domain": registered_domain(name)})
+            for name in names]
+
+
+def _destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
     if event.family == "dns_query":
-        record_role = dns_role(event)
-        if record_role is None:
-            return None
-        source, _resolver = dns_endpoints(event, record_role)
-        names = question_names(event) or []
-        source_ip = _canon_ip(source)
-        if not names or source_ip is None:
-            return None
-        # A lookup's destination is the name asked, never the resolver that answered it.
-        scope = _scope("internal_ip", address=source_ip[0])
-        return [_key(spec, scope, {"kind": "registered_domain", "registered_domain": registered_domain(name)})
-                for name in names]
-    source_ip, destination_ip = _canon_ip(event.get("source.ip")), _canon_ip(event.get("destination.ip"))
-    if source_ip is None or destination_ip is None:
-        return None
-    scope = _scope("internal_ip", address=source_ip[0])
+        return _dns_destination(event, context, spec)
+    source, destination = _ip(event, "source.ip"), _ip(event, "destination.ip")
+    if not isinstance(source, Missing) and not context.is_internal(source):
+        return NotApplicable("the source is outside the site (inbound or transit traffic)")
+    if not isinstance(destination, Missing) and not _external_unicast(destination, context):
+        return NotApplicable("the destination is not an external unicast address (east-west or local)")
+    for value in (source, destination):
+        if isinstance(value, Missing):
+            return value
+    sni_value = event.get("tls.client.server_name")
+    if sni_value is not None and not isinstance(sni_value, str):
+        return Missing("tls.client.server_name is not a single string", ("tls.client.server_name",))
+    scope = _scope("internal_ip", address=str(source))
     keys = [
-        _key(spec, scope, {"kind": "dest_ip", "dest_ip": destination_ip[0]}),
-        _key(spec, scope, {"kind": "dest_network", "dest_network": destination_ip[1]}),
+        _key(spec, scope, {"kind": "dest_ip", "dest_ip": str(destination)}),
+        _key(spec, scope, {"kind": "dest_network", "dest_network": _network(destination)}),
     ]
-    sni = _canon_dns(event.get("tls.client.server_name"))
+    sni = _canon_dns(sni_value)
     if sni is not None:
         keys.append(_key(spec, scope, {"kind": "sni", "sni": sni}))
         keys.append(_key(spec, scope, {"kind": "registered_domain", "registered_domain": registered_domain(sni)}))
     return keys
 
 
-def _service_rate(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
-    account = event.get("process.user")
-    if not event.host or account in (None, "") or str(account) not in context.service_accounts:
-        return None
-    return [_key(spec, _scope("host_account", host=event.host, account=str(account)), {})]
+def _uid(event: TypedEvent) -> int | Missing:
+    value = event.get("process.uid")
+    if value is None or value == "":
+        return Missing("process.uid is absent", ("process.uid",))
+    if isinstance(value, bool):
+        return Missing("process.uid is not a user id", ("process.uid",))
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        value = int(value)
+    # 4294967295 is the kernel's unset id, never a real account
+    if not isinstance(value, int) or not 0 <= value < 4294967295:
+        return Missing("process.uid is not a user id", ("process.uid",))
+    return value
 
+
+def _service_rate(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    account = _text(event, "process.user")
+    raw_uid = event.get("process.uid")
+    uid = _uid(event)
+    if account == "root" or uid == 0:
+        return NotApplicable("root is not a service account")
+    low, high = context.system_uid_range
+    if isinstance(uid, int) and not low <= uid <= high and account not in context.service_accounts:
+        return NotApplicable(f"uid {uid} is outside the system range and the account is not configured")
+    host = _host(event)
+    for value in (host, account):
+        if isinstance(value, Missing):
+            return value
+    if isinstance(uid, Missing) and not (raw_uid is None and account in context.service_accounts):
+        # an absent uid is decided by a configured name; a malformed one is never trusted
+        return uid
+    return [_key(spec, _scope("host_account", host=host, account=account), {})]
+
+
+_FLOW_IDS = ("suricata.flow_id", "network.community_id")
 
 BASELINE_SPECS = (
     BaselineSpec(
         id="bl.ssh_tuple", version="1", key_version="1", families=("auth",),
         datasets=("systemd.journal",), scope="site", measure="presence", bucket="day",
-        required_fields={"auth": ("auth.service", "source.ip", "user.name")}, _extract=_ssh_tuple,
+        required_fields={"auth": ("auth.service", "source.ip", "user.name")},
+        optional_fields={"auth": ()},
+        _extract=_ssh_tuple,
     ),
     BaselineSpec(
         id="bl.exec_path", version="1", key_version="1", families=("process_exec",),
         datasets=("linux.audit",), scope=("host", "account"), measure="prevalence", bucket="day",
         required_fields={
             "process_exec": ("process.executable", "process.exec_file.path", "process.user"),
-        }, _extract=_exec_path,
+        },
+        optional_fields={"process_exec": ()},
+        _extract=_exec_path,
     ),
     BaselineSpec(
         id="bl.exec_pair", version="1", key_version="1", families=("process_exec",),
         datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
-        required_fields={"process_exec": ("process.executable", "process.ppid")}, _extract=_exec_pair,
+        required_fields={"process_exec": ("process.executable", "process.ppid")},
+        optional_fields={"process_exec": ("host.boot.id",)},
+        _extract=_exec_pair,
     ),
     BaselineSpec(
         id="bl.cmd_shape", version="1", key_version="1", families=("process_exec",),
         datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
-        required_fields={"process_exec": ("process.executable", "process.argv")}, _extract=_cmd_shape,
+        required_fields={"process_exec": ("process.executable", "process.argv")},
+        optional_fields={"process_exec": ("process.argv_complete",)},
+        _extract=_cmd_shape,
     ),
     BaselineSpec(
         id="bl.ext_dest", version="1", key_version="1",
@@ -312,16 +533,25 @@ BASELINE_SPECS = (
         scope="internal_ip", measure="prevalence", bucket="day",
         required_fields={
             "net_flow": ("source.ip", "destination.ip"),
-            "dns_query": ("source.ip", "destination.ip", "dns.question.name"),
+            "dns_query": ("source.ip", "destination.ip", ("dns.question.names", "dns.question.name")),
             "tls_session": ("source.ip", "destination.ip"),
             "net_session": ("source.ip", "destination.ip"),
+        },
+        optional_fields={
+            "net_flow": (*_FLOW_IDS,),
+            "dns_query": ("dns.type", *_FLOW_IDS),
+            "tls_session": ("tls.client.server_name", *_FLOW_IDS),
+            "net_session": ("tls.client.server_name", *_FLOW_IDS),
         },
         _extract=_destination,
     ),
     BaselineSpec(
         id="bl.svc_exec_rate", version="1", key_version="1", families=("process_exec",),
         datasets=("linux.audit",), scope="host_account", measure="rate", bucket="hour",
-        required_fields={"process_exec": ("process.user",)}, _extract=_service_rate,
+        # the uid decides a service account; a configured account name decides one without it
+        required_fields={"process_exec": ("process.user", "process.uid")},
+        optional_fields={"process_exec": ()},
+        _extract=_service_rate,
     ),
 )
 

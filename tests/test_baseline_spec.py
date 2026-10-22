@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.baseline.spec import BASELINE_SPECS, SPEC_BY_ID, KeyContext, Pending
+from romulus.baseline.spec import (
+    BASELINE_SPECS,
+    SPEC_BY_ID,
+    KeyContext,
+    Missing,
+    NotApplicable,
+    ParentLookup,
+    Pending,
+)
 from romulus.detect.correlation import PidTable
 from romulus.evidence.typed import Outcome, TypedEvent, fv
 from scripts.archmap import violations
@@ -118,23 +127,47 @@ def test_ssh_tuple_known_source_network_keeps_its_key_when_the_address_changes()
     assert first_by["source_ip"] != second_by["source_ip"]
 
 
+SSH = {"auth.service": "sshd", "source.ip": "192.0.2.1", "user.name": "a"}
+
+
 @pytest.mark.parametrize(
-    "event",
+    ("host", "outcome", "fields", "missing"),
     [
-        _event("auth", host=None, outcome=Outcome.success,
-               **{"auth.service": "sshd", "source.ip": "192.0.2.1", "user.name": "a"}),
-        _event("auth", outcome=Outcome.success,
-               **{"auth.service": "sshd", "source.ip": None, "user.name": "a"}),
-        _event("auth", outcome=Outcome.success,
-               **{"auth.service": "sshd", "source.ip": "192.0.2.1", "user.name": None}),
-        _event("auth", outcome=Outcome.failure,
-               **{"auth.service": "sshd", "source.ip": "192.0.2.1", "user.name": "a"}),
-        _event("auth", outcome=Outcome.success,
-               **{"auth.service": "sudo", "source.ip": "192.0.2.1", "user.name": "a"}),
+        (None, Outcome.success, {}, ("host",)),
+        ("", Outcome.success, {}, ("host",)),
+        ("web01", Outcome.success, {"source.ip": None}, ("source.ip",)),
+        ("web01", Outcome.success, {"source.ip": "not-an-ip"}, ("source.ip",)),
+        ("web01", Outcome.success, {"source.ip": 3232235777}, ("source.ip",)),
+        ("web01", Outcome.success, {"user.name": None}, ("user.name",)),
+        ("web01", Outcome.success, {"user.name": ["alice", "bob"]}, ("user.name",)),
+        ("web01", Outcome.success, {"user.name": 1000}, ("user.name",)),
+        ("web01", Outcome.success, {"auth.service": None}, ("auth.service",)),
+        ("web01", Outcome.unknown, {}, ("outcome",)),
     ],
 )
-def test_ssh_tuple_missing_or_failed_auth_never_keys(event):
-    assert SPEC_BY_ID["bl.ssh_tuple"].keys(event, _ctx()) is None
+def test_ssh_tuple_absent_or_malformed_required_value_is_typed_missing(host, outcome, fields, missing):
+    result = SPEC_BY_ID["bl.ssh_tuple"].keys(_event("auth", host=host, outcome=outcome, **{**SSH, **fields}), _ctx())
+    assert isinstance(result, Missing) and result.fields == missing and result.reason
+
+
+@pytest.mark.parametrize(
+    ("outcome", "fields"),
+    [
+        (Outcome.failure, {}),
+        (Outcome.success, {"auth.service": "sudo"}),
+        # a known non-applicable value decides even when another required value is absent
+        (Outcome.failure, {"source.ip": None}),
+        (Outcome.unknown, {"auth.service": "su"}),
+    ],
+)
+def test_ssh_tuple_failed_auth_and_other_services_are_not_applicable(outcome, fields):
+    result = SPEC_BY_ID["bl.ssh_tuple"].keys(_event("auth", outcome=outcome, **{**SSH, **fields}), _ctx())
+    assert isinstance(result, NotApplicable) and result.reason
+
+
+def test_wrong_family_is_not_applicable():
+    result = SPEC_BY_ID["bl.ssh_tuple"].keys(_event("process_exec", outcome=Outcome.success, **SSH), _ctx())
+    assert isinstance(result, NotApplicable)
 
 
 def test_exec_path_preserves_paths_verbatim_and_emits_host_and_account_scopes():
@@ -154,18 +187,30 @@ def test_exec_path_preserves_paths_verbatim_and_emits_host_and_account_scopes():
     }
 
 
-@pytest.mark.parametrize("missing", ["host", "process.executable", "process.exec_file.path", "process.user"])
-def test_exec_path_missing_required_value_never_keys(missing):
-    fields = {
-        "process.executable": "/bin/sh", "process.exec_file.path": "/bin/sh", "process.user": "www-data",
-    }
-    host = "web01"
-    if missing == "host":
-        host = None
-    else:
-        fields[missing] = None
-    event = _event("process_exec", host=host, outcome=Outcome.success, **fields)
-    assert SPEC_BY_ID["bl.exec_path"].keys(event, _ctx()) is None
+EXEC = {"process.executable": "/bin/sh", "process.exec_file.path": "/bin/sh", "process.user": "www-data"}
+
+
+@pytest.mark.parametrize(
+    ("host", "outcome", "fields", "missing"),
+    [
+        (None, Outcome.success, {}, ("host",)),
+        ("web01", Outcome.success, {"process.executable": None}, ("process.executable",)),
+        ("web01", Outcome.success, {"process.exec_file.path": None}, ("process.exec_file.path",)),
+        ("web01", Outcome.success, {"process.user": None}, ("process.user",)),
+        ("web01", Outcome.success, {"process.user": ["a", "b"]}, ("process.user",)),
+        ("web01", Outcome.success, {"process.executable": ["/bin/sh"]}, ("process.executable",)),
+        ("web01", Outcome.unknown, {}, ("outcome",)),
+    ],
+)
+def test_exec_path_absent_or_malformed_required_value_is_typed_missing(host, outcome, fields, missing):
+    event = _event("process_exec", host=host, outcome=outcome, **{**EXEC, **fields})
+    result = SPEC_BY_ID["bl.exec_path"].keys(event, _ctx())
+    assert isinstance(result, Missing) and result.fields == missing
+
+
+def test_exec_path_failed_exec_is_not_applicable():
+    event = _event("process_exec", outcome=Outcome.failure, **{**EXEC, "process.user": None})
+    assert isinstance(SPEC_BY_ID["bl.exec_path"].keys(event, _ctx()), NotApplicable)
 
 
 def test_exec_pair_uses_the_same_boot_parent_exec():
@@ -192,9 +237,33 @@ def test_exec_pair_uses_the_same_boot_parent_exec():
     assert keys[0].key == {"child_executable": "/bin/sh", "parent_executable": "/usr/sbin/nginx"}
 
 
-def test_exec_pair_without_parent_exec_returns_pending_carry_in():
-    child = _event("process_exec", **{"process.ppid": 100, "process.executable": "/bin/sh"})
-    assert SPEC_BY_ID["bl.exec_pair"].keys(child, _ctx()) == Pending("web01", None, 100, T0)
+def test_exec_pair_without_parent_exec_returns_compact_pending_carry_in():
+    child = _event("process_exec", event_id="child-1", host="Web01",
+                   **{"process.ppid": 100, "process.executable": "/bin/sh"})
+    # the host stays as recorded: a carry-in pid table is keyed on the recorded host
+    assert SPEC_BY_ID["bl.exec_pair"].keys(child, _ctx()) == Pending(
+        host="Web01", boot=None, ppid=100, ts=T0, event_id="child-1", child_executable="/bin/sh",
+    )
+
+
+def test_exec_pair_accepts_any_parent_lookup_exposing_only_lookup():
+    class OneParent:
+        """A bounded stand-in: the extractor may call nothing but lookup()."""
+
+        def __init__(self):
+            self.calls = []
+
+        def lookup(self, host, pid, ts, boot=None):
+            self.calls.append((host, pid, ts, boot))
+            return (ts - 1, "/usr/sbin/cron", 1, "raw-1", boot)
+
+    table = OneParent()
+    child = _event("process_exec", **{"process.ppid": 7, "process.executable": "/bin/sh",
+                                      "host.boot.id": "boot-a"})
+    keys = SPEC_BY_ID["bl.exec_pair"].keys(child, KeyContext(pid_table=table))
+    assert keys[0].key == {"child_executable": "/bin/sh", "parent_executable": "/usr/sbin/cron"}
+    assert table.calls == [("web01", 7, T0.timestamp(), "boot-a")]
+    assert isinstance(OneParent(), ParentLookup)
 
 
 def test_exec_pair_never_joins_a_parent_from_another_boot():
@@ -209,18 +278,27 @@ def test_exec_pair_never_joins_a_parent_from_another_boot():
         "process_exec",
         **{"process.ppid": 100, "process.executable": "/bin/sh", "host.boot.id": "boot-b"},
     )
-    assert SPEC_BY_ID["bl.exec_pair"].keys(child, _ctx(table)) == Pending("web01", "boot-b", 100, T0)
+    assert SPEC_BY_ID["bl.exec_pair"].keys(child, _ctx(table)) == Pending(
+        host="web01", boot="boot-b", ppid=100, ts=T0, event_id="event-1", child_executable="/bin/sh",
+    )
 
 
-@pytest.mark.parametrize("missing", ["host", "process.ppid", "process.executable"])
-def test_exec_pair_missing_required_value_never_keys(missing):
-    fields = {"process.ppid": 100, "process.executable": "/bin/sh"}
-    host = "web01"
-    if missing == "host":
-        host = None
-    else:
-        fields[missing] = None
-    assert SPEC_BY_ID["bl.exec_pair"].keys(_event("process_exec", host=host, **fields), _ctx()) is None
+@pytest.mark.parametrize(
+    ("host", "fields", "missing"),
+    [
+        (None, {}, ("host",)),
+        ("web01", {"process.ppid": None}, ("process.ppid",)),
+        ("web01", {"process.ppid": "100"}, ("process.ppid",)),
+        ("web01", {"process.ppid": True}, ("process.ppid",)),
+        ("web01", {"process.ppid": -1}, ("process.ppid",)),
+        ("web01", {"process.executable": None}, ("process.executable",)),
+        ("web01", {"process.executable": 5}, ("process.executable",)),
+    ],
+)
+def test_exec_pair_absent_or_malformed_required_value_is_typed_missing(host, fields, missing):
+    event = _event("process_exec", host=host, **{"process.ppid": 100, "process.executable": "/bin/sh", **fields})
+    result = SPEC_BY_ID["bl.exec_pair"].keys(event, _ctx())
+    assert isinstance(result, Missing) and result.fields == missing
 
 
 def test_command_shape_masks_variable_tokens_without_using_serialized_records():
@@ -246,16 +324,21 @@ def test_command_shape_masks_variable_tokens_without_using_serialized_records():
 
 
 @pytest.mark.parametrize(
-    "fields",
+    ("host", "fields", "missing"),
     [
-        {"process.executable": "/bin/sh", "process.argv": ["sh"], "process.argv_complete": False},
-        {"process.executable": "/bin/sh", "process.argv": None},
-        {"process.executable": "/bin/sh", "process.argv": ["sh", None]},
-        {"process.executable": None, "process.argv": ["sh"]},
+        ("web01", {"process.executable": "/bin/sh", "process.argv": ["sh"], "process.argv_complete": False},
+         ("process.argv",)),
+        ("web01", {"process.executable": "/bin/sh", "process.argv": None}, ("process.argv",)),
+        ("web01", {"process.executable": "/bin/sh", "process.argv": []}, ("process.argv",)),
+        ("web01", {"process.executable": "/bin/sh", "process.argv": "sh -c id"}, ("process.argv",)),
+        ("web01", {"process.executable": "/bin/sh", "process.argv": ["sh", None]}, ("process.argv",)),
+        ("web01", {"process.executable": None, "process.argv": ["sh"]}, ("process.executable",)),
+        (None, {"process.executable": "/bin/sh", "process.argv": ["sh"]}, ("host",)),
     ],
 )
-def test_command_shape_incomplete_or_missing_argv_never_keys(fields):
-    assert SPEC_BY_ID["bl.cmd_shape"].keys(_event("process_exec", **fields), _ctx()) is None
+def test_command_shape_incomplete_or_missing_argv_is_typed_missing(host, fields, missing):
+    result = SPEC_BY_ID["bl.cmd_shape"].keys(_event("process_exec", host=host, **fields), _ctx())
+    assert isinstance(result, Missing) and result.fields == missing
 
 
 def _kinds(keys) -> dict[str, dict]:
@@ -332,28 +415,171 @@ def test_dns_answer_scopes_the_client_not_the_resolver():
 
 
 @pytest.mark.parametrize(
-    "fields",
+    ("family", "fields", "missing"),
     [
-        {"source.ip": None, "destination.ip": "192.0.2.1"},
-        {"source.ip": "10.0.0.1", "destination.ip": None},
-        {"source.ip": "not-an-ip", "destination.ip": "192.0.2.1"},
-        {"source.ip": "10.0.0.1", "destination.ip": "not-an-ip"},
+        ("net_flow", {"source.ip": None, "destination.ip": "192.0.2.1"}, ("source.ip",)),
+        ("net_flow", {"source.ip": "10.0.0.1", "destination.ip": None}, ("destination.ip",)),
+        ("net_flow", {"source.ip": "not-an-ip", "destination.ip": "192.0.2.1"}, ("source.ip",)),
+        ("net_flow", {"source.ip": "10.0.0.1", "destination.ip": "not-an-ip"}, ("destination.ip",)),
+        ("net_session", {"source.ip": ["10.0.0.1"], "destination.ip": "192.0.2.1"}, ("source.ip",)),
+        ("tls_session", {"source.ip": "10.0.0.1", "destination.ip": "192.0.2.1",
+                         "tls.client.server_name": ["a.example.com"]}, ("tls.client.server_name",)),
+        ("tls_session", {"source.ip": "10.0.0.1", "destination.ip": "192.0.2.1",
+                         "tls.client.server_name": 7}, ("tls.client.server_name",)),
+        ("dns_query", {"dns.type": "query", "source.ip": None, "destination.ip": "10.0.0.53",
+                       "dns.question.name": "example.com"}, ("source.ip",)),
+        ("dns_query", {"dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "bogus",
+                       "dns.question.name": "example.com"}, ("destination.ip",)),
+        ("dns_query", {"dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53"},
+         ("dns.question.names", "dns.question.name")),
+        ("dns_query", {"dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
+                       "dns.question.names": ["example.com", 7]}, ("dns.question.names",)),
     ],
 )
-def test_external_destination_missing_or_malformed_address_never_keys(fields):
-    assert SPEC_BY_ID["bl.ext_dest"].keys(_event("net_flow", **fields), _ctx()) is None
+def test_external_destination_absent_or_malformed_value_is_typed_missing(family, fields, missing):
+    result = SPEC_BY_ID["bl.ext_dest"].keys(_event(family, **fields), _ctx())
+    assert isinstance(result, Missing) and result.fields == missing
 
 
-def test_service_exec_rate_uses_configured_service_accounts_and_empty_key():
+@pytest.mark.parametrize(
+    ("family", "fields"),
+    [
+        # inbound scanner traffic: external source to an internal host
+        ("net_flow", {"source.ip": "203.0.113.50", "destination.ip": "10.0.0.8"}),
+        ("net_session", {"source.ip": "203.0.113.50", "destination.ip": "10.0.0.8"}),
+        # east-west between internal hosts
+        ("net_flow", {"source.ip": "10.0.0.4", "destination.ip": "10.0.0.8"}),
+        ("tls_session", {"source.ip": "fd00::4", "destination.ip": "fd00::8",
+                         "tls.client.server_name": "intranet.example"}),
+        # transit between two external addresses
+        ("net_flow", {"source.ip": "198.51.100.1", "destination.ip": "203.0.113.2"}),
+        # multicast, broadcast and unspecified destinations are not external hosts
+        ("net_flow", {"source.ip": "10.0.0.4", "destination.ip": "224.0.0.251"}),
+        ("net_flow", {"source.ip": "10.0.0.4", "destination.ip": "255.255.255.255"}),
+        ("net_flow", {"source.ip": "10.0.0.4", "destination.ip": "ff02::fb"}),
+        ("net_flow", {"source.ip": "10.0.0.4", "destination.ip": "0.0.0.0"}),
+        # an external source decides even when the destination is unreadable
+        ("net_flow", {"source.ip": "203.0.113.50", "destination.ip": None}),
+        # a DNS client outside the site asking a site resolver
+        ("dns_query", {"dns.type": "query", "source.ip": "203.0.113.50", "destination.ip": "10.0.0.53",
+                       "dns.question.name": "example.com"}),
+        # a recorded DNS role that is neither question nor answer
+        ("dns_query", {"dns.type": "update", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
+                       "dns.question.name": "example.com"}),
+        # a Suricata v1 answer resource record carries no question; its query record does
+        ("dns_query", {"dns.type": "answer", "source.ip": "10.0.0.53", "destination.ip": "10.0.0.4"}),
+    ],
+)
+def test_external_destination_wrong_direction_or_role_is_not_applicable(family, fields):
+    result = SPEC_BY_ID["bl.ext_dest"].keys(_event(family, **fields), _ctx())
+    assert isinstance(result, NotApplicable) and result.reason
+
+
+def test_internal_network_test_is_a_context_seam():
+    lab_nets = (ipaddress.ip_network("198.51.100.0/24"),)
+    context = KeyContext(is_internal=lambda address: any(address in net for net in lab_nets))
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(
+        _event("net_flow", **{"source.ip": "198.51.100.4", "destination.ip": "203.0.113.9"}), context,
+    )
+    assert {key.scope for key in keys} == {"internal_ip:198.51.100.4"}
+    assert isinstance(SPEC_BY_ID["bl.ext_dest"].keys(
+        _event("net_flow", **{"source.ip": "10.0.0.4", "destination.ip": "203.0.113.9"}), context,
+    ), NotApplicable)
+
+
+def test_service_exec_rate_keys_configured_service_accounts_with_an_empty_key():
     spec = SPEC_BY_ID["bl.svc_exec_rate"]
-    service = _event("process_exec", **{"process.user": "www-data"})
+    service = _event("process_exec", **{"process.user": "www-data", "process.uid": "1001"})
     keys = spec.keys(service, _ctx(service_accounts=frozenset({"www-data"})))
     assert len(keys) == 1 and keys[0].scope == 'host_account:{"account":"www-data","host":"web01"}'
-    assert keys[0].key == {}
-    assert spec.keys(_event("process_exec", **{"process.user": "alice"}), _ctx(
-        service_accounts=frozenset({"www-data"}),
-    )) is None
-    assert spec.keys(_event("process_exec", **{"process.user": None}), _ctx()) is None
+    assert keys[0].scope_kind == "host_account" and keys[0].key == {}
+
+
+@pytest.mark.parametrize(("account", "uid"), [("postgres", "114"), ("jenkins", "998"), ("svc", 1), ("www-data", 33)])
+def test_service_exec_rate_keys_system_range_accounts_by_typed_uid(account, uid):
+    keys = SPEC_BY_ID["bl.svc_exec_rate"].keys(
+        _event("process_exec", **{"process.user": account, "process.uid": uid}), _ctx(),
+    )
+    assert [key.scope for key in keys] == [f'host_account:{{"account":"{account}","host":"web01"}}']
+
+
+def test_service_exec_rate_default_context_is_not_the_web_only_list():
+    assert KeyContext().service_accounts == frozenset()
+    assert KeyContext().system_uid_range == (1, 999)
+
+
+@pytest.mark.parametrize(
+    ("fields", "configured"),
+    [
+        ({"process.user": "alice", "process.uid": "1000"}, frozenset()),
+        ({"process.user": "root", "process.uid": "0"}, frozenset()),
+        ({"process.user": "root", "process.uid": "0"}, frozenset({"root"})),
+        ({"process.user": "root"}, frozenset({"root"})),
+        ({"process.user": "nobody", "process.uid": "65534"}, frozenset()),
+    ],
+)
+def test_service_exec_rate_human_root_and_out_of_range_accounts_are_not_applicable(fields, configured):
+    result = SPEC_BY_ID["bl.svc_exec_rate"].keys(_event("process_exec", **fields), _ctx(service_accounts=configured))
+    assert isinstance(result, NotApplicable)
+
+
+def test_service_exec_rate_uid_range_is_configurable():
+    context = KeyContext(system_uid_range=(1, 499))
+    result = SPEC_BY_ID["bl.svc_exec_rate"].keys(
+        _event("process_exec", **{"process.user": "jenkins", "process.uid": "998"}), context,
+    )
+    assert isinstance(result, NotApplicable)
+
+
+@pytest.mark.parametrize(
+    ("host", "fields", "missing"),
+    [
+        (None, {"process.user": "postgres", "process.uid": "114"}, ("host",)),
+        ("web01", {"process.user": None, "process.uid": "114"}, ("process.user",)),
+        ("web01", {"process.user": ["postgres"], "process.uid": "114"}, ("process.user",)),
+        ("web01", {"process.user": "postgres"}, ("process.uid",)),
+        ("web01", {"process.user": "postgres", "process.uid": True}, ("process.uid",)),
+        ("web01", {"process.user": "postgres", "process.uid": "abc"}, ("process.uid",)),
+        ("web01", {"process.user": "postgres", "process.uid": "4294967295"}, ("process.uid",)),
+    ],
+)
+def test_service_exec_rate_absent_or_malformed_identity_is_typed_missing(host, fields, missing):
+    result = SPEC_BY_ID["bl.svc_exec_rate"].keys(_event("process_exec", host=host, **fields), _ctx())
+    assert isinstance(result, Missing) and result.fields == missing
+
+
+_COMPLETE = {
+    ("bl.ssh_tuple", "auth"): (Outcome.success, SSH),
+    ("bl.exec_path", "process_exec"): (Outcome.success, EXEC),
+    ("bl.exec_pair", "process_exec"): (Outcome.unknown, {"process.ppid": 100, "process.executable": "/bin/sh"}),
+    ("bl.cmd_shape", "process_exec"): (Outcome.unknown, {"process.executable": "/bin/sh", "process.argv": ["sh"]}),
+    ("bl.ext_dest", "net_flow"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
+    ("bl.ext_dest", "net_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
+    ("bl.ext_dest", "tls_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
+    ("bl.ext_dest", "dns_query"): (Outcome.unknown, {
+        "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53", "dns.question.name": "example.com",
+        "dns.question.names": ["example.com"],
+    }),
+    ("bl.svc_exec_rate", "process_exec"): (Outcome.unknown, {"process.user": "postgres", "process.uid": "114"}),
+}
+
+
+def test_required_fields_are_accurate_per_event_kind():
+    """Each family's required fields are exactly what the extractor needs: a complete event keys, and
+    removing any one required field (every alternative of an any-of group) makes the event Missing."""
+    pairs = {(spec.id, family) for spec in BASELINE_SPECS for family in spec.families}
+    assert pairs == set(_COMPLETE)
+    for (spec_id, family), (outcome, fields) in _COMPLETE.items():
+        spec = SPEC_BY_ID[spec_id]
+        assert set(spec.required_fields) == set(spec.families)
+        complete = spec.keys(_event(family, outcome=outcome, **fields), _ctx())
+        assert isinstance(complete, (list, Pending)), (spec_id, family, complete)
+        for requirement in spec.required_fields[family]:
+            group = requirement if isinstance(requirement, tuple) else (requirement,)
+            reduced = {name: value for name, value in fields.items() if name not in group}
+            result = spec.keys(_event(family, outcome=outcome, **reduced), _ctx())
+            assert isinstance(result, Missing), (spec_id, family, group, result)
+            assert set(result.fields) <= set(group), (spec_id, family, group, result)
 
 
 def test_key_digests_are_deterministic_across_repeated_extraction():
