@@ -580,11 +580,19 @@ class Toolbox:
         start = (page - 1) * ENTITY_EVENT_LIMIT
         page_ids = event_ids[start:start + ENTITY_EVENT_LIMIT]
         cells = [item.model_dump(mode="json") for item in result.coverage]
-        gaps = [cell for cell in cells if cell["status"] != "complete"]
+        control_cells = []
+        for cell in cells:
+            control_cells.append({
+                key: ([{range_key: range_value for range_key, range_value in item.items()
+                        if range_key != "reason"} for item in value]
+                      if key in {"covered_ranges", "unresolved_ranges"} else value)
+                for key, value in cell.items() if key != "reasons"
+            })
+        gaps = [cell for cell in control_cells if cell["status"] != "complete"]
         if not cells and result.status != "complete" and result.reasons:
-            gaps = [{"reason": reason} for reason in result.reasons]
+            gaps = [{"status": "unresolved"}]
         coverage = {"status": "complete" if result.status == "complete" else "partial",
-                    "cells": cells, "gaps": gaps}
+                    "cells": control_cells, "gaps": gaps}
         evidence = []
         event_aliases = {}
         for event_id in page_ids:
@@ -615,7 +623,7 @@ class Toolbox:
             "result": {
                 "evidence": evidence, "candidates": candidates, "entities": entities,
                 "event_summaries": summaries, "task_count": len(result.task_ids),
-                "reasons": list(result.reasons), "duration_ms": result.duration_ms,
+                "coverage": cells, "reasons": list(result.reasons), "duration_ms": result.duration_ms,
                 "page": page, "cursor": cursor,
             }
         }
