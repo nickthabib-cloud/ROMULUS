@@ -135,3 +135,28 @@ def test_boot_conflict_in_an_hour_makes_the_hour_partial_and_the_map_is_per_hour
     older = source.plan("host-index", START, START + timedelta(hours=1), query_budget=5)
     assert source.fetch(older.partitions[0]).completeness == "complete"
     assert maps[0] is not maps[1] and not maps[1].conflicts
+
+
+def test_a_process_execs_time_is_the_retrieval_time_field():
+    """The parent carry's continuity rests on this: an exec's typed time is the very field history partitions
+    retrieve by, so no exec can be typed in one hour and retrieved in another. If exec time ever moved (to the
+    audit header, say), the carry's tripwire and horizon would catch only part of it; this test then fails first.
+    """
+    from romulus.evidence.normalize import normalize_hits
+    from romulus.sources.profile import FieldContract
+
+    stamped = "2024-11-18T14:40:00.250Z"            # the shipper's time, minutes after the audit header's
+    raws = [
+        'type=EXECVE msg=audit(1731940424.829:9001): argc=1 a0="ls"',
+        ('type=SYSCALL msg=audit(1731940424.829:9001): arch=c000003e syscall=59 success=yes exit=0 ppid=10 '
+         'pid=11 auid=1000 uid=1000 euid=1000 comm="ls" exe="/usr/bin/ls" key=(null)'),
+    ]
+    hits = [{"_id": f"r{n}", "_index": "host-index", "_source": {
+        "@timestamp": stamped, "message": raw, "host": {"name": "video"},
+        "event": {"dataset": "linux.audit", "original": raw}}} for n, raw in enumerate(raws)]
+    events, _skips, errors = normalize_hits(hits)
+    execs = [event for event in events if event.family == "process_exec"]
+    assert not errors and len(execs) == 1
+    time_field = FieldContract(target="host-index", fields={}).time_field
+    assert time_field == "@timestamp"
+    assert execs[0].ts == datetime.fromisoformat(hits[0]["_source"][time_field]).astimezone(UTC)
