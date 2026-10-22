@@ -394,8 +394,28 @@ class Repo:
                     link_rows.append({"event_id": e.id, "entity_id": eid, "role": role})
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
             _upsert_ignore(c, t.typed_event, ev_rows, ["id"])
+            self._fill_boot(c, ev_rows)
             _upsert_ignore(c, t.entity, list(ent_rows.values()), ["id"])
             _upsert_ignore(c, t.event_entity, link_rows, ["event_id", "entity_id", "role"])
+
+    @staticmethod
+    def _fill_boot(c, ev_rows: list[dict]) -> None:
+        """An audit event's boot id depends on its journald copy being in the same retrieval batch, so one event id
+        can be stored first without it (a link fetch) and seen later with it (the sweep). Fill a missing boot id
+        forward onto the stored row; a recorded one is never overwritten. Nothing else about the row changes."""
+        booted = {row["id"]: row["event"]["fields"]["host.boot.id"] for row in ev_rows
+                  if (row["event"].get("fields") or {}).get("host.boot.id", {}).get("value") not in (None, "")}
+        ids = sorted(booted)
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            for row in c.execute(select(t.typed_event.c.id, t.typed_event.c.event)
+                                 .where(t.typed_event.c.id.in_(chunk))).mappings():
+                stored = row["event"]
+                fields = stored.get("fields") or {}
+                if (fields.get("host.boot.id") or {}).get("value") not in (None, ""):
+                    continue
+                stored = {**stored, "fields": {**fields, "host.boot.id": booted[row["id"]]}}
+                c.execute(t.typed_event.update().where(t.typed_event.c.id == row["id"]).values(event=stored))
 
     def events_by_ids(self, ids: list[str]) -> list[dict]:
         with self.engine.connect() as c:

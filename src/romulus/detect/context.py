@@ -28,6 +28,7 @@ from romulus.detect.base import (
     outcome_phrase,
     pf,
 )
+from romulus.detect.correlation import boot_of, merge_unknown_boot
 from romulus.detect.host import is_internal
 from romulus.detect.linux_argv import (
     client_operands,
@@ -78,13 +79,37 @@ def _context_suffix(anchor: ContextAnchor, link: ContextLink) -> str:
     return f"It was reached from {anchor.id} through observed {link.link_type} link {link.id}."
 
 
-def _session_key(event: TypedEvent, anchor: ContextAnchor) -> tuple:
-    """Group key for one session/lineage: host, boot id (when typed) and audit session id. When no session id
-    is typed (a lineage link), the anchor's content identity keeps lineages on one host apart; its id would differ
-    between identical hunts."""
+def _session_part(event: TypedEvent, anchor: ContextAnchor):
     session = event.get("process.session_id")
-    boot = event.get("host.boot.id")
-    return (event.host, boot, session if session is not None else f"lin:{anchor.identity}")
+    return session if session is not None else f"lin:{anchor.identity}"
+
+
+def _session_boots(events: list[TypedEvent], anchor: ContextAnchor) -> dict[tuple, str]:
+    """(host, session part) -> the one boot id recorded among these records of that session. A session id restarts
+    at a reboot; with two recorded boots there is no entry, so a record without a boot id stays apart."""
+    seen: dict[tuple, set[str]] = defaultdict(set)
+    for event in events:
+        boot = boot_of(event)
+        if boot is not None:
+            seen[(event.host, _session_part(event, anchor))].add(boot)
+    return {key: next(iter(boots)) for key, boots in seen.items() if len(boots) == 1}
+
+
+def _session_key(event: TypedEvent, anchor: ContextAnchor, boots: dict[tuple, str] | None = None) -> tuple:
+    """Group key for one session/lineage: host, boot id and audit session id. When no session id
+    is typed (a lineage link), the anchor's content identity keeps lineages on one host apart; its id would differ
+    between identical hunts.
+
+    Records reached by expansion links usually carry no boot id (their journald copies are not retrieved) while the
+    sweep's own records do. A record without one takes the session's only recorded boot among `boots` (see
+    `_session_boots`), so one session is never split by boot presence; two recorded boots are two sessions. Without
+    `boots` the record's own boot id (or None) is used. A session id reused after a reboot, where neither side's
+    records carry a boot id, can still join two logins."""
+    part = _session_part(event, anchor)
+    boot = boot_of(event)
+    if boot is None and boots:
+        boot = boots.get((event.host, part))
+    return (event.host, boot, part)
 
 
 def _group_id(key: tuple) -> str:
@@ -362,6 +387,7 @@ class PostAccessDiscovery(_HostContextRule):
                    "network flows the session opens next")
 
     def match_linked(self, anchor, link, events):
+        boots = _session_boots(events, anchor)
         groups: dict[tuple, list[tuple[str, str, TypedEvent]]] = defaultdict(list)
         for event in self.eligible_records(events):
             prog = program(event)
@@ -371,7 +397,7 @@ class PostAccessDiscovery(_HostContextRule):
                 continue                       # counted as missing: a lost argument may be a change verb
             found = classify_discovery(prog.name, prog.args, event.get("process.cwd"))
             if found is not None:
-                groups[_session_key(event, anchor)].append((found[0], found[1], event))
+                groups[_session_key(event, anchor, boots)].append((found[0], found[1], event))
             elif _operands_unplaced(prog, event):
                 self.missing_required += 1
 
@@ -490,6 +516,7 @@ class PrivilegeProbing(_HostContextRule):
                    "commands the root-privileged process ran next")
 
     def match_linked(self, anchor, link, events):
+        boots = _session_boots(events, anchor)
         eligible = self.eligible_records(events)
         # The anchor's own exec records are not among the link events on a lineage link, so add them to the
         # index: a root record's parent may be the anchor's own shell. They are lookups only, not candidates.
@@ -504,7 +531,7 @@ class PrivilegeProbing(_HostContextRule):
             prog = program(event)
             if prog is None:
                 continue
-            key = _session_key(event, anchor)
+            key = _session_key(event, anchor, boots)
             if prog.name in ELEVATION_HELPERS and key not in helper_first:
                 helper_first[key] = event.ts
             # sudo's own options end at its command; with an incomplete argv where they end is not known
@@ -522,7 +549,7 @@ class PrivilegeProbing(_HostContextRule):
                     continue
                 if _is_real_root(parent):
                     continue                        # inherited root, not a transition
-                tkey = (event.host, event.get("host.boot.id"), key[2], event.get("process.pid"),
+                tkey = (event.host, key[1], key[2], event.get("process.pid"),
                         event.get("process.executable"))
                 if tkey in seen_transition:
                     continue
@@ -588,7 +615,7 @@ class PrivilegeProbing(_HostContextRule):
                           _predicate_all(cited, field, "process.uid", "process.euid", "process.auid",
                                          "process.executable", "process.ppid"),
                           event.ts, "high" if lane == "high" else "medium", lane, "medium", event.entities(),
-                          group_key=f"euid0|{event.host}|{event.get('host.boot.id')}|{key[2]}|{pid}|"
+                          group_key=f"euid0|{event.host}|{key[1]}|{key[2]}|{pid}|"
                                     f"{event.get('process.executable')}")
             match.notes.extend(techniques)
             out.append(self._finish(match, [event]))
@@ -710,6 +737,7 @@ class CredentialAccessInContext(_HostContextRule):
                    "the other commands in the same session")
 
     def match_linked(self, anchor, link, events):
+        boots = _session_boots(events, anchor)
         groups: dict[tuple, list[tuple[str, TypedEvent]]] = defaultdict(list)
         for event in self.eligible_records(events):
             prog = program(event)
@@ -722,7 +750,7 @@ class CredentialAccessInContext(_HostContextRule):
                 found = classify_credential(path)
                 if found is not None:
                     technique, lane, desc = found
-                    groups[(_session_key(event, anchor), technique, lane)].append((desc, event))
+                    groups[(_session_key(event, anchor, boots), technique, lane)].append((desc, event))
                     break
 
         out = []
@@ -985,6 +1013,7 @@ class StagingAndTransfer(_HostContextRule):
                    "the other commands in the same session")
 
     def match_linked(self, anchor, link, events):
+        boots = _session_boots(events, anchor)
         groups: dict[tuple, dict] = defaultdict(
             lambda: {"stage": [], "transfer": [], "ingress": [], "tech": set()})
         for event in self.eligible_records(events):
@@ -1000,7 +1029,7 @@ class StagingAndTransfer(_HostContextRule):
             if kind == "unknown":
                 self.missing_required += 1         # an unparseable shell -c is partial, never a clean no-match
                 continue
-            bucket = groups[_session_key(event, anchor)]
+            bucket = groups[_session_key(event, anchor, boots)]
             bucket[kind].append((desc, event))
             bucket["tech"].add(technique)
 
@@ -1095,13 +1124,14 @@ class LateralMovement(_HostContextRule):
                    "whether a network sensor also recorded the flow")
 
     def match_linked(self, anchor, link, events):
+        boots = _session_boots(events, anchor)
         eligible = self.eligible_records(events)
         index = _exec_index(eligible)
         clients: dict[tuple, list[_Client]] = defaultdict(list)
         exec_groups: dict[tuple, dict] = defaultdict(lambda: {"exec": [], "tech": set()})
         socket_groups: dict[tuple, dict] = defaultdict(lambda: {"socket": [], "tech": set()})
         for event in sorted(eligible, key=lambda item: (item.ts, item.id)):
-            session = _session_key(event, anchor)
+            session = _session_key(event, anchor, boots)
             if event.family == "process_exec":
                 prog = program(event)
                 if prog is None or prog.name not in _REMOTE_CLIENTS:
@@ -1247,8 +1277,9 @@ class EntryPointPromotion(ContextPlaybook):
     _PHASE_RANK: ClassVar[dict[str, int]] = {"login": 0, "authentication": 0, "session_open": 2}
 
     def match_linked(self, anchor, link, events):
-        # Group the session's own sshd success records by (host, boot, session id). The external-vs-internal
-        # test uses only a session's own records, so another session can never affect it.
+        # Group the session's own sshd success records by (host, boot, session id); a group without a recorded boot
+        # joins the session's only recorded boot. The external-vs-internal test uses only a session's own records,
+        # so another session (another boot's login that reused the session id) can never affect it.
         sessions: dict[tuple, list[TypedEvent]] = defaultdict(list)
         for event in self.eligible_records(events):
             if event.get("auth.service") != "sshd" or event.outcome != Outcome.success:
@@ -1260,9 +1291,10 @@ class EntryPointPromotion(ContextPlaybook):
                 except ValueError:
                     self.missing_required += 1       # a present-but-unparseable source is not a clean field
                     continue
-            key = (event.host, event.get("host.boot.id"),
+            key = (event.host, boot_of(event),
                    event.get("process.session_id") or link.key.get("process.session_id"))
             sessions[key].append(event)
+        sessions = merge_unknown_boot(sessions, 1)
 
         out = []
         for (host, boot, session), records in sessions.items():
