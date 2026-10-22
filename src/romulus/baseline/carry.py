@@ -59,14 +59,17 @@ class CarryInStore:
     """
 
     def __init__(self, repo: Repo, hunt_id: str, target: str = "", *,
-                 _markers: dict[tuple[str, str], tuple[str, datetime]] | None = None):
+                 _markers: dict[tuple[str, str], tuple[str, datetime]] | None = None,
+                 _dirty: set[tuple[str, str]] | None = None):
         self.repo, self.hunt_id, self.target = repo, hunt_id, target
         # Shared across the per-target views of one hunt, so the cache cap bounds the whole hunt.
         self._markers: dict[tuple[str, str], tuple[str, datetime]] = {} if _markers is None else _markers
+        # Cached markers advanced in memory but not yet on disk; a flush writes only these.
+        self._dirty: set[tuple[str, str]] = set() if _dirty is None else _dirty
 
     def for_target(self, target: str) -> CarryInStore:
         """The same hunt's carry for another target; the marker cache and its cap are shared."""
-        return CarryInStore(self.repo, self.hunt_id, target, _markers=self._markers)
+        return CarryInStore(self.repo, self.hunt_id, target, _markers=self._markers, _dirty=self._dirty)
 
     def mark_observed(self, start: datetime, end: datetime) -> None:
         """Record that every record of this target in [start, end) has been fed to the carry."""
@@ -144,9 +147,10 @@ class CarryInStore:
                     row for generations in pending.values() for row in generations
                 )
                 pending.clear()
-            for (target, host), (boot, latest) in sorted(self._markers.items()):
-                if target == self.target:
-                    self.repo.set_baseline_parent_boot(self.hunt_id, target, host, boot, latest)
+            for key in sorted(key for key in self._dirty if key[0] == self.target):
+                boot, latest = self._markers[key]
+                self.repo.set_baseline_parent_boot(self.hunt_id, key[0], key[1], boot, latest)
+                self._dirty.discard(key)
             maximum = max(maximum, self.repo.baseline_parent_count(self.hunt_id))
             seen = 0
 
@@ -175,6 +179,7 @@ class CarryInStore:
             elif timestamp > marker[1]:
                 if (self.target, item.host) in self._markers:
                     self._remember_marker(item.host, (boot, timestamp))
+                    self._dirty.add((self.target, item.host))
                 elif not self.repo.set_baseline_parent_boot(
                         self.hunt_id, self.target, item.host, boot, timestamp):
                     continue

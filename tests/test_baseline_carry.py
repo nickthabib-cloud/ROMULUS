@@ -146,3 +146,26 @@ def test_host_with_carry_state_in_two_targets_is_never_resolved_from_one():
     child = START + timedelta(seconds=5)
     explained = PendingResolver(store).resolve(Pending("host", "boot-a", 10, child, "child", "/bin/sh"))
     assert explained.keys == () and explained.reason == "host exec history spans targets"
+
+
+def test_flush_writes_only_the_host_markers_that_changed():
+    repo, store = _store()
+    store.observe_rows([
+        ParentExec(f"host{index}", "boot-a", 100, START, "/bin/x", 1, "r") for index in range(500)
+    ])
+    writes: list[str] = []
+    real = repo.set_baseline_parent_boot
+
+    def counted(hunt_id, target, host, boot, latest_ts):
+        writes.append(host)
+        return real(hunt_id, target, host, boot, latest_ts)
+
+    repo.set_baseline_parent_boot = counted
+    started = time.perf_counter()
+    store.observe_rows([ParentExec("host1", "boot-a", 200, START + timedelta(seconds=5), "/bin/y", 1, "r")])
+    elapsed = time.perf_counter() - started
+    assert writes == ["host1"]
+    assert repo.baseline_parent_boot("hunt", "", "host1") == ("boot-a", START + timedelta(seconds=5))
+    store.observe_rows([ParentExec("host1", "boot-a", 201, START + timedelta(seconds=4), "/bin/z", 1, "r")])
+    assert writes == ["host1"], "an exec that does not advance the marker writes no marker"
+    assert elapsed < 0.5
