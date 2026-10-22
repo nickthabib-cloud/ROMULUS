@@ -18,9 +18,9 @@ from romulus.evidence.normalize import BootIntervals, normalize_hits
 from romulus.hunt.pivot import PivotExecutor
 from tests import throughput_fixture as tf
 
-# Reference digests of the synthetic fixture's results; any change to hunt output changes them. The A2
-# investigator intentionally separates agent and deterministic task identities and retains every reached raw
-# citation, which changes task/link/raw/report identity without changing the deterministic findings.
+# Reference digests of the synthetic fixture's results; any change to hunt output changes them. Expansion task
+# ids include the query scope, so links and raw copies reference those ids, and the report's incident graph marks
+# each edge's kind; the deterministic findings are unchanged.
 GOLDEN_STACK = {
     "anchors": "5bfad42385ad92785c91d770613dff8e893f140c4f8d1606128b7ea0f170c120",
     "audit": "2fd12fa42a64f8c3bb7a8079c056f68e24d4c371b69644eaf02688e6c706ab6a",
