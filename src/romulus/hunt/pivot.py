@@ -380,6 +380,8 @@ MAX_SAMPLE_QUERIES = 4
 
 # A host lookup refused for budget is not an answer: it is retried when budget allows.
 HOST_LOOKUP_BUDGET = "source query budget exhausted"
+NO_HOST_RECORD = "no host record carries host.ip"      # a complete lookup: no host claims the address
+HOST_AMBIGUOUS = "victim host ambiguous"               # a complete lookup: several hosts claim the address
 
 class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
@@ -664,9 +666,9 @@ class PivotExecutor:
         elif len(names) == 1:
             host, reason = next(iter(names)), None
         elif not names:
-            host, reason = None, f"victim host unknown for {ip}: no host record carries host.ip {ip}"
+            host, reason = None, f"victim host unknown for {ip}: {NO_HOST_RECORD} {ip}"
         else:
-            host, reason = None, f"victim host ambiguous for {ip}: {sorted(names)[:5]}"
+            host, reason = None, f"{HOST_AMBIGUOUS} for {ip}: {sorted(names)[:5]}"
         # An incomplete lookup (timeout, shard failure, budget) is not a final answer: it stays retryable.
         self.repo.update_task(task_id, "partial" if incomplete else "evaluated",
                               outcome={"host": host, "reason": reason}, owner_token=self.owner_token)

@@ -10,7 +10,10 @@ from datetime import UTC, datetime, timedelta
 
 from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import LANE_ORDER
+from romulus.detect import netdef
+from romulus.detect.correlation import routable_remote
 from romulus.detect.host import is_internal
+from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.registry import fresh_direct_pack, rule_kind
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.context import finalize_context
@@ -23,6 +26,7 @@ from romulus.hunt.links import (
     LinkWindow,
     usable_key,
 )
+from romulus.hunt.pivot import HOST_AMBIGUOUS, NO_HOST_RECORD
 from romulus.hunt.publish import publish_match
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.sources.models import Window
@@ -117,25 +121,60 @@ class ExpansionEngine:
                     internal.add(address)
         return [str(address) for address in sorted(internal, key=lambda a: (a.version, int(a)))]
 
+    @staticmethod
+    def _undecided_ips(events: list[TypedEvent]) -> list[str]:
+        """Under the default internal-network definition, the routable endpoints it reads as outside the site: on a
+        site in public space they may be the site's own hosts, so host resolution decides. Empty under a
+        configured definition, which says where the site is."""
+        if netdef.current().configured:
+            return []
+        found = set()
+        for event in events:
+            for field in ("source.ip", "destination.ip"):
+                try:
+                    address = ipaddress.ip_address(str(event.get(field)))
+                except ValueError:
+                    continue
+                if not is_internal(address) and routable_remote(str(address)) and usable_key(str(address)):
+                    found.add(address)
+        return [str(address) for address in sorted(found, key=lambda a: (a.version, int(a)))]
+
     def _victim_variants(self, finding_id: str, variants: list[LinkAnchor], events: list[TypedEvent],
-                         query_cap: int | None = None) -> tuple[list[LinkAnchor], list[str]]:
-        """Host-side links of a network anchor run once per internal endpoint, each against the host that
-        endpoint resolves to; an endpoint that resolves to no single host carries the reason instead.
+                         query_cap: int | None = None) -> tuple[list[LinkAnchor], list[str], list[str]]:
+        """Host-side links of a network anchor run once per victim endpoint, each against the host that endpoint
+        resolves to; an internal endpoint that resolves to no single host carries the reason instead.
+        Under the default definition, the endpoints it reads as outside are resolved too: one that resolves to a
+        host is a victim, one that no host record carries is not, and one that cannot be resolved (no host
+        source, an incomplete lookup, or the budget) is named with the direction assumption, in the returned
+        notes for the anchor and, when no victim is left, in the links' reason.
         A lookup not yet made (in this run or a resumed one) is made only while it fits under `query_cap`,
-        the anchor's share of the query budget, checked against the live query count before each lookup."""
-        ips = self._victim_ips(events)
-        if not ips:
-            return variants, []
+        the anchor's share of the query budget, checked against the live query count before each lookup.
+        Returns (variants, endpoints beyond MAX_ANCHOR_KEYS, notes)."""
+        ips, undecided = self._victim_ips(events), self._undecided_ips(events)
+        if not ips and not undecided:
+            return variants, [], []
         resolve = getattr(self.fetcher, "resolve_host", None)
-        out = []
-        for variant in variants:
-            for ip in ips:
-                if resolve is None:
-                    host, reason = None, f"victim host unknown for {ip}: host resolution is unavailable"
-                else:
-                    host, reason = resolve(finding_id, ip, query_cap=query_cap)
-                out.append(variant.model_copy(update={"host": host, "victim_ip": ip, "host_reason": reason}))
-        return out[:MAX_ANCHOR_KEYS], [item.victim_ip for item in out[MAX_ANCHOR_KEYS:]]
+
+        def lookup(ip: str) -> tuple[str | None, str | None]:
+            if resolve is None:
+                return None, f"victim host unknown for {ip}: host resolution is unavailable"
+            return resolve(finding_id, ip, query_cap=query_cap)
+
+        victims = [(ip, *lookup(ip)) for ip in ips]
+        unresolved = []
+        for ip in undecided:
+            host, reason = lookup(ip)
+            if host is not None or (reason or "").startswith(HOST_AMBIGUOUS):
+                victims.append((ip, host, reason))      # host records claim the address: it is the site's
+            elif NO_HOST_RECORD not in (reason or ""):
+                unresolved.append(reason or f"victim host unknown for {ip}")
+        notes = ([f"endpoints outside the default internal ranges not resolved to a site host "
+                  f"({'; '.join(unresolved)}); {DIRECTION_ASSUMED_REASON}"] if unresolved else [])
+        out = [variant.model_copy(update={"host": host, "victim_ip": ip, "host_reason": reason})
+               for variant in variants for ip, host, reason in victims]
+        if not out:
+            out = [variant.model_copy(update={"host_reason": notes[0]}) for variant in variants] if notes else variants
+        return out[:MAX_ANCHOR_KEYS], [item.victim_ip for item in out[MAX_ANCHOR_KEYS:]], notes
 
     @staticmethod
     def _link_anchors(anchor: LinkAnchor, link_type: LinkType) -> tuple[list[LinkAnchor], list[dict]]:
@@ -332,8 +371,10 @@ class ExpansionEngine:
                         variants, dropped = self._link_anchors(base_anchor, link_type)
                         if link_type in HOST_SIDE_LINKS and not base_anchor.host:
                             cap = root_cap if anchor_row["depth"] == 0 else self.max_source_queries
-                            variants, dropped_ips = self._victim_variants(
+                            variants, dropped_ips, notes = self._victim_variants(
                                 candidate["id"], variants, anchor_events, query_cap=cap)
+                            anchor_reasons[anchor_row["id"]].extend(
+                                note for note in notes if note not in anchor_reasons[anchor_row["id"]])
                             if dropped_ips:
                                 anchor_reasons[anchor_row["id"]].append(
                                     "keys_not_expanded:" + json.dumps(

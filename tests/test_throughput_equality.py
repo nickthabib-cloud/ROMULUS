@@ -31,20 +31,23 @@ from tests import throughput_fixture as tf
 # - candidates, rule_cells, manifest: those six rules' versions are bumped for their changed coverage semantics,
 #   so the rule_version on their cells and findings changes. With rule_version removed, nothing else differs.
 # - manifest: the internal-network view gains `line`, the summary followed by the ranges themselves.
+# - tasks, audit, expansion, manifest: under the default definition expansion also resolves a network anchor's
+#   endpoints that the default reads as outside (here one lookup, 203.0.113.8, which no host record carries, so
+#   it is not a victim). Links, anchors and findings are unchanged; the manifest's task counts follow.
 GOLDEN_STACK = {
     "anchors": "5bfad42385ad92785c91d770613dff8e893f140c4f8d1606128b7ea0f170c120",
-    "audit": "2fd12fa42a64f8c3bb7a8079c056f68e24d4c371b69644eaf02688e6c706ab6a",
+    "audit": "396dfe062e233988393b689f8722a852a9929b89125f19e3a85f111d933990e1",
     "candidates": "81448272353e19d2e529904941ad3e073a60f1d3fcdcaf4539195f6ea6746bc5",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_entities": "af8053b6219447233c1329e280f0ca64054ceceeea79d5d84bfa12af8e067a23",
     "events": "7cb68efe39e15155efa9b2f8edc22e79b93fb3804ba23981e97fbde26c5b0664",
-    "expansion": "5a12fe7c7f06127db41f5229bda524a0c9e21e101f8d87dc32d10e5589358770",
+    "expansion": "8cf87266934aafe1f4c32bcd6e7945552797b91ffe84ec0b3d9109aefe43c9b2",
     "links": "c6589f2bef67ee2bab7f194cb3fa551ff913ac43266ce8cd6a20efd2d6c0aa2b",
-    "manifest": "b16f15b97a7e2a0d9016f91a2ce8befe673d0a71b4cfd43dedc8fe5f07a8f639",
+    "manifest": "70518bc1f1f07a8bc9f87d2ae4c3445965fe9f90456bc0d1539b32ad250f7f6f",
     "raw": "f3c3185ebf52b2b84224ea7866648e6bbe117267a423b600f203d780178efad9",
     "rule_cells": "fa61a7de1361749ab0f149532bc412aae0c2ce35f2f667a9f9c3a0587d3d3530",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "a6118de2aa8b88a5f50f08d3476de4e866c6dd69e4f4a49407e98f06198ee497",
+    "tasks": "6542534cee7b80cedc3ae25595cb06a7842b8ca98c326497bed833929451fc6f",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "ab962996ad3da493263e7cf5971b6d853a75684e82f9daff420d871ef389a1d0",
