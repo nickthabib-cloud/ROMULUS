@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 from collections import Counter
 from collections.abc import Iterable
+from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 from .attack import load_attack_bundle
 from .models import (
@@ -26,21 +31,12 @@ _STRENGTH_RANK = {
     CoverageStrength.NEGATIVE_CAPABLE: 3,
 }
 
-_PUBLIC_INDICATOR_DIR = Path(__file__).resolve().parents[3] / "content" / "indicators"
+_ROOT = Path(__file__).resolve().parents[3]
+_SRC_ROOT = _ROOT / "src"
+_PUBLIC_INDICATOR_DIR = _ROOT / "content" / "indicators"
 _NON_ENTERPRISE_ID_REASONS = {
     "T0815": "ATT&CK for ICS id (not in the Enterprise bundle)",
 }
-
-
-def _public_pack() -> tuple[tuple[type, ...], str]:
-    """Import the pack without allowing a runtime indicator override into public metadata."""
-    override = os.environ.pop("ROMULUS_INDICATOR_DIR", None)
-    try:
-        from romulus.detect.registry import ALL_PLAYBOOKS, PACK_VERSION
-    finally:
-        if override is not None:
-            os.environ["ROMULUS_INDICATOR_DIR"] = override
-    return tuple(ALL_PLAYBOOKS), PACK_VERSION
 
 
 def _public_version(playbook: type) -> str:
@@ -97,6 +93,113 @@ def _rule_metadata(playbook: type) -> RuleMetadata:
     )
 
 
+def _rule_document(rule: RuleMetadata) -> dict[str, Any]:
+    return {
+        "id": rule.id,
+        "version": rule.version,
+        "title": rule.title,
+        "kind": rule.kind,
+        "lane": rule.lane,
+        "severity": rule.severity,
+        "assures_negative": rule.assures_negative,
+        "positive_only_reason": rule.positive_only_reason,
+        "families": list(rule.families),
+        "datasets": list(rule.datasets),
+        "required_fields": list(rule.required_fields),
+        "required_by_family": {
+            family: list(fields) for family, fields in rule.required_by_family.items()
+        },
+        "telemetry": rule.telemetry,
+        "attack_ids": list(rule.attack_ids),
+        "status": rule.status,
+        "attack_exempt": rule.attack_exempt,
+        "behavior": rule.behavior,
+        "fidelity": rule.fidelity,
+    }
+
+
+def _pack_probe_document() -> dict[str, Any]:
+    """Run inside a sanitized child process when runtime detection modules are not loaded."""
+    from romulus.detect.registry import ALL_PLAYBOOKS, PACK_VERSION
+
+    rules = tuple(sorted((_rule_metadata(playbook) for playbook in ALL_PLAYBOOKS), key=lambda item: item.id))
+    return {"pack_version": PACK_VERSION, "rules": [_rule_document(rule) for rule in rules]}
+
+
+def _rule_from_document(item: dict[str, Any]) -> RuleMetadata:
+    return RuleMetadata(
+        id=str(item["id"]),
+        version=str(item["version"]),
+        title=str(item["title"]),
+        kind=str(item["kind"]),
+        lane=str(item["lane"]),
+        severity=str(item["severity"]),
+        assures_negative=bool(item["assures_negative"]),
+        positive_only_reason=str(item["positive_only_reason"]),
+        families=tuple(map(str, item["families"])),
+        datasets=tuple(map(str, item["datasets"])),
+        required_fields=tuple(map(str, item["required_fields"])),
+        required_by_family=MappingProxyType(
+            {
+                str(family): tuple(map(str, fields))
+                for family, fields in dict(item["required_by_family"]).items()
+            }
+        ),
+        telemetry=str(item["telemetry"]),
+        attack_ids=tuple(map(str, item["attack_ids"])),
+        status=str(item["status"]),
+        attack_exempt=str(item["attack_exempt"]),
+        behavior=str(item["behavior"]),
+        fidelity=str(item["fidelity"]),
+    )
+
+
+@lru_cache(maxsize=1)
+def _public_pack() -> tuple[tuple[RuleMetadata, ...], str]:
+    """Read public pack metadata without changing the caller's runtime indicator environment."""
+    if "romulus.detect.registry" in sys.modules:
+        rules = tuple(
+            sorted(
+                (
+                    _rule_metadata(playbook)
+                    for playbook in sys.modules["romulus.detect.registry"].ALL_PLAYBOOKS
+                ),
+                key=lambda item: item.id,
+            )
+        )
+        return (
+            rules,
+            str(sys.modules["romulus.detect.registry"].PACK_VERSION),
+        )
+    env = os.environ.copy()
+    env.pop("ROMULUS_INDICATOR_DIR", None)
+    existing_path = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(_SRC_ROOT) + (os.pathsep + existing_path if existing_path else "")
+    code = (
+        "import json; "
+        "from romulus.catalog.build import _pack_probe_document; "
+        "print(json.dumps(_pack_probe_document(), sort_keys=True, separators=(',', ':')))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", code],
+        cwd=_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"public pack metadata probe failed: {completed.stderr.strip()}")
+    try:
+        document = json.loads(completed.stdout)
+        rules = tuple(_rule_from_document(item) for item in document["rules"])
+        pack_version = str(document["pack_version"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("public pack metadata probe returned invalid JSON") from exc
+    return rules, pack_version
+
+
 def _rule_issues(rules: tuple[RuleMetadata, ...], attack: AttackKnowledge) -> tuple[RuleAttackIssue, ...]:
     ids = {item.id: item for item in attack.techniques}
     seen: set[str] = set()
@@ -125,15 +228,17 @@ def build_catalog(
     strict: bool = False,
 ) -> Catalog:
     """Return a sorted catalog; strict mode makes invalid ATT&CK mappings fail."""
-    public_playbooks, pack_version = _public_pack()
+    public_rules, pack_version = _public_pack()
     attack = attack or load_attack_bundle()
-    classes = tuple(playbooks) if playbooks is not None else public_playbooks
-    rules = tuple(sorted((_rule_metadata(playbook) for playbook in classes), key=lambda item: item.id))
+    rules = (
+        tuple(sorted((_rule_metadata(playbook) for playbook in playbooks), key=lambda item: item.id))
+        if playbooks is not None
+        else public_rules
+    )
     invalid = _rule_issues(rules, attack)
     if strict and invalid:
         issue = invalid[0]
         raise ValueError(f"playbook {issue.rule_id} maps {issue.reason} ATT&CK id {issue.attack_id}")
-    classes_by_id = {str(playbook.id): playbook for playbook in classes}
     rules_by_id = {rule.id: rule for rule in rules}
     active_rules = tuple(rule for rule in rules if rule.status == "active")
     missing = tuple(rule.id for rule in active_rules if not rule.attack_ids and not rule.attack_exempt)
@@ -151,7 +256,7 @@ def build_catalog(
         if technique.revoked or technique.deprecated:
             continue
         rule_ids = tuple(sorted(rule_ids_by_technique.get(technique.id, ())))
-        strengths = [strength_for_rule(classes_by_id[rule_id]) for rule_id in rule_ids]
+        strengths = [strength_for_rule(rules_by_id[rule_id]) for rule_id in rule_ids]
         strength = max(strengths, key=_STRENGTH_RANK.__getitem__) if strengths else CoverageStrength.NONE
         families = tuple(sorted({family for rule_id in rule_ids for family in rules_by_id[rule_id].families}))
         coverage.append(

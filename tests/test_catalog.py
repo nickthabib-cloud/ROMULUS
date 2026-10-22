@@ -13,6 +13,7 @@ from typing import ClassVar
 
 import pytest
 
+import romulus.catalog.build as catalog_build
 from romulus.catalog import (
     CoverageStrength,
     build_catalog,
@@ -149,6 +150,27 @@ def test_public_catalog_ignores_runtime_indicator_directory(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == expected_version
+
+
+def test_build_catalog_does_not_mutate_process_indicator_environment(monkeypatch, tmp_path):
+    class TrackingEnvironment(dict):
+        def __init__(self, values):
+            super().__init__(values)
+            self.popped: list[str] = []
+
+        def pop(self, key, *default):
+            self.popped.append(key)
+            return super().pop(key, *default)
+
+    tracking = TrackingEnvironment(os.environ)
+    tracking["ROMULUS_INDICATOR_DIR"] = str(tmp_path)
+    before = dict(tracking)
+    monkeypatch.setattr(catalog_build.os, "environ", tracking)
+
+    build_catalog()
+
+    assert dict(tracking) == before
+    assert "ROMULUS_INDICATOR_DIR" not in tracking.popped
 
 
 def test_catalog_maps_rules_to_techniques_and_tactic_rollups_deterministically():
