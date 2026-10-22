@@ -202,14 +202,16 @@ def scalar(value):
 
 # Per-store disk budget: the only limit that may refuse a record. Rows are compact pickled per-key states.
 DISK_BUDGET = 8 * 2**30
+_MISSING = object()
 
 
 class KeyedStore:
     """Per-key rule state that never forgets: a hot set in memory, least recently used out to a keyed table on disk,
     and brought back when the key is read again. Memory holds at most `hot` keys between batches (`trim`, called
     when a batch ends, so a state read in a batch stays valid for the whole batch). Only the disk byte budget
-    refuses: `put` of a new key returns False once the store's rows reach `disk_budget` bytes, and the rule refuses
-    that record through its honest coverage path.
+    refuses: `put` of a new key returns False once the store's rows on disk reach `disk_budget` bytes (the bytes on
+    disk now: a state read back leaves the disk until it is moved there again), and the rule refuses that record
+    through its honest coverage path.
 
     `candidate(state)` (optional) is kept as a column, so finalize can read only states that can still be reported;
     `group(key)` (optional) is kept as a text column, so finalize can read states grouped. Without an owner the
@@ -360,9 +362,18 @@ class KeyedStore:
 
     def clear(self) -> None:
         self.hot.clear()
-        if self.on_disk and self.owner is not None and self._ready:
+        if self.on_disk and self.owner is not None and self._ready and self.owner._spill is not None:
             self._db().execute(f"DELETE FROM {self.name}")
         self.on_disk = self.disk_bytes = 0
+        self._ready = False             # the spill may be closed and recreated: create the table again on use
+
+    def __eq__(self, other: object) -> bool:
+        """Equal to a dict holding the same keys and states (read without making them hot)."""
+        if isinstance(other, dict):
+            return len(self) == len(other) and all(self.peek(key, _MISSING) == state for key, state in other.items())
+        return NotImplemented
+
+    __hash__ = None
 
 
 class SpillList:
