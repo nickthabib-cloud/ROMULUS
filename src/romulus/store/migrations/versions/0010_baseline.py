@@ -24,6 +24,7 @@ def upgrade() -> None:
         sa.Column("normalizer", sa.String(), nullable=False),
         sa.Column("start", sa.DateTime(timezone=True), nullable=False),
         sa.Column("end", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("bucket", sa.String(), nullable=False),
         sa.Column("origin", sa.String(), nullable=False),
         sa.Column("source_hunt_id", sa.String(), nullable=True),
         sa.Column("built_by_hunt_id", sa.String(), nullable=True),
@@ -31,9 +32,11 @@ def upgrade() -> None:
         sa.Column("excluded_keys", sa.JSON(), nullable=False),
         sa.Column("hunted", sa.Integer(), nullable=False),
         sa.Column("events_total", sa.Integer(), nullable=False),
+        sa.Column("rows_digest", sa.String(), nullable=False),
         sa.Column("status", sa.String(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("origin IN ('lookback', 'hunt')", name="ck_baseline_segment_origin"),
+        sa.CheckConstraint("bucket IN ('day', 'hour')", name="ck_baseline_segment_bucket"),
         sa.CheckConstraint("status IN ('active', 'stale', 'revoked')", name="ck_baseline_segment_status"),
         sa.CheckConstraint("hunted IN (0, 1)", name="ck_baseline_segment_hunted"),
         sa.CheckConstraint("events_total >= 0", name="ck_baseline_segment_events"),
@@ -59,7 +62,7 @@ def upgrade() -> None:
         sa.Column("first_ts", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_ts", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("segment_id", "scope", "key_digest", "bucket", name="pk_baseline_count"),
-        sa.CheckConstraint("count >= 0", name="ck_baseline_count_count"),
+        sa.CheckConstraint("count >= 1", name="ck_baseline_count_count"),
     )
     op.create_index("ix_baseline_count_key", "baseline_count", ["key_id", "scope_kind", "scope", "segment_id"])
 

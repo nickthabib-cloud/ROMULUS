@@ -337,6 +337,7 @@ baseline_segment = Table(
     Column("normalizer", String, nullable=False),
     Column("start", DateTime(timezone=True), nullable=False),
     Column("end", DateTime(timezone=True), nullable=False),
+    Column("bucket", String, nullable=False),
     Column("origin", String, nullable=False),
     Column("source_hunt_id", String),
     Column("built_by_hunt_id", String),
@@ -344,9 +345,13 @@ baseline_segment = Table(
     Column("excluded_keys", JSON, nullable=False),
     Column("hunted", Integer, nullable=False),
     Column("events_total", Integer, nullable=False),
+    # order-independent digest of the segment's count and scope-hour rows, so a rewrite of the same id with
+    # other content is refused without reading the stored rows back
+    Column("rows_digest", String, nullable=False),
     Column("status", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("origin IN ('lookback', 'hunt')", name="ck_baseline_segment_origin"),
+    CheckConstraint("bucket IN ('day', 'hour')", name="ck_baseline_segment_bucket"),
     CheckConstraint("status IN ('active', 'stale', 'revoked')", name="ck_baseline_segment_status"),
     CheckConstraint("hunted IN (0, 1)", name="ck_baseline_segment_hunted"),
     CheckConstraint("events_total >= 0", name="ck_baseline_segment_events"),
@@ -371,7 +376,7 @@ baseline_count = Table(
     Column("first_ts", DateTime(timezone=True), nullable=False),
     Column("last_ts", DateTime(timezone=True), nullable=False),
     PrimaryKeyConstraint("segment_id", "scope", "key_digest", "bucket", name="pk_baseline_count"),
-    CheckConstraint("count >= 0", name="ck_baseline_count_count"),
+    CheckConstraint("count >= 1", name="ck_baseline_count_count"),
 )
 # Prevalence ("how many scopes of one kind hold this key in these segments") and the scoped history probe are
 # both one range search on this index; the primary key serves per-segment reads.
