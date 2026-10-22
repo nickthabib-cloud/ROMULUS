@@ -46,6 +46,15 @@ ALLOWLIST: list[tuple[str, re.Pattern]] = [
 ]
 FORBIDDEN_QUERY_KEYS = {"script", "script_fields", "runtime_mappings", "stored_fields"}
 
+SEARCH_FILTER_PATH = (
+    "pit_id,timed_out,terminated_early,_shards.failed,hits.total.value,hits.total.relation,"
+    "hits.hits._id,hits.hits._index,hits.hits._source,hits.hits.sort,aggregations"
+)
+MAPPING_FILTER_PATH = "*.mappings.properties"
+FIELD_CAPS_FILTER_PATH = "fields.*.*"
+PIT_OPEN_FILTER_PATH = "id"
+PIT_CLOSE_FILTER_PATH = "succeeded,num_freed"
+
 
 def check_allowed(method: str, path: str) -> None:
     method = method.upper()
@@ -137,18 +146,33 @@ class ElasticClient:
         return sorted(set(names))
 
     def mapping(self, index: str) -> dict:
-        return self.request("GET", f"/{index}/_mapping")
+        return self.request("GET", f"/{index}/_mapping", params={"filter_path": MAPPING_FILTER_PATH})
+
+    def field_caps(self, index: str, fields: str = "*") -> dict:
+        return self.request("GET", f"/{index}/_field_caps", params={
+            "fields": fields, "filter_path": FIELD_CAPS_FILTER_PATH,
+        })
+
+    def search(self, target: str | None, body: dict) -> dict:
+        path = f"/{target}/_search" if target is not None else "/_search"
+        return self.request("POST", path, body, params={"filter_path": SEARCH_FILTER_PATH})
+
+    def _open_pit(self, target: str) -> str:
+        return self.request("POST", f"/{target}/_pit", params={
+            "keep_alive": "2m", "filter_path": PIT_OPEN_FILTER_PATH,
+        })["id"]
+
+    def _close_pit(self, pit_id: str) -> None:
+        self.request("DELETE", "/_pit", {"id": pit_id}, params={"filter_path": PIT_CLOSE_FILTER_PATH})
 
     @contextmanager
     def point_in_time(self, target: str):
-        session = PitSession(
-            self.request("POST", f"/{target}/_pit", params={"keep_alive": "2m"})["id"],
-        )
+        session = PitSession(self._open_pit(target))
         try:
             yield session
         finally:
             try:
-                self.request("DELETE", "/_pit", {"id": session.id})
+                self._close_pit(session.id)
             except SourceError:
                 pass
 
@@ -157,7 +181,7 @@ class ElasticClient:
         """Execute a single-request (aggregate/histogram) query. Returns (outcome shell, response)."""
         started = datetime.now(UTC)
         try:
-            d = self.request("POST", f"/{q.target}/_search", q.body)
+            d = self.search(q.target, q.body)
         except SourceError as e:
             return SearchOutcome(target=q.target, fingerprint=q.fingerprint, started_at=started,
                                  ended_at=datetime.now(UTC), completeness=Completeness.failed,
@@ -178,9 +202,7 @@ class ElasticClient:
         Raises SourceError on failure; the caller records partial coverage.
         """
         owned = pit is None
-        session = pit or PitSession(
-            self.request("POST", f"/{q.target}/_pit", params={"keep_alive": "2m"})["id"],
-        )
+        session = pit or PitSession(self._open_pit(q.target))
         try:
             body = dict(q.body)
             body["size"] = min(page_size, max_records)
@@ -193,7 +215,7 @@ class ElasticClient:
             body["track_total_hits"] = True
             fetched = 0
             while True:
-                d = self.request("POST", "/_search", body)
+                d = self.search(None, body)
                 session.id = d.get("pit_id", session.id)
                 body["pit"]["id"] = session.id
                 hits = d.get("hits", {}).get("hits", [])
@@ -213,12 +235,12 @@ class ElasticClient:
         finally:
             if owned:
                 try:
-                    self.request("DELETE", "/_pit", {"id": session.id})
+                    self._close_pit(session.id)
                 except SourceError:
                     pass
 
     def search_raw(self, q: CompiledQuery) -> dict:
-        return self.request("POST", f"/{q.target}/_search", q.body)
+        return self.search(q.target, q.body)
 
 
 def _response_problems(d: dict) -> list[str]:

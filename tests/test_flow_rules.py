@@ -117,7 +117,7 @@ def _attack_ids():
 def test_flow_rules_are_registered_with_cards_and_existing_attack_ids():
     ids = _attack_ids()
     pack = {type(pb) for pb in fresh_pack()}
-    assert PACK_VERSION == "pack@15"
+    assert PACK_VERSION == "pack@16"
     for cls in FLOW_PLAYBOOKS:
         assert cls in ALL_PLAYBOOKS and cls in pack
         assert cls.kind == "aggregate" and cls.staged and cls.anchor_class == "network_observation"
@@ -128,6 +128,18 @@ def test_flow_rules_are_registered_with_cards_and_existing_attack_ids():
     assert not ProtocolPortMismatch.assures_negative and not LongUnidentifiedSession.assures_negative
     assert not OutboundVolumeAsymmetry.assures_negative
     assert OutboundVolumeAsymmetry.severity == "high" and OutboundVolumeAsymmetry.lane == "lead"
+
+
+def test_flow_rule_releases_connection_and_stage_indexes():
+    rule = HorizontalSweep()
+    rule.consume(events(eve("release-1")))
+    assert rule.sweeps and rule._seen and rule._staged
+
+    rule.release_state()
+
+    assert rule.sweeps == {}
+    assert rule._seen == set()
+    assert rule._staged == set()
 
 
 def test_port_ranges_compress_runs():

@@ -41,7 +41,7 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
             buckets, reasons, total, rel = [], [], None, "unknown"
             body = q.body
             for _ in range(MAX_COMPOSITE_PAGES):
-                d = client.request("POST", f"/{q.target}/_search", body)
+                d = client.search(q.target, body)
                 if d.get("timed_out"):
                     reasons.append("timed_out")
                 if d.get("_shards", {}).get("failed"):

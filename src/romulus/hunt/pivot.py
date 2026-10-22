@@ -1,6 +1,7 @@
 """Hunt-layer execution of validated, source-neutral investigator pivots."""
 from __future__ import annotations
 
+import json
 import re
 from collections import deque
 from collections.abc import Callable
@@ -44,6 +45,16 @@ _ISO_NANOS = re.compile(
     r"^(?P<base>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d{1,9}))?"
     r"(?P<zone>Z|[+-]\d{2}:\d{2})$"
 )
+_SURICATA_FAMILY = {
+    "alert": "net_alert",
+    "flow": "net_flow",
+    "netflow": "net_flow",
+    "dns": "dns_query",
+    "http": "http_tx",
+    "fileinfo": "file_transfer",
+    "tls": "tls_session",
+    "ssh": "ssh_session",
+}
 
 
 @dataclass
@@ -100,6 +111,84 @@ def _source_value(source: dict, path: str):
             return None
         value = value.get(part)
     return value
+
+
+def _raw_identity(record: dict) -> tuple[str, str]:
+    return str(record.get("_index", "")), str(record.get("_id", ""))
+
+
+def _audit_identity(record: dict) -> tuple | None:
+    """Return an audit event identity only when its authoritative record parses."""
+    source = record.get("_source") or {}
+    if _source_value(source, "event.dataset") != "linux.audit":
+        return None
+    raw = _source_value(source, "event.original") or source.get("message")
+    if not raw:
+        return None
+    try:
+        parsed = parse_record(raw)
+    except AuditParseError:
+        return None
+    return (_source_value(source, "host.name") or "", parsed.ts, parsed.serial)
+
+
+def _normalization_groups(records: list[dict]) -> list[list[dict]]:
+    """Keep multi-record audit events atomic; every other hit is independent."""
+    groups: dict[tuple, list[dict]] = {}
+    order: list[tuple] = []
+    for record in records:
+        audit = _audit_identity(record)
+        key = ("audit", *audit) if audit is not None else ("raw", *_raw_identity(record))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(record)
+    return [groups[key] for key in order]
+
+
+def _audit_types(records: list[dict]) -> set[str] | None:
+    types: set[str] = set()
+    for record in records:
+        source = record.get("_source") or {}
+        raw = _source_value(source, "event.original") or source.get("message")
+        if not raw:
+            return None
+        try:
+            types.add(parse_record(raw).type)
+        except AuditParseError:
+            return None
+    return types
+
+
+def _prefilter_raw(records: list[dict], families: set[str]) -> list[dict]:
+    """Discard only groups whose authoritative type cannot produce a requested family."""
+    selected: list[dict] = []
+    for group in _normalization_groups(records):
+        source = group[0].get("_source") or {}
+        dataset = _source_value(source, "event.dataset") or ""
+        if dataset == "linux.audit":
+            types = _audit_types(group)
+            if types is None:
+                selected.extend(group)
+            elif ((families == {"process_exec"} and "EXECVE" not in types)
+                  or (families == {"net_socket"} and "SOCKADDR" not in types)):
+                continue
+            else:
+                selected.extend(group)
+            continue
+        if dataset.startswith("suricata.eve"):
+            raw = _source_value(source, "event.original") or source.get("message")
+            try:
+                event_type = json.loads(raw or "").get("event_type")
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                selected.extend(group)
+                continue
+            family = _SURICATA_FAMILY.get(event_type)
+            if family is None or family in families:
+                selected.extend(group)
+            continue
+        selected.extend(group)
+    return selected
 
 
 def _datetime_ns(value: datetime) -> int | None:
@@ -274,7 +363,8 @@ class PivotExecutor:
                  contracts: dict[str, FieldContract], heartbeat=None, owner_token: str | None = None,
                  source_query_budget: int | None = None,
                  source_query_scope: str | None = None,
-                 dataset_inventory: dict[str, set[str] | list[str] | tuple[str, ...]] | None = None):
+                 dataset_inventory: dict[str, set[str] | list[str] | tuple[str, ...]] | None = None,
+                 optimize_normalization: bool = True):
         self.repo = repo
         self.client = client
         self.hunt_id = hunt_id
@@ -287,6 +377,18 @@ class PivotExecutor:
         self.dataset_inventory = {
             target: tuple(sorted(datasets)) for target, datasets in (dataset_inventory or {}).items()
         }
+        self.optimize_normalization = optimize_normalization
+        self.raw_family_prefilter = optimize_normalization
+
+    def _normalize_pivot_records(
+        self, records: list[dict], raw_families: set[str] | None,
+    ) -> tuple[list[TypedEvent], list[tuple[str, str]]]:
+        prefilter = self.optimize_normalization and raw_families
+        selected = _prefilter_raw(records, raw_families) if prefilter else records
+        # one call per leaf: an audit event takes its boot id from a journald copy in the same batch, and nothing
+        # outlives the leaf, so memory stays bounded by the per-leaf record cap
+        events, _skips, errors = normalize_hits(selected)
+        return events, errors
 
     def _execute(
         self, intent: SearchIntent, contract: FieldContract, *, pit=None,
@@ -643,6 +745,7 @@ class PivotExecutor:
         anchor_ts: datetime | None = None,
         query_cap: int | None = None,
         planning_coverage: list[PivotCoverage] | None = None,
+        raw_families: set[str] | None = None,
     ) -> PivotEventBatch:
         """Execute deterministic typed link intents without evaluating any playbook."""
         if anchor_ts is not None:
@@ -684,7 +787,7 @@ class PivotExecutor:
                 else:
                     successful += 1
                     task_successes += 1
-                    events, _skips, errors = normalize_hits(outcome.records)
+                    events, errors = self._normalize_pivot_records(outcome.records, raw_families)
                     normalization_reasons = self._ip_normalization_reasons(leaf_intent, outcome.records)
                     leaf_reasons.extend(normalization_reasons)
                     if errors or normalization_reasons:

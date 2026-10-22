@@ -1,4 +1,5 @@
 """Safe pivot execution and shared deterministic candidate publication."""
+import json
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -174,6 +175,96 @@ def test_fetch_query_cap_leaves_unattempted_ranges_unresolved(monkeypatch):
         interval.reason == "expansion_link_query_cap:2"
         for cell in batch.coverage for interval in cell.unresolved_ranges
     )
+
+
+def test_fetch_raw_prefilter_and_normalize_cache_preserve_results(monkeypatch):
+    records = []
+    for event_type in ("alert", "dns"):
+        event_id = f"raw-{event_type}"
+        body = {
+            "timestamp": START.isoformat(), "event_type": event_type,
+            "src_ip": "203.0.113.8", "dest_ip": "10.0.0.8", "proto": "TCP",
+        }
+        if event_type == "alert":
+            body["alert"] = {"signature": "test", "signature_id": 1, "severity": 1}
+        else:
+            body["dns"] = {"type": "query", "rrname": "example.test", "rrtype": "A"}
+        records.append({
+            "_id": event_id, "_index": "network-x",
+            "_source": {
+                "@timestamp": START.isoformat(), "host": {"name": "sensor"},
+                "event": {"dataset": f"suricata.eve.{event_type}", "original": json.dumps(body)},
+            },
+        })
+
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="network-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=2, total_relation="eq", returned=2,
+        records=records,
+    ))
+    normalized_sizes = []
+    real_normalize = pivot_module.normalize_hits
+
+    def counted(items):
+        normalized_sizes.append(len(items))
+        return real_normalize(items)
+
+    monkeypatch.setattr(pivot_module, "normalize_hits", counted)
+    contract = contract_from_types("network-x", {
+        "@timestamp": "date", "event.dataset": "keyword",
+    })
+    intent = SearchIntent(
+        kind="raw", target="network-x", window=Window(start=START, end=END), max_records=10,
+        purpose="expansion:network_flow",
+    )
+    retain = lambda event: event.family in {"net_flow", "net_alert", "net_session"}
+
+    baseline = PivotExecutor(
+        _repo(), FakeClient(), "h1", {"network-x": contract}, optimize_normalization=False,
+    ).fetch_intents("F1", "baseline", [intent], retain, raw_families={
+        "net_flow", "net_alert", "net_session",
+    })
+    assert normalized_sizes == [2]
+    normalized_sizes.clear()
+
+    optimized_executor = PivotExecutor(_repo(), FakeClient(), "h1", {"network-x": contract})
+    optimized = optimized_executor.fetch_intents(
+        "F1", "optimized", [intent], retain,
+        raw_families={"net_flow", "net_alert", "net_session"},
+    )
+    repeated = optimized_executor.fetch_intents(
+        "F1", "repeated", [intent], retain,
+        raw_families={"net_flow", "net_alert", "net_session"},
+    )
+
+    # no cross-leaf cache: a repeated fetch normalizes again, so memory never grows with expansion length
+    assert normalized_sizes == [1, 1]
+    assert [event.model_dump(mode="json") for event in optimized.events] == [
+        event.model_dump(mode="json") for event in baseline.events
+    ]
+    assert [cell.model_dump(mode="json") for cell in optimized.coverage] == [
+        cell.model_dump(mode="json") for cell in baseline.coverage
+    ]
+    assert [event.model_dump(mode="json") for event in repeated.events] == [
+        event.model_dump(mode="json") for event in optimized.events
+    ]
+
+
+def test_prefiltered_leaf_keeps_the_journald_boot_join(monkeypatch):
+    from tests.test_boot_identity import BOOT_A, exec_records, journal_copy
+    records = [*exec_records(), journal_copy("j1")]
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=3, total_relation="eq", returned=3, records=records,
+    ))
+    contract = contract_from_types("host-x", {"@timestamp": "date", "event.dataset": "keyword"})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+
+    batch = PivotExecutor(_repo(), FakeClient(), "h1", {"host-x": contract}).fetch_intents(
+        "F1", "lineage", [intent], lambda event: event.family == "process_exec", raw_families={"process_exec"},
+    )
+
+    assert [event.get("host.boot.id") for event in batch.events] == [BOOT_A]
 
 
 def test_shared_publication_sets_source_case_and_keeps_machine_policy():
