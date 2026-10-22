@@ -34,6 +34,7 @@ packages = ["src/romulus"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["slow: large synthetic volume tests (deselect with -m \"not slow\")"]
 
 [tool.ruff]
 line-length = 110
