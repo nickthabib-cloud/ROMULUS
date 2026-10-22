@@ -72,6 +72,10 @@ def test_catalog_export_explains_strength_and_labels_each_covering_rule():
         "A covering rule can report a complete negative for its own predicate when runtime "
         "coverage is complete; this never means the ATT&CK technique is absent."
     )
+    assert document["coverage_strength_legend"]["context-only"] == (
+        "A covering rule can provide investigation context, but it cannot support a complete "
+        "negative."
+    )
     assert web_protocols["covering_rules"] == [
         {"rule_id": "net.rare_client_fingerprint", "strength": "context-only"}
     ]

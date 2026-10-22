@@ -14,7 +14,7 @@ Every collapsed id and name remains listed and is marked not covered.
 
 - **negative-capable** — A covering rule can report a complete negative for its own predicate when runtime coverage is complete; this never means the ATT&CK technique is absent.
 - **positive-only** — A covering rule can report matching evidence, but a non-match cannot support a complete negative.
-- **context-only** — A covering rule is judged only on evidence reached through an explicit investigation context and cannot support a technique-wide negative.
+- **context-only** — A covering rule can provide investigation context, but it cannot support a complete negative.
 - **none** — No active rule explicitly maps to the technique.
 
 A technique's strength is the strongest strength among its active covering rules.

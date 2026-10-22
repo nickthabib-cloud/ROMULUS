@@ -53,6 +53,11 @@ def test_public_matrix_explains_strength_and_labels_each_covering_rule():
     assert "## Strength legend" in text
     assert "for its own predicate" in text
     assert "never means the ATT&CK technique is absent" in text
+    assert (
+        "A covering rule can provide investigation context, but it cannot support a complete "
+        "negative."
+        in text
+    )
     assert "strongest covering rule's strength" in text
     assert (
         "[net.rare_client_fingerprint](#rule-net-rare-client-fingerprint) (context-only)"

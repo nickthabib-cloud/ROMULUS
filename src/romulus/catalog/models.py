@@ -38,8 +38,8 @@ COVERAGE_STRENGTH_LEGEND: tuple[tuple[CoverageStrength, str], ...] = (
     (
         CoverageStrength.CONTEXT_ONLY,
         (
-            "A covering rule is judged only on evidence reached through an explicit investigation "
-            "context and cannot support a technique-wide negative."
+            "A covering rule can provide investigation context, but it cannot support a complete "
+            "negative."
         ),
     ),
     (
