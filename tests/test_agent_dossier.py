@@ -14,6 +14,37 @@ from romulus.store.repo import Repo
 T = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 
 
+def _large_gap_repo(gaps: int, *, finding: bool) -> Repo:
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("large", {
+        "window": {"start": T.isoformat(), "end": (T + timedelta(hours=2)).isoformat()},
+        "targets": ["host-index"], "source_profiles": {"host-index": {"id": "hp"}},
+        "pack": {"playbooks": []},
+    }, "digest", "test")
+    for index in range(gaps):
+        repo.set_rule_cell(
+            "large", f"rule.{index % 37:02d}", "1", "host-index", f"p{index:04d}",
+            "evaluated_partial", 0, index, {"reason": "shard timed out"},
+        )
+    if finding:
+        event = TypedEvent(
+            id="large-event", family="process_exec", ts=T, host="web01", outcome=Outcome.success,
+            fields={"process.argv": fv(["id"], "large:argv")}, raw=[], normalizer="test@1",
+        )
+        repo.save_evidence("large", [event], {}, None)
+        repo.save_candidate({
+            "id": "large-finding", "hunt_id": "large", "rule_id": "rule.00", "rule_version": "1",
+            "claim": "one finding", "claim_type": "observed_action", "event_ids": [event.id],
+            "predicate_fields": [], "entities": [["host", "web01", "host"]], "ts": T,
+            "severity": "high", "confidence": "high", "lane": "high", "priority": 90.0,
+            "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+            "group_key": "", "source_case_id": None, "source_anchor_id": None,
+            "source_link_id": None,
+        })
+    return repo
+
+
 def _repo(reverse: bool = False) -> Repo:
     repo = Repo(make_engine(":memory:"))
     migrate(repo.engine)
@@ -184,3 +215,45 @@ def test_dossier_incidents_and_expansion_use_aliases_and_explain_unreached_tiers
     }]
     assert any(item["tier"] == "T1" and item["link_type"] == "login_session"
                for item in dossier["expansion"]["link_tiers_not_reached"])
+
+
+def test_dossier_pages_hundreds_of_context_gaps_without_exceeding_budget():
+    repo = _large_gap_repo(500, finding=True)
+
+    dossier = build_dossier(repo, "large", token_budget=8_000)
+
+    assert len(dossier.pages) > 1
+    assert all(estimate_tokens(json.dumps(page, sort_keys=True, separators=(",", ":"))) <= 8_000
+               for page in dossier.pages)
+    assert [page["header"]["dossier"]["page"] for page in dossier.pages] == list(
+        range(1, len(dossier.pages) + 1)
+    )
+    gaps = [gap for page in dossier.pages for gap in page.get("scope", {}).get(
+        "coverage", {}).get("gaps", [])]
+    assert len(gaps) == 500
+    assert dossier.payload["scope"]["coverage"]["summary"]["gap_count"] == 500
+
+
+def test_dossier_zero_findings_still_pages_context_and_enforces_budget():
+    dossier = build_dossier(_large_gap_repo(500, finding=False), "large", token_budget=8_000)
+
+    assert all(not page.get("findings") for page in dossier.pages)
+    assert all(estimate_tokens(json.dumps(page, sort_keys=True, separators=(",", ":"))) <= 8_000
+               for page in dossier.pages)
+    assert sum(len(page.get("scope", {}).get("coverage", {}).get("gaps", []))
+               for page in dossier.pages) == 500
+
+
+def test_dossier_truncates_attacker_controlled_account_values_with_marker():
+    repo = _repo()
+    long_account = "attacker-" + ("x" * 20_000)
+    repo.update_context_candidate("finding-0", {
+        "entities": [["host", "web01", "host"], ["account", long_account, "actor"]],
+    })
+
+    dossier = build_dossier(repo, "h1", token_budget=8_000)
+    finding = next(item for page in dossier.pages for item in page.get("findings", [])
+                   if item["alias"] == "F1")
+
+    assert len(finding["account"]) < 300
+    assert "chars omitted" in finding["account"]

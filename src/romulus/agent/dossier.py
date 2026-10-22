@@ -19,13 +19,44 @@ from romulus.store.repo import Repo
 DOSSIER_SCHEMA = "agent-dossier@1"
 REPORTABLE_LANES = ("urgent", "high", "lead")
 CLAIM_LIMIT = 180
+DATA_TEXT_LIMIT = 180
+DATA_COLLECTION_LIMIT = 50
 _GAP_STATES = frozenset({
     "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
 })
 
 
+def _bounded_text(value: Any, limit: int = DATA_TEXT_LIMIT) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…[{len(text) - limit} chars omitted]"
+
+
 def _jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+
+def _bounded_data(value: Any) -> Any:
+    """Return persisted input data without an unbounded scalar/container."""
+    if isinstance(value, dict):
+        items = sorted(value.items(), key=lambda item: str(item[0]))
+        bounded = {
+            _bounded_text(key): _bounded_data(item)
+            for key, item in items[:DATA_COLLECTION_LIMIT]
+        }
+        if len(items) > DATA_COLLECTION_LIMIT:
+            bounded["_omitted"] = f"{len(items) - DATA_COLLECTION_LIMIT} entries omitted"
+        return bounded
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = list(value)
+        bounded = [_bounded_data(item) for item in items[:DATA_COLLECTION_LIMIT]]
+        if len(items) > DATA_COLLECTION_LIMIT:
+            bounded.append(f"…[{len(items) - DATA_COLLECTION_LIMIT} entries omitted]")
+        return bounded
+    if isinstance(value, str):
+        return _bounded_text(value)
+    return _jsonable(value)
 
 
 def _canonical(value: Any) -> str:
@@ -61,7 +92,7 @@ def _entity_value(entities: list, kind: str) -> str | None:
         else:
             continue
         if item_kind == kind and value not in (None, ""):
-            return str(value)
+            return _bounded_text(value)
     return None
 
 
@@ -98,7 +129,7 @@ def _coverage(repo: Repo, hunt_id: str, manifest: dict) -> dict:
     gaps = [{
         "rule_id": row["rule_id"], "rule_version": row["rule_version"],
         "target": row["target"], "partition": row["partition"], "status": "partial",
-        "state": row["state"], "detail": _jsonable(row.get("detail") or {}),
+        "state": row["state"], "detail": _bounded_data(row.get("detail") or {}),
     } for row in cells if row["state"] in _GAP_STATES]
     rules = sorted({str(item["id"]) for item in (manifest.get("pack") or {}).get("playbooks", [])
                     if isinstance(item, dict) and item.get("id")})
@@ -117,6 +148,7 @@ def _coverage(repo: Repo, hunt_id: str, manifest: dict) -> dict:
             "recorded_cells": len(cells),
             "partial_cells": sum(gap["status"] == "partial" for gap in gaps),
             "unassessed_cells": sum(gap["status"] == "unassessed" for gap in gaps),
+            "gap_count": len(gaps),
         },
         "gaps": gaps,
     }
@@ -217,53 +249,77 @@ def _entity_refs(repo: Repo, candidates: list[dict], aliases: AliasBook) -> list
     wanted = {(str(item[0]), str(item[1])) for row in candidates for item in row.get("entities") or []
               if isinstance(item, (list, tuple)) and len(item) >= 2}
     return [{
-        "alias": aliases.alias_for("N", row["id"]), "kind": row["kind"], "value": row["value"],
+        "alias": aliases.alias_for("N", row["id"]), "kind": _bounded_text(row["kind"]),
+        "value": _bounded_text(row["value"]),
     } for row in repo.entities(aliases.hunt_id) if (row["kind"], row["value"]) in wanted]
 
 
-def _page_payload(base: dict, findings: list[dict], page: int, pages: int, cursor: str) -> dict:
+def _page_payload(payload: dict, page: int, pages: int, cursor: str) -> dict:
     if page < pages:
         message = (f"index page {page} of {pages}; call list_findings(page={page + 1},"
                    f"cursor={cursor}) for the rest")
     else:
         message = f"index page {page} of {pages}; all findings in the index have been included"
-    payload = {**base, "header": {**base["header"], "index": {
+    payload = {**payload, "header": {**payload["header"], "index": {
         "page": page, "pages": pages, "cursor": cursor, "message": message,
-    }}, "findings": findings}
+    }, "dossier": {
+        "page": page, "pages": pages,
+        "message": f"dossier page {page} of {pages}",
+    }}}
     return _jsonable(payload)
 
 
-def _paginate(base: dict, findings: list[dict], token_budget: int, cursor: str) -> tuple[dict, ...]:
-    one = _page_payload(base, findings, 1, 1, cursor)
-    if estimate_tokens(_canonical(one)) <= token_budget:
-        return (one,)
-    continuation = {"schema": base["schema"], "header": base["header"]}
-    chunks: list[list[dict]] = []
-    remaining = list(findings)
-    while remaining or not chunks:
-        page_base = base if not chunks else continuation
-        current: list[dict] = []
-        while remaining:
-            trial = current + [remaining[0]]
-            # Six digits reserves more header room than any realistic page count.
-            if estimate_tokens(_canonical(_page_payload(
-                    page_base, trial, 999999, 999999, cursor))) > token_budget:
-                break
-            current.append(remaining.pop(0))
-        if not current and remaining:
-            if chunks:
-                raise ValueError("token_budget is too small for one dossier finding")
-            # The context envelope can consume a small budget by itself. Emit it
-            # once, then use compact continuation pages for the findings index.
-            if estimate_tokens(_canonical(_page_payload(
-                    page_base, [], 999999, 999999, cursor))) > token_budget:
-                raise ValueError("token_budget is too small for the dossier context")
-        chunks.append(current)
-        if not remaining:
-            break
-    total = len(chunks)
-    return tuple(_page_payload(base if index == 1 else continuation, chunk, index, total, cursor)
-                 for index, chunk in enumerate(chunks, 1))
+def _append_detail(payload: dict, section: str, item: dict) -> None:
+    if section in {"findings", "context_counts", "entities", "incidents"}:
+        payload.setdefault(section, []).append(item)
+    elif section == "sources":
+        payload.setdefault("scope", {}).setdefault("sources", []).append(item)
+    elif section == "coverage_gaps":
+        payload.setdefault("scope", {}).setdefault("coverage", {}).setdefault("gaps", []).append(item)
+    elif section.startswith("expansion."):
+        key = section.partition(".")[2]
+        payload.setdefault("expansion", {}).setdefault(key, []).append(item)
+    elif section == "safety_flags":
+        payload.setdefault("safety", {}).setdefault("flags", []).append(item)
+    else:  # pragma: no cover - internal programming guard
+        raise ValueError(f"unknown dossier section {section}")
+
+
+def _paginate(base: dict, details: list[tuple[str, dict]], token_budget: int,
+              cursor: str) -> tuple[dict, ...]:
+    continuation = {"schema": base["schema"], "header": base["header"], "findings": []}
+    current = _jsonable(base)
+    pages: list[dict] = []
+    item_count = 0
+
+    if estimate_tokens(_canonical(_page_payload(current, 999999, 999999, cursor))) > token_budget:
+        raise ValueError("token_budget is too small for the fixed dossier summary")
+
+    for section, item in details:
+        trial = _jsonable(current)
+        _append_detail(trial, section, item)
+        if estimate_tokens(_canonical(_page_payload(trial, 999999, 999999, cursor))) <= token_budget:
+            current = trial
+            item_count += 1
+            continue
+        if item_count:
+            pages.append(current)
+            current = _jsonable(continuation)
+            item_count = 0
+        trial = _jsonable(current)
+        _append_detail(trial, section, item)
+        if estimate_tokens(_canonical(_page_payload(trial, 999999, 999999, cursor))) > token_budget:
+            raise ValueError(f"token_budget is too small for one dossier {section} item")
+        current = trial
+        item_count = 1
+    pages.append(current)
+
+    total = len(pages)
+    output = tuple(_page_payload(payload, index, total, cursor)
+                   for index, payload in enumerate(pages, 1))
+    if any(estimate_tokens(_canonical(page)) > token_budget for page in output):
+        raise AssertionError("dossier page exceeded its token budget")
+    return output
 
 
 def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
@@ -283,6 +339,14 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
     context_counts = Counter(row["rule_id"] for row in repo.candidates(hunt_id) if row["lane"] == "context")
     profiles = manifest.get("source_profiles") or {}
     source_targets = sorted(set(manifest.get("targets") or []) | set(profiles))
+    coverage = _coverage(repo, hunt_id, manifest)
+    sources = [{"target": _bounded_text(target), "profile": _bounded_data(profiles.get(target) or {})}
+               for target in source_targets]
+    context_rows = [{"rule_id": _bounded_text(rule_id), "count": count}
+                    for rule_id, count in sorted(context_counts.items())]
+    entities = _entity_refs(repo, reportable, aliases)
+    incidents = _incidents(repo, hunt_id, reportable, aliases)
+    expansion = _expansion(repo, hunt_id, aliases)
     base = {
         "schema": DOSSIER_SCHEMA,
         "header": {"finding_counts": {
@@ -290,30 +354,39 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
             "total": sum(lane_counts[lane] for lane in REPORTABLE_LANES),
         }},
         "scope": {
-            "window": {**_jsonable(manifest.get("window") or {}), "semantics": "[start, end) UTC"},
-            "sources": [{"target": target, "profile": _jsonable(profiles.get(target) or {})}
-                        for target in source_targets],
-            "coverage": _coverage(repo, hunt_id, manifest),
+            "window": {**_bounded_data(manifest.get("window") or {}), "semantics": "[start, end) UTC"},
+            "sources": [],
+            "coverage": {"summary": coverage["summary"], "gaps": []},
         },
-        "context_counts": [{"rule_id": rule_id, "count": count}
-                           for rule_id, count in sorted(context_counts.items())],
-        "entities": _entity_refs(repo, reportable, aliases),
-        "incidents": _incidents(repo, hunt_id, reportable, aliases),
-        "expansion": _expansion(repo, hunt_id, aliases),
+        "context_counts": [],
+        "entities": [],
+        "incidents": [],
+        "expansion": {key: [] for key in expansion},
         "agent_budget": _budget(repo, hunt_id, manifest),
+        "safety": {"flags": []},
+        "findings": [],
     }
-    base["safety"] = {"flags": injection_flags({
+    safety_flags = injection_flags({
         "findings": finding_rows,
-        "scope": base["scope"],
-        "entities": base["entities"],
-        "incidents": base["incidents"],
-        "expansion": base["expansion"],
-    })}
+        "scope": {"sources": sources, "coverage": coverage},
+        "entities": entities,
+        "incidents": incidents,
+        "expansion": expansion,
+    })
+    details: list[tuple[str, dict]] = [("findings", item) for item in finding_rows]
+    details.extend(("sources", item) for item in sources)
+    details.extend(("context_counts", item) for item in context_rows)
+    details.extend(("entities", item) for item in entities)
+    details.extend(("incidents", item) for item in incidents)
+    for key, values in expansion.items():
+        details.extend((f"expansion.{key}", item) for item in values)
+    details.extend(("coverage_gaps", item) for item in coverage["gaps"])
+    details.extend(("safety_flags", item) for item in safety_flags)
     cursor = "D" + digest({
         "hunt_id": hunt_id, "token_budget": token_budget, "context": base,
-        "findings": finding_rows,
+        "details": details,
     })[:16]
-    pages = _paginate(base, finding_rows, token_budget, cursor)
+    pages = _paginate(base, details, token_budget, cursor)
     repo.save_agent_dossier_page_plan(
         hunt_id, cursor, [[finding["alias"] for finding in page["findings"]] for page in pages],
     )
