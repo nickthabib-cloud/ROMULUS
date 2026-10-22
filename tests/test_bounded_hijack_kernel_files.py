@@ -6,7 +6,9 @@ from romulus.detect.kernel_files import PersistencePathChange, RootExecNonRootMo
 from tests.test_kernel_files import JOB, T0, change, pexec, root_exec, user_exec
 
 
-def _staged_run(cls, partitions, directory, hot=None, monkeypatch=None, budgets=None):
+def _staged_run(cls, partitions, directory, hot=None, monkeypatch=None, budgets=None, published=None):
+    """Drive a rule as the sweep does; matches it publishes while reading go to `published` (none is expected
+    unless a list is given)."""
     if hot is not None:
         monkeypatch.setattr(cls, "HOT", hot)
     pb = cls()
@@ -15,7 +17,11 @@ def _staged_run(cls, partitions, directory, hot=None, monkeypatch=None, budgets=
         getattr(pb, name).disk_budget = budget
     store = {}
     for part in partitions:
-        assert pb.consume(list(part)) == []
+        found = pb.consume(list(part))
+        if published is None:
+            assert found == []
+        else:
+            published += found
         store.update({e.id: e for e in pb.drain_staged()})
     pb.bind_loader(lambda ids: [store[i] for i in ids if i in store])
     out = pb.finalize()
@@ -66,7 +72,9 @@ def test_root_exec_disk_budget_refuses_a_new_session_and_says_so(monkeypatch, tm
     later = [root_exec(ts=T0 + timedelta(hours=1), ses=3)]
     pb, out = _staged_run(RootExecNonRootModifiableFile, [first, filler, later], tmp_path, hot=2,
                           monkeypatch=monkeypatch, budgets={"runs": 1})
-    assert pb.capped == 1 and pb.evaluated == len(first) + len(filler)          # the refused run is not evaluated
+    # which runs are refused depends on how many reached disk (the hot size); every refused run is not evaluated,
+    # and the run of the next hour, a new session, is refused
+    assert pb.capped >= 1 and pb.evaluated + pb.capped == len(first) + len(filler) + len(later)
     assert any("disk budget" in reason for reason in pb.limit_reasons())
     [job] = [m for m in out if m.group_key == f"app01|33|{JOB}"]
     assert "executed /srv/tasks/rotate.sh as the #! script once" in job.claim      # its session-1 run is kept
@@ -98,10 +106,14 @@ def test_persistence_changes_and_groups_spill_and_match_the_unbounded_result(mon
     assert evil.proposed_lane == "high" and small.limit_reasons() == []
 
 
-def test_persistence_disk_budget_refuses_a_later_change_and_says_so(monkeypatch, tmp_path):
+def test_persistence_disk_budget_publishes_a_later_change_on_its_own_and_says_so(monkeypatch, tmp_path):
     parts = _persistence_hunt()
+    alone = []
     pb, out = _staged_run(PersistencePathChange, parts, tmp_path, hot=5, monkeypatch=monkeypatch,
-                          budgets={"changes": 1})
-    # the first partition of changes reached disk; every later change is refused and not evaluated
-    assert pb.capped == 501 and any("disk budget" in reason for reason in pb.limit_reasons())
+                          budgets={"changes": 1}, published=alone)
+    # the first partition of changes reached disk; every later change is a finding on its own, published as read
+    assert pb.capped == 0 and any("published as they are read" in reason for reason in pb.limit_reasons())
     assert [m.group_key for m in out] == ["app01|package:dpkg"]
+    assert len(alone) == 501 and all(m.group_key.endswith("|unheld") for m in alone)
+    [evil] = [m for m in alone if "/etc/cron.d/evil" in m.claim + " ".join(m.notes)]
+    assert evil.proposed_lane == "high"

@@ -29,15 +29,18 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
 from romulus.detect.host import (
     UNBUDGETED,
     Lineage,
     ProcessLineage,
     _argv_summary,
     _outcome_tally,
+    add_unheld,
+    alone,
     boot_of,
     lineage_phrase,
+    need,
 )
 from romulus.detect.linux_argv import (
     canonical,
@@ -369,6 +372,7 @@ def _actor(e: TypedEvent) -> str:
 
 
 class _TamperRule(Playbook):
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     kind = "aggregate"
     claim_type = "aggregate_observation"
     assures_negative = False
@@ -391,6 +395,7 @@ class _TamperRule(Playbook):
         self.markers = _ShutdownMarkers(self)
         self._items = SpillList(self, "tamper_items", self.HOT, disk_budget=self.COMMANDS_DISK)
         self.items: list[_Item] = []         # the command matches, read back at finalize
+        self._alone: list[Match] = []        # command matches published on their own (the budget refused the list)
         self._seen = RecentIds()        # bounded re-read guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
@@ -422,6 +427,7 @@ class _TamperRule(Playbook):
     def consume(self, events):
         order = {"process_exec": 0, "system_state": 1, "service_change": 2, "audit_config": 3}
         fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
+        self._batch = events
         for e in sorted(fresh, key=lambda x: (x.ts, order.get(x.family, 9), x.id)):
             self._seen.add(e.id)
             marker = self.markers.observe(e)
@@ -434,9 +440,15 @@ class _TamperRule(Playbook):
                     self.missing_required += int(argv_incomplete(e))
                     continue
             self._event(e)
-        return []
+        self._batch = None
+        out, self._alone = self._alone, []
+        return out
 
     program_prefilter = True
+
+    def _describer(self):
+        """The function that words a group of command matches (one per rule)."""
+        return getattr(self, "_describe_commands", None) or self._describe
 
     def _process_relevant(self, event: TypedEvent) -> bool:
         name = program_name_hint(event)
@@ -461,20 +473,37 @@ class _TamperRule(Playbook):
         actor = _actor(e)
         kept = False
         for key, target, how, lane in found:
-            if self._items.append(_Item(e.host, e.ts.timestamp(), (e.host, actor, lineage.kind, key), how, target,
-                                        lane, e, lineage, actor, from_text=from_text)):
+            item = _Item(e.host, e.ts.timestamp(), (e.host, actor, lineage.kind, key), how, target, lane, e, lineage,
+                         actor, from_text=from_text)
+            if self._items.append(item):
                 kept = True
             else:
-                self.evaluated -= 1
-                self.refuse("commands_disk", "the command matches' disk budget is spent; a later command match is "
-                                             "not evaluated")
-                break
+                # a command match is a finding by itself: published now as a one-command group, instead of refused
+                self.note_limit("commands_alone", "the command matches' disk budget is spent; later command matches "
+                                                  "are published one record at a time, not grouped or linked to unit "
+                                                  "stop or configuration records")
+                add_unheld(self._alone, alone(self._describer()(item.group, [item]), self, e))
         if kept:
             self._pending.append(e)
 
     def _load_items(self) -> None:
         """Finalize: the command matches, read back from their list."""
         self.items = list(self._items)
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Every command match, grouped as usual (the matches are read, nothing is written), without the unit stop or
+        configuration records whose linking needed disk."""
+        try:
+            self.items = list(self._items)
+        except StateExhausted:
+            self.items = [item for _order, item in self._items.buffer]  # the list on disk cannot be read
+        for item in self.items:
+            item.linked.clear()
+        out = self._group_findings(self._describer())
+        for m in out:
+            m.notes.append(f"published without linked service-manager or configuration records: linking them "
+                           f"needed disk ({reason})")
+        return out
 
     def _group_findings(self, describe) -> list[Match]:
         groups: dict[tuple, list[_Item]] = defaultdict(list)
@@ -670,7 +699,8 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                 kind = "shutdown"
             else:
                 kind = "stopped"
-            typed.setdefault((stop.host, name, kind), list).append((stop, kind, gap))
+            need(typed.setdefault((stop.host, name, kind), list), self, "the unit stop grouping").append(
+                (stop, kind, gap))
             typed.trim()
         out = self._group_findings(self._describe_commands)
         for key in sorted(typed.keys(), key=str):
@@ -1011,7 +1041,8 @@ class AuditRulesTamper(_TamperRule):
                         or (f"audit login uid {config.get('process.auid')}" if config.has("process.auid")
                             else "no login session"))
             session = (config.get("process.auid"), config.get("process.session_id"))
-            typed.setdefault((config.host, actor, kind, session), list).append(config)
+            need(typed.setdefault((config.host, actor, kind, session), list), self,
+                 "the configuration record grouping").append(config)
             typed.trim()
         out = self._group_findings(self._describe_commands)
         for key in sorted(typed.keys(), key=str):

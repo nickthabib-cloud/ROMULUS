@@ -14,10 +14,18 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HOT_COUNT, ExecHistory, HeldExamples, KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import (
+    HOT_COUNT,
+    ExecHistory,
+    HeldExamples,
+    KeyedStore,
+    RecentIds,
+    SpillList,
+    StateExhausted,
+)
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
-from romulus.detect.host import WEB_SERVICE_USERS
+from romulus.detect.host import WEB_SERVICE_USERS, add_unheld, alone, need
 from romulus.evidence.typed import Outcome, TypedEvent
 
 CITE = 10                       # records cited per finding; claims give exact totals
@@ -143,6 +151,7 @@ class _RunTally:
 
 
 class RootExecNonRootModifiableFile(Playbook):
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.root_exec_nonroot_modifiable_file"
     version = "2"
     title = "Root executed a file that a non-root account owns or can write"
@@ -556,6 +565,7 @@ class _Change:
 
 
 class PersistencePathChange(Playbook):
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.persistence_path_change"
     version = "4"
     title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"
@@ -627,6 +637,7 @@ class PersistencePathChange(Playbook):
         self.changes = SpillList(self, "persistence_changes", self.HOT)
         # (time, parent pid, executable, boot) per (host, pid): the most recent in memory, the rest on disk
         self.execs = ExecHistory(self.EXEC_CAPACITY, 2**62, self, "persistence_execs")
+        self._alone: list[Match] = []   # changes published on their own (the budget refused holding them)
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
@@ -637,6 +648,7 @@ class PersistencePathChange(Playbook):
 
     def consume(self, events):
         fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
+        self._batch = events
         for event in sorted(fresh, key=lambda e: (e.ts, e.id)):
             self._seen.add(event.id)
             if event.family == "process_exec":
@@ -645,7 +657,9 @@ class PersistencePathChange(Playbook):
                 self._change(event)
         self.changes.trim()
         self.execs.trim()
-        return []
+        self._batch = None
+        out, self._alone = self._alone, []
+        return out
 
     def _exec(self, event: TypedEvent) -> None:
         """Process lineage only: (time, parent pid, kernel-recorded executable, boot id) per process id."""
@@ -674,7 +688,7 @@ class PersistencePathChange(Playbook):
         if change not in _INSTALLING:
             return
         user = event.get("process.user")
-        held = self.changes.append(_Change(
+        change = _Change(
             ts=event.ts.timestamp(), event_id=event.id, host=event.host or "", path=str(path), change=str(change),
             location=location[0], description=location[1], technique=location[2], uid=uid,
             account=str(user or f"uid {uid}"), web=user in WEB_SERVICE_USERS,
@@ -683,10 +697,16 @@ class PersistencePathChange(Playbook):
             exe=str(event.get("process.executable") or ""), pid=event.get("process.pid"),
             ppid=event.get("process.ppid"), auid=_str(event.get("process.auid")), tty=_str(event.get("process.tty")),
             boot=boot_of(event),
-            outcome=event.outcome))
-        if not held:
-            self.evaluated -= 1
-            self.refuse("disk", "the persistence-location changes' disk budget is spent; a later one is not evaluated")
+            outcome=event.outcome)
+        if not self.changes.append(change):
+            # a write to a persistence location is a finding by itself: published now, on its own
+            self.note_limit("changes_alone", "the persistence-location changes' disk budget is spent; later changes "
+                                             "are published as they are read, not grouped per process")
+            load, self.load = self.load, lambda ids: [event]
+            try:
+                add_unheld(self._alone, alone(self._single(change), self, event))
+            finally:
+                self.load = load
             return
         if event.id not in self._staged:
             self._staged.add(event.id)
@@ -702,7 +722,8 @@ class PersistencePathChange(Playbook):
                 return name
             if not isinstance(ppid, int) or ppid <= 1:
                 return None
-            parent = _latest(self.execs.get((change.host, ppid), touch=True), ts, boot)
+            parent = _latest(self.execs.get((change.host, ppid), touch=True)
+                             or self.execs.store.peek((change.host, ppid), []), ts, boot)
             if parent is None:
                 return None
             ts, ppid, exe, parent_boot = parent
@@ -719,22 +740,11 @@ class PersistencePathChange(Playbook):
     def finalize(self):
         groups = KeyedStore(self, "persistence_groups", self.HOT)          # group key -> [_Change]
         for i, change in enumerate(self.changes):
-            manager = self._manager(change) if change.uid == "0" else None
             # Package activity is batched per (host, manager). Anything else is one finding per writing process
             # (host, uid, pid) and directory, so one editor run (file, swap and backup files) is one finding; without
             # a pid it is one finding per file. Every file is named and its first record cited.
-            if manager:
-                key = ("package", change.host, manager)
-            elif isinstance(change.pid, int):
-                key = ("account", change.host, posixpath.dirname(change.path), change.uid, change.pid, change.exe,
-                       change.boot)
-            else:
-                key = ("account", change.host, change.path, change.uid, None, change.exe, change.boot)
-            held = groups.setdefault(key, list)
-            if held is None:
-                self.refuse("disk", "the grouped changes' disk budget is spent; a later change is not evaluated")
-                continue
-            held.append(change)
+            key = self._key(change)
+            need(groups.setdefault(key, list), self, "the persistence change grouping").append(change)
             if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
                 groups.trim()
                 self.execs.trim()
@@ -751,6 +761,35 @@ class PersistencePathChange(Playbook):
                             self._package_finding(final, run) if final[0] == "package" else self._finding(final, run)))
         groups.clear()
         return [match for _key, match in sorted(out, key=lambda item: item[0])]
+
+    def _key(self, change: _Change) -> tuple:
+        """The finding a change belongs to: package activity per (host, manager); anything else per writing
+        process and directory (per file without a pid)."""
+        manager = self._manager(change) if change.uid == "0" else None
+        if manager:
+            return ("package", change.host, manager)
+        if isinstance(change.pid, int):
+            return ("account", change.host, posixpath.dirname(change.path), change.uid, change.pid, change.exe,
+                    change.boot)
+        return ("account", change.host, change.path, change.uid, None, change.exe, change.boot)
+
+    def _single(self, change: _Change) -> Match:
+        """The finding of one change on its own."""
+        ((final, run),) = self._split_runs({self._key(change): [change]}).items()
+        return self._package_finding(final, run) if final[0] == "package" else self._finding(final, run)
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Every held change on its own (grouping needed disk)."""
+        out = []
+        try:
+            for change in self.changes:
+                m = self._single(change)
+                m.group_key += f"|alone:{change.event_id}"
+                m.notes.append(f"published on its own: grouping per process needed disk ({reason})")
+                out.append(m)
+        except StateExhausted:
+            pass                                    # the list on disk cannot be read: what was read stands
+        return out
 
     @staticmethod
     def _split_runs(groups: dict[tuple, list[_Change]]) -> dict[tuple, list[_Change]]:

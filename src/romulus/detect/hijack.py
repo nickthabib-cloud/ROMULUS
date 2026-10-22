@@ -270,6 +270,7 @@ def _written(state: _File) -> bool:
 
 
 class NonRootWriteRootExecutedFile(Playbook):
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.nonroot_write_root_executed_file"
     version = "7"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
@@ -684,7 +685,8 @@ class NonRootWriteRootExecutedFile(Playbook):
                 return True
             if not isinstance(ppid, int) or ppid <= 1:
                 return False
-            parent = self._latest(self.daemons.get((event.host, ppid), touch=True), ts, boot)
+            parent = self._latest(self.daemons.get((event.host, ppid), touch=True)
+                                  or self.daemons.store.peek((event.host, ppid), []), ts, boot)
             if parent is None:
                 return False
             ts, ppid, parent_boot = parent

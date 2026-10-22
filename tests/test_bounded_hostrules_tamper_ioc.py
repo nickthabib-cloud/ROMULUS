@@ -154,11 +154,13 @@ def test_indicator_groups_spill_and_read_back_exactly(tmp_path, monkeypatch):
     assert len(out) == 43 and all(item[1] is None for _k, state in rule.groups.items() for item in state[2].items)
 
 
-def test_indicator_disk_budgets_refuse_only_when_the_overflow_is_spent_too(tmp_path, monkeypatch):
+def test_an_indicator_hit_with_no_room_for_a_group_is_published_on_its_own(tmp_path, monkeypatch):
     parts = [[query(T0, f"a{i}.c2.test", f"s{i}") for i in range(4)],
              [query(T0 + timedelta(minutes=1), f"b{i}.c2.test", f"t{i}") for i in range(4)],
              [query(T0 + timedelta(minutes=2), f"c{i}.c2.test", f"u{i}") for i in range(4)]]
     rule, out = staged_run(_Listed, parts, tmp_path, hot=1, monkeypatch=monkeypatch,
                            budgets={"groups": 1, "overflow": 1})
-    assert len(out) == 8 and rule.capped == 4 and rule.evaluated == 8
-    assert any("a later match is not evaluated" in r for r in rule.limit_reasons())
+    alone = [m for m in out if m.group_key.endswith("|unheld")]
+    assert len(out) == 12 and len(alone) == 4 and rule.capped == 0 and rule.evaluated == 12
+    assert all(len(m.events) == 1 and "1 dns_query record(s)" in m.claim for m in alone)
+    assert any("published one record at a time" in r for r in rule.limit_reasons())

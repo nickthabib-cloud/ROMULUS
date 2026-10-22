@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
-from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds, SpillList, StateExhausted
 from romulus.detect.linux_argv import canonical, read_operand_paths
 from romulus.evidence.shellparse import (
     SHELLS,
@@ -206,6 +206,54 @@ def _argv_summary(argv: list[str], limit: int = 160) -> str:
     return s if len(s) <= limit else s[: limit - 1] + "…"
 
 
+ALONE_NOTE = ("published from a record read after this rule's share of the hunt's state budget was spent: the group "
+              "it belongs to could not be held, so later records of the same group are not counted or cited")
+
+
+def alone(match: Match, rule: Playbook, record: TypedEvent) -> Match | None:
+    """A strong match published from consume because the rule's state budget refused the state that would group it.
+    It is identified per group (`<group key>|unheld`; a match without a group key is its own record's), so the first
+    record of a group read after the budget was spent publishes it and later ones of the same group add nothing
+    (None here while the rule still remembers the group; the candidate store drops a later repeat in any case). It
+    cites only records of the batch being read (the sweep holds their raw copies now); a related record read earlier
+    is named in the claim but not cited."""
+    key = f"{match.group_key or f'record:{record.id}'}|unheld"
+    seen = rule.__dict__.get("_unheld")
+    if seen is None:
+        seen = rule._unheld = RecentIds()
+    if key in seen:
+        return None
+    seen.add(key)
+    batch = getattr(rule, "_batch", None) or [record]
+    cache = getattr(rule, "_batch_ids", None)
+    if cache is None or cache[0] is not batch:
+        cache = rule._batch_ids = (batch, {e.id for e in batch})
+    kept = [e for e in match.events if e.id in cache[1]] or [record]
+    if len(kept) < len(match.events):
+        match.notes.append(f"{len(match.events) - len(kept)} related record(s) read in an earlier partition are named "
+                           f"in the claim but not cited")
+    match.events = kept
+    match.group_key = key
+    match.notes.append(ALONE_NOTE)
+    return match
+
+
+def add_unheld(out: list, match: Match | None) -> None:
+    """Add a match `alone` published (None: its group was already published)."""
+    if match is not None:
+        out.append(match)
+
+
+def need(value, rule: Playbook, what: str):
+    """A finalize table refused new state (the stage volume is at its reserve): finalize stops honestly, and the rule
+    publishes what it can without disk (`finalize_fallback`)."""
+    if value is None or value is False:
+        budget = rule.budget
+        reason = (budget.hard if budget is not None else "") or "a finalize table could not take new state"
+        raise StateExhausted(f"{what}: {reason}")
+    return value
+
+
 def _exec_entities(e: TypedEvent) -> list[tuple[str, str, str]]:
     ents = e.entities()
     if e.get("process.user"):
@@ -276,6 +324,7 @@ def interpreter_indicators(argv: list[str]) -> list[str]:
 class WebServiceSpawnsInterpreter(Playbook):
     """Stack-counted: routine shapes collapse into one context item; rare shapes become leads and
     are escalated only when typed argv indicators are present (rarity alone is not suspicion)."""
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.web_service_spawns_interpreter"
     argv_prefix_safe = True
     anchor_class = "web_shell"
@@ -308,7 +357,8 @@ class WebServiceSpawnsInterpreter(Playbook):
     def __init__(self):
         super().__init__()
         self.shapes = KeyedStore(self, "web_shapes", self.HOT)    # key -> [runs, cited runs, {clock hour: runs}]
-        self.order = SpillList(self, "web_shape_order", self.HOT)   # shapes in first-seen order
+        # shapes in first-seen order: an index of shapes the store accepted, so the budget never refuses it
+        self.order = SpillList(self, "web_shape_order", self.HOT, refusable=False)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
@@ -344,9 +394,13 @@ class WebServiceSpawnsInterpreter(Playbook):
             if state is None:
                 state = [0, HeldExamples(self.CITE), {}]
                 if not self.shapes.put(key, state):
-                    self.evaluated -= 1
-                    self.refuse("shapes_disk", "the web-service interpreter shapes' disk budget is spent; a run of a "
-                                               "new shape is not evaluated")
+                    # its rarity cannot be judged without the shape's count: a lead per shape, published as read
+                    self.note_limit("shapes_unheld", "the web-service interpreter shapes' disk budget is spent; a run "
+                                                     "of a new shape is published as a lead without its count")
+                    m = self._event_match(e, user, argv, [])
+                    m.group_key = "|".join(map(str, key))
+                    m.notes.append("the shape's run count is unknown, so its rarity was not judged")
+                    add_unheld(matches, alone(m, self, e))
                     continue
                 self.order.append(key)
             state[0] += 1
@@ -429,6 +483,7 @@ class WebServiceSpawnsInterpreter(Playbook):
 class DownloaderFeedsInterpreter(Playbook):
     """Sequence: a downloader exec and a stdin-reading interpreter exec with the same parent on the
     same host within MAX_GAP seconds (the shape of `curl URL | sh` typed into a shell or a script)."""
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.downloader_feeds_interpreter"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
@@ -470,16 +525,18 @@ class DownloaderFeedsInterpreter(Playbook):
 
     def consume(self, events):
         newest = None
+        self._batch, out = events, []
         for e in sorted(self.applicable(events), key=lambda x: x.ts):
             newest = e.ts
-            self._consume_one(e)
+            self._consume_one(e, out)
         if newest is not None:
             for key in [k for k, waiting in self.pending.items()
                         if not waiting or (newest - waiting[-1].ts).total_seconds() > self.MAX_GAP * 2]:
                 del self.pending[key]
-        return []
+        self._batch = None
+        return out
 
-    def _consume_one(self, e) -> None:
+    def _consume_one(self, e, out: list) -> None:
         argv = e.get("process.argv")
         name = interpreter_name(argv[0])
         key = (e.host, e.get("process.ppid"))
@@ -503,9 +560,10 @@ class DownloaderFeedsInterpreter(Playbook):
                               _exec_entities(d), group_key=f"{raw_identity(d)}|{raw_identity(e)}")
                     m.notes.append(f"download URL: {url}")
                     if not self.found.append(m):
-                        self.evaluated -= 1
-                        self.refuse("pairs_disk", "the downloader-interpreter pairs' disk budget is spent; a later "
-                                                  "pair is not evaluated")
+                        # the pair is a finding by itself: published now, ungrouped, instead of being refused
+                        self.note_limit("pairs_alone", "the downloader-interpreter pairs' disk budget is spent; later "
+                                                       "pairs are published one at a time, not grouped by URL")
+                        add_unheld(out, alone(m, self, e))
                         break
                     self._pending.append(e)
                     break
@@ -521,8 +579,8 @@ class DownloaderFeedsInterpreter(Playbook):
             key = (d.host, url, basename(e.get("process.argv")[0]))
             ms = grouped.get(key)
             if ms is None:
-                grouped.put(key, ms := [])              # a finalize table: no budget refuses it
-                order.append(key)
+                need(grouped.put(key, ms := []), self, "the downloader pairs' grouping")
+                need(order.append(key), self, "the downloader pairs' grouping")
             ms.append(m)
             if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
                 grouped.trim()
@@ -553,6 +611,16 @@ class DownloaderFeedsInterpreter(Playbook):
         grouped.clear()
         order.clear()
         return out
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Every pair held, each on its own (no grouping by URL needs disk)."""
+        try:
+            pairs = list(self.found)
+        except StateExhausted:
+            pairs = [m for _order, m in self.found.buffer]          # the list on disk cannot be read: memory only
+        for m in pairs:
+            m.notes.append(f"published on its own: grouping by URL needed disk ({reason})")
+        return pairs
 
 
 class DownloadPipedToShell(Playbook):
@@ -732,6 +800,7 @@ class FirewallRuleChange(Playbook):
     """Direct findings for commands that block or unblock a specific address on a built-in chain, leads for
     commands that weaken the firewall (disable, flush, accept-by-default, open a port, remove a block); other
     rule-change commands are grouped per host as context."""
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.firewall_rule_change_command"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
@@ -772,6 +841,7 @@ class FirewallRuleChange(Playbook):
         return list(self._pending)                      # the rest are staged on disk
 
     def consume(self, events):
+        self._batch, out = events, []
         for e in self.applicable(events):
             argv = e.get("process.argv")
             name, args = basename(argv[0]), argv[1:]
@@ -809,9 +879,9 @@ class FirewallRuleChange(Playbook):
                           self.lane, "high", _exec_entities(e))
                 m.entities.append(("ip", addr.split("/")[0], "subject"))
                 if not self.direct.append(m):
-                    self.evaluated -= 1
-                    self.refuse("direct_disk", "the specific-address firewall changes' disk budget is spent; a later "
-                                               "one is not evaluated")
+                    self.note_limit("direct_alone", "the specific-address firewall changes' disk budget is spent; "
+                                                    "later ones are published as they are read")
+                    add_unheld(out, alone(m, self, e))
                     continue
                 self._pending.append(e)
             else:
@@ -820,7 +890,8 @@ class FirewallRuleChange(Playbook):
                 if len(self.routine[key]) < 10:
                     self.routine[key].append(e)
                     self._pending.append(e)
-        return []
+        self._batch = None
+        return out
 
     def _weakening(self, e: TypedEvent, name: str, weakening: tuple[str, bool]) -> None:
         # Disabling, flushing or opening the firewall is defense impairment (T1562.004): always a lead, grouped per
@@ -1026,6 +1097,7 @@ class AuthorizedKeysWrite(Playbook):
 
 
 class SshLoginFromExternal(Playbook):
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.ssh_login_external_source"
     anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
@@ -1052,7 +1124,8 @@ class SshLoginFromExternal(Playbook):
         super().__init__()
         # (host, account, source) -> [journal records, audit records, latest time, cited records]
         self.groups = KeyedStore(self, "ssh_external_groups", self.HOT)
-        self.order = SpillList(self, "ssh_external_order", self.HOT)     # groups in first-seen order
+        # groups in first-seen order: an index of groups the store accepted, so the budget never refuses it
+        self.order = SpillList(self, "ssh_external_order", self.HOT, refusable=False)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
@@ -1070,6 +1143,7 @@ class SshLoginFromExternal(Playbook):
         return [item[1] for store in self._fresh for item in store.items if item[1] is not None]
 
     def consume(self, events):
+        self._batch, out = events, []
         for e in self.applicable(events):
             if e.get("auth.service") != "sshd" or e.outcome != Outcome.success:
                 continue
@@ -1086,9 +1160,11 @@ class SshLoginFromExternal(Playbook):
             if tally is None:
                 tally = [0, 0, e.ts, HeldExamples(20, earliest=True)]
                 if not self.groups.put(key, tally):
-                    self.evaluated -= 1
-                    self.refuse("groups_disk", "the (host, account, source) groups' disk budget is spent; a login of "
-                                               "a new group is not evaluated")
+                    # a login from outside is a finding by itself: published now, ungrouped, instead of refused
+                    self.note_limit("groups_alone", "the (host, account, source) groups' disk budget is spent; "
+                                                    "logins of a new group are published one at a time")
+                    login = e.get("auth.phase") == "login"
+                    add_unheld(out, alone(self._login_match(key, int(not login), int(login), e.ts, [e]), self, e))
                     continue
                 self.order.append(key)
             tally[1 if e.get("auth.phase") == "login" else 0] += 1
@@ -1097,28 +1173,32 @@ class SshLoginFromExternal(Playbook):
             if store.offer(e):
                 self._pending.append(e)
                 self._fresh.append(store)
-        return []
+        self._batch = None
+        return out
 
     def finalize(self):
         out = []
         for host, user, ip in self.order:
             journal, audit, last, store = self.groups.peek((host, user, ip))
-            evs = store.events(self.load)
-            # Each login appears once per collected source (journal sshd "Accepted", audit USER_LOGIN), so the
-            # login count is the larger per-source count, never their sum.
-            logins = max(journal, audit)
-            sources = "; ".join(part for part in (
-                f"{journal} sshd 'Accepted' journal record(s)" if journal else "",
-                f"{audit} audit USER_LOGIN record(s)" if audit else "") if part)
-            claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from non-private address "
-                     f"{ip} ({evs[0].ts.isoformat()} – {last.isoformat()}; {sources}).")
-            m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"), pf(evs[0], "user.name")],
-                      evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}")
-            if journal + audit > 20:
-                m.notes.append(f"{journal + audit} matching records; the first 20 are cited and the time range covers "
-                               "all of them")
-            out.append(m)
+            out.append(self._login_match((host, user, ip), journal, audit, last, store.events(self.load)))
         return out
+
+    def _login_match(self, key: tuple, journal: int, audit: int, last, evs: list[TypedEvent]) -> Match:
+        host, user, ip = key
+        # Each login appears once per collected source (journal sshd "Accepted", audit USER_LOGIN), so the
+        # login count is the larger per-source count, never their sum.
+        logins = max(journal, audit)
+        sources = "; ".join(part for part in (
+            f"{journal} sshd 'Accepted' journal record(s)" if journal else "",
+            f"{audit} audit USER_LOGIN record(s)" if audit else "") if part)
+        claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from non-private address "
+                 f"{ip} ({evs[0].ts.isoformat()} – {last.isoformat()}; {sources}).")
+        m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"), pf(evs[0], "user.name")],
+                  evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}")
+        if journal + audit > 20:
+            m.notes.append(f"{journal + audit} matching records; the first 20 are cited and the time range covers "
+                           "all of them")
+        return m
 
 
 _DELETED_SUFFIX = " (deleted)"
@@ -1151,6 +1231,7 @@ def unbacked_executable(exe: str) -> tuple[str, str] | None:
 class UnbackedExecutable(Playbook):
     """A process whose kernel-recorded executable is memory-backed, deleted or in an in-memory runtime directory,
     seen on any audit record that carries the executable (exec, socket or file-change calls)."""
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.unbacked_or_deleted_executable"
     version = "2"
     title = "Process running from a memory-backed, deleted or in-memory-directory executable"
@@ -1207,6 +1288,7 @@ class UnbackedExecutable(Playbook):
         self.load = lambda ids: []
 
     def consume(self, events):
+        self._batch, out = events, []
         for e in sorted((e for e in events if e.family in self.families and e.id not in self._seen),
                         key=lambda e: (e.ts, e.id)):
             self._seen.add(e.id)
@@ -1221,9 +1303,12 @@ class UnbackedExecutable(Playbook):
             ts = e.ts.timestamp()
             group = self.groups.setdefault(key, lambda ts=ts: [{}, [ts, ts], set(), HeldExamples(_UNBACKED_CITE)])
             if group is None:
-                self.evaluated -= 1
-                self.refuse("groups_disk", "the (host, executable) groups' disk budget is spent; a record of a new "
-                                           "group is not evaluated")
+                # the record is a finding by itself: published now, ungrouped, instead of being refused
+                self.note_limit("groups_alone", "the (host, executable) groups' disk budget is spent; records of a "
+                                                "new group are published one at a time")
+                uid = e.get("process.uid")
+                add_unheld(out, alone(self._group_match(key, {e.family: 1}, ts, ts,
+                                                   {str(uid)} if uid is not None else set(), [e]), self, e))
                 continue
             counts, span, uids, store = group
             counts[e.family] = counts.get(e.family, 0) + 1
@@ -1233,7 +1318,8 @@ class UnbackedExecutable(Playbook):
             if store.offer(e):
                 self._pending.append(e)
                 self._fresh.append(store)
-        return []
+        self._batch = None
+        return out
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
@@ -1248,27 +1334,31 @@ class UnbackedExecutable(Playbook):
 
     def finalize(self):
         out = []
-        names = {"process_exec": "exec", "net_socket": "socket call", "file_change": "file-change call"}
         for key in sorted(self.groups.keys()):
-            host, exe = key
-            cls, meaning = unbacked_executable(exe)
             counts, (first, last), uids, store = self.groups.peek(key)
-            evs = sorted(store.events(self.load), key=lambda x: (x.ts, x.id))
-            total = sum(counts.values())
-            when = (f"at {evs[0].ts.isoformat()}" if first == last else
-                    f"from {datetime.fromtimestamp(first, UTC).isoformat()} to "
-                    f"{datetime.fromtimestamp(last, UTC).isoformat()}")
-            kinds = ", ".join(f"{counts[f]} {names[f]} record(s)" for f in self.families if counts.get(f))
-            uids = sorted(uids)
-            claim = (f"On {host}, {total} audit record(s) {when} carry the kernel-recorded executable '{exe}' "
-                     f"({kinds}; process uid(s) {', '.join(uids) or 'not recorded'}): {meaning}.")
-            if total > len(evs):
-                claim += f" {len(evs)} of these records are cited."
-            m = Match(self.id, claim, self.claim_type, evs, [pf(e, "process.executable") for e in evs], evs[0].ts,
-                      self.severity, self.lane, "high", _exec_entities(evs[0]), group_key=f"{host}|{exe}")
-            m.notes = [f"executable class: {cls}"]
-            out.append(m)
+            out.append(self._group_match(key, counts, first, last, uids, store.events(self.load)))
         return out
+
+    def _group_match(self, key: tuple, counts: dict, first: float, last: float, uids: set,
+                     evs: list[TypedEvent]) -> Match:
+        names = {"process_exec": "exec", "net_socket": "socket call", "file_change": "file-change call"}
+        host, exe = key
+        cls, meaning = unbacked_executable(exe)
+        evs = sorted(evs, key=lambda x: (x.ts, x.id))
+        total = sum(counts.values())
+        when = (f"at {evs[0].ts.isoformat()}" if first == last else
+                f"from {datetime.fromtimestamp(first, UTC).isoformat()} to "
+                f"{datetime.fromtimestamp(last, UTC).isoformat()}")
+        kinds = ", ".join(f"{counts[f]} {names[f]} record(s)" for f in self.families if counts.get(f))
+        uids = sorted(uids)
+        claim = (f"On {host}, {total} audit record(s) {when} carry the kernel-recorded executable '{exe}' "
+                 f"({kinds}; process uid(s) {', '.join(uids) or 'not recorded'}): {meaning}.")
+        if total > len(evs):
+            claim += f" {len(evs)} of these records are cited."
+        m = Match(self.id, claim, self.claim_type, evs, [pf(e, "process.executable") for e in evs], evs[0].ts,
+                  self.severity, self.lane, "high", _exec_entities(evs[0]), group_key=f"{host}|{exe}")
+        m.notes = [f"executable class: {cls}"]
+        return m
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1385,7 +1475,9 @@ class ProcessLineage:
         if ppid is None or ppid <= 1:
             return None
         best = None
-        for entry in self.records.get((host, ppid)) or ():
+        # below the stage volume's reserve a process on disk is not brought back to memory: it is read in place
+        entries = self.records.get((host, ppid))
+        for entry in (entries if entries is not None else self.records.peek((host, ppid))) or ():
             if entry.ts <= ts:
                 best = entry
         return None if best is not None and boots_conflict(boot, best.boot) else best

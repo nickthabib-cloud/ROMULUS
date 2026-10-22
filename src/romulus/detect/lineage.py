@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
 from romulus.detect.correlation import (
     PidTable,
     StageMissing,
@@ -62,7 +62,7 @@ from romulus.detect.correlation import (
     external,
     merge_unknown_boot,
 )
-from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS, _py_pty_spawn, interpreter_name
+from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS, _py_pty_spawn, interpreter_name, need
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
@@ -210,10 +210,20 @@ class _Hit:
                 and _port(self.socket.peer_port) not in NOT_A_CHANNEL)
 
 
+class _Groups(dict):
+    """An in-memory stand-in for a keyed store's setdefault (one shell's hits, in the finalize fallback)."""
+
+    def setdefault(self, key, factory):
+        if key not in self:
+            self[key] = factory()
+        return self[key]
+
+
 class ReverseShellByLineage(Playbook):
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.shell_spawned_by_connected_process"
     anchor_class = "execution"
-    version = "4"
+    version = "5"
     title = "Shell or interpreter executed by a process holding an external connection (reverse shell by lineage)"
     kind = "aggregate"
     staged = True
@@ -402,7 +412,8 @@ class ReverseShellByLineage(Playbook):
     def _hits(self, shell: _Shell, groups: KeyedStore) -> None:
         """Join one shell with its owners' external socket calls; every hit goes to its group."""
         for owner_pid, start, end, relation in self._owners(shell):
-            window = sorted((s for s in self.sockets.get((shell.host, owner_pid), ())
+            held = self.sockets.get((shell.host, owner_pid)) or self.sockets.peek((shell.host, owner_pid), ())
+            window = sorted((s for s in held
                              if start <= s.ts < end and shell.ts - s.ts <= MAX_GAP
                              and not boots_conflict(shell.boot, s.boot)),
                             key=lambda s: (s.ts, s.event_id))
@@ -419,11 +430,7 @@ class ReverseShellByLineage(Playbook):
             boot = shell.boot if shell.boot is not None else latest.boot
             key = ((shell.host, latest.exe, "helpers") if hit.helper
                    else (shell.host, boot, owner_pid, latest.peer_ip))
-            held = groups.setdefault(key, list)
-            if held is None:
-                self.refuse("disk", "the joined hits' disk budget is spent; a later join is not evaluated")
-                continue
-            held.append(hit)
+            need(groups.setdefault(key, list), self, "the joined hits' grouping").append(hit)
 
     def finalize(self):
         groups = KeyedStore(self, "rs_groups", self.HOT)
@@ -440,6 +447,23 @@ class ReverseShellByLineage(Playbook):
             hits = [hit for old in merged[key] for hit in groups.peek(old)]
             out.append(self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits))
         groups.clear()
+        return out
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Every joined hit, one shell at a time (grouping hits across shells needed disk); a table on disk that cannot
+        be read ends the pass with what was published."""
+        out = []
+        try:
+            for shell in self.shells:
+                local = _Groups()
+                self._hits(shell, local)
+                for key, hits in local.items():
+                    m = self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits)
+                    m.group_key += f"|alone:{shell.event_id}"
+                    m.notes.append(f"published one shell at a time: grouping the joins needed disk ({reason})")
+                    out.append(m)
+        except StateExhausted:
+            pass
         return out
 
     def _helpers(self, key: tuple, hits: list[_Hit]) -> Match:

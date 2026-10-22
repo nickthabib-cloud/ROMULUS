@@ -118,11 +118,15 @@ def test_account_changes_spill_and_read_back_exactly(tmp_path, monkeypatch):
     assert rule.retained_events() == [] and any(m.proposed_lane == "high" for m in out)
 
 
-@pytest.mark.parametrize("budget, refused", [("by_pid", "account changes'"), ("records", "account records'")])
-def test_account_disk_budgets_refuse_and_the_record_is_not_evaluated(budget, refused, tmp_path, monkeypatch):
+@pytest.mark.parametrize("budget", ["by_pid", "records"])
+def test_an_account_change_the_budget_cannot_hold_is_published_on_its_own(budget, tmp_path, monkeypatch):
     parts = account_hunt()
     unbounded, _ = staged_run(AccountOrGroupChange, parts, tmp_path / "big", hot=10**6, monkeypatch=monkeypatch)
-    rule, _ = staged_run(AccountOrGroupChange, parts, tmp_path / "small", hot=1, monkeypatch=monkeypatch,
-                         budgets={budget: 1})
-    assert rule.capped > 0 and rule.evaluated == unbounded.evaluated - rule.capped
-    assert any(refused in r and "disk budget is spent" in r for r in rule.limit_reasons())
+    rule, out = staged_run(AccountOrGroupChange, parts, tmp_path / "small", hot=1, monkeypatch=monkeypatch,
+                           budgets={budget: 1})
+    alone = [m for m in out if m.group_key.endswith("|unheld")]
+    # nothing is refused: every change the budget could not hold is a finding of its own, published as read
+    assert alone and rule.capped == 0 and rule.evaluated == unbounded.evaluated
+    assert any("published as they are read" in r for r in rule.limit_reasons())
+    if budget == "by_pid":
+        assert any(m.proposed_lane == "high" for m in alone)      # a sudo promotion keeps its lane alone

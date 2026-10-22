@@ -34,6 +34,8 @@ from romulus.detect.host import (
     AWK_INTERPRETERS,
     SCRIPT_FILE_INTERPRETERS,
     _awk_script_file_of,
+    add_unheld,
+    alone,
     interpreter_name,
 )
 from romulus.evidence.shellparse import SHELLS, UnknownShellScript, shell_script_file_of
@@ -150,6 +152,7 @@ _SET = load_indicators()
 
 
 class IndicatorMatch(Playbook):
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "ioc.indicator_match"
     anchor_class = "indicator"
     version = f"4+{_SET.digest}"
@@ -195,7 +198,7 @@ class IndicatorMatch(Playbook):
         self.overflow = KeyedStore(self, "ioc_overflow", self.HOT)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
-        self._refused = False
+        self._alone: list[Match] = []
         self.load = lambda ids: []
 
     # Groups (indicator, role, host, value): the first 20 records cited (staged, held as ids) and a count. A listed
@@ -224,9 +227,12 @@ class IndicatorMatch(Playbook):
             state = self.overflow.setdefault(key[:3] + ("*",),
                                              lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), []])
             if state is None:
-                self._refused = True
-                self.refuse("groups_disk", "the indicator match groups' disk budget is spent; a later match is not "
-                                           "evaluated")
+                # an indicator hit is a finding by itself: published now as its own single-record finding
+                self.note_limit("groups_alone", "the indicator match groups' disk budget is spent; later matches "
+                                                "with no group are published one record at a time")
+                m = self._finding(key, 1, field_name, [e])
+                m.group_key = "|".join(map(str, key[:3])) + "|*"   # one per indicator, role and host
+                add_unheld(self._alone, alone(m, self, e))
                 return
             self.note_limit("groups_overflow", "the indicator match groups' disk budget is spent; later matches of "
                                                "a new value are grouped per indicator, role and host")
@@ -318,11 +324,11 @@ class IndicatorMatch(Playbook):
     def consume(self, events):
         if not self.set.indicators:
             return []
+        self._batch = events
         for e in events:
             if e.family not in self.families:
                 continue
             self.evaluated += 1
-            self._refused = False
             if e.family == "process_exec":
                 self._programs(e)
             if self.ips or self.nets:
@@ -331,9 +337,9 @@ class IndicatorMatch(Playbook):
                 self._domains(e)
             if self.prints:
                 self._fingerprints(e)
-            if self._refused:
-                self.evaluated -= 1             # a refused record was not evaluated
-        return []
+        self._batch = None
+        out, self._alone = self._alone, []
+        return out
 
     def retained_events(self) -> list[TypedEvent]:
         return []                               # staged on disk instead
@@ -345,68 +351,83 @@ class IndicatorMatch(Playbook):
         groups = [(key, store) for store, keys in stores for key in keys]
         for key, store in sorted(groups, key=lambda item: str(item[0])):
             state = store.peek(key)
-            _iid, role, host, value = key
-            evs = sorted(state[2].events(self.load), key=lambda x: (x.ts, x.id))
-            n, field_name = state[0], state[1]
-            ind: Indicator = self.by_id[key[0]]
-            if len(state) > 3:
-                value = state[3][0]             # an overflow group: worded by its first value, then the others
-            e0 = evs[0]
-            span = f"{evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}"
-            listed = f"indicator {ind.id} ({ind.label}, list {ind.source})"
-            if role == "executed":
-                claim = (f"{n} auditd exec record(s) on {host} show a program whose kernel-recorded executable is named "
-                         f"'{value}' ({e0.get('process.executable')}), matching {listed} ({span}). The name matches; "
-                         f"whether the program is that tool is not established, and a renamed copy would not match.")
-                lane, claim_type = ind.lane, "observed_action"
-            elif role == "script":
-                claim = (f"{n} auditd exec record(s) on {host} show an interpreter started with script operand "
-                         f"'{value}', matching {listed} ({span}). The argv names the script; its content is not "
-                         f"verified.")
-                lane, claim_type = ind.lane, "script_content"
-            elif role == "argument":
-                # A command naming an offensive tool (downloading, unpacking or chmod-ing it) is associated with an
-                # attack even though it does not show the tool ran: surfaced as a lead, worded as a mention.
-                claim = (f"{n} command(s) on {host} have an argument naming '{value}', matching {listed} ({span}). "
-                         f"An argument naming a tool is a mention, not evidence that the tool ran.")
-                lane, claim_type = "lead", "mention"
-            elif role.startswith("address:"):
-                claim = (f"{n} {e0.family} record(s) observed by {host} have {role.split(':')[1]} address {value}, "
-                         f"matching {listed} ({span}).")
-                lane, claim_type = ind.lane, "network_observation"
-            elif role == "domain":
-                claim = (f"{n} {e0.family} record(s) observed by {host} name '{value}', which matches {listed} at a "
-                         f"label boundary ({span}).")
-                lane, claim_type = ind.lane, "network_observation"
-            elif role == "dns_answer":
-                claim = (f"In {n} {e0.family} record(s) observed by {host}, a DNS answer names '{value}' (as the "
-                         f"answer's owner name or as a name it points to), which matches {listed} at a label "
-                         f"boundary ({span}). The name was in a response; whether a client then connected to it is "
-                         f"not established.")
-                lane, claim_type = ind.lane, "network_observation"
-            elif role == "sni":
-                claim = (f"In {n} {e0.family} record(s) observed by {host}, the TLS SNI names '{value}', which "
-                         f"matches {listed} at a label boundary ({span}). The SNI is the name the client asked "
-                         f"for; the certificate the server returned is a separate check.")
-                lane, claim_type = ind.lane, "network_observation"
-            else:
-                claim = (f"{n} session record(s) observed by {host} carry {role.upper()} client fingerprint {value}, "
-                         f"matching {listed} ({span}).")
-                lane, claim_type = ind.lane, "network_observation"
-            m = Match(self.id, claim, claim_type, evs, [pf(e0, field_name)], e0.ts, ind.severity, lane, "medium",
-                      e0.entities(), group_key="|".join(map(str, key)))
-            if ind.attack:
-                m.notes.append(f"indicator ATT&CK context: {list(ind.attack)}")
-            if n > len(evs):
-                m.notes.append(f"{n} matching records; {len(evs)} are cited")
-            if len(state) > 3:
-                others = state[3][1:]
-                m.claim += (f" These {n} record(s) are every match of {ind.id} by {host} in this role once the "
-                            f"per-value groups' disk budget was spent: '{value}' and "
-                            + (f"{len(others)} more value(s) ({', '.join(others)})" if others else "no other value")
-                            + (" or more; records of each value are not counted apart." if others else "."))
-            out.append(m)
+            out.append(self._finding(key, state[0], state[1], state[2].events(self.load),
+                                     state[3] if len(state) > 3 else None))
         return out
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """A group store whose disk table cannot be read: the groups held in memory, each complete for its key."""
+        out = []
+        for store in (self.groups, self.overflow):
+            for key, state in sorted(store.hot.items(), key=lambda item: str(item[0])):
+                m = self._finding(key, state[0], state[1], state[2].events(self.load),
+                                  state[3] if len(state) > 3 else None)
+                m.notes.append(f"published from memory only: the groups on disk could not be read ({reason})")
+                out.append(m)
+        return out
+
+    def _finding(self, key: tuple, n: int, field_name: str, evs: list[TypedEvent],
+                 values: list[str] | None = None) -> Match:
+        _iid, role, host, value = key
+        evs = sorted(evs, key=lambda x: (x.ts, x.id))
+        ind: Indicator = self.by_id[key[0]]
+        if values is not None:
+            value = values[0]               # an overflow group: worded by its first value, then the others
+        e0 = evs[0]
+        span = f"{evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}"
+        listed = f"indicator {ind.id} ({ind.label}, list {ind.source})"
+        if role == "executed":
+            claim = (f"{n} auditd exec record(s) on {host} show a program whose kernel-recorded executable is named "
+                     f"'{value}' ({e0.get('process.executable')}), matching {listed} ({span}). The name matches; "
+                     f"whether the program is that tool is not established, and a renamed copy would not match.")
+            lane, claim_type = ind.lane, "observed_action"
+        elif role == "script":
+            claim = (f"{n} auditd exec record(s) on {host} show an interpreter started with script operand "
+                     f"'{value}', matching {listed} ({span}). The argv names the script; its content is not "
+                     f"verified.")
+            lane, claim_type = ind.lane, "script_content"
+        elif role == "argument":
+            # A command naming an offensive tool (downloading, unpacking or chmod-ing it) is associated with an
+            # attack even though it does not show the tool ran: surfaced as a lead, worded as a mention.
+            claim = (f"{n} command(s) on {host} have an argument naming '{value}', matching {listed} ({span}). "
+                     f"An argument naming a tool is a mention, not evidence that the tool ran.")
+            lane, claim_type = "lead", "mention"
+        elif role.startswith("address:"):
+            claim = (f"{n} {e0.family} record(s) observed by {host} have {role.split(':')[1]} address {value}, "
+                     f"matching {listed} ({span}).")
+            lane, claim_type = ind.lane, "network_observation"
+        elif role == "domain":
+            claim = (f"{n} {e0.family} record(s) observed by {host} name '{value}', which matches {listed} at a "
+                     f"label boundary ({span}).")
+            lane, claim_type = ind.lane, "network_observation"
+        elif role == "dns_answer":
+            claim = (f"In {n} {e0.family} record(s) observed by {host}, a DNS answer names '{value}' (as the "
+                     f"answer's owner name or as a name it points to), which matches {listed} at a label "
+                     f"boundary ({span}). The name was in a response; whether a client then connected to it is "
+                     f"not established.")
+            lane, claim_type = ind.lane, "network_observation"
+        elif role == "sni":
+            claim = (f"In {n} {e0.family} record(s) observed by {host}, the TLS SNI names '{value}', which "
+                     f"matches {listed} at a label boundary ({span}). The SNI is the name the client asked "
+                     f"for; the certificate the server returned is a separate check.")
+            lane, claim_type = ind.lane, "network_observation"
+        else:
+            claim = (f"{n} session record(s) observed by {host} carry {role.upper()} client fingerprint {value}, "
+                     f"matching {listed} ({span}).")
+            lane, claim_type = ind.lane, "network_observation"
+        m = Match(self.id, claim, claim_type, evs, [pf(e0, field_name)], e0.ts, ind.severity, lane, "medium",
+                  e0.entities(), group_key="|".join(map(str, key)))
+        if ind.attack:
+            m.notes.append(f"indicator ATT&CK context: {list(ind.attack)}")
+        if n > len(evs):
+            m.notes.append(f"{n} matching records; {len(evs)} are cited")
+        if values is not None:
+            others = values[1:]
+            m.claim += (f" These {n} record(s) are every match of {ind.id} by {host} in this role once the "
+                        f"per-value groups' disk budget was spent: '{value}' and "
+                        + (f"{len(others)} more value(s) ({', '.join(others)})" if others else "no other value")
+                        + (" or more; records of each value are not counted apart." if others else "."))
+        return m
 
 
 INDICATOR_PLAYBOOKS = [IndicatorMatch]

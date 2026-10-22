@@ -99,12 +99,16 @@ def test_web_shape_run_every_five_minutes_for_three_weeks_stays_routine(tmp_path
     assert rule.retained_events() == []
 
 
-def test_web_shape_disk_budget_refuses_a_new_shape_and_says_so(tmp_path, monkeypatch):
-    parts = [[web(T0, f"h{h}") for h in range(5)], [web(T0 + timedelta(hours=1), f"g{h}") for h in range(4)]]
+def test_a_run_of_a_shape_the_budget_cannot_hold_is_a_lead_per_shape(tmp_path, monkeypatch):
+    parts = [[web(T0, f"h{h}") for h in range(5)], [web(T0 + timedelta(hours=1), f"g{h}") for h in range(4)]
+             + [web(T0 + timedelta(hours=1, minutes=1), "g0")]]
     rule, out = staged_run(host.WebServiceSpawnsInterpreter, parts, tmp_path, hot=1, monkeypatch=monkeypatch,
                            budgets={"shapes": 1})
-    assert len(out) == 5 and rule.capped == 4 and rule.evaluated == 5
-    assert any("disk budget is spent" in r for r in rule.limit_reasons())
+    unheld = [m for m in out if m.group_key.endswith("|unheld")]
+    # one lead per new shape (a second run of it adds nothing), nothing refused
+    assert len(out) == 9 and len(unheld) == 4 and rule.capped == 0 and rule.evaluated == 10
+    assert all(m.proposed_lane == "lead" and any("rarity was not judged" in n for n in m.notes) for m in unheld)
+    assert any("published as a lead without its count" in r for r in rule.limit_reasons())
 
 
 # ---------------------------------------------------------------- external ssh logins
@@ -130,13 +134,15 @@ def test_external_ssh_logins_hold_twenty_citations_and_exact_counts(tmp_path, mo
     assert all(item[1] is None for _key, state in rule.groups.items() for item in state[3].items)
 
 
-def test_external_ssh_login_disk_budget_refuses_a_new_group_and_says_so(tmp_path, monkeypatch):
+def test_external_ssh_login_of_a_refused_group_is_published_on_its_own(tmp_path, monkeypatch):
     parts = [[login(T0, ip=f"203.0.113.{i}") for i in range(1, 4)],
              [login(T0 + timedelta(minutes=1), ip=f"198.51.100.{i}") for i in range(1, 4)]]
     rule, out = staged_run(host.SshLoginFromExternal, parts, tmp_path, hot=1, monkeypatch=monkeypatch,
                            budgets={"groups": 1})
-    assert len(out) == 3 and rule.capped == 3 and rule.evaluated == 3
-    assert any("disk budget is spent" in r for r in rule.limit_reasons())
+    alone = [m for m in out if m.group_key.endswith("|unheld")]
+    assert len(out) == 6 and len(alone) == 3 and rule.capped == 0 and rule.evaluated == 6
+    assert all("At least 1 successful SSH login(s)" in m.claim and m.events for m in alone)
+    assert any("published one at a time" in r for r in rule.limit_reasons())
 
 
 # ---------------------------------------------------------------- unbacked executables
@@ -151,12 +157,14 @@ def test_unbacked_executable_groups_spill_and_read_back_exactly(tmp_path, monkey
     assert len(out) == 40 and all("12 audit record(s)" in m.claim and len(m.events) == 10 for m in out)
 
 
-def test_unbacked_executable_disk_budget_refuses_a_new_group_and_says_so(tmp_path, monkeypatch):
+def test_unbacked_executable_record_of_a_refused_group_is_published_on_its_own(tmp_path, monkeypatch):
     parts = [[memfd(T0, i) for i in range(3)], [memfd(T0 + timedelta(minutes=1), i) for i in range(3, 7)]]
     rule, out = staged_run(host.UnbackedExecutable, parts, tmp_path, hot=1, monkeypatch=monkeypatch,
                            budgets={"groups": 1})
-    assert len(out) == 3 and rule.capped == 4 and rule.evaluated == 3
-    assert any("disk budget is spent" in r for r in rule.limit_reasons())
+    alone = [m for m in out if m.group_key.endswith("|unheld")]
+    assert len(out) == 7 and len(alone) == 4 and rule.capped == 0 and rule.evaluated == 7
+    assert all("1 audit record(s)" in m.claim for m in alone)
+    assert any("published one at a time" in r for r in rule.limit_reasons())
 
 
 # ---------------------------------------------------------------- downloader feeds interpreter
@@ -183,13 +191,15 @@ def test_downloader_pairs_spill_and_read_back_exactly(tmp_path, monkeypatch):
     assert len(out) == 20 and all("occurred 30 times" in m.claim and "regular" in m.claim for m in out)
 
 
-def test_downloader_pair_disk_budget_refuses_a_later_pair_and_says_so(tmp_path, monkeypatch):
+def test_downloader_pair_refused_by_the_budget_is_published_on_its_own(tmp_path, monkeypatch):
     parts = [[*pair(T0, 100), *pair(T0, 101, host_name="web2"), *pair(T0, 102, host_name="web3")],
              [*pair(T0 + timedelta(minutes=5), 103), *pair(T0 + timedelta(minutes=5), 104, host_name="web4")]]
     rule, out = staged_run(host.DownloaderFeedsInterpreter, parts, tmp_path, hot=1, monkeypatch=monkeypatch,
                            budgets={"found": 1})
-    assert len(out) == 3 and rule.capped == 2
-    assert any("disk budget is spent" in r for r in rule.limit_reasons())
+    alone = [m for m in out if m.group_key.endswith("|unheld")]
+    assert len(out) == 5 and len(alone) == 2 and rule.capped == 0
+    assert all(m.proposed_lane == "urgent" and len(m.events) == 2 for m in alone)    # both execs in the batch
+    assert any("published one at a time" in r for r in rule.limit_reasons())
 
 
 # ---------------------------------------------------------------- firewall
@@ -206,9 +216,10 @@ def test_firewall_direct_changes_spill_and_read_back_exactly(tmp_path, monkeypat
     assert len(out) == 5 * 29 + 1
 
 
-def test_firewall_direct_disk_budget_refuses_a_later_change_and_says_so(tmp_path, monkeypatch):
+def test_firewall_direct_change_refused_by_the_budget_is_published_on_its_own(tmp_path, monkeypatch):
     parts = [[block(T0, i) for i in range(1, 4)], [block(T0 + timedelta(minutes=1), i) for i in range(4, 6)]]
     rule, out = staged_run(host.FirewallRuleChange, parts, tmp_path, hot=1, monkeypatch=monkeypatch,
                            budgets={"direct": 1})
-    assert len(out) == 3 and rule.capped == 2
-    assert any("disk budget is spent" in r for r in rule.limit_reasons())
+    alone = [m for m in out if m.group_key.endswith("|unheld")]
+    assert len(out) == 5 and len(alone) == 2 and rule.capped == 0
+    assert any("published as they are read" in r for r in rule.limit_reasons())

@@ -29,15 +29,18 @@ from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
 from romulus.detect.host import (
     UNBUDGETED,
     Lineage,
     ProcessLineage,
     _argv_summary,
     _outcome_tally,
+    add_unheld,
+    alone,
     boot_of,
     lineage_phrase,
+    need,
 )
 from romulus.detect.linux_argv import (
     canonical,
@@ -1037,6 +1040,7 @@ def _record_text(e: TypedEvent) -> str:
 
 
 class AccountOrGroupChange(Playbook):
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.account_or_group_change"
     version = "4"
     title = "Account or group created, deleted or modified (command or account-management audit record)"
@@ -1114,6 +1118,8 @@ class AccountOrGroupChange(Playbook):
         self.boots = KeyedStore(self, "acct_boots", self.HOT)           # host -> boot records
         self._seen = RecentIds()        # bounded re-read guard
         self._pending: list[TypedEvent] = []
+        self._alone: list[Match] = []   # changes published on their own (the budget refused holding them)
+        self._boot_events: dict[str, TypedEvent] = {}
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
@@ -1131,10 +1137,6 @@ class AccountOrGroupChange(Playbook):
         self.records.trim()
         self.boots.trim()
 
-    def _refused(self, what: str) -> None:
-        self.evaluated -= 1
-        self.refuse(f"{what}_disk", f"the account {what}' disk budget is spent; a later one is not evaluated")
-
     @staticmethod
     def _process_relevant(event: TypedEvent) -> bool:
         name = program_name_hint(event)
@@ -1143,6 +1145,7 @@ class AccountOrGroupChange(Playbook):
 
     def consume(self, events):
         fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
+        self._batch = events
         for e in sorted(fresh, key=lambda x: (x.ts, x.family != "process_exec", x.id)):
             self._seen.add(e.id)
             if e.family == "process_exec":
@@ -1160,7 +1163,20 @@ class AccountOrGroupChange(Playbook):
                     self._pending.append(e)
             else:
                 self._record(e)
-        return []
+        self._batch = None
+        out, self._alone = self._alone, []
+        return out
+
+    def _publish_alone(self, changes: list[_Change], record: TypedEvent) -> None:
+        """An account change the budget refused to hold is a finding by itself: published now, one finding per
+        group it would have joined, without the tool records a later join would have added."""
+        self.note_limit("changes_alone", "the account changes' disk budget is spent; later changes are published as "
+                                         "they are read, not grouped or joined to their tool records")
+        groups: dict[tuple, list[_Change]] = {}
+        for change in changes:
+            groups.setdefault(self._group(change), []).append(change)
+        for key, held in groups.items():
+            add_unheld(self._alone, alone(self._finding(key, held), self, record))
 
     def _exec(self, e: TypedEvent) -> None:
         argv = e.get("process.argv")
@@ -1201,11 +1217,11 @@ class AccountOrGroupChange(Playbook):
         if isinstance(e.get("process.pid"), int):
             held = self.by_pid.setdefault((e.host, e.get("process.pid")), list)
             if held is None:
-                self._refused("changes")
+                self._publish_alone(changes, e)
                 return
             held += changes
         elif not self.loose.append(changes, (changes[0].ts, e.id)):
-            self._refused("changes")
+            self._publish_alone(changes, e)
             return
         self._pending.append(e)
 
@@ -1215,7 +1231,7 @@ class AccountOrGroupChange(Playbook):
             return
         self.evaluated += 1
         if not self.records.append(e, (e.ts.timestamp(), e.id)):
-            self._refused("records")
+            self._publish_alone(list(self._record_changes([e])), e)
             return
         self._pending.append(e)
 
@@ -1237,7 +1253,7 @@ class AccountOrGroupChange(Playbook):
                 for change in candidates:
                     change.records.append(record)
             else:
-                unjoined.append(record)
+                need(unjoined.append(record), self, "the unjoined tool records")
             if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
                 self.by_pid.trim()
                 unjoined.trim()
@@ -1246,7 +1262,7 @@ class AccountOrGroupChange(Playbook):
         changes = (c for _key, held in self.by_pid.items() for c in held)
         loose = (c for held in self.loose for c in held)
         for i, change in enumerate(itertools.chain(changes, loose, self._record_changes(unjoined))):
-            groups.setdefault(self._group(change), list).append(change)
+            need(groups.setdefault(self._group(change), list), self, "the account change grouping").append(change)
             if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
                 groups.trim()
         out = [self._finding(key, groups.peek(key)) for key in sorted(groups.keys(), key=str)]
@@ -1254,7 +1270,28 @@ class AccountOrGroupChange(Playbook):
         unjoined.clear()
         return out
 
-    def _record_changes(self, unjoined: SpillList):
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Every held change on its own (grouping and joining needed disk): command changes by process, changes
+        without a pid, then each tool record as the change it reports."""
+        self._boot_events = {}
+        out: list[Match] = []
+
+        def each(changes) -> None:
+            for change in changes:
+                m = self._finding(self._group(change), [change])
+                m.group_key += f"|alone:{(change.command or change.records[0]).id}"
+                m.notes.append(f"published on its own: grouping and joining needed disk ({reason})")
+                out.append(m)
+        for source in (lambda: (c for _key, held in self.by_pid.items() for c in held),
+                       lambda: (c for held in self.loose for c in held),
+                       lambda: self._record_changes(self.records)):
+            try:
+                each(source())
+            except StateExhausted:
+                continue                            # a table on disk cannot be read: what was read stands
+        return out
+
+    def _record_changes(self, unjoined):
         """A change for each tool record no command of its process explains."""
         for record in unjoined:
             ts = record.ts.timestamp()
