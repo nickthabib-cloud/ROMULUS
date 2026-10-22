@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "coverage_matrix.py"
 PRIVATE_DOC = Path("docs/project/COVERAGE_GAPS.md")
@@ -22,6 +24,13 @@ def _run_generator(*args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+@pytest.fixture
+def ignored_private_output(tmp_path):
+    output = ROOT / "docs" / "project" / f"coverage-test-{tmp_path.name}.md"
+    yield output
+    output.unlink(missing_ok=True)
 
 
 def _research_fixture(root: Path) -> None:
@@ -123,9 +132,11 @@ def test_private_output_path_is_ignored_and_not_tracked():
     assert tracked.returncode != 0
 
 
-def test_private_generator_joins_ranked_gaps_backlog_tools_lotl_and_lab_state(tmp_path):
+def test_private_generator_joins_ranked_gaps_backlog_tools_lotl_and_lab_state(
+    tmp_path, ignored_private_output
+):
     research = tmp_path / "research"
-    output = tmp_path / "COVERAGE_GAPS.md"
+    output = ignored_private_output
     _research_fixture(research)
 
     result = _run_generator("--private", "--research-root", str(research), "--output", str(output))
@@ -142,9 +153,9 @@ def test_private_generator_joins_ranked_gaps_backlog_tools_lotl_and_lab_state(tm
     assert "win_security (absent)" in text
 
 
-def test_private_generator_is_byte_stable_and_has_a_check_gate(tmp_path):
+def test_private_generator_is_byte_stable_and_has_a_check_gate(tmp_path, ignored_private_output):
     research = tmp_path / "research"
-    output = tmp_path / "COVERAGE_GAPS.md"
+    output = ignored_private_output
     _research_fixture(research)
     args = ("--private", "--research-root", str(research), "--output", str(output))
 
@@ -154,3 +165,26 @@ def test_private_generator_is_byte_stable_and_has_a_check_gate(tmp_path):
     assert _run_generator(*args).returncode == 0
     assert output.read_bytes() == first
     assert _run_generator("--check", *args).returncode == 0
+
+
+def test_private_generator_refuses_tracked_and_non_ignored_output_paths(tmp_path):
+    research = tmp_path / "research"
+    _research_fixture(research)
+    outputs = (
+        ROOT / "docs" / "detection" / "ATTACK_COVERAGE.md",
+        ROOT / f"private-coverage-{tmp_path.name}.md",
+    )
+
+    for output in outputs:
+        result = _run_generator(
+            "--private",
+            "--check",
+            "--research-root",
+            str(research),
+            "--output",
+            str(output),
+        )
+        assert result.returncode == 2
+        assert "private output path must be gitignored" in result.stderr
+        if output.parent == ROOT:
+            assert not output.exists()

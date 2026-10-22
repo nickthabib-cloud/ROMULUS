@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -32,14 +34,31 @@ def _write(path: Path, text: str) -> None:
         handle.write(text)
 
 
+def _gitignored_private_output(path: Path) -> bool:
+    try:
+        relative = path.relative_to(ROOT)
+    except ValueError:
+        return False
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "--", relative.as_posix()],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     catalog = build_catalog()
     if args.private:
+        output = (args.output or PRIVATE_OUTPUT).resolve()
+        if not _gitignored_private_output(output):
+            print(f"private output path must be gitignored: {output}", file=sys.stderr)
+            return 2
         from coverage_research import load_research, render_private
 
         expected = render_private(catalog, load_research(args.research_root.resolve()))
-        output = (args.output or PRIVATE_OUTPUT).resolve()
     else:
         expected = render_public(catalog)
         output = (args.output or PUBLIC_OUTPUT).resolve()
