@@ -7,6 +7,7 @@
   <div><span class="label">Result</span> {{ h.detection_result or '—' }}</div>
   <div><span class="label">Window (UTC)</span> {{ h.manifest.window.start }} → {{ h.manifest.window.end }}</div>
   <div><span class="label">Sources</span> {{ h.manifest.targets | join(', ') }}</div>
+  <div class="wide"><span class="label">Internal networks</span> {{ internal_networks.summary | replace('Internal networks: ', '', 1) }}</div>
   {% if h.stop_reason %}<div class="wide"><span class="label">Stop reason</span> {{ h.stop_reason }}</div>{% endif %}
   {% if ai_agent %}<div class="wide"><span class="label">AI agent</span> {{ ai_agent.status }}{% if ai_agent.reason %}: {{ ai_agent.reason }}{% endif %}</div>{% endif %}
 </div>

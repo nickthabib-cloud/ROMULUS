@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from romulus.agent.cases import seed_candidate_ids
 from romulus.agent.provider import egress_banners
 from romulus.decide.policy import LANE_ORDER
+from romulus.detect.netdef import recorded_view
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.report.incidents import build_incident_graph, incident_narrative
 from romulus.store import schema as t
@@ -510,6 +511,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "execution_state": h["execution_state"],
         "detection_result": h["detection_result"],
         "stop_reason": h["stop_reason"],
+        "internal_networks": recorded_view(hm.get("internal_networks")),
         "lane_counts": dict(lane_counts),
         "findings": findings,
         "context_items": lane_counts.get("context", 0),

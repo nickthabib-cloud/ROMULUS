@@ -19,6 +19,9 @@ from romulus.hunt.pivot import PivotExecutor
 from tests import throughput_fixture as tf
 
 # Reference digests of the synthetic fixture's results; any change to hunt output changes them.
+# Re-recorded on purpose (semantic changes, each reviewed on its own):
+# - manifest: the report manifest names the internal-network definition the hunt used (`internal_networks`;
+#   the fixture's hunt records none, so it shows the default). Without that key the manifest is unchanged.
 GOLDEN_STACK = {
     "anchors": "5bfad42385ad92785c91d770613dff8e893f140c4f8d1606128b7ea0f170c120",
     "audit": "2fd12fa42a64f8c3bb7a8079c056f68e24d4c371b69644eaf02688e6c706ab6a",
@@ -28,7 +31,7 @@ GOLDEN_STACK = {
     "events": "7cb68efe39e15155efa9b2f8edc22e79b93fb3804ba23981e97fbde26c5b0664",
     "expansion": "5a12fe7c7f06127db41f5229bda524a0c9e21e101f8d87dc32d10e5589358770",
     "links": "c6589f2bef67ee2bab7f194cb3fa551ff913ac43266ce8cd6a20efd2d6c0aa2b",
-    "manifest": "e2777e5acc6734440c3f5b1890976b666318bf0e8a7400f865a739cff51e66e2",
+    "manifest": "32043fd974f02df0b489f8306ee7b296ab86b222eb00d99170a560c36b5523c7",
     "raw": "f3c3185ebf52b2b84224ea7866648e6bbe117267a423b600f203d780178efad9",
     "rule_cells": "ad1e2537cbf1a5aed5421ba9eebb1925d73dffbe910718af066f15ed74ef64fb",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",

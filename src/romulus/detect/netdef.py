@@ -177,6 +177,16 @@ class SiteNetworks:
                 "always_internal": list(ALWAYS_INTERNAL), "digest": self.digest, "summary": self.summary()}
 
 
+def recorded_view(record: dict | None) -> dict:
+    """A hunt's recorded definition for a report or page: the record (the default for a hunt recorded before the
+    setting existed) with its one-line summary. A record that does not match its digest is shown as such."""
+    try:
+        return SiteNetworks.from_record(record).record()
+    except (KeyError, TypeError, ValueError) as error:
+        return {"source": "unreadable", "digest": (record or {}).get("digest"),
+                "summary": f"Internal networks: the hunt's recorded definition is unreadable ({error})"}
+
+
 # ---- the installed definition ----------------------------------------------------------------------------
 
 _installed: SiteNetworks = SiteNetworks.default()

@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from romulus.agent.provider import egress_banners
 from romulus.config import Settings
 from romulus.decide.policy import LANE_ORDER
+from romulus.detect.netdef import recorded_view
 from romulus.hunt.run import open_repo
 from romulus.report.manifest import investigations_for_hunt, publish_revision
 from romulus.report.markdown import render as render_md
@@ -161,7 +162,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
                     coverage=cov["rules"], tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
                     investigations=investigations, ai_agent=ai_audit["detail"] if ai_audit else None,
-                    egress_banners=banners)
+                    egress_banners=banners,
+                    internal_networks=recorded_view(h["manifest"].get("internal_networks")))
 
     def _timeline_findings(hunt_id: str) -> list[dict]:
         return [{"id": c["id"], "lane": c["lane"], "rule_id": c["rule_id"], "claim": c["claim"],
