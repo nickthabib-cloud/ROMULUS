@@ -506,6 +506,8 @@ def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec)
     dns_id = event.get("dns.id")
     if isinstance(dns_id, (bool, list, dict)):
         dns_id = None
+    elif dns_id is not None:
+        dns_id = str(dns_id)
     token = None if flow is None else _sha256(canonical_json(["dns", flow, names, dns_id]))
     return _with_token(keys, token)
 
