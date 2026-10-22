@@ -552,6 +552,37 @@ class Repo:
             c.execute(t.agent_alias.insert().values(**row))
             return row
 
+    def seed_agent_aliases(self, hunt_id: str, targets: list[tuple[str, str]]) -> list[dict]:
+        """Assign an ordered seed set atomically, preserving existing aliases."""
+        with write_txn(self.engine) as c:
+            if c.execute(select(t.hunt.c.id).where(t.hunt.c.id == hunt_id)).scalar() is None:
+                raise KeyError(hunt_id)
+            existing = [dict(row) for row in c.execute(select(t.agent_alias).where(
+                t.agent_alias.c.hunt_id == hunt_id,
+            )).mappings()]
+            by_target = {(row["kind"], row["target_id"]): row for row in existing}
+            next_number: dict[str, int] = {}
+            for row in existing:
+                suffix = row["alias"][1:]
+                if suffix.isdigit():
+                    next_number[row["kind"]] = max(next_number.get(row["kind"], 1), int(suffix) + 1)
+            created = []
+            ordered = []
+            for kind, target_id in targets:
+                key = (kind, target_id)
+                row = by_target.get(key)
+                if row is None:
+                    number = next_number.get(kind, 1)
+                    next_number[kind] = number + 1
+                    row = {"hunt_id": hunt_id, "alias": f"{kind}{number}", "kind": kind,
+                           "target_id": target_id, "created_at": utcnow()}
+                    by_target[key] = row
+                    created.append(row)
+                ordered.append(row)
+            if created:
+                c.execute(t.agent_alias.insert(), created)
+            return ordered
+
     def entities(self, hunt_id: str) -> list[dict]:
         query = (select(t.entity).where(t.entity.c.hunt_id == hunt_id)
                  .order_by(t.entity.c.kind, t.entity.c.value, t.entity.c.id))

@@ -73,6 +73,28 @@ def test_alias_book_seeds_findings_in_content_order_and_is_idempotent():
     assert aliases.resolve("F2", {"F"}) == "high-priority"
 
 
+def test_alias_book_seeds_all_existing_objects_in_one_write_transaction(monkeypatch):
+    repo = _repo()
+    _seed(repo, reverse=True)
+    from romulus.store import repo as repo_module
+
+    original = repo_module.write_txn
+    calls = 0
+
+    def counted(engine):
+        nonlocal calls
+        calls += 1
+        return original(engine)
+
+    monkeypatch.setattr(repo_module, "write_txn", counted)
+
+    aliases = AliasBook(repo, "h1")
+
+    assert calls == 1
+    assert aliases.alias_for("F", "urgent") == "F1"
+    assert aliases.alias_for("F", "lead") == "F4"
+
+
 def test_alias_errors_distinguish_unknown_wrong_kind_and_other_hunt():
     repo = _repo()
     _candidate(repo, "finding", "high", 50.0, T)
