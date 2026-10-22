@@ -194,6 +194,24 @@ def test_0013_backfills_snapshot_membership_and_downgrades_without_losing_snapsh
         assert conn.exec_driver_sql("SELECT count(*) FROM baseline_count").scalar_one() == 1
 
 
+def test_0013_round_trips_a_gap_shortened_snapshot(tmp_path):
+    engine = make_engine(tmp_path / "gap-status.db")
+    with engine.begin() as conn:
+        command.upgrade(_alembic_config(conn), "0013")
+        conn.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'planned')"
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO baseline_snapshot "
+            "(hunt_id, plan, store_cut, segment_ids, coverage, status, digest) VALUES "
+            "('h1', '{}', '{}', '[]', '{}', 'gap_shortened', 'd')"
+        )
+        command.downgrade(_alembic_config(conn), "0012")
+        # The older schema has no such status; a gap-shortened history is unresolved there, never shortened.
+        assert conn.exec_driver_sql("SELECT status FROM baseline_snapshot").scalar_one() == "unresolved"
+
+
 def test_0010_through_0012_round_trip_agent_link_without_prior_scheduler_anchor(tmp_path):
     engine = make_engine(tmp_path / "agent-migrations.db")
     with engine.begin() as connection:

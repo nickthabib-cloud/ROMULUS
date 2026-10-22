@@ -445,7 +445,7 @@ baseline_snapshot = Table(
     Column("status", String, nullable=False),
     Column("digest", String, nullable=False),
     CheckConstraint(
-        "status IN ('resolved', 'shortened', 'unresolved')", name="ck_baseline_snapshot_status",
+        "status IN ('resolved', 'shortened', 'gap_shortened', 'unresolved')", name="ck_baseline_snapshot_status",
     ),
 )
 

@@ -91,6 +91,8 @@ class SnapshotPlanner:
         - the effective span is the contiguous covered run ending at the window start, beginning at its first
           segment holding records; complete zero-record segments before that are evidence of absence
           (`absent_before`), and a run with no records at all is `absent`, never resolved;
+        - a span shorter than the lookback is `gap_shortened` when the run stopped at an uncovered hour, and
+          `shortened` only when it reaches history_start and is short by evidenced absence alone;
         - every uncovered hour of [history_start, window_start) is a gap, never absence.
         """
         history_gaps = tuple(history_gaps)
@@ -154,7 +156,11 @@ class SnapshotPlanner:
                     status = "unresolved"
                 elif effective_hours == int(lookback / _HOUR):
                     status = "resolved"
+                elif cursor > history_start:
+                    # The run stopped at an uncovered hour: shortened by a gap, which is a failure to S5.
+                    status = "gap_shortened"
                 else:
+                    # The run reaches history_start and is short only by evidenced absence.
                     status = "shortened"
                 statuses.append(status)
                 causes = _gap_causes(history_gaps, target, spec.id, history_start, window_start)
@@ -164,8 +170,9 @@ class SnapshotPlanner:
                     "absent_before": absent_before,
                     "status": status, "segment_ids": sorted(row["id"] for row in chosen),
                 }
-        # Absent history resolves nothing, so it is unresolved at the snapshot level.
+        # Absent history resolves nothing, so it is unresolved at the snapshot level. A gap outranks absence.
         status = ("unresolved" if {"unresolved", "absent"} & set(statuses) else
+                  "gap_shortened" if "gap_shortened" in statuses else
                   "shortened" if "shortened" in statuses else "resolved")
         segment_ids = sorted(selected_ids)
         store_cut = {

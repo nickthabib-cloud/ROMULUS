@@ -26,6 +26,12 @@ def upgrade() -> None:
     op.execute(sa.text("INSERT INTO baseline_scope_hour SELECT * FROM _baseline_scope_hour_0013"))
     op.execute(sa.text("DROP TABLE _baseline_count_0013"))
     op.execute(sa.text("DROP TABLE _baseline_scope_hour_0013"))
+    # 'shortened' means shortened only by evidenced absence; a span cut short by a gap is 'gap_shortened'.
+    with op.batch_alter_table("baseline_snapshot", recreate="always") as batch:
+        batch.drop_constraint("ck_baseline_snapshot_status", type_="check")
+        batch.create_check_constraint(
+            "ck_baseline_snapshot_status", "status IN ('resolved', 'shortened', 'gap_shortened', 'unresolved')",
+        )
     op.create_table(
         "baseline_snapshot_segment",
         sa.Column(
@@ -113,6 +119,13 @@ def downgrade() -> None:
     op.drop_table("baseline_parent_host_boot")
     op.drop_index("ix_baseline_snapshot_segment_segment", table_name="baseline_snapshot_segment")
     op.drop_table("baseline_snapshot_segment")
+    # The older schema has no gap-shortened status; such a history is unresolved there, never 'shortened'.
+    op.execute(sa.text("UPDATE baseline_snapshot SET status = 'unresolved' WHERE status = 'gap_shortened'"))
+    with op.batch_alter_table("baseline_snapshot", recreate="always") as batch:
+        batch.drop_constraint("ck_baseline_snapshot_status", type_="check")
+        batch.create_check_constraint(
+            "ck_baseline_snapshot_status", "status IN ('resolved', 'shortened', 'unresolved')",
+        )
     op.execute(sa.text("DELETE FROM baseline_segment WHERE status = 'building'"))
     op.execute(sa.text("CREATE TEMP TABLE _baseline_count_0013 AS SELECT * FROM baseline_count"))
     op.execute(sa.text("CREATE TEMP TABLE _baseline_scope_hour_0013 AS SELECT * FROM baseline_scope_hour"))

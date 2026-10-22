@@ -85,7 +85,8 @@ def test_gaps_stop_effective_span_and_carry_their_reason():
         "state": "missing", "reason": "no complete segment",
     }]
     assert coverage["absent_before"] is None
-    assert coverage["status"] == "shortened"
+    assert coverage["status"] == "gap_shortened"
+    assert snapshot["status"] == "gap_shortened"
 
 
 def test_missing_segments_before_the_first_one_are_gaps_never_absence():
@@ -99,7 +100,7 @@ def test_missing_segments_before_the_first_one_are_gaps_never_absence():
         "end": (START - timedelta(hours=2)).isoformat(),
         "state": "missing", "reason": "no complete segment",
     }]
-    assert coverage["effective_hours"] == 2 and coverage["status"] == "shortened"
+    assert coverage["effective_hours"] == 2 and coverage["status"] == "gap_shortened"
 
 
 def test_complete_empty_segments_are_the_evidence_of_absence():
@@ -111,7 +112,9 @@ def test_complete_empty_segments_are_the_evidence_of_absence():
     assert coverage["gaps"] == []
     assert coverage["absent_before"] == (START - timedelta(hours=2)).isoformat()
     assert coverage["effective_start"] == (START - timedelta(hours=2)).isoformat()
+    # Shortened only by evidenced absence, never by a gap.
     assert coverage["effective_hours"] == 2 and coverage["status"] == "shortened"
+    assert snapshot["status"] == "shortened"
 
 
 def test_complete_span_without_records_is_absent_never_resolved():
@@ -181,7 +184,7 @@ def test_budget_truncated_lookback_is_gaps_and_empty_source_is_absent():
     )
     coverage = snapshot["coverage"]["host-index|bl.exec_path"]
     assert coverage["absent_before"] is None
-    assert coverage["effective_hours"] == 50 and coverage["status"] == "shortened"
+    assert coverage["effective_hours"] == 50 and coverage["status"] == "gap_shortened"
     assert [(gap["state"], gap["start"], gap["end"]) for gap in coverage["gaps"]] == [(
         "omitted_budget", (LOOKBACK_START - timedelta(hours=hours)).isoformat(),
         (LOOKBACK_START - timedelta(hours=50)).isoformat(),
