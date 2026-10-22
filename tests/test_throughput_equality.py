@@ -18,7 +18,9 @@ from romulus.evidence.normalize import BootIntervals, normalize_hits
 from romulus.hunt.pivot import PivotExecutor
 from tests import throughput_fixture as tf
 
-# Reference digests of the synthetic fixture's results; any change to hunt output changes them.
+# Reference digests of the synthetic fixture's results; any change to hunt output changes them. Expansion task
+# ids include the query scope, so links and raw copies reference those ids, and the report's incident graph marks
+# each edge's kind; the deterministic findings are unchanged.
 GOLDEN_STACK = {
     "anchors": "5bfad42385ad92785c91d770613dff8e893f140c4f8d1606128b7ea0f170c120",
     "audit": "2fd12fa42a64f8c3bb7a8079c056f68e24d4c371b69644eaf02688e6c706ab6a",
@@ -27,12 +29,12 @@ GOLDEN_STACK = {
     "event_entities": "af8053b6219447233c1329e280f0ca64054ceceeea79d5d84bfa12af8e067a23",
     "events": "7cb68efe39e15155efa9b2f8edc22e79b93fb3804ba23981e97fbde26c5b0664",
     "expansion": "5a12fe7c7f06127db41f5229bda524a0c9e21e101f8d87dc32d10e5589358770",
-    "links": "c6589f2bef67ee2bab7f194cb3fa551ff913ac43266ce8cd6a20efd2d6c0aa2b",
-    "manifest": "e2777e5acc6734440c3f5b1890976b666318bf0e8a7400f865a739cff51e66e2",
-    "raw": "f3c3185ebf52b2b84224ea7866648e6bbe117267a423b600f203d780178efad9",
+    "links": "204e7ff86b5e7785a6eba0ac4bc4ed4187a0095ddcf1dc7d9ce8a55d459a5ed5",
+    "manifest": "de3a9c57387d42a44c41a665458c8c2560ad8e5d006964430242eb3b61763db3",
+    "raw": "1b5eb4a23e51d23ba7b032ca69c4d879d2884ae338a137aca44d30580051c347",
     "rule_cells": "ad1e2537cbf1a5aed5421ba9eebb1925d73dffbe910718af066f15ed74ef64fb",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "a6118de2aa8b88a5f50f08d3476de4e866c6dd69e4f4a49407e98f06198ee497",
+    "tasks": "06e1c9c6b4e5134a66c7f122289b8a7537a0cfc704e9623f59be2c0bf03679db",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "ab962996ad3da493263e7cf5971b6d853a75684e82f9daff420d871ef389a1d0",

@@ -12,6 +12,7 @@ from romulus.detect.context import _session_key
 from romulus.detect.correlation import merge_unknown_boot
 from romulus.detect.registry import anchor_class_for_rule, fresh_context_pack
 from romulus.evidence.typed import TypedEvent
+from romulus.hunt.links import is_agent_reach
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -255,7 +256,8 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
     per group key across reaches, and the result is upserted as one candidate per (rule, group key). A candidate
     a previous pass produced that this pass no longer does is withdrawn to the context lane. Order-independent:
     the output depends only on the set of reaches."""
-    link_rows = sorted((row for row in repo.expansion_links(hunt_id) if row["evaluated"]),
+    link_rows = sorted((row for row in repo.expansion_links(hunt_id)
+                        if row["evaluated"] and not is_agent_reach(row["link_type"], row["strength"])),
                        key=lambda row: (row["anchor_id"], row["id"]))
     # Records without a boot id take the boot the hunt's boot-interval map places them in, so session keys tell a
     # session id reused after a reboot apart. The whole map is used, so the result does not depend on stage order.
