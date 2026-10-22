@@ -351,6 +351,12 @@ def test_service_discovery_names_and_rtsp_read_as_http_are_consistent_with_their
     # HTTP's leniency is limited to RTSP's ports
     (eve("http5353", proto="TCP", dst=ATTACKER, dport=5353, app_proto="http", c2s=4000, s2c=9000, pkts_s=12), "http",
      "tcp/5353"),
+    # Arkime parses RTSP itself: its HTTP-only label on the RTSP port is a real disagreement
+    (ark("ark-http554", dst=ATTACKER, dport=554, protocols=["http"], c2s=4000, s2c=9000, data_c=3000, data_s=8000),
+     "http", "tcp/554"),
+    # the leniency is never applied through the source port
+    (eve("http-from-554", src=ATTACKER, sport=554, dst="10.0.0.5", dport=51234, app_proto="http", c2s=4000, s2c=9000,
+         pkts_s=12), "http", "tcp/51234"),
 ])
 def test_real_disagreements_stay_reported(hit, protocol, port):
     [m] = run(ProtocolPortMismatch(), events(hit))

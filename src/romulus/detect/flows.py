@@ -163,18 +163,21 @@ def canonical_protocol(name: str) -> str:
 
 
 # Protocols built on another protocol's message syntax, so that protocol's parser labels them with its own name. RTSP
-# (RFC 2326, RFC 7826) uses HTTP/1.1 request and response syntax and defines tunnelling through HTTP: an HTTP label on
-# a port registered for RTSP does not show a protocol other than the registered one. Keyed by the registered protocol.
+# (RFC 2326, RFC 7826) uses HTTP/1.1 request and response syntax and defines tunnelling through HTTP: a sensor without
+# an RTSP parser labels RTSP on its port as HTTP. Keyed by the registered protocol.
 SYNTAX_SIBLINGS: dict[str, frozenset[str]] = {"rtsp": frozenset({"http"})}
 
 
 def standard_on(protocol: str, transport: str, port: int | None) -> bool:
-    """The protocol is registered on this port, or is the syntax sibling a parser reports for a protocol that is."""
-    if port is None:
-        return False
-    if port in PROTOCOL_PORTS.get(protocol, {}).get(transport, frozenset()):
-        return True
-    return any(protocol in SYNTAX_SIBLINGS.get(registered, ()) for registered in expected_protocols(transport, port))
+    return port is not None and port in PROTOCOL_PORTS.get(protocol, {}).get(transport, frozenset())
+
+
+def sibling_label(protocol: str, transport: str, dport: int | None, sensor: str) -> bool:
+    """The label is the syntax sibling of a protocol registered on the destination port that this sensor cannot
+    parse, so its parser names it by the sibling. A sensor that parses the registered protocol would have named it;
+    the source port is never used."""
+    return any(protocol in SYNTAX_SIBLINGS.get(registered, ()) and registered not in PARSERS[sensor]
+               for registered in expected_protocols(transport, dport))
 
 
 def expected_protocols(transport: str, port: int | None) -> frozenset[str]:
@@ -797,8 +800,9 @@ class ProtocolPortMismatch(_FlowRule):
                     "program bound to the service port) is judged against its source port, and cleared when a "
                     "forward record of the same connection had its protocol identified. Multicast name "
                     "resolution under its own name (Arkime's mdns on udp/5353, llmnr on 5355) is registered on its "
-                    "port, and an HTTP label on a port registered for RTSP is RTSP's own HTTP-based syntax, not a "
-                    "different protocol",
+                    "port, and an HTTP label on a destination port registered for RTSP, from a sensor with no RTSP "
+                    "parser (Suricata), is RTSP's own HTTP-based syntax, not a different protocol; Arkime parses "
+                    "RTSP, so its HTTP-only label there is still reported",
         "telemetry": "Suricata EVE flow records (network.app_proto, ports, transport, flow.bytes_* and flow.pkts_* "
                      "per direction) and Arkime sessions (network.protocols, ports, transport, client.bytes/"
                      "server.bytes, or source/destination bytes and packets): present in the lab profile, app_proto "
@@ -810,8 +814,8 @@ class ProtocolPortMismatch(_FlowRule):
         "benign_and_cost": "custom service ports, proxies, mid-stream pickups and sensor parser gaps (Kafka without "
                            "a Suricata parser is excluded by the parser table; partial Arkime Kafka recognition "
                            "stays visible as a grouped lead with the destination's identified share). Plain HTTP "
-                           "on an RTSP port is not told apart from RTSP and is not reported by this rule (the HTTP "
-                           "and beaconing rules still read it). One item "
+                           "on an RTSP port seen only by Suricata is not told apart from RTSP and is not reported by "
+                           "this rule (the HTTP and beaconing rules still read it). One item "
                            "per (destination, port, protocol), or per (destination, port) for unidentified traffic, "
                            "listing every source with its connection count",
         "query_cost": "none beyond the sweep",
@@ -850,6 +854,7 @@ class ProtocolPortMismatch(_FlowRule):
         if view.protocols:
             # a protocol that negotiates its ports at run time is consistent with any port
             consistent = any(p in DYNAMIC_PROTOCOLS or standard_on(p, view.transport, port)
+                             or sibling_label(p, view.transport, view.dport, view.sensor)
                              for p in view.protocols for port in (view.sport, view.dport))
             judged = expected or any(p in PROTOCOL_PORTS for p in view.protocols)
             if registered or (not consistent and judged):
