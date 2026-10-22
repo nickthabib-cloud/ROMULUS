@@ -479,6 +479,99 @@ def test_default_definition_names_the_assumption_when_the_budget_refuses_a_looku
     assert notes and DIRECTION_ASSUMED_REASON in notes[0] and SITE_HOST in notes[0] and OUTSIDER in notes[0]
 
 
+def _roots(pairs):
+    """One network-alert root anchor per (source, destination) pair."""
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
+                            "targets": [], "budgets": {}}, "digest", "test")
+    for i, (src, dst) in enumerate(pairs):
+        alert = ev(f"alert{i}", "net_alert", host="sensor1", target="network-x", ts=T0 + timedelta(minutes=i),
+                   source__ip=src, source__port=50000 + i, destination__ip=dst, destination__port=22,
+                   network__transport="tcp")
+        repo.save_evidence("h1", [alert], {}, None)
+        repo.save_candidate({
+            "id": f"F-{i:02d}", "hunt_id": "h1", "rule_id": "net.suricata_alert", "rule_version": "1",
+            "claim": "alert", "claim_type": "network_observation", "event_ids": [alert.id], "predicate_fields": [],
+            "entities": [["host", "sensor1", "observer"]], "ts": alert.ts, "severity": "high", "confidence": "high",
+            "lane": "high", "priority": 50.0, "priority_reasons": [], "gate_results": {}, "benign_alternatives": [],
+            "next_checks": [], "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+        })
+    return repo
+
+
+def _lookups(executor, address):
+    return sum(1 for i in executor.sent if i.purpose == "expansion:resolve_host_ip"
+               and any(p.field == "host.ip" and p.value == address for p in i.filters))
+
+
+def test_the_same_outside_address_on_several_anchors_costs_one_lookup():
+    repo = _roots([(OUTSIDER, "10.0.0.2")] * 4)
+    executor = PredicateExecutor(repo, [_site_host_marker()], contracts(host_ip=True))
+    ExpansionEngine(repo, "h1", WINDOW, LinkFetcher(executor, WINDOW.start, WINDOW.end), max_depth=1).run()
+    assert _lookups(executor, OUTSIDER) == 1
+
+
+def test_fallback_lookups_stop_at_their_share_of_the_budget_and_the_rest_are_stated():
+    from romulus.hunt.expansion import FALLBACK_LOOKUP_SHARE, fallback_lookup_cap
+    assert FALLBACK_LOOKUP_SHARE == 0.10
+    assert (fallback_lookup_cap(180), fallback_lookup_cap(25), fallback_lookup_cap(5)) == (18, 2, 1)
+    outsiders = [f"203.0.113.{i}" for i in range(1, 26)]
+    repo = _roots([(ip, "10.0.0.2") for ip in outsiders])
+    executor = PredicateExecutor(repo, [_site_host_marker()], contracts(host_ip=True))
+    ExpansionEngine(repo, "h1", WINDOW, LinkFetcher(executor, WINDOW.start, WINDOW.end), max_depth=1,
+                    max_source_queries=180).run()
+    fallback = sum(_lookups(executor, ip) for ip in outsiders)
+    assert fallback == fallback_lookup_cap(180) == 18                     # the rest of the budget is the links'
+    assert _lookups(executor, "10.0.0.2") == 1                             # the internal endpoint is not capped
+    stated = [a for a in repo.expansion_anchors("h1")
+              if any("fallback lookup cap reached" in r and DIRECTION_ASSUMED_REASON in r for r in a["reasons"])]
+    assert len(stated) == len(outsiders) - 18
+
+
+def test_the_fallback_cap_is_stated_in_the_links_when_no_victim_is_left():
+    repo = _roots([(f"192.0.2.{i}", SITE_HOST) for i in range(1, 4)])  # looked up before the site host
+    executor = PredicateExecutor(repo, [_site_host_marker()], contracts(host_ip=True))
+    engine = ExpansionEngine(repo, "h1", WINDOW, LinkFetcher(executor, WINDOW.start, WINDOW.end),
+                             max_source_queries=10)                       # cap 1: only the first lookup is made
+    events = engine._events(repo.candidate("F-00")["event_ids"])
+    base = LinkAnchor(finding_id="F-00", ts=T0, events=events)
+    variants, _dropped, _notes = engine._victim_variants("F-00", [base], events)
+    assert [v.host for v in variants] == [None]                            # the outsider was looked up, the site
+    assert "fallback lookup cap reached" in variants[0].host_reason        # host was not: the cap was used
+    assert DIRECTION_ASSUMED_REASON in variants[0].host_reason and SITE_HOST in variants[0].host_reason
+
+
+def test_a_resumed_hunt_reuses_every_fallback_verdict_and_its_cap_spend():
+    repo = _roots([(OUTSIDER, SITE_HOST), ("203.0.113.77", SITE_HOST)])
+    first = PredicateExecutor(repo, [_site_host_marker()], contracts(host_ip=True))
+    real = first._execute
+
+    def flaky(intent, contract, **kw):              # the query is spent, but one address's answer is incomplete
+        outcome = real(intent, contract, **kw)
+        if any(p.value == "203.0.113.77" for p in intent.filters):
+            return outcome.model_copy(update={"completeness": Completeness.partial, "reasons": ["timed_out"]})
+        return outcome
+
+    first._execute = flaky
+    engine = ExpansionEngine(repo, "h1", WINDOW, LinkFetcher(first, WINDOW.start, WINDOW.end))
+    for finding in ("F-00", "F-01"):
+        events = engine._events(repo.candidate(finding)["event_ids"])
+        engine._victim_variants(finding, [LinkAnchor(finding_id=finding, ts=T0, events=events)], events)
+    spent = first.source_queries
+    assert spent == 3                                                      # two outsiders and the site host
+    resumed = PredicateExecutor(repo, [_site_host_marker()], contracts(host_ip=True))
+    again = ExpansionEngine(repo, "h1", WINDOW, LinkFetcher(resumed, WINDOW.start, WINDOW.end))
+    events = again._events(repo.candidate("F-01")["event_ids"])
+    variants, _dropped, notes = again._victim_variants(
+        "F-01", [LinkAnchor(finding_id="F-01", ts=T0, events=events)], events)
+    assert resumed.source_queries == 0                                     # nothing is looked up twice
+    assert [v.host for v in variants] == ["web1"]
+    assert notes and "203.0.113.77" in notes[0] and "timed_out" in notes[0]  # the incomplete one is not retried
+    assert again._fallback_spent() == 3
+
+
 def test_a_configured_site_never_looks_up_an_address_outside_it():
     netdef.install(netdef.SiteNetworks.from_lists(["198.51.100.0/24"], []))
     repo = network_anchor_repo(src=OUTSIDER, dst=SITE_HOST, dport=22)

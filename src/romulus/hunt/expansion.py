@@ -26,7 +26,7 @@ from romulus.hunt.links import (
     LinkWindow,
     usable_key,
 )
-from romulus.hunt.pivot import HOST_AMBIGUOUS, NO_HOST_RECORD
+from romulus.hunt.pivot import HOST_AMBIGUOUS, HOST_LOOKUP_BUDGET, NO_HOST_RECORD
 from romulus.hunt.publish import publish_match
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.sources.models import Window
@@ -67,6 +67,16 @@ def expansion_windows(ts: datetime, hunt_window: Window) -> list[LinkWindow]:
 
 
 RESERVED_REASON = "source query budget reserved for discovered anchors"
+# Under the default internal-network definition, the endpoints it reads as outside are looked up to learn whether
+# they are site hosts. Those fallback lookups together may spend at most this share of the expansion budget, so a
+# network full of internet endpoints cannot starve the links themselves.
+FALLBACK_LOOKUP_SHARE = 0.10
+FALLBACK_CAP_REASON = "fallback lookup cap reached"
+
+
+def fallback_lookup_cap(max_source_queries: int) -> int:
+    """Source queries all fallback lookups of a hunt may spend: FALLBACK_LOOKUP_SHARE of the budget, at least 1."""
+    return max(1, int(max_source_queries * FALLBACK_LOOKUP_SHARE))
 
 class ExpansionEngine:
     def __init__(
@@ -90,6 +100,10 @@ class ExpansionEngine:
         self.boots = given if given else stored_boot_intervals(repo, hunt_id)
         if given is not None and not given:
             fetcher.boots = self.boots
+        # address -> (host, reason) for fallback lookups already made in this hunt, and the queries they spent;
+        # rebuilt from the durable lookup tasks on first use, so a resumed hunt neither repeats nor re-spends
+        self._fallback: dict[str, tuple[str | None, str | None]] | None = None
+        self._fallback_queries = 0
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
@@ -139,6 +153,57 @@ class ExpansionEngine:
                     found.add(address)
         return [str(address) for address in sorted(found, key=lambda a: (a.version, int(a)))]
 
+    def _fallback_map(self) -> dict[str, tuple[str | None, str | None]]:
+        """Fallback lookups this hunt already made, rebuilt once from its durable lookup tasks: an address the
+        default reads as outside, with the verdict (a host, no host, ambiguous, or why it is unresolved)."""
+        if self._fallback is None:
+            self._fallback, self._fallback_queries = {}, 0
+            for task in self.repo.host_resolution_tasks(self.hunt_id):
+                ip = (task.get("intent") or {}).get("resolve_host_ip")
+                spent = int(task.get("source_queries") or 0)
+                try:
+                    address = ipaddress.ip_address(str(ip))
+                except ValueError:
+                    continue
+                if is_internal(address) or not routable_remote(str(address)) or ip in self._fallback:
+                    continue                            # an internal endpoint's lookup is not a fallback
+                outcome = task.get("outcome") or {}
+                if task["state"] in ("evaluated", "partial") and isinstance(outcome, dict):
+                    self._fallback[ip] = (outcome.get("host"), outcome.get("reason"))
+                elif spent:
+                    self._fallback[ip] = (None, f"victim host unresolved for {ip}: an earlier lookup did not finish")
+                else:
+                    continue                            # planned but never queried: not looked up yet
+                self._fallback_queries += spent
+        return self._fallback
+
+    def _fallback_spent(self) -> int:
+        self._fallback_map()
+        return self._fallback_queries
+
+    def _fallback_lookup(self, finding_id: str, ip: str, query_cap: int | None) -> tuple[str | None, str | None]:
+        """Look up an endpoint the default reads as outside at most once per hunt, while the hunt's fallback
+        lookups stay within fallback_lookup_cap(budget) source queries and the anchor's own `query_cap`. A lookup
+        refused for the cap or the budget is not remembered, so it is stated now and may be made later."""
+        known = self._fallback_map()
+        if ip in known:
+            return known[ip]
+        remaining = fallback_lookup_cap(self.max_source_queries) - self._fallback_queries
+        if remaining <= 0:
+            return None, f"victim host not looked up for {ip}: {FALLBACK_CAP_REASON}"
+        before = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
+        cap = before + remaining if isinstance(before, int) else None
+        effective = query_cap if cap is None else cap if query_cap is None else min(query_cap, cap)
+        host, reason = self.fetcher.resolve_host(finding_id, ip, query_cap=effective)
+        if host is None and (reason or "").endswith(HOST_LOOKUP_BUDGET):
+            if cap is not None and (query_cap is None or cap < query_cap):
+                reason = f"victim host not looked up for {ip}: {FALLBACK_CAP_REASON}"
+            return host, reason
+        after = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
+        self._fallback_queries += after - before if isinstance(before, int) and isinstance(after, int) else 1
+        known[ip] = (host, reason)
+        return host, reason
+
     def _victim_variants(self, finding_id: str, variants: list[LinkAnchor], events: list[TypedEvent],
                          query_cap: int | None = None) -> tuple[list[LinkAnchor], list[str], list[str]]:
         """Host-side links of a network anchor run once per victim endpoint, each against the host that endpoint
@@ -163,7 +228,7 @@ class ExpansionEngine:
         victims = [(ip, *lookup(ip)) for ip in ips]
         unresolved = []
         for ip in undecided:
-            host, reason = lookup(ip)
+            host, reason = self._fallback_lookup(finding_id, ip, query_cap) if resolve else lookup(ip)
             if host is not None or (reason or "").startswith(HOST_AMBIGUOUS):
                 victims.append((ip, host, reason))      # host records claim the address: it is the site's
             elif NO_HOST_RECORD not in (reason or ""):
