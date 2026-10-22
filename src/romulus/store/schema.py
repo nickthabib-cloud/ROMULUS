@@ -414,6 +414,16 @@ baseline_snapshot = Table(
     ),
 )
 
+# Snapshot membership is normalized so every baseline probe joins the frozen hunt cut instead of
+# interpolating a potentially huge list of segment ids into SQL.
+baseline_snapshot_segment = Table(
+    "baseline_snapshot_segment", metadata,
+    Column("hunt_id", String, ForeignKey("baseline_snapshot.hunt_id", ondelete="CASCADE"), nullable=False),
+    Column("segment_id", String, ForeignKey("baseline_segment.id", ondelete="RESTRICT"), nullable=False),
+    PrimaryKeyConstraint("hunt_id", "segment_id", name="pk_baseline_snapshot_segment"),
+)
+Index("ix_baseline_snapshot_segment_segment", baseline_snapshot_segment.c.segment_id)
+
 baseline_observation = Table(
     "baseline_observation", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),

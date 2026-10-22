@@ -153,6 +153,34 @@ def test_0009_upgrade_and_downgrade_preserve_existing_data(tmp_path):
     assert "baseline_segment" not in set(inspect(engine).get_table_names())
 
 
+def test_0013_backfills_snapshot_membership_and_downgrades_without_losing_snapshot(tmp_path):
+    engine = make_engine(tmp_path / "membership-migration.db")
+    with engine.begin() as conn:
+        command.upgrade(_alembic_config(conn), "0009")
+        conn.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'planned')"
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO baseline_segment "
+            "(id, site, target, spec_id, spec_version, key_version, normalizer, start, end, bucket, origin, "
+            "exclusion_digest, excluded_keys, hunted, events_total, rows_digest, status, created_at) VALUES "
+            "('s1', 'site', 'idx', 'bl.exec_path', '1', '1', 'n@1', '2026-01-01', '2026-01-02', 'day', "
+            "'lookback', 'none', '[]', 0, 1, 'd', 'active', '2026-01-03')"
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO baseline_snapshot "
+            "(hunt_id, plan, store_cut, segment_ids, coverage, status, digest) VALUES "
+            "('h1', '{}', '{}', '[\"s1\"]', '{}', 'resolved', 'd')"
+        )
+        command.upgrade(_alembic_config(conn), "0013")
+        assert conn.exec_driver_sql(
+            "SELECT hunt_id || ':' || segment_id FROM baseline_snapshot_segment"
+        ).scalar_one() == "h1:s1"
+        command.downgrade(_alembic_config(conn), "0009")
+        assert conn.exec_driver_sql("SELECT segment_ids FROM baseline_snapshot").scalar_one() == '["s1"]'
+
+
 def test_segment_is_insert_only_except_for_status_and_children_are_stable():
     repo = _repo()
     assert repo.save_baseline_segment(_segment(), [_count()], [_scope_hour()]) is True
@@ -189,10 +217,12 @@ def test_segment_requires_hour_aligned_nonempty_span():
 def test_snapshot_is_write_once_and_resume_reuses_original():
     repo = _repo()
     repo.create_hunt("h1", {}, "d", "test")
+    repo.save_baseline_segment(_segment(), [], [])
     assert repo.save_baseline_snapshot(_snapshot("h1")) is True
     assert repo.save_baseline_snapshot(_snapshot("h1", digest="changed", segment_ids=[])) is False
     stored = repo.baseline_snapshot("h1")
     assert stored["digest"] == "snap-one" and stored["segment_ids"] == ["seg-b"]
+    assert repo.baseline_snapshot_segments("h1") == ["seg-b"]
 
 
 def test_observation_upsert_uses_full_window_key_and_keeps_every_key():
@@ -222,7 +252,9 @@ def test_delete_hunt_drops_its_snapshot_and_observations_and_revokes_derived_seg
     ):
         repo.save_baseline_segment(row, [], [])
     for hunt_id in ("h1", "h2"):
-        repo.save_baseline_snapshot(_snapshot(hunt_id, digest=f"snap-{hunt_id}"))
+        repo.save_baseline_snapshot(_snapshot(
+            hunt_id, digest=f"snap-{hunt_id}", segment_ids=["seg-other"],
+        ))
         repo.upsert_baseline_observation(_observation(hunt_id))
 
     counts = repo.delete_hunt("h1", actor="test")
@@ -255,7 +287,7 @@ def test_baseline_listings_are_deterministically_sorted():
 
 
 BASELINE_TABLES = ("baseline_segment", "baseline_count", "baseline_scope_hour", "baseline_snapshot",
-                   "baseline_observation")
+                   "baseline_snapshot_segment", "baseline_observation")
 
 
 def _shape(engine) -> dict:
@@ -304,16 +336,25 @@ def _seed_prevalence(repo: Repo) -> None:
         )
 
 
+def _snapshot_members(repo: Repo, hunt_id: str, segment_ids: list[str]) -> None:
+    repo.create_hunt(hunt_id, {}, "d", "test")
+    repo.save_baseline_snapshot(_snapshot(hunt_id, segment_ids=segment_ids, digest=f"snapshot-{hunt_id}"))
+
+
 def test_prevalence_counts_distinct_scopes_of_one_kind_holding_a_key_id_in_the_given_segments():
     repo = _repo()
     _seed_prevalence(repo)
-    assert repo.baseline_key_prevalence("shared", "host", ["seg-1", "seg-2"]) == 3
-    assert repo.baseline_key_prevalence("shared", "account", ["seg-1", "seg-2"]) == 1
-    assert repo.baseline_key_prevalence("shared", "host", ["seg-3"]) == 1
-    assert repo.baseline_key_prevalence("missing", "host", ["seg-1"]) == 0
-    assert repo.baseline_key_prevalence("shared", "host", []) == 0
-    assert repo.baseline_peer_scopes("host", ["seg-1", "seg-2"]) == 3
-    history = repo.baseline_key_history("shared", "host", "host:a", ["seg-1", "seg-2", "seg-3"])
+    _snapshot_members(repo, "two", ["seg-1", "seg-2"])
+    _snapshot_members(repo, "three", ["seg-3"])
+    _snapshot_members(repo, "all", ["seg-1", "seg-2", "seg-3"])
+    _snapshot_members(repo, "empty", [])
+    assert repo.baseline_key_prevalence("shared", "host", "two") == 3
+    assert repo.baseline_key_prevalence("shared", "account", "two") == 1
+    assert repo.baseline_key_prevalence("shared", "host", "three") == 1
+    assert repo.baseline_key_prevalence("missing", "host", "two") == 0
+    assert repo.baseline_key_prevalence("shared", "host", "empty") == 0
+    assert repo.baseline_peer_scopes("host", "two") == 3
+    history = repo.baseline_key_history("shared", "host", "host:a", "all")
     assert sorted(row["segment_id"] for row in history) == ["seg-1", "seg-2"]
     assert all(row["count"] == 3 for row in history)
 
@@ -327,18 +368,19 @@ def _plan(engine, statement) -> str:
 def test_query_plans_serve_the_baseline_probes_from_indexes_without_temp_btrees(tmp_path):
     engine = make_engine(tmp_path / "plans.db")
     migrate(engine)
-    segments = ["seg-1", "seg-2", "seg-3"]
+    hunt_id = "snapshot"
     plans = {
-        "prevalence": _plan(engine, repo_module.baseline_prevalence_query("k", "host", segments)),
-        "peers": _plan(engine, repo_module.baseline_peer_scopes_query("host", segments)),
-        "history": _plan(engine, repo_module.baseline_key_history_query("k", "host", "host:a", segments)),
-        "scope_hours": _plan(engine, repo_module.baseline_scope_series_query("host", "host:a", segments)),
+        "prevalence": _plan(engine, repo_module.baseline_prevalence_query("k", "host", hunt_id)),
+        "peers": _plan(engine, repo_module.baseline_peer_scopes_query("host", hunt_id)),
+        "history": _plan(engine, repo_module.baseline_key_history_query("k", "host", "host:a", hunt_id)),
+        "scope_hours": _plan(engine, repo_module.baseline_scope_series_query("host", "host:a", hunt_id)),
     }
     assert "COVERING INDEX ix_baseline_count_key (key_id=? AND scope_kind=?)" in plans["prevalence"]
-    assert "INDEX ix_baseline_count_key (key_id=? AND scope_kind=? AND scope=? AND segment_id=?)" in plans["history"]
+    assert "INDEX ix_baseline_count_key (key_id=? AND scope_kind=? AND scope=?)" in plans["history"]
     assert "COVERING INDEX ix_baseline_scope_hour_lookup (scope_kind=?)" in plans["peers"]
-    assert "INDEX ix_baseline_scope_hour_lookup (scope_kind=? AND scope=? AND segment_id=?)" in plans["scope_hours"]
+    assert "INDEX ix_baseline_scope_hour_lookup (scope_kind=? AND scope=?)" in plans["scope_hours"]
     for plan in plans.values():
+        assert "COVERING INDEX sqlite_autoindex_baseline_snapshot_segment_1 (hunt_id=? AND segment_id=?)" in plan
         assert "TEMP B-TREE" not in plan and "SCAN baseline" not in plan
 
 
@@ -509,10 +551,11 @@ def test_one_million_count_rows_stream_through_the_api_and_probes_stay_indexed(t
           "events": 1} for scope in range(scopes)),
     )
     written = time.perf_counter() - started
+    _snapshot_members(repo, "volume", ["seg-volume"])
     started = time.perf_counter()
-    prevalence = repo.baseline_key_prevalence("id000500", "host", ["seg-volume"])
-    history = repo.baseline_key_history("id000500", "host", "host:h0007", ["seg-volume"])
-    peers = repo.baseline_peer_scopes("host", ["seg-volume"])
+    prevalence = repo.baseline_key_prevalence("id000500", "host", "volume")
+    history = repo.baseline_key_history("id000500", "host", "host:h0007", "volume")
+    peers = repo.baseline_peer_scopes("host", "volume")
     probed = time.perf_counter() - started
     print(f"wrote {total} baseline_count rows in {written:.1f}s; three probes in {probed * 1000:.1f}ms")
     assert prevalence == scopes and len(history) == 1 and peers == scopes
