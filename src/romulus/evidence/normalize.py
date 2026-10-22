@@ -393,14 +393,22 @@ def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], s
 def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent:
     """Build one process_exec event from the EXECVE record plus whatever companions are present.
     Missing SYSCALL means uid/ppid/success are unknown (caveat), not defaulted."""
-    by_type = {r.type: (h, r) for h, r in members if r.type in EXEC_COMPANIONS and r.type != "EXECVE"}
-    execs = [(h, r) for h, r in members if r.type == "EXECVE"]
+    by_type: dict[str, tuple[dict, AuditRecord]] = {}
+    execs: list[tuple[dict, AuditRecord]] = []
+    refs = []
+    for hit, record in members:
+        if record.type not in EXEC_COMPANIONS:
+            continue
+        refs.append(_ref(hit))
+        if record.type == "EXECVE":
+            execs.append((hit, record))
+        else:
+            by_type[record.type] = (hit, record)
     if not execs:
         raise Skip("no EXECVE record in group")
     h_exec, r_exec = merge_execve(execs)
     by_type["EXECVE"] = (h_exec, r_exec)
     argv, argv_problem = execve_argv(r_exec)
-    refs = [_ref(h) for h, r in members if r.type in EXEC_COMPANIONS]
     nid = h_exec["_id"]
     f = {
         "process.argv": fv(argv, f"{nid}:event.original#auditd:EXECVE.a*"),
