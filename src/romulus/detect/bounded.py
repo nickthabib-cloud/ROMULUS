@@ -73,3 +73,53 @@ class Limit:
         if self.records:
             return f"state limit: {self.text} ({self.records} record(s) not evaluated)"
         return f"state limit: {self.text}"
+
+
+class HeldExamples:
+    """The cited records of one group. Each is held as its event only until the sweep has handed that event to the
+    disk stage (`staged`), then as its (time, id) reference, so a group costs references, not events. With
+    `earliest` it keeps the `limit` earliest records by (time, id) whatever the arrival order; otherwise the first
+    `limit` records to arrive, in arrival order."""
+
+    __slots__ = ("earliest", "items", "limit")
+
+    def __init__(self, limit: int, earliest: bool = False):
+        self.limit = limit
+        self.earliest = earliest
+        self.items: list[list] = []                     # [(time, id), event or None]
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def offer(self, event) -> bool:
+        """Hold the record if it is among those kept; True when it entered (so it must reach the stage)."""
+        ref = (event.ts, event.id)
+        if not self.earliest:
+            if len(self.items) >= self.limit:
+                return False
+            self.items.append([ref, event])
+            return True
+        if len(self.items) >= self.limit and ref >= self.items[-1][0]:
+            return False
+        if len(self.items) >= self.limit:
+            self.items.pop()
+        self.items.append([ref, event])
+        self.items.sort(key=lambda item: item[0])
+        return True
+
+    def staged(self) -> None:
+        """Every held event has reached the stage: keep its reference only."""
+        for item in self.items:
+            item[1] = None
+
+    def ids(self) -> list[str]:
+        return [item[0][1] for item in self.items]
+
+    def events(self, load) -> list:
+        """The held records as events, in held order: events not yet staged as they are, the rest from `load`."""
+        wanted = [item[0][1] for item in self.items if item[1] is None]
+        found = {event.id: event for event in load(wanted)} if wanted else {}
+        missing = [event_id for event_id in wanted if event_id not in found]
+        if missing:
+            raise LookupError(f"{len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
+        return [item[1] if item[1] is not None else found[item[0][1]] for item in self.items]

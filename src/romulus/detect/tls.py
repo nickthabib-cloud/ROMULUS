@@ -24,12 +24,11 @@ What the evidence shows, and what it does not:
 from __future__ import annotations
 
 import json
-from collections import defaultdict
 from datetime import datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import RecentIds
+from romulus.detect.bounded import HeldExamples, RecentIds
 from romulus.detect.correlation import canon_ip, external
 from romulus.evidence.typed import TypedEvent
 
@@ -98,12 +97,35 @@ class _CertificateRule(Playbook):
     families = ("tls_session", "net_session")
     required_fields = ("source.ip", "destination.ip")
     severity, lane = "medium", "lead"
+    # Citations are held as ids once the sweep has staged them. Per group the distinct sources and connections are
+    # counted up to a cap (a group to a popular server can reach millions of connections over weeks); above it the
+    # claim says "at least". Groups exist only for matching certificates; the budget is about 3 KB per group.
+    staged = True
+    SOURCES_PER_GROUP = 10_000
+    CONNS_PER_GROUP = 20_000
+    MAX_KEYS = 100_000
 
     def __init__(self):
         super().__init__()
         self._seen = RecentIds()        # bounded re-read guard
-        self.groups: dict[tuple, list[TypedEvent]] = defaultdict(list)
+        self.groups: dict[tuple, HeldExamples] = {}
         self.info: dict[tuple, dict] = {}
+        self._pending: list[TypedEvent] = []
+        self._fresh: list[HeldExamples] = []
+        self.load = lambda ids: []
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        for store in self._fresh:
+            store.staged()
+        self._fresh = []
+        return out
+
+    def retained_events(self) -> list[TypedEvent]:
+        return []                               # staged on disk instead
+
+    def examples(self, key: tuple) -> list[TypedEvent]:
+        return self.groups[key].events(self.load)
 
     def judge(self, e: TypedEvent, cert: dict) -> list[str] | None:
         """Reasons one candidate server certificate matches: non-empty on a match, empty when it was judged and
@@ -133,43 +155,57 @@ class _CertificateRule(Playbook):
             # A certificate value that was present but unreadable (a name, a bound) can change which certificate
             # is the server's own and how it is judged: positives still stand, but the record is not a negative.
             unknown = any(p == "cert" or p.startswith(("cert[", "tls.")) for p in e.get("parse.malformed") or [])
+            refused = False
             for cert in candidates:
                 reasons = self.judge(e, cert)
                 if reasons is None:
                     unknown = True
                 elif reasons:
-                    self._keep(e, cert, reasons)
-            if unknown:
+                    refused = not self._keep(e, cert, reasons) or refused
+            if refused:
+                self.evaluated -= 1
+                self.refuse("groups", f"certificate groups reached {self.MAX_KEYS:,}; a record of a new group is not "
+                                      f"evaluated")
+            elif unknown:
                 self.evaluated -= 1
                 self.missing_required += 1
         return []
 
-    def _keep(self, e: TypedEvent, cert: dict, reasons: list[str]) -> None:
+    def _keep(self, e: TypedEvent, cert: dict, reasons: list[str]) -> bool:
         key = (_identity(cert), str(e.get("destination.ip")))
         g = self.info.get(key)
+        if g is None and len(self.info) >= self.MAX_KEYS:
+            return False
         if g is not None and _preference(cert) < _preference(g["cert"]):
             g["cert"] = cert                    # the same certificate from another sensor: keep a fixed choice
         if g is None:
             g = self.info[key] = {"cert": cert, "records": 0, "sources": set(), "ports": set(), "conns": set(),
-                                  "reasons": set(), "first": e.ts, "last": e.ts}
+                                  "reasons": set(), "first": e.ts, "last": e.ts, "capped": False}
         g["records"] += 1
-        g["sources"].add(str(e.get("source.ip")))
+        for name, value, cap in (("sources", str(e.get("source.ip")), self.SOURCES_PER_GROUP),
+                                 ("conns", str(e.get("network.community_id") or e.get("suricata.flow_id") or e.id),
+                                  self.CONNS_PER_GROUP)):
+            if value not in g[name]:
+                if len(g[name]) < cap:
+                    g[name].add(value)
+                elif name == "conns":
+                    g["capped"] = True              # more sources than the cap are already "and others"
         g["ports"].add(str(e.get("destination.port")))
-        g["conns"].add(str(e.get("network.community_id") or e.get("suricata.flow_id") or e.id))
         g["reasons"].update(reasons)
         g["first"], g["last"] = min(g["first"], e.ts), max(g["last"], e.ts)
-        group = self.groups[key]
-        if len(group) < EXAMPLE_LIMIT:
-            group.append(e)
-            group.sort(key=lambda event: (event.ts, event.id))
-        elif (e.ts, e.id) < (group[-1].ts, group[-1].id):
-            group[-1] = e                               # keep the earliest records whatever the reading order
-            group.sort(key=lambda event: (event.ts, event.id))
+        group = self.groups.get(key)
+        if group is None:
+            group = self.groups[key] = HeldExamples(EXAMPLE_LIMIT, earliest=True)
+        if group.offer(e):                      # keep the earliest records whatever the reading order
+            self._pending.append(e)
+            self._fresh.append(group)
+        return True
 
     def summary(self, key: tuple) -> str:
         g = self.info[key]
         sources = sorted(g["sources"])
-        return (f"{g['records']} record(s) of {len(g['conns'])} outbound TLS connection(s) from "
+        at_least = "at least " if g["capped"] else ""
+        return (f"{g['records']} record(s) of {at_least}{len(g['conns'])} outbound TLS connection(s) from "
                 f"{', '.join(sources[:5])}{' and others' if len(sources) > 5 else ''} to {key[1]} port(s) "
                 f"{', '.join(sorted(g['ports']))} ({g['first'].isoformat()} – {g['last'].isoformat()})")
 
@@ -219,7 +255,8 @@ class SelfSignedCertificateOutbound(_CertificateRule):
 
     def finalize(self):
         out = []
-        for key, evs in self.groups.items():
+        for key in self.groups:
+            evs = self.examples(key)
             g = self.info[key]
             cert = g["cert"]
             compared = cert.get("names_compared") or "CN and O"
@@ -299,7 +336,8 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
 
     def finalize(self):
         out = []
-        for key, evs in self.groups.items():
+        for key in self.groups:
+            evs = self.examples(key)
             g = self.info[key]
             cert, parts = g["cert"], []
             validity = self.validity_days(cert)
