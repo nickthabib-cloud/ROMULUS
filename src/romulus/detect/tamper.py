@@ -29,7 +29,14 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.host import Lineage, ProcessLineage, _argv_summary, _outcome_tally, lineage_phrase
+from romulus.detect.host import (
+    Lineage,
+    ProcessLineage,
+    _argv_summary,
+    _outcome_tally,
+    boot_of,
+    lineage_phrase,
+)
 from romulus.detect.linux_argv import (
     canonical,
     getopt_long,
@@ -496,7 +503,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             return []
         out = []
         for pid in pids:
-            daemon = self.lineage.parent(e.host, pid, e.ts.timestamp())
+            daemon = self.lineage.parent(e.host, pid, e.ts.timestamp(), boot_of(e))
             if daemon is not None and service_category(daemon.name):
                 unit = service_name(daemon.name)
                 how = (f"'kill {' '.join(args)}' (pid {pid} is '{daemon.name}' by its exec record; "
@@ -971,7 +978,7 @@ class AuditRulesTamper(_TamperRule):
         if applied == 0 and lane == "high":
             lane = "lead"
             notes.append("lane lowered: no record shows the change applied")
-        lineage = self.lineage.classify_pid(host, first.get("process.pid"), first.ts.timestamp())
+        lineage = self.lineage.classify_pid(host, first.get("process.pid"), first.ts.timestamp(), boot_of(first))
         if lineage.kind == "web":
             lane = "high"
             claim += f" Exec lineage: {lineage_phrase(lineage)}."

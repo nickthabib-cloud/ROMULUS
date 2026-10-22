@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.correlation import StageMissing
+from romulus.detect.correlation import StageMissing, boot_of, boots_conflict, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
 from romulus.detect.host import WEB_SERVICE_USERS
 from romulus.evidence.typed import Outcome, TypedEvent
@@ -164,7 +164,7 @@ class RootExecNonRootModifiableFile(Playbook):
             self.missing_required += 1
             return
         session = event.get("process.session_id")
-        tag = (event.get("host.boot.id"), session) if session is not None else None
+        tag = (boot_of(event), session) if session is not None else None
         if "0" not in (uid, euid):
             self.evaluated += 1
             if tag is not None and uid is not None:
@@ -522,7 +522,7 @@ class PersistencePathChange(Playbook):
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
         self.changes: list[_Change] = []
-        self.execs: dict[tuple[str, int], list[tuple[float, int | None, str]]] = defaultdict(list)
+        self.execs: dict[tuple[str, int], list[tuple[float, int | None, str, str | None]]] = defaultdict(list)
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
@@ -542,10 +542,11 @@ class PersistencePathChange(Playbook):
         return []
 
     def _exec(self, event: TypedEvent) -> None:
-        """Process lineage only: (time, parent pid, kernel-recorded executable) per process id."""
+        """Process lineage only: (time, parent pid, kernel-recorded executable, boot id) per process id."""
         pid, exe = event.get("process.pid"), event.get("process.executable")
         if isinstance(pid, int) and exe:
-            self.execs[(event.host or "", pid)].append((event.ts.timestamp(), event.get("process.ppid"), str(exe)))
+            self.execs[(event.host or "", pid)].append((event.ts.timestamp(), event.get("process.ppid"), str(exe),
+                                                        boot_of(event)))
 
     def _change(self, event: TypedEvent) -> None:
         path, uid = event.get("file.path"), _str(event.get("process.uid"))
@@ -578,23 +579,24 @@ class PersistencePathChange(Playbook):
             setuid=uid != "0" and _str(event.get("process.euid")) == "0",
             exe=str(event.get("process.executable") or ""), pid=event.get("process.pid"),
             ppid=event.get("process.ppid"), auid=_str(event.get("process.auid")), tty=_str(event.get("process.tty")),
-            boot=_str(event.get("host.boot.id")),
+            boot=boot_of(event),
             outcome=event.outcome))
 
     # ---------------------------------------------------------------- finalize
     def _manager(self, change: _Change) -> str | None:
         """The package manager in the writer's kernel-recorded lineage (its own executable, then parents)."""
-        exe, ppid, ts = change.exe, change.ppid, change.ts
+        exe, ppid, ts, boot = change.exe, change.ppid, change.ts, change.boot
         for _ in range(LINEAGE_DEPTH):
             name = posixpath.basename(exe)
             if name in PACKAGE_MANAGERS and exe.startswith(_SYSTEM_EXE_DIRS):
                 return name
             if not isinstance(ppid, int) or ppid <= 1:
                 return None
-            parent = _latest(self.execs.get((change.host, ppid), ()), ts)
+            parent = _latest(self.execs.get((change.host, ppid), ()), ts, boot)
             if parent is None:
                 return None
-            ts, ppid, exe = parent
+            ts, ppid, exe, parent_boot = parent
+            boot = boot if boot is not None else parent_boot
         return None
 
     def _events(self, ids: list[str]) -> dict[str, TypedEvent]:
@@ -619,7 +621,9 @@ class PersistencePathChange(Playbook):
             else:
                 key = ("account", change.host, change.path, change.uid, None, change.exe, change.boot)
             groups[key].append(change)
-        groups = self._split_runs(groups)
+        # one process's records whose boot is not recorded stay with it unless the records show a second boot
+        accounts = merge_unknown_boot({k: v for k, v in groups.items() if k[0] == "account"}, 6)
+        groups = self._split_runs({**{k: v for k, v in groups.items() if k[0] != "account"}, **accounts})
         out = []
         for key in sorted(groups, key=lambda k: tuple(str(part) for part in k)):
             items = sorted(groups[key], key=lambda c: (c.ts, c.event_id))
@@ -748,12 +752,14 @@ class PersistencePathChange(Playbook):
         return match
 
 
-def _latest(entries, ts: float):
+def _latest(entries, ts: float, boot: str | None = None):
+    """The latest entry at or before `ts`, unless it is in a boot other than `boot` (its last element): a pid
+    restarts at a reboot, so an earlier entry is in that other boot or an earlier one."""
     best = None
     for entry in entries:
         if entry[0] <= ts and (best is None or entry[0] >= best[0]):
             best = entry
-    return best
+    return None if best is not None and boots_conflict(boot, best[-1]) else best
 
 
 def _root_session(items: list[_Change]) -> str:

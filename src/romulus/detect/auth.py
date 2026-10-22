@@ -33,6 +33,7 @@ from romulus.detect.host import (
     ProcessLineage,
     _argv_summary,
     _outcome_tally,
+    boot_of,
     lineage_phrase,
 )
 from romulus.detect.linux_argv import (
@@ -1136,14 +1137,15 @@ class AccountOrGroupChange(Playbook):
             unjoined.append(record)
         for record in unjoined:
             ts = record.ts.timestamp()
-            lineage = self.lineage.classify_pid(record.host, record.get("process.pid"), ts)
+            lineage = self.lineage.classify_pid(record.host, record.get("process.pid"), ts, boot_of(record))
             actor = str(record.get("process.login_user") or record.get("process.user")
                         or (f"audit login uid {record.get('process.auid')}" if record.has("process.auid")
                             else "an unrecorded account"))
             name = record.get("account.name")
             group = record.get("account.group")
             pid = record.get("process.pid")
-            exec_seen = isinstance(pid, int) and self.lineage.parent(record.host, pid, ts) is not None
+            exec_seen = (isinstance(pid, int)
+                         and self.lineage.parent(record.host, pid, ts, boot_of(record)) is not None)
             self.changes.append(_Change(record.host, ts, str(record.get("account.action")),
                                         (str(name),) if name else (), (str(group),) if group else (),
                                         _RECORD_PHRASE.get(str(record.get("account.action")), "an account change"),
