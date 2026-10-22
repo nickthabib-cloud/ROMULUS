@@ -30,6 +30,7 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
+from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
@@ -559,6 +560,7 @@ class HorizontalSweep(_FlowRule):
     window: the shape of host discovery and service sweeps, and of worm-style propagation."""
     id = "net.horizontal_sweep"
     version = "2"
+    direction_dependent = True
     title = "One source contacted many distinct addresses on the same port within minutes"
     severity, lane = "medium", "lead"
     attack = ("T1046", "T1018", "T1595.001")
@@ -600,7 +602,10 @@ class HorizontalSweep(_FlowRule):
                      "port as the destination port)",
         "fidelity": "aggregate observation over typed connection records; 'answered' means the responder sent at "
                     "least one packet on a recorded connection (a TCP reset counts as an answer), 'no reply' means "
-                    "every recorded connection shows zero packets from it",
+                    "every recorded connection shows zero packets from it. Internal or external destinations are "
+                    "decided by the site's internal-network definition; under the default (not configured for the "
+                    "site) a partition holding an external-scope record, judged by the stricter external standard, "
+                    "is partial with the reason 'direction assumed', never a complete negative",
         "benign_and_cost": "authorized scanners, monitoring and management servers polling internal hosts; external "
                            "fan-out from resolvers or relays only when most destinations stay silent. One grouped "
                            "item per (source, transport, port, internal or external destinations)",
@@ -630,6 +635,9 @@ class HorizontalSweep(_FlowRule):
         if not routable_remote(view.dst):
             return True                 # multicast, broadcast, loopback or link-local: not a host being reached
         scope = "external" if external(view.dst) else "internal"
+        if scope == "external":
+            # judged by the stricter external fan-out standard; on a site in public space it may be internal
+            assume_direction(self)
         key = (view.src, view.transport, view.dport, scope)
         group = self.sweeps.get(key)
         if group is None:

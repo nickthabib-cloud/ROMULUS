@@ -29,7 +29,8 @@ from datetime import datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.correlation import canon_ip, external
+from romulus.detect.correlation import canon_ip, external, routable_remote
+from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
@@ -97,6 +98,7 @@ class _CertificateRule(Playbook):
     families = ("tls_session", "net_session")
     required_fields = ("source.ip", "destination.ip")
     severity, lane = "medium", "lead"
+    direction_dependent = True
 
     def __init__(self):
         super().__init__()
@@ -120,8 +122,12 @@ class _CertificateRule(Playbook):
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
-            if not direction or e.get("arkime.continuation") is True:
-                continue                        # not outbound; or a later Arkime record (the first holds the handshake)
+            if e.get("arkime.continuation") is True:
+                continue                        # a later Arkime record: the first holds the handshake
+            if not direction:
+                if routable_remote(canon_ip(e.get("source.ip"))) and routable_remote(canon_ip(e.get("destination.ip"))):
+                    assume_direction(self)      # skipped for its direction alone
+                continue                        # not outbound
             certs = e.get("tls.server.certificates")
             candidates = [c for c in certs if not c.get("issues_other")] if isinstance(certs, list) else []
             if not candidates:
@@ -209,6 +215,10 @@ class SelfSignedCertificateOutbound(_CertificateRule):
         "missing": "an outbound TLS record without a visible server certificate (TLS 1.3, resumption, malformed "
                    "block) or whose certificate has no recorded names is counted missing, so the negative is "
                    "partial",
+        "direction": "inside and outside are decided by the site's internal-network definition; under the default "
+                     "(RFC 1918 and reserved ranges, not configured for the site) a partition holding a TLS record "
+                     "between two routable addresses that is not outbound, skipped for that reason alone, is "
+                     "partial with the reason 'direction assumed', never a complete negative",
     }
 
     def judge(self, e, cert):
@@ -268,6 +278,10 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
                      "what this evaluator reads",
         "missing": "an outbound TLS record without a visible server certificate, or whose certificate lacks the "
                    "validity bounds needed, is counted missing, so the negative is partial",
+        "direction": "inside and outside are decided by the site's internal-network definition; under the default "
+                     "(RFC 1918 and reserved ranges, not configured for the site) a partition holding a TLS record "
+                     "between two routable addresses that is not outbound, skipped for that reason alone, is "
+                     "partial with the reason 'direction assumed', never a complete negative",
     }
 
     @staticmethod

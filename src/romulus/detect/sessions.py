@@ -15,6 +15,7 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
+from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
@@ -24,6 +25,10 @@ PERIODIC_BY_DESIGN = {"ntp"}      # Arkime parser protocol names whose normal op
 def _public(ip) -> bool:
     """Routable and outside the configured internal space: the same boundary the host rules use."""
     return external(canon_ip(ip))
+
+
+def _both_routable(e: TypedEvent) -> bool:
+    return routable_remote(canon_ip(e.get("source.ip"))) and routable_remote(canon_ip(e.get("destination.ip")))
 
 
 def _epoch(value) -> float | None:
@@ -111,6 +116,7 @@ class _Stitched(Playbook):
 
 class LongExternalConnection(_Stitched):
     id = "net.long_external_connection"
+    direction_dependent = True
     title = "Long-lived TCP connection between an internal and a public address"
     severity, lane = "medium", "lead"
     attack = ("T1071", "T1095", "T1571")
@@ -119,6 +125,34 @@ class LongExternalConnection(_Stitched):
     next_checks = ("process connections on the internal host for this endpoint", "flow detail for the community ID",
                    "packets of the connection (cleartext content, TLS fingerprint)")
     MIN_SECONDS = 1800
+    card: ClassVar[dict] = {
+        "behavior": "one TCP connection between an address inside the site and one outside it, recorded by Arkime "
+                    "as session records that together span at least 30 minutes",
+        "telemetry": "Arkime 6.x sessions as net_session: source.ip, destination.ip, flow.start, flow.end, "
+                     "network.transport, network.community_id (present and normalized in the lab profile)",
+        "fidelity": "direct observation of the connection's lifetime by the sensor; says nothing about what it "
+                    "carried",
+        "benign_and_cost": "remote administration, VPN tunnels, push channels, long downloads; one item per "
+                           "connection",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "the internal host's process for the endpoint, then the connection's packets",
+        "adds": "the only rule that judges a connection's duration across the site boundary",
+        "research_basis": "ATT&CK Enterprise 20.0 T1071, T1095 and T1571 (network traffic flow detection); "
+                          "reimplemented from the behavior",
+        "retrieval": "the sweep retrieves every record of the Arkime session index in each partition, a superset "
+                     "of what this evaluator reads",
+        "direction": "inside and outside are decided by the site's internal-network definition; under the default "
+                     "(RFC 1918 and reserved ranges, not configured for the site) a partition holding a TCP record "
+                     "between two routable addresses on the same side, skipped for that reason alone, is partial "
+                     "with the reason 'direction assumed', never a complete negative",
+        "lanes": "lead; severity medium: a long connection is a channel, not an impact",
+    }
+
+    def observe(self, e, conn):
+        # a TCP record between two routable addresses on the same side is skipped for its direction alone
+        if e.get("network.transport") == "tcp" and _both_routable(e) \
+                and _public(e.get("source.ip")) == _public(e.get("destination.ip")):
+            assume_direction(self)
 
     def finalize(self):
         out = []
@@ -143,6 +177,7 @@ class LongExternalConnection(_Stitched):
 class Beaconing(_Stitched):
     """Many separate connections from one internal address to one public endpoint at regular intervals."""
     id = "net.beaconing"
+    direction_dependent = True
     title = "Regular, repeated connections from an internal address to one public endpoint"
     severity, lane = "medium", "lead"
     attack = ("T1071", "T1029", "T1573")
@@ -152,6 +187,34 @@ class Beaconing(_Stitched):
     MIN_CONNECTIONS = 8
     MIN_INTERVAL = 10.0
     MAX_JITTER = 0.1          # median absolute deviation of the intervals, relative to their median
+    card: ClassVar[dict] = {
+        "behavior": "at least 8 separate connections from one address inside the site to one address outside it, "
+                    "on one port and transport, starting at a regular interval (median at least 10 s, median "
+                    "absolute deviation at most a tenth of it)",
+        "telemetry": "Arkime 6.x sessions as net_session: source.ip, destination.ip, destination.port, "
+                     "network.transport, flow.start, flow.end, network.protocols (present in the lab profile)",
+        "fidelity": "aggregate observation of connection start times; regularity is a deviation, not proof of "
+                    "command and control",
+        "benign_and_cost": "NTP (context lane when the parser names it), update checks, telemetry and monitoring "
+                           "agents; one item per (source, destination, port, transport)",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "the internal host's process and scheduled jobs for the endpoint",
+        "adds": "the only rule that measures the regularity of repeated connections",
+        "research_basis": "ATT&CK Enterprise 20.0 T1071, T1029 and T1573; reimplemented from the behavior",
+        "retrieval": "the sweep retrieves every record of the Arkime session index in each partition, a superset "
+                     "of what this evaluator reads",
+        "direction": "inside and outside are decided by the site's internal-network definition; under the default "
+                     "(RFC 1918 and reserved ranges, not configured for the site) a partition holding a record "
+                     "between two routable addresses that is not inside-to-outside, skipped for that reason alone, "
+                     "is partial with the reason 'direction assumed', never a complete negative",
+        "lanes": "lead, or context when Arkime's parser identified every connection as a protocol periodic by "
+                 "design; severity medium",
+    }
+
+    def observe(self, e, conn):
+        # only internal-to-public series are judged: any other routable pair is skipped for its direction alone
+        if _both_routable(e) and not (_public(e.get("destination.ip")) and not _public(e.get("source.ip"))):
+            assume_direction(self)
 
     def finalize(self):
         series: dict[tuple, list[dict]] = defaultdict(list)
@@ -193,6 +256,7 @@ class RareClientFingerprint(_Stitched):
     not a verdict: the lane stays context."""
     id = "net.rare_client_fingerprint"
     version = "2"
+    direction_dependent = True
     title = "TLS or SSH handshake fingerprint, or SSH client software, seen from only one internal address"
     families = ("net_session", "tls_session", "ssh_session")
     required_fields = ("source.ip", "destination.ip")
@@ -224,6 +288,10 @@ class RareClientFingerprint(_Stitched):
         "research_basis": "JA3/JA3S (Salesforce), JA4 (FoxIO) and HASSH (Salesforce) fingerprint definitions as "
                           "the sensors compute them",
         "retrieval": "the sweep retrieves every record of the network targets in each partition, a superset",
+        "direction": "inside and outside are decided by the site's internal-network definition; under the default "
+                     "(RFC 1918 and reserved ranges, not configured for the site) a partition holding a "
+                     "fingerprinted record between two routable addresses that is not inside-to-outside, skipped "
+                     "for that reason alone, is partial with the reason 'direction assumed'",
     }
 
     def __init__(self):
@@ -247,6 +315,8 @@ class RareClientFingerprint(_Stitched):
 
     def observe(self, e, conn):
         if not _public(e.get("destination.ip")) or _public(e.get("source.ip")) or canon_ip(e.get("source.ip")) is None:
+            if _both_routable(e) and any(e.has(field) for _kind, field, _label in self.KINDS):
+                assume_direction(self)              # a fingerprint skipped for its direction alone
             return
         for kind, field, _label in self.KINDS:
             value = e.get(field)

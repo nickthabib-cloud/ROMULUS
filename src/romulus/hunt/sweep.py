@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
+from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
@@ -332,7 +333,7 @@ class Sweep:
         staged: dict[str, TypedEvent] = {}
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
-            before_eval, before_missing = pb.evaluated, pb.missing_required
+            before_eval, before_missing, before_assumed = pb.evaluated, pb.missing_required, pb.direction_assumed
             matches = pb.consume(events)
             for m in matches:
                 self._publish(m, tid, raw_sources)
@@ -345,27 +346,33 @@ class Sweep:
                 self._retain_aggregate_raw(pb, raw_sources)
             evaluated = pb.evaluated - before_eval
             missing = pb.missing_required - before_missing
+            # records skipped or judged for a direction the default internal-network definition only assumes
+            assumed = pb.direction_assumed - before_assumed
+            gap = rule_partial or missing or assumed
             if not (set(pb.families) & families) and evaluated == 0:
                 state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
             elif pb.kind == "aggregate" and matches:
                 # aggregate rules may publish indicator events during consume(); those are matches
-                state = "match_on_partial" if (rule_partial or missing) else "matched"
+                state = "match_on_partial" if gap else "matched"
             elif pb.kind == "aggregate":
-                state = "evaluated_partial" if (rule_partial or missing) else "evaluated_complete"
+                state = "evaluated_partial" if gap else "evaluated_complete"
             elif matches:
-                state = "match_on_partial" if (rule_partial or missing) else "matched"
+                state = "match_on_partial" if gap else "matched"
             elif not pb.assures_negative:
                 # script-text rules can show intent but never prove absence (spec section 1)
-                state = "positive_only_partial" if (rule_partial or missing) else "positive_only"
+                state = "positive_only_partial" if gap else "positive_only"
             else:
-                state = "evaluated_partial" if (rule_partial or missing) else "no_match_complete"
+                state = "evaluated_partial" if gap else "no_match_complete"
             reasons = list(base_reasons)
             if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
                 reasons.append(error_reason)
             if missing:
                 reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
-            cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated,
-                                    {"missing_required": missing, "reasons": reasons}))
+            detail = {"missing_required": missing, "reasons": reasons}
+            if assumed:
+                reasons.append(DIRECTION_ASSUMED_REASON)
+                detail["direction_assumed"] = assumed
+            cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated, detail))
         if any(pb.staged for pb in self.pack):
             self._event_stage().put(list(staged.values()), raw_sources)
         staged.clear()
@@ -482,6 +489,8 @@ class Sweep:
                 state = "no_match_complete"
             reasons = (["no source partition of this rule was evaluated"] if not cells else
                        [WINDOW_ROLLUP_PARTIAL] if any_partial else [])
+            if any(DIRECTION_ASSUMED_REASON in ((c["detail"] or {}).get("reasons") or []) for c in cells):
+                reasons.append(DIRECTION_ASSUMED_REASON)
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
                                     len(ms) + consumed_matches, evaluated, {"reasons": reasons})
             pb.release_state()
