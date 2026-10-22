@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import ExecHistory, HeldExamples, RecentIds
+from romulus.detect.bounded import ExecHistory, HeldExamples, KeyedStore, RecentIds, SpillList
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
 from romulus.detect.host import WEB_SERVICE_USERS
@@ -65,7 +65,9 @@ class _Runs:
     failed: int = 0
     first: float = 0.0
     last: float = 0.0
+    auid: str | None = None                                 # the login uid the latest run recorded
     cited: HeldExamples = field(default_factory=lambda: HeldExamples(CITE))     # the first runs to arrive
+    prefixes: dict[str, set[str]] = field(default_factory=dict)                 # cited event -> field prefix
 
 
 @dataclass
@@ -82,9 +84,6 @@ class _ModifiableFile:
     world: bool
     others_can_write: bool
     prefix: str
-    sessions: dict[tuple | None, _Runs] = field(default_factory=dict)
-    auids: dict[tuple | None, str | None] = field(default_factory=dict)
-    prefixes: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))   # cited event -> field prefix
 
     def merge(self, other: _ModifiableFile) -> None:
         self.paths |= other.paths
@@ -98,9 +97,54 @@ class _ModifiableFile:
         self.others_can_write = self.others_can_write or other.others_can_write
 
 
+class _RunTally:
+    """Root runs summed one session at a time: totals, span, login uids, and the CITE earliest cited runs by
+    (time, id) with the field prefixes each matched on."""
+
+    def __init__(self):
+        self.count = self.failed = 0
+        self.first = self.last = None
+        self.auids: set[str] = set()
+        self.cited: dict[str, list] = {}                    # event id -> [(time, id), event or None]
+        self.prefixes: dict[str, set[str]] = defaultdict(set)
+
+    def __bool__(self) -> bool:
+        return self.count > 0
+
+    def add(self, runs: _Runs | _RunTally) -> None:
+        self.count += runs.count
+        self.failed += runs.failed
+        self.first = runs.first if self.first is None else min(self.first, runs.first)
+        self.last = runs.last if self.last is None else max(self.last, runs.last)
+        if isinstance(runs, _Runs):
+            self.auids.add(runs.auid or "none")
+            items = runs.cited.items
+        else:
+            self.auids |= runs.auids
+            items = list(runs.cited.values())
+        for ref, event in items:
+            held = self.cited.setdefault(ref[1], [ref, event])
+            if held[1] is None:
+                held[1] = event
+            self.prefixes[ref[1]] |= runs.prefixes.get(ref[1], set())
+        if len(self.cited) > CITE:
+            for _ref, _event in sorted(self.cited.values(), key=lambda item: item[0])[CITE:]:
+                del self.cited[_ref[1]]
+                self.prefixes.pop(_ref[1], None)
+
+    def events(self, load) -> list[TypedEvent]:
+        items = sorted(self.cited.values(), key=lambda item: item[0])
+        wanted = [ref[1] for ref, event in items if event is None]
+        found = {event.id: event for event in load(wanted)} if wanted else {}
+        missing = [event_id for event_id in wanted if event_id not in found]
+        if missing:
+            raise LookupError(f"{len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
+        return [event if event is not None else found[ref[1]] for ref, event in items]
+
+
 class RootExecNonRootModifiableFile(Playbook):
     id = "host.root_exec_nonroot_modifiable_file"
-    version = "1"
+    version = "2"
     title = "Root executed a file that a non-root account owns or can write"
     anchor_class = "execution"
     kind = "aggregate"
@@ -143,21 +187,22 @@ class RootExecNonRootModifiableFile(Playbook):
                      "only), a superset of what this evaluator reads",
     }
 
-    # Root runs are kept per (file, audit session): a job run by a scheduler opens a new session each run, so the
-    # session runs held over all files are budgeted (about 1 KB each with their cited ids: 200 MB), as are the files
-    # (rare: about 2 KB each) and the owners' own sessions (about 100 bytes each). Citations are staged; a run beyond
-    # a budget is not evaluated and coverage says so.
+    # Root runs are kept per (file, audit session): a job run by a scheduler opens a new session each run. The files,
+    # the session runs (with their cited ids) and the owners' own sessions are keyed stores: the HOT most recently
+    # used in memory, the rest on the rule's disk spill, read back when the key returns, never forgotten. Finalize
+    # reads one file's session runs at a time. Citations are staged; only a store's disk byte budget refuses a run,
+    # and coverage says so.
     staged = True
-    MAX_RUNS = 200_000
-    MAX_FILES = 50_000
-    MAX_OWNER_SESSIONS = 1_000_000
+    HOT = 50_000
 
     def __init__(self):
         super().__init__()
         self._seen = RecentIds()        # bounded re-read guard
-        self.files: dict[tuple[str, str, str], _ModifiableFile] = {}
-        self.owner_sessions: dict[tuple[str, str], set[tuple]] = defaultdict(set)
-        self.runs_held = self.owner_sessions_held = 0
+        self.files = KeyedStore(self, "rx_files", self.HOT)                       # (host, file, owner) -> file
+        # (host, file, owner, session tag) -> _Runs, grouped by file
+        self.runs = KeyedStore(self, "rx_runs", self.HOT, group=lambda key: "\x00".join(key[:3]))
+        # (host, uid, audit session id) -> boot ids of that account's own sessions with that id
+        self.owner_sessions = KeyedStore(self, "rx_owner_sessions", self.HOT)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
@@ -167,12 +212,13 @@ class RootExecNonRootModifiableFile(Playbook):
         for store in self._fresh:
             store.staged()
         self._fresh = []
+        for store in (self.files, self.runs, self.owner_sessions):
+            store.trim()
         return out
 
     def retained_events(self) -> list[TypedEvent]:
         # the sweep stages these instead; before staging they are the cited runs still held as events
-        return [item[1] for f in self.files.values() for runs in f.sessions.values() for item in runs.cited.items
-                if item[1] is not None]
+        return list(self._pending)
 
     def consume(self, events):
         for event in sorted((e for e in events if e.family == "process_exec" and e.id not in self._seen),
@@ -180,9 +226,6 @@ class RootExecNonRootModifiableFile(Playbook):
             self._seen.add(event.id)
             self._exec(event)
         return []
-
-    def _cited(self, runs: list) -> list[TypedEvent]:
-        return sorted({e.id: e for r in runs for e in r.cited.events(self.load)}.values(), key=lambda e: (e.ts, e.id))
 
     def _exec(self, event: TypedEvent) -> None:
         uid, euid = _str(event.get("process.uid")), _str(event.get("process.euid"))
@@ -194,15 +237,12 @@ class RootExecNonRootModifiableFile(Playbook):
         if "0" not in (uid, euid):
             self.evaluated += 1
             if tag is not None and uid is not None:
-                sessions = self.owner_sessions[(event.host or "", uid)]
-                if tag not in sessions:
-                    if self.owner_sessions_held < self.MAX_OWNER_SESSIONS:
-                        self.owner_sessions_held += 1
-                        sessions.add(tag)
-                    else:
-                        self.note_limit("owner_sessions", f"non-root accounts' own audit sessions held reached "
-                                                          f"{self.MAX_OWNER_SESSIONS:,}; a later root run in such a "
-                                                          f"session is reported as another account's, never as own")
+                boots = self.owner_sessions.setdefault((event.host or "", uid, session), set)
+                if boots is None:
+                    self.note_limit("disk", "the own audit sessions' disk budget is spent; a later root run in such a "
+                                            "session is reported as another account's, never as own")
+                else:
+                    boots.add(tag[0])
             return
         found = [f for f in (self._modifiable(event, prefix, role) for prefix, role in _EXEC_FILES) if f]
         if not found and not event.has("process.exec_file.owner.id") and not event.has("process.exec_file.mode"):
@@ -212,19 +252,18 @@ class RootExecNonRootModifiableFile(Playbook):
         for candidate in found:
             key = (event.host or "", path_key(next(iter(candidate.paths))), candidate.owner)
             entry = self.files.get(key)
-            if (entry is None and len(self.files) >= self.MAX_FILES) or (
-                    (entry is None or tag not in entry.sessions) and self.runs_held >= self.MAX_RUNS):
-                self.evaluated -= 1
-                self.refuse("runs", f"root runs held per (file, audit session) reached {self.MAX_RUNS:,} (or files "
-                                    f"{self.MAX_FILES:,}); a run of a new file or session is not evaluated")
-                return
-            entry = self.files.setdefault(key, candidate)
-            if entry is not candidate:
+            if entry is None:
+                entry = candidate if self.files.put(key, candidate) else None
+            else:
                 entry.merge(candidate)
-            if tag not in entry.sessions:
-                self.runs_held += 1
-            runs = entry.sessions.setdefault(tag, _Runs(first=event.ts.timestamp()))
-            entry.auids[tag] = _str(event.get("process.auid"))
+            runs = None if entry is None else self.runs.setdefault((*key, tag),
+                                                                   lambda: _Runs(first=event.ts.timestamp()))
+            if runs is None:
+                self.evaluated -= 1
+                self.refuse("disk", "the root runs' disk budget is spent; a run of a new file or session is not "
+                                    "evaluated")
+                return
+            runs.auid = _str(event.get("process.auid"))
             runs.count += 1
             runs.failed += event.outcome == Outcome.failure
             runs.last = max(runs.last, event.ts.timestamp())
@@ -233,7 +272,7 @@ class RootExecNonRootModifiableFile(Playbook):
                 self._pending.append(event)
                 self._fresh.append(runs.cited)
             if event.id in runs.cited.ids():               # only a cited record's predicate is ever stated
-                entry.prefixes[event.id].add(candidate.prefix)
+                runs.prefixes.setdefault(event.id, set()).add(candidate.prefix)
 
     def _modifiable(self, event: TypedEvent, prefix: str, role: str | None) -> _ModifiableFile | None:
         owner = _str(event.get(f"{prefix}.owner.id"))
@@ -271,48 +310,59 @@ class RootExecNonRootModifiableFile(Playbook):
 
     def finalize(self):
         out = []
-        own: dict[tuple[str, str], list[tuple[_ModifiableFile, list[_Runs]]]] = defaultdict(list)
-        for key in sorted(self.files):
-            f = self.files[key]
-            runs = sorted(f.sessions.items(), key=lambda item: str(item[0]))
-            mine = [r for tag, r in runs if self._own(key[0], f, tag)]
-            others = [(tag, r) for tag, r in runs if not self._own(key[0], f, tag)]
-            if others:
-                out.append(self._finding(key, f, others))
-            if mine:
-                own[(key[0], f.owner)].append((f, mine))
-        out += [self._own_finding(host, owner, own[(host, owner)]) for host, owner in sorted(own)]
+        own = KeyedStore(self, "rx_own", self.HOT)      # (host, owner) -> [(file, tally of own runs)]
+        current = f = others = mine = None
+        for key, runs in self.runs.grouped():           # one file's session runs at a time, files in key order
+            if key[:3] != current:
+                self._file_done(current, f, others, mine, out, own)
+                current, others, mine = key[:3], _RunTally(), _RunTally()
+                f = self.files.peek(current)
+            (mine if self._own(current[0], f, key[3], runs.auid) else others).add(runs)
+        self._file_done(current, f, others, mine, out, own)
+        out += [self._own_finding(host, owner, own.peek((host, owner))) for host, owner in sorted(own.keys())]
+        own.clear()
         return out
 
-    def _predicate(self, cited: list[TypedEvent], files: list[_ModifiableFile]) -> list:
+    def _file_done(self, key, f, others: _RunTally, mine: _RunTally, out: list, own: KeyedStore) -> None:
+        if key is None:
+            return
+        if others:
+            out.append(self._finding(key, f, others))
+        if mine:
+            held = own.setdefault((key[0], f.owner), list)
+            if held is None:
+                self.refuse("disk", "the own-run leads' disk budget is spent; a file's own runs are not evaluated",
+                            records=mine.count)
+            else:
+                held.append((f, mine))
+                own.trim()
+
+    def _predicate(self, cited: list[TypedEvent], prefixes: dict[str, set[str]]) -> list:
         """Predicate fields of each cited event, from the field prefix (program or interpreter) it matched on."""
         out = []
         for event in cited:
-            prefixes = sorted(set().union(*(f.prefixes.get(event.id, set()) for f in files)))
-            names = ["process.uid", "process.euid"] + [f"{p}.{n}" for p in prefixes for n in ("owner.id", "mode", "path")]
+            names = ["process.uid", "process.euid"] + [f"{p}.{n}" for p in sorted(prefixes.get(event.id, set()))
+                                                       for n in ("owner.id", "mode", "path")]
             out += [pf(event, name) for name in names if event.has(name)]
         return out
 
-    def _own(self, host: str, f: _ModifiableFile, tag: tuple | None) -> bool:
+    def _own(self, host: str, f: _ModifiableFile, tag: tuple | None, auid: str | None) -> bool:
         """The owner running their own file as root, by the write/run rule's own-elevation test. Such runs are
         reported as their own lead, never dropped. The test applies only when non-root ownership is the whole
         reason; a file other accounts can write is never the owner's own matter."""
-        auid = f.auids.get(tag)
         if auid is None or f.owner == "0" or f.others_can_write:
             return False                         # outside any login session: a daemon, unit or scheduler run
-        sessions = self.owner_sessions.get((host, f.owner)) or {None}
+        boots = self.owner_sessions.peek((host, f.owner, tag[1]), ()) if tag is not None else ()
+        sessions = sorted({(boot, tag[1]) for boot in boots}, key=str) or [None]
         owners = [_Write(0.0, "", min(f.paths), "", f.owner_name or f.owner, f.owner, session, f.web, False)
-                  for session in sorted(sessions, key=str)]
+                  for session in sessions]
         return _own_elevation(("login", tag, auid), owners)
 
-    def _finding(self, key: tuple[str, str, str], f: _ModifiableFile, kept: list) -> Match:
+    def _finding(self, key: tuple[str, str, str], f: _ModifiableFile, kept: _RunTally) -> Match:
         host = key[0]
-        total = sum(runs.count for _tag, runs in kept)
-        failed = sum(runs.failed for _tag, runs in kept)
-        first = min(runs.first for _tag, runs in kept)
-        last = max(runs.last for _tag, runs in kept)
-        cited = self._cited([runs for _tag, runs in kept])[:CITE]
-        auids = sorted({f.auids.get(tag) or "none" for tag, _runs in kept})
+        total, failed, first, last = kept.count, kept.failed, kept.first, kept.last
+        cited = kept.events(self.load)
+        auids = sorted(kept.auids)
         who = f"uid {f.owner}" + (f" ('{f.owner_name}')" if f.owner_name else "")
         if f.web:
             who += ", a web-service account"
@@ -338,21 +388,22 @@ class RootExecNonRootModifiableFile(Playbook):
         if failed == total:
             lane = "lead"
             notes.append("lane lowered: every recorded exec of the file failed")
-        match = Match(self.id, claim, self.claim_type, cited, self._predicate(cited, [f]), cited[0].ts,
+        match = Match(self.id, claim, self.claim_type, cited, self._predicate(cited, kept.prefixes), cited[0].ts,
                       self.severity, lane, "high", cited[0].entities(), group_key=f"{host}|{f.owner}|{key[1]}")
         match.notes = notes + ["T1574"]
         return match
 
-    def _own_finding(self, host: str, owner: str, files: list[tuple[_ModifiableFile, list[_Runs]]]) -> Match:
+    def _own_finding(self, host: str, owner: str, files: list[tuple[_ModifiableFile, _RunTally]]) -> Match:
         """One lead per (host, owner) for root runs of the owner's files in the owner's own session or login."""
-        runs = [r for _f, rs in files for r in rs]
-        total = sum(r.count for r in runs)
-        first, last = min(r.first for r in runs), max(r.last for r in runs)
-        cited = self._cited(runs)[:CITE]
+        runs = _RunTally()
+        for _f, tally in files:
+            runs.add(tally)
+        total, first, last = runs.count, runs.first, runs.last
+        cited = runs.events(self.load)
         name = next((f.owner_name for f, _rs in files if f.owner_name), None)
         who = f"uid {owner}" + (f" ('{name}')" if name else "")
-        listed = "; ".join(f"{' or '.join(sorted(f.paths))} ({sum(r.count for r in rs)} run(s), mode "
-                           f"{', '.join(sorted(f.modes)) or 'not recorded'})" for f, rs in files)
+        listed = "; ".join(f"{' or '.join(sorted(f.paths))} ({tally.count} run(s), mode "
+                           f"{', '.join(sorted(f.modes)) or 'not recorded'})" for f, tally in files)
         claim = (f"On {host}, root ran file(s) owned by {who} {total} time(s) {_span(first, last)} in the owner's own "
                  f"audit session or under the owner's own login uid: {listed}. The owner ran their own writable file "
                  f"as root. An administrator running their own script through sudo looks like this; so does a sudo "
@@ -361,7 +412,7 @@ class RootExecNonRootModifiableFile(Playbook):
         if total > len(cited):
             claim += f" {len(cited)} of these runs are cited."
         claim += f" The {_tally(cited, 'exec calls')}."
-        match = Match(self.id, claim, self.claim_type, cited, self._predicate(cited, [f for f, _rs in files]),
+        match = Match(self.id, claim, self.claim_type, cited, self._predicate(cited, runs.prefixes),
                       cited[0].ts, self.severity, "lead", "high", cited[0].entities(), group_key=f"{host}|own:{owner}")
         match.notes = ["T1548.003", "T1574",
                        ("own sessions are matched by audit session id and boot id; where the boot id is not recorded, "
@@ -506,7 +557,7 @@ class _Change:
 
 class PersistencePathChange(Playbook):
     id = "host.persistence_path_change"
-    version = "3"
+    version = "4"
     title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -559,10 +610,13 @@ class PersistencePathChange(Playbook):
                      "only), a superset of what this evaluator reads",
     }
 
-    # Exec history: processes held at once (about 200 bytes each, so 60 MB) and execs per pid. Changes in persistence
-    # locations are rare except package upgrades: about 600 bytes each, so 120 MB at the budget.
+    # The exec history holds EXEC_CAPACITY processes in memory (about 200 bytes each, so 60 MB), the rest on the
+    # rule's disk spill. Changes in persistence locations (rare except package upgrades, about 600 bytes each) and
+    # finalize's groups of them hold HOT in memory and the rest on disk. Only a disk byte budget refuses a change, and
+    # coverage says so.
     EXEC_CAPACITY = 300_000
-    MAX_CHANGES = 200_000
+    HOT = 50_000
+    TRIM_EVERY = 10_000
 
     def __init__(self):
         super().__init__()
@@ -570,8 +624,8 @@ class PersistencePathChange(Playbook):
         self._staged = RecentIds()      # bounded re-stage guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
-        self.changes: list[_Change] = []
-        # (time, parent pid, executable, boot) per (host, pid), bounded; a root change pins the lineage it rests on
+        self.changes = SpillList(self, "persistence_changes", self.HOT)
+        # (time, parent pid, executable, boot) per (host, pid): the most recent in memory, the rest on disk
         self.execs = ExecHistory(self.EXEC_CAPACITY, 2**62, self, "persistence_execs")
 
     def drain_staged(self) -> list[TypedEvent]:
@@ -589,6 +643,7 @@ class PersistencePathChange(Playbook):
                 self._exec(event)
             else:
                 self._change(event)
+        self.changes.trim()
         self.execs.trim()
         return []
 
@@ -618,16 +673,8 @@ class PersistencePathChange(Playbook):
         self.evaluated += 1
         if change not in _INSTALLING:
             return
-        if len(self.changes) >= self.MAX_CHANGES:
-            self.evaluated -= 1
-            self.refuse("changes", f"persistence-location changes held reached {self.MAX_CHANGES:,}; a later one is "
-                                   f"not evaluated")
-            return
-        if event.id not in self._staged:
-            self._staged.add(event.id)
-            self._pending.append(event)
         user = event.get("process.user")
-        self.changes.append(_Change(
+        held = self.changes.append(_Change(
             ts=event.ts.timestamp(), event_id=event.id, host=event.host or "", path=str(path), change=str(change),
             location=location[0], description=location[1], technique=location[2], uid=uid,
             account=str(user or f"uid {uid}"), web=user in WEB_SERVICE_USERS,
@@ -637,6 +684,13 @@ class PersistencePathChange(Playbook):
             ppid=event.get("process.ppid"), auid=_str(event.get("process.auid")), tty=_str(event.get("process.tty")),
             boot=boot_of(event),
             outcome=event.outcome))
+        if not held:
+            self.evaluated -= 1
+            self.refuse("disk", "the persistence-location changes' disk budget is spent; a later one is not evaluated")
+            return
+        if event.id not in self._staged:
+            self._staged.add(event.id)
+            self._pending.append(event)
 
     # ---------------------------------------------------------------- finalize
     def _manager(self, change: _Change) -> str | None:
@@ -663,8 +717,8 @@ class PersistencePathChange(Playbook):
         return {event.id: event for event in loaded}
 
     def finalize(self):
-        groups: dict[tuple, list[_Change]] = defaultdict(list)
-        for change in self.changes:
+        groups = KeyedStore(self, "persistence_groups", self.HOT)          # group key -> [_Change]
+        for i, change in enumerate(self.changes):
             manager = self._manager(change) if change.uid == "0" else None
             # Package activity is batched per (host, manager). Anything else is one finding per writing process
             # (host, uid, pid) and directory, so one editor run (file, swap and backup files) is one finding; without
@@ -676,15 +730,27 @@ class PersistencePathChange(Playbook):
                        change.boot)
             else:
                 key = ("account", change.host, change.path, change.uid, None, change.exe, change.boot)
-            groups[key].append(change)
+            held = groups.setdefault(key, list)
+            if held is None:
+                self.refuse("disk", "the grouped changes' disk budget is spent; a later change is not evaluated")
+                continue
+            held.append(change)
+            if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
+                groups.trim()
+                self.execs.trim()
         # one process's records whose boot is not recorded stay with it unless the records show a second boot
-        accounts = merge_unknown_boot({k: v for k, v in groups.items() if k[0] == "account"}, 6)
-        groups = self._split_runs({**{k: v for k, v in groups.items() if k[0] != "account"}, **accounts})
+        keys = groups.keys()
+        merged = {**{k: [k] for k in keys if k[0] != "account"},
+                  **merge_unknown_boot({k: [k] for k in keys if k[0] == "account"}, 6)}
         out = []
-        for key in sorted(groups, key=lambda k: tuple(str(part) for part in k)):
-            items = sorted(groups[key], key=lambda c: (c.ts, c.event_id))
-            out.append(self._package_finding(key, items) if key[0] == "package" else self._finding(key, items))
-        return out
+        for key, parts in merged.items():               # one merged group read at a time
+            items = [change for part in parts for change in groups.peek(part)]
+            for final, run in self._split_runs({key: items}).items():
+                run = sorted(run, key=lambda c: (c.ts, c.event_id))
+                out.append((tuple(str(part) for part in final),
+                            self._package_finding(final, run) if final[0] == "package" else self._finding(final, run)))
+        groups.clear()
+        return [match for _key, match in sorted(out, key=lambda item: item[0])]
 
     @staticmethod
     def _split_runs(groups: dict[tuple, list[_Change]]) -> dict[tuple, list[_Change]]:

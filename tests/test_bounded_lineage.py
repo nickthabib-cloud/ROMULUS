@@ -171,15 +171,17 @@ def test_package_lineage_of_a_root_change_survives_exec_history_release(monkeypa
 
 
 @pytest.mark.slow
-def test_root_job_series_and_scheduler_sessions_stay_bounded_over_weeks():
+def test_root_job_series_and_scheduler_sessions_stay_bounded_over_weeks(monkeypatch, tmp_path):
     """A root cron job runs a script every 10 minutes for two weeks, each in a new cron session; on day 9 the web
-    account edits it. Held run times and scheduler sessions stay bounded, and the counts in the claim are exact."""
+    account edits it. Every scheduler session is held for the whole hunt, memory holds only the hot set, held run
+    times stay bounded, and the counts in the claim are exact."""
     from romulus.detect.hijack import NonRootWriteRootExecutedFile
     from tests.test_hijack_root_job import JOB, VI, cron_runs, web
+    monkeypatch.setattr(NonRootWriteRootExecutedFile, "HOT", 20)
     rule = NonRootWriteRootExecutedFile()
+    rule.spill_dir = tmp_path
     stage = {}
     write_at = T0 + timedelta(days=9, hours=4, minutes=5)
-    peak_sessions = 0
     for hour in range(24 * 14):
         start = T0 + timedelta(hours=hour)
         batch = []
@@ -190,14 +192,16 @@ def test_root_job_series_and_scheduler_sessions_stay_bounded_over_weeks():
             batch.append(web(*VI, ts=write_at))
         rule.consume(batch)
         stage.update({e.id: e for e in rule.drain_staged()})
-        peak_sessions = max(peak_sessions, sum(len(v) for v in rule.sessions.values()))
-        for series in (s for by_exec in rule.runs.values() for s in by_exec.values()):
+        for store in (rule.files, rule.sessions, rule.session_pids):
+            assert len(store.hot) <= 20
+        for series in (s for state in rule.files.hot.values() for s in state.runs.values()):
             assert len(series.ok_ts.kept) <= series.ok_ts.KEPT
-    assert peak_sessions <= 6 * 14, peak_sessions                     # about 13 hours of sessions, not two weeks
+    runs = 6 * 24 * 14                                                 # each run has two exec records naming JOB
+    assert len(rule.sessions) == runs and rule.sessions.on_disk >= runs - 20   # none released, most on disk
     rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
     [m] = rule.finalize()
-    runs = 6 * 24 * 14                                                 # each run has two exec records naming JOB
     after = runs - (6 * (24 * 9 + 4) + 1)                              # runs that began after the write
     assert f"{2 * runs} root exec record(s) in the window execute {JOB}" in m.claim
     assert f"; {2 * after} of them began after the first write-capable command" in m.claim
-    assert m.proposed_lane == "high"
+    assert m.proposed_lane == "high" and rule.limit_reasons() == []
+    rule.close_spill()
