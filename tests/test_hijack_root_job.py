@@ -456,8 +456,17 @@ def test_downloads_without_a_file_name_or_to_stdout_are_not_writes():
     assert out == [] and pb.missing_required == 1          # the download's directory is unknown: partial
 
 
+def test_editor_with_stderr_dup_now_parses_and_the_write_is_found():
+    # `2>&1` used to make the whole script unevaluable; the editor write on JOB is now recovered.
+    _pb, out = run([web(["sh", "-c", f"vi {JOB} 2>&1 | true"], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
+    assert len(out) == 1 and out[0].proposed_lane == "high"
+    assert f"on {JOB} " in out[0].claim and "the editor 'vi'" in out[0].claim
+
+
 def test_unmodelled_editor_redirect_text_is_counted_partial():
-    pb, out = run([web(["sh", "-c", f"vi {JOB} 2>&1 | true"], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
+    # A still-unmodelled construct (here-string) keeps the write-side evaluation partial, never a
+    # clean negative.
+    pb, out = run([web(["sh", "-c", f"vi {JOB} <<< edits"], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
     assert out == [] and pb.missing_required == 1
 
 
@@ -515,11 +524,25 @@ def test_relative_root_script_without_cwd_is_partial():
     assert out == [] and pb.missing_required == 1
 
 
-@pytest.mark.parametrize("script", [f"echo $(id) > {JOB}", f"for f in a; do echo $f >> {JOB}; done",
-                                    f"echo x &> {JOB}"])
+@pytest.mark.parametrize("script", [f"echo $(id) > {JOB}", f"for f in a; do echo $f >> {JOB}; done"])
 def test_unmodelled_shell_text_is_partial(script):
     pb, _out = run([web(["sh", "-c", script], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
     assert pb.missing_required >= 1
+
+
+@pytest.mark.parametrize("script", [f"echo x &> {JOB}", f"echo x &>> {JOB}", f"echo x >& {JOB}"])
+def test_combined_stream_redirect_into_a_root_run_file_is_a_write(script):
+    # bash: `&>` / `&>>` / `>&FILE` parse, and a redirect that writes the file root runs is detected.
+    _pb, out = run([web(["bash", "-c", script], "/usr/bin/bash"), *cron_runs(T0 + timedelta(minutes=10))])
+    assert len(out) == 1 and out[0].proposed_lane == "high"
+    assert f"on {JOB} " in out[0].claim
+
+
+@pytest.mark.parametrize("script", [f"echo x &> {JOB}", f"echo x &>> {JOB}", f"echo x >& {JOB}"])
+def test_bash_only_redirect_under_dash_is_partial(script):
+    # dash reads these differently (or rejects them), so the text is unevaluable rather than guessed.
+    pb, out = run([web(["sh", "-c", script], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
+    assert out == [] and pb.missing_required >= 1
 
 
 def test_auth_record_without_service_is_missing():

