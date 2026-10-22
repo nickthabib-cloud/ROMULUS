@@ -204,5 +204,5 @@ def test_compression_is_a_setting_and_stays_on_by_default():
         ElasticClient(settings, transport=httpx.MockTransport(handler)).info()
     assert "gzip" in seen[0] and seen[1] == "identity"
     assert load_settings(environ={"ES_COMPRESSION": "false"}).es_compression is False
-    assert load_settings(environ={"ROMULUS_SWEEP_PREFETCH": "false"}).sweep_prefetch is False
-    assert Settings().es_compression is True and Settings().sweep_prefetch is True
+    assert load_settings(environ={"ROMULUS_SWEEP_PREFETCH": "true"}).sweep_prefetch is True
+    assert Settings().es_compression is True and Settings().sweep_prefetch is False

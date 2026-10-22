@@ -28,6 +28,8 @@ from romulus.store.repo import Repo
 log = logging.getLogger("romulus.sweep")
 
 PARTITION_MAX_DOCS = 120_000
+# planned cells are written before any partition runs, this many partitions per transaction
+PLANNED_CHUNK = 500
 HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
@@ -168,8 +170,10 @@ class Sweep:
             return
         # persist every planned (rule x target x partition) cell first: anything never executed
         # stays visibly 'planned' and can never be read as a complete negative
-        self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, w.key(), "planned")
-                                                for w, _est in parts for pb in self.pack])
+        for start in range(0, len(parts), PLANNED_CHUNK):
+            self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, w.key(), "planned")
+                                                    for w, _est in parts[start:start + PLANNED_CHUNK]
+                                                    for pb in self.pack])
         try:
             for index, (w, est) in enumerate(parts):
                 following = parts[index + 1] if index + 1 < len(parts) else None
@@ -324,7 +328,7 @@ class Sweep:
                            if unmapped else "")) if errors else ""
         cells: list[dict] = []
         # events the joining aggregates may cite later, by id: several playbooks stage the same events, and each
-        # is serialized to the stage once per partition (the first staged copy of an id is kept, as before)
+        # is serialized to the stage once per partition (the first staged copy of an id is kept)
         staged: dict[str, TypedEvent] = {}
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)

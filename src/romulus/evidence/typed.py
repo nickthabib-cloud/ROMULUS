@@ -99,9 +99,13 @@ def raw_identity(event: TypedEvent) -> str:
 # given, and no extra or private attributes (BaseModel keeps the last three in slots).
 _new = object.__new__
 _set_attr = object.__setattr__
-_set_fields_set = BaseModel.__dict__["__pydantic_fields_set__"].__set__
-_set_extra = BaseModel.__dict__["__pydantic_extra__"].__set__
-_set_private = BaseModel.__dict__["__pydantic_private__"].__set__
+try:
+    _set_fields_set = BaseModel.__dict__["__pydantic_fields_set__"].__set__
+    _set_extra = BaseModel.__dict__["__pydantic_extra__"].__set__
+    _set_private = BaseModel.__dict__["__pydantic_private__"].__set__
+    _SLOTS = True
+except (KeyError, AttributeError):   # a pydantic release without these slots: use the validating constructor
+    _SLOTS = False
 
 
 # Every field sets both of its fields, so all fields share one fields-set: pydantic only adds a name to it when that
@@ -127,7 +131,7 @@ def _same_layout() -> bool:
 
 
 # Checked once at import: a pydantic release that lays instances out differently gets the validating constructor.
-_FAST = _same_layout()
+_FAST = _SLOTS and _same_layout()
 
 
 def fv(value, origin: str) -> FieldValue:

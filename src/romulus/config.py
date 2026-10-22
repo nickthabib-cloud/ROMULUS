@@ -64,8 +64,9 @@ class Settings(BaseModel):
     es_index_patterns: list[str] = []
     # gzip responses (the client's default); false asks for uncompressed ones, cheaper to read on a fast link
     es_compression: bool = True
-    # fetch the sweep's next partition on one background thread while the current one is evaluated
-    sweep_prefetch: bool = True
+    # fetch the sweep's next partition on one background thread while the current one is evaluated; off by
+    # default because it holds a second partition's decoded records in memory
+    sweep_prefetch: bool = False
 
     arkime_url: str = "http://127.0.0.1:8005"
     arkime_username: str = ""
