@@ -27,6 +27,9 @@ _STRENGTH_RANK = {
 }
 
 _PUBLIC_INDICATOR_DIR = Path(__file__).resolve().parents[3] / "content" / "indicators"
+_NON_ENTERPRISE_ID_REASONS = {
+    "T0815": "ATT&CK for ICS id (not in the Enterprise bundle)",
+}
 
 
 def _public_pack() -> tuple[tuple[type, ...], str]:
@@ -105,10 +108,13 @@ def _rule_issues(rules: tuple[RuleMetadata, ...], attack: AttackKnowledge) -> tu
         for attack_id in rule.attack_ids:
             technique = ids.get(attack_id)
             if technique is None:
-                issues.append(RuleAttackIssue(rule.id, attack_id, "unknown"))
+                reason = _NON_ENTERPRISE_ID_REASONS.get(attack_id, "unknown")
+                issues.append(RuleAttackIssue(rule.id, attack_id, reason))
             elif technique.revoked or technique.deprecated:
                 reason = "revoked" if technique.revoked else "deprecated"
-                issues.append(RuleAttackIssue(rule.id, attack_id, reason))
+                issues.append(
+                    RuleAttackIssue(rule.id, attack_id, reason, attack.replacement(attack_id))
+                )
     return tuple(sorted(issues, key=lambda item: (item.rule_id, item.attack_id)))
 
 

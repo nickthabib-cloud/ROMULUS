@@ -98,11 +98,13 @@ def test_catalog_export_is_byte_deterministic_and_reports_metadata_issues():
         {
             "rule_id": "host.firewall_rule_change_command",
             "attack_id": "T0815",
-            "reason": "unknown",
+            "reason": "ATT&CK for ICS id (not in the Enterprise bundle)",
+            "replacement_id": None,
         },
         {
             "rule_id": "host.firewall_rule_change_command",
             "attack_id": "T1562.004",
             "reason": "revoked",
+            "replacement_id": "T1686",
         },
     ]

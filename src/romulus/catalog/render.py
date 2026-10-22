@@ -171,7 +171,8 @@ def _metadata_issues(catalog: Catalog) -> list[str]:
             "Invalid mappings are excluded from coverage:",
             "",
             *[
-                f"- `{issue.rule_id}` → `{issue.attack_id}` ({issue.reason})"
+                f"- `{issue.rule_id}` → `{issue.attack_id}` ({issue.reason}"
+                f"{' → use `' + issue.replacement_id + '`' if issue.replacement_id else ''})"
                 for issue in catalog.invalid_attack_ids
             ],
             "",

@@ -460,8 +460,8 @@ Active rules without an ATT&CK mapping or an explicit exemption:
 
 Invalid mappings are excluded from coverage:
 
-- `host.firewall_rule_change_command` → `T0815` (unknown)
-- `host.firewall_rule_change_command` → `T1562.004` (revoked)
+- `host.firewall_rule_change_command` → `T0815` (ATT&CK for ICS id (not in the Enterprise bundle))
+- `host.firewall_rule_change_command` → `T1562.004` (revoked → use `T1686`)
 
 ## Rule card summaries
 

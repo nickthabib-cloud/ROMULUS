@@ -36,6 +36,7 @@ def test_vendored_attack_bundle_loads_the_pinned_enterprise_release():
     assert attack.technique("T1055.011").parent_id == "T1055"
     assert attack.technique("T1055.011").platforms == ("Windows",)
     assert attack.technique("T1055.011").tactics == ("privilege-escalation", "stealth")
+    assert attack.replacement("T1562.004") == "T1686"
 
 
 def test_attack_loader_enforces_its_uncompressed_byte_bound(tmp_path):
@@ -95,9 +96,17 @@ def test_catalog_loads_sorted_rule_metadata_and_reports_unmapped_active_rules():
     assert tuple(rule.id for rule in catalog.rules) == tuple(sorted(rule.id for rule in catalog.rules))
     assert len(catalog.rules) == len(ALL_PLAYBOOKS)
     assert catalog.missing_attack_ids == ("ioc.indicator_match", "net.suricata_alert_stack")
-    assert [(issue.rule_id, issue.attack_id, issue.reason) for issue in catalog.invalid_attack_ids] == [
-        ("host.firewall_rule_change_command", "T0815", "unknown"),
-        ("host.firewall_rule_change_command", "T1562.004", "revoked"),
+    assert [
+        (issue.rule_id, issue.attack_id, issue.reason, issue.replacement_id)
+        for issue in catalog.invalid_attack_ids
+    ] == [
+        (
+            "host.firewall_rule_change_command",
+            "T0815",
+            "ATT&CK for ICS id (not in the Enterprise bundle)",
+            None,
+        ),
+        ("host.firewall_rule_change_command", "T1562.004", "revoked", "T1686"),
     ]
     ssh = catalog.rule("host.ssh_password_guessing")
     assert ssh.kind == "aggregate"

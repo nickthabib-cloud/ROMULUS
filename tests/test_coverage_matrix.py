@@ -60,6 +60,13 @@ def test_public_matrix_explains_strength_and_labels_each_covering_rule():
     )
 
 
+def test_public_matrix_explains_non_enterprise_and_replaced_attack_ids():
+    text = render_public(build_catalog())
+
+    assert "`T0815` (ATT&CK for ICS id (not in the Enterprise bundle))" in text
+    assert "`T1562.004` (revoked → use `T1686`)" in text
+
+
 def test_public_matrix_keeps_every_active_technique_visible_when_subtechniques_collapse():
     catalog = build_catalog()
     text = render_public(catalog)

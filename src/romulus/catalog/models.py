@@ -101,12 +101,16 @@ class AttackKnowledge:
     techniques: tuple[AttackTechnique, ...]
     data_sources: tuple[AttackDataSource, ...]
     data_components: tuple[AttackDataComponent, ...]
+    replacements: Mapping[str, str]
 
     def technique(self, attack_id: str) -> AttackTechnique:
         try:
             return next(item for item in self.techniques if item.id == attack_id)
         except StopIteration as exc:
             raise KeyError(attack_id) from exc
+
+    def replacement(self, attack_id: str) -> str | None:
+        return self.replacements.get(attack_id)
 
 
 @dataclass(frozen=True)
@@ -144,6 +148,7 @@ class RuleAttackIssue:
     rule_id: str
     attack_id: str
     reason: str
+    replacement_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from .models import (
@@ -146,6 +147,7 @@ def load_attack_bundle(
     }
     technique_ids = {stix_id: _external_id(item) for stix_id, item in technique_objects.items()}
     parents: dict[str, str] = {}
+    replacements: dict[str, str] = {}
     strategies_by_technique: dict[str, set[str]] = {}
     for item in objects:
         if item.get("type") != "relationship" or item.get("revoked") or item.get("x_mitre_deprecated"):
@@ -158,6 +160,12 @@ def load_attack_bundle(
             and target in technique_ids
         ):
             parents[source] = technique_ids[target]
+        elif (
+            item.get("relationship_type") == "revoked-by"
+            and source in technique_ids
+            and target in technique_ids
+        ):
+            replacements[technique_ids[source]] = technique_ids[target]
         elif item.get("relationship_type") == "detects" and target in technique_ids:
             strategies_by_technique.setdefault(target, set()).add(source)
 
@@ -218,4 +226,5 @@ def load_attack_bundle(
         techniques=techniques,
         data_sources=data_sources,
         data_components=data_components,
+        replacements=MappingProxyType(dict(sorted(replacements.items()))),
     )

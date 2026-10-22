@@ -145,6 +145,7 @@ def export(catalog: Catalog | None = None) -> dict[str, Any]:
                     "rule_id": issue.rule_id,
                     "attack_id": issue.attack_id,
                     "reason": issue.reason,
+                    "replacement_id": issue.replacement_id,
                 }
                 for issue in catalog.invalid_attack_ids
             ],
