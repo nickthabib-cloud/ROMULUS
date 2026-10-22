@@ -136,6 +136,7 @@ def test_public_catalog_ignores_runtime_indicator_directory(tmp_path):
         "print(json.dumps(build_catalog().rule('ioc.indicator_match').version))"
     )
     env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src")
     env["ROMULUS_INDICATOR_DIR"] = str(tmp_path)
 
     completed = subprocess.run(
