@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from xml.etree import ElementTree
@@ -12,6 +14,7 @@ from romulus.evidence.typed import FieldValue, Outcome, RawRef, TypedEvent, even
 from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass, lookup_event_class
 
 WINDOWS_NORMALIZER = "windows-ecs@1"
+_GUID = re.compile(r"^\{?([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\}?$")
 
 
 class WindowsInputError(ValueError):
@@ -146,25 +149,237 @@ def _raw_ref(hit: dict) -> RawRef:
     )
 
 
+def windows_path_key(path: object) -> str:
+    """Comparison form for a Windows path; display fields retain the source spelling."""
+    return ntpath.normpath(str(path).replace("/", "\\")).casefold()
+
+
+def _guid(value: object) -> str:
+    match = _GUID.fullmatch(str(value).strip())
+    return match.group(1).casefold() if match else str(value).strip().strip("{}").casefold()
+
+
+def _integer(value: object) -> int:
+    if isinstance(value, bool):
+        raise WindowsInputError("boolean is not an integer event field")
+    return int(str(value), 0)
+
+
+def _event_time(value: object) -> datetime:
+    text = str(value).strip().replace(" ", "T", 1)
+    parsed = datetime.fromisoformat(text)
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _put(fields: dict[str, FieldValue], record: WindowsRecord, typed: str, *native: str, transform=None) -> None:
+    for name in native:
+        item = record.data.get(name)
+        if item is None or item.value in (None, ""):
+            continue
+        try:
+            value = transform(item.value) if transform else item.value
+        except (TypeError, ValueError) as exc:
+            raise WindowsInputError(f"{name} is malformed: {exc}") from exc
+        fields[typed] = fv(value, item.origin)
+        return
+
+
+def _account(record: WindowsRecord, prefix: str) -> tuple[str | None, str | None, str | None]:
+    sid = record.value(f"{prefix}UserSid")
+    domain = record.value(f"{prefix}DomainName")
+    name = record.value(f"{prefix}UserName")
+    if sid and str(sid) not in {"-", "S-1-0-0"}:
+        key = f"sid:{str(sid).casefold()}"
+    elif name:
+        joined = f"{domain}\\{name}" if domain and str(domain) not in {"-", "."} else str(name)
+        key = f"name:{joined.casefold()}"
+    else:
+        key = None
+    return key, str(domain).casefold() if domain else None, str(name).casefold() if name else None
+
+
+def _account_fields(fields: dict[str, FieldValue], record: WindowsRecord) -> None:
+    subject, subject_domain, subject_name = _account(record, "Subject")
+    target, target_domain, target_name = _account(record, "Target")
+    if subject:
+        origin = record.origin("SubjectUserSid") if record.value("SubjectUserSid") else record.origin("SubjectUserName")
+        fields["user.entity_id"] = fv(subject, origin)
+    if subject_name:
+        fields["user.name"] = fv(subject_name, record.origin("SubjectUserName"))
+    if subject_domain:
+        fields["user.domain"] = fv(subject_domain, record.origin("SubjectDomainName"))
+    if target:
+        origin = record.origin("TargetUserSid") if record.value("TargetUserSid") else record.origin("TargetUserName")
+        fields["auth.target_account"] = fv(target, origin)
+        fields["auth.target_user"] = fv(target, origin)
+    if target_name:
+        fields["account.name"] = fv(target_name, record.origin("TargetUserName"))
+    if target_domain:
+        fields["account.domain"] = fv(target_domain, record.origin("TargetDomainName"))
+
+
+def _process_fields(fields: dict[str, FieldValue], record: WindowsRecord, host: str) -> None:
+    event_id = record.event_class.event_id
+    _put(fields, record, "process.command_line", "CommandLine")
+    _put(fields, record, "process.executable", "Image", "NewProcessName", "ProcessName")
+    _put(fields, record, "process.parent.executable", "ParentImage")
+    if event_id == 4688:
+        _put(fields, record, "process.pid", "NewProcessId", transform=_integer)
+        _put(fields, record, "process.ppid", "ProcessId", "CreatorProcessId", transform=_integer)
+    else:
+        _put(fields, record, "process.pid", "ProcessId", transform=_integer)
+        if event_id == 1:
+            _put(fields, record, "process.ppid", "ParentProcessId", transform=_integer)
+    _put(fields, record, "process.guid", "ProcessGuid", transform=_guid)
+    _put(fields, record, "process.parent.guid", "ParentProcessGuid", transform=_guid)
+    guid = fields.get("process.guid")
+    pid = fields.get("process.pid")
+    if guid:
+        fields["process.entity_id"] = fv(f"guid:{guid.value}", guid.origin)
+        fields["process.id_kind"] = fv("guid", guid.origin)
+    elif pid:
+        fields["process.entity_id"] = fv(f"pid:{host}:{pid.value}", pid.origin)
+        fields["process.id_kind"] = fv("fenced_pid", pid.origin)
+    parent_guid = fields.get("process.parent.guid")
+    if parent_guid:
+        fields["process.parent.entity_id"] = fv(f"guid:{parent_guid.value}", parent_guid.origin)
+    executable = fields.get("process.executable")
+    if executable:
+        fields["process.executable_key"] = fv(windows_path_key(executable.value), executable.origin)
+    parent = fields.get("process.parent.executable")
+    if parent:
+        fields["process.parent.executable_key"] = fv(windows_path_key(parent.value), parent.origin)
+    for algorithm in ("MD5", "SHA1", "SHA256", "IMPHASH"):
+        _put(fields, record, f"file.hash.{algorithm.casefold()}", f"Hashes.{algorithm}")
+    if event_id in {4689, 5}:
+        fields["process.fence"] = fv("termination", fields.get("event.code", fv(event_id, "catalog")).origin)
+
+
+_AUTH_ACTIONS = {
+    4624: "logon",
+    4625: "logon",
+    4648: "explicit_credentials",
+    4672: "special_privileges",
+    4634: "logoff",
+    4647: "logoff",
+}
+_ACCOUNT_ACTIONS = {
+    4720: "create",
+    4722: "enable",
+    4724: "password_reset",
+    4726: "delete",
+    4728: "add_to_global_group",
+    4732: "add_to_local_group",
+    4756: "add_to_universal_group",
+    4738: "modify",
+    4740: "lockout",
+}
+
+
+def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host: str) -> Outcome:
+    event_id, family = record.event_class.event_id, record.event_class.family
+    _account_fields(fields, record)
+    if family in {"process_exec", "process_termination"}:
+        _process_fields(fields, record, host)
+        return Outcome.success
+    if family == "net_socket":
+        _process_fields(fields, record, host)
+        for typed, native, transform in (
+            ("source.ip", "SourceIp", None),
+            ("source.port", "SourcePort", _integer),
+            ("destination.ip", "DestinationIp", None),
+            ("destination.port", "DestinationPort", _integer),
+            ("network.transport", "Protocol", lambda value: str(value).casefold()),
+            ("network.direction", "Initiated", lambda value: "egress" if str(value).casefold() == "true" else "ingress"),
+        ):
+            _put(fields, record, typed, native, transform=transform)
+        return Outcome.success
+    if family == "auth":
+        fields["auth.action"] = fv(_AUTH_ACTIONS[event_id], fields["event.code"].origin)
+        _put(fields, record, "auth.logon_type", "LogonType", transform=_integer)
+        _put(fields, record, "source.ip", "IpAddress")
+        _put(fields, record, "source.port", "IpPort", transform=_integer)
+        session = record.data.get("TargetLogonId") or record.data.get("SubjectLogonId")
+        if session and session.value not in (None, "", "0x0", "0"):
+            session_id = str(session.value).casefold()
+            fields["auth.session_id"] = fv(session_id, session.origin)
+            fields["auth.session_key"] = fv(f"{host}:{session_id}", session.origin)
+        _put(fields, record, "auth.logon_guid", "LogonGuid", transform=_guid)
+        return Outcome.failure if event_id == 4625 else Outcome.success
+    if family == "account_change":
+        fields["account.action"] = fv(_ACCOUNT_ACTIONS[event_id], fields["event.code"].origin)
+        _put(fields, record, "account.member_id", "MemberSid")
+        _put(fields, record, "account.member_name", "MemberName", transform=lambda value: str(value).casefold())
+        _put(fields, record, "account.group_id", "TargetSid")
+        _put(fields, record, "account.group_name", "TargetUserName", transform=lambda value: str(value).casefold())
+        return Outcome.success
+    if family == "service_change":
+        _put(fields, record, "service.name", "ServiceName")
+        _put(fields, record, "service.image_path", "ImagePath", "ServiceFileName")
+        _put(fields, record, "service.start_type", "StartType", "ServiceStartType")
+        _put(fields, record, "service.account", "AccountName", "ServiceAccount")
+        _put(fields, record, "service.type", "ServiceType")
+        return Outcome.success
+    if family == "scheduled_task":
+        fields["task.action"] = fv("created" if event_id == 4698 else "updated", fields["event.code"].origin)
+        _put(fields, record, "task.name", "TaskName")
+        _put(fields, record, "task.xml", "TaskContent")
+        return Outcome.success
+    if family == "audit_config":
+        action = "audit_policy_changed" if event_id == 4719 else "log_cleared"
+        fields["audit.config.action"] = fv(action, fields["event.code"].origin)
+        _put(fields, record, "audit.config.subcategory_guid", "SubcategoryGuid", transform=_guid)
+        _put(fields, record, "audit.config.changes", "AuditPolicyChanges")
+        return Outcome.success
+    if family == "system_state":
+        state = "boot_start" if event_id in {12, 6005} else "boot_stop"
+        fields["system.event"] = fv(state, fields["event.code"].origin)
+        fields["process.fence"] = fv("boot", fields["event.code"].origin)
+        return Outcome.success
+    return Outcome.unknown
+
+
 def normalize_windows(hit: dict) -> TypedEvent:
-    """Create the catalog-selected typed shell; family-specific fields are added by the semantic normalizer."""
+    """Normalize one cataloged Windows event from structured shipper fields only."""
     record = read_windows_event(hit)
     source, winlog = hit["_source"], hit["_source"]["winlog"]
     ref = _raw_ref(hit)
+    computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+    if not computer:
+        raise WindowsInputError("Windows record is missing winlog.computer_name")
+    host = computer.split(".", 1)[0]
     fields = {
         "event.code": fv(record.event_class.event_id, f"{hit['_id']}:winlog.event_id"),
         "event.channel": fv(record.event_class.channel, f"{hit['_id']}:winlog.channel"),
         "event.provider": fv(record.event_class.provider, f"{hit['_id']}:winlog.provider_name"),
+        "host.os.family": fv("windows", f"{hit['_id']}:winlog.computer_name#known-os"),
+        "host.name": fv(host, f"{hit['_id']}:winlog.computer_name#short-name"),
+        "host.full_name": fv(computer, f"{hit['_id']}:winlog.computer_name"),
+        "winlog.computer_name": fv(computer, f"{hit['_id']}:winlog.computer_name"),
     }
+    record_id = winlog.get("record_id")
+    if record_id is not None:
+        try:
+            fields["winlog.record_id"] = fv(int(record_id), f"{hit['_id']}:winlog.record_id")
+        except (TypeError, ValueError) as exc:
+            raise WindowsInputError(f"winlog.record_id is malformed: {exc}") from exc
     fields.update({f"windows.event_data.{name}": value for name, value in record.data.items()})
     timestamp = datetime.fromisoformat(str(source["@timestamp"])).astimezone(UTC)
-    host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold() or None
+    event_time = record.data.get("UtcTime") or record.data.get("SystemTime")
+    if event_time:
+        timestamp = _event_time(event_time.value)
+        fields["event.created"] = fv(timestamp.isoformat(), event_time.origin)
+    fields["event.ingested"] = fv(
+        datetime.fromisoformat(str(source["@timestamp"])).astimezone(UTC).isoformat(),
+        f"{hit['_id']}:@timestamp",
+    )
+    outcome = _semantic_fields(fields, record, host)
     return TypedEvent(
         id=event_id(record.event_class.family, [ref], WINDOWS_NORMALIZER),
         family=record.event_class.family,
         ts=timestamp,
         host=host,
-        outcome=Outcome.unknown,
+        outcome=outcome,
         fields=fields,
         raw=[ref],
         normalizer=WINDOWS_NORMALIZER,

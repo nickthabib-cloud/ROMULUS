@@ -14,6 +14,7 @@ from romulus.detect import packets as packet_rules
 from romulus.evidence import typed
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import EVIDENCE_VERSION, RawRef, event_id
+from romulus.evidence.windows import WINDOWS_NORMALIZER
 from romulus.hunt import packets as packet_stage
 from romulus.sources import packets as packet_sources
 
@@ -22,6 +23,10 @@ EVIDENCE_FILES = ("__init__.py", "auditd.py", "normalize.py", "typed.py")
 # The v9 source digest changed only to route separately versioned Windows records; the Linux producer and event
 # ids stay v9. The throughput equality fixture proves its serialized Linux output remains byte-identical.
 PINNED_EVIDENCE = {9: "472e4c234404b66703a2d54e080e65439ffbe802bc35777ec7ab4ce9e4006d8c"}
+WINDOWS_EVIDENCE_FILES = ("windows.py", "windows_catalog.py")
+PINNED_WINDOWS = {
+    "windows-ecs@1": "21da0798845ff17032bab74a0e6f4f413851115a5cbbe3d76d13c3b118e84013"
+}
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).
 PACKET_FUNCTIONS = (packet_stage._body_event, packet_rules.analyze_body, packet_rules._text, packet_rules._shebang,
@@ -53,6 +58,14 @@ def _files_digest() -> str:
     return h.hexdigest()
 
 
+def _windows_files_digest() -> str:
+    h = hashlib.sha256()
+    for name in WINDOWS_EVIDENCE_FILES:
+        path = Path(typed.__file__).parent / name
+        h.update(name.encode() + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return h.hexdigest()
+
+
 def _functions_digest() -> str:
     h = hashlib.sha256()
     for fn in PACKET_FUNCTIONS:
@@ -67,6 +80,13 @@ def test_evidence_normalization_matches_the_pinned_version():
         f"record {_files_digest()} for version {EVIDENCE_VERSION} in tests/test_evidence_version.py")
 
 
+def test_windows_normalization_matches_the_pinned_producer_version():
+    assert PINNED_WINDOWS.get(WINDOWS_NORMALIZER) == _windows_files_digest(), (
+        "Windows evidence normalization changed: bump WINDOWS_NORMALIZER, then record "
+        f"{_windows_files_digest()} for {WINDOWS_NORMALIZER} in tests/test_evidence_version.py"
+    )
+
+
 def test_packet_normalization_matches_the_pinned_version():
     version = packet_stage.PACKET_NORMALIZER
     assert PINNED_PACKETS.get(version) == _functions_digest(), (
@@ -79,5 +99,6 @@ def test_event_ids_carry_the_producer_and_version():
     assert NORMALIZER_VERSION.endswith(f"@{EVIDENCE_VERSION}")
     legacy = hashlib.sha256(b"process_exec|" + ref.key.encode()).hexdigest()[:24]
     assert event_id("process_exec", [ref]) != legacy                    # never collides with pre-versioned rows
+    assert event_id("process_exec", [ref], WINDOWS_NORMALIZER) != event_id("process_exec", [ref])
     assert event_id("http_body", [ref], "tshark-http@3") != event_id("http_body", [ref], "tshark-http@4")
     assert event_id("http_body", [ref], "tshark-http@4") != event_id("http_body", [ref], "tshark-packets@5")
