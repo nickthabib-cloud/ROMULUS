@@ -3,9 +3,11 @@ accumulated across every partition, so bursts spanning partition boundaries are 
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.correlation import StageMissing
 from romulus.evidence.typed import TypedEvent
 
 TOOL_UA_PREFIXES = ("curl/", "wget/", "python-requests/", "python-urllib/", "go-http-client/", "libwww-perl/",
@@ -19,25 +21,98 @@ def _registered(name: str) -> str:
 
 
 class _Grouped(Playbook):
+    """Exact per-group counts with up to EXAMPLE_LIMIT cited examples per group. The examples are held as ids and
+    the events go to the sweep's disk stage, so a group costs a few hundred bytes of memory, not its events. The
+    number of groups is bounded by MAX_KEYS (a record of a new group beyond it is not evaluated and coverage says
+    so); a rule whose behaviour has a time horizon also releases groups that stayed small and silent for IDLE."""
     kind = "aggregate"
     anchor_class = "network_observation"
     claim_type = "aggregate_observation"
+    staged = True
+    # Groups held at once: about 2 KB each with their ids and per-group sets, so about 400 MB at the budget.
+    MAX_KEYS: ClassVar[int] = 200_000
+    IDLE: ClassVar[timedelta | None] = None
 
     def __init__(self):
         super().__init__()
-        self.groups: dict[tuple, list[TypedEvent]] = defaultdict(list)
+        # group -> its examples: the event until it is handed to the stage, then its id
+        self.groups: dict[tuple, list[TypedEvent | str]] = defaultdict(list)
         self.counts: dict[tuple, int] = defaultdict(int)
         self.extra: dict[tuple, dict] = defaultdict(lambda: defaultdict(set))
         self._first: dict[tuple, object] = {}
         self._last: dict[tuple, object] = {}
+        self._pending: list[TypedEvent] = []
+        self._fresh: set[tuple] = set()             # groups holding events not yet handed to the stage
+        self.load = lambda ids: []
+        self.watermark: datetime | None = None
+        self._swept: datetime | None = None
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        for key in self._fresh:
+            if key in self.groups:
+                self.groups[key] = [x.id if isinstance(x, TypedEvent) else x for x in self.groups[key]]
+        self._fresh.clear()
+        return out
+
+    def retained_events(self) -> list[TypedEvent]:
+        return []                                   # staged on disk instead
+
+    def admit(self, key: tuple) -> bool:
+        """Whether a record of this group can be evaluated: the group is held, or there is room for it."""
+        if key in self.counts or len(self.counts) < self.MAX_KEYS:
+            return True
+        self.evaluated -= 1
+        self.refuse("groups", f"groups held at once reached {self.MAX_KEYS:,}; a record of a new group is not "
+                              f"evaluated")
+        return False
 
     def keep(self, key: tuple, e: TypedEvent):
         """Exact count for every record; retain up to EXAMPLE_LIMIT cited examples per group."""
         self.counts[key] += 1
         if len(self.groups[key]) < EXAMPLE_LIMIT:
             self.groups[key].append(e)
+            self._fresh.add(key)
+            self._pending.append(e)
         self._first[key] = min(self._first.get(key, e.ts), e.ts)
         self._last[key] = max(self._last.get(key, e.ts), e.ts)
+        self.watermark = e.ts if self.watermark is None else max(self.watermark, e.ts)
+
+    def examples(self, key: tuple) -> list[TypedEvent]:
+        """The group's cited examples in the order they were read: from the stage, or the events themselves while
+        they have not been handed to it (a caller that drives the rule without a sweep)."""
+        held = self.groups[key]
+        ids = [x for x in held if isinstance(x, str)]
+        found = {e.id: e for e in self.load(ids)} if ids else {}
+        missing = [i for i in ids if i not in found]
+        if missing:
+            raise StageMissing(f"{self.id}: {len(missing)} cited event(s) absent from the stage")
+        return [found[x] if isinstance(x, str) else x for x in held]
+
+    def small(self, key: tuple) -> bool:
+        """Whether a silent group may be released: it cannot yet meet the rule's threshold."""
+        return False
+
+    def release_idle(self) -> None:
+        """At most hourly, release every group that is small and has had no record for IDLE."""
+        if self.IDLE is None or self.watermark is None:
+            return
+        if self._swept is not None and self.watermark - self._swept < timedelta(hours=1):
+            return
+        self._swept = self.watermark
+        horizon = self.watermark - self.IDLE
+        for key in [k for k, last in self._last.items() if last < horizon and self.small(k)]:
+            self.forget(key)
+
+    def forget(self, key: tuple) -> None:
+        for store in (self.groups, self.counts, self.extra, self._first, self._last):
+            store.pop(key, None)
+
+    def release_state(self) -> None:
+        self.load = lambda ids: []
+        for value in vars(self).values():
+            if isinstance(value, (dict, list, set)):
+                value.clear()
 
     def span(self, key) -> str:
         return f"{self._first[key].isoformat()} – {self._last[key].isoformat()}"
@@ -61,6 +136,8 @@ class SuricataAlertStack(_Grouped):
         scanner triggering hundreds of signatures is one item, not hundreds."""
         for e in self.applicable(events):
             key = (e.get("source.ip"), e.get("destination.ip"), e.get("alert.category"), e.get("alert.severity"))
+            if not self.admit(key):
+                continue
             self.keep(key, e)
             sigs = self.extra[key]["sigs"]
             if len(sigs) < 2000:
@@ -72,7 +149,8 @@ class SuricataAlertStack(_Grouped):
 
     def finalize(self):
         out = []
-        for key, evs in self.groups.items():
+        for key in list(self.groups):
+            evs = self.examples(key)
             src, dst, cat, sev = key
             n = self.counts[key]
             sigs = sorted(self.extra[key]["sigs"], key=lambda s: (str(s[1]), str(s[0])))
@@ -109,10 +187,19 @@ class WebScanBurst(_Grouped):
     next_checks = ("http_requests from the source with 2xx status after the burst",
                    "ids_alerts for the source", "entity_timeline of the web host after the burst")
     MIN_REQUESTS, MIN_ERROR_RATIO = 200, 0.5
+    URLS_PER_SOURCE = 5000
+    URLS_BUDGET = 1_000_000          # distinct URLs held over all sources (about 150 bytes each)
+
+    def __init__(self):
+        super().__init__()
+        self.errors: dict[tuple, int] = defaultdict(int)     # 4xx/5xx responses per (host, source)
+        self.urls_held = 0
 
     def consume(self, events):
         for e in self.applicable(events):
             key = (e.host, e.get("source.ip"))
+            if not self.admit(key):
+                continue
             self.keep(key, e)
             try:
                 st = int(e.get("http.response.status_code"))
@@ -122,9 +209,15 @@ class WebScanBurst(_Grouped):
                 continue
             ex = self.extra[key]
             if st >= 400:
-                ex["errors"].add(e.id)
-            if len(ex["urls"]) < 5000:
-                ex["urls"].add(e.get("url.original"))
+                self.errors[key] += 1
+            url = e.get("url.original")
+            if len(ex["urls"]) < self.URLS_PER_SOURCE and url not in ex["urls"]:
+                if self.urls_held < self.URLS_BUDGET:
+                    self.urls_held += 1
+                    ex["urls"].add(url)
+                else:
+                    self.note_limit("urls", f"distinct URLs held over all sources reached {self.URLS_BUDGET:,}; a "
+                                            f"source's distinct-URL count is a lower bound (worded with '+')")
             ua = e.get("user_agent.original")
             if ua and len(ex["uas"]) < 10:
                 ex["uas"].add(ua)
@@ -132,11 +225,12 @@ class WebScanBurst(_Grouped):
 
     def finalize(self):
         out = []
-        for key, evs in self.groups.items():
+        for key in list(self.groups):
             n = self.counts[key]
-            errs = len(self.extra[key]["errors"])
+            errs = self.errors.get(key, 0)
             if n < self.MIN_REQUESTS or errs / n < self.MIN_ERROR_RATIO:
                 continue
+            evs = self.examples(key)
             host, src = key
             uas = sorted(self.extra[key]["uas"])
             claim = (f"{n} HTTP requests to {host} from {src} ({self.span(key)}), {errs} ({errs / n:.0%}) with "
@@ -178,9 +272,21 @@ class DnsSubdomainEnumeration(_Grouped):
         "research_basis": "ATT&CK Enterprise 20.0 T1590.002 (DNS)",
         "retrieval": "the sweep retrieves every record of a network target in each partition with no field "
                      "filter, a superset of what this evaluator reads",
+        "state": "one group per (source, registered domain) with its examples on the stage. A group with fewer than "
+                 "100 distinct names and no question for 24 hours is released, so the distinct-name count covers an "
+                 "activity period with no 24-hour silence: wordlist enumeration tools ask hundreds of names a minute",
     }
+    IDLE = timedelta(hours=24)
+
+    def small(self, key: tuple) -> bool:
+        return len(self.extra[key]["names"]) < self.MIN_DISTINCT
 
     def consume(self, events):
+        self._consume(events)
+        self.release_idle()
+        return []
+
+    def _consume(self, events):
         for e in self.applicable(events):
             if e.get("dns.type") is not None and str(e.get("dns.type")).lower() not in ("query", "request"):
                 # answers/other record types are not evaluated by this rule: they must not count toward a
@@ -195,18 +301,20 @@ class DnsSubdomainEnumeration(_Grouped):
             key = (e.get("source.ip"), _registered(e.get("dns.question.name")))
             if key[1] in self.REVERSE_TREES:
                 continue
+            if not self.admit(key):
+                continue
             self.keep(key, e)
             names = self.extra[key]["names"]
             if len(names) <= self.MIN_DISTINCT * 50:
                 names.add(e.get("dns.question.name").lower())
-        return []
 
     def finalize(self):
         out = []
-        for key, evs in self.groups.items():
+        for key in list(self.groups):
             distinct = len(self.extra[key]["names"])
             if distinct < self.MIN_DISTINCT:
                 continue
+            evs = self.examples(key)
             src, dom = key
             claim = (f"{src} issued {self.counts[key]} DNS queries for {distinct} distinct names under '{dom}' "
                      f"({self.span(key)}).")
@@ -242,6 +350,8 @@ class ToolUserAgentHttp(_Grouped):
             if not ua.startswith(TOOL_UA_PREFIXES):
                 continue
             key = (e.get("source.ip"), e.get("destination.ip"), e.get("http.hostname"), ua.split(" ")[0])
+            if not self.admit(key):
+                continue
             self.keep(key, e)
             if len(self.extra[key]["urls"]) < 50:
                 self.extra[key]["urls"].add(e.get("url.original"))
@@ -249,7 +359,8 @@ class ToolUserAgentHttp(_Grouped):
 
     def finalize(self):
         out = []
-        for key, evs in self.groups.items():
+        for key in list(self.groups):
+            evs = self.examples(key)
             src, dst, hostname, ua = key
             urls = sorted(u for u in self.extra[key]["urls"] if u)
             claim = (f"{self.counts[key]} HTTP request(s) from {src} to {dst} (Host: {hostname}) with user agent "
@@ -277,6 +388,10 @@ class PortScan(_Grouped):
     EPHEMERAL_FLOOR = 32768
     MAX_REQUESTS = 500_000
     version = "6"
+    # A pair with fewer than MIN_PORTS ports and no flow for a day is released, and so is a recorded request older
+    # than a day. Ports are counted per activity period with no 24-hour silence: nmap's slowest timing template
+    # (T0, five minutes between probes) covers MIN_PORTS ports in about two hours, far inside it.
+    IDLE = timedelta(hours=24)
 
     def __init__(self):
         super().__init__()
@@ -286,10 +401,32 @@ class PortScan(_Grouped):
         # Per (src, dst): destination port of a low-source-port flow -> [earliest start, source ports seen].
         self.replies: dict[tuple, dict[int, list]] = defaultdict(dict)
 
+    def small(self, key: tuple) -> bool:
+        return len(self.extra[key]["ports"] | set(self.replies.get(key, ()))) < self.MIN_PORTS
+
+    def forget(self, key: tuple) -> None:
+        super().forget(key)
+        self.replies.pop(key, None)
+
+    def release_idle(self) -> None:
+        swept = self._swept
+        super().release_idle()
+        if self._swept is not swept:                  # a sweep ran: requests older than the horizon go too
+            horizon = self._swept - self.IDLE
+            for tuple_ in [t for t, start in self.requests.items() if start < horizon]:
+                del self.requests[tuple_]
+
     def consume(self, events):
+        self._consume(events)
+        self.release_idle()
+        return []
+
+    def _consume(self, events):
         for e in self.applicable(events):
             src, dst = e.get("source.ip"), e.get("destination.ip")
             key = (src, dst)
+            if not self.admit(key):
+                continue
             self.keep(key, e)
             try:
                 sport, dport = int(e.get("source.port")), int(e.get("destination.port"))
@@ -310,10 +447,14 @@ class PortScan(_Grouped):
                 continue
             if len(self.extra[key]["ports"]) < 70000:
                 self.extra[key]["ports"].add(dport)
-            if sport is not None and sport >= 1024 > dport and len(self.requests) < self.MAX_REQUESTS:
+            if sport is not None and sport >= 1024 > dport:
                 tuple_ = (src, sport, dst, dport)
-                self.requests[tuple_] = min(self.requests.get(tuple_, e.ts), e.ts)
-        return []
+                if tuple_ in self.requests or len(self.requests) < self.MAX_REQUESTS:
+                    self.requests[tuple_] = min(self.requests.get(tuple_, e.ts), e.ts)
+                else:
+                    self.note_limit("requests", f"the index of earlier flows reached {self.MAX_REQUESTS:,}; an "
+                                                f"answer to an unindexed request is counted as a probe (more leads, "
+                                                f"never fewer)")
 
     def _answered(self, src, dst, port, seen) -> bool:
         """A port's low-source-port flows look like answers when a flow on the mirrored 4-tuple started strictly
@@ -328,13 +469,14 @@ class PortScan(_Grouped):
 
     def finalize(self):
         rows = []
-        for key, evs in self.groups.items():
+        for key in list(self.groups):
             src, dst = key
             forward = self.extra[key]["ports"]
             replies = self.replies.get(key, {})
             ports = forward | set(replies)
             if len(ports) < self.MIN_PORTS:
                 continue
+            evs = self.examples(key)
             answered = {port for port, seen in replies.items() if self._answered(src, dst, port, seen)}
             unanswered = set(replies) - answered
             client_range = {port for port in unanswered if port >= self.EPHEMERAL_FLOOR}
@@ -349,7 +491,7 @@ class PortScan(_Grouped):
                           f"of a request and its answer), {len(client_range)} go to client "
                           f"(ephemeral) ports with no recorded request, and {len(unanswered) - len(client_range)} "
                           f"have neither, the shape of a scan sent from a fixed low source port.")
-                if len(self.requests) >= self.MAX_REQUESTS:
+                if "requests" in self.limits or len(self.requests) >= self.MAX_REQUESTS:
                     claim += (f" The index of earlier flows reached its limit of {self.MAX_REQUESTS}, so some answers "
                               f"may be counted as probes.")
             if len(probed) >= self.MIN_PORTS:
