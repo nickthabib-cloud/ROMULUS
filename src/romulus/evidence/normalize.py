@@ -5,6 +5,7 @@ import hashlib
 import json
 import posixpath
 import re
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -177,6 +178,22 @@ def _iso(micros: int) -> str:
     return (_EPOCH + micros * _US).isoformat()
 
 
+def _without_zones(pieces: list[tuple[int, int, str]], centres: list[int], radius: int) -> list[tuple[int, int, str]]:
+    """Sorted disjoint closed ranges (first, last, boot) with every time within `radius` of a sorted centre
+    removed. Each range looks only at the centres that reach it."""
+    out: list[tuple[int, int, str]] = []
+    for lo, hi, boot in pieces:
+        i, cur = bisect_left(centres, lo - radius), lo
+        while i < len(centres) and centres[i] - radius <= hi:
+            if centres[i] - radius > cur:
+                out.append((cur, centres[i] - radius - 1, boot))
+            cur = max(cur, centres[i] + radius + 1)
+            i += 1
+        if cur <= hi:
+            out.append((cur, hi, boot))
+    return out
+
+
 @dataclass
 class _Span:
     """One boot's observations on one host: the earliest and latest as (time in µs, record id), their count, and
@@ -203,13 +220,15 @@ class BootIntervals:
         self.skew_us = skew // _US
         self.spans: dict[str, dict[str, _Span]] = {}
         self.boundaries: dict[str, set[tuple[int, str]]] = {}
-        self._merged: dict[str, list[tuple[int, int, list[str]]]] = {}     # per host, until it is observed again
+        # Per host, until it is observed again: the times that place, as sorted disjoint closed ranges
+        # (first µs, last µs, boot), and their first times for bisection.
+        self._segments: dict[str, tuple[list[int], list[tuple[int, int, str]]]] = {}
 
     def __bool__(self) -> bool:
         return bool(self.spans)
 
     def observe(self, host: str, boot: str, when_us: int, ref: str, marker: bool = False) -> None:
-        self._merged.pop(host, None)
+        self._segments.pop(host, None)
         point = (when_us, ref)
         span = self.spans.setdefault(host, {}).get(boot)
         if span is None:
@@ -220,6 +239,7 @@ class BootIntervals:
             span.marker = point if span.marker is None else min(span.marker, point)
 
     def boundary(self, host: str, when_us: int, ref: str) -> None:
+        self._segments.pop(host, None)
         self.boundaries.setdefault(host, set()).add((when_us, ref))
 
     def observe_event(self, event: TypedEvent) -> None:
@@ -238,8 +258,6 @@ class BootIntervals:
         """The host's boot spans in time order as (start, end, boots). Spans that overlap are one interval naming
         every boot in it: records of two boots at the same times mean a clock step or two hosts under one name,
         so no time inside it is placed."""
-        if host in self._merged:
-            return self._merged[host]
         out: list[tuple[int, int, list[str]]] = []
         for boot, span in sorted(self.spans.get(host, {}).items(), key=lambda item: (item[1].first, item[0])):
             if out and span.first[0] <= out[-1][1]:
@@ -247,21 +265,41 @@ class BootIntervals:
                 out[-1] = (start, max(end, span.last[0]), [*boots, boot])
             else:
                 out.append((span.first[0], span.last[0], [boot]))
-        self._merged[host] = out
         return out
+
+    def _index(self, host: str) -> tuple[list[int], list[tuple[int, int, str]]]:
+        """The host's placeable times as sorted disjoint closed ranges (first µs, last µs, boot), built once per
+        change to the host's observations: each single-boot interval shrunk by the skew at both ends, kept more
+        than the skew from its neighbours, with every time within the skew of a boundary removed. Built in
+        O((boots + boundaries) log) so that placing an event is one bisection, however many boots and boundaries
+        a host has."""
+        cached = self._segments.get(host)
+        if cached is not None:
+            return cached
+        skew, intervals = self.skew_us, self._intervals(host)
+        pieces: list[tuple[int, int, str]] = []
+        for i, (start, end, boots) in enumerate(intervals):
+            if len(boots) != 1:
+                continue
+            lo, hi = start + skew, end - skew
+            if i > 0:
+                lo = max(lo, intervals[i - 1][1] + skew + 1)
+            if i + 1 < len(intervals):
+                hi = min(hi, intervals[i + 1][0] - skew - 1)
+            if lo <= hi:
+                pieces.append((lo, hi, boots[0]))
+        segments = _without_zones(pieces, sorted({at for at, _ref in self.boundaries.get(host, ())}), skew)
+        index = self._segments[host] = ([lo for lo, _hi, _boot in segments], segments)
+        return index
 
     def boot_at(self, host: str, when_us: int) -> tuple[str, _Span] | None:
         """The one boot this host's time falls in, with its span, or None (see the class)."""
-        skew = self.skew_us
-        near = [item for item in self._intervals(host) if item[0] - skew <= when_us <= item[1] + skew]
-        if len(near) != 1:
+        starts, segments = self._index(host)
+        i = bisect_right(starts, when_us) - 1
+        if i < 0 or when_us > segments[i][1]:
             return None
-        start, end, boots = near[0]
-        if len(boots) != 1 or not start + skew <= when_us <= end - skew:
-            return None
-        if any(abs(when_us - at) <= skew for at, _ref in self.boundaries.get(host, ())):
-            return None
-        return boots[0], self.spans[host][boots[0]]
+        boot = segments[i][2]
+        return boot, self.spans[host][boot]
 
     def fill(self, events: list[TypedEvent], *, rederive: bool = False) -> None:
         """Give each host-record event without a boot id the boot its time falls in, citing the span's first and

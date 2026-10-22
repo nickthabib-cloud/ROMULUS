@@ -8,6 +8,7 @@ accounts and addresses are invented (documentation ranges).
 """
 import json
 import random
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -494,6 +495,64 @@ def test_the_sweep_records_the_map_and_a_resumed_hunt_reads_the_same_one(monkeyp
     resumed.save_evidence("h1", [tail], {}, None)
     assert boot(expansion._events([tail.id])[0]) == BOOT_A
     assert sw.stored_boot_intervals(resumed, "other-hunt").to_json()["hosts"] == {}
+
+
+# ---------------------------------------------------------------- scale: per-host indexes, not scans
+def test_ten_thousand_boundaries_on_one_host_place_by_bisect():
+    # SYSTEM_BOOT/SYSTEM_SHUTDOWN records that name no boot can come from any process allowed to write audit
+    # records, so one host can carry thousands of them. Boot A runs 0 s to 1,000,000 s with a nameless boundary
+    # every 100 s at 50 s past each hundred; a time places only when it is more than the skew from every boundary.
+    boots = BootIntervals()
+    boots.observe("host01", BOOT_A, us(0), "a0")
+    boots.observe("host01", BOOT_A, us(1_000_000), "a1")
+    for k in range(10_000):
+        boots.boundary("host01", us(100 * k + 50), f"sb{k}")
+    for host in range(200):                                    # other hosts, each with a few boots
+        for n in range(5):
+            boots.observe(f"h{host}", f"{host:016x}{n:016x}", us(1000 * n), f"o{host}-{n}a")
+            boots.observe(f"h{host}", f"{host:016x}{n:016x}", us(1000 * n + 900), f"o{host}-{n}b")
+    times = [100 * k + offset for k in range(0, 10_000, 2) for offset in (0, 15, 19.5, 50, 80.5, 99)]
+    events = [ev("process_exec", at(seconds), process__pid=7) for seconds in times]
+    started = time.perf_counter()
+    boots.fill(events)
+    elapsed = time.perf_counter() - started
+    for seconds, event in zip(times, events, strict=True):
+        offset = seconds % 100
+        expected = BOOT_A if SKEW <= seconds <= 1_000_000 - SKEW and abs(offset - 50) > SKEW else None
+        assert boot(event) == expected, seconds
+    assert placed(boots, 1500, host="h7") == "0000000000000007" + "0000000000000001"
+    assert elapsed < 5.0, elapsed                              # a scan of every boundary per event takes minutes
+
+
+def _reference(boots, host, when):
+    """The placement rule stated directly, one scan per time: inside exactly one merged interval of a single boot
+    by the skew, more than the skew from every other interval and every boundary."""
+    skew = boots.skew_us
+    near = [item for item in boots._intervals(host) if item[0] - skew <= when <= item[1] + skew]
+    if len(near) != 1 or len(near[0][2]) != 1 or not near[0][0] + skew <= when <= near[0][1] - skew:
+        return None
+    if any(abs(when - at) <= skew for at, _ref in boots.boundaries.get(host, ())):
+        return None
+    return near[0][2][0]
+
+
+def test_the_bisect_index_agrees_with_the_rule_stated_directly():
+    rng = random.Random(5)
+    for trial in range(40):
+        boots = BootIntervals(timedelta(seconds=rng.choice((0, 1, 30))))
+        for n in range(rng.randint(1, 8)):
+            start = rng.randint(0, 5000)
+            for _ in range(rng.randint(1, 3)):
+                boots.observe("host01", f"{n:032x}", us(start + rng.randint(0, 800)), f"r{trial}-{n}")
+        for k in range(rng.randint(0, 6)):
+            boots.boundary("host01", us(rng.randint(0, 6000)), f"sb{k}")
+        edges = [point for span in boots.spans["host01"].values() for point in (span.first[0], span.last[0])]
+        edges += [at for at, _ref in boots.boundaries.get("host01", ())]
+        probes = [us(seconds) for seconds in [rng.uniform(-100, 6100) for _ in range(300)] + list(range(-50, 6050, 7))]
+        probes += [edge + sign * boots.skew_us + nudge for edge in edges for sign in (-1, 1) for nudge in (-1, 0, 1)]
+        for when in probes:
+            found = boots.boot_at("host01", when)
+            assert (None if found is None else found[0]) == _reference(boots, "host01", when), (trial, when)
 
 
 @pytest.mark.parametrize("seconds,expected", [(300, BOOT_A), (1050, None), (1500, BOOT_B)])
