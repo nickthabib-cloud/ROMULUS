@@ -356,6 +356,11 @@ MAX_SAMPLE_QUERIES = 4
 # A host lookup refused for budget is not an answer: it is retried when budget allows.
 HOST_LOOKUP_BUDGET = "source query budget exhausted"
 
+
+def _link_task_kind(executor) -> str:
+    """Keep borrowed executor methods compatible while separating agent link work."""
+    return "agent_follow_link" if getattr(executor, "source_query_scope", None) == "agent" else "expansion_link"
+
 class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
 
@@ -634,7 +639,7 @@ class PivotExecutor:
         if query_cap is not None and self.source_queries + len(targets) > query_cap:
             return None, f"victim host not resolved for {ip}: {HOST_LOOKUP_BUDGET}"
         intent_record = {"resolve_host_ip": ip, "targets": [target for target, _ in targets]}
-        self.repo.upsert_task(task_id, self.hunt_id, "expansion_link", "host-resolution", intent_record,
+        self.repo.upsert_task(task_id, self.hunt_id, _link_task_kind(self), "host-resolution", intent_record,
                               fingerprint, owner_token=self.owner_token)
         self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
         names: set[str] = set()
@@ -766,7 +771,7 @@ class PivotExecutor:
             task_id = "t-" + fingerprint[:20]
             task_ids.append(task_id)
             self.repo.upsert_task(
-                task_id, self.hunt_id, "expansion_link", owner,
+                task_id, self.hunt_id, _link_task_kind(self), owner,
                 intent.model_dump(mode="json"), fingerprint, owner_token=self.owner_token,
             )
             self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)

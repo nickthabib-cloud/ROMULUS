@@ -22,6 +22,7 @@ from romulus.hunt.links import (
     LinkResult,
     LinkType,
     LinkWindow,
+    is_agent_reach,
     usable_key,
 )
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
@@ -405,7 +406,10 @@ class ExpansionEngine:
             if not made_progress:
                 continue
 
-        final_links = self.repo.expansion_links(self.hunt_id)
+        final_links = [
+            link for link in self.repo.expansion_links(self.hunt_id)
+            if not is_agent_reach(link["link_type"], link["strength"])
+        ]
         for row in self.repo.expansion_anchors(self.hunt_id):
             # Only anchors this run worked are finalized: those still pending. An anchor a previous run finalized
             # (resume re-runs expansion) was never scheduled here, so its recorded status and reasons stand; above

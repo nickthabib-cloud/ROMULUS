@@ -147,6 +147,26 @@ def test_agent_source_query_cap_makes_link_fetch_partial_not_failed():
     assert batch.reasons == ["agent_source_query_budget:0"]
 
 
+def test_agent_link_fetch_uses_its_own_task_kind_and_never_counts_as_expansion(monkeypatch):
+    repo = _repo()
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+    ))
+    executor = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=5, source_query_scope="agent",
+    )
+
+    batch = executor.fetch_intents("anchor", "fetch-key", [intent], lambda _event: True)
+
+    assert batch.status == "complete"
+    assert [task["kind"] for task in repo.tasks("h1")] == ["agent_follow_link"]
+    assert repo.expansion_source_queries("h1") == 0
+
+
 def test_fetch_query_cap_leaves_unattempted_ranges_unresolved(monkeypatch):
     calls = []
 

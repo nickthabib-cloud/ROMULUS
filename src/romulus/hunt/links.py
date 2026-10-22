@@ -43,6 +43,11 @@ RAW_FAMILIES_BY_LINK = {
 }
 
 
+def is_agent_reach(link_type: str | None, strength: str | None) -> bool:
+    """Agent-requested reaches are hypotheses, never deterministic expansion work."""
+    return strength == "agent_hypothesis" or bool(link_type and link_type.startswith("agent_"))
+
+
 def usable_key(value: Any) -> bool:
     """Return whether a typed pivot key is meaningful and safe to use."""
     if value is None or isinstance(value, bool):

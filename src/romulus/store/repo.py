@@ -414,6 +414,8 @@ class Repo:
             )).scalar_one())
             link_spend = int(c.execute(select(func.coalesce(func.sum(t.expansion_link.c.query_spend), 0)).where(
                 t.expansion_link.c.hunt_id == hunt_id,
+                t.expansion_link.c.strength != "agent_hypothesis",
+                ~t.expansion_link.c.link_type.like("agent_%"),
             )).scalar_one())
         # Completed links and tasks describe the same calls. The max also supports
         # databases upgraded from link-only accounting without double-counting.
