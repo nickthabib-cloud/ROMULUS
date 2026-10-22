@@ -1724,8 +1724,12 @@ class Repo:
                 generations.append(int(suffix))
         return f"{base_id}-r{max(generations) + 1}"
 
-    def begin_baseline_segment(self, row: dict, *, reclaim_owner: bool = False) -> bool:
+    def begin_baseline_segment(self, row: dict, *, reclaim_owner: bool = False) -> str:
         """Create an invisible building segment, optionally restarting this hunt's crashed build.
+
+        Returns "begun" when the caller now owns an empty building row; "active" when the identical segment
+        is already active (another hunt finished it); "building_elsewhere" when another hunt, or cleanup,
+        holds it; otherwise the stored status (for example "stale" or "revoked"), which the caller must report.
 
         The hunt lease serializes one writer per hunt. Reclamation is therefore safe only for the same
         ``built_by_hunt_id``; a building row owned by another hunt, or claimed by cleanup, remains protected.
@@ -1742,20 +1746,21 @@ class Repo:
             existing = c.execute(select(t.baseline_segment).where(s.id == segment["id"])).mappings().first()
             if existing is None:
                 c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
-                return True
+                return "begun"
             stored = _with_utc(existing, ("start", "end", "created_at"))
             if any(stored[name] != segment[name] for name in _BUILD_CONTENT):
                 raise ValueError(f"baseline segment {segment['id']} exists with different content")
-            if not (reclaim_owner and stored["status"] == "building"
-                    and stored["built_by_hunt_id"] == segment["built_by_hunt_id"]):
-                return False
+            if stored["status"] != "building":
+                return stored["status"]
+            if not (reclaim_owner and stored["built_by_hunt_id"] == segment["built_by_hunt_id"]):
+                return "building_elsewhere"
             c.execute(t.baseline_segment.update().where(owned).values(created_at=segment["created_at"]))
         self._drop_baseline_children(segment["id"])
         with write_txn(self.engine) as c:
             if not c.execute(t.baseline_segment.delete().where(owned)).rowcount:
-                return False
+                return "building_elsewhere"
             c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
-            return True
+            return "begun"
 
     def _drop_baseline_children(self, segment_id: str) -> None:
         """Delete one segment's child rows, one short write transaction per bounded chunk."""

@@ -269,12 +269,28 @@ def test_fresh_building_segment_is_not_cleaned_by_a_concurrent_writer():
         hunt_id="build", target="host", spec=SPEC,
         start=START - timedelta(hours=1), end=START, events_total=0,
     )
-    assert repo.begin_baseline_segment(row)
+    assert repo.begin_baseline_segment(row) == "begun"
     contender = _writer(repo, FakeHistory()).fill(
         hunt_id="other-builder", targets=["host"], start=START - timedelta(hours=1), end=START,
     )
     assert contender.complete == 0
     assert repo.baseline_segments()[0]["status"] == "building"
+    # Never skipped silently: the hour is a gap for this hunt, with the reason.
+    assert [(gap.start, gap.state, gap.reason) for gap in contender.gaps] == [
+        (START - timedelta(hours=1), "partial", "bl.exec_path: being built by another hunt"),
+    ]
+
+
+def test_segment_another_hunt_finished_meanwhile_counts_as_built():
+    repo = _repo()
+    first = _writer(repo, FakeHistory())
+    row = first.segment_row(
+        hunt_id="first", target="host", spec=SPEC, start=START - timedelta(hours=1), end=START, events_total=0,
+    )
+    assert repo.begin_baseline_segment(row) == "begun"
+    repo.finalize_baseline_segment(row["id"])
+    late = {**row, "built_by_hunt_id": "second", "status": "building"}
+    assert repo.begin_baseline_segment(late, reclaim_owner=True) == "active"
 
 
 def test_unresolved_exec_pair_pending_never_becomes_an_empty_complete_segment():
@@ -658,7 +674,7 @@ def test_cleanup_and_reclaim_delete_child_rows_in_bounded_transactions(monkeypat
     row = _building_with_rows(repo, 50)
     statements.clear()
     monkeypatch.setattr(repo_module, "write_txn", Counting)
-    assert repo.begin_baseline_segment(row, reclaim_owner=True)
+    assert repo.begin_baseline_segment(row, reclaim_owner=True) == "begun"
     assert len(statements) >= 9
     assert list(repo.baseline_counts(row["id"])) == []
     assert repo.baseline_segments()[0]["status"] == "building"
@@ -674,7 +690,7 @@ def test_a_build_claimed_by_cleanup_is_not_reclaimed_by_its_owner():
             repo_module.t.baseline_segment.c.id == row["id"],
         ).values(built_by_hunt_id=repo_module.CLEANUP_OWNER))
     # A cleaner holds the row: the owner's resume must neither delete under it nor raise.
-    assert repo.begin_baseline_segment(row, reclaim_owner=True) is False
+    assert repo.begin_baseline_segment(row, reclaim_owner=True) == "building_elsewhere"
     assert len(list(repo.baseline_counts(row["id"]))) == 3
 
 

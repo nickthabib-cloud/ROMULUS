@@ -273,7 +273,18 @@ class LookbackWriter:
                 )
                 counter.bind_segment(row["id"])
                 try:
-                    if not self.repo.begin_baseline_segment(row, reclaim_owner=True):
+                    state = self.repo.begin_baseline_segment(row, reclaim_owner=True)
+                    if state == "active":
+                        built += 1  # another hunt finished the identical segment since the cover check
+                        continue
+                    if state != "begun":
+                        # Never skipped silently: the hour is not in the store for this hunt yet.
+                        gaps.append(HistoryGap(
+                            target, hour_start, hour_end, "partial",
+                            f"{spec.id}: " + ("being built by another hunt" if state == "building_elsewhere"
+                                              else f"segment {row['id']} is {state}"),
+                            (spec.id,),
+                        ))
                         continue
                     longest = max(longest, self.repo.append_baseline_segment_rows(
                         row["id"], counter.count_rows(), counter.scope_hour_rows(),
