@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
-from sqlalchemy import Engine, and_, func, or_, select, true
+from sqlalchemy import Engine, and_, case, func, or_, select, true
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
@@ -512,6 +512,42 @@ class Repo:
             q = q.where(t.candidate.c.lane.in_(lanes))
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(q).mappings()]
+
+    def candidate_count(self, hunt_id: str, *, lane: str | None = None,
+                        rule_id: str | None = None) -> int:
+        query = select(func.count()).select_from(t.candidate).where(t.candidate.c.hunt_id == hunt_id)
+        if lane is not None:
+            query = query.where(t.candidate.c.lane == lane)
+        if rule_id is not None:
+            query = query.where(t.candidate.c.rule_id == rule_id)
+        with self.engine.connect() as connection:
+            return int(connection.execute(query).scalar_one())
+
+    def candidate_page(self, hunt_id: str, *, offset: int, limit: int,
+                       lane: str | None = None, rule_id: str | None = None) -> list[dict]:
+        """Return one stable finding page without materializing the hunt's candidate table."""
+        lane_order = case(
+            (t.candidate.c.lane == "urgent", 0), (t.candidate.c.lane == "high", 1),
+            (t.candidate.c.lane == "lead", 2), (t.candidate.c.lane == "context", 3),
+            (t.candidate.c.lane == "suppressed", 4), else_=99,
+        )
+        query = select(t.candidate).where(t.candidate.c.hunt_id == hunt_id)
+        if lane is not None:
+            query = query.where(t.candidate.c.lane == lane)
+        if rule_id is not None:
+            query = query.where(t.candidate.c.rule_id == rule_id)
+        query = query.order_by(
+            lane_order, t.candidate.c.priority.desc(), t.candidate.c.ts, t.candidate.c.id,
+        ).offset(offset).limit(limit)
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+    def candidate_rule_counts(self, hunt_id: str, *, lane: str) -> dict[str, int]:
+        query = (select(t.candidate.c.rule_id, func.count())
+                 .where(t.candidate.c.hunt_id == hunt_id, t.candidate.c.lane == lane)
+                 .group_by(t.candidate.c.rule_id))
+        with self.engine.connect() as connection:
+            return {str(rule_id): int(count) for rule_id, count in connection.execute(query)}
 
     def candidate(self, cid: str) -> dict | None:
         with self.engine.connect() as c:

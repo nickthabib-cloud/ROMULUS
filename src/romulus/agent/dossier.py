@@ -103,13 +103,12 @@ def _claim(text: str, alias: str) -> str:
     return f"{text[:CLAIM_LIMIT]}…[+{len(text) - CLAIM_LIMIT} chars: get_finding {alias}]"
 
 
-def _findings(repo: Repo, hunt_id: str, aliases: AliasBook) -> tuple[list[dict], Counter]:
-    counts: Counter = Counter()
+def _findings(repo: Repo, hunt_id: str,
+              aliases: AliasBook) -> tuple[list[dict], Counter, list[dict]]:
+    counts = Counter(repo.lane_counts(hunt_id))
     out = []
-    for row in sorted(repo.candidates(hunt_id), key=_candidate_key):
-        counts[row["lane"]] += 1
-        if row["lane"] not in REPORTABLE_LANES:
-            continue
+    rows = sorted(repo.candidates(hunt_id, lanes=list(REPORTABLE_LANES)), key=_candidate_key)
+    for row in rows:
         alias = aliases.alias_for("F", row["id"])
         out.append({
             "alias": alias,
@@ -120,7 +119,7 @@ def _findings(repo: Repo, hunt_id: str, aliases: AliasBook) -> tuple[list[dict],
             "account": _entity_value(row.get("entities") or [], "account"),
             "time": str(row["ts"]),
         })
-    return out, counts
+    return out, counts, rows
 
 
 def _coverage(repo: Repo, hunt_id: str) -> dict:
@@ -380,12 +379,8 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
         raise KeyError(hunt_id)
     manifest = hunt.get("manifest") or {}
     aliases = AliasBook(repo, hunt_id)
-    finding_rows, lane_counts = _findings(repo, hunt_id, aliases)
-    reportable = sorted(
-        (row for row in repo.candidates(hunt_id) if row["lane"] in REPORTABLE_LANES),
-        key=_candidate_key,
-    )
-    context_counts = Counter(row["rule_id"] for row in repo.candidates(hunt_id) if row["lane"] == "context")
+    finding_rows, lane_counts, reportable = _findings(repo, hunt_id, aliases)
+    context_counts = repo.candidate_rule_counts(hunt_id, lane="context")
     profiles = manifest.get("source_profiles") or {}
     source_targets = sorted(set(manifest.get("targets") or []) | set(profiles))
     coverage = _coverage(repo, hunt_id)

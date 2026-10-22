@@ -377,7 +377,8 @@ def test_dossier_and_toolbox_use_canonical_packet_and_not_assessed_coverage():
 
     assert not coverage["gaps"]
     assert not listed["gaps"]
-    assert coverage["not_assessed"] == listed["not_assessed"]
+    assert listed["counts"]["not_assessed"] == 1
+    assert listed["more"] is True
     assert coverage["not_assessed"] == [{
         "target": "packet-target", "dataset": "unknown.dataset", "records": 4,
         "count_scope": "whole index at source preflight, not only the hunt window",
@@ -422,7 +423,8 @@ def test_dossier_bounds_long_reasons_and_source_errors_without_raising():
 
 @pytest.mark.slow
 def test_mission_scale_dossier_is_bounded_for_50k_findings_and_500_linked_incidents():
-    dossier = build_dossier(_mission_scale_repo(), "mission", token_budget=8_000)
+    repo = _mission_scale_repo()
+    dossier = build_dossier(repo, "mission", token_budget=8_000)
 
     incidents = [item for page in dossier.pages for item in page.get("incidents", [])]
     context = [item for page in dossier.pages for item in page.get("context_counts", [])]
@@ -437,3 +439,12 @@ def test_mission_scale_dossier_is_bounded_for_50k_findings_and_500_linked_incide
     assert max(item_tokens) < 2_000
     assert all(estimate_tokens(json.dumps(page, sort_keys=True, separators=(",", ":"))) <= 8_000
                for page in dossier.pages)
+    toolbox = Toolbox(repo, "mission")
+    tool_results = [
+        toolbox.execute("list_findings", {
+            "lane": None, "rule": None, "entity": None, "page": 1, "cursor": None,
+        }),
+        toolbox.execute("get_incident", {"incident": "I1", "page": 1, "cursor": None}),
+    ]
+    assert max(estimate_tokens(json.dumps(result, sort_keys=True, separators=(",", ":")))
+               for result in tool_results) < 8_000
