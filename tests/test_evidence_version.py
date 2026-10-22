@@ -25,7 +25,7 @@ EVIDENCE_FILES = ("__init__.py", "auditd.py", "normalize.py", "typed.py")
 PINNED_EVIDENCE = {9: "472e4c234404b66703a2d54e080e65439ffbe802bc35777ec7ab4ce9e4006d8c"}
 WINDOWS_EVIDENCE_FILES = ("windows.py", "windows_catalog.py")
 PINNED_WINDOWS = {
-    "windows-ecs@1": "21da0798845ff17032bab74a0e6f4f413851115a5cbbe3d76d13c3b118e84013"
+    "windows-ecs@1": "fa716d2ce3bca220868ce4ecf86fa97e09f6a2813480a17b36017530c3d7383e"
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).

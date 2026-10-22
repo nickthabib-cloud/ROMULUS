@@ -80,6 +80,36 @@ WINDOWS_DATASETS = frozenset(
         "windows.system",
     }
 )
+WINDOWS_HOST_DATASETS = (
+    "windows.sysmon_operational",
+    "system.security",
+    "windows.security",
+    "system.system",
+    "windows.system",
+)
+_SECURITY_FAMILIES = frozenset(
+    {event.family for event in EVENT_CLASSES if event.channel.casefold() == "security"}
+)
+_SYSMON_FAMILIES = frozenset(
+    {event.family for event in EVENT_CLASSES if event.channel.casefold() == SYSMON_CHANNEL.casefold()}
+)
+_SYSTEM_FAMILIES = frozenset(
+    {event.family for event in EVENT_CLASSES if event.channel.casefold() == "system"}
+)
+WINDOWS_DATASET_FAMILIES = {
+    "windows.sysmon_operational": _SYSMON_FAMILIES,
+    "system.security": _SECURITY_FAMILIES,
+    "windows.security": _SECURITY_FAMILIES,
+    "system.system": _SYSTEM_FAMILIES,
+    "windows.system": _SYSTEM_FAMILIES,
+}
+
+
+def datasets_for_families(families: set[str] | frozenset[str]) -> tuple[str, ...]:
+    return tuple(
+        dataset for dataset in WINDOWS_HOST_DATASETS
+        if WINDOWS_DATASET_FAMILIES.get(dataset, frozenset()).intersection(families)
+    )
 
 
 def lookup_event_class(channel: object, provider: object, event_id: object) -> WindowsEventClass | None:

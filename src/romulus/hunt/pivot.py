@@ -21,6 +21,7 @@ from romulus.detect.registry import fresh_direct_pack
 from romulus.evidence.auditd import AuditParseError, AuditRecord, parse_record
 from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, normalize_hits
 from romulus.evidence.typed import TypedEvent
+from romulus.evidence.windows_catalog import WINDOWS_HOST_DATASETS, datasets_for_families
 from romulus.hunt.publish import publish_match
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.execute import execute
@@ -71,7 +72,32 @@ class PivotEventBatch:
 
 
 def _is_network(target: str, contract: FieldContract | None = None) -> bool:
-    return "network" in target.lower() or bool(contract and contract.time_field == "firstPacket")
+    del target
+    return bool(contract and contract.role == "network")
+
+
+def _host_datasets(contract: FieldContract, families: set[str] | None = None) -> tuple[str, ...]:
+    if contract.os_family == "windows":
+        return datasets_for_families(families) if families else WINDOWS_HOST_DATASETS
+    if families:
+        by_family = {
+            "process_exec": ("linux.audit",),
+            "net_socket": ("linux.audit",),
+            "auth": ("linux.audit", "systemd.journal"),
+            "privilege_use": ("systemd.journal",),
+            "service_change": ("linux.audit", "systemd.journal"),
+            "account_change": ("linux.audit",),
+            "audit_config": ("linux.audit",),
+            "system_state": ("linux.audit",),
+            "file_change": ("linux.audit",),
+            "http_access": ("apache.access",),
+            "web_error": ("apache.error",),
+        }
+        selected = {
+            dataset for family in families for dataset in by_family.get(family, ())
+        }
+        return tuple(dataset for dataset in HOST_TIMELINE_DATASETS if dataset in selected)
+    return tuple(HOST_TIMELINE_DATASETS)
 
 
 def _supports(contract: FieldContract, field: str, op: str = "eq") -> bool:
@@ -502,9 +528,10 @@ class PivotExecutor:
                 elif entity.kind == "ip" and not network:
                     if not _supports(contract, "event.dataset"):
                         continue
-                    datasets = dataset_inventory.get(target, tuple(HOST_TIMELINE_DATASETS))
+                    supported_datasets = _host_datasets(contract)
+                    datasets = dataset_inventory.get(target, supported_datasets)
                     for dataset in datasets:
-                        if dataset not in HOST_TIMELINE_DATASETS:
+                        if dataset not in supported_datasets:
                             continue
                         dataset_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
                         dataset_any_of: list[list[Predicate]] = []
@@ -525,7 +552,7 @@ class PivotExecutor:
                 elif (entity.kind == "host" and not network
                       and _supports(contract, "event.dataset", "in") and _supports(contract, "host.name")):
                     filters = [
-                        Predicate(field="event.dataset", op="in", value=HOST_TIMELINE_DATASETS),
+                        Predicate(field="event.dataset", op="in", value=list(_host_datasets(contract))),
                         Predicate(field="host.name", op="eq", value=entity.value),
                     ]
                 else:
@@ -533,18 +560,32 @@ class PivotExecutor:
             elif isinstance(request, AuthActivityRequest):
                 if network or not _supports(contract, "event.dataset"):
                     continue
-                filters = [Predicate(field="event.dataset", op="eq", value="systemd.journal")]
-                if args.entity.kind == "host":
-                    if not _supports(contract, "host.name"):
-                        continue
-                    filters.append(Predicate(field="host.name", op="eq", value=args.entity.value))
+                auth_datasets = (("systemd.journal",) if contract.os_family != "windows"
+                                 else _host_datasets(contract, {"auth"}))
+                if args.entity.kind == "host" and not _supports(contract, "host.name"):
+                    continue
+                for dataset in auth_datasets:
+                    auth_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
+                    if args.entity.kind == "host":
+                        auth_filters.append(Predicate(field="host.name", op="eq", value=args.entity.value))
+                    intents.append(SearchIntent(
+                        kind="raw", target=target, window=window, filters=auth_filters,
+                        max_records=MAX_PIVOT_RECORDS, purpose=f"agent:{request.tool}:{dataset}",
+                    ))
+                continue
             elif isinstance(request, ProcessTreeRequest):
                 if network or not (_supports(contract, "event.dataset") and _supports(contract, "host.name")):
                     continue
-                filters = [
-                    Predicate(field="event.dataset", op="eq", value="linux.audit"),
-                    Predicate(field="host.name", op="eq", value=args.host),
-                ]
+                for dataset in _host_datasets(contract, {"process_exec"}):
+                    intents.append(SearchIntent(
+                        kind="raw", target=target, window=window,
+                        filters=[
+                            Predicate(field="event.dataset", op="eq", value=dataset),
+                            Predicate(field="host.name", op="eq", value=args.host),
+                        ],
+                        max_records=MAX_PIVOT_RECORDS, purpose=f"agent:{request.tool}:{dataset}",
+                    ))
+                continue
             elif isinstance(request, IdsAlertsRequest):
                 if not network or not _supports(contract, "event.dataset"):
                     continue
@@ -620,7 +661,7 @@ class PivotExecutor:
                     ))
                     continue
                 normalized = set(NETWORK_TIMELINE_DATASETS if _is_network(target, contract)
-                                 else HOST_TIMELINE_DATASETS)
+                                 else _host_datasets(contract))
                 for dataset in inventoried:
                     if (target, dataset) in planned:
                         continue
@@ -636,7 +677,7 @@ class PivotExecutor:
                 continue
             if _supports(contract, "event.dataset"):
                 continue
-            for dataset in HOST_TIMELINE_DATASETS:
+            for dataset in _host_datasets(contract):
                 reason = f"dataset_unsearchable:{dataset}:event.dataset predicate unavailable"
                 unresolved.append(PivotCoverage(
                     target=target, dataset=dataset, start=args.start, end=args.end,

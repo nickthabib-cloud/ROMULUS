@@ -16,6 +16,7 @@ from romulus.evidence.normalize import (
     normalize_hits,
 )
 from romulus.evidence.typed import TypedEvent
+from romulus.evidence.windows_catalog import WINDOWS_DATASET_FAMILIES, WINDOWS_HOST_DATASETS
 from romulus.hunt.publish import publish_match
 from romulus.hunt.stage import EventStage
 from romulus.sources.es import ElasticClient, fetch_limit
@@ -30,21 +31,28 @@ log = logging.getLogger("romulus.sweep")
 PARTITION_MAX_DOCS = 120_000
 # planned cells are written before any partition runs, this many partitions per transaction
 PLANNED_CHUNK = 500
-HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
+LINUX_HOST_DATASETS = ("linux.audit", "systemd.journal", "apache.access", "apache.error")
+HOST_DATASETS = [*LINUX_HOST_DATASETS, *WINDOWS_HOST_DATASETS]
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
 # A login group that fails is tagged linux.audit.auth; it takes every record of its event, so it may also hide
 # an exec, socket or file record of that event and carries the whole audit family set.
 _AUDIT_ADMIN = {"account_change", "service_change", "audit_config", "system_state"}
-DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
-                    "linux.audit.socket": {"net_socket"}, "linux.audit.file": {"file_change"},
-                    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
-                    "linux.audit.admin": _AUDIT_ADMIN,
-                    "arkime.session": {"net_session"},
-                    "systemd.journal": {"auth", "privilege_use", "service_change"},
-                    "apache.access": {"http_access"}, "apache.error": {"web_error"},
-                    **{f"suricata.eve.{t}": NET_FAMILIES for t in ("alert", "flow", "netflow", "dns", "http",
-                                                                  "fileinfo", "tls", "ssh")}}
+LINUX_DATASET_FAMILIES = {
+    "linux.audit": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
+    "linux.audit.socket": {"net_socket"},
+    "linux.audit.file": {"file_change"},
+    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
+    "linux.audit.admin": _AUDIT_ADMIN,
+    "arkime.session": {"net_session"},
+    "systemd.journal": {"auth", "privilege_use", "service_change"},
+    "apache.access": {"http_access"},
+    "apache.error": {"web_error"},
+    **{f"suricata.eve.{event_type}": NET_FAMILIES for event_type in (
+        "alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh",
+    )},
+}
+DATASET_FAMILIES = {**LINUX_DATASET_FAMILIES, **WINDOWS_DATASET_FAMILIES}
 ALL_FAMILIES = frozenset({"*"})
 WINDOW_ROLLUP_PARTIAL = ("whole-window result over partitions of which one or more were partial, failed or "
                          "unexecuted (listed separately)")
@@ -128,11 +136,12 @@ class Sweep:
             self.stats["candidates"] += 1
             self.on_candidate(row)
 
-    def _filters_for(self, target: str) -> list[Predicate]:
-        if "host" in target:
+    def _filters_for(self, target: str, contract: FieldContract | None = None) -> list[Predicate]:
+        if contract is not None and contract.role == "host":
+            datasets = WINDOWS_HOST_DATASETS if contract.os_family == "windows" else LINUX_HOST_DATASETS
             # recorded so the report can list the target's other datasets as not assessed
-            self.stats.setdefault("dataset_filter", {})[target] = list(HOST_DATASETS)
-            return [Predicate(field="event.dataset", op="in", value=HOST_DATASETS)]
+            self.stats.setdefault("dataset_filter", {})[target] = list(datasets)
+            return [Predicate(field="event.dataset", op="in", value=list(datasets))]
         return []
 
     # -------------------------------------------------------------------------------------
@@ -158,7 +167,7 @@ class Sweep:
 
     def run_target(self, target: str):
         contract = self.contracts[target]
-        filters = self._filters_for(target)
+        filters = self._filters_for(target, contract)
         try:
             self.heartbeat()
             parts = plan_partitions(self.client, target, contract, self.window, filters)

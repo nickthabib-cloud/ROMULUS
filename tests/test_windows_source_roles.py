@@ -1,0 +1,214 @@
+"""Typed source roles and OS-aware dataset/key selection replace target-name assumptions."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from romulus.agent.models import EntityRef
+from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest, ProcessTreeArgs, ProcessTreeRequest
+from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.windows_catalog import SECURITY, SYSMON, SYSMON_CHANNEL, WINDOWS_HOST_DATASETS
+from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
+from romulus.hunt.pivot import PivotExecutor, _is_network
+from romulus.hunt.sweep import LINUX_HOST_DATASETS, Sweep
+from romulus.sources.compile import build_query
+from romulus.sources.models import Predicate, SearchIntent, Window
+from romulus.sources.profile import build_profile, contract_from_types, flatten_mapping
+
+START = datetime(2026, 1, 2, tzinfo=UTC)
+END = START + timedelta(hours=1)
+
+
+def _windows_types() -> dict[str, str]:
+    return {
+        "@timestamp": "date",
+        "event.dataset": "keyword",
+        "winlog.computer_name": "keyword",
+        "winlog.event_id": "keyword",
+        "winlog.event_data": "flattened",
+    }
+
+
+def _event(event_id: int, *, channel=SYSMON_CHANNEL, provider=SYSMON, data=None):
+    return normalize_hits(
+        [
+            {
+                "_index": "logs-windows",
+                "_id": f"w-{event_id}",
+                "_source": {
+                    "@timestamp": "2026-01-02T00:05:00Z",
+                    "agent": {"type": "winlogbeat"},
+                    "event": {"dataset": "windows.sysmon_operational"},
+                    "winlog": {
+                        "channel": channel,
+                        "provider_name": provider,
+                        "event_id": event_id,
+                        "computer_name": "WS01.example.test",
+                        "record_id": 100 + event_id,
+                        "event_data": data or {},
+                    },
+                },
+            }
+        ]
+    )[0][0]
+
+
+def test_contract_role_is_typed_and_never_inferred_from_a_misleading_target_name():
+    host = contract_from_types("definitely-network-by-name", {"@timestamp": "date"}, role="host")
+    network = contract_from_types("definitely-host-by-name", {"@timestamp": "date"}, role="network")
+
+    assert host.role == "host" and _is_network(host.target, host) is False
+    assert network.role == "network" and _is_network(network.target, network) is True
+
+
+def test_sweep_filters_derive_from_role_and_os_not_the_index_name():
+    linux = contract_from_types("network-looking", {"@timestamp": "date", "event.dataset": "keyword"}, role="host")
+    windows = contract_from_types("anything", _windows_types(), role="host")
+    network = contract_from_types("host-looking", {"@timestamp": "date", "event.dataset": "keyword"}, role="network")
+    sweep = object.__new__(Sweep)
+    sweep.stats = {}
+
+    assert Sweep._filters_for(sweep, linux.target, linux)[0].value == list(LINUX_HOST_DATASETS)
+    assert Sweep._filters_for(sweep, windows.target, windows)[0].value == list(WINDOWS_HOST_DATASETS)
+    assert Sweep._filters_for(sweep, network.target, network) == []
+
+
+def test_flattened_fields_and_explicit_native_to_typed_aliases_compile():
+    mapping = {"idx": {"mappings": {"properties": {"winlog": {"properties": {
+        "computer_name": {"type": "keyword"},
+        "event_data": {"type": "flattened"},
+    }}}}}}
+    flattened = flatten_mapping(mapping)
+    contract = contract_from_types("idx", {"@timestamp": "date", "event.dataset": "keyword", **flattened})
+
+    assert flattened["winlog.event_data"] == "flattened"
+    assert contract.spec("host.name").native == "winlog.computer_name"
+    assert contract.spec("process.command_line").native == "winlog.event_data.CommandLine"
+    assert contract.spec("process.command_line").type == "flattened"
+    query = build_query(
+        SearchIntent(
+            kind="raw",
+            target="idx",
+            window=Window(start=START, end=END),
+            filters=[Predicate(field="process.command_line", op="eq", value="whoami.exe")],
+        ),
+        contract,
+    )
+    assert {"term": {"winlog.event_data.CommandLine": "whoami.exe"}} in query["bool"]["filter"]
+
+
+def test_live_profile_records_the_typed_role_and_profiles_the_event_computer():
+    class Client:
+        version = "8.0"
+
+        class settings:
+            es_flavor = "elasticsearch"
+
+        @staticmethod
+        def mapping(_target):
+            return {"idx": {"mappings": {"properties": {
+                "@timestamp": {"type": "date"},
+                "event": {"properties": {"dataset": {"type": "keyword"}}},
+                "winlog": {"properties": {
+                    "computer_name": {"type": "keyword"},
+                    "event_data": {"type": "flattened"},
+                }},
+            }}}}
+
+        @staticmethod
+        def search(_target, body):
+            assert body["aggs"]["hosts"]["terms"]["field"] == "winlog.computer_name"
+            return {
+                "hits": {"total": {"value": 1}},
+                "aggregations": {
+                    "tmin": {},
+                    "tmax": {},
+                    "ds": {"buckets": [{"key": "windows.security", "doc_count": 1}]},
+                    "hosts": {"buckets": [{"key": "ws01.example.test", "doc_count": 1}]},
+                },
+            }
+
+    profile, contract = build_profile(Client(), "name-does-not-matter")
+
+    assert profile.role == "host" and contract.role == "host"
+    assert contract.os_family == "windows"
+    assert profile.hosts == {"ws01.example.test": 1}
+
+
+def test_windows_host_timeline_and_process_tree_use_catalog_datasets_and_native_host_key():
+    contract = contract_from_types("not-host", _windows_types(), role="host")
+    executor = PivotExecutor(None, None, "h1", {contract.target: contract})
+    timeline = EntityTimelineRequest(
+        tool="entity_timeline",
+        arguments=EntityTimelineArgs(
+            entity=EntityRef(kind="host", value="ws01", role="host"), start=START, end=END
+        ),
+    )
+    process = ProcessTreeRequest(
+        tool="process_tree",
+        arguments=ProcessTreeArgs(host="ws01", process_id=512, start=START, end=END),
+    )
+
+    [timeline_intent] = executor._intents(timeline)
+    process_intents = executor._intents(process)
+    assert next(item.value for item in timeline_intent.filters if item.field == "event.dataset") == list(
+        WINDOWS_HOST_DATASETS
+    )
+    assert next(item.value for item in timeline_intent.filters if item.field == "host.name") == "ws01"
+    assert {next(item.value for item in intent.filters if item.field == "event.dataset") for intent in process_intents} == {
+        "system.security",
+        "windows.security",
+        "windows.sysmon_operational",
+    }
+
+
+def test_windows_lineage_session_and_flow_host_links_select_os_specific_keys_and_datasets():
+    contract = contract_from_types(
+        "misleading-network-name",
+        {
+            **_windows_types(),
+            "winlog.event_data.ProcessGuid": "keyword",
+            "winlog.event_data.TargetLogonId": "keyword",
+            "winlog.event_data.DestinationIp": "ip",
+            "winlog.event_data.DestinationPort": "integer",
+        },
+        role="host",
+    )
+    executor = PivotExecutor(None, None, "h1", {contract.target: contract})
+    fetcher = LinkFetcher(executor, START, END)
+    process = _event(
+        1,
+        data={
+            "ProcessGuid": "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}",
+            "ParentProcessGuid": "{11111111-2222-3333-4444-555555555555}",
+            "ProcessId": "512",
+        },
+    )
+    auth = _event(
+        4624,
+        channel="Security",
+        provider=SECURITY,
+        data={"TargetLogonId": "0x44"},
+    )
+    net = _event(
+        3,
+        data={
+            "SourceIp": "192.0.2.10",
+            "SourcePort": "50100",
+            "DestinationIp": "198.51.100.10",
+            "DestinationPort": "443",
+            "Protocol": "tcp",
+        },
+    )
+    window = LinkWindow(label="near", start=START, end=END)
+
+    lineage = fetcher._lineage(LinkAnchor(finding_id="a", ts=process.ts, host=process.host, events=[process]), window)
+    session = fetcher._session(LinkAnchor(finding_id="b", ts=auth.ts, host=auth.host, events=[auth]), window)
+    flow = fetcher._flow_host_side(LinkAnchor(finding_id="c", ts=net.ts, host=net.host, events=[net]), window)
+
+    assert lineage[0]["process.guid"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert session[0]["auth.session_key"] == "ws01:0x44"
+    for planned in (lineage[2], session[2], flow[2]):
+        assert planned
+        assert all("linux.audit" not in str(intent.model_dump(mode="json")) for intent in planned)
+

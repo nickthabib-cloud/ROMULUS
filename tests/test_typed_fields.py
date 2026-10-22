@@ -95,7 +95,7 @@ def test_every_family_serializes_identically_with_validated_fields(records):
     built, built_skips, built_errors = _dumps(records)
     checked, checked_skips, checked_errors = _dumps(records, monkeypatch=True)
     families = {event.family for event in built}
-    assert families >= set().union(*sweep.DATASET_FAMILIES.values()) | {"net_session"}
+    assert families >= set().union(*sweep.LINUX_DATASET_FAMILIES.values()) | {"net_session"}
     assert (built_skips, built_errors) == (checked_skips, checked_errors)
     assert len(built) == len(checked)
     for one, other in zip(built, checked, strict=True):
