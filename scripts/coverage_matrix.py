@@ -11,6 +11,8 @@ from romulus.catalog.render import render_public
 
 ROOT = Path(__file__).resolve().parent.parent
 PUBLIC_OUTPUT = ROOT / "docs" / "detection" / "ATTACK_COVERAGE.md"
+PRIVATE_OUTPUT = ROOT / "docs" / "project" / "COVERAGE_GAPS.md"
+PRIVATE_RESEARCH = ROOT / "content" / "research"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -18,7 +20,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check", action="store_true", help="exit non-zero if the generated document is stale"
     )
-    parser.add_argument("--output", type=Path, default=PUBLIC_OUTPUT, help=argparse.SUPPRESS)
+    parser.add_argument("--private", action="store_true", help="generate the local research gap register")
+    parser.add_argument("--output", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--research-root", type=Path, default=PRIVATE_RESEARCH, help=argparse.SUPPRESS)
     return parser
 
 
@@ -30,8 +34,15 @@ def _write(path: Path, text: str) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    expected = render_public(build_catalog())
-    output = args.output.resolve()
+    catalog = build_catalog()
+    if args.private:
+        from coverage_research import load_research, render_private
+
+        expected = render_private(catalog, load_research(args.research_root.resolve()))
+        output = (args.output or PRIVATE_OUTPUT).resolve()
+    else:
+        expected = render_public(catalog)
+        output = (args.output or PUBLIC_OUTPUT).resolve()
     if args.check:
         current = output.read_bytes() if output.exists() else b""
         if current != expected.encode("utf-8"):
