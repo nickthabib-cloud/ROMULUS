@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HeldExamples, RecentIds
+from romulus.detect.bounded import HeldExamples, KeyedStore, RecentIds
 from romulus.detect.correlation import canon_ip, external
 from romulus.evidence.typed import TypedEvent
 
@@ -99,17 +99,17 @@ class _CertificateRule(Playbook):
     severity, lane = "medium", "lead"
     # Citations are held as ids once the sweep has staged them. Per group the distinct sources and connections are
     # counted up to a cap (a group to a popular server can reach millions of connections over weeks); above it the
-    # claim says "at least". Groups exist only for matching certificates; the budget is about 3 KB per group.
+    # claim says "at least". Groups exist only for matching certificates (about 3 KB each) and are held in a keyed
+    # store: HOT in memory, the rest on disk; only its disk budget refuses a record of a new group.
     staged = True
     SOURCES_PER_GROUP = 10_000
     CONNS_PER_GROUP = 20_000
-    MAX_KEYS = 100_000
+    HOT = 20_000
 
     def __init__(self):
         super().__init__()
         self._seen = RecentIds()        # bounded re-read guard
-        self.groups: dict[tuple, HeldExamples] = {}
-        self.info: dict[tuple, dict] = {}
+        self.groups = KeyedStore(self, "cert_groups", self.HOT)     # key -> {"info": ..., "examples": HeldExamples}
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
@@ -119,13 +119,16 @@ class _CertificateRule(Playbook):
         for store in self._fresh:
             store.staged()
         self._fresh = []
+        self.groups.trim()                      # after staging: a trimmed group holds references only
         return out
+
+    def release_state(self) -> None:
+        self.load = lambda ids: []
+        self.groups.clear()
+        self.close_spill()
 
     def retained_events(self) -> list[TypedEvent]:
         return []                               # staged on disk instead
-
-    def examples(self, key: tuple) -> list[TypedEvent]:
-        return self.groups[key].events(self.load)
 
     def judge(self, e: TypedEvent, cert: dict) -> list[str] | None:
         """Reasons one candidate server certificate matches: non-empty on a match, empty when it was judged and
@@ -164,8 +167,8 @@ class _CertificateRule(Playbook):
                     refused = not self._keep(e, cert, reasons) or refused
             if refused:
                 self.evaluated -= 1
-                self.refuse("groups", f"certificate groups reached {self.MAX_KEYS:,}; a record of a new group is not "
-                                      f"evaluated")
+                self.refuse("disk", "the certificate groups' disk budget is spent; a record of a new group is not "
+                                    "evaluated")
             elif unknown:
                 self.evaluated -= 1
                 self.missing_required += 1
@@ -173,14 +176,15 @@ class _CertificateRule(Playbook):
 
     def _keep(self, e: TypedEvent, cert: dict, reasons: list[str]) -> bool:
         key = (_identity(cert), str(e.get("destination.ip")))
-        g = self.info.get(key)
-        if g is None and len(self.info) >= self.MAX_KEYS:
+        state = self.groups.setdefault(key, lambda: {
+            "info": {"cert": cert, "records": 0, "sources": set(), "ports": set(), "conns": set(), "reasons": set(),
+                     "first": e.ts, "last": e.ts, "capped": False},
+            "examples": HeldExamples(EXAMPLE_LIMIT, earliest=True)})
+        if state is None:
             return False
-        if g is not None and _preference(cert) < _preference(g["cert"]):
+        g = state["info"]
+        if _preference(cert) < _preference(g["cert"]):
             g["cert"] = cert                    # the same certificate from another sensor: keep a fixed choice
-        if g is None:
-            g = self.info[key] = {"cert": cert, "records": 0, "sources": set(), "ports": set(), "conns": set(),
-                                  "reasons": set(), "first": e.ts, "last": e.ts, "capped": False}
         g["records"] += 1
         for name, value, cap in (("sources", str(e.get("source.ip")), self.SOURCES_PER_GROUP),
                                  ("conns", str(e.get("network.community_id") or e.get("suricata.flow_id") or e.id),
@@ -193,16 +197,14 @@ class _CertificateRule(Playbook):
         g["ports"].add(str(e.get("destination.port")))
         g["reasons"].update(reasons)
         g["first"], g["last"] = min(g["first"], e.ts), max(g["last"], e.ts)
-        group = self.groups.get(key)
-        if group is None:
-            group = self.groups[key] = HeldExamples(EXAMPLE_LIMIT, earliest=True)
+        group = state["examples"]
         if group.offer(e):                      # keep the earliest records whatever the reading order
             self._pending.append(e)
             self._fresh.append(group)
         return True
 
-    def summary(self, key: tuple) -> str:
-        g = self.info[key]
+    @staticmethod
+    def summary(key: tuple, g: dict) -> str:
         sources = sorted(g["sources"])
         at_least = "at least " if g["capped"] else ""
         return (f"{g['records']} record(s) of {at_least}{len(g['conns'])} outbound TLS connection(s) from "
@@ -215,6 +217,7 @@ class _CertificateRule(Playbook):
 
 class SelfSignedCertificateOutbound(_CertificateRule):
     id = "net.tls_self_signed_certificate_outbound"
+    version = "2"
     title = "Public server presented a certificate whose subject name equals its issuer name"
     attack = ("T1573.002", "T1587.003", "T1608.003")
     benign = (("appliances, VPN concentrators and management interfaces reached over the internet with their "
@@ -255,12 +258,12 @@ class SelfSignedCertificateOutbound(_CertificateRule):
 
     def finalize(self):
         out = []
-        for key in self.groups:
-            evs = self.examples(key)
-            g = self.info[key]
+        for key, state in self.groups.items():
+            evs = state["examples"].events(self.load)
+            g = state["info"]
             cert = g["cert"]
             compared = cert.get("names_compared") or "CN and O"
-            claim = (f"{self.summary(key)}: the server presented a certificate whose subject name equals its issuer "
+            claim = (f"{self.summary(key, g)}: the server presented a certificate whose subject name equals its issuer "
                      f"name ({describe(cert)}), and no other certificate in the handshake names it as issuer. "
                      f"Compared by {compared}; the signature was not verified.")
             out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
@@ -271,6 +274,7 @@ class SelfSignedCertificateOutbound(_CertificateRule):
 
 class ShortLivedOrNewCertificateOutbound(_CertificateRule):
     id = "net.tls_short_lived_or_new_certificate_outbound"
+    version = "2"
     title = "Public server presented a short-lived or recently issued certificate"
     attack = ("T1573.002", "T1588.004", "T1608.003")
     # Public CA default profiles issue for 45 days or more (the CA/Browser Forum schedule bottoms out at 47 days);
@@ -336,9 +340,9 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
 
     def finalize(self):
         out = []
-        for key in self.groups:
-            evs = self.examples(key)
-            g = self.info[key]
+        for key, state in self.groups.items():
+            evs = state["examples"].events(self.load)
+            g = state["info"]
             cert, parts = g["cert"], []
             validity = self.validity_days(cert)
             if "short-lived" in g["reasons"] and validity is not None:
@@ -350,7 +354,7 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
             elif age is not None and age < self.FRESH_DAYS:
                 parts.append(f"its notBefore is {age * 24:.1f} hours before the first such session "
                              f"(under {self.FRESH_DAYS} days)")
-            claim = (f"{self.summary(key)}: the server presented its certificate ({describe(cert)}), and "
+            claim = (f"{self.summary(key, g)}: the server presented its certificate ({describe(cert)}), and "
                      f"{'; '.join(parts)}.")
             out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
                              self.lane, "medium", evs[0].entities(), group_key=f"{key[0]}|{key[1]}"))
