@@ -54,6 +54,13 @@ MAPPING_FILTER_PATH = "*.mappings.properties"
 FIELD_CAPS_FILTER_PATH = "fields.*.*"
 PIT_OPEN_FILTER_PATH = "id"
 PIT_CLOSE_FILTER_PATH = "succeeded,num_freed"
+PAGE_SIZE = 2000
+
+
+def fetch_limit(max_records: int, page_size: int = PAGE_SIZE) -> int:
+    """The most hits `iterate` returns for `max_records`: it reads whole pages until it has at least that many."""
+    size = min(page_size, max_records)
+    return -(-max_records // size) * size
 
 
 def check_allowed(method: str, path: str) -> None:
@@ -80,6 +87,9 @@ class ElasticClient:
         self.settings = settings
         auth = None
         headers = {"Content-Type": "application/json"}
+        if not settings.es_compression:
+            # uncompressed responses: no decompression cost here, more bytes on the wire
+            headers["Accept-Encoding"] = "identity"
         if settings.es_api_key.get_secret_value():
             headers["Authorization"] = "ApiKey " + settings.es_api_key.get_secret_value()
         elif settings.es_username:
@@ -194,7 +204,7 @@ class ElasticClient:
                              reasons=reasons, total=total.get("value"),
                              total_relation=total.get("relation", "unknown")), d
 
-    def iterate(self, q: CompiledQuery, max_records: int, page_size: int = 2000,
+    def iterate(self, q: CompiledQuery, max_records: int, page_size: int = PAGE_SIZE,
                 pit: PitSession | None = None,
                 ) -> Iterator[tuple[list[dict], dict]]:
         """Exhaustive raw retrieval with PIT + search_after. Yields (hits, page_meta).
@@ -228,10 +238,15 @@ class ElasticClient:
                     yield [], meta
                     return
                 fetched += len(hits)
+                # read the cursor before the hits are handed over: the consumer may take them as they are
+                last = hits[-1]
+                after, has_after = last.get("sort"), "sort" in last
                 yield hits, meta
                 if fetched >= max_records or len(hits) < body["size"]:
                     return
-                body["search_after"] = hits[-1]["sort"]
+                if not has_after:
+                    raise KeyError("sort")
+                body["search_after"] = after
         finally:
             if owned:
                 try:

@@ -13,6 +13,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.bounded import ExecHistory, HeldExamples, RecentIds
@@ -40,11 +41,23 @@ LANE_SEVERITY = {"high": "high", "lead": "medium", "context": "low"}
 SOCKET_TYPE_CAVEAT = "auditd does not record the socket type; a connect() on a UDP socket sends no packets"
 
 
-def canon_ip(value) -> str | None:
+# Distinct addresses whose canonical form and scope are kept (least recently used dropped first): the detectors ask
+# about the same addresses millions of times, and a cache miss only costs the parse again.
+ADDRESS_CACHE = 65_536
+
+
+def _canon_ip_uncached(text: str) -> str | None:
     try:
-        return str(ipaddress.ip_address(str(value)))
+        return str(ipaddress.ip_address(text))
     except ValueError:
         return None
+
+
+_canon_text = lru_cache(maxsize=ADDRESS_CACHE)(_canon_ip_uncached)
+
+
+def canon_ip(value) -> str | None:
+    return _canon_text(value if type(value) is str else str(value))
 
 
 def routable_remote(ip: str | None) -> bool:
@@ -55,8 +68,16 @@ def routable_remote(ip: str | None) -> bool:
                 or (a.version == 4 and a == ipaddress.IPv4Address("255.255.255.255")))
 
 
-def external(ip: str | None) -> bool:
+def _external_uncached(ip: str | None) -> bool:
     return routable_remote(ip) and not is_internal(ipaddress.ip_address(ip))
+
+
+# INTERNAL_NETS is a constant table, so an address's answer never changes during a run.
+_external_text = lru_cache(maxsize=ADDRESS_CACHE)(_external_uncached)
+
+
+def external(ip: str | None) -> bool:
+    return _external_text(ip) if type(ip) is str else _external_uncached(ip)
 
 
 def connect_phrase(e: TypedEvent) -> str:
