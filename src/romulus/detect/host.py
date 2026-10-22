@@ -926,7 +926,7 @@ class SshLoginFromExternal(Playbook):
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
     version = "3"
-    title = "Successful SSH login from a non-private source address"
+    title = "Successful SSH login from an address outside the site's internal networks"
     kind = "aggregate"
     families = ("auth",)
     required_fields = ("auth.service", "source.ip", "user.name")
@@ -968,8 +968,8 @@ class SshLoginFromExternal(Playbook):
             sources = "; ".join(part for part in (
                 f"{journal} sshd 'Accepted' journal record(s)" if journal else "",
                 f"{audit} audit USER_LOGIN record(s)" if audit else "") if part)
-            claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from non-private address "
-                     f"{ip} ({evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}; {sources}).")
+            claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from {ip}, an "
+                     f"address outside the site's internal networks ({evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}; {sources}).")
             m = Match(self.id, claim, self.claim_type, evs[:20], [pf(evs[0], "source.ip"), pf(evs[0], "user.name")],
                       evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}")
             if len(evs) > 20:

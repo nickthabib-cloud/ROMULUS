@@ -253,7 +253,8 @@ class InterpreterExternalConnection(Playbook):
     account, port), listing every destination, so routine update traffic is one lead, not one per address."""
     id = "host.interpreter_external_connection"
     version = "3"
-    title = "Shell, interpreter, relay tool or web-service process made connect() calls to non-private addresses"
+    title = ("Shell, interpreter, relay tool or web-service process made connect() calls to addresses outside the "
+             "site's internal networks")
     kind = "aggregate"
     families = ("net_socket", "process_exec")
     required_fields = ()
@@ -326,7 +327,7 @@ class InterpreterExternalConnection(Playbook):
             else:
                 lineage = " Its ancestry is not fully recorded in the window."
             claim = (f"auditd connect() records on {e0.host} show {_process_words(e0)}, {info['reason']}, making "
-                     f"{info['count']} connect() call(s) to {len(info['dests'])} non-private address(es) on port "
+                     f"{info['count']} connect() call(s) to {len(info['dests'])} address(es) outside the site's internal networks on port "
                      f"{port} ({info['first'].isoformat()} – {info['last'].isoformat()}): {dests}{more}; "
                      f"{outcomes}.{lineage} {SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
             preds = [pf(e0, "socket.syscall"), pf(e0, "process.executable"), pf(e0, "destination.port")]
@@ -688,8 +689,8 @@ class ProcessNetworkLink(Playbook):
                 {"shared": "shared", "ambiguous": "ambiguous", "unestablished": "not established"}[c] for c in caps)
                 + ", the lane is capped at lead.")
         if notable:
-            parts.append(f"The process is notable as {notable[0].reason} calling connect() to a non-private "
-                         f"address.")
+            parts.append(f"The process is notable as {notable[0].reason} calling connect() to an address "
+                         f"outside the site's internal networks.")
         alert_event = next((loaded[n.id] for n in alerts if n.id in loaded), None)
         flow_event = next((loaded[n.id] for n in flows if n.id in loaded), None)
         preds = [pf(first, "process.executable"), pf(first, "destination.ip"), pf(first, "destination.port")]

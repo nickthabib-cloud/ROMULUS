@@ -17,7 +17,8 @@ order (the same identity a community ID hashes), so the same connection seen by 
 in several save-interval records, is counted once. A 5-tuple reused later is the same identity; rules that measure
 duration split it again where records are more than STITCH_GAP seconds apart.
 
-Internal and external are the built-in private-address boundary shared with the other network rules.
+Internal and external come from the site's internal-network definition (romulus.detect.netdef), shared with the
+other network rules.
 """
 from __future__ import annotations
 
@@ -1209,9 +1210,9 @@ class OutboundVolumeAsymmetry(_FlowRule):
     attack = ("T1041", "T1048", "T1567")
     assures_negative = False
     positive_only_reason = (
-        "internal and external are judged from the built-in private-address list, not the site's own address plan, "
-        "and only connections that internal addresses initiated are read; transfers outside that view are not "
-        "evaluated, so the absence of a match proves nothing")
+        "internal and external are judged from the site's internal-network definition (the RFC 1918 and reserved "
+        "ranges when it is not configured), and only connections that internal addresses initiated are read; "
+        "transfers outside that view are not evaluated, so the absence of a match proves nothing")
     benign = ("backups and cloud file synchronisation", "log and telemetry shipping", "video and media uploads",
               "software publishing to external repositories")
     next_checks = ("the process on the internal host that owns the connections",

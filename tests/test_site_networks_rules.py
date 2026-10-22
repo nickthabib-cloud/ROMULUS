@@ -118,6 +118,17 @@ def test_ssh_login_rule_reports_the_partner_range_and_not_the_site(configured):
     assert found == {f"web01|admin|{INSIDE_PUBLIC}"}
 
 
+def test_titles_claims_and_reasons_name_the_sites_internal_networks_not_private_space(configured):
+    outside = "outside the site's internal networks"
+    assert outside in host.SshLoginFromExternal.title and outside in correlation.InterpreterExternalConnection.title
+    [login] = run(host.SshLoginFromExternal(), [_login(PARTNER)])
+    assert f"from {PARTNER}, an address {outside}" in login.claim and "non-private" not in login.claim
+    [connect] = run(correlation.InterpreterExternalConnection(), [_connect(PARTNER)])
+    assert f"1 address(es) {outside}" in connect.claim and "non-private" not in connect.claim
+    reason = flows.OutboundVolumeAsymmetry.positive_only_reason
+    assert "internal-network definition" in reason and "built-in private-address list" not in reason
+
+
 def _connect(ip):
     return ev("net_socket", socket__syscall="connect", process__executable="/usr/bin/bash", process__user="root",
               process__pid=4242, process__ppid=1, destination__ip=ip, destination__port=4444)

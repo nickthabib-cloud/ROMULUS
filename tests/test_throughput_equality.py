@@ -34,16 +34,20 @@ from tests import throughput_fixture as tf
 # - tasks, audit, expansion, manifest: under the default definition expansion also resolves a network anchor's
 #   endpoints that the default reads as outside (here one lookup, 203.0.113.8, which no host record carries, so
 #   it is not a victim). Links, anchors and findings are unchanged; the manifest's task counts follow.
+# - candidates, manifest: wording only. "non-private address" becomes "an address outside the site's internal
+#   networks" in the claims and titles of host.ssh_login_external_source, host.interpreter_external_connection and
+#   the correlated-link text, and net.outbound_volume_asymmetry's positive-only reason names the definition.
+#   With the old wording substituted back, both are unchanged.
 GOLDEN_STACK = {
     "anchors": "5bfad42385ad92785c91d770613dff8e893f140c4f8d1606128b7ea0f170c120",
     "audit": "396dfe062e233988393b689f8722a852a9929b89125f19e3a85f111d933990e1",
-    "candidates": "81448272353e19d2e529904941ad3e073a60f1d3fcdcaf4539195f6ea6746bc5",
+    "candidates": "f0317fd671fc534ccbccbdb38ce650cf2b2724da99a448fa8741b4f0e12c09f9",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_entities": "af8053b6219447233c1329e280f0ca64054ceceeea79d5d84bfa12af8e067a23",
     "events": "7cb68efe39e15155efa9b2f8edc22e79b93fb3804ba23981e97fbde26c5b0664",
     "expansion": "8cf87266934aafe1f4c32bcd6e7945552797b91ffe84ec0b3d9109aefe43c9b2",
     "links": "c6589f2bef67ee2bab7f194cb3fa551ff913ac43266ce8cd6a20efd2d6c0aa2b",
-    "manifest": "70518bc1f1f07a8bc9f87d2ae4c3445965fe9f90456bc0d1539b32ad250f7f6f",
+    "manifest": "af8391bc8c63f393ec48cf3b0a94b2f984ed778f5323a664ef97cbadcd49970c",
     "raw": "f3c3185ebf52b2b84224ea7866648e6bbe117267a423b600f203d780178efad9",
     "rule_cells": "fa61a7de1361749ab0f149532bc412aae0c2ce35f2f667a9f9c3a0587d3d3530",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
