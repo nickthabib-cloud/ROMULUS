@@ -63,6 +63,27 @@ def test_token_cap_marks_counter_partial_and_refuses_segment_rows():
     assert list(counter.scope_hour_rows()) == []
 
 
+def test_count_and_pending_caps_make_oversized_segments_partial():
+    rows = KeyCounter("segment", SPEC_BY_ID["bl.exec_path"], row_cap=1)
+    rows.add_keys(T0, [_key("a", None)])
+    rows.add_keys(T0, [_key("b", None)])
+    assert rows.partial and "count row cap 1 exceeded" in rows.reasons
+
+    pendings = KeyCounter("segment", SPEC_BY_ID["bl.exec_pair"], pending_cap=1)
+    for index in range(2):
+        pendings.consume(_event("process_exec", f"child-{index}", **{
+            "process.executable": "/bin/sh", "process.ppid": 99,
+        }), KeyContext())
+    assert pendings.partial and "pending parent cap 1 exceeded" in pendings.reasons
+
+
+def test_missing_reason_collection_stops_after_the_first_partial_fact():
+    counter = KeyCounter("segment", SPEC_BY_ID["bl.exec_path"])
+    for index in range(10_000):
+        counter.consume(_event("process_exec", f"missing-{index}"), KeyContext())
+    assert counter.partial and len(counter.reasons) == 1
+
+
 def test_shuffle_within_one_bucket_is_deterministic():
     items = [
         (T0 + timedelta(seconds=2), [_key("a", "two")]),

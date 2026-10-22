@@ -86,8 +86,7 @@ class SnapshotPlanner:
                     key_version=spec.key_version, start=history_start, end=window_start,
                 )
                 cut_material.extend({
-                    "id": row["id"], "status": row["status"], "created_at": _iso(row["created_at"]),
-                    "target": target, "spec_id": spec.id,
+                    "id": row["id"], "status": row["status"], "target": target, "spec_id": spec.id,
                 } for row in eligible)
                 ranked = sorted(eligible, key=lambda row: (
                     0 if row["origin"] == "hunt" else 1, -row["created_at"].timestamp(), row["id"],

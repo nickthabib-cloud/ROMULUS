@@ -20,8 +20,10 @@ def test_adapter_reuses_partition_planner_execute_and_normalizer(monkeypatch):
 
     monkeypatch.setattr(module, "plan_partitions", plan)
     source = HuntHistorySource("client", {"host-index": "contract"})
-    parts = list(source.plan("host-index", START, START + timedelta(hours=1)))
+    result = source.plan("host-index", START, START + timedelta(hours=1), query_budget=5)
+    parts = list(result.partitions)
     assert len(parts) == 1 and parts[0].expected_records == 2
+    assert result.query_count == 1 and result.completeness == "complete"
     assert planned[0][4][0].field == "event.dataset"
 
     outcome = SimpleNamespace(
@@ -33,6 +35,23 @@ def test_adapter_reuses_partition_planner_execute_and_normalizer(monkeypatch):
     fetched = source.fetch(parts[0])
     assert fetched.completeness == "complete"
     assert fetched.events == ("event",) and fetched.record_count == 2
+
+
+def test_recursive_planning_stops_at_the_physical_query_budget(monkeypatch):
+    calls = []
+
+    def oversized(_client, _target, _contract, window, _filters):
+        calls.append(window)
+        return [(window, module.PARTITION_MAX_DOCS + 1)]
+
+    monkeypatch.setattr(module, "plan_partitions", oversized)
+    source = HuntHistorySource("client", {"host-index": "contract"})
+
+    result = source.plan("host-index", START, START + timedelta(hours=1), query_budget=1)
+
+    assert result.completeness == "partial"
+    assert result.query_count == 1 and len(calls) == 1
+    assert result.reasons == ("planning query budget exhausted",)
 
 
 def test_adapter_turns_normalization_errors_and_unsupported_records_partial(monkeypatch):

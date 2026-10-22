@@ -2,7 +2,7 @@
 
 from romulus.baseline.carry import CarryInStore, ParentExec, PendingResolution, PendingResolver
 from romulus.baseline.count import KeyCounter
-from romulus.baseline.protocol import HistoryFetch, HistoryPartition, HistorySource
+from romulus.baseline.protocol import HistoryFetch, HistoryPartition, HistoryPlan, HistorySource
 from romulus.baseline.spec import (
     BASELINE_SPECS,
     SPEC_BY_ID,
@@ -23,6 +23,7 @@ __all__ = [
     "CarryInStore",
     "HistoryFetch",
     "HistoryPartition",
+    "HistoryPlan",
     "HistorySource",
     "KeyContext",
     "KeyCounter",

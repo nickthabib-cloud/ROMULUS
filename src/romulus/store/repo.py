@@ -11,7 +11,7 @@ from functools import lru_cache
 from itertools import islice
 from typing import Any, ClassVar
 
-from sqlalchemy import Engine, and_, func, or_, select, true, tuple_
+from sqlalchemy import Engine, and_, case, func, or_, select, true, tuple_
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
@@ -73,11 +73,9 @@ def raw_id(target: str, native_id: str) -> str:
 def baseline_prevalence_query(key_id: str, scope_kind: str, hunt_id: str):
     """Distinct scopes of `scope_kind` holding `key_id` in one hunt's frozen snapshot."""
     c, m = t.baseline_count.c, t.baseline_snapshot_segment.c
-    scopes = (select(c.scope)
-              .join(t.baseline_snapshot_segment, and_(m.segment_id == c.segment_id, m.hunt_id == hunt_id))
-              .where(c.key_id == key_id, c.scope_kind == scope_kind)
-              .group_by(c.scope).subquery())
-    return select(func.count()).select_from(scopes)
+    return (select(func.count(c.scope.distinct()))
+            .join(t.baseline_snapshot_segment, and_(m.segment_id == c.segment_id, m.hunt_id == hunt_id))
+            .where(c.key_id == key_id, c.scope_kind == scope_kind))
 
 
 def baseline_key_history_query(key_id: str, scope_kind: str, scope: str, hunt_id: str):
@@ -92,10 +90,9 @@ def baseline_key_history_query(key_id: str, scope_kind: str, scope: str, hunt_id
 def baseline_peer_scopes_query(scope_kind: str, hunt_id: str):
     """Distinct live scopes of `scope_kind` in the segments (ix_baseline_scope_hour_lookup, covering)."""
     c, m = t.baseline_scope_hour.c, t.baseline_snapshot_segment.c
-    scopes = (select(c.scope)
-              .join(t.baseline_snapshot_segment, and_(m.segment_id == c.segment_id, m.hunt_id == hunt_id))
-              .where(c.scope_kind == scope_kind).group_by(c.scope).subquery())
-    return select(func.count()).select_from(scopes)
+    return (select(func.count(c.scope.distinct()))
+            .join(t.baseline_snapshot_segment, and_(m.segment_id == c.segment_id, m.hunt_id == hunt_id))
+            .where(c.scope_kind == scope_kind))
 
 
 def observation_citations_query(hunt_id: str):
@@ -1176,15 +1173,38 @@ class Repo:
             return True
 
     def upsert_baseline_parents(self, rows: Iterable[dict]) -> None:
-        """Keep only the latest observed exec for each live (hunt, host, boot, pid)."""
+        """Keep the latest two observed exec generations for each live PID."""
         stmt = insert(t.baseline_parent_carry)
+        table, excluded = t.baseline_parent_carry.c, stmt.excluded
+        newer = excluded.exec_ts > table.exec_ts
+        older_candidate = and_(
+            excluded.exec_ts < table.exec_ts,
+            or_(table.previous_exec_ts.is_(None), excluded.exec_ts > table.previous_exec_ts),
+        )
         stmt = stmt.on_conflict_do_update(
             index_elements=["hunt_id", "host", "boot", "pid"],
             set_={
-                "exec_ts": stmt.excluded.exec_ts, "executable": stmt.excluded.executable,
-                "parent_pid": stmt.excluded.parent_pid, "raw_id": stmt.excluded.raw_id,
+                "previous_exec_ts": case(
+                    (newer, table.exec_ts), (older_candidate, excluded.exec_ts),
+                    else_=table.previous_exec_ts,
+                ),
+                "previous_executable": case(
+                    (newer, table.executable), (older_candidate, excluded.executable),
+                    else_=table.previous_executable,
+                ),
+                "previous_parent_pid": case(
+                    (newer, table.parent_pid), (older_candidate, excluded.parent_pid),
+                    else_=table.previous_parent_pid,
+                ),
+                "previous_raw_id": case(
+                    (newer, table.raw_id), (older_candidate, excluded.raw_id),
+                    else_=table.previous_raw_id,
+                ),
+                "exec_ts": case((newer, excluded.exec_ts), else_=table.exec_ts),
+                "executable": case((newer, excluded.executable), else_=table.executable),
+                "parent_pid": case((newer, excluded.parent_pid), else_=table.parent_pid),
+                "raw_id": case((newer, excluded.raw_id), else_=table.raw_id),
             },
-            where=stmt.excluded.exec_ts >= t.baseline_parent_carry.c.exec_ts,
         )
         for chunk in _chunks(rows, BASELINE_CHUNK):
             with write_txn(self.engine) as c:
@@ -1199,12 +1219,20 @@ class Repo:
         with self.engine.connect() as c:
             row = c.execute(select(t.baseline_parent_carry).where(
                 table.hunt_id == hunt_id, table.host == host, table.boot == (boot or ""),
-                table.pid == pid, table.exec_ts <= at, table.executable != "",
+                table.pid == pid,
             )).mappings().first()
         if row is None:
             return None
         exec_ts = _stored_utc(row["exec_ts"])
-        return exec_ts.timestamp(), row["executable"], row["parent_pid"], row["raw_id"], boot
+        if exec_ts <= at and row["executable"]:
+            return exec_ts.timestamp(), row["executable"], row["parent_pid"], row["raw_id"], boot
+        if row["previous_exec_ts"] is None or not row["previous_executable"]:
+            return None
+        previous_ts = _stored_utc(row["previous_exec_ts"])
+        if previous_ts > at:
+            return None
+        return (previous_ts.timestamp(), row["previous_executable"], row["previous_parent_pid"],
+                row["previous_raw_id"], boot)
 
     def baseline_parent_count(self, hunt_id: str) -> int:
         with self.engine.connect() as c:

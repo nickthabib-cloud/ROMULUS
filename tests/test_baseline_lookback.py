@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.baseline import CarryInStore, HistoryFetch, HistoryPartition, KeyContext
+from romulus.baseline import CarryInStore, HistoryFetch, HistoryPartition, HistoryPlan, KeyContext
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.lookback import LookbackBudget, LookbackWriter, segment_content_id
 from romulus.baseline.spec import SPEC_BY_ID
@@ -38,11 +38,16 @@ class FakeHistory:
         self.plans: list[tuple[str, datetime]] = []
         self.fetches: list[HistoryPartition] = []
 
-    def plan(self, target, start, end):
+    def plan(self, target, start, end, *, query_budget):
         self.plans.append((target, start))
-        return [HistoryPartition(target, start, end, len(self.events), f"{target}:{start.isoformat()}")]
+        if query_budget < 1:
+            return HistoryPlan((), 0, "partial", ("planning query budget exhausted",))
+        expected = sum(start <= event.ts < end for event in self.events)
+        return HistoryPlan((
+            HistoryPartition(target, start, end, expected, f"{target}:{start.isoformat()}"),
+        ), 1, "complete", ())
 
-    def fetch(self, partition):
+    def fetch(self, partition, *, record_budget=None):
         self.fetches.append(partition)
         if self.outcomes:
             return self.outcomes.pop(0)
@@ -60,6 +65,7 @@ def _writer(repo, source, **budget):
     return LookbackWriter(
         repo, source, site="site", specs=[SPEC], normalizer="fixture@1",
         budget=LookbackBudget(**({"queries": 100, "records": 1000, "seconds": 60} | budget)),
+        now=lambda: START,
     )
 
 
@@ -111,6 +117,71 @@ def test_budget_exhaustion_is_visible_and_resume_skips_completed_hours():
     )
     assert resumed.complete == 1 and resumed.gaps == ()
     assert [target for target, _ in resumed_source.plans] == ["b"]
+
+
+def test_exact_record_budget_omits_before_fetching_partition():
+    repo, source = _repo(), FakeHistory([_event(1, START - timedelta(minutes=1))])
+    result = _writer(repo, source, records=0).fill(
+        hunt_id="build", targets=["host"], start=START - timedelta(hours=1), end=START,
+    )
+    assert source.fetches == []
+    assert result.records == 0 and result.gaps[0].state == "omitted_budget"
+
+
+def test_wall_budget_is_rechecked_after_a_slow_source_call():
+    class Clock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    class SlowPlan(FakeHistory):
+        def plan(self, target, start, end, *, query_budget):
+            result = super().plan(target, start, end, query_budget=query_budget)
+            clock.value = 11.0
+            return result
+
+    clock = Clock()
+    repo, source = _repo(), SlowPlan()
+    writer = LookbackWriter(
+        repo, source, site="site", specs=[SPEC], normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=10, seconds=10), clock=clock, now=lambda: START,
+    )
+
+    result = writer.fill(
+        hunt_id="build", targets=["host"], start=START - timedelta(hours=1), end=START,
+    )
+
+    assert source.fetches == [] and repo.baseline_segments() == []
+    assert result.gaps[0].state == "omitted_budget"
+
+
+def test_wall_budget_is_rechecked_after_a_slow_fetch():
+    class Clock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    class SlowFetch(FakeHistory):
+        def fetch(self, partition, *, record_budget=None):
+            result = super().fetch(partition, record_budget=record_budget)
+            clock.value = 11.0
+            return result
+
+    clock = Clock()
+    repo, source = _repo(), SlowFetch([_event(1, START - timedelta(minutes=1))])
+    writer = LookbackWriter(
+        repo, source, site="site", specs=[SPEC], normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=10, seconds=10), clock=clock, now=lambda: START,
+    )
+
+    result = writer.fill(
+        hunt_id="build", targets=["host"], start=START - timedelta(hours=1), end=START,
+    )
+
+    assert len(source.fetches) == 1 and repo.baseline_segments() == []
+    assert result.records == 1 and result.gaps[0].state == "omitted_budget"
 
 
 def test_lookback_counts_equal_direct_key_counter_counts():
@@ -167,6 +238,40 @@ def test_building_segment_is_invisible_and_stale_cleanup_removes_its_rows():
     assert repo.baseline_segments() == [] and list(repo.baseline_counts(row["id"])) == []
 
 
+def test_fresh_building_segment_is_not_cleaned_by_a_concurrent_writer():
+    repo = _repo()
+    writer = _writer(repo, FakeHistory())
+    row = writer.segment_row(
+        hunt_id="build", target="host", spec=SPEC,
+        start=START - timedelta(hours=1), end=START, events_total=0,
+    )
+    assert repo.begin_baseline_segment(row)
+    contender = _writer(repo, FakeHistory()).fill(
+        hunt_id="other-builder", targets=["host"], start=START - timedelta(hours=1), end=START,
+    )
+    assert contender.complete == 0
+    assert repo.baseline_segments()[0]["status"] == "building"
+
+
+def test_unresolved_exec_pair_pending_never_becomes_an_empty_complete_segment():
+    repo = _repo()
+    child = TypedEvent(
+        id="child", family="process_exec", ts=START - timedelta(minutes=1), host="web01",
+        fields={"process.executable": fv("/bin/sh", "fixture"), "process.ppid": fv(99, "fixture")},
+        raw=[], normalizer="fixture@1",
+    )
+    writer = LookbackWriter(
+        repo, FakeHistory([child]), site="site", specs=[SPEC_BY_ID["bl.exec_pair"]],
+        normalizer="fixture@1", budget=LookbackBudget(queries=10, records=10, seconds=10),
+        now=lambda: START,
+    )
+    result = writer.fill(
+        hunt_id="build", targets=["host-index"], start=START - timedelta(hours=1), end=START,
+    )
+    assert repo.baseline_segments(statuses=["active"]) == []
+    assert result.gaps[0].state == "partial" and "parent exec before history" in result.gaps[0].reason
+
+
 def test_complete_lookback_fetch_records_parent_carry_on_disk():
     repo = _repo()
     repo.create_hunt("build", {}, "d", "test")
@@ -179,9 +284,83 @@ def test_complete_lookback_fetch_records_parent_carry_on_disk():
     writer = LookbackWriter(
         repo, FakeHistory([event]), site="site", specs=[SPEC], normalizer="fixture@1",
         budget=LookbackBudget(queries=10, records=10, seconds=10), parent_carry=carry,
+        now=lambda: START,
     )
     writer.fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=1), end=START)
     assert carry.lookup("web01", 42, START.timestamp(), "boot-a")[1] == "/bin/tool1"
+
+
+def test_parent_in_an_earlier_hour_is_explicit_then_resolves_on_resume():
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    parent = TypedEvent(
+        id="parent", family="process_exec", ts=START - timedelta(minutes=90), host="web01",
+        fields={
+            "process.pid": fv(10, "fixture"), "process.ppid": fv(1, "fixture"),
+            "process.executable": fv("/usr/sbin/parent", "fixture"),
+            "host.boot.id": fv("boot-a", "fixture"),
+        }, raw=[], normalizer="fixture@1",
+    )
+    child = TypedEvent(
+        id="child", family="process_exec", ts=START - timedelta(minutes=30), host="web01",
+        fields={
+            "process.pid": fv(11, "fixture"), "process.ppid": fv(10, "fixture"),
+            "process.executable": fv("/bin/sh", "fixture"),
+            "host.boot.id": fv("boot-a", "fixture"),
+        }, raw=[], normalizer="fixture@1",
+    )
+    carry = CarryInStore(repo, "build")
+
+    def run():
+        return LookbackWriter(
+            repo, FakeHistory([parent, child]), site="site", specs=[SPEC_BY_ID["bl.exec_pair"]],
+            normalizer="fixture@1", budget=LookbackBudget(queries=20, records=20, seconds=10),
+            parent_carry=carry, now=lambda: START,
+        ).fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START)
+
+    first = run()
+    assert any(gap.start == START - timedelta(hours=1) and gap.state == "partial" for gap in first.gaps)
+    second = run()
+    active = repo.baseline_segments(statuses=["active"])
+    assert second.complete == 1
+    assert any(row["start"] == START - timedelta(hours=1) for row in active)
+
+
+def test_exec_pair_writer_matches_direct_counter_with_same_hour_parent():
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    parent = TypedEvent(
+        id="parent", family="process_exec", ts=START - timedelta(minutes=2), host="web01",
+        fields={
+            "process.pid": fv(10, "fixture"), "process.ppid": fv(1, "fixture"),
+            "process.executable": fv("/usr/sbin/parent", "fixture"),
+            "host.boot.id": fv("boot-a", "fixture"),
+        }, raw=[], normalizer="fixture@1",
+    )
+    child = TypedEvent(
+        id="child", family="process_exec", ts=START - timedelta(minutes=1), host="web01",
+        fields={
+            "process.pid": fv(11, "fixture"), "process.ppid": fv(10, "fixture"),
+            "process.executable": fv("/bin/sh", "fixture"),
+            "host.boot.id": fv("boot-a", "fixture"),
+        }, raw=[], normalizer="fixture@1",
+    )
+    carry = CarryInStore(repo, "build")
+    carry.observe_events([parent])
+    result = LookbackWriter(
+        repo, FakeHistory([child]), site="site", specs=[SPEC_BY_ID["bl.exec_pair"]],
+        normalizer="fixture@1", budget=LookbackBudget(queries=10, records=10, seconds=10),
+        parent_carry=carry, now=lambda: START,
+    ).fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=1), end=START)
+
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    stored = [{key: value for key, value in row.items() if key != "segment_id"}
+              for row in repo.baseline_counts(segment["id"])]
+    direct = KeyCounter("direct", SPEC_BY_ID["bl.exec_pair"])
+    direct.consume(child, KeyContext(pid_table=carry))
+    expected = [{key: value for key, value in row.items() if key != "segment_id"}
+                for row in direct.count_rows()]
+    assert result.complete == 1 and stored == expected
 
 
 @pytest.mark.slow

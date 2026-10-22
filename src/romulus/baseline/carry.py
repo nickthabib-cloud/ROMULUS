@@ -10,6 +10,10 @@ from romulus.detect.correlation import boot_of
 from romulus.evidence.typed import Outcome, TypedEvent
 from romulus.store.repo import Repo
 
+# Ten thousand hot hosts avoid a read per exec in large sites; overflow remains correct through indexed disk
+# lookups, so memory never grows with the total number of hosts.
+MARKER_CACHE_CAP = 10_000
+
 
 @dataclass(frozen=True)
 class ParentExec:
@@ -30,11 +34,11 @@ class PendingResolution:
 
 
 class CarryInStore:
-    """Latest exec per live PID, bounded by PIDs in the newest observed boot per host.
+    """Latest two exec generations per live PID in the newest observed boot per host.
 
     History may arrive newest-first. A different boot only replaces a host when its timestamp is newer than
     the current marker; older-boot rows are ignored. Within the chosen boot, the primary-key upsert retains the
-    latest exec for each PID. Romulus currently normalizes execs but not process-exit records, so "live" means
+    latest two execs for each PID. Romulus currently normalizes execs but not process-exit records, so "live" means
     not superseded by a PID reuse or reboot as far as available telemetry shows.
     """
 
@@ -49,8 +53,14 @@ class CarryInStore:
         if host not in self._markers:
             stored = self.repo.baseline_parent_boot(self.hunt_id, host)
             if stored is not None:
-                self._markers[host] = stored
+                self._remember_marker(host, stored)
+                return stored
         return self._markers.get(host)
+
+    def _remember_marker(self, host: str, marker: tuple[str, datetime]) -> None:
+        """Cache common hosts while leaving overflow authoritative on disk."""
+        if host in self._markers or len(self._markers) < MARKER_CACHE_CAP:
+            self._markers[host] = marker
 
     def observe_events(self, events: Iterable[TypedEvent], *, chunk_size: int = 100_000) -> int:
         def rows():
@@ -74,13 +84,15 @@ class CarryInStore:
     def observe_rows(self, rows: Iterable[ParentExec], *, chunk_size: int = 100_000) -> int:
         if chunk_size < 1:
             raise ValueError("carry-in chunk size must be positive")
-        pending: dict[tuple[str, str, int], dict] = {}
+        pending: dict[tuple[str, str, int], list[dict]] = {}
         seen = maximum = 0
 
         def flush() -> None:
             nonlocal maximum, seen
             if pending:
-                self.repo.upsert_baseline_parents(pending.values())
+                self.repo.upsert_baseline_parents(
+                    row for generations in pending.values() for row in generations
+                )
                 pending.clear()
             for host, (boot, latest) in sorted(self._markers.items()):
                 self.repo.set_baseline_parent_boot(self.hunt_id, host, boot, latest)
@@ -98,7 +110,7 @@ class CarryInStore:
             if marker is None:
                 if not self.repo.set_baseline_parent_boot(self.hunt_id, item.host, boot, timestamp):
                     continue
-                self._markers[item.host] = (boot, timestamp)
+                self._remember_marker(item.host, (boot, timestamp))
             elif marker[0] != boot:
                 if marker[1] >= timestamp:
                     continue
@@ -106,17 +118,20 @@ class CarryInStore:
                 pending = {key: value for key, value in pending.items() if key[0] != item.host}
                 if not self.repo.set_baseline_parent_boot(self.hunt_id, item.host, boot, timestamp):
                     continue
-                self._markers[item.host] = (boot, timestamp)
+                self._remember_marker(item.host, (boot, timestamp))
             elif timestamp > marker[1]:
-                self._markers[item.host] = (boot, timestamp)
+                self._remember_marker(item.host, (boot, timestamp))
             key = (item.host, boot, item.pid)
-            current = pending.get(key)
-            if current is None or current["exec_ts"] <= timestamp:
-                pending[key] = {
-                    "hunt_id": self.hunt_id, "host": item.host, "boot": boot, "pid": item.pid,
-                    "exec_ts": timestamp, "executable": item.executable,
-                    "parent_pid": item.parent_pid, "raw_id": item.raw_id,
-                }
+            row = {
+                "hunt_id": self.hunt_id, "host": item.host, "boot": boot, "pid": item.pid,
+                "exec_ts": timestamp, "executable": item.executable,
+                "parent_pid": item.parent_pid, "raw_id": item.raw_id,
+            }
+            generations = pending.setdefault(key, [])
+            if all(generation["exec_ts"] != timestamp for generation in generations):
+                generations.append(row)
+                generations.sort(key=lambda generation: generation["exec_ts"], reverse=True)
+                del generations[2:]
             seen += 1
             if seen >= chunk_size:
                 flush()

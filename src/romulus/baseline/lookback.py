@@ -9,13 +9,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from romulus.baseline.carry import CarryInStore
+from romulus.baseline.carry import CarryInStore, PendingResolver
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.protocol import HistorySource
 from romulus.baseline.spec import BaselineSpec, KeyContext
+from romulus.store.db import utcnow
 from romulus.store.repo import Repo
 
 _HOUR = timedelta(hours=1)
+# A normal source can produce at most 720 five-second leaves in one hour. The defensive partition cap leaves
+# more than an order of magnitude of headroom; the target-hour cap bounds the returned coverage ledger itself.
+MAX_WORK_ITEMS = 100_000
+MAX_PARTITIONS_PER_HOUR = 10_000
 
 
 @dataclass(frozen=True)
@@ -80,12 +85,14 @@ class LookbackWriter:
                  specs: list[BaselineSpec], normalizer: str, budget: LookbackBudget,
                  context: KeyContext | None = None,
                  parent_carry: CarryInStore | None = None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 now: Callable[[], datetime] = utcnow):
         self.repo, self.source, self.site = repo, source, site
         self.specs = tuple(sorted(specs, key=lambda item: item.id))
         self.normalizer, self.budget = normalizer, budget
         self.context, self.clock = context or KeyContext(), clock
         self.parent_carry = parent_carry
+        self.now = now
 
     def segment_row(self, *, hunt_id: str, target: str, spec: BaselineSpec,
                     start: datetime, end: datetime, events_total: int,
@@ -102,7 +109,7 @@ class LookbackWriter:
             "normalizer": self.normalizer, "start": start, "end": end, "bucket": spec.bucket,
             "origin": "lookback", "source_hunt_id": None, "built_by_hunt_id": hunt_id,
             "exclusion_digest": exclusion_digest, "excluded_keys": excluded_keys, "hunted": 0,
-            "events_total": events_total, "status": "building", "created_at": start,
+            "events_total": events_total, "status": "building", "created_at": self.now(),
         }
 
     def _covered(self, target: str, spec: BaselineSpec, start: datetime, end: datetime) -> bool:
@@ -116,15 +123,20 @@ class LookbackWriter:
         if start >= end or any((value.minute, value.second, value.microsecond) != (0, 0, 0)
                                for value in (start, end)):
             raise ValueError("lookback fill requires a nonempty hour-aligned interval")
-        self.repo.cleanup_baseline_building(before=end)
+        self.repo.cleanup_baseline_building(before=self.now() - _HOUR)
         begun = self.clock()
         queries = records = complete = 0
         longest = 0.0
         gaps: list[HistoryGap] = []
         hours = int((end - start) / _HOUR)
+        ordered_targets = tuple(sorted(set(targets)))
+        if hours * len(ordered_targets) > MAX_WORK_ITEMS:
+            raise ValueError(f"lookback work exceeds {MAX_WORK_ITEMS} target-hours")
         # One newest hour from every target before moving older: round-robin without target starvation.
-        work = [(target, end - offset * _HOUR, end - (offset - 1) * _HOUR)
-                for offset in range(1, hours + 1) for target in sorted(set(targets))]
+        work = (
+            (target, end - offset * _HOUR, end - (offset - 1) * _HOUR)
+            for offset in range(1, hours + 1) for target in ordered_targets
+        )
         for target, hour_start, hour_end in work:
             missing = tuple(spec for spec in self.specs if not self._covered(target, spec, hour_start, hour_end))
             if not missing:
@@ -136,26 +148,59 @@ class LookbackWriter:
                 ))
                 continue
             try:
-                partitions = list(self.source.plan(target, hour_start, hour_end))
-                queries += 1
+                planned = self.source.plan(
+                    target, hour_start, hour_end, query_budget=self.budget.queries - queries,
+                )
+                queries += planned.query_count
             except Exception as error:  # noqa: BLE001 - source failure is a coverage fact
+                queries = min(self.budget.queries, queries + 1)
                 gaps.append(HistoryGap(
                     target, hour_start, hour_end, "failed", f"partition planning failed: {error}"[:300],
+                    tuple(spec.id for spec in missing),
+                ))
+                continue
+            if planned.completeness != "complete":
+                gaps.append(HistoryGap(
+                    target, hour_start, hour_end,
+                    "failed" if planned.completeness == "failed" else "partial",
+                    "; ".join(planned.reasons) or planned.completeness,
+                    tuple(spec.id for spec in missing),
+                ))
+                continue
+            if len(planned.partitions) > MAX_PARTITIONS_PER_HOUR:
+                gaps.append(HistoryGap(
+                    target, hour_start, hour_end, "partial",
+                    f"history partition cap {MAX_PARTITIONS_PER_HOUR} exceeded",
+                    tuple(spec.id for spec in missing),
+                ))
+                continue
+            if self.clock() - begun >= self.budget.seconds:
+                gaps.append(HistoryGap(
+                    target, hour_start, hour_end, "omitted_budget", "lookback wall-clock budget exhausted",
                     tuple(spec.id for spec in missing),
                 ))
                 continue
             counters = {spec.id: KeyCounter("pending", spec) for spec in missing}
             events_total = 0
             failure: tuple[str, str] | None = None
-            for partition in sorted(partitions, key=lambda item: (item.start, item.end, item.identity)):
+            for partition in planned.partitions:
                 if self.clock() - begun >= self.budget.seconds or queries >= self.budget.queries:
                     failure = ("omitted_budget", "lookback query or wall-clock budget exhausted")
                     break
+                if records + partition.expected_records > self.budget.records:
+                    failure = ("omitted_budget", "lookback record budget exhausted")
+                    break
                 try:
-                    fetched = self.source.fetch(partition)
+                    fetched = self.source.fetch(
+                        partition, record_budget=self.budget.records - records,
+                    )
                     queries += 1
                 except Exception as error:  # noqa: BLE001 - adapter error is a coverage fact
                     failure = ("failed", f"partition fetch failed: {error}"[:300])
+                    break
+                records += fetched.record_count
+                if self.clock() - begun >= self.budget.seconds:
+                    failure = ("omitted_budget", "lookback wall-clock budget exhausted")
                     break
                 if fetched.completeness != "complete":
                     failure = (
@@ -169,10 +214,6 @@ class LookbackWriter:
                         f"received {fetched.record_count}"
                     ))
                     break
-                if records + fetched.record_count > self.budget.records:
-                    failure = ("omitted_budget", "lookback record budget exhausted")
-                    break
-                records += fetched.record_count
                 events_total += len(fetched.events)
                 if self.parent_carry is not None:
                     self.parent_carry.observe_events(fetched.events)
@@ -184,6 +225,17 @@ class LookbackWriter:
                     target, hour_start, hour_end, failure[0], failure[1], tuple(counter for counter in counters),
                 ))
                 continue
+            resolver = PendingResolver(self.parent_carry) if self.parent_carry is not None else None
+            for counter in counters.values():
+                for pending in counter.take_pendings():
+                    if resolver is None:
+                        counter.mark_partial("parent exec before history")
+                        continue
+                    resolution = resolver.resolve(pending)
+                    if resolution.reason is not None:
+                        counter.mark_partial(f"{pending.event_id}: {resolution.reason}")
+                    else:
+                        counter.add_keys(pending.ts, resolution.keys)
             partial = tuple(sorted(spec_id for spec_id, counter in counters.items() if counter.partial))
             if partial:
                 reason = "; ".join(

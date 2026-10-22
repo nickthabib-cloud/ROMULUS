@@ -37,7 +37,9 @@ def test_pid_reuse_across_reboot_never_resolves_old_boot():
 def test_pid_reuse_within_boot_returns_latest_nonempty_exec_before_child():
     _repo, store = _store()
     store.observe_rows([_row(10, 1, "/old"), _row(10, 2, "/new")])
+    between = store.lookup("host", 10, (START + timedelta(seconds=1.5)).timestamp(), "boot-a")
     parent = store.lookup("host", 10, (START + timedelta(seconds=3)).timestamp(), "boot-a")
+    assert between[1] == "/old"
     assert parent[1] == "/new" and parent[0] == (START + timedelta(seconds=2)).timestamp()
     store.observe_rows([_row(11, 2, "")])
     assert store.lookup("host", 11, (START + timedelta(seconds=3)).timestamp(), "boot-a") is None

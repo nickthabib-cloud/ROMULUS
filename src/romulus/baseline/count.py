@@ -15,7 +15,12 @@ from romulus.baseline.spec import (
 )
 from romulus.evidence.typed import TypedEvent
 
+# One 120k-record physical partition can legitimately produce two keys per record. The token/pending caps
+# therefore admit that full partition plus headroom; the row cap admits the required million-row segment.
+# Crossing any cap makes the whole counter partial rather than silently approximating it.
 DEFAULT_TOKEN_CAP = 250_000
+DEFAULT_ROW_CAP = 1_000_000
+DEFAULT_PENDING_CAP = 250_000
 
 
 def _bucket(ts: datetime, width: str) -> datetime:
@@ -34,15 +39,19 @@ class KeyCounter:
     """
 
     def __init__(self, segment_id: str, spec: BaselineSpec, *,
-                 token_cap: int = DEFAULT_TOKEN_CAP):
-        if token_cap < 1:
-            raise ValueError("token_cap must be positive")
+                 token_cap: int = DEFAULT_TOKEN_CAP, row_cap: int = DEFAULT_ROW_CAP,
+                 pending_cap: int = DEFAULT_PENDING_CAP):
+        if min(token_cap, row_cap, pending_cap) < 1:
+            raise ValueError("counter caps must be positive")
         self.segment_id = segment_id
         self.spec = spec
         self.token_cap = token_cap
+        self.row_cap = row_cap
+        self.pending_cap = pending_cap
         self._counts: dict[tuple, dict] = {}
         self._scope_hours: dict[tuple, int] = defaultdict(int)
         self._tokens: dict[tuple, set[str]] = defaultdict(set)
+        self._token_entries = 0
         self._open_bucket: datetime | None = None
         self._partial_reasons: set[str] = set()
         self._pendings: list[Pending] = []
@@ -60,9 +69,18 @@ class KeyCounter:
     def pendings(self) -> tuple[Pending, ...]:
         return tuple(self._pendings)
 
+    def take_pendings(self) -> tuple[Pending, ...]:
+        """Return and release compact unresolved children before persistence."""
+        pending, self._pendings = tuple(self._pendings), []
+        return pending
+
+    def mark_partial(self, reason: str) -> None:
+        """Make incompleteness explicit; partial counters never expose rows."""
+        self._partial_reasons.add(reason)
+
     @property
     def token_entries(self) -> int:
-        return sum(len(tokens) for tokens in self._tokens.values())
+        return self._token_entries
 
     def bind_segment(self, segment_id: str) -> None:
         """Bind staged counts to their content-derived segment id before persistence."""
@@ -73,11 +91,16 @@ class KeyCounter:
             row["segment_id"] = segment_id
 
     def consume(self, event: TypedEvent, context: KeyContext) -> None:
+        if self.partial:
+            return
         result = self.spec.keys(event, context)
         if isinstance(result, Missing):
-            self._partial_reasons.add(f"{event.id}: {result.reason}")
+            self.mark_partial(f"{event.id}: {result.reason}")
         elif isinstance(result, Pending):
-            self._pendings.append(result)
+            if len(self._pendings) >= self.pending_cap:
+                self.mark_partial(f"pending parent cap {self.pending_cap} exceeded")
+            else:
+                self._pendings.append(result)
         elif not isinstance(result, NotApplicable):
             self.add_keys(event.ts, result)
 
@@ -89,9 +112,26 @@ class KeyCounter:
         bucket = _bucket(ts, self.spec.bucket)
         if self._open_bucket is None or bucket > self._open_bucket:
             self._tokens.clear()
+            self._token_entries = 0
             self._open_bucket = bucket
         elif bucket < self._open_bucket:
-            self._partial_reasons.add("events arrived after their bucket was closed")
+            self.mark_partial("events arrived after their bucket was closed")
+            return
+
+        identities = {
+            (key.scope_kind, key.scope, key.key_digest, bucket) for key in keys
+            if (key.scope_kind, key.scope, key.key_digest, bucket) not in self._counts
+        }
+        if len(self._counts) + len(identities) > self.row_cap:
+            self.mark_partial(f"count row cap {self.row_cap} exceeded")
+            return
+        hour = _bucket(ts, "hour")
+        scope_identities = {
+            (scope_kind, scope, hour) for scope_kind, scope in event_scopes
+            if (scope_kind, scope, hour) not in self._scope_hours
+        }
+        if len(self._scope_hours) + len(scope_identities) > self.row_cap:
+            self.mark_partial(f"scope-hour row cap {self.row_cap} exceeded")
             return
 
         accepted: list[BaselineKey] = []
@@ -107,11 +147,12 @@ class KeyCounter:
                         row["last_ts"] = max(row["last_ts"], instant)
                     continue
                 if self.token_entries >= self.token_cap:
-                    self._partial_reasons.add(
+                    self.mark_partial(
                         f"dedup token cap {self.token_cap} exceeded in an open bucket",
                     )
                     return
                 tokens.add(key.dedup_token)
+                self._token_entries += 1
                 self.max_token_entries = max(self.max_token_entries, self.token_entries)
             accepted.append(key)
 
@@ -136,7 +177,6 @@ class KeyCounter:
                 row["first_ts"] = min(row["first_ts"], ts.astimezone(UTC))
                 row["last_ts"] = max(row["last_ts"], ts.astimezone(UTC))
 
-        hour = _bucket(ts, "hour")
         for scope_kind, scope in sorted(event_scopes):
             self._scope_hours[(scope_kind, scope, hour)] += 1
 

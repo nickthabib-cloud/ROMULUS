@@ -395,7 +395,7 @@ def test_query_plans_serve_the_baseline_probes_from_indexes_without_temp_btrees(
     assert "INDEX ix_baseline_scope_hour_lookup (scope_kind=? AND scope=?)" in plans["scope_hours"]
     for plan in plans.values():
         assert "COVERING INDEX sqlite_autoindex_baseline_snapshot_segment_1 (hunt_id=? AND segment_id=?)" in plan
-        assert "TEMP B-TREE" not in plan and "SCAN baseline" not in plan
+        assert "TEMP B-TREE" not in plan and "SCAN" not in plan
 
 
 class _Counted:

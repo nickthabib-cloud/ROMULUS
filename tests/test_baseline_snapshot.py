@@ -102,9 +102,10 @@ def test_min_live_hours_and_resume_write_once():
 
 def test_twin_plans_have_identical_digest():
     outputs = []
-    for hunt_id in ("hunt-a", "hunt-b"):
+    for index, hunt_id in enumerate(("hunt-a", "hunt-b")):
         repo = _repo(hunt_id)
-        _segment(repo, "segment", START - timedelta(hours=4), START)
+        _segment(repo, "segment", START - timedelta(hours=4), START,
+                 created=START + timedelta(days=index))
         outputs.append(_freeze(repo, hunt_id)["digest"])
     assert outputs[0] == outputs[1]
 
