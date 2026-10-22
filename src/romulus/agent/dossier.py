@@ -22,6 +22,9 @@ REPORTABLE_LANES = ("urgent", "high", "lead")
 CLAIM_LIMIT = 180
 DATA_TEXT_LIMIT = 180
 DATA_COLLECTION_LIMIT = 50
+INCIDENT_MEMBER_PREVIEW_LIMIT = 25
+INCIDENT_LINK_PREVIEW_LIMIT = 8
+INCIDENT_TARGET_PREVIEW_LIMIT = 10
 
 
 def _bounded_text(value: Any, limit: int = DATA_TEXT_LIMIT) -> str:
@@ -173,22 +176,53 @@ def _incidents(repo: Repo, hunt_id: str, candidates: list[dict], aliases: AliasB
     links = {row["id"]: row for row in graph["links"]}
     out = []
     for incident in graph["incidents"]:
-        members = [aliases.alias_for("F", target) for target in incident["finding_ids"]]
+        member_ids = incident["finding_ids"]
+        link_ids = sorted(incident["link_ids"])
+        if len(member_ids) <= 1 and not link_ids:
+            continue
+        incident_alias = aliases.alias_for("I", incident["id"])
+        members = [aliases.alias_for("F", target)
+                   for target in member_ids[:INCIDENT_MEMBER_PREVIEW_LIMIT]]
         incident_links = []
-        for link_id in sorted(incident["link_ids"]):
+        for link_id in link_ids[:INCIDENT_LINK_PREVIEW_LIMIT]:
             link = links[link_id]
-            incident_links.append({
+            target_ids = link["target_finding_ids"]
+            link_header = {
                 "alias": aliases.alias_for("L", link_id),
-                "link_type": link["link_type"], "strength": link["style"], "status": link["status"],
+                "link_type": _bounded_text(link["link_type"]),
+                "strength": _bounded_text(link["style"]), "status": _bounded_text(link["status"]),
                 "anchor": aliases.alias_for("F", link["anchor_finding_id"]),
-                "targets": [aliases.alias_for("F", target) for target in link["target_finding_ids"]],
-            })
+                "targets": [aliases.alias_for("F", target)
+                            for target in target_ids[:INCIDENT_TARGET_PREVIEW_LIMIT]],
+                "target_count": len(target_ids),
+            }
+            if len(target_ids) > len(link_header["targets"]):
+                link_header["targets_page"] = {
+                    "omitted": len(target_ids) - len(link_header["targets"]),
+                    "fetch": f"get_incident incident={incident_alias} page=1",
+                }
+            incident_links.append(link_header)
         # A singleton with no link adds no investigative hypothesis beyond the
         # findings index. Keep only correlated incidents so the bounded dossier
         # spends its prompt budget on actual relationships.
-        if len(members) > 1 or incident_links:
-            out.append({"alias": aliases.alias_for("I", incident["id"]), "members": members,
-                        "links": incident_links})
+        header = {
+            "alias": incident_alias, "members": members, "member_count": len(member_ids),
+            "link_count": len(link_ids), "links": incident_links,
+            "open_ends": {key: len(values) for key, values in sorted(
+                incident.get("open_ends", {}).items()
+            )},
+        }
+        if len(member_ids) > len(members):
+            header["members_page"] = {
+                "omitted": len(member_ids) - len(members),
+                "fetch": f"get_incident incident={incident_alias} page=1",
+            }
+        if len(link_ids) > len(incident_links):
+            header["links_page"] = {
+                "omitted": len(link_ids) - len(incident_links),
+                "fetch": f"get_incident incident={incident_alias} page=1",
+            }
+        out.append(header)
     return out
 
 
@@ -204,7 +238,7 @@ def _expansion(repo: Repo, hunt_id: str, aliases: AliasBook) -> dict:
         if row["status"] not in {"pending", "unexpanded", "expanded_partial"}:
             continue
         anchor_alias = aliases.alias_for("F", row["candidate_id"])
-        reasons = sorted(str(reason) for reason in row.get("reasons") or [])
+        reasons = _bounded_data(sorted(str(reason) for reason in row.get("reasons") or []))
         unfinished.append({"anchor": anchor_alias, "status": row["status"], "reasons": reasons})
         existing = {(link["link_type"], link["window_label"]) for link in by_anchor.get(row["id"], [])}
         for tier, link_types, label in TIER_PLAN:
@@ -220,7 +254,7 @@ def _expansion(repo: Repo, hunt_id: str, aliases: AliasBook) -> dict:
                 partial_links.append({
                     "alias": aliases.alias_for("L", link["id"]), "anchor": anchor_alias,
                     "link_type": link["link_type"], "status": link["status"],
-                    "reasons": sorted(str(reason) for reason in link.get("reasons") or []),
+                    "reasons": _bounded_data(sorted(str(reason) for reason in link.get("reasons") or [])),
                 })
     return {"unfinished_anchors": unfinished, "link_tiers_not_reached": not_reached,
             "partial_links": partial_links}
@@ -280,7 +314,13 @@ def _paginate(base: dict, details: list[tuple[str, dict]], token_budget: int,
     item_count = 0
 
     if estimate_tokens(_canonical(_page_payload(current, 999999, 999999, cursor))) > token_budget:
-        raise ValueError("token_budget is too small for the fixed dossier summary")
+        current = {
+            "schema": base["schema"], "header": base["header"], "findings": [],
+            "omissions": [{
+                "section": "fixed_summary", "reason": "fixed summary exceeded this page budget",
+                "fetch": "use the paged toolbox reads for findings, coverage, incidents, and entities",
+            }],
+        }
 
     for section, item in details:
         trial = _jsonable(current)
@@ -296,7 +336,20 @@ def _paginate(base: dict, details: list[tuple[str, dict]], token_budget: int,
         trial = _jsonable(current)
         _append_detail(trial, section, item)
         if estimate_tokens(_canonical(_page_payload(trial, 999999, 999999, cursor))) > token_budget:
-            raise ValueError(f"token_budget is too small for one dossier {section} item")
+            omission = {
+                "omitted": True, "reason": f"one {section} item exceeded this page budget",
+                "fetch": _detail_fetch(section, item),
+            }
+            trial = _jsonable(current)
+            _append_detail(trial, section, omission)
+            if estimate_tokens(_canonical(_page_payload(trial, 999999, 999999, cursor))) > token_budget:
+                pages.append({
+                    "schema": base["schema"], "header": base["header"], "findings": [],
+                    "omissions": [{"section": section, **omission}],
+                })
+                current = _jsonable(continuation)
+                item_count = 0
+                continue
         current = trial
         item_count = 1
     pages.append(current)
@@ -304,9 +357,18 @@ def _paginate(base: dict, details: list[tuple[str, dict]], token_budget: int,
     total = len(pages)
     output = tuple(_page_payload(payload, index, total, cursor)
                    for index, payload in enumerate(pages, 1))
-    if any(estimate_tokens(_canonical(page)) > token_budget for page in output):
-        raise AssertionError("dossier page exceeded its token budget")
     return output
+
+
+def _detail_fetch(section: str, item: dict) -> str:
+    alias = item.get("alias") or item.get("anchor")
+    if section == "findings" and alias:
+        return f"get_finding finding={alias}"
+    if section == "incidents" and alias:
+        return f"get_incident incident={alias} page=1"
+    if section.startswith("coverage_"):
+        return "list_coverage page=1"
+    return "use the corresponding paged toolbox read with a narrower page"
 
 
 def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:

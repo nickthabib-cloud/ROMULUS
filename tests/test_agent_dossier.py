@@ -4,11 +4,15 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from sqlalchemy import insert
+
 from romulus.agent.dossier import CLAIM_LIMIT, build_dossier
 from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.toolbox import Toolbox
 from romulus.evidence.typed import Outcome, TypedEvent, fv
-from romulus.store.db import make_engine, migrate
+from romulus.store import schema as t
+from romulus.store.db import make_engine, migrate, utcnow
 from romulus.store.repo import Repo
 
 T = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
@@ -98,6 +102,94 @@ def _repo(reverse: bool = False) -> Repo:
         "benign_alternatives": [], "next_checks": [], "group_key": "", "source_case_id": None,
         "source_anchor_id": None, "source_link_id": None,
     })
+    return repo
+
+
+def _linked_incident_repo(*, anchors: int = 40, links_per_anchor: int = 15,
+                          source_error: str | None = None) -> Repo:
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("incident", {
+        "window": {"start": T.isoformat(), "end": (T + timedelta(hours=2)).isoformat()},
+        "targets": ["host-index"],
+        "source_profiles": {"host-index": {"id": "hp", "error": source_error or ""}},
+        "pack": {"playbooks": []},
+    }, "digest", "test")
+    now = utcnow()
+    candidates = []
+    for index in range(anchors):
+        candidates.append({
+            "id": f"finding-{index}", "hunt_id": "incident", "rule_id": "host.test",
+            "rule_version": "1", "claim": f"finding {index}", "claim_type": "observed_action",
+            "event_ids": [f"event-{index}"], "predicate_fields": [],
+            "entities": [["host", "web01", "host"]], "ts": T + timedelta(seconds=index),
+            "severity": "high", "confidence": "high", "lane": "high", "priority": 90.0 - index,
+            "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+            "group_key": "", "source_case_id": None, "source_anchor_id": None,
+            "source_link_id": None, "created_at": now,
+        })
+    links = []
+    for anchor in range(anchors):
+        target = (anchor + 1) % anchors
+        for offset in range(links_per_anchor):
+            links.append({
+                "id": f"link-{anchor:03d}-{offset:03d}", "hunt_id": "incident",
+                "anchor_id": f"finding-{anchor}", "link_type": f"process_lineage_{offset:03d}",
+                "window_label": "anchor +/- 5 min", "window_start": T - timedelta(minutes=5),
+                "window_end": T + timedelta(minutes=5), "strength": "observed", "key": {},
+                "status": "complete", "event_ids": [f"event-{target}"], "evidence_ids": [],
+                "task_ids": [], "coverage": [], "reasons": [], "duration_ms": 1,
+                "query_spend": 1, "evaluated": 1, "created_at": now, "updated_at": now,
+            })
+    with repo.engine.begin() as connection:
+        connection.execute(insert(t.candidate), candidates)
+        connection.execute(insert(t.expansion_link), links)
+    return repo
+
+
+def _mission_scale_repo() -> Repo:
+    """50k findings and 500 incidents, each backed by one hundred persisted links."""
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("mission", {
+        "window": {"start": T.isoformat(), "end": (T + timedelta(days=21)).isoformat()},
+        "targets": ["host-index"], "source_profiles": {"host-index": {"id": "hp"}},
+        "pack": {"playbooks": []},
+    }, "digest", "test")
+    now = utcnow()
+    with repo.engine.begin() as connection:
+        for start in range(0, 50_000, 5_000):
+            rows = []
+            for index in range(start, min(start + 5_000, 50_000)):
+                reportable = index < 500
+                rows.append({
+                    "id": f"finding-{index:05d}", "hunt_id": "mission",
+                    "rule_id": "host.test" if reportable else "context.inventory",
+                    "rule_version": "1", "claim": f"finding {index}",
+                    "claim_type": "observed_action" if reportable else "mention", "event_ids": [],
+                    "predicate_fields": [], "entities": [["host", f"host-{index % 1000:04d}", "host"]],
+                    "ts": T + timedelta(seconds=index), "severity": "high" if reportable else "info",
+                    "confidence": "high", "lane": "high" if reportable else "context",
+                    "priority": float(50_000 - index) if reportable else 0.0, "priority_reasons": [],
+                    "gate_results": {}, "benign_alternatives": [], "next_checks": [], "group_key": "",
+                    "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+                    "created_at": now,
+                })
+            connection.execute(insert(t.candidate), rows)
+        for start in range(0, 50_000, 5_000):
+            links = []
+            for index in range(start, min(start + 5_000, 50_000)):
+                anchor = index // 100
+                offset = index % 100
+                links.append({
+                    "id": f"link-{anchor:03d}-{offset:03d}", "hunt_id": "mission",
+                    "anchor_id": f"finding-{anchor:05d}", "link_type": f"agent_probe_{offset:03d}",
+                    "window_label": "case window", "window_start": T, "window_end": T + timedelta(hours=1),
+                    "strength": "agent_hypothesis", "key": {}, "status": "complete", "event_ids": [],
+                    "evidence_ids": [], "task_ids": [], "coverage": [], "reasons": [], "duration_ms": 1,
+                    "query_spend": 1, "evaluated": 1, "created_at": now, "updated_at": now,
+                })
+            connection.execute(insert(t.expansion_link), links)
     return repo
 
 
@@ -292,3 +384,56 @@ def test_dossier_and_toolbox_use_canonical_packet_and_not_assessed_coverage():
         "reason": ("not retrieved by the sweep: no normalizer reads this dataset, so no rule "
                    "evaluates it"),
     }]
+
+
+@pytest.mark.parametrize("budget", [8_000, 16_000])
+def test_large_incident_is_a_bounded_header_with_link_count_and_fetch_pointer(budget):
+    dossier = build_dossier(_linked_incident_repo(), "incident", token_budget=budget)
+
+    incidents = [item for page in dossier.pages for item in page.get("incidents", [])]
+    assert len(incidents) == 1
+    incident = incidents[0]
+    assert incident["member_count"] == 40
+    assert incident["link_count"] == 600
+    assert len(incident["links"]) < incident["link_count"]
+    assert incident["links_page"]["omitted"] == incident["link_count"] - len(incident["links"])
+    assert "get_incident" in incident["links_page"]["fetch"]
+    assert all(estimate_tokens(json.dumps(page, sort_keys=True, separators=(",", ":"))) <= budget
+               for page in dossier.pages)
+
+
+def test_dossier_bounds_long_reasons_and_source_errors_without_raising():
+    hostile = "keys_not_expanded:" + ("hostile-input-" * 5_000)
+    repo = _linked_incident_repo(anchors=2, links_per_anchor=1, source_error=hostile)
+    repo.save_expansion_anchor({
+        "id": "finding-0", "hunt_id": "incident", "candidate_id": "finding-0", "depth": 0,
+        "parent_anchor_id": None, "host": "web01", "lane": "high", "severity": "high", "ts": T,
+        "status": "expanded_partial", "reasons": [hostile],
+    })
+
+    dossier = build_dossier(repo, "incident", token_budget=8_000)
+    encoded = json.dumps(dossier.pages, sort_keys=True, separators=(",", ":"))
+
+    assert len(encoded) < len(hostile)
+    assert "chars omitted" in encoded
+    assert all(estimate_tokens(json.dumps(page, sort_keys=True, separators=(",", ":"))) <= 8_000
+               for page in dossier.pages)
+
+
+@pytest.mark.slow
+def test_mission_scale_dossier_is_bounded_for_50k_findings_and_500_linked_incidents():
+    dossier = build_dossier(_mission_scale_repo(), "mission", token_budget=8_000)
+
+    incidents = [item for page in dossier.pages for item in page.get("incidents", [])]
+    context = [item for page in dossier.pages for item in page.get("context_counts", [])]
+    item_tokens = [estimate_tokens(json.dumps(item, sort_keys=True, separators=(",", ":")))
+                   for page in dossier.pages for value in page.values() if isinstance(value, list)
+                   for item in value]
+
+    assert dossier.payload["header"]["finding_counts"]["total"] == 500
+    assert context == [{"rule_id": "context.inventory", "count": 49_500}]
+    assert len(incidents) == 500
+    assert all(item["link_count"] == 100 and len(item["links"]) < 100 for item in incidents)
+    assert max(item_tokens) < 2_000
+    assert all(estimate_tokens(json.dumps(page, sort_keys=True, separators=(",", ":"))) <= 8_000
+               for page in dossier.pages)

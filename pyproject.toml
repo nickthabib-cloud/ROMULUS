@@ -34,6 +34,7 @@ packages = ["src/romulus"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["slow: mission-scale regression that intentionally builds a large synthetic hunt"]
 
 [tool.ruff]
 line-length = 110
