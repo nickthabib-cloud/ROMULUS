@@ -7,6 +7,7 @@ import posixpath
 import re
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
@@ -556,11 +557,12 @@ def _journal_observations(hit: dict, j: dict) -> list[tuple[str, str, int | None
 EXEC_COMPANIONS = {"EXECVE", "SYSCALL", "CWD", "PROCTITLE"}
 
 
-def group_audit(hits: list[dict]) -> tuple[dict[tuple[str, float, int], list[tuple[dict, AuditRecord]]],
-                                           list[tuple[str, str]]]:
+def group_audit(hits: list[dict], parse: Callable[[dict, str], AuditRecord] | None = None,
+                ) -> tuple[dict[tuple[str, float, int], list[tuple[dict, AuditRecord]]], list[tuple[str, str]]]:
     """Group audit records into events by (host, audit timestamp, serial). Records that cannot be
     parsed, or lack the authoritative raw text, are returned as errors: they are never dropped
-    silently, because a dropped exec record would make a negative look complete."""
+    silently, because a dropped exec record would make a negative look complete. `parse(hit, raw)` parses one
+    record's raw text (a caller that already parsed the batch passes its parses); it raises AuditParseError."""
     groups: dict[tuple[str, float, int], list[tuple[dict, AuditRecord]]] = defaultdict(list)
     errors: list[tuple[str, str]] = []
     for h in hits:
@@ -570,7 +572,7 @@ def group_audit(hits: list[dict]) -> tuple[dict[tuple[str, float, int], list[tup
             errors.append((h["_id"], "linux.audit: missing authoritative event.original/message"))
             continue
         try:
-            rec = parse_record(raw)
+            rec = parse_record(raw) if parse is None else parse(h, raw)
         except AuditParseError as e:
             errors.append((h["_id"], f"linux.audit: unparseable record: {e}"))
             continue
@@ -1860,9 +1862,11 @@ SINGLE = {
 }
 
 
-def normalize_hits(hits: list[dict], boots: BootIntervals | None = None
+def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
+                   audit_parse: Callable[[dict, str], AuditRecord] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
-    """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]).
+    """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]). `audit_parse` is passed to
+    `group_audit`.
 
     An audit event's boot id (`host.boot.id`) comes from the shipper's own field, else from journald's copy of one
     of its records when that copy is in the same batch. With `boots` (a hunt's boot-interval map), the batch's boot
@@ -1898,7 +1902,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None
             skips[s.reason] += 1
         except (ValueError, KeyError, TypeError, AttributeError) as e:   # malformed telemetry: an error, never a crash
             errors.append((h["_id"], f"{ds}: {e}"))
-    groups, audit_errors = group_audit(audit_hits)
+    groups, audit_errors = group_audit(audit_hits, audit_parse)
     errors.extend(audit_errors)
     partners = _boot_partners(audit_copies)
     audit_start, boot_by_hit = len(events), {}

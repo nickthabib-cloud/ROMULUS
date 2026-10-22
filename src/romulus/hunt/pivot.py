@@ -18,7 +18,7 @@ from romulus.agent.tools import (
     ToolRequest,
 )
 from romulus.detect.registry import fresh_direct_pack
-from romulus.evidence.auditd import AuditParseError, parse_record
+from romulus.evidence.auditd import AuditParseError, AuditRecord, parse_record
 from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, normalize_hits
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.publish import publish_match
@@ -117,7 +117,32 @@ def _raw_identity(record: dict) -> tuple[str, str]:
     return str(record.get("_index", "")), str(record.get("_id", ""))
 
 
-def _audit_identity(record: dict) -> tuple | None:
+class _AuditParses:
+    """Each audit record's parse, made once and shared by every step of one pivot leaf that reads it (grouping, the
+    raw-family prefilter, normalization). Keyed by the record object, so it lives only as long as the leaf's
+    records: one instance per `_normalize_pivot_records` call, never shared between leaves."""
+
+    def __init__(self) -> None:
+        self._by_record: dict[int, AuditRecord | AuditParseError] = {}
+
+    def __call__(self, record: dict, raw: str) -> AuditRecord:
+        found = self._by_record.get(id(record))
+        if found is None:
+            try:
+                found = parse_record(raw)
+            except AuditParseError as error:
+                found = error
+            self._by_record[id(record)] = found
+        if isinstance(found, AuditParseError):
+            raise type(found)(*found.args)
+        return found
+
+
+def _parse_once(parse: _AuditParses | None, record: dict, raw: str) -> AuditRecord:
+    return parse_record(raw) if parse is None else parse(record, raw)
+
+
+def _audit_identity(record: dict, parse: _AuditParses | None = None) -> tuple | None:
     """Return an audit event identity only when its authoritative record parses."""
     source = record.get("_source") or {}
     if _source_value(source, "event.dataset") != "linux.audit":
@@ -126,18 +151,18 @@ def _audit_identity(record: dict) -> tuple | None:
     if not raw:
         return None
     try:
-        parsed = parse_record(raw)
+        parsed = _parse_once(parse, record, raw)
     except AuditParseError:
         return None
     return (_source_value(source, "host.name") or "", parsed.ts, parsed.serial)
 
 
-def _normalization_groups(records: list[dict]) -> list[list[dict]]:
+def _normalization_groups(records: list[dict], parse: _AuditParses | None = None) -> list[list[dict]]:
     """Keep multi-record audit events atomic; every other hit is independent."""
     groups: dict[tuple, list[dict]] = {}
     order: list[tuple] = []
     for record in records:
-        audit = _audit_identity(record)
+        audit = _audit_identity(record, parse)
         key = ("audit", *audit) if audit is not None else ("raw", *_raw_identity(record))
         if key not in groups:
             groups[key] = []
@@ -146,7 +171,7 @@ def _normalization_groups(records: list[dict]) -> list[list[dict]]:
     return [groups[key] for key in order]
 
 
-def _audit_types(records: list[dict]) -> set[str] | None:
+def _audit_types(records: list[dict], parse: _AuditParses | None = None) -> set[str] | None:
     types: set[str] = set()
     for record in records:
         source = record.get("_source") or {}
@@ -154,20 +179,20 @@ def _audit_types(records: list[dict]) -> set[str] | None:
         if not raw:
             return None
         try:
-            types.add(parse_record(raw).type)
+            types.add(_parse_once(parse, record, raw).type)
         except AuditParseError:
             return None
     return types
 
 
-def _prefilter_raw(records: list[dict], families: set[str]) -> list[dict]:
+def _prefilter_raw(records: list[dict], families: set[str], parse: _AuditParses | None = None) -> list[dict]:
     """Discard only groups whose authoritative type cannot produce a requested family."""
     selected: list[dict] = []
-    for group in _normalization_groups(records):
+    for group in _normalization_groups(records, parse):
         source = group[0].get("_source") or {}
         dataset = _source_value(source, "event.dataset") or ""
         if dataset == "linux.audit":
-            types = _audit_types(group)
+            types = _audit_types(group, parse)
             if types is None:
                 selected.extend(group)
             elif ((families == {"process_exec"} and "EXECVE" not in types)
@@ -382,10 +407,11 @@ class PivotExecutor:
         self, records: list[dict], raw_families: set[str] | None,
     ) -> tuple[list[TypedEvent], list[tuple[str, str]]]:
         prefilter = self.optimize_normalization and raw_families
-        selected = _prefilter_raw(records, raw_families) if prefilter else records
         # one call per leaf: an audit event takes its boot id from a journald copy in the same batch, and nothing
-        # outlives the leaf, so memory stays bounded by the per-leaf record cap
-        events, _skips, errors = normalize_hits(selected)
+        # (the batch, its audit parses) outlives the leaf, so memory stays bounded by the per-leaf record cap
+        parse = _AuditParses()
+        selected = _prefilter_raw(records, raw_families, parse) if prefilter else records
+        events, _skips, errors = normalize_hits(selected, audit_parse=parse)
         return events, errors
 
     def _execute(
