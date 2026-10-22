@@ -95,3 +95,40 @@ def test_account_change_budget_refuses_later_changes(monkeypatch):
                  process__user="root") for i in range(5)]
     rule.consume(events)
     assert len(rule.changes) == 2 and rule.capped == 3
+
+
+@pytest.mark.slow
+def test_reverse_shell_join_streams_and_still_finds_the_shell():
+    """A week of hourly partitions: every minute a cron shell, and a monitoring agent connecting out; on day 5 a
+    python process connects out and execs a stdin shell. Waiting shells and held sockets stay about an hour's
+    worth; the reverse shell is found."""
+    from romulus.detect.lineage import ReverseShellByLineage
+    rule = ReverseShellByLineage()
+    peak_shells = peak_sockets = 0
+    stage = {}
+    pid = 10_000
+    for hour in range(24 * 7):
+        start = T0 + timedelta(hours=hour)
+        batch = []
+        for minute in range(60):
+            ts = start + timedelta(minutes=minute)
+            pid += 2
+            batch.append(execd(pid, 1, "/usr/bin/dash", ts))
+            batch.append(ev(f"agent-{pid}", "net_socket", ts + timedelta(seconds=1), socket__syscall="connect",
+                            process__executable="/opt/agent/agent", process__pid=pid + 1, process__user="root",
+                            destination__ip="198.51.100.20", destination__port=443))
+        if hour == 24 * 5 + 3:
+            ts = start + timedelta(minutes=30, seconds=10)
+            batch += [execd(777, 1, "/usr/bin/python3", ts),
+                      ev("rs-sock", "net_socket", ts + timedelta(seconds=2), socket__syscall="connect",
+                         process__executable="/usr/bin/python3", process__pid=777, process__user="root",
+                         destination__ip="203.0.113.66", destination__port=4444),
+                      execd(778, 777, "/bin/sh", ts + timedelta(seconds=3))]
+        rule.consume(batch)
+        stage.update({e.id: e for e in rule.drain_staged()})
+        peak_shells = max(peak_shells, len(rule.shells))
+        peak_sockets = max(peak_sockets, sum(len(v) for v in rule.sockets.values()))
+    assert peak_shells <= 2 * 60 + 1 and peak_sockets <= 3 * 60 + 1, (peak_shells, peak_sockets)
+    rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    out = rule.finalize()
+    assert [(m.group_key, m.proposed_lane) for m in out] == [("web1|None|777|203.0.113.66", "high")]
