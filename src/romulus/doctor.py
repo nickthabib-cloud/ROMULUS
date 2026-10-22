@@ -168,14 +168,70 @@ def check_paths(s: Settings, env_file: Path | None) -> list[Check]:
     free_gb = shutil.disk_usage(s.home).free / 1e9
     out.append(Check("disk.free", "ok" if free_gb > 10 else "warn", f"{free_gb:.1f} GB free at {s.home}"))
     out.append(check_state_budget(s))
+    out.append(check_stage_volume(s))
     return out
+
+
+# Data directories of services that may share a host with ROMULUS: a stage on their volume can fill it (Elasticsearch
+# blocks writes to its indices at its flood-stage watermark). Only paths that exist are compared.
+SERVICE_DATA_PATHS = {
+    "Elasticsearch": ("/var/lib/elasticsearch", "/usr/share/elasticsearch/data", "/var/lib/opensearch",
+                      "/usr/share/opensearch/data"),
+    "Arkime": ("/opt/arkime/raw", "/data/arkime", "/opt/molochd/raw", "/data/moloch/raw"),
+    "docker": ("/var/lib/docker", "/var/lib/containerd"),
+}
+
+
+def _elasticsearch_data_paths() -> list[str]:
+    """`path.data` entries of a local Elasticsearch or OpenSearch configuration, when readable."""
+    found = []
+    for config in ("/etc/elasticsearch/elasticsearch.yml", "/etc/opensearch/opensearch.yml"):
+        try:
+            text = Path(config).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("path.data:"):
+                value = line.split(":", 1)[1].strip().strip("[]\"'")
+                found += [part.strip().strip("\"'") for part in value.split(",") if part.strip()]
+    return found
+
+
+def check_stage_volume(s: Settings, paths: dict[str, tuple[str, ...]] | None = None) -> Check:
+    """Warn when the stage directory is on the same filesystem as another service's data it can detect."""
+    stage = s.stage_path
+    probe = stage
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        device = probe.stat().st_dev
+    except OSError as exc:
+        return Check("stage.volume", "warn", f"cannot read the stage directory {stage}: {exc}")
+    services = dict(paths if paths is not None else SERVICE_DATA_PATHS)
+    if paths is None:
+        services["Elasticsearch"] = (*services["Elasticsearch"], *_elasticsearch_data_paths())
+    shared = []
+    for service, candidates in services.items():
+        for candidate in candidates:
+            try:
+                if Path(candidate).exists() and Path(candidate).stat().st_dev == device:
+                    shared.append(f"{service} ({candidate})")
+                    break
+            except OSError:
+                continue
+    if shared:
+        return Check("stage.volume", "warn", f"the stage directory {stage} is on the same filesystem as "
+                                             f"{', '.join(shared)}: point ROMULUS_STAGE_DIR at another volume, so a "
+                                             f"hunt's stage can never fill theirs")
+    return Check("stage.volume", "ok", f"{stage} shares no filesystem with a detected service's data")
 
 
 def check_state_budget(s: Settings) -> Check:
     """The sweep's detector-state budget on the stage volume: fail when its free space is already at the reserve
     (rules that keep state would evaluate nothing), warn when the hunt's disk total is under 1 GiB."""
     from romulus.hunt.sweep import state_budget
-    budget = state_budget(s, s.home / "stage")
+    budget = state_budget(s, s.stage_path)
     free = budget.free()
     detail = (f"disk total {budget.disk_total / 2**30:.1f} GiB, reserve {budget.reserve / 2**30:.1f} GiB, "
               f"memory {budget.memory_total / 2**20:.0f} MiB; stage volume "

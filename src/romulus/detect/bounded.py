@@ -138,64 +138,122 @@ SPILL_CACHE_KIB = 4096            # each spill's SQLite page cache (memory besid
 
 # ---- the hunt's state budget -------------------------------------------------------------------------------------
 # Defaults; the sweep takes the hunt's values from the settings (romulus.config).
-DISK_RESERVE = 2 * 2**30          # free space always left on the stage volume
-DISK_TOTAL_FALLBACK = 64 * 2**30  # the hunt's disk total when the stage volume's free space cannot be read
+DISK_RESERVE = 2 * 2**30          # the least free space always left on the stage volume
+RESERVE_SHARE = 0.15              # ... and at least this share of the volume's size (other services share it)
+TOTAL_SHARE = 0.10                # the automatic disk total: at most this share of the volume's size
+DISK_TOTAL_FLOOR = 256 * 2**20    # the automatic disk total never goes below this (the reserve still applies)
+DISK_TOTAL_FALLBACK = 16 * 2**30  # the hunt's disk total when the stage volume cannot be read
+STRONG_SHARE = 0.25               # the share of the disk total protected for strong-indicator rules
 MEMORY_TOTAL = 1536 * 2**20       # the memory every hot set of the hunt shares (an estimate, see KeyedStore)
-FREE_CHECK_BYTES = 64 * 2**20     # the stage volume's free space is read again after this much growth
-SAMPLE_MIN = 1000                 # hot sets smaller than this are not measured (they are small whatever they hold)
-MEM_FACTOR = 3                    # a state's Python objects take about this many times its pickled size
+SAMPLE = 32                       # states sized at each measurement of a hot set, drawn across the whole set
+REMEASURE_TRIMS = 16              # a hot set is measured again at least every this many trims
 KEY_OVERHEAD = 200                # per hot key: the key, its order number and two table slots
+HOT_FLOOR = 16                    # the memory budget never moves a hot set below this many states
+# A rule's state belongs to one slice of the hunt's disk total. Strong-indicator rules (indicator matches, tamper
+# commands, account changes, web-service shells, downloads fed to interpreters, reverse shells, hijacked files)
+# have a protected slice, so routine volume (flows, sessions, DNS, network groups, certificates, joins) can never
+# spend it.
+SLICES = ("strong", "routine")
 
 
 class StateExhausted(RuntimeError):
     """Detector state could not be written to disk at finalize (the stage volume is at its free-space reserve, or a
-    write failed): the rule's finalize stops and its window cell says so, instead of the hunt failing."""
+    write failed): the rule publishes what it can without disk (`Playbook.finalize_fallback`) and its window cell
+    says what was not computed, instead of the hunt failing."""
+
+
+def volume_usage(directory) -> tuple[int, int] | None:
+    """(size, free bytes) of the volume holding `directory` (its nearest existing parent), or None."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+    probe = Path(directory if directory is not None else tempfile.gettempdir())
+    try:
+        while not probe.exists() and probe.parent != probe:
+            probe = probe.parent
+        usage = shutil.disk_usage(probe)
+    except OSError:
+        return None
+    return usage.total, usage.free
+
+
+class _Flags(dict):
+    """A slice -> reason map that keeps its budget's `calm` flag current whenever a reason is set."""
+
+    def __init__(self, budget, keys):
+        super().__init__(dict.fromkeys(keys, ""))
+        self._budget = budget
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self._budget._recalm()
 
 
 class StateBudget:
     """The hunt's ledger for detector state, shared by every playbook's spill.
 
-    Disk: every spill reports how much its file grew. Once the total reaches `disk_total`, or the stage volume's free
-    space falls below `reserve`, or a write fails, the budget is spent: the sweep refuses every later record of each
-    playbook that holds state (coverage partial, the reason named), so no state grows any more, and nothing already
-    held is dropped. The total can be passed by at most one batch's writes, which the reserve absorbs. At finalize
-    the total no longer applies (finalize re-reads what consume kept); only the reserve does, and a finalize that
-    would need disk below it stops with `StateExhausted`.
+    Disk: each spill charges its database's growth to its rule's slice (`SLICES`). The automatic total is the smaller
+    of half the stage volume's free space (after the reserve) and TOTAL_SHARE of the volume, and the reserve is the
+    larger of the setting and RESERVE_SHARE of the volume, because the stage volume may also hold the telemetry
+    platform's own data. When a slice reaches its share of the total, its rules keep running in no-growth mode:
+    existing states update, a record that needs a new key is refused (coverage partial, the reason named), and every
+    match that needs no new state still publishes. Below the reserve, or after a failed write, no state is read back
+    from or written to disk: only states in memory update. Every spill also caps its own database at the volume's
+    headroom (`PRAGMA max_page_count`), so a long statement stops itself. At finalize the slices no longer apply
+    (finalize re-reads what consume kept); only the reserve does.
 
     Memory: each store reports an estimate of its hot set's size; while the estimates together exceed
     `memory_total`, a store above its fair share moves its least recently used states to disk at its next trim."""
 
-    def __init__(self, directory=None, *, disk_total: int | None = None, reserve: int = DISK_RESERVE,
-                 memory_total: int = MEMORY_TOTAL):
+    def __init__(self, directory=None, *, disk_total: int | None = None, reserve: int | None = None,
+                 reserve_floor: int = DISK_RESERVE, memory_total: int = MEMORY_TOTAL,
+                 strong_share: float = STRONG_SHARE):
         self.directory = directory
+        usage = volume_usage(directory)
+        if reserve is None:             # the larger of the floor and RESERVE_SHARE of the volume
+            reserve = max(reserve_floor, int(usage[0] * RESERVE_SHARE)) if usage else reserve_floor
         self.reserve = reserve
         self.memory_total = memory_total
         if not disk_total:
-            free = self.free()
-            disk_total = DISK_TOTAL_FALLBACK if free is None else max(2**30, (free - reserve) // 2)
+            if usage is None:
+                disk_total = DISK_TOTAL_FALLBACK
+            else:
+                disk_total = max(DISK_TOTAL_FLOOR, min((usage[1] - self.reserve) // 2, int(usage[0] * TOTAL_SHARE)))
         self.disk_total = disk_total
+        strong = int(disk_total * strong_share)
+        self.slice_total = {"strong": strong, "routine": disk_total - strong}
+        self.slice_used = dict.fromkeys(SLICES, 0)
+        self.calm = True                # no limit reached: the per-record check is one attribute read
+        self.slice_over = _Flags(self, SLICES)
         self.disk_used = 0
-        self.over_total = ""            # why the disk total is spent (sticky)
+        self.over_total = ""            # every slice spent at once (sticky)
         self.low_space = ""             # why the stage volume is at its reserve (sticky)
         self.broken = ""                # a write failed (sticky)
         self.finalizing = False
-        self._since_check = 0
         self._mem: dict[int, int] = {}
         self.mem_used = 0
 
+    _REASONS = frozenset({"over_total", "low_space", "broken"})
+
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name in StateBudget._REASONS:
+            self._recalm()
+
+    def _recalm(self) -> None:
+        slices = self.__dict__.get("slice_over") or {}
+        object.__setattr__(self, "calm", not (self.__dict__.get("over_total") or self.__dict__.get("low_space")
+                                              or self.__dict__.get("broken") or any(slices.values())))
+
     # ---- disk ----
     def free(self) -> int | None:
-        import shutil
-        import tempfile
-        path = self.directory if self.directory is not None else tempfile.gettempdir()
-        try:
-            from pathlib import Path
-            probe = Path(path)
-            while not probe.exists() and probe.parent != probe:
-                probe = probe.parent
-            return shutil.disk_usage(probe).free
-        except OSError:
-            return None
+        usage = volume_usage(self.directory)
+        return None if usage is None else usage[1]
+
+    def headroom(self) -> int | None:
+        """Bytes that may still be written before the stage volume reaches its reserve (None: unknown)."""
+        free = self.free()
+        return None if free is None else max(0, free - self.reserve)
 
     def check_free(self) -> None:
         free = self.free()
@@ -208,34 +266,42 @@ class StateBudget:
         self.check_free()
         return self.low_space
 
-    def grew(self, nbytes: int) -> None:
+    def grew(self, nbytes: int, slice_: str = "routine") -> None:
         if nbytes <= 0:
             return
         self.disk_used += nbytes
-        self._since_check += nbytes
-        if self.disk_used >= self.disk_total and not self.over_total:
-            self.over_total = (f"detector state on disk reached the hunt's budget of "
-                               f"{self.disk_total / 2**30:.1f} GiB")
-        if self._since_check >= FREE_CHECK_BYTES:
-            self._since_check = 0
-            self.check_free()
+        self.slice_used[slice_] += nbytes
+        if self.slice_used[slice_] >= self.slice_total[slice_] and not self.slice_over[slice_]:
+            self.slice_over[slice_] = (f"detector state on disk of {slice_} rules reached its share of the hunt's "
+                                       f"budget ({self.slice_total[slice_] / 2**30:.2f} GiB)")
+        self.check_free()
 
     def fail(self, reason: str) -> None:
         self.broken = self.broken or reason
 
     @property
+    def hard(self) -> str:
+        """Why no state may be read back from or written to disk now ("" while it may)."""
+        return self.broken or self.low_space
+
+    def new_key_reason(self, slice_: str) -> str:
+        """Why a record needing new state of this slice is refused now ("" while it is not)."""
+        if self.finalizing:
+            return self.hard
+        return self.hard or self.over_total or self.slice_over.get(slice_, "")
+
+    @property
     def spent(self) -> str:
-        """Why state may no longer grow during consume ("" while it may)."""
-        return self.broken or self.low_space or self.over_total
+        """Every limit reached so far, for the sweep's summary ("" when none)."""
+        reasons = [self.broken, self.low_space, self.over_total, *self.slice_over.values()]
+        return "; ".join(dict.fromkeys(r for r in reasons if r))
 
     def may_write(self) -> bool:
         """Whether state may be moved to disk now."""
-        if self.finalizing:
-            return not (self.broken or self.low_space)
-        return not self.spent
+        return not self.hard
 
     def blocked(self) -> str:
-        return self.broken or self.low_space or ("" if self.finalizing else self.over_total)
+        return self.hard
 
     # ---- memory ----
     def hot_allowance(self, store, own: int) -> int | None:
@@ -262,15 +328,56 @@ def _budget_of(owner) -> StateBudget:
     return owner.state_budget()
 
 
+def _slice_of(owner) -> str:
+    return getattr(owner, "state_slice", "routine")
+
+
+def deep_size(value, depth: int = 0) -> int:
+    """An estimate of the memory a value holds: its own size plus what it refers to, recursively for containers and
+    slotted or plain objects; a large container is sized from a sample of its items."""
+    import sys
+    size = sys.getsizeof(value)
+    if depth > 6:
+        return size
+    kind = type(value)
+    if kind in (str, bytes, int, float, bool) or value is None:
+        return size
+    if kind is dict or isinstance(value, dict):
+        n = len(value)
+        if not n:
+            return size
+        from itertools import islice
+        items = list(islice(value.items(), 16))
+        per = sum(deep_size(k, depth + 1) + deep_size(v, depth + 1) for k, v in items) / len(items)
+        return size + int(per * n)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        n = len(value)
+        if not n:
+            return size
+        from itertools import islice
+        items = list(islice(value, 16))
+        per = sum(deep_size(item, depth + 1) for item in items) / len(items)
+        return size + int(per * n)
+    slots = getattr(kind, "__slots__", None)
+    if slots is not None:
+        names = (slots,) if isinstance(slots, str) else slots
+        return size + sum(deep_size(getattr(value, name), depth + 1) for name in names if hasattr(value, name))
+    attrs = getattr(value, "__dict__", None)
+    if attrs is not None:
+        return size + deep_size(attrs, depth + 1)
+    return size
+
+
 class Spill:
     """A playbook's private on-disk tables for compact rows it must join over the whole hunt (cross-target joins
     cannot be streamed: one target is read whole before the next). Rows are buffered and written in batches; queries
     flush first. It lives in its own directory (mode 0700) under the sweep's stage directory, holds telemetry-derived
     values, and is removed by `close` (the sweep closes it on every exit path it controls; a killed process leaves it
     to the stale-stage cleanup, which goes by directory age: every write and every sweep heartbeat refreshes it).
-    Its file's growth is charged to the hunt's state budget."""
+    Its database's growth is charged to the rule's slice of the hunt's state budget, and the database is capped at
+    the volume's headroom above the reserve, so no statement can run the volume into it."""
 
-    def __init__(self, directory=None, budget: StateBudget | None = None):
+    def __init__(self, directory=None, budget: StateBudget | None = None, slice_: str = "routine"):
         import sqlite3
         import tempfile
         from pathlib import Path
@@ -284,8 +391,22 @@ class Spill:
             self.db.execute(f"PRAGMA {pragma}")
         self._page = self.db.execute("PRAGMA page_size").fetchone()[0]
         self.budget = budget if budget is not None else StateBudget(directory)
+        self.slice = slice_
         self._size = 0
         self._buffers: dict[str, tuple[str, list[tuple]]] = {}
+
+    def cap(self) -> None:
+        """Cap the database at its pages now plus the volume's headroom above the reserve: SQLite then stops any
+        statement that would pass it with "database or disk is full"."""
+        import sqlite3
+        headroom = self.budget.headroom()
+        if headroom is None:
+            return
+        try:
+            pages = self.db.execute("PRAGMA page_count").fetchone()[0]
+            self.db.execute(f"PRAGMA max_page_count = {pages + headroom // self._page + 1}")
+        except sqlite3.Error:
+            pass
 
     def table(self, name: str, columns: str) -> None:
         self.db.execute(f"CREATE TABLE {name} ({columns})")
@@ -293,13 +414,14 @@ class Spill:
         self._buffers[name] = (f"INSERT INTO {name} VALUES ({','.join('?' * width)})", [])
 
     def write(self, sql: str, rows: list[tuple]) -> None:
-        """Write rows, charging the file's growth to the budget. Raises StateExhausted when the stage volume is at
-        its free-space reserve or a write failed (nothing of a failed batch can be trusted). The hunt's total does
-        not stop a write already under way: the sweep stops the rule's records once it is spent."""
+        """Write rows, charging the database's growth to the budget. Raises StateExhausted when the stage volume is
+        at its free-space reserve or a write failed (nothing of a failed batch can be trusted). A slice's share does
+        not stop a write already under way: the rule refuses records needing new state once it is spent."""
         import sqlite3
-        reason = self.budget.broken or self.budget.low_space
+        reason = self.budget.hard
         if reason:
             raise StateExhausted(reason)
+        self.cap()
         try:
             self.db.executemany(sql, rows)
         except sqlite3.OperationalError as exc:
@@ -316,13 +438,13 @@ class Spill:
         return exc
 
     def check(self) -> None:
-        """Charge growth from statements run directly on `db` (finalize's join tables) and stop once the stage
-        volume is at its reserve."""
+        """Charge growth from statements run directly on `db` (finalize's join tables), stop once the stage volume is
+        at its reserve, and cap the database again for the next statement."""
         self.grew()
-        self.budget.check_free()
-        reason = self.budget.broken or self.budget.low_space
+        reason = self.budget.hard
         if reason:
             raise StateExhausted(reason)
+        self.cap()
 
     def add(self, name: str, row: tuple) -> None:
         sql, rows = self._buffers[name]
@@ -348,7 +470,7 @@ class Spill:
         except sqlite3.Error:
             return
         if size > self._size:
-            self.budget.grew(size - self._size)
+            self.budget.grew(size - self._size, self.slice)
             self._size = size
         self.touch()
 
@@ -439,22 +561,41 @@ class _KeyFilter:
 
 
 class _HotMeasure:
-    """The estimate of a hot set's memory: its size times a sampled per-entry cost (pickled size x MEM_FACTOR plus
-    KEY_OVERHEAD), sampled again when the hot set has grown or shrunk by a quarter."""
+    """The estimate of a hot set's memory: its size times the mean deep size (`deep_size`, plus KEY_OVERHEAD) of up
+    to SAMPLE states drawn at random across the whole set, measured again at least every REMEASURE_TRIMS trims
+    (states grow in place) and whenever the set has shrunk by a quarter. When it has grown by a quarter, the new
+    entries (the most recently used end) are measured and blended in by count; the whole set is still measured at
+    random every REMEASURE_TRIMS trims."""
 
-    __slots__ = ("at", "avg")
+    __slots__ = ("at", "avg", "rng", "trims")
 
     def __init__(self):
+        import random
         self.avg = 0.0
         self.at = 0
+        self.trims = 0
+        self.rng = random.Random(0)             # reproducible: the same hunt measures the same states
 
     def per_entry(self, values, n: int) -> float:
-        if not self.avg or n >= self.at * 1.25 or n <= self.at * 0.75:
-            from itertools import islice
-            sample = [*islice(values, 16), *islice(reversed(values), 16)]
-            sizes = [len(pickle.dumps(state, protocol=4)) for state in sample]
-            self.avg = (sum(sizes) / len(sizes)) * MEM_FACTOR + KEY_OVERHEAD if sizes else float(KEY_OVERHEAD)
+        from itertools import islice
+        self.trims += 1
+        if self.avg and self.trims < REMEASURE_TRIMS and self.at * 0.75 < n < self.at * 1.25:
+            return self.avg
+        if self.avg and n >= self.at * 1.25 and self.trims < REMEASURE_TRIMS:
+            fresh = list(islice(reversed(values), min(SAMPLE, n - self.at)))
+            mean = sum(deep_size(state) for state in fresh) / len(fresh) + KEY_OVERHEAD
+            self.avg = (self.avg * self.at + mean * (n - self.at)) / n
             self.at = n
+            return self.avg
+        picks = sorted(self.rng.sample(range(n), min(SAMPLE, n)))
+        sample, it, pos = [], iter(values), 0
+        for index in picks:
+            if index > pos:
+                next(islice(it, index - pos, index - pos), None)        # skip, in C
+            sample.append(next(it))
+            pos = index + 1
+        self.avg = sum(deep_size(state) for state in sample) / len(sample) + KEY_OVERHEAD
+        self.at, self.trims = n, 0
         return self.avg
 
 
@@ -464,19 +605,39 @@ def _hot_limit(store, n: int, values, keep: int | None) -> int:
     if keep is not None:
         return keep
     limit = store.hot_size
-    if store.owner is None or n < SAMPLE_MIN:
+    if store.owner is None:
         return limit
     per = store._measure.per_entry(values, n)
     budget = _budget_of(store.owner)
     allowance = budget.hot_allowance(store, int(n * per))
     if allowance is not None:
-        limit = min(limit, max(SAMPLE_MIN, int(allowance // per)))
+        limit = min(limit, max(HOT_FLOOR, int(allowance // per)))
     return limit
 
 
 # Per-store disk budget: a store's own share of the hunt's budget, so no one store (a flood of routine records)
 # can spend the whole hunt's disk and starve another rule's evidence. Rows are compact pickled per-key states.
 DISK_BUDGET = 8 * 2**30
+
+
+def _budget_refuses(owner) -> bool:
+    """Whether the hunt's state budget refuses new state of the owner's slice now; when it does, the owner's
+    coverage names why (the caller refuses the record through its own path)."""
+    budget = None if owner is None else owner.budget
+    if budget is None or budget.calm:
+        return False
+    reason = budget.new_key_reason(_slice_of(owner))
+    if reason:
+        owner.note_limit("state_budget", f"the hunt's state budget is spent ({reason}); records of this rule that "
+                                         f"need new state are not evaluated")
+        return True
+    return False
+
+
+def _held_in_memory(budget: StateBudget, keep: int | None) -> bool:
+    """When disk cannot be written: whether a trim may leave its states in memory. During consume it may (the rule
+    takes no new state, so they grow no more); at finalize while the hunt's hot sets fit the memory budget."""
+    return keep is None and (not budget.finalizing or budget.mem_used <= budget.memory_total)
 # The count cap of a hot set when its rule names none: memory is governed by the hunt's memory budget (bytes).
 HOT_COUNT = 2_000_000
 _MISSING = object()
@@ -489,8 +650,9 @@ class KeyedStore:
     (StateBudget) is over its total and this store is above its fair share. Only disk refuses: `put` of a new key
     returns False once the store's rows on disk reach `disk_budget` bytes (the bytes on disk now: a state read back
     leaves the disk until it is moved there again), and the rule refuses that record through its honest coverage
-    path; the hunt-level disk budget is enforced by the sweep, which refuses every later record of a rule holding
-    state once it is spent.
+    path. A new key is also refused while the rule's slice of the hunt's StateBudget is spent; below the volume's
+    reserve (or after a failed write) no state is read back from or written to disk, so only states in memory
+    update. A refusal never stops the rule: records that need no new state are still evaluated.
 
     Keys are stored as canonical bytes (`key_bytes`), so equal keys meet on disk whatever their object identity. A
     Bloom filter of the keys on disk spares a query for keys that never left memory. Every key keeps the number of
@@ -581,7 +743,7 @@ class KeyedStore:
             if self._ordered:
                 self.hot.move_to_end(key)
             return state
-        if not self.on_disk:
+        if not self.on_disk or self._hard():
             return default
         found = self._load(key, remove=True)
         if found is None:
@@ -613,12 +775,17 @@ class KeyedStore:
                 self.hot.move_to_end(key)
             return True
         if not self._ordered:                       # nothing has left memory: no disk, and the dict keeps order
+            if _budget_refuses(self.owner):
+                return False
             self.hot[key] = state
             return True
+        if self._hard():
+            _budget_refuses(self.owner)
+            return False
         found = self._load(key, remove=True)
         if found is not None:
             seq = found[1]
-        elif self.disk_bytes >= self.disk_budget:
+        elif self.disk_bytes >= self.disk_budget or _budget_refuses(self.owner):
             return False
         else:
             seq = self._next
@@ -626,6 +793,10 @@ class KeyedStore:
         self.hot[key] = state
         self._seq[key] = seq
         return True
+
+    def _hard(self) -> bool:
+        budget = None if self.owner is None else self.owner.budget
+        return budget is not None and not budget.calm and bool(budget.hard)
 
     def setdefault(self, key, factory):
         """The key's state, created by `factory` when new; None when the disk budget refuses a new key."""
@@ -657,9 +828,9 @@ class KeyedStore:
             return
         budget = _budget_of(self.owner)
         if not budget.may_write():
-            if budget.finalizing or keep is not None:
-                raise StateExhausted(budget.blocked())
-            return
+            if _held_in_memory(budget, keep):
+                return
+            raise StateExhausted(budget.blocked())
         spill = self.owner.spill()
         self._db()
         if not self._ordered:                       # the first eviction: number the keys in their order so far
@@ -688,9 +859,10 @@ class KeyedStore:
                 self._seq[key] = seq
             if budget.broken:
                 self.broken = budget.broken                 # a partial write: the table can no longer be trusted
-            if budget.finalizing or keep is not None:
-                raise
-            return
+            if keep is None and (not budget.finalizing
+                                 or (not self.broken and budget.mem_used <= budget.memory_total)):
+                return                                      # held in memory (see _held_in_memory)
+            raise
         for row in rows:
             self._filter.add(row[0])
         self.disk_bytes += nbytes
@@ -772,11 +944,14 @@ class SpillList:
     memory budget is over its total), the rest on disk, read back in arrival order, or in the order of a
     (number, text) key given at append (`ordered`). Only the disk byte budget refuses (`append` returns False)."""
 
-    def __init__(self, owner, name: str, hot: int, *, disk_budget: int | None = None):
+    def __init__(self, owner, name: str, hot: int, *, disk_budget: int | None = None, refusable: bool = True):
         self.owner = owner
         self.name = name
         self.hot_size = hot
         self.disk_budget = DISK_BUDGET if disk_budget is None else disk_budget
+        # False for an index of keys a KeyedStore already accepted (it must stay complete); such a list takes
+        # no new record of its own while the budget refuses, since its store takes no new key
+        self.refusable = refusable
         self.buffer: list = []                  # (order, record)
         self._measure = _HotMeasure()
         self.on_disk = 0
@@ -790,7 +965,8 @@ class SpillList:
         return len(self.buffer) + self.on_disk
 
     def append(self, record, order: tuple = (0.0, "")) -> bool:
-        if self.disk_bytes >= self.disk_budget:
+        """Hold a record; False when the list's disk budget or the hunt's state budget refuses it."""
+        if self.disk_bytes >= self.disk_budget or (self.refusable and _budget_refuses(self.owner)):
             return False
         self.buffer.append((order, record))
         return True
@@ -805,9 +981,9 @@ class SpillList:
             return
         budget = _budget_of(self.owner)
         if not budget.may_write():
-            if budget.finalizing or keep is not None:
-                raise StateExhausted(budget.blocked())
-            return
+            if _held_in_memory(budget, keep):
+                return
+            raise StateExhausted(budget.blocked())
         spill = self.owner.spill()
         if not self._ready:
             spill.db.execute(f"CREATE TABLE IF NOT EXISTS {self.name} (seq INTEGER PRIMARY KEY, o1, o2, v BLOB)")
@@ -822,9 +998,9 @@ class SpillList:
         except StateExhausted:
             if budget.broken:
                 self.broken = budget.broken
-            if budget.finalizing or keep is not None:
-                raise
-            return
+            if not budget.finalizing and keep is None:
+                return
+            raise
         self.disk_bytes += nbytes
         self.on_disk += len(rows)
         self.buffer = []

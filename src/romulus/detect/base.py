@@ -191,9 +191,11 @@ class Playbook:
     # The hunt's state budget (romulus.detect.bounded.StateBudget), shared by every playbook of a sweep; a playbook
     # outside a sweep makes its own on first use.
     budget = None
-    # True once the playbook keeps per-key state (a KeyedStore, SpillList or spill): when the hunt's state budget is
-    # spent, the sweep refuses its later records instead of letting that state grow.
+    # True once the playbook keeps per-key state (a KeyedStore, SpillList or spill).
     holds_state = False
+    # The slice of the hunt's disk budget this rule's state is charged to (romulus.detect.bounded.SLICES): "strong"
+    # for strong-indicator rules, whose slice routine volume can never spend; "routine" otherwise.
+    state_slice: ClassVar[str] = "routine"
 
     def state_budget(self):
         if self.budget is None:
@@ -205,14 +207,21 @@ class Playbook:
         """This playbook's private on-disk tables (created on first use)."""
         if self._spill is None:
             from romulus.detect.bounded import Spill
-            self._spill = Spill(self.spill_dir, self.state_budget())
+            self._spill = Spill(self.spill_dir, self.state_budget(), self.state_slice)
         return self._spill
 
-    def refuse_batch(self, events: list[TypedEvent], text: str) -> None:
-        """The hunt's state budget is spent: none of these records of this rule's families is evaluated."""
-        records = sum(1 for e in events if e.family in self.families)
-        if records:
+    def refuse_unevaluated(self, events: list[TypedEvent], evaluated: int, text: str) -> None:
+        """A write to the stage volume failed while this rule read a batch: its records of this rule's families that
+        were not evaluated before the failure are refused (counted exactly), never counted as evaluated."""
+        records = sum(1 for e in events if e.family in self.families) - evaluated
+        if records > 0:
             self.refuse("state_disk", text, records)
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Finalize could not get the disk it needs (`StateExhausted`): what can still be published from state that
+        is readable without writing to disk. Rules with strong per-record items publish them here; the default is
+        nothing. The window cell is partial with the reason either way."""
+        return []
 
     def close_spill(self) -> None:
         """Remove any on-disk spill. The sweep calls it on every exit path it controls."""

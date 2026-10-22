@@ -898,7 +898,7 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
         return summary
     own = packets is None
     packets = packets or ArkimePackets(s)
-    work_root = s.home / "stage"
+    work_root = s.stage_path
     work_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=PCAP_PREFIX, dir=work_root))
     try:

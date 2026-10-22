@@ -19,10 +19,22 @@ from datetime import UTC, datetime
 from functools import lru_cache
 
 from romulus.detect.base import Match, Playbook, basename, pf
-from romulus.detect.bounded import HOT_COUNT, ExecHistory, HeldExamples, KeyedStore, RecentIds, Spill, scalar
+from romulus.detect.bounded import (
+    HOT_COUNT,
+    ExecHistory,
+    HeldExamples,
+    KeyedStore,
+    RecentIds,
+    Spill,
+    StateExhausted,
+    _budget_refuses,
+    scalar,
+)
 from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
     INTERPRETERS,
     WEB_SERVICE_USERS,
+    add_unheld,
+    alone,
     boot_of,
     boots_conflict,
     interpreter_name,
@@ -175,7 +187,8 @@ class PidTable:
         self.execs.trim()
 
     def _entries(self, host: str, pid: int):
-        return self.execs.get((host, pid))
+        # read in place when the store does not bring a process back to memory (below the volume's reserve)
+        return self.execs.get((host, pid)) or self.execs.store.peek((host, pid), [])
 
     def _lookup(self, host: str, pid: int, ts: float, boot: str | None = None, *, strict: bool = False):
         latest = None
@@ -257,8 +270,9 @@ class InterpreterExternalConnection(Playbook):
     """Positive-only: the audit rule set's scope (syscalls, families, ports) is not visible in telemetry,
     so a missing connect record never proves a connection did not happen. One item per (host, program,
     account, port), listing every destination, so routine update traffic is one lead, not one per address."""
+    state_slice = "strong"           # a protected slice of the hunt's disk budget
     id = "host.interpreter_external_connection"
-    version = "3"
+    version = "4"
     title = "Shell, interpreter, relay tool or web-service process made connect() calls to non-private addresses"
     kind = "aggregate"
     families = ("net_socket", "process_exec")
@@ -297,6 +311,7 @@ class InterpreterExternalConnection(Playbook):
         return out
 
     def consume(self, events):
+        self._batch, out = events, []
         for e in events:
             if e.family == "process_exec":
                 self.pids.add(e)
@@ -318,8 +333,12 @@ class InterpreterExternalConnection(Playbook):
                 {"count": 0, "dests": Counter(), "outcomes": Counter(), "first": e.ts, "last": e.ts,
                  "reason": reason, "lane": lane}, HeldExamples(EXAMPLE_LIMIT)])
             if state is None:
-                self.evaluated -= 1
-                self.refuse("disk", "the groups' disk budget is spent; a call of a new group is not evaluated")
+                # the call is a finding by itself: published now, on its own, instead of being refused
+                self.note_limit("groups_alone", "the groups' disk budget is spent; calls of a new group are published "
+                                                "one at a time")
+                info = {"count": 1, "dests": Counter({ip: 1}), "outcomes": Counter({str(e.outcome): 1}),
+                        "first": e.ts, "last": e.ts, "reason": reason, "lane": lane}
+                add_unheld(out, alone(self._group_match(key, info, [e]), self, e))
                 continue
             info, group = state
             info["count"] += 1
@@ -329,46 +348,50 @@ class InterpreterExternalConnection(Playbook):
             if group.offer(e):
                 self._pending.append(e)
                 self._fresh.append(group)
-        return []
+        self._batch = None
+        return out
 
     def finalize(self):
         out = []
         for key in sorted(self.groups.keys()):
             info, group = self.groups.peek(key)
-            evs = sorted(group.events(self.load), key=lambda x: (x.ts, x.id))
-            e0 = evs[0]
-            verdict, chain = self.pids.ancestry(e0.host, e0.get("process.ppid"), e0.ts.timestamp(), boot_of(e0))
-            lane, notes = lineage_lane(info["reason"], info["lane"], verdict, chain)
-            if lane == "high" and all(o == Outcome.failure for o in info["outcomes"]):
-                lane = "lead"
-                notes.append("lane lowered to lead: every connect() call failed")
-            dests = ", ".join(f"{ip} ({n})" for ip, n in info["dests"].most_common(8))
-            more = f" and {len(info['dests']) - 8} more" if len(info["dests"]) > 8 else ""
-            outcomes = ", ".join(f"{n} {w}" for w, n in (
-                ("succeeded", info["outcomes"].get(Outcome.success, 0)),
-                ("failed", info["outcomes"].get(Outcome.failure, 0)),
-                ("with unknown or in-progress outcome", info["outcomes"].get(Outcome.unknown, 0))) if n)
-            port = e0.get("destination.port")
-            if verdict == "web_server":
-                lineage = f" Its ancestry includes the web server '{chain[-1][0]}'."
-            elif verdict == "service_manager":
-                lineage = " Its ancestry reaches the service manager with no web server."
-            else:
-                lineage = " Its ancestry is not fully recorded in the window."
-            claim = (f"auditd connect() records on {e0.host} show {_process_words(e0)}, {info['reason']}, making "
-                     f"{info['count']} connect() call(s) to {len(info['dests'])} non-private address(es) on port "
-                     f"{port} ({info['first'].isoformat()} – {info['last'].isoformat()}): {dests}{more}; "
-                     f"{outcomes}.{lineage} {SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
-            preds = [pf(e0, "socket.syscall"), pf(e0, "process.executable"), pf(e0, "destination.port")]
-            if e0.has("process.user"):
-                preds.append(pf(e0, "process.user"))
-            m = Match(self.id, claim, self.claim_type, evs, preds, e0.ts, self.severity, lane, "high",
-                      e0.entities(), group_key=key)
-            m.notes.extend(notes)
-            if info["count"] > len(evs):
-                m.notes.append(f"{info['count']} matching connect() records; {len(evs)} are cited")
-            out.append(m)
+            out.append(self._group_match(key, info, group.events(self.load)))
         return out
+
+    def _group_match(self, key: str, info: dict, evs: list[TypedEvent]) -> Match:
+        evs = sorted(evs, key=lambda x: (x.ts, x.id))
+        e0 = evs[0]
+        verdict, chain = self.pids.ancestry(e0.host, e0.get("process.ppid"), e0.ts.timestamp(), boot_of(e0))
+        lane, notes = lineage_lane(info["reason"], info["lane"], verdict, chain)
+        if lane == "high" and all(o == Outcome.failure for o in info["outcomes"]):
+            lane = "lead"
+            notes.append("lane lowered to lead: every connect() call failed")
+        dests = ", ".join(f"{ip} ({n})" for ip, n in info["dests"].most_common(8))
+        more = f" and {len(info['dests']) - 8} more" if len(info["dests"]) > 8 else ""
+        outcomes = ", ".join(f"{n} {w}" for w, n in (
+            ("succeeded", info["outcomes"].get(Outcome.success, 0)),
+            ("failed", info["outcomes"].get(Outcome.failure, 0)),
+            ("with unknown or in-progress outcome", info["outcomes"].get(Outcome.unknown, 0))) if n)
+        port = e0.get("destination.port")
+        if verdict == "web_server":
+            lineage = f" Its ancestry includes the web server '{chain[-1][0]}'."
+        elif verdict == "service_manager":
+            lineage = " Its ancestry reaches the service manager with no web server."
+        else:
+            lineage = " Its ancestry is not fully recorded in the window."
+        claim = (f"auditd connect() records on {e0.host} show {_process_words(e0)}, {info['reason']}, making "
+                 f"{info['count']} connect() call(s) to {len(info['dests'])} non-private address(es) on port "
+                 f"{port} ({info['first'].isoformat()} – {info['last'].isoformat()}): {dests}{more}; "
+                 f"{outcomes}.{lineage} {SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
+        preds = [pf(e0, "socket.syscall"), pf(e0, "process.executable"), pf(e0, "destination.port")]
+        if e0.has("process.user"):
+            preds.append(pf(e0, "process.user"))
+        m = Match(self.id, claim, self.claim_type, evs, preds, e0.ts, self.severity, lane, "high",
+                  e0.entities(), group_key=key)
+        m.notes.extend(notes)
+        if info["count"] > len(evs):
+            m.notes.append(f"{info['count']} matching connect() records; {len(evs)} are cited")
+        return m
 
     def retained_events(self) -> list[TypedEvent]:
         return []                               # staged on disk instead
@@ -501,6 +524,7 @@ class ProcessNetworkLink(Playbook):
     # growth is charged to the hunt's state budget.
     DISK_BUDGET = 16 * 2**30
     ROW_BYTES = 160
+    JOIN_CHUNK = 50_000             # socket calls joined per statement at finalize
     holds_state = True
 
     def __init__(self):
@@ -519,7 +543,7 @@ class ProcessNetworkLink(Playbook):
 
     def _store(self) -> Spill:
         if self._spill is None:
-            spill = self._spill = Spill(self.spill_dir, self.state_budget())
+            spill = self._spill = Spill(self.spill_dir, self.state_budget(), self.state_slice)
             spill.table("sock", "id, host, ts, ip, port, exe, user, pid, outcome, reason, lane, grp, claimant")
             spill.table("net", 'id, family, observer, start, "end", src, sport, dst, dport, cid, sev, cat, sig, '
                                "seq INTEGER PRIMARY KEY")
@@ -535,7 +559,13 @@ class ProcessNetworkLink(Playbook):
         self.close_spill()
 
     def _room(self, rows: int) -> bool:
-        """Count the rows against the disk budget. Once it is spent the record is refused (not evaluated) instead."""
+        """Count the rows against the disk budget. Once it, or the rule's slice of the hunt's state budget, is spent
+        the record is refused (not evaluated) instead: every record here needs new rows."""
+        if _budget_refuses(self):
+            self.evaluated -= 1
+            self.refuse("state_disk", "the hunt's state budget for this join is spent; later socket calls and network "
+                                      "records are not evaluated")
+            return False
         if self.spilled_bytes >= self.DISK_BUDGET:
             self.evaluated -= 1
             self.refuse("disk", f"the join's spilled rows reached their disk budget of {self.DISK_BUDGET:,} bytes; "
@@ -561,7 +591,11 @@ class ProcessNetworkLink(Playbook):
                _claimant_key(s.claimant))
         if not self._room(1):
             return
-        self._store().add("sock", row)
+        try:
+            self._store().add("sock", row)
+        except StateExhausted as exc:
+            self._lost(exc)
+            return
         self._pending.append(e)
 
     def _net(self, e: TypedEvent) -> None:
@@ -587,10 +621,21 @@ class ProcessNetworkLink(Playbook):
             return
         self._net_seq = seq
         store = self._store()
-        store.add("net", row)
-        for endpoint in endpoints:
-            store.add("ep", endpoint)
+        try:
+            store.add("net", row)
+            for endpoint in endpoints:
+                store.add("ep", endpoint)
+        except StateExhausted as exc:
+            self._lost(exc)
+            return
         self._pending.append(e)
+
+    def _lost(self, exc: StateExhausted) -> None:
+        """A batch of rows could not be written (the stage volume is at its reserve): this record is refused, and
+        finalize, which needs every row, says so."""
+        self.evaluated -= 1
+        self.refuse("state_disk", f"a write to the stage volume failed ({exc}); later socket calls and network "
+                                  f"records are not evaluated")
 
     def consume(self, events):
         for e in events:
@@ -613,24 +658,33 @@ class ProcessNetworkLink(Playbook):
         direction) starting within the join window, then records sharing a directly linked record's community ID
         and endpoint pair inside its flow's lifetime (plus slack)."""
         db = spill.db
+        spill.cap()                     # every statement below stops itself at the volume's headroom
         db.execute("CREATE INDEX ep_key ON ep (ip, port, start)")
         db.execute("CREATE INDEX net_cid ON net (cid)")
+        spill.check()
         db.execute("CREATE TABLE link (sock INTEGER, net INTEGER, direct INTEGER, PRIMARY KEY (sock, net)) "
                    "WITHOUT ROWID")
-        db.execute("INSERT OR IGNORE INTO link SELECT s.rowid, ep.net, 1 FROM sock s JOIN ep ON ep.ip = s.ip "
-                   "AND ep.port = s.port AND ep.start >= s.ts - ? AND ep.start <= s.ts + ?",
-                   (JOIN_BEFORE, JOIN_AFTER))
-        spill.check()
-        self.heartbeat()
-        db.execute('INSERT OR IGNORE INTO link SELECT l.sock, m.seq, 0 FROM link l JOIN net d ON d.seq = l.net '
-                   'JOIN net m ON m.cid = d.cid WHERE l.direct = 1 AND d.cid IS NOT NULL '
-                   'AND m.start >= d.start - ? AND m.start <= COALESCE(d."end", d.start + ?) + ? '
-                   'AND ((m.src = d.src AND m.sport = d.sport AND m.dst = d.dst AND m.dport = d.dport) '
-                   'OR (m.src = d.dst AND m.sport = d.dport AND m.dst = d.src AND m.dport = d.sport))',
-                   (FLOW_SLACK, JOIN_AFTER, FLOW_SLACK))
-        spill.check()
-        self.heartbeat()
+        last = db.execute("SELECT COALESCE(MAX(rowid), 0) FROM sock").fetchone()[0]
+        # in socket-call chunks, with the budget checked between them: one statement never runs the volume past
+        # its reserve (the page cap stops it first) and a stop loses at most one chunk's work
+        for low in range(0, last + 1, self.JOIN_CHUNK):
+            db.execute("INSERT OR IGNORE INTO link SELECT s.rowid, ep.net, 1 FROM sock s JOIN ep ON ep.ip = s.ip "
+                       "AND ep.port = s.port AND ep.start >= s.ts - ? AND ep.start <= s.ts + ? "
+                       "WHERE s.rowid > ? AND s.rowid <= ?", (JOIN_BEFORE, JOIN_AFTER, low, low + self.JOIN_CHUNK))
+            spill.check()
+            self.heartbeat()
+        for low in range(0, last + 1, self.JOIN_CHUNK):
+            db.execute('INSERT OR IGNORE INTO link SELECT l.sock, m.seq, 0 FROM link l JOIN net d ON d.seq = l.net '
+                       'JOIN net m ON m.cid = d.cid WHERE l.direct = 1 AND d.cid IS NOT NULL '
+                       'AND l.sock > ? AND l.sock <= ? '
+                       'AND m.start >= d.start - ? AND m.start <= COALESCE(d."end", d.start + ?) + ? '
+                       'AND ((m.src = d.src AND m.sport = d.sport AND m.dst = d.dst AND m.dport = d.dport) '
+                       'OR (m.src = d.dst AND m.sport = d.dport AND m.dst = d.src AND m.dport = d.sport))',
+                       (low, low + self.JOIN_CHUNK, FLOW_SLACK, JOIN_AFTER, FLOW_SLACK))
+            spill.check()
+            self.heartbeat()
         db.execute("CREATE INDEX link_net ON link (net)")
+        spill.check()
         # how many distinct processes claim each linked record
         db.execute("CREATE TABLE nc (net INTEGER PRIMARY KEY, n INTEGER)")
         db.execute("INSERT INTO nc SELECT l.net, COUNT(DISTINCT s.claimant) FROM link l JOIN sock s "

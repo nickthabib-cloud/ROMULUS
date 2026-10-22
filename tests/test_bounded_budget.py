@@ -28,7 +28,7 @@ class _Owner(Playbook):
 
 class _Growing(Playbook):
     """Keeps every record's text under its host, hot set 1, so state moves to disk at every batch end and an
-    existing host's state grows; finalize reads every state back."""
+    existing host's state grows; a record of a host it cannot hold is refused; finalize reads every state back."""
     id = "test.growing"
     title = "test"
     kind = "aggregate"
@@ -41,6 +41,10 @@ class _Growing(Playbook):
     def consume(self, events):
         for e in self.applicable(events):
             state = self.notes.setdefault(e.host, list)
+            if state is None:
+                self.evaluated -= 1
+                self.refuse("disk", "a record of a new host is not evaluated")
+                continue
             state.append(e.id + "x" * 2000)          # distinct strings (pickle would share one object)
         self.notes.trim()
         return []
@@ -88,34 +92,41 @@ def _sweep(monkeypatch, tmp_path, pack, batches, budget: StateBudget):
 
 
 def _batches(n: int, per: int = 20):
-    return [[_event(b * per + i, f"host{i % 3}") for i in range(per)] for b in range(n)]
+    """`per` records of three recurring hosts, then one record of a host new in that batch."""
+    return [[_event(b * (per + 1) + i, f"host{i % 3}") for i in range(per)] + [_event(b * (per + 1) + per, f"new{b}")]
+            for b in range(n)]
 
 
-def test_an_exhausted_disk_total_refuses_later_records_and_the_hunt_completes(monkeypatch, tmp_path):
-    budget = StateBudget(tmp_path, disk_total=60_000, reserve=0)
+def _parts(cells, rule_id):
+    return sorted((c for c in cells if c["rule_id"] == rule_id and c["target"] != "*"), key=lambda c: c["partition"])
+
+
+def test_a_spent_slice_refuses_only_records_needing_new_state_and_the_hunt_completes(monkeypatch, tmp_path):
+    budget = StateBudget(tmp_path, disk_total=80_000, reserve=0)      # the routine slice: 60,000 bytes
     growing, stateless = _Growing(), _Stateless()
     sweep, cells = _sweep(monkeypatch, tmp_path, [growing, stateless], _batches(8), budget)
-    assert budget.over_total and budget.disk_used >= 60_000      # growth of existing states counted it
-    mine = sorted((c for c in cells if c["rule_id"] == growing.id and c["target"] != "*"),
-                  key=lambda c: c["partition"])
-    assert mine[0]["state"] == "evaluated_complete"
-    assert mine[-1]["state"] == "evaluated_partial" and mine[-1]["evaluated"] == 0
-    assert any("state budget is spent" in r for r in mine[-1]["detail"]["reasons"])
+    assert budget.slice_over["routine"] and not budget.slice_over["strong"]
+    assert budget.slice_used["routine"] >= 60_000                     # growth of existing states counted it
+    mine = _parts(cells, growing.id)
+    assert mine[0]["state"] == "evaluated_complete" and mine[0]["evaluated"] == 21
+    # once spent, the recurring hosts are still evaluated (their states update); only the new host is refused
+    assert mine[-1]["state"] == "evaluated_partial" and mine[-1]["evaluated"] == 20
+    assert mine[-1]["detail"]["state_capped"] == 1
     window = next(c for c in cells if c["rule_id"] == growing.id and c["target"] == "*")
     assert window["state"] in ("evaluated_partial", "match_on_partial")
-    # a rule that keeps no state is not touched
+    assert any("state budget is spent" in r for r in window["detail"]["reasons"])
     assert all(c["state"] == "no_match_complete" for c in cells if c["rule_id"] == stateless.id)
     assert any("state budget" in r for r in sweep.partial_reasons)
-    assert sweep.stats["state_budget"]["spent"].startswith("detector state on disk reached")
+    assert sweep.stats["state_budget"]["spent"].startswith("detector state on disk of routine rules")
 
 
-def test_free_space_below_the_reserve_at_preflight_evaluates_no_stateful_record(monkeypatch, tmp_path):
+def test_free_space_below_the_reserve_at_preflight_holds_no_new_state(monkeypatch, tmp_path):
     monkeypatch.setattr(StateBudget, "free", lambda self: 10)
     budget = StateBudget(tmp_path, disk_total=2**30, reserve=2**30)
     growing = _Growing()
     sweep, cells = _sweep(monkeypatch, tmp_path, [growing, _Stateless()], _batches(2), budget)
     assert any("below the reserve" in r for r in sweep.partial_reasons)
-    mine = [c for c in cells if c["rule_id"] == growing.id and c["target"] != "*"]
+    mine = _parts(cells, growing.id)
     assert mine and all(c["state"] == "evaluated_partial" and c["evaluated"] == 0 for c in mine)
     assert all(c["state"] == "no_match_complete" for c in cells if c["rule_id"] == "test.stateless")
 
@@ -123,24 +134,25 @@ def test_free_space_below_the_reserve_at_preflight_evaluates_no_stateful_record(
 def test_free_space_falling_below_the_reserve_during_the_sweep_is_partial_not_a_crash(monkeypatch, tmp_path):
     free = {"bytes": 10 * 2**30}
     monkeypatch.setattr(StateBudget, "free", lambda self: free["bytes"])
-    monkeypatch.setattr(bounded, "FREE_CHECK_BYTES", 1)
     budget = StateBudget(tmp_path, disk_total=2**40, reserve=2**30)
     growing = _Growing()
     original = growing.consume
 
     def consume(events):
         out = original(events)
-        if events and events[0].id == "e40":
+        if events and events[0].id == "e42":
             free["bytes"] = 100             # the volume fills while the hunt runs
         return out
     growing.consume = consume
     _unused, cells = _sweep(monkeypatch, tmp_path, [growing], _batches(5), budget)
     assert budget.low_space
-    mine = sorted((c for c in cells if c["rule_id"] == growing.id and c["target"] != "*"),
-                  key=lambda c: c["partition"])
-    assert mine[-1]["evaluated"] == 0 and mine[-1]["state"] == "evaluated_partial"
+    mine = _parts(cells, growing.id)
+    assert mine[0]["evaluated"] == 21
+    # below the reserve only the state in memory updates: the rest is refused, counted, never dropped silently
+    assert mine[-1]["state"] == "evaluated_partial" and mine[-1]["detail"]["state_capped"] >= 1
+    assert mine[-1]["evaluated"] + mine[-1]["detail"]["state_capped"] == 21
     window = next(c for c in cells if c["rule_id"] == growing.id and c["target"] == "*")
-    assert any("finalize stopped" in r or "state limit" in r for r in window["detail"]["reasons"])
+    assert any("state" in r for r in window["detail"]["reasons"])
 
 
 class _FullDisk:
@@ -156,26 +168,26 @@ class _FullDisk:
         return getattr(self._db, name)
 
 
-def test_a_failed_write_keeps_state_in_memory_and_later_records_are_refused(monkeypatch, tmp_path):
+def test_a_failed_write_keeps_state_in_memory_and_refuses_only_what_needs_disk(monkeypatch, tmp_path):
     budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
     growing = _Growing()
     original = growing.consume
 
     def consume(events):
-        if events and events[0].id == "e20":
+        if events and events[0].id == "e21":
             spill = growing.spill()
             spill.db = _FullDisk(spill.db)
         return original(events)
     growing.consume = consume
     _unused, cells = _sweep(monkeypatch, tmp_path, [growing], _batches(4), budget)
     assert budget.broken and "disk is full" in budget.broken
-    mine = sorted((c for c in cells if c["rule_id"] == growing.id and c["target"] != "*"),
-                  key=lambda c: c["partition"])
-    assert [c["evaluated"] for c in mine] == [20, 20, 0, 0]
-    assert growing.held == 40                       # what was evaluated is all still held: nothing dropped
+    mine = _parts(cells, growing.id)
+    assert [c["evaluated"] + c["detail"].get("state_capped", 0) for c in mine] == [21, 21, 21, 21]
+    assert all(c["detail"].get("state_capped", 0) >= 1 for c in mine[2:])
     window = next(c for c in cells if c["rule_id"] == growing.id and c["target"] == "*")
     assert window["state"] == "evaluated_partial"
-    assert any("state budget is spent" in r for r in window["detail"]["reasons"])
+    # every state was in memory when the write failed (none was left in the table), so finalize is exact
+    assert growing.held == sum(c["evaluated"] for c in mine)
 
 
 def test_a_store_whose_disk_write_failed_stops_finalize_instead_of_reading_a_partial_table(tmp_path):
@@ -209,7 +221,7 @@ def test_finalize_tables_are_charged_and_stop_at_the_reserve(monkeypatch, tmp_pa
     rule.consume(events)
     rule.budget.finalizing = True
     monkeypatch.setattr(StateBudget, "free", lambda self: 10)
-    with pytest.raises(StateExhausted, match="below the reserve"):
+    with pytest.raises(StateExhausted):          # the page cap stops the join, or the check between chunks does
         rule.finalize()
     rule.release_state()
 
@@ -371,10 +383,15 @@ def test_settings_reach_the_state_budget(tmp_path):
         "ROMULUS_HOME": str(tmp_path), "ROMULUS_STATE_DISK_GB": "3", "ROMULUS_STATE_DISK_RESERVE_GB": "0.5",
         "ROMULUS_STATE_MEMORY_MB": "256"})
     budget = sw.state_budget(s, tmp_path)
-    assert (budget.disk_total, budget.reserve, budget.memory_total) == (3 * 2**30, 2**29, 256 * 2**20)
+    size, free = bounded.volume_usage(tmp_path)
+    assert (budget.disk_total, budget.memory_total) == (3 * 2**30, 256 * 2**20)
+    assert budget.reserve == max(2**29, int(size * bounded.RESERVE_SHARE))       # the setting is a floor
+    assert budget.slice_total["strong"] == int(3 * 2**30 * bounded.STRONG_SHARE)
     auto = sw.state_budget(load_settings(env_file=tmp_path / "none.env", environ={"ROMULUS_HOME": str(tmp_path)}),
                            tmp_path)
-    assert auto.disk_total >= 2**30 and auto.reserve == 2 * 2**30
+    assert auto.reserve == max(2 * 2**30, int(size * bounded.RESERVE_SHARE))
+    assert auto.disk_total <= max(bounded.DISK_TOTAL_FLOOR, int(size * bounded.TOTAL_SHARE))
+    assert auto.disk_total <= max(bounded.DISK_TOTAL_FLOOR, (free - auto.reserve) // 2 + 2**20)
 
 
 def _exec(event_id: str, pid: int, seconds: int) -> TypedEvent:
@@ -409,3 +426,64 @@ def test_doctor_reports_a_stage_volume_at_its_reserve(monkeypatch, tmp_path):
     monkeypatch.setattr(StateBudget, "free", lambda self: 10)
     check = check_state_budget(s)
     assert check.status == "fail" and "below the reserve" in check.detail
+
+
+def test_the_page_cap_stops_a_long_statement_at_the_volume_headroom(monkeypatch, tmp_path):
+    budget = StateBudget(tmp_path, disk_total=2**40, reserve=2**30)
+    monkeypatch.setattr(StateBudget, "free", lambda self: 2**30 + 200_000)      # 200 KB above the reserve
+    spill = Spill(tmp_path, budget)
+    spill.table("t", "a, b")
+    spill.flush()
+    spill.cap()
+    with pytest.raises(sqlite3.OperationalError) as failure:
+        spill.db.execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) "
+                         "INSERT INTO t SELECT i, hex(randomblob(50)) FROM n")
+    assert isinstance(spill.failed(failure.value), StateExhausted) and "full" in budget.broken
+    pages = spill.db.execute("PRAGMA page_count").fetchone()[0] * spill._page
+    assert pages <= 200_000 + 4 * spill._page
+    spill.close()
+
+
+class _FailsMidBatch(Playbook):
+    """Evaluates records one at a time and loses the stage volume at the sixth."""
+    id = "test.fails_mid_batch"
+    title = "test"
+    kind = "aggregate"
+    families = ("process_exec",)
+    holds_state = True
+
+    def consume(self, events):
+        for i, _e in enumerate(e for e in events if e.family in self.families):
+            if i == 5:
+                raise StateExhausted("a write failed")
+            self.evaluated += 1
+        return []
+
+
+def test_a_failure_mid_batch_refuses_exactly_the_records_not_evaluated(monkeypatch, tmp_path):
+    rule = _FailsMidBatch()
+    _unused, cells = _sweep(monkeypatch, tmp_path, [rule], _batches(1), StateBudget(tmp_path, reserve=0))
+    (cell,) = _parts(cells, rule.id)
+    assert cell["evaluated"] == 5 and cell["detail"]["state_capped"] == 16 and cell["state"] == "evaluated_partial"
+
+
+def test_doctor_warns_when_the_stage_shares_a_service_data_volume(tmp_path):
+    from romulus.config import load_settings
+    from romulus.doctor import check_stage_volume
+    s = load_settings(env_file=tmp_path / "none.env", environ={
+        "ROMULUS_HOME": str(tmp_path), "ROMULUS_STAGE_DIR": str(tmp_path / "stage")})
+    assert s.stage_path == tmp_path / "stage"
+    (tmp_path / "esdata").mkdir()
+    shared = check_stage_volume(s, {"Elasticsearch": (str(tmp_path / "esdata"),)})
+    assert shared.status == "warn" and "ROMULUS_STAGE_DIR" in shared.detail and "Elasticsearch" in shared.detail
+    assert check_stage_volume(s, {"Elasticsearch": (str(tmp_path / "absent"),)}).status == "ok"
+
+
+def test_the_automatic_total_and_reserve_leave_a_shared_volume_room(monkeypatch, tmp_path):
+    size = 100 * 2**30
+    monkeypatch.setattr(bounded, "volume_usage", lambda directory: (size, 60 * 2**30))
+    budget = StateBudget(tmp_path)
+    assert budget.reserve == int(size * 0.15)                       # 15 GiB, not 2
+    assert budget.disk_total == int(size * 0.10)                    # 10 GiB, not half of the free space
+    monkeypatch.setattr(bounded, "volume_usage", lambda directory: (size, 16 * 2**30))
+    assert StateBudget(tmp_path).disk_total == (16 * 2**30 - int(size * 0.15)) // 2

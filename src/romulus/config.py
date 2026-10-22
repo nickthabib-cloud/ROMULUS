@@ -67,9 +67,12 @@ class Settings(BaseModel):
     # fetch the sweep's next partition on one background thread while the current one is evaluated; off by
     # default because it holds a second partition's decoded records in memory
     sweep_prefetch: bool = False
-    # Detector state that does not fit in memory goes to disk under ROMULUS_HOME/stage. The hunt's disk total for it
-    # (0: half the stage volume's free space when the sweep starts), the free space always left on that volume, and
-    # the memory the in-memory parts of every rule share. Reaching a disk limit makes coverage partial, never a crash.
+    # Where a hunt stages events and detector state that does not fit in memory (default ROMULUS_HOME/stage). Put it
+    # on a volume no other service writes to: never the volume of Elasticsearch, Arkime or docker data.
+    stage_dir: Path | None = None
+    # The hunt's disk total for detector state (0: the smaller of half the stage volume's free space and 10% of its
+    # size), the least free space always left on that volume (the reserve is at least 15% of the volume), and the
+    # memory the in-memory parts of every rule share. Reaching a disk limit makes coverage partial, never a crash.
     state_disk_gb: float = Field(default=0.0, ge=0.0)
     state_disk_reserve_gb: float = Field(default=2.0, ge=0.0)
     state_memory_mb: int = Field(default=1536, ge=64)
@@ -138,6 +141,11 @@ class Settings(BaseModel):
         return v
 
     @property
+    def stage_path(self) -> Path:
+        """The directory a hunt stages events and detector state in."""
+        return self.stage_dir if self.stage_dir is not None else self.home / "stage"
+
+    @property
     def db_path(self) -> Path:
         return self.home / "db" / "romulus.db"
 
@@ -179,7 +187,7 @@ ENV_MAP = {
     "ES_API_KEY": "es_api_key", "ES_CA_CERT": "es_ca_cert", "ES_VERIFY_TLS": "es_verify_tls",
     "ES_INDEX_PATTERNS": "es_index_patterns", "ES_COMPRESSION": "es_compression",
     "ROMULUS_SWEEP_PREFETCH": "sweep_prefetch",
-    "ROMULUS_STATE_DISK_GB": "state_disk_gb", "ROMULUS_STATE_DISK_RESERVE_GB": "state_disk_reserve_gb",
+    "ROMULUS_STAGE_DIR": "stage_dir", "ROMULUS_STATE_DISK_GB": "state_disk_gb", "ROMULUS_STATE_DISK_RESERVE_GB": "state_disk_reserve_gb",
     "ROMULUS_STATE_MEMORY_MB": "state_memory_mb",
     "ARKIME_URL": "arkime_url", "ARKIME_USERNAME": "arkime_username", "ARKIME_PASSWORD": "arkime_password",
     "ARKIME_VERIFY_TLS": "arkime_verify_tls",

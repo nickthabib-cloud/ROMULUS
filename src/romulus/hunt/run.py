@@ -309,7 +309,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     def heartbeat():
         repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
 
-    stage_dir = s.home / "stage"
+    stage_dir = s.stage_path
     clear_stale_stages(stage_dir)
     sweep = Sweep(
         repo, client, hunt_id, window, contracts, on_candidate, heartbeat=heartbeat, stage_dir=stage_dir,

@@ -75,7 +75,7 @@ def state_budget(settings, stage_dir) -> StateBudget:
     memory_mb = getattr(settings, "state_memory_mb", None)
     kwargs = {}
     if reserve_gb is not None:
-        kwargs["reserve"] = int(float(reserve_gb) * 2**30)
+        kwargs["reserve_floor"] = int(float(reserve_gb) * 2**30)
     if memory_mb is not None:
         kwargs["memory_total"] = int(memory_mb) * 2**20
     return StateBudget(stage_dir, disk_total=int(disk_gb * 2**30) or None, **kwargs)
@@ -143,7 +143,8 @@ class Sweep:
         self.partial_reasons: list[str] = []
         preflight = self.budget.preflight()
         if preflight:
-            self.partial_reasons.append(f"state budget: {preflight}; rules that keep state evaluate no records")
+            self.partial_reasons.append(f"state budget: {preflight}; rules evaluate only records that need no new "
+                                        f"state")
         # Built as partitions are read, in time order per target: each batch's events are placed with what has
         # been observed so far. Expansion and the context pass use the whole map, recorded at finalize.
         self.boots = BootIntervals()
@@ -364,20 +365,19 @@ class Sweep:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
             before_limits = {name: limit.records for name, limit in pb.limits.items()}
-            spent = self.budget.spent if pb.holds_state else ""
-            if spent:
-                # the hunt's state budget is spent: this rule's state may not grow, so its records are refused
+            # Every rule reads every batch, whatever the state budget: once a slice is spent its stores refuse
+            # only records that need new state (each rule's own refusal path), and every match that needs no new
+            # state still publishes.
+            try:
+                matches = pb.consume(events)
+            except StateExhausted as exc:
+                # a write to the stage volume failed mid-batch (a rule that writes rows directly): the records it
+                # had not evaluated yet are refused, counted exactly
                 matches = []
-                pb.refuse_batch(events, f"the hunt's state budget is spent ({spent}); later records of this rule "
-                                        f"are not evaluated")
-            else:
-                try:
-                    matches = pb.consume(events)
-                except StateExhausted as exc:
-                    # a write to the stage volume failed mid-batch: the batch is not counted as evaluated
-                    matches = []
-                    pb.refuse_batch(events, f"the hunt's state budget is spent ({exc}); later records of this "
-                                            f"rule are not evaluated")
+                pb.refuse_unevaluated(events, pb.evaluated - before_eval + pb.missing_required - before_missing
+                                      + pb.capped - before_capped,
+                                      f"a write to the stage volume failed ({exc}); this rule's later records of "
+                                      f"the batch are not evaluated")
             for m in matches:
                 self._publish(m, tid, raw_sources)
             if pb.staged:
@@ -424,6 +424,8 @@ class Sweep:
         if any(pb.staged for pb in self.pack):
             self._event_stage().put(list(staged.values()), raw_sources)
         staged.clear()
+        # the event stage shares the stage volume: its growth counts toward the free-space reserve
+        self.budget.check_free()
         # the partition's cells together: a crash before this leaves them all visibly `planned`
         self.repo.set_rule_cells(self.hunt_id, cells)
         self.repo.update_task(tid, "evaluated")
@@ -549,19 +551,26 @@ class Sweep:
         if self.budget.spent:
             self.partial_reasons.append(f"state budget: {self.budget.spent}")
             self.stats["state_budget"] = {"spent": self.budget.spent, "disk_bytes": self.budget.disk_used,
-                                          "disk_total": self.budget.disk_total, "reserve": self.budget.reserve}
+                                          "disk_total": self.budget.disk_total, "reserve": self.budget.reserve,
+                                          "slices": {name: {"used": self.budget.slice_used[name],
+                                                            "total": self.budget.slice_total[name]}
+                                                     for name in self.budget.slice_total}}
         self.close_stage()
 
     @staticmethod
     def _finalize_rule(pb: Playbook) -> list[Match]:
-        """A rule's finalize; when it needs disk the stage volume cannot give, its results are not computed and its
-        window cell says so (the hunt goes on)."""
+        """A rule's finalize. When it needs disk the stage volume cannot give, the rule publishes what it can from
+        state readable without writing (`finalize_fallback`: strong per-record items), and its window cell says
+        which results were not computed (the hunt goes on)."""
         try:
             return pb.finalize()
         except StateExhausted as exc:
-            pb.note_limit("state_disk", f"finalize stopped: {exc}; this rule's whole-window results were not "
-                                        f"computed")
-            return []
+            pb.note_limit("state_disk", f"finalize stopped: {exc}; this rule's groupings were not computed, only "
+                                        f"what it could publish without disk")
+            try:
+                return pb.finalize_fallback(str(exc))
+            except StateExhausted:
+                return []
 
     def close_stage(self) -> None:
         """Remove the disk stage (raw telemetry copies) and the playbooks' spills. Called by finalize and on every
