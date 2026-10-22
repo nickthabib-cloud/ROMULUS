@@ -606,3 +606,103 @@ def test_parent_resolves_across_continuously_observed_hours():
             hunt_id="build", targets=["host-index"], start=F_HOUR, end=START,
         )
     assert (H_HOUR, "/usr/sbin/parent", "/bin/sh") in _pair_keys(repo)
+
+
+def _building_with_rows(repo, rows, *, hunt_id="build"):
+    row = _writer(repo, FakeHistory()).segment_row(
+        hunt_id=hunt_id, target="host", spec=SPEC,
+        start=START - timedelta(hours=1), end=START, events_total=rows,
+    )
+    assert repo.begin_baseline_segment(row)
+
+    def counts():
+        for index in range(rows):
+            yield {
+                "segment_id": row["id"], "scope_kind": "host", "scope": f"host:{index % 1000}",
+                "key_id": f"key-{index}", "key_digest": f"digest-{index}", "key": {"n": index},
+                "bucket": START.replace(hour=0) - timedelta(days=1), "count": 1,
+                "first_ts": START - timedelta(minutes=1), "last_ts": START - timedelta(minutes=1),
+            }
+
+    repo.append_baseline_segment_rows(row["id"], counts(), (), chunk_size=5000)
+    return row
+
+
+def test_cleanup_and_reclaim_delete_child_rows_in_bounded_transactions(monkeypatch):
+    from romulus.store import repo as repo_module
+
+    monkeypatch.setattr(repo_module, "BASELINE_DELETE_CHUNK", 7)
+    repo = _repo()
+    statements: list[str] = []
+    real = repo_module.write_txn
+
+    class Counting:
+        def __init__(self, engine):
+            self.inner = real(engine)
+
+        def __enter__(self):
+            statements.append("txn")
+            return self.inner.__enter__()
+
+        def __exit__(self, *exc):
+            return self.inner.__exit__(*exc)
+
+    row = _building_with_rows(repo, 50)
+    monkeypatch.setattr(repo_module, "write_txn", Counting)
+    assert repo.cleanup_baseline_building(before=START + timedelta(days=1)) == 1
+    # 50 child rows in chunks of 7 need at least 8 delete transactions besides the claim and the parent.
+    assert len(statements) >= 10
+    assert repo.baseline_segments() == [] and list(repo.baseline_counts(row["id"])) == []
+
+    monkeypatch.setattr(repo_module, "write_txn", real)
+    row = _building_with_rows(repo, 50)
+    statements.clear()
+    monkeypatch.setattr(repo_module, "write_txn", Counting)
+    assert repo.begin_baseline_segment(row, reclaim_owner=True)
+    assert len(statements) >= 9
+    assert list(repo.baseline_counts(row["id"])) == []
+    assert repo.baseline_segments()[0]["status"] == "building"
+
+
+def test_a_build_claimed_by_cleanup_is_not_reclaimed_by_its_owner():
+    from romulus.store import repo as repo_module
+
+    repo = _repo()
+    row = _building_with_rows(repo, 3)
+    with repo_module.write_txn(repo.engine) as connection:
+        connection.execute(repo_module.t.baseline_segment.update().where(
+            repo_module.t.baseline_segment.c.id == row["id"],
+        ).values(built_by_hunt_id=repo_module.CLEANUP_OWNER))
+    # A cleaner holds the row: the owner's resume must neither delete under it nor raise.
+    assert repo.begin_baseline_segment(row, reclaim_owner=True) is False
+    assert len(list(repo.baseline_counts(row["id"]))) == 3
+
+
+@pytest.mark.slow
+def test_cleanup_of_a_million_row_crashed_build_never_holds_the_write_lock_for_a_second(tmp_path):
+    path = tmp_path / "cleanup.db"
+    repo, other = _repo(path), Repo(make_engine(path))
+    row = _building_with_rows(repo, 1_000_000)
+    stopped = threading.Event()
+    waits: list[float] = []
+
+    def concurrent_writes():
+        index = 0
+        while not stopped.is_set():
+            before = time.perf_counter()
+            other.create_hunt(f"concurrent-{index}", {}, "d", "test")
+            waits.append(time.perf_counter() - before)
+            index += 1
+
+    thread = threading.Thread(target=concurrent_writes)
+    thread.start()
+    try:
+        started = time.perf_counter()
+        removed = repo.cleanup_baseline_building(before=START + timedelta(days=1))
+        elapsed = time.perf_counter() - started
+    finally:
+        stopped.set()
+        thread.join(timeout=35)
+    print(f"cleanup of a crashed million-row build {elapsed:.1f}s; concurrent max wait {max(waits):.3f}s")
+    assert removed == 1 and list(repo.baseline_counts(row["id"])) == []
+    assert waits and max(waits) < 1

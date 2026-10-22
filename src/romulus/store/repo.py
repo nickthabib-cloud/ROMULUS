@@ -24,6 +24,7 @@ from sqlalchemy import (
     literal_column,
     or_,
     select,
+    text,
     true,
     tuple_,
 )
@@ -147,12 +148,19 @@ def baseline_scope_series_query(scope_kind: str, scope: str, hunt_id: str, spec_
 # ---- baseline rows ---------------------------------------------------------------------------
 BASELINE_CHUNK = 5000      # rows per executemany batch while streaming a segment or observations
 BASELINE_PAGE = 5000       # rows per keyset page on reads
+# Child rows deleted per write transaction when an abandoned build is removed. One chunk is about as costly as
+# one append chunk, so the write lock is released every fraction of a second however large the build was.
+BASELINE_DELETE_CHUNK = 5000
+# The builder recorded on a building segment while cleanup removes it: never a hunt id, so no owner reclaims it.
+CLEANUP_OWNER = "\x00cleanup"
 _BUCKET_WIDTH = {"day": timedelta(days=1), "hour": timedelta(hours=1)}
 _SEGMENT_COLUMNS = frozenset(column.name for column in t.baseline_segment.columns) - {"rows_digest"}
 _SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id"})
 # What makes two writes of one segment id the same segment: everything but its lifecycle status and the time
 # this copy was written (the rows are compared through rows_digest).
 _SEGMENT_IDENTITY = tuple(sorted(_SEGMENT_COLUMNS - {"status", "created_at"}))
+# Content identity of a building segment: who builds it is provenance, not content.
+_BUILD_CONTENT = tuple(name for name in _SEGMENT_IDENTITY if name != "built_by_hunt_id")
 _COUNT_COLUMNS = tuple(column.name for column in t.baseline_count.columns)
 _HOUR_COLUMNS = tuple(column.name for column in t.baseline_scope_hour.columns)
 _OBSERVATION_COLUMNS = tuple(column.name for column in t.baseline_observation.columns)
@@ -1720,25 +1728,48 @@ class Repo:
         """Create an invisible building segment, optionally restarting this hunt's crashed build.
 
         The hunt lease serializes one writer per hunt. Reclamation is therefore safe only for the same
-        ``built_by_hunt_id``; a building row owned by another hunt remains protected.
+        ``built_by_hunt_id``; a building row owned by another hunt, or claimed by cleanup, remains protected.
+        Reclaiming first refreshes the row's ``created_at`` so a concurrent cleanup cannot claim it, then drops
+        the crashed rows in bounded transactions, then replaces the row.
         """
         segment = _baseline_segment_row(row)
         if segment["status"] != "building":
             raise ValueError("a chunked baseline segment must begin with status building")
+        s = t.baseline_segment.c
+        owned = and_(s.id == segment["id"], s.status == "building",
+                     s.built_by_hunt_id == segment["built_by_hunt_id"])
         with write_txn(self.engine) as c:
-            existing = c.execute(select(t.baseline_segment).where(
-                t.baseline_segment.c.id == segment["id"],
-            )).mappings().first()
-            if existing is not None:
-                stored = _with_utc(existing, ("start", "end", "created_at"))
-                if any(stored[name] != segment[name] for name in _SEGMENT_IDENTITY):
-                    raise ValueError(f"baseline segment {segment['id']} exists with different content")
-                if not (reclaim_owner and stored["status"] == "building"
-                        and stored["built_by_hunt_id"] == segment["built_by_hunt_id"]):
-                    return False
-                c.execute(t.baseline_segment.delete().where(t.baseline_segment.c.id == segment["id"]))
+            existing = c.execute(select(t.baseline_segment).where(s.id == segment["id"])).mappings().first()
+            if existing is None:
+                c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
+                return True
+            stored = _with_utc(existing, ("start", "end", "created_at"))
+            if any(stored[name] != segment[name] for name in _BUILD_CONTENT):
+                raise ValueError(f"baseline segment {segment['id']} exists with different content")
+            if not (reclaim_owner and stored["status"] == "building"
+                    and stored["built_by_hunt_id"] == segment["built_by_hunt_id"]):
+                return False
+            c.execute(t.baseline_segment.update().where(owned).values(created_at=segment["created_at"]))
+        self._drop_baseline_children(segment["id"])
+        with write_txn(self.engine) as c:
+            if not c.execute(t.baseline_segment.delete().where(owned)).rowcount:
+                return False
             c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
             return True
+
+    def _drop_baseline_children(self, segment_id: str) -> None:
+        """Delete one segment's child rows, one short write transaction per bounded chunk."""
+        chunk = BASELINE_DELETE_CHUNK
+        for table in (t.baseline_count, t.baseline_scope_hour):
+            statement = text(
+                f"DELETE FROM {table.name} WHERE rowid IN "
+                f"(SELECT rowid FROM {table.name} WHERE segment_id = :segment_id LIMIT :chunk)"
+            )
+            while True:
+                with write_txn(self.engine) as c:
+                    deleted = c.execute(statement, {"segment_id": segment_id, "chunk": chunk}).rowcount
+                if deleted < chunk:
+                    break
 
     def append_baseline_segment_rows(self, segment_id: str, counts: Iterable[dict],
                                      scope_hours: Iterable[dict], *,
@@ -1792,14 +1823,31 @@ class Repo:
         return value
 
     def cleanup_baseline_building(self, *, before: datetime) -> int:
-        """Delete abandoned builds and their cascading child rows before history work resumes."""
+        """Delete abandoned builds before history work resumes, never holding the write lock for long.
+
+        Each abandoned row is claimed in one small transaction (its builder becomes ``CLEANUP_OWNER``, so its
+        owner can no longer reclaim it), its child rows go in bounded chunks, and the row itself goes last. A
+        cleaner that crashes part way leaves a claimed row that the next cleanup finishes.
+        """
         before = _utc(before, "building cleanup time")
-        with write_txn(self.engine) as c:
-            result = c.execute(t.baseline_segment.delete().where(
-                t.baseline_segment.c.status == "building",
-                t.baseline_segment.c.created_at < before,
-            ))
-            return int(result.rowcount or 0)
+        s = t.baseline_segment.c
+        abandoned = and_(s.status == "building", s.created_at < before)
+        removed = 0
+        while True:
+            with self.engine.connect() as c:
+                segment_id = c.execute(select(s.id).where(abandoned).order_by(s.id).limit(1)).scalar_one_or_none()
+            if segment_id is None:
+                return removed
+            with write_txn(self.engine) as c:
+                claimed = c.execute(t.baseline_segment.update().where(s.id == segment_id, abandoned)
+                                    .values(built_by_hunt_id=CLEANUP_OWNER)).rowcount
+            if not claimed:
+                continue  # its owner refreshed it between the read and the claim; it is no longer abandoned
+            self._drop_baseline_children(segment_id)
+            with write_txn(self.engine) as c:
+                removed += c.execute(t.baseline_segment.delete().where(
+                    s.id == segment_id, s.status == "building", s.built_by_hunt_id == CLEANUP_OWNER,
+                )).rowcount
 
     def baseline_segments(self, *, site: str | None = None, target: str | None = None,
                           spec_id: str | None = None, statuses: Iterable[str] | None = None) -> list[dict]:
