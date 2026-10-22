@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from romulus.agent.models import PivotCoverage
+from romulus.config import Settings
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import run as hunt_run
 from romulus.hunt.expansion import ExpansionEngine
@@ -118,6 +119,20 @@ def repo_with_aggregate_anchor(events, *, candidate_id="F-aggregate"):
     return repo
 
 
+def test_resume_seed_does_not_promote_agent_published_candidate_to_deterministic_anchor():
+    repo = repo_with_anchor()
+    add_anchor(repo, "F-agent-published", "web2")
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.candidate.update().where(
+            tables.candidate.c.id == "F-agent-published",
+        ).values(source_case_id="case-1", source_anchor_id="F-anchor", source_link_id="L-agent"))
+
+    ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo))._seed_anchors()
+
+    assert {row["candidate_id"] for row in repo.expansion_anchors("h1")} == {"F-anchor"}
+
+
 class KeyRecordingFetcher(ScriptedFetcher):
     def result_id(self, anchor, link_type, window):
         pid = anchor.events[0].get("process.pid") if anchor.events else None
@@ -168,6 +183,29 @@ def stable_state(repo):
                                                      "status", "event_ids", "evaluated")}
                   for row in repo.expansion_links("h1")],
     }
+
+
+def seed_agent_reach(repo, *, query_spend=170, status="partial"):
+    ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo))._seed_anchors()
+    repo.upsert_task(
+        "T-agent", "h1", "agent_follow_link", "agent-session",
+        {"link_type": "process_lineage"}, "fp-agent",
+    )
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as tables
+        connection.execute(tables.task.update().where(
+            tables.task.c.id == "T-agent",
+        ).values(source_queries=query_spend))
+    repo.save_expansion_link({
+        "id": "L-agent", "hunt_id": "h1", "anchor_id": "F-anchor",
+        "link_type": "agent_follow_process_lineage", "window_label": "agent requested",
+        "window_start": WINDOW.start, "window_end": WINDOW.end,
+        "strength": "agent_hypothesis", "key": {"agent_tool": "follow_link"},
+        "status": status, "event_ids": [], "evidence_ids": ["anchor-event"],
+        "task_ids": ["T-agent"], "coverage": [],
+        "reasons": ["agent query cap"] if status != "complete" else [],
+        "duration_ms": 1, "query_spend": query_spend, "evaluated": 1,
+    })
 
 
 def without_timing(manifest):
@@ -350,6 +388,37 @@ def test_resume_seeds_budget_from_persisted_query_spend_and_uses_only_remainder(
     assert 170 + resumed.queries_executed == 180
     assert result["source_queries"] == 180
     assert repo.expansion_source_queries("h1") == 180
+
+
+def test_agent_spend_and_reach_do_not_consume_or_taint_resumed_deterministic_expansion():
+    repo = repo_with_anchor()
+    seed_agent_reach(repo)
+
+    assert repo.expansion_source_queries("h1") == 0
+
+    fetcher = ScriptedFetcher(repo)
+    result = ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=180).run()
+
+    assert fetcher.calls
+    assert result["expanded_complete"] == 1
+    assert result["expanded_partial"] == 0
+    assert repo.expansion_anchors("h1")[0]["status"] == "expanded_complete"
+    assert not [cell for cell in repo.rule_cells("h1") if cell["target"].startswith("link:agent_")]
+
+
+def test_expansion_failure_ignores_agent_reach_when_classifying_unworked_anchor(tmp_path, monkeypatch):
+    repo = repo_with_anchor()
+    seed_agent_reach(repo, query_spend=1, status="complete")
+    monkeypatch.setattr(hunt_run, "_run_expansion", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("source unavailable"),
+    ))
+
+    summary = hunt_run._run_expansion_safely(
+        Settings(home=tmp_path), repo, object(), repo.get_hunt("h1"), {}, WINDOW, None,
+    )
+
+    assert summary["status"] == "failed"
+    assert repo.expansion_anchors("h1")[0]["status"] == "unexpanded"
 
 
 def test_inferred_link_context_candidate_is_lead_and_keeps_provenance():

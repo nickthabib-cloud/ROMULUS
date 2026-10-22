@@ -115,6 +115,39 @@ entity = Table(
     Column("event_count", Integer, nullable=False, default=0),
 )
 
+agent_alias = Table(
+    "agent_alias", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("alias", String, nullable=False),
+    Column("kind", String, nullable=False),
+    Column("target_id", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("kind IN ('F', 'I', 'E', 'N', 'L')", name="ck_agent_alias_kind"),
+    UniqueConstraint("hunt_id", "alias", name="uq_agent_alias_name"),
+    UniqueConstraint("hunt_id", "kind", "target_id", name="uq_agent_alias_target"),
+)
+Index("ix_agent_alias_hunt_kind", agent_alias.c.hunt_id, agent_alias.c.kind)
+
+agent_page_plan = Table(
+    "agent_page_plan", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
+    Column("cursor", String, primary_key=True),
+    Column("identity", JSON, nullable=False),
+    Column("summary", JSON, nullable=False),
+    Column("item_count", Integer, nullable=False, default=0),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+agent_page_item = Table(
+    "agent_page_item", metadata,
+    Column("hunt_id", String, nullable=False, primary_key=True),
+    Column("cursor", String, nullable=False, primary_key=True),
+    Column("ordinal", Integer, nullable=False, primary_key=True),
+    Column("payload", JSON, nullable=False),
+)
+Index("ix_agent_page_item_lookup", agent_page_item.c.hunt_id,
+      agent_page_item.c.cursor, agent_page_item.c.ordinal)
+
 event_entity = Table(
     "event_entity", metadata,
     Column("event_id", String, nullable=False),
@@ -190,7 +223,9 @@ expansion_link = Table(
     "expansion_link", metadata,
     Column("id", String, primary_key=True),
     Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
-    Column("anchor_id", String, ForeignKey("expansion_anchor.id"), nullable=False),
+    # A reach belongs to its candidate anchor even when the model requested it
+    # before the deterministic expansion scheduler has claimed that candidate.
+    Column("anchor_id", String, ForeignKey("candidate.id"), nullable=False),
     Column("link_type", String, nullable=False),
     Column("window_label", String, nullable=False),
     Column("window_start", DateTime(timezone=True), nullable=False),

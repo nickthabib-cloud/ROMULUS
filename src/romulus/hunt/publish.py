@@ -6,6 +6,20 @@ from romulus.detect.base import Match, Playbook
 from romulus.store.repo import Repo
 
 
+def mark_hypothesis_relation(match: Match, *, anchor_id: str, link_type: str,
+                             link_id: str, strength: str) -> None:
+    """Label a non-observed relation without weakening the finding's own cited claim."""
+    if strength == "observed":
+        return
+    relation = "agent-requested" if strength == "agent_hypothesis" else "inferred"
+    match.claim += (f" Its relation to {anchor_id} rests on an {relation} {link_type} reach "
+                    f"{link_id} and is a hypothesis; the actor is not proven identical.")
+    match.notes.append(
+        f"reached through an {relation} {link_type} relation: the relation to the anchor "
+        "is a hypothesis, the finding itself is not",
+    )
+
+
 def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   task_id: str | None, raw_sources: dict[str, dict],
                   source_case_id: str | None = None, source_anchor_id: str | None = None,
@@ -46,4 +60,6 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         "source_anchor_id": source_anchor_id,
         "source_link_id": source_link_id,
     }
-    return row if repo.save_candidate(row, owner_token=owner_token) else None
+    return row if repo.save_candidate(
+        row, canonicalize_agent=source_case_id is None, owner_token=owner_token,
+    ) else None
