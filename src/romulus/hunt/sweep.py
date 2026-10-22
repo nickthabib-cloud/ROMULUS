@@ -24,15 +24,21 @@ PARTITION_MAX_DOCS = 120_000
 HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
+# A login group that fails is tagged linux.audit.auth; it takes every record of its event, so it may also hide
+# an exec, socket or file record of that event and carries the whole audit family set.
 _AUDIT_ADMIN = {"account_change", "service_change", "audit_config", "system_state"}
-DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth"} | _AUDIT_ADMIN,
-                    "linux.audit.socket": {"net_socket"}, "linux.audit.admin": _AUDIT_ADMIN,
+DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
+                    "linux.audit.socket": {"net_socket"}, "linux.audit.file": {"file_change"},
+                    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
+                    "linux.audit.admin": _AUDIT_ADMIN,
                     "arkime.session": {"net_session"},
                     "systemd.journal": {"auth", "privilege_use", "service_change"},
                     "apache.access": {"http_access"}, "apache.error": {"web_error"},
                     **{f"suricata.eve.{t}": NET_FAMILIES for t in ("alert", "flow", "netflow", "dns", "http",
                                                                   "fileinfo", "tls", "ssh")}}
 ALL_FAMILIES = frozenset({"*"})
+WINDOW_ROLLUP_PARTIAL = ("whole-window result over partitions of which one or more were partial, failed or "
+                         "unexecuted (listed separately)")
 
 
 BUCKET_SECONDS = 300
@@ -91,6 +97,8 @@ class Sweep:
 
     def _filters_for(self, target: str) -> list[Predicate]:
         if "host" in target:
+            # recorded so the report can list the target's other datasets as not assessed
+            self.stats.setdefault("dataset_filter", {})[target] = list(HOST_DATASETS)
             return [Predicate(field="event.dataset", op="in", value=HOST_DATASETS)]
         return []
 
@@ -192,11 +200,26 @@ class Sweep:
         # rule; a normalization error affects only families its dataset feeds; an unsupported
         # dataset could hold anything, so it affects every rule.
         affected = ALL_FAMILIES if (out.completeness != Completeness.complete or unsupported) else set()
-        for _rid, msg in errors:
-            if affected is ALL_FAMILIES:
+        # An error tag that feeds no known family could hide anything, so it affects every rule.
+        error_affected: set[str] | frozenset[str] = set()
+        tags = sorted({msg.split(":", 1)[0].strip() for _rid, msg in errors})
+        for tag in tags:
+            fams = DATASET_FAMILIES.get(tag)
+            if fams is None:
+                error_affected = ALL_FAMILIES
                 break
-            fams = DATASET_FAMILIES.get(msg.split(":", 1)[0].strip())
-            affected = ALL_FAMILIES if fams is None else affected | fams
+            error_affected |= fams
+        if affected is not ALL_FAMILIES:
+            affected = error_affected
+        # The reasons a cell is partial, stated on the cell so the report can list each gap with its cause.
+        base_reasons = list(out.reasons)
+        if unsupported:
+            base_reasons.append(f"unsupported_records={sum(unsupported.values())} (no normalizer; could hold any "
+                                f"behavior): {'; '.join(sorted(unsupported))}")
+        unmapped = [tag for tag in tags if tag not in DATASET_FAMILIES]
+        error_reason = (f"normalization_errors={len(errors)} in {', '.join(tags)}"
+                        + (f"; {', '.join(unmapped)} feeds no known event family, so every rule is partial"
+                           if unmapped else "")) if errors else ""
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing = pb.evaluated, pb.missing_required
@@ -225,8 +248,13 @@ class Sweep:
                 state = "positive_only_partial" if (rule_partial or missing) else "positive_only"
             else:
                 state = "evaluated_partial" if (rule_partial or missing) else "no_match_complete"
+            reasons = list(base_reasons)
+            if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
+                reasons.append(error_reason)
+            if missing:
+                reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, state, len(matches), evaluated,
-                                    {"missing_required": missing, "reasons": out.reasons})
+                                    {"missing_required": missing, "reasons": reasons})
         self.repo.update_task(tid, "evaluated")
 
     def _event_stage(self) -> EventStage:
@@ -281,8 +309,10 @@ class Sweep:
                 state = "not_applicable_no_events"
             else:
                 state = "no_match_complete"
+            reasons = (["no source partition of this rule was evaluated"] if not cells else
+                       [WINDOW_ROLLUP_PARTIAL] if any_partial else [])
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
-                                    len(ms) + consumed_matches, evaluated)
+                                    len(ms) + consumed_matches, evaluated, {"reasons": reasons})
         self.close_stage()
 
     def close_stage(self) -> None:

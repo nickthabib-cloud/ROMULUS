@@ -204,7 +204,7 @@ def test_kernel_file_change_proof_and_root_run_after_it_is_urgent_for_a_web_acco
     _pb, out = run([web(*VI), change, *cron_runs(T0 + timedelta(minutes=10))])
     m = out[0]
     assert m.proposed_lane == "urgent"
-    assert "A kernel file-change record shows this account changed the file (content)" in m.claim
+    assert "A kernel file-change record shows this account opened it for writing" in m.claim
     assert change.id in {e.id for e in m.events}
 
 
@@ -349,7 +349,8 @@ def test_writer_elevating_own_file_in_own_login_is_not_matched():
     writer = ex(["vi", "/home/alice/deploy.sh"], "/usr/bin/vim.basic", 1000, T0, auid=1000, ses=3)
     elevated = ex(["/bin/bash", "/home/alice/deploy.sh"], "/usr/bin/bash", 0, T0 + timedelta(minutes=1), auid=1000,
                   ses=3, pid=990, ppid=989)
-    assert run([writer, elevated])[1] == []
+    out = run([writer, elevated])[1]
+    assert len(out) == 1 and out[0].proposed_lane == "lead" and "the writer's own elevation" in out[0].claim
 
 
 def test_another_hosts_root_job_does_not_join():
@@ -392,14 +393,14 @@ def test_non_web_writer_excluded_only_by_own_session_or_own_uid():
     alice = ex(["vi", JOB], "/usr/bin/vim.basic", 1000, T0, auid=1000, ses=3, pid=900, ppid=899)
     # her own uid as the login uid of a root run in another session: her own sudo
     own_sudo = ex(["bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=3), auid=1000, ses=9, pid=950, ppid=949)
-    assert run([alice, own_sudo])[1] == []
+    assert [m.proposed_lane for m in run([alice, own_sudo])[1]] == ["lead"]
     # a process of hers that inherited auid 0 does not make root's logins hers
     inherited = ex(["vi", JOB], "/usr/bin/vim.basic", 1000, T0, auid=0, ses=4, pid=900, ppid=899)
     root_login = ex(["bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=3), auid=0, ses=60, pid=950, ppid=949)
     assert len(run([inherited, root_login])[1]) == 1
     # ... but a root run inside that very audit session is her own elevation
     same_session = ex(["bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=3), auid=0, ses=4, pid=950, ppid=949)
-    assert run([inherited, same_session])[1] == []
+    assert [m.proposed_lane for m in run([inherited, same_session])[1]] == ["lead"]
 
 
 def test_scheduler_session_excluded_only_when_it_is_the_writers_own_crontab():
@@ -410,7 +411,7 @@ def test_scheduler_session_excluded_only_when_it_is_the_writers_own_crontab():
                    euid=0, pid=6001, ppid=6000),
                 ex(["/bin/bash", JOB], "/usr/bin/bash", 0, T0 + timedelta(minutes=5, seconds=2), auid=1000, ses=40,
                    pid=6002, ppid=6001)]
-    assert run([alice, *own_cron])[1] == []
+    assert [m.proposed_lane for m in run([alice, *own_cron])[1]] == ["lead"]
     inherited = ex(["vi", JOB], "/usr/bin/vim.basic", 1000, T0, auid=0, ses=3)    # root's cron is never hers
     assert len(run([inherited, *cron_runs(T0 + timedelta(minutes=10))])[1]) == 1
 

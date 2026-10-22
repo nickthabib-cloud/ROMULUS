@@ -182,6 +182,12 @@ def _plain_operands(name: str, args: list[str]) -> tuple[list[str], bool]:
 def read_operands(name: str, args: list[str], cwd: str | None = None) -> list[str]:
     """Normalized absolute paths a reader program was given as files to open. Positive-only: a reader can be
     given files in ways argv does not show (stdin, shell redirects, globs expanded by nobody)."""
+    return read_operand_paths(name, args, cwd)[0]
+
+
+def read_operand_paths(name: str, args: list[str], cwd: str | None = None) -> tuple[list[str], bool]:
+    """`read_operands`, and whether a named file could not be placed (a relative operand with no usable working
+    directory). A caller must count such a record as missing a required field, never as a clean no-match."""
     raw: list[str] = []
     if name in PLAIN_READERS:
         operands, target_dir = _plain_operands(name, args)
@@ -211,11 +217,16 @@ def read_operands(name: str, args: list[str], cwd: str | None = None) -> list[st
     elif name == "dd":
         raw = [arg[3:] for arg in args if arg.startswith("if=")]
     out = []
+    unresolved = False
     for item in raw:
+        if item in ("", "-"):
+            continue                              # no file, or standard input
         path = normalize_path(item, cwd)
         if path:
             out.append(path)
-    return out
+        else:
+            unresolved = True
+    return out, unresolved
 
 
 # ------------------------------------------------------------------------------------------------
