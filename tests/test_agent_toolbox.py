@@ -186,6 +186,25 @@ def test_list_findings_bounds_coverage_and_list_coverage_pages_a_stable_snapshot
     assert all(len(json.dumps(result, sort_keys=True)) < 20_000 for result in pages)
 
 
+def test_filtered_coverage_preserves_canonical_every_rule_there_meaning():
+    repo = _repo(1)
+    repo.set_rule_cell(
+        "h1", RULE, "1", "host-index", "mixed", "evaluated_partial", 0, 1,
+        {"error": "one source shard failed"},
+    )
+    repo.set_rule_cell(
+        "h1", "host.web_shell", "1", "host-index", "mixed", "no_match_complete", 0, 1, {},
+    )
+
+    result = Toolbox(repo, "h1").execute("list_findings", {
+        "lane": None, "rule": RULE, "entity": None, "page": 1, "cursor": None,
+    })
+    gap = next(item for item in result["coverage"]["gaps"] if item["partition"] == "mixed")
+
+    assert gap["every_rule_there"] is False
+    assert gap["every_requested_rule_there"] is True
+
+
 def test_entity_values_are_bounded_in_finding_and_profile_results():
     repo = _repo(2)
     long_value = "hostile-" + ("x" * 20_000)

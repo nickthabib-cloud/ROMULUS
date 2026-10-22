@@ -302,7 +302,7 @@ class Toolbox:
             selected = {rule: state for rule, state in gap["rules"].items() if rule in rule_ids}
             if selected:
                 gaps.append({**gap, "rules": selected,
-                             "every_rule_there": set(selected) == set(rule_ids)})
+                             "every_requested_rule_there": set(selected) == set(rule_ids)})
         not_assessed = canonical["not_assessed"]
         unresolved = any(
             row["negative_claim"].startswith("unresolved:")
@@ -328,6 +328,7 @@ class Toolbox:
                 "partition": _bounded_text(gap["partition"]),
                 "rules": selected, "reasons": reasons,
                 "every_rule_there": bool(gap.get("every_rule_there")),
+                "every_requested_rule_there": bool(gap.get("every_requested_rule_there")),
             }
             if len(gap.get("reasons", [])) > len(reasons):
                 item["reasons_omitted"] = len(gap["reasons"]) - len(reasons)
@@ -371,6 +372,7 @@ class Toolbox:
             }
             entries.append({
                 "kind": "gap", **base, "every_rule_there": bool(gap.get("every_rule_there")),
+                "every_requested_rule_there": bool(gap.get("every_requested_rule_there")),
             })
             entries.extend({
                 "kind": "gap_rule", **base, "rule_id": _bounded_text(rule),
