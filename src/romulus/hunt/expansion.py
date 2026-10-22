@@ -416,6 +416,13 @@ class ExpansionEngine:
 
         final_links = self.repo.expansion_links(self.hunt_id)
         for row in self.repo.expansion_anchors(self.hunt_id):
+            # Only anchors this run worked are finalized: those still pending. An anchor a previous run finalized
+            # (resume re-runs expansion) was never scheduled here, so its recorded status and reasons stand; above
+            # all, an unexpanded or partial anchor is never upgraded to complete. Budget-stopped anchors are left
+            # as recorded rather than re-attempted: the source-query and wall-clock budgets are hunt-wide and
+            # persist across a resume, so the budget that stopped them is still spent.
+            if row["status"] != "pending":
+                continue
             links = [link for link in final_links if link["anchor_id"] == row["id"]]
             reasons = sorted(set(anchor_reasons[row["id"]] + [
                 reason for link in links if link["status"] != "complete"
