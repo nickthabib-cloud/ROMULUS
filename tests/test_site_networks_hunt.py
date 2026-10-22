@@ -101,11 +101,13 @@ def test_the_report_manifest_and_markdown_show_one_line(tmp_path):
     configured = _reported(tmp_path, SITE.record())
     assert configured["internal_networks"]["summary"] == SITE_LINE
     assert configured["internal_networks"]["digest"] == SITE.digest
-    assert f"| Internal networks | {SITE_LINE.removeprefix('Internal networks: ')} |" in _render(configured)
+    assert ("| Internal networks | configured (2 ranges, 1 carve-out). Ranges: 10.0.0.0/8, 198.51.100.0/24; "
+            "carve-outs: 10.50.0.0/16 |") in _render(configured)
     default = _reported(tmp_path, None)                                     # recorded before the setting existed
     assert default["internal_networks"]["summary"] == DEFAULT_LINE
-    assert "| Internal networks | default (RFC 1918 and reserved ranges); not configured for this site |" \
-        in _render(default)
+    assert ("| Internal networks | default (RFC 1918 and reserved ranges); not configured for this site. Ranges: "
+            "10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, ::1/128, "
+            "fc00::/7, fe80::/10 |") in _render(default)
 
 
 def _render(manifest: dict) -> str:

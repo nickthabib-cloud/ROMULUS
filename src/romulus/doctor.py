@@ -85,15 +85,15 @@ def check_site_networks(s: Settings, client: ElasticClient | None = None) -> Che
     except SourceError as e:
         notes.append(f"{definition.summary()}; host addresses could not be checked: {e}")
         return Check("site.internal_networks", "warn", "; ".join(notes))
+    if not result["values_present"]:
+        unchecked = "; ".join(f"{t}: {why}" for t, why in sorted(result["unchecked_targets"].items()))
+        notes.append(f"{definition.summary()}; no host.ip value in host telemetry ({result['window']}), so the "
+                     "definition could not be checked against the site's own hosts"
+                     + (f" ({unchecked})" if unchecked else ""))
+    elif not result["outside"]:
+        notes.append(f"{definition.summary()}; every host.ip value in host telemetry ({result['window']}) is inside")
     if result["warning"]:
         notes.append(result["warning"])
-    elif not result["addresses"]:
-        unchecked = "; ".join(f"{t}: {why}" for t, why in sorted(result["unchecked_targets"].items()))
-        notes.append(f"{definition.summary()}; no host.ip value in host telemetry, so the definition could not be "
-                     "checked against the site's own hosts" + (f" ({unchecked})" if unchecked else ""))
-    else:
-        notes.append(f"{definition.summary()}; {'at least ' if result['at_least'] else ''}{result['addresses']} "
-                     "host address(es) checked, all inside")
     status = "warn" if result["warning"] or not definition.configured else "ok"
     return Check("site.internal_networks", status, "; ".join(notes), data=result)
 

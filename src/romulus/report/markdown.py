@@ -61,7 +61,7 @@ def _ai_agent_cell(m: dict) -> str:
 def _internal_networks_cell(m: dict) -> str:
     """Which addresses the hunt treated as the site's, in one line."""
     view = m.get("internal_networks") or {}
-    return str(view.get("summary") or "Internal networks: not recorded").removeprefix("Internal networks: ")
+    return str(view.get("line") or view.get("summary") or "Internal networks: not recorded").removeprefix("Internal networks: ")
 
 
 def render(m: dict, banner: str = BANNER) -> str:

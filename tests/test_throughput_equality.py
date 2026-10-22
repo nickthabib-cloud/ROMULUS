@@ -30,6 +30,7 @@ from tests import throughput_fixture as tf
 #   are unchanged.
 # - candidates, rule_cells, manifest: those six rules' versions are bumped for their changed coverage semantics,
 #   so the rule_version on their cells and findings changes. With rule_version removed, nothing else differs.
+# - manifest: the internal-network view gains `line`, the summary followed by the ranges themselves.
 GOLDEN_STACK = {
     "anchors": "5bfad42385ad92785c91d770613dff8e893f140c4f8d1606128b7ea0f170c120",
     "audit": "2fd12fa42a64f8c3bb7a8079c056f68e24d4c371b69644eaf02688e6c706ab6a",
@@ -39,7 +40,7 @@ GOLDEN_STACK = {
     "events": "7cb68efe39e15155efa9b2f8edc22e79b93fb3804ba23981e97fbde26c5b0664",
     "expansion": "5a12fe7c7f06127db41f5229bda524a0c9e21e101f8d87dc32d10e5589358770",
     "links": "c6589f2bef67ee2bab7f194cb3fa551ff913ac43266ce8cd6a20efd2d6c0aa2b",
-    "manifest": "6942c7600e77f717142f8722a6d4899e130336940c0dde5700da9819c5885759",
+    "manifest": "b16f15b97a7e2a0d9016f91a2ce8befe673d0a71b4cfd43dedc8fe5f07a8f639",
     "raw": "f3c3185ebf52b2b84224ea7866648e6bbe117267a423b600f203d780178efad9",
     "rule_cells": "fa61a7de1361749ab0f149532bc412aae0c2ce35f2f667a9f9c3a0587d3d3530",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",

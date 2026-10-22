@@ -14,7 +14,12 @@ from romulus.hunt.links import LinkFetcher
 from romulus.hunt.manifest import build_manifest, new_hunt_id
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
-from romulus.hunt.site_networks import check_host_addresses, install_for_hunt
+from romulus.hunt.site_networks import (
+    check_host_addresses,
+    contradiction_reason,
+    install_for_hunt,
+    narrow_direction_negatives,
+)
 from romulus.hunt.stage import clear_stale_stages
 from romulus.hunt.sweep import Sweep
 from romulus.sources.es import ElasticClient
@@ -122,11 +127,11 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
     return summary
 
 
-def _site_network_check(client: ElasticClient, contracts: dict, window: Window) -> dict:
+def _site_network_check(client: ElasticClient, contracts: dict, window: Window, heartbeat) -> dict:
     """Host addresses in the hunt window outside the installed internal-network definition: a warning for the
     sweep summary. A failed check is recorded and never stops the hunt."""
     try:
-        result = check_host_addresses(client, contracts, netdef.current(), window)
+        result = check_host_addresses(client, contracts, netdef.current(), window, heartbeat=heartbeat)
     except Exception as exc:          # a warning check must never sink the hunt
         log.exception("internal-network check failed")
         return {"definition": netdef.current().summary(), "error": f"{exc}"[:300], "warning": None}
@@ -345,12 +350,19 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
             hunt_id, "failed", owner_token=owner_token, stop_reason=f"sweep error: {e}",
         )
         raise
+    site_check = _site_network_check(client, contracts, window, heartbeat)
+    contradiction = contradiction_reason(site_check)
+    if contradiction:
+        # the hunt's own hosts contradict the definition (or it could not be checked): no direction-dependent
+        # rule may keep a complete negative, and the hunt says why it is partial
+        narrow_direction_negatives(repo, hunt_id, contradiction, owner_token=owner_token)
+        sweep.partial_reasons.append(contradiction)
     sweep_summary = {
         "finished": True,
         "complete": not sweep.partial_reasons,
         "partial_reasons": sweep.partial_reasons,
         "stats": sweep.stats,
-        "internal_networks": _site_network_check(client, contracts, window),
+        "internal_networks": site_check,
     }
     repo.audit(
         "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,

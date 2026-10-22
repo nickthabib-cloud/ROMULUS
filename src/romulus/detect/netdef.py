@@ -33,6 +33,9 @@ DIRECTION_ASSUMED_REASON = ("internal networks not configured for this site; dir
                             "defaults")
 RECORD_SCHEMA = "site-networks@1"
 LOOKUP_CACHE = 65_536            # distinct addresses whose answer each definition keeps
+LISTED_RANGES = 20               # ranges named in the report line; the rest are counted
+# A configured internal range shorter than this reads almost every address as the site's (a /8 is 1/256 of IPv4)
+BROAD_PREFIX = {4: 8, 6: 16}
 
 
 def parse_network(text: str, setting: str) -> IPNetwork:
@@ -172,11 +175,33 @@ class SiteNetworks:
             return f"Internal networks: configured ({ranges} range{'s' if ranges != 1 else ''}, {carved})"
         return f"Internal networks: {DEFAULT_LABEL}{', ' + carved if carve else ''}; not configured for this site"
 
+    def line(self) -> str:
+        """The summary with the ranges themselves, each list bounded to LISTED_RANGES: the report's one line."""
+        text = f"{self.summary()}. Ranges: {_listed(self.internal)}"
+        return text + (f"; carve-outs: {_listed(self.external)}" if self.external else "")
+
+    def effective_internal(self) -> tuple[IPNetwork, ...]:
+        """Every range that reads as internal unless a more specific carve-out says otherwise."""
+        return _canonical((*self.internal, *parse_networks(ALWAYS_INTERNAL, "always-internal ranges")))
+
+    def broad_ranges(self) -> list[str]:
+        """Configured internal ranges so wide that almost every address reads as the site's: shorter than /8
+        (IPv4) or /16 (IPv6), up to 0.0.0.0/0 and ::/0. The default list is never flagged."""
+        if not self.configured:
+            return []
+        return [str(n) for n in self.internal if n.prefixlen < BROAD_PREFIX[n.version]]
+
     def record(self) -> dict:
-        """What the hunt manifest records: source label, ranges, digest and the one-line summary."""
+        """What the hunt manifest records: source label, ranges, digest, the summary and the report line."""
         return {"schema": RECORD_SCHEMA, "source": self.source, "label": self.label,
                 "internal": [str(n) for n in self.internal], "external": [str(n) for n in self.external],
-                "always_internal": list(ALWAYS_INTERNAL), "digest": self.digest, "summary": self.summary()}
+                "always_internal": list(ALWAYS_INTERNAL), "digest": self.digest, "summary": self.summary(),
+                "line": self.line()}
+
+
+def _listed(networks: tuple[IPNetwork, ...]) -> str:
+    shown = ", ".join(str(n) for n in networks[:LISTED_RANGES])
+    return shown + (f" and {len(networks) - LISTED_RANGES} more" if len(networks) > LISTED_RANGES else "")
 
 
 def recorded_view(record: dict | None) -> dict:
@@ -185,8 +210,8 @@ def recorded_view(record: dict | None) -> dict:
     try:
         return SiteNetworks.from_record(record).record()
     except (KeyError, TypeError, ValueError) as error:
-        return {"source": "unreadable", "digest": (record or {}).get("digest"),
-                "summary": f"Internal networks: the hunt's recorded definition is unreadable ({error})"}
+        summary = f"Internal networks: the hunt's recorded definition is unreadable ({error})"
+        return {"source": "unreadable", "digest": (record or {}).get("digest"), "summary": summary, "line": summary}
 
 
 # ---- the installed definition ----------------------------------------------------------------------------
