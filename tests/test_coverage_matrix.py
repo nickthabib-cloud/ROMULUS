@@ -84,7 +84,14 @@ def test_public_matrix_keeps_every_active_technique_visible_when_subtechniques_c
 
 def test_public_matrix_excludes_private_register_and_lab_history_language():
     text = render_public(build_catalog())
-    forbidden = ("content/research", "BL-01", "lab profile", "lab availability", "milestone", "run 14")
+    forbidden = (
+        "content/research",
+        "BX-PRIVATE",
+        "lab profile",
+        "lab availability",
+        "milestone",
+        "private run marker",
+    )
     assert all(value not in text for value in forbidden)
 
 

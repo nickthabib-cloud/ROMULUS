@@ -38,17 +38,17 @@ def _research_fixture(root: Path) -> None:
     (root / "backlog.yaml").write_text(
         """schema_version: 1
 backlog:
-  - id: BL-01
+  - id: BX-1
     rank: 1
     title: Password guessing rule
     rule_id: host.ssh_password_guessing
     techniques: [T1110.001]
-  - id: BL-02
+  - id: BX-2
     rank: 2
     title: Pipeline poisoning
     techniques: [T1677]
 next_candidates: []
-v1_ports: []
+planned_ports: []
 """,
         encoding="utf-8",
         newline="",
@@ -145,9 +145,9 @@ def test_private_generator_joins_ranked_gaps_backlog_tools_lotl_and_lab_state(
     assert "# Private ATT&CK coverage gaps" in text
     assert "| P1 | [`T1677`]" in text
     assert "| planned | not covered | win_security (absent) |" in text
-    assert "| 1 | `BL-01` | built | `host.ssh_password_guessing` |" in text
-    assert "| 2 | `BL-02` | planned | — |" in text
-    assert "## Unmatched backlog items" in text and "`BL-02` — Pipeline poisoning" in text
+    assert "| 1 | `BX-1` | built | `host.ssh_password_guessing` |" in text
+    assert "| 2 | `BX-2` | planned | — |" in text
+    assert "## Unmatched backlog items" in text and "`BX-2` — Pipeline poisoning" in text
     assert "## Tools with no covering rule" in text and "`tool.example`" in text
     assert "## LOTL patterns with no covering rule" in text and "Poison a build pipeline" in text
     assert "win_security (absent)" in text
