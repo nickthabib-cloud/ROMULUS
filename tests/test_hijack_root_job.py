@@ -408,6 +408,15 @@ def test_own_elevation_leads_of_one_account_and_layout_on_several_hosts_are_one_
     assert {("host", h, "host") for h in hosts} <= set(m.entities) and "T1548.003" in m.notes
 
 
+def test_a_cross_host_lead_cites_and_names_every_host_beyond_the_citation_cap():
+    hosts = [f"node{i:02d}" for i in range(14)]
+    records = [r for k, host in enumerate(hosts) for r in _managed(host, 2, start=T0 + timedelta(minutes=5 * k))]
+    [m] = run(records)[1]
+    assert {e.host for e in m.events} == set(hosts)
+    assert {("host", h, "host") for h in hosts} <= set(m.entities)
+    assert "28 files" in m.claim and "and 18 more (every host and path is in the notes)" in m.claim
+
+
 def test_a_different_layout_or_account_on_another_host_stays_its_own_lead():
     records = _managed("app01", 3) + _managed("app02", 3)
     records += _managed("db01", 2, base="/opt/jobs")                 # the same account, another layout

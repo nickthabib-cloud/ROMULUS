@@ -632,8 +632,9 @@ class NonRootWriteRootExecutedFile(Playbook):
         items = {host: sorted(by_host[host], key=lambda item: (item[1].ts, item[0])) for host in hosts}
         total = sum(len(v) for v in items.values())
         firsts = {host: [min(m.events, key=lambda e: (e.ts, e.id)) for _p, m in items[host]] for host in hosts}
-        cited: dict[str, TypedEvent] = {}
-        for rank in range(max(len(v) for v in firsts.values())):
+        # every host's earliest file is cited, whatever the cap; later files fill up to the cap
+        cited: dict[str, TypedEvent] = {firsts[host][0].id: firsts[host][0] for host in hosts}
+        for rank in range(1, max(len(v) for v in firsts.values())):
             for host in hosts:
                 if rank < len(firsts[host]) and len(cited) < WRITE_CITE:
                     cited.setdefault(firsts[host][rank].id, firsts[host][rank])
@@ -657,7 +658,8 @@ class NonRootWriteRootExecutedFile(Playbook):
         notes = sorted({n for m in all_matches for n in m.notes if n.startswith("T")})
         notes += [n for n in all_matches[0].notes if n.startswith("own elevation")]
         notes += [f"file: {path}" for path in shown]
-        entities = list(dict.fromkeys(entity for e in events for entity in e.entities()))
+        entities = list(dict.fromkeys([*(("host", host, "host") for host in hosts),
+                                       *(entity for e in events for entity in e.entities())]))
         match = Match(self.id, claim, self.claim_type, events, _predicate(events), events[0].ts, self.severity,
                       "lead", "high", entities, group_key=f"{'+'.join(hosts)}|{account}|own-elevation")
         match.notes = notes
