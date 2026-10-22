@@ -6,12 +6,12 @@ import ipaddress
 import itertools
 import posixpath
 import re
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
-from romulus.detect.linux_argv import read_operand_paths
+from romulus.detect.linux_argv import canonical, read_operand_paths
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
@@ -1105,6 +1105,125 @@ class UnbackedExecutable(Playbook):
             m.notes = [f"executable class: {cls}"]
             out.append(m)
         return out
+
+
+# ------------------------------------------------------------------------------------------------
+# Process ancestry from exec records (shared by rules that weigh who started a command).
+# ------------------------------------------------------------------------------------------------
+
+PACKAGE_TOOLS = {"dpkg", "apt", "apt-get", "aptitude", "unattended-upgrade", "unattended-upgrades", "rpm", "yum",
+                 "dnf", "microdnf", "zypper", "apk", "pacman", "packagekitd", "snapd"}
+CLOUD_INIT_TOOLS = {"cloud-init"}
+LOG_ROTATORS = {"logrotate"}
+SYSTEM_BIN_DIRS = ("/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/usr/lib/", "/usr/libexec/")
+# Package maintainer scripts: Debian's /var/lib/dpkg/info/<package>.<phase> and the scriptlets rpm writes to
+# /var/tmp/rpm-tmp.XXXXXX.
+_MAINTAINER_SCRIPT = re.compile(r"^/var/lib/dpkg/info/[^/]+\.(?:preinst|postinst|prerm|postrm|config)$"
+                                r"|^/var/tmp/rpm-tmp\.\w+$")
+
+
+class Ancestor(NamedTuple):
+    ts: float
+    ppid: int | None
+    name: str              # program name; for an interpreter, the script it was given
+    user: str | None
+    marker: str            # "package" | "cloud-init" | "logrotate" | ""
+    event_id: str
+
+
+class Lineage(NamedTuple):
+    kind: str              # "web" | "package" | "cloud-init" | "logrotate" | ""
+    ancestor: Ancestor | None
+    depth: int             # 0: the record itself; 1: its parent; ...
+
+
+class ProcessLineage:
+    """Exec-record ancestry on each host. Every process_exec record with a pid is remembered (a few per pid, a bounded
+    number overall, oldest forgotten first); a record's parent is the latest exec of its parent pid that began no
+    later than it did. The walk is only as complete as the retrieved exec records: a parent that did not exec
+    inside the window (a daemon started earlier) ends the chain. Lineage can therefore raise or explain a lane, but
+    its absence proves nothing."""
+    DEPTH = 16
+    CAPACITY = 100_000
+    PER_PID = 4
+
+    def __init__(self):
+        self.records: OrderedDict[tuple[str | None, int], list[Ancestor]] = OrderedDict()
+
+    @staticmethod
+    def entry(event: TypedEvent) -> Ancestor:
+        argv = event.get("process.argv") or []
+        executable = event.get("process.executable")
+        name = canonical(basename(str(executable))) if executable else canonical(basename(str(argv[0]))) if argv else ""
+        # Only a program installed where the package manager puts it can mark a lineage: a copy named dpkg in
+        # /tmp is not package management. Without a recorded executable no marker is given.
+        located = str(executable or "")
+        script = next((str(a) for a in argv[1:] if not str(a).startswith("-")), "")
+        if name in SHELLS | SCRIPT_FILE_INTERPRETERS and script:
+            name, located = basename(script) or name, script
+        system = located.startswith(SYSTEM_BIN_DIRS)
+        marker = ("package" if (system and name in PACKAGE_TOOLS)
+                  or any(_MAINTAINER_SCRIPT.match(str(a)) for a in argv[1:3])
+                  else "cloud-init" if system and name in CLOUD_INIT_TOOLS
+                  else "logrotate" if system and name in LOG_ROTATORS else "")
+        ppid = event.get("process.ppid")
+        return Ancestor(event.ts.timestamp(), ppid if isinstance(ppid, int) else None, name,
+                        event.get("process.user"), marker, event.id)
+
+    def observe(self, event: TypedEvent) -> None:
+        pid = event.get("process.pid")
+        if event.family != "process_exec" or not isinstance(pid, int):
+            return
+        key = (event.host, pid)
+        entries = self.records.pop(key, [])
+        entries = sorted([*entries, self.entry(event)], key=lambda a: (a.ts, a.event_id))[-self.PER_PID:]
+        self.records[key] = entries
+        while len(self.records) > self.CAPACITY:
+            self.records.popitem(last=False)
+
+    def parent(self, host: str | None, ppid: int | None, ts: float) -> Ancestor | None:
+        if ppid is None or ppid <= 1:
+            return None
+        best = None
+        for entry in self.records.get((host, ppid), ()):
+            if entry.ts <= ts:
+                best = entry
+        return best
+
+    def classify(self, event: TypedEvent) -> Lineage:
+        """The record's own account or nearest exec ancestor that is a web-service account (which wins at any
+        depth), else the nearest package-manager, cloud-init or log-rotation ancestor."""
+        return self._walk(event.host, self.entry(event))
+
+    def classify_pid(self, host: str | None, pid: int | None, ts: float) -> Lineage:
+        """Lineage of the process with this pid at this time (its latest exec record no later than ts), for records
+        that name a process but are not exec records themselves."""
+        start = self.parent(host, pid, ts) if isinstance(pid, int) else None
+        return self._walk(host, start) if start is not None else Lineage("", None, 0)
+
+    def _walk(self, host: str | None, current: Ancestor) -> Lineage:
+        nearest: Lineage | None = None
+        for depth in range(self.DEPTH + 1):
+            if current.user in WEB_SERVICE_USERS:
+                return Lineage("web", current, depth)
+            if current.marker and nearest is None:
+                nearest = Lineage(current.marker, current, depth)
+            found = self.parent(host, current.ppid, current.ts)
+            if found is None or found.event_id == current.event_id:
+                break
+            current = found
+        return nearest or Lineage("", None, 0)
+
+
+def lineage_phrase(lineage: Lineage) -> str:
+    """Plain wording for a lineage, naming the record it rests on."""
+    if not lineage.kind or lineage.ancestor is None:
+        return ""
+    who = "it" if lineage.depth == 0 else f"its exec ancestor {lineage.depth} level(s) up"
+    if lineage.kind == "web":
+        return f"{who} ran as web-service account '{lineage.ancestor.user}' ('{lineage.ancestor.name}')"
+    what = {"package": "package management", "cloud-init": "cloud-init", "logrotate": "log rotation"}[lineage.kind]
+    return f"{who} is '{lineage.ancestor.name}' ({what})"
 
 
 HOST_PLAYBOOKS = [WebServiceSpawnsInterpreter, DownloadPipedToShell, DownloaderFeedsInterpreter, PtyUpgrade,

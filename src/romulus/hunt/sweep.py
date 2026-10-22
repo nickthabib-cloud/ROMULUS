@@ -26,11 +26,13 @@ NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer"
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
 # A login group that fails is tagged linux.audit.auth; it takes every record of its event, so it may also hide
 # an exec, socket or file record of that event and carries the whole audit family set.
-DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth", "file_change"},
+_AUDIT_ADMIN = {"account_change", "service_change", "audit_config", "system_state"}
+DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
                     "linux.audit.socket": {"net_socket"}, "linux.audit.file": {"file_change"},
-                    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change"},
+                    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
+                    "linux.audit.admin": _AUDIT_ADMIN,
                     "arkime.session": {"net_session"},
-                    "systemd.journal": {"auth", "privilege_use"},
+                    "systemd.journal": {"auth", "privilege_use", "service_change"},
                     "apache.access": {"http_access"}, "apache.error": {"web_error"},
                     **{f"suricata.eve.{t}": NET_FAMILIES for t in ("alert", "flow", "netflow", "dns", "http",
                                                                   "fileinfo", "tls", "ssh")}}
