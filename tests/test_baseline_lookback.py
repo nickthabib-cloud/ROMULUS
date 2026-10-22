@@ -311,7 +311,10 @@ def test_complete_lookback_fetch_records_parent_carry_on_disk():
         now=lambda: START,
     )
     writer.fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=1), end=START)
-    assert carry.lookup("web01", 42, START.timestamp(), "boot-a")[1] == "/bin/tool1"
+    # The carry is per target, and answers only inside the hours the writer observed completely.
+    at = (START - timedelta(seconds=1)).timestamp()
+    assert carry.for_target("host-index").lookup("web01", 42, at, "boot-a")[1] == "/bin/tool1"
+    assert carry.for_target("host-index").lookup("web01", 42, START.timestamp(), "boot-a") is None
 
 
 def test_parent_in_an_earlier_hour_is_explicit_then_resolves_on_resume():
@@ -369,7 +372,7 @@ def test_exec_pair_writer_matches_direct_counter_with_same_hour_parent():
             "host.boot.id": fv("boot-a", "fixture"),
         }, raw=[], normalizer="fixture@1",
     )
-    carry = CarryInStore(repo, "build")
+    carry = CarryInStore(repo, "build", "host-index")
     carry.observe_events([parent])
     result = LookbackWriter(
         repo, FakeHistory([child]), site="site", specs=[SPEC_BY_ID["bl.exec_pair"]],
@@ -466,3 +469,140 @@ def test_million_row_build_uses_short_transactions_and_allows_a_concurrent_write
     print(f"million-row building max lock {max_lock:.3f}s; concurrent max wait {max(waits):.3f}s")
     assert waits and max_lock < 3 and max(waits) < 30
     assert repo.baseline_segments(statuses=["active"])[0]["status"] == "active"
+
+
+def _exec(index, ts, pid, ppid, executable, *, host="web01", boot="boot-a"):
+    return TypedEvent(
+        id=f"e{index}", family="process_exec", ts=ts, host=host, outcome=Outcome.success,
+        fields={
+            "process.pid": fv(pid, "fixture"), "process.ppid": fv(ppid, "fixture"),
+            "process.executable": fv(executable, "fixture"), "host.boot.id": fv(boot, "fixture"),
+        }, raw=[], normalizer="fixture@1",
+    )
+
+
+def _pair_writer(repo, source, carry):
+    return LookbackWriter(
+        repo, source, site="site", specs=[SPEC_BY_ID["bl.exec_pair"]], normalizer="fixture@1",
+        budget=LookbackBudget(queries=50, records=50, seconds=60), parent_carry=carry, now=lambda: START,
+    )
+
+
+def _pair_keys(repo):
+    return sorted(
+        (segment["start"], row["key"]["parent_executable"], row["key"]["child_executable"])
+        for segment in repo.baseline_segments(statuses=["active"])
+        for row in repo.baseline_counts(segment["id"])
+    )
+
+
+F_HOUR, G_HOUR, H_HOUR = (START - timedelta(hours=n) for n in (3, 2, 1))
+
+
+def test_parent_across_a_failed_hour_is_unresolved_never_the_older_generation():
+    events = [
+        _exec(1, F_HOUR + timedelta(minutes=10), 10, 500, "/old"),
+        _exec(2, G_HOUR + timedelta(minutes=10), 10, 500, "/true_parent"),
+        _exec(3, H_HOUR + timedelta(minutes=10), 11, 10, "/bin/sh"),
+    ]
+
+    class FailingG(FakeHistory):
+        def fetch(self, partition, **kwargs):
+            if partition.start == G_HOUR:
+                return HistoryFetch((), "failed", ("shard failure",), 0)
+            return super().fetch(partition, **kwargs)
+
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    for _ in range(2):
+        result = _pair_writer(repo, FailingG(events), carry).fill(
+            hunt_id="build", targets=["host-index"], start=F_HOUR, end=START,
+        )
+    assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
+    child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
+    assert child_gap and child_gap[0].state == "partial"
+    assert "e3: parent exec in an unobserved hour" in child_gap[0].reason
+
+
+def test_parent_across_an_hour_another_hunt_built_is_unresolved_never_the_older_generation():
+    repo = _repo()
+    repo.create_hunt("A", {}, "d", "test")
+    repo.create_hunt("B", {}, "d", "test")
+    true_parent = _exec(2, G_HOUR + timedelta(minutes=10), 10, 500, "/true_parent")
+    carry_a = CarryInStore(repo, "A", "host-index")
+    carry_a.observe_events([_exec(0, START - timedelta(hours=4), 500, 1, "/usr/sbin/sshd")])
+    carry_a.mark_observed(START - timedelta(hours=4), G_HOUR)
+    built = _pair_writer(repo, FakeHistory([true_parent]), carry_a).fill(
+        hunt_id="A", targets=["host-index"], start=G_HOUR, end=H_HOUR,
+    )
+    assert built.complete == 1
+
+    events = [
+        _exec(1, F_HOUR + timedelta(minutes=10), 10, 1, "/old"), true_parent,
+        _exec(3, H_HOUR + timedelta(minutes=10), 11, 10, "/bin/sh"),
+    ]
+    carry_b = CarryInStore(repo, "B")
+    for _ in range(2):
+        source = FakeHistory(events)
+        result = _pair_writer(repo, source, carry_b).fill(
+            hunt_id="B", targets=["host-index"], start=F_HOUR, end=START,
+        )
+    # Hunt B skipped G because hunt A's segment covers it, so B's carry never saw /true_parent.
+    assert G_HOUR not in [start for _, start in source.plans]
+    assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
+    child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
+    assert child_gap and "e3: parent exec in an unobserved hour" in child_gap[0].reason
+
+
+def test_partially_fetched_hour_breaks_parent_continuity():
+    events = [
+        _exec(1, F_HOUR + timedelta(minutes=10), 10, 500, "/old"),
+        _exec(2, G_HOUR + timedelta(minutes=5), 12, 500, "/unrelated"),
+        _exec(3, G_HOUR + timedelta(minutes=40), 10, 500, "/true_parent"),
+        _exec(4, H_HOUR + timedelta(minutes=10), 11, 10, "/bin/sh"),
+    ]
+
+    class SplitG(FakeHistory):
+        """G has two partitions; the first is fed to the carry, the second (holding the parent) is capped."""
+
+        def plan(self, target, start, end, *, query_budget):
+            if start != G_HOUR:
+                return super().plan(target, start, end, query_budget=query_budget)
+            middle = start + timedelta(minutes=30)
+            return HistoryPlan((
+                HistoryPartition(target, start, middle, 1, "g1"),
+                HistoryPartition(target, middle, end, 1, "g2"),
+            ), 1, "complete", ())
+
+        def fetch(self, partition, **kwargs):
+            if partition.identity == "g2":
+                return HistoryFetch((), "partial", ("cap:0<total:1",), 0)
+            return super().fetch(partition, **kwargs)
+
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    for _ in range(2):
+        result = _pair_writer(repo, SplitG(events), carry).fill(
+            hunt_id="build", targets=["host-index"], start=F_HOUR, end=START,
+        )
+    assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
+    child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
+    assert child_gap and "e4: parent exec in an unobserved hour" in child_gap[0].reason
+
+
+def test_parent_resolves_across_continuously_observed_hours():
+    events = [
+        _exec(1, F_HOUR + timedelta(minutes=10), 10, 500, "/usr/sbin/parent"),
+        _exec(2, G_HOUR + timedelta(minutes=10), 12, 500, "/unrelated"),
+        _exec(3, H_HOUR + timedelta(minutes=10), 11, 10, "/bin/sh"),
+    ]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    for _ in range(2):
+        _pair_writer(repo, FakeHistory(events), carry).fill(
+            hunt_id="build", targets=["host-index"], start=F_HOUR, end=START,
+        )
+    assert (H_HOUR, "/usr/sbin/parent", "/bin/sh") in _pair_keys(repo)

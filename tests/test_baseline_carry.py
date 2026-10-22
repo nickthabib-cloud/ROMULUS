@@ -18,7 +18,10 @@ def _store() -> tuple[Repo, CarryInStore]:
     repo = Repo(make_engine(":memory:"))
     migrate(repo.engine)
     repo.create_hunt("hunt", {}, "d", "test")
-    return repo, CarryInStore(repo, "hunt")
+    store = CarryInStore(repo, "hunt")
+    # The fixtures' execs and children share this hour, which the store has fully observed.
+    store.mark_observed(START, START + timedelta(hours=1))
+    return repo, store
 
 
 def _row(pid, seconds, executable, *, boot="boot-a", ppid=1):
@@ -64,7 +67,7 @@ def test_marker_cache_overflow_persists_advances_before_reboot_comparison(monkey
         ParentExec("overflow", "boot-b", 10, START + timedelta(seconds=2), "/b2", 1, "b2"),
     ])
 
-    assert repo.baseline_parent_boot("hunt", "overflow") == ("boot-a", START + timedelta(seconds=3))
+    assert repo.baseline_parent_boot("hunt", "", "overflow") == ("boot-a", START + timedelta(seconds=3))
     assert store.lookup("overflow", 10, (START + timedelta(seconds=4)).timestamp(), "boot-a")[1] == "/a3"
     assert store.lookup("overflow", 10, (START + timedelta(seconds=4)).timestamp(), "boot-b") is None
 
@@ -106,3 +109,40 @@ def test_ten_million_exec_history_is_bounded_by_live_pids():
     print(f"10m parent execs in {elapsed:.1f}s; max stored live pids {maximum}")
     assert maximum == 1000 and repo.baseline_parent_count("hunt") == 1000
     assert elapsed < 180
+
+
+def test_lookup_requires_continuous_observation_from_parent_exec_to_child():
+    _repo, store = _store()
+    store.observe_rows([_row(10, 1, "/old")])
+    store.mark_observed(START + timedelta(hours=2), START + timedelta(hours=3))
+    child = START + timedelta(hours=2, minutes=5)
+    # The hour between the parent's exec and the child was never observed: the PID may have been reused there.
+    assert store.lookup("host", 10, child.timestamp(), "boot-a") is None
+    explained = PendingResolver(store).resolve(Pending("host", "boot-a", 10, child, "child", "/bin/sh"))
+    assert explained.keys == () and explained.reason == "parent exec in an unobserved hour"
+
+    store.mark_observed(START + timedelta(hours=1), START + timedelta(hours=2))
+    assert store.lookup("host", 10, child.timestamp(), "boot-a")[1] == "/old"
+
+
+def test_observed_ledger_stores_ranges_not_hours():
+    repo, store = _store()
+    for offset in reversed(range(200)):
+        hour = START + timedelta(hours=offset)
+        store.mark_observed(hour, hour + timedelta(hours=1))
+    store.mark_observed(START + timedelta(hours=300), START + timedelta(hours=301))
+    assert repo.baseline_parent_observed_ranges("hunt", "") == [
+        (START, START + timedelta(hours=200)),
+        (START + timedelta(hours=300), START + timedelta(hours=301)),
+    ]
+
+
+def test_host_with_carry_state_in_two_targets_is_never_resolved_from_one():
+    repo, store = _store()
+    other = CarryInStore(repo, "hunt", target="second-index")
+    other.mark_observed(START, START + timedelta(hours=1))
+    store.observe_rows([_row(10, 1, "/a")])
+    other.observe_rows([_row(10, 2, "/b")])
+    child = START + timedelta(seconds=5)
+    explained = PendingResolver(store).resolve(Pending("host", "boot-a", 10, child, "child", "/bin/sh"))
+    assert explained.keys == () and explained.reason == "host exec history spans targets"

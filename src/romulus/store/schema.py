@@ -459,18 +459,35 @@ baseline_snapshot_segment = Table(
 )
 Index("ix_baseline_snapshot_segment_segment", baseline_snapshot_segment.c.segment_id)
 
+# Parent carry state is per (hunt, target): a child resolves only from execs its own target delivered, and only
+# across hours that target delivered completely (baseline_parent_observed).
 baseline_parent_host_boot = Table(
     "baseline_parent_host_boot", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
     Column("host", String, nullable=False),
     Column("boot", String, nullable=False),
     Column("latest_ts", DateTime(timezone=True), nullable=False),
-    PrimaryKeyConstraint("hunt_id", "host", name="pk_baseline_parent_host_boot"),
+    PrimaryKeyConstraint("hunt_id", "target", "host", name="pk_baseline_parent_host_boot"),
+)
+Index("ix_baseline_parent_host_boot_host", baseline_parent_host_boot.c.hunt_id, baseline_parent_host_boot.c.host)
+
+# Hours whose every record was fed to the carry, stored as coalesced half-open ranges so the ledger grows with
+# the number of breaks, not the number of hours.
+baseline_parent_observed = Table(
+    "baseline_parent_observed", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "start", name="pk_baseline_parent_observed"),
+    CheckConstraint("end > start", name="ck_baseline_parent_observed_span"),
 )
 
 baseline_parent_carry = Table(
     "baseline_parent_carry", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
     Column("host", String, nullable=False),
     Column("boot", String, nullable=False),
     Column("pid", Integer, nullable=False),
@@ -482,7 +499,7 @@ baseline_parent_carry = Table(
     Column("previous_executable", String),
     Column("previous_parent_pid", Integer),
     Column("previous_raw_id", String),
-    PrimaryKeyConstraint("hunt_id", "host", "boot", "pid", name="pk_baseline_parent_carry"),
+    PrimaryKeyConstraint("hunt_id", "target", "host", "boot", "pid", name="pk_baseline_parent_carry"),
     CheckConstraint("pid >= 0", name="ck_baseline_parent_carry_pid"),
     CheckConstraint("executable <> ''", name="ck_baseline_parent_carry_executable"),
 )

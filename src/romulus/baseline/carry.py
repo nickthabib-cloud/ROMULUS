@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from romulus.baseline.spec import BaselineKey, Pending, key_digest_of, key_id_of
 from romulus.detect.correlation import boot_of
@@ -33,34 +33,84 @@ class PendingResolution:
     reason: str | None
 
 
+_HOUR = timedelta(hours=1)
+
+UNOBSERVED_HOUR = "parent exec in an unobserved hour"
+BEFORE_HISTORY = "parent exec before history"
+SPANS_TARGETS = "host exec history spans targets"
+
+
+def _hour(value: datetime) -> datetime:
+    return value.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+
+
 class CarryInStore:
-    """Latest two exec generations per live PID in the newest observed boot per host.
+    """Latest two exec generations per live PID in the newest observed boot per host, for one hunt and target.
 
     History may arrive newest-first. A different boot only replaces a host when its timestamp is newer than
     the current marker; older-boot rows are ignored. Within the chosen boot, the primary-key upsert retains the
     latest two execs for each PID. Romulus currently normalizes execs but not process-exit records, so "live" means
     not superseded by a PID reuse or reboot as far as available telemetry shows.
+
+    A stored generation is the PID's meaning at a later time only when nothing between them went unseen. The
+    observed ledger records the hours whose every record was fed here; a lookup answers only when one
+    continuous observed run spans the generation's exec hour through the child's hour. A failed, partial,
+    budget-omitted or skipped hour in between could hold a later exec of the same PID, so the answer is unknown.
     """
 
-    def __init__(self, repo: Repo, hunt_id: str):
-        self.repo, self.hunt_id = repo, hunt_id
-        self._markers: dict[str, tuple[str, datetime]] = {}
+    def __init__(self, repo: Repo, hunt_id: str, target: str = "", *,
+                 _markers: dict[tuple[str, str], tuple[str, datetime]] | None = None):
+        self.repo, self.hunt_id, self.target = repo, hunt_id, target
+        # Shared across the per-target views of one hunt, so the cache cap bounds the whole hunt.
+        self._markers: dict[tuple[str, str], tuple[str, datetime]] = {} if _markers is None else _markers
+
+    def for_target(self, target: str) -> CarryInStore:
+        """The same hunt's carry for another target; the marker cache and its cap are shared."""
+        return CarryInStore(self.repo, self.hunt_id, target, _markers=self._markers)
+
+    def mark_observed(self, start: datetime, end: datetime) -> None:
+        """Record that every record of this target in [start, end) has been fed to the carry."""
+        self.repo.mark_baseline_parent_observed(self.hunt_id, self.target, start, end)
+
+    def parent(self, host: str, pid: int, ts: datetime,
+               boot: str | None = None) -> tuple[tuple | None, str | None]:
+        """The parent identity at `ts`, or None with the reason it cannot be known."""
+        if len(self.repo.baseline_parent_targets(self.hunt_id, host)) > 1:
+            return None, SPANS_TARGETS
+        child_hour = _hour(ts)
+        entry = self.repo.baseline_parent_lookup(self.hunt_id, self.target, host, pid, ts.timestamp(), boot)
+        if entry is None:
+            # No stored generation precedes the child. Only when observation runs unbroken from the start of
+            # this target's ledger through the child is the exec before history; otherwise it may sit in an
+            # unobserved hour.
+            ranges = self.repo.baseline_parent_observed_ranges(self.hunt_id, self.target)
+            if not ranges or (ranges[0][0] <= child_hour and child_hour + _HOUR <= ranges[0][1]):
+                return None, BEFORE_HISTORY
+            return None, UNOBSERVED_HOUR
+        exec_hour = _hour(datetime.fromtimestamp(entry[0], UTC))
+        if not self.repo.baseline_parent_observed_covers(
+                self.hunt_id, self.target, exec_hour, child_hour + _HOUR):
+            return None, UNOBSERVED_HOUR
+        return entry, None
 
     def lookup(self, host: str, pid: int, ts: float, boot: str | None = None) -> tuple | None:
-        return self.repo.baseline_parent_lookup(self.hunt_id, host, pid, ts, boot)
+        """ParentLookup: the continuity-checked parent identity, else None."""
+        return self.parent(host, pid, datetime.fromtimestamp(ts, UTC), boot)[0]
 
     def _marker(self, host: str) -> tuple[str, datetime] | None:
-        if host not in self._markers:
-            stored = self.repo.baseline_parent_boot(self.hunt_id, host)
+        key = (self.target, host)
+        if key not in self._markers:
+            stored = self.repo.baseline_parent_boot(self.hunt_id, self.target, host)
             if stored is not None:
                 self._remember_marker(host, stored)
                 return stored
-        return self._markers.get(host)
+        return self._markers.get(key)
 
     def _remember_marker(self, host: str, marker: tuple[str, datetime]) -> None:
         """Cache common hosts while leaving overflow authoritative on disk."""
-        if host in self._markers or len(self._markers) < MARKER_CACHE_CAP:
-            self._markers[host] = marker
+        key = (self.target, host)
+        if key in self._markers or len(self._markers) < MARKER_CACHE_CAP:
+            self._markers[key] = marker
 
     def observe_events(self, events: Iterable[TypedEvent], *, chunk_size: int = 100_000) -> int:
         def rows():
@@ -94,8 +144,9 @@ class CarryInStore:
                     row for generations in pending.values() for row in generations
                 )
                 pending.clear()
-            for host, (boot, latest) in sorted(self._markers.items()):
-                self.repo.set_baseline_parent_boot(self.hunt_id, host, boot, latest)
+            for (target, host), (boot, latest) in sorted(self._markers.items()):
+                if target == self.target:
+                    self.repo.set_baseline_parent_boot(self.hunt_id, target, host, boot, latest)
             maximum = max(maximum, self.repo.baseline_parent_count(self.hunt_id))
             seen = 0
 
@@ -108,7 +159,8 @@ class CarryInStore:
             timestamp, boot = item.ts.astimezone(UTC), item.boot or ""
             marker = self._marker(item.host)
             if marker is None:
-                if not self.repo.set_baseline_parent_boot(self.hunt_id, item.host, boot, timestamp):
+                if not self.repo.set_baseline_parent_boot(
+                        self.hunt_id, self.target, item.host, boot, timestamp):
                     continue
                 self._remember_marker(item.host, (boot, timestamp))
             elif marker[0] != boot:
@@ -116,17 +168,19 @@ class CarryInStore:
                     continue
                 # A newer reboot supersedes every process in the former boot, including buffered rows.
                 pending = {key: value for key, value in pending.items() if key[0] != item.host}
-                if not self.repo.set_baseline_parent_boot(self.hunt_id, item.host, boot, timestamp):
+                if not self.repo.set_baseline_parent_boot(
+                        self.hunt_id, self.target, item.host, boot, timestamp):
                     continue
                 self._remember_marker(item.host, (boot, timestamp))
             elif timestamp > marker[1]:
-                if item.host in self._markers:
+                if (self.target, item.host) in self._markers:
                     self._remember_marker(item.host, (boot, timestamp))
-                elif not self.repo.set_baseline_parent_boot(self.hunt_id, item.host, boot, timestamp):
+                elif not self.repo.set_baseline_parent_boot(
+                        self.hunt_id, self.target, item.host, boot, timestamp):
                     continue
             key = (item.host, boot, item.pid)
             row = {
-                "hunt_id": self.hunt_id, "host": item.host, "boot": boot, "pid": item.pid,
+                "hunt_id": self.hunt_id, "target": self.target, "host": item.host, "boot": boot, "pid": item.pid,
                 "exec_ts": timestamp, "executable": item.executable,
                 "parent_pid": item.parent_pid, "raw_id": item.raw_id,
             }
@@ -151,9 +205,13 @@ class PendingResolver:
     def resolve(self, pending: Pending) -> PendingResolution:
         if pending.ppid in (1, 2):
             return PendingResolution(pending.event_id, (), "parent pid 1/2 out of scope")
-        parent = self.parents.lookup(pending.host, pending.ppid, pending.ts.timestamp(), pending.boot)
+        if isinstance(self.parents, CarryInStore):
+            parent, reason = self.parents.parent(pending.host, pending.ppid, pending.ts, pending.boot)
+        else:
+            parent = self.parents.lookup(pending.host, pending.ppid, pending.ts.timestamp(), pending.boot)
+            reason = None
         if parent is None or not isinstance(parent[1], str) or not parent[1]:
-            return PendingResolution(pending.event_id, (), "parent exec before history")
+            return PendingResolution(pending.event_id, (), reason or BEFORE_HISTORY)
         key = {"child_executable": pending.child_executable, "parent_executable": parent[1]}
         scope = f"host:{pending.host.lower()}"
         resolved = BaselineKey(

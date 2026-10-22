@@ -51,14 +51,28 @@ def upgrade() -> None:
     op.create_table(
         "baseline_parent_host_boot",
         sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("target", sa.String(), nullable=False),
         sa.Column("host", sa.String(), nullable=False),
         sa.Column("boot", sa.String(), nullable=False),
         sa.Column("latest_ts", sa.DateTime(timezone=True), nullable=False),
-        sa.PrimaryKeyConstraint("hunt_id", "host", name="pk_baseline_parent_host_boot"),
+        sa.PrimaryKeyConstraint("hunt_id", "target", "host", name="pk_baseline_parent_host_boot"),
+    )
+    op.create_index(
+        "ix_baseline_parent_host_boot_host", "baseline_parent_host_boot", ["hunt_id", "host"],
+    )
+    op.create_table(
+        "baseline_parent_observed",
+        sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("target", sa.String(), nullable=False),
+        sa.Column("start", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("end", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("hunt_id", "target", "start", name="pk_baseline_parent_observed"),
+        sa.CheckConstraint("end > start", name="ck_baseline_parent_observed_span"),
     )
     op.create_table(
         "baseline_parent_carry",
         sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("target", sa.String(), nullable=False),
         sa.Column("host", sa.String(), nullable=False),
         sa.Column("boot", sa.String(), nullable=False),
         sa.Column("pid", sa.Integer(), nullable=False),
@@ -70,7 +84,9 @@ def upgrade() -> None:
         sa.Column("previous_executable", sa.String(), nullable=True),
         sa.Column("previous_parent_pid", sa.Integer(), nullable=True),
         sa.Column("previous_raw_id", sa.String(), nullable=True),
-        sa.PrimaryKeyConstraint("hunt_id", "host", "boot", "pid", name="pk_baseline_parent_carry"),
+        sa.PrimaryKeyConstraint(
+            "hunt_id", "target", "host", "boot", "pid", name="pk_baseline_parent_carry",
+        ),
         sa.CheckConstraint("pid >= 0", name="ck_baseline_parent_carry_pid"),
         sa.CheckConstraint("executable <> ''", name="ck_baseline_parent_carry_executable"),
     )
@@ -78,6 +94,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("baseline_parent_carry")
+    op.drop_table("baseline_parent_observed")
+    op.drop_index("ix_baseline_parent_host_boot_host", table_name="baseline_parent_host_boot")
     op.drop_table("baseline_parent_host_boot")
     op.drop_index("ix_baseline_snapshot_segment_segment", table_name="baseline_snapshot_segment")
     op.drop_table("baseline_snapshot_segment")

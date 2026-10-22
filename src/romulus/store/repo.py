@@ -1908,24 +1908,25 @@ class Repo:
         with self.engine.connect() as c:
             return list(c.execute(query).scalars())
 
-    def baseline_parent_boot(self, hunt_id: str, host: str) -> tuple[str, datetime] | None:
+    def baseline_parent_boot(self, hunt_id: str, target: str, host: str) -> tuple[str, datetime] | None:
         with self.engine.connect() as c:
             row = c.execute(select(t.baseline_parent_host_boot).where(
                 t.baseline_parent_host_boot.c.hunt_id == hunt_id,
+                t.baseline_parent_host_boot.c.target == target,
                 t.baseline_parent_host_boot.c.host == host,
             )).mappings().first()
         if row is None:
             return None
         return row["boot"], _stored_utc(row["latest_ts"])
 
-    def set_baseline_parent_boot(self, hunt_id: str, host: str, boot: str,
+    def set_baseline_parent_boot(self, hunt_id: str, target: str, host: str, boot: str,
                                  latest_ts: datetime) -> bool:
         """Advance one host's carry state; an older different boot is rejected."""
         latest_ts = _utc(latest_ts, "parent boot latest_ts")
         table = t.baseline_parent_host_boot.c
         with write_txn(self.engine) as c:
             current = c.execute(select(t.baseline_parent_host_boot).where(
-                table.hunt_id == hunt_id, table.host == host,
+                table.hunt_id == hunt_id, table.target == target, table.host == host,
             )).mappings().first()
             if current is not None:
                 current_ts = _stored_utc(current["latest_ts"])
@@ -1934,18 +1935,27 @@ class Repo:
                 if current["boot"] != boot:
                     c.execute(t.baseline_parent_carry.delete().where(
                         t.baseline_parent_carry.c.hunt_id == hunt_id,
+                        t.baseline_parent_carry.c.target == target,
                         t.baseline_parent_carry.c.host == host,
                     ))
                 elif current_ts > latest_ts:
                     latest_ts = current_ts
             stmt = insert(t.baseline_parent_host_boot).values(
-                hunt_id=hunt_id, host=host, boot=boot, latest_ts=latest_ts,
+                hunt_id=hunt_id, target=target, host=host, boot=boot, latest_ts=latest_ts,
             ).on_conflict_do_update(
-                index_elements=["hunt_id", "host"],
+                index_elements=["hunt_id", "target", "host"],
                 set_={"boot": boot, "latest_ts": latest_ts},
             )
             c.execute(stmt)
             return True
+
+    def baseline_parent_targets(self, hunt_id: str, host: str) -> list[str]:
+        """Targets that delivered at least one exec for `host` in this hunt (ix_baseline_parent_host_boot_host)."""
+        table = t.baseline_parent_host_boot.c
+        with self.engine.connect() as c:
+            return sorted(c.execute(select(table.target).where(
+                table.hunt_id == hunt_id, table.host == host,
+            )).scalars())
 
     def upsert_baseline_parents(self, rows: Iterable[dict]) -> None:
         """Keep the latest two observed exec generations for each live PID."""
@@ -1957,7 +1967,7 @@ class Repo:
             or_(table.previous_exec_ts.is_(None), excluded.exec_ts > table.previous_exec_ts),
         )
         stmt = stmt.on_conflict_do_update(
-            index_elements=["hunt_id", "host", "boot", "pid"],
+            index_elements=["hunt_id", "target", "host", "boot", "pid"],
             set_={
                 "previous_exec_ts": case(
                     (newer, table.exec_ts), (older_candidate, excluded.exec_ts),
@@ -1985,16 +1995,17 @@ class Repo:
             with write_txn(self.engine) as c:
                 c.execute(stmt, chunk)
 
-    def baseline_parent_lookup(self, hunt_id: str, host: str, pid: int, ts: float,
+    def baseline_parent_lookup(self, hunt_id: str, target: str, host: str, pid: int, ts: float,
                                boot: str | None) -> tuple | None:
+        """The latest stored generation of `pid` at or before `ts`; continuity is the caller's check."""
         if isinstance(pid, bool) or not isinstance(pid, int) or pid < 0:
             return None
         at = datetime.fromtimestamp(ts, UTC)
         table = t.baseline_parent_carry.c
         with self.engine.connect() as c:
             row = c.execute(select(t.baseline_parent_carry).where(
-                table.hunt_id == hunt_id, table.host == host, table.boot == (boot or ""),
-                table.pid == pid,
+                table.hunt_id == hunt_id, table.target == target, table.host == host,
+                table.boot == (boot or ""), table.pid == pid,
             )).mappings().first()
         if row is None:
             return None
@@ -2014,6 +2025,53 @@ class Repo:
             return int(c.execute(select(func.count()).select_from(t.baseline_parent_carry).where(
                 t.baseline_parent_carry.c.hunt_id == hunt_id,
             )).scalar_one())
+
+    def mark_baseline_parent_observed(self, hunt_id: str, target: str, start: datetime,
+                                      end: datetime) -> None:
+        """Record that every record of `target` in [start, end) was fed to the carry.
+
+        Overlapping or touching ranges are coalesced in the same transaction, so the ledger holds one row per
+        continuous observed run.
+        """
+        start, end = _utc(start, "observed start"), _utc(end, "observed end")
+        if end <= start:
+            raise ValueError("observed range must be nonempty")
+        table = t.baseline_parent_observed.c
+        with write_txn(self.engine) as c:
+            touching = c.execute(select(table.start, table.end).where(
+                table.hunt_id == hunt_id, table.target == target,
+                table.start <= end, table.end >= start,
+            )).all()
+            for row in touching:
+                start = min(start, _stored_utc(row.start))
+                end = max(end, _stored_utc(row.end))
+            if touching:
+                c.execute(t.baseline_parent_observed.delete().where(
+                    table.hunt_id == hunt_id, table.target == target,
+                    table.start.in_([row.start for row in touching]),
+                ))
+            c.execute(t.baseline_parent_observed.insert().values(
+                hunt_id=hunt_id, target=target, start=start, end=end,
+            ))
+
+    def baseline_parent_observed_covers(self, hunt_id: str, target: str, start: datetime,
+                                        end: datetime) -> bool:
+        """Whether one continuous observed run contains [start, end) (a primary-key range search)."""
+        start, end = _utc(start, "observed start"), _utc(end, "observed end")
+        table = t.baseline_parent_observed.c
+        with self.engine.connect() as c:
+            row = c.execute(select(table.end).where(
+                table.hunt_id == hunt_id, table.target == target, table.start <= start,
+            ).order_by(table.start.desc()).limit(1)).first()
+        return row is not None and _stored_utc(row.end) >= end
+
+    def baseline_parent_observed_ranges(self, hunt_id: str, target: str) -> list[tuple[datetime, datetime]]:
+        table = t.baseline_parent_observed.c
+        with self.engine.connect() as c:
+            rows = c.execute(select(table.start, table.end).where(
+                table.hunt_id == hunt_id, table.target == target,
+            ).order_by(table.start)).all()
+        return [(_stored_utc(row.start), _stored_utc(row.end)) for row in rows]
 
     def upsert_baseline_observation(self, row: dict) -> None:
         self.upsert_baseline_observations([row])

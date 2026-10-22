@@ -182,6 +182,7 @@ class LookbackWriter:
                 ))
                 continue
             counters = {spec.id: KeyCounter("pending", spec) for spec in missing}
+            carry = self.parent_carry.for_target(target) if self.parent_carry is not None else None
             hour_parents = PidTable()
             hour_context = KeyContext(
                 pid_table=hour_parents,
@@ -225,8 +226,8 @@ class LookbackWriter:
                     ))
                     break
                 events_total += len(fetched.events)
-                if self.parent_carry is not None:
-                    self.parent_carry.observe_events(fetched.events)
+                if carry is not None:
+                    carry.observe_events(fetched.events)
                 ordered_events = sorted(fetched.events, key=lambda item: (item.ts, item.id))
                 for event in ordered_events:
                     hour_parents.add(event)
@@ -238,7 +239,13 @@ class LookbackWriter:
                     target, hour_start, hour_end, failure[0], failure[1], tuple(counter for counter in counters),
                 ))
                 continue
-            resolver = PendingResolver(self.parent_carry) if self.parent_carry is not None else None
+            # Every partition of the hour was fetched completely and fed to the carry, so the hour joins the
+            # carry's continuity ledger before its children are resolved against it. Failed, partial,
+            # budget-omitted and skipped (already covered) hours never do, and so break parent continuity.
+            resolver = None
+            if carry is not None:
+                carry.mark_observed(hour_start, hour_end)
+                resolver = PendingResolver(carry)
             for counter in counters.values():
                 for pending in counter.take_pendings():
                     if resolver is None:
