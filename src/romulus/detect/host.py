@@ -10,6 +10,7 @@ from collections import OrderedDict, defaultdict
 from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
+from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
 from romulus.detect.linux_argv import canonical, read_operand_paths
 from romulus.evidence.shellparse import (
@@ -127,11 +128,6 @@ NFT_BASE_CHAINS = {"input", "forward", "output", "prerouting", "postrouting"}
 FW_CHANGE_FLAGS = {"-A", "--append", "-I", "--insert", "-D", "--delete", "-R", "--replace", "-F", "--flush",
                    "-P", "--policy", "-X", "--delete-chain", "-N", "--new-chain", "-Z"}
 NFT_CHANGE = {"add", "insert", "delete", "flush", "replace", "create", "destroy"}
-# Explicit internal space (mission-configurable later). Not ipaddress.is_private, which also
-# classifies documentation/benchmark ranges as private.
-INTERNAL_NETS = [ipaddress.ip_network(n) for n in (
-    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10",
-    "::1/128", "fc00::/7", "fe80::/10")]
 
 
 def _normalize_posix_path(path: str) -> str:
@@ -177,7 +173,9 @@ def interpreter_name(argv0: str) -> str:
 
 
 def is_internal(ip: ipaddress._BaseAddress) -> bool:
-    return any(ip in n for n in INTERNAL_NETS if n.version == ip.version)
+    """Whether the address belongs to the site, by the internal-network definition installed for this hunt
+    (romulus.detect.netdef). Not ipaddress.is_private, which also counts documentation and benchmark ranges."""
+    return netdef.current().is_internal(ip)
 
 
 def _py_pty_spawn(code: str) -> bool:

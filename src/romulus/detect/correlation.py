@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 
+from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
     INTERPRETERS,
@@ -71,8 +72,9 @@ def _external_uncached(ip: str | None) -> bool:
     return routable_remote(ip) and not is_internal(ipaddress.ip_address(ip))
 
 
-# INTERNAL_NETS is a constant table, so an address's answer never changes during a run.
+# The answer depends on the installed internal-network definition: installing one clears this cache.
 _external_text = lru_cache(maxsize=ADDRESS_CACHE)(_external_uncached)
+netdef.on_install(_external_text.cache_clear)
 
 
 def external(ip: str | None) -> bool:
