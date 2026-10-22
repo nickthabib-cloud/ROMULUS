@@ -132,3 +132,35 @@ def test_reverse_shell_join_streams_and_still_finds_the_shell():
     rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
     out = rule.finalize()
     assert [(m.group_key, m.proposed_lane) for m in out] == [("web1|None|777|203.0.113.66", "high")]
+
+
+def test_root_exec_runs_are_budgeted_per_session_and_cited_as_ids(monkeypatch):
+    from romulus.detect.kernel_files import RootExecNonRootModifiableFile
+    from tests.test_kernel_files import root_exec
+    monkeypatch.setattr(RootExecNonRootModifiableFile, "MAX_RUNS", 5)
+    rule = RootExecNonRootModifiableFile()
+    runs = [root_exec(ts=T0 + timedelta(minutes=i), auid="0", ses=100 + i) for i in range(9)]    # a session per run
+    rule.consume(runs)
+    staged = {e.id: e for e in rule.drain_staged()}
+    assert rule.runs_held == 5 and rule.capped == 4 and rule.retained_events() == []
+    rule.bind_loader(lambda ids: [staged[i] for i in ids if i in staged])
+    [m] = rule.finalize()
+    assert "5 times" in m.claim
+    assert any("4 record(s) not evaluated" in r for r in rule.limit_reasons())
+
+
+def test_package_lineage_of_a_root_change_survives_exec_history_release(monkeypatch):
+    from romulus.detect.kernel_files import PersistencePathChange
+    from tests.test_kernel_files import change, pexec
+    monkeypatch.setattr(PersistencePathChange, "EXEC_CAPACITY", 50)
+    rule = PersistencePathChange()
+    rule.consume([pexec("/usr/bin/dpkg", 100, 90, ts=T0)])
+    rule.consume([change("/etc/cron.d/a", uid="0", exe="/usr/bin/dash", pid=101, ppid=100,
+                         ts=T0 + timedelta(seconds=1))])
+    rule.consume([pexec("/usr/bin/true", 1000 + i, 1, ts=T0 + timedelta(seconds=2 + i)) for i in range(500)])
+    staged = {e.id: e for e in rule.drain_staged()}
+    assert len(rule.execs) <= 50 and rule.execs.evicted > 0
+    rule.bind_loader(lambda ids: [staged[i] for i in ids if i in staged])
+    [m] = rule.finalize()
+    assert m.group_key == "app01|package:dpkg"
+    assert any("released" in r for r in rule.limit_reasons())
