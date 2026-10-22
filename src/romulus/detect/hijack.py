@@ -52,7 +52,9 @@ from romulus.detect.linux_argv import canonical, is_under, normalize_path, progr
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
+    classify_redirect,
     parse_script,
+    shell_dialect,
     shell_script_file_of,
     shell_script_of,
 )
@@ -91,7 +93,6 @@ _ELEVATION = {"sudo", "su", "doas", "pkexec", "run0"}
 _USR_ALIASES = (("/bin/", "/usr/bin/"), ("/sbin/", "/usr/sbin/"), ("/lib/", "/usr/lib/"),
                 ("/lib64/", "/usr/lib64/"), ("/lib32/", "/usr/lib32/"))
 _PSEUDO_FS = ("/dev", "/proc", "/sys")
-_REDIRECT_WRITE = {">", ">>", "2>", "2>>"}
 _FAMILY_ORDER = {"auth": 0, "file_change": 1, "process_exec": 2}
 # What a kernel file-change record shows was done to the file, in claim wording.
 CHANGE_WORDS = {"content": "opened it for writing", "create": "created it", "rename_target": "renamed a file onto it",
@@ -159,11 +160,11 @@ def _interpreter_script(name: str, args: list[str]) -> str | None:
     return args[index]
 
 
-def _text_commands(script: str, cwd: str | None):
+def _text_commands(script: str, cwd: str | None, dialect: str = "bash"):
     """(command, working directory) for each parsed command of shell text, following `cd DIR`; and whether the
     text was only partly modelled. A `cd` the parser cannot place (`cd`, `cd -`, `cd ~`) leaves the directory
     unknown, so later relative operands are unresolved, never guessed."""
-    parsed = parse_script(script)
+    parsed = parse_script(script, dialect)
     if not parsed.ok and not parsed.partial:
         return [], True
     out = []
@@ -385,7 +386,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             if isinstance(script, UnknownShellScript):
                 incomplete = True
             elif script:
-                text_found, text_incomplete = self._text_writes(script, cwd)
+                text_found, text_incomplete = self._text_writes(
+                    script, cwd, shell_dialect(event.get("process.executable"), argv))
                 found += text_found
                 incomplete = incomplete or text_incomplete
         if incomplete:
@@ -413,14 +415,16 @@ class NonRootWriteRootExecutedFile(Playbook):
                                            event.get("process.user") in WEB_SERVICE_USERS, assumed))
 
     @staticmethod
-    def _text_writes(script: str, cwd: str | None) -> tuple[list[tuple[str, str, bool]], bool]:
-        commands, incomplete = _text_commands(script, cwd)
+    def _text_writes(script: str, cwd: str | None,
+                     dialect: str = "bash") -> tuple[list[tuple[str, str, bool]], bool]:
+        commands, incomplete = _text_commands(script, cwd, dialect)
         found: list[tuple[str, str, bool]] = []
         for command, current in commands:
             for op, target in command.redirects:
-                if op not in _REDIRECT_WRITE:
+                written = classify_redirect(op, target).writes_file
+                if written is None:                 # a read, duplication or close writes no file
                     continue
-                path = normalize_path(target, current)
+                path = normalize_path(written, current)
                 if not path:
                     incomplete = True
                 elif not is_under(path, _PSEUDO_FS):
@@ -455,7 +459,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             if isinstance(script, UnknownShellScript):
                 incomplete = True
             elif script:
-                text_runs, text_incomplete = self._text_runs(script, cwd)
+                text_runs, text_incomplete = self._text_runs(
+                    script, cwd, shell_dialect(event.get("process.executable")))
                 runs += text_runs
                 incomplete = incomplete or text_incomplete
         elif name in SCRIPT_FILE_INTERPRETERS:
@@ -496,8 +501,8 @@ class NonRootWriteRootExecutedFile(Playbook):
                     self._stage(auth)
 
     @staticmethod
-    def _text_runs(script: str, cwd: str | None) -> tuple[list[tuple[str, str]], bool]:
-        commands, incomplete = _text_commands(script, cwd)
+    def _text_runs(script: str, cwd: str | None, dialect: str = "bash") -> tuple[list[tuple[str, str]], bool]:
+        commands, incomplete = _text_commands(script, cwd, dialect)
         runs: list[tuple[str, str]] = []
         for command, current in commands:
             if not command.argv or command.name in _ELEVATION:

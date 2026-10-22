@@ -129,6 +129,36 @@ class PidTable:
         """Latest exec identity for a PID at or before `ts`; public for expansion lineage links."""
         return self._lookup(host, pid, ts)
 
+    def exec_before(self, host: str, pid: int, ts: float):
+        """The exec identity a PID held strictly before `ts` — the program it ran before a later exec
+        on the same PID replaced it. Returns `(exec_ts, exe, parent_pid, raw_id)` or None."""
+        if not self._sorted:
+            self._lookup(host, pid, ts)                 # triggers the lazy per-pid sort
+        prior = None
+        for entry in self.execs.get((host, pid), ()):
+            if entry[0] < ts:
+                prior = entry
+            else:
+                break
+        return prior
+
+    def lineage_entries(self, host: str, ppid, ts: float, depth: int = LINEAGE_DEPTH):
+        """Walk up the recorded parent chain from `ppid` as of `ts`. Returns a list of
+        `(pid, exec_ts, exe, raw_id)`, nearest ancestor first, stopping at an ancestor whose exec is
+        not in the window (so the chain never invents a link)."""
+        entries = []
+        pid = ppid
+        for _ in range(depth):
+            if not isinstance(pid, int) or pid in (0, 1):
+                break
+            entry = self._lookup(host, pid, ts)
+            if entry is None:
+                break
+            exec_ts, exe, parent, raw_id = entry
+            entries.append((pid, exec_ts, exe, raw_id))
+            pid, ts = parent, exec_ts
+        return entries
+
     def ancestry(self, host: str, ppid, ts: float) -> tuple[str, list[tuple[str, str]]]:
         """Walk up from a parent pid. Returns (verdict, [(exe, raw id)]) with verdict 'web_server' when a web
         server is an ancestor, 'service_manager' when the chain provably reaches pid 1 or systemd/init without
@@ -182,7 +212,9 @@ class InterpreterExternalConnection(Playbook):
               "web applications and their daemons making approved outbound API calls",
               "name resolution: resolvers and address sorting call connect() on UDP sockets")
     next_checks = ("process_tree for the connecting process", "network records for the same destination and time",
-                   "entity_timeline of the host around the connection")
+                   "entity_timeline of the host around the connection",
+                   ("whether this process or a child then executed a shell "
+                    "(host.shell_spawned_by_connected_process), which would make this a reverse shell"))
 
     def __init__(self):
         super().__init__()

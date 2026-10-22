@@ -44,7 +44,13 @@ from romulus.detect.linux_argv import (
     ssh_destination,
     tar_spec,
 )
-from romulus.evidence.shellparse import UnknownShellScript, parse_script, shell_script_of
+from romulus.evidence.shellparse import (
+    UnknownShellScript,
+    network_redirects,
+    parse_script,
+    shell_dialect,
+    shell_script_of,
+)
 from romulus.evidence.typed import Outcome, TypedEvent
 
 # Anchor classes that denote a host-attributed foothold whose session or lineage is worth judging. A
@@ -803,22 +809,16 @@ def _shell_devtcp(event: TypedEvent) -> tuple[str, str, str] | None:
         return None                                # not a shell -c command
     if isinstance(script, UnknownShellScript):
         return ("T1048", "unknown", "a shell -c command whose script position is not safely modelled")
-    parsed = parse_script(script)
+    parsed = parse_script(script, shell_dialect(event.get("process.executable"), argv))
     if not parsed.ok:
         return ("T1048", "unknown", "a shell -c command whose script text could not be fully parsed")
-    out_target = in_target = None
-    for command in parsed.commands():
-        for op, target in command.redirects:
-            if not target.startswith(("/dev/tcp/", "/dev/udp/")):
-                continue
-            if ">" in op:
-                out_target = target
-            elif "<" in op:
-                in_target = target
-    if out_target is not None:
-        return ("T1048", "transfer", f"shell command text that redirects output to {out_target}")
-    if in_target is not None:
-        return ("T1105", "ingress", f"shell command text that reads from {in_target}")
+    # A redirection of stdout/stderr to /dev/tcp|/dev/udp is an outbound transfer; a read from one is
+    # an inbound pull. Typed classification covers plain, fd-prefixed and `>&`/`&>` forms alike.
+    outbound, inbound = network_redirects(parsed)
+    if outbound:
+        return ("T1048", "transfer", f"shell command text that redirects output to {outbound[0]}")
+    if inbound:
+        return ("T1105", "ingress", f"shell command text that reads from {inbound[0]}")
     return None
 
 
