@@ -70,6 +70,7 @@ class AgentReadiness:
                 "egress_switch": s.model_egress or None,
                 "budgets": {**BudgetLimits.from_settings(s).as_dict(),
                             "max_tool_calls_per_session": s.agent_max_tool_calls_per_session,
+                            "max_source_queries": s.agent_max_source_queries,
                             "concurrency": s.agent_concurrency}}
 
 

@@ -1,13 +1,13 @@
 """baseline S4 snapshot membership
 
 Revision ID: 0013
-Revises: 0009
+Revises: 0012
 """
 import sqlalchemy as sa
 from alembic import op
 
 revision = "0013"
-down_revision = "0009"
+down_revision = "0012"
 branch_labels = None
 depends_on = None
 
