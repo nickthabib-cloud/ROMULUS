@@ -15,7 +15,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from romulus.detect.base import Match, Playbook, basename, pf
-from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS, interpreter_name, is_internal
+from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
+    INTERPRETERS,
+    WEB_SERVICE_USERS,
+    boot_of,
+    boots_conflict,
+    interpreter_name,
+    is_internal,
+)
 from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome, TypedEvent
 
@@ -92,21 +99,6 @@ def _process_words(e: TypedEvent) -> str:
 WEB_SERVER_PREFIXES = ("apache2", "httpd", "nginx", "lighttpd", "php-fpm", "php-cgi", "uwsgi", "gunicorn", "caddy")
 SERVICE_MANAGERS = {"systemd", "init"}
 LINEAGE_DEPTH = 6
-
-
-def boot_of(e: TypedEvent) -> str | None:
-    """The boot id a record carries (`host.boot.id`), or None when the source did not record it."""
-    value = e.get("host.boot.id")
-    return None if value in (None, "") else str(value)
-
-
-def boots_conflict(a: str | None, b: str | None) -> bool:
-    """Whether two records are known to come from different boots of a host. Process ids and audit session ids
-    restart at every boot, so a pid or session join across a boot boundary is false. Only two recorded boot ids that
-    differ prove a boundary: an unrecorded boot id (None) is compatible with any boot, so such a record keeps the
-    boot-blind join it had before boot identity was recorded (and a pid or session id reused after a reboot can
-    still join it)."""
-    return a is not None and b is not None and a != b
 
 
 def merge_unknown_boot(groups: dict[tuple, list], index: int) -> dict[tuple, list]:

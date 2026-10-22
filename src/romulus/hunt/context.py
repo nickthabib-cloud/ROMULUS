@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from romulus.decide.policy import Decision, decide
 from romulus.detect.base import ContextAnchor, ContextLink, Match, Playbook
 from romulus.detect.context import _session_key
+from romulus.detect.correlation import merge_unknown_boot
 from romulus.detect.registry import anchor_class_for_rule, fresh_context_pack
 from romulus.evidence.typed import TypedEvent
 from romulus.store.db import digest
@@ -82,6 +83,18 @@ def _aware(value) -> datetime | None:
 def _session_of(event: TypedEvent, anchor: ContextAnchor, link: ContextLink) -> tuple:
     """A record's session identity: exactly the rules' own group key, so one bucket never splits a group."""
     return _session_key(event, anchor)
+
+
+def _merge_boot_buckets(sessions: dict[tuple, dict]) -> dict[tuple, dict]:
+    """A bucket of records without a boot id joins the session's only recorded boot (records reached by links
+    usually carry none); with two recorded boots it stays apart, and two recorded boots never share a bucket."""
+    merged: dict[tuple, dict] = {}
+    for key, olds in merge_unknown_boot({key: [key] for key in sessions}, 1).items():
+        bucket = merged.setdefault(key, {"events": {}, "pairs": {}})
+        for old in olds:
+            bucket["events"].update(sessions[old]["events"])
+            bucket["pairs"].update(sessions[old]["pairs"])
+    return merged
 
 
 def _content_key(pair: tuple) -> tuple:
@@ -177,6 +190,7 @@ def _finalize_rule(repo: Repo, hunt_id: str, playbook_cls, reaches: list[tuple],
             bucket = sessions.setdefault(skey, {"events": {}, "pairs": {}})
             bucket["events"][event.id] = event
             bucket["pairs"][(anchor.id, link.id)] = (anchor, link)
+    sessions = _merge_boot_buckets(sessions)
 
     # One run per session over the union of its records; collect the admitted matches and which reaches fed them.
     admitted: dict[str, tuple] = {}                 # group key -> (match, decision, contributing pairs)

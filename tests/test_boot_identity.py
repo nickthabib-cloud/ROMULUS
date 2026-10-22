@@ -10,7 +10,7 @@ import random
 from datetime import UTC, datetime, timedelta
 
 from romulus.detect.base import ContextAnchor
-from romulus.detect.context import _session_key
+from romulus.detect.context import _session_boots, _session_key
 from romulus.detect.correlation import (
     InterpreterExternalConnection,
     PidTable,
@@ -347,12 +347,18 @@ def test_lineage_link_refuses_an_ancestor_pid_from_another_boot_and_keeps_unreco
     assert result.key["host.boot.id"] == BOOT_A
 
 
-# ---------------------------------------------------------------- context: boot-blind session keys
+# ---------------------------------------------------------------- context: session keys
 def test_context_session_keys_do_not_split_a_session_by_boot_presence():
     anchor = ContextAnchor(id="cand-1", anchor_class="execution", lane="high", claim="x", events=[], rule_id="r")
     with_boot = exc("/usr/bin/id", 10, T0, boot=BOOT_A, process__session_id=3)
     without = exc("/usr/bin/id", 11, T0, process__session_id=3)
-    assert _session_key(with_boot, anchor) == _session_key(without, anchor) == ("host01", None, 3)
+    boots = _session_boots([with_boot, without], anchor)
+    assert _session_key(with_boot, anchor, boots) == _session_key(without, anchor, boots) == ("host01", BOOT_A, 3)
+    other = exc("/usr/bin/id", 12, T0, boot=BOOT_B, process__session_id=3)
+    boots = _session_boots([with_boot, without, other], anchor)
+    # two recorded boots: two sessions, and the record without a boot id joins neither
+    assert {_session_key(e, anchor, boots) for e in (with_boot, without, other)} == {
+        ("host01", BOOT_A, 3), ("host01", None, 3), ("host01", BOOT_B, 3)}
 
 
 # ---------------------------------------------------------------- single-boot data: identical to boot-blind

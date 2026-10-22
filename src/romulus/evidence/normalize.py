@@ -91,16 +91,37 @@ def _journal_boot(j: dict) -> str | None:
     return value if isinstance(value, str) and _BOOT_ID.fullmatch(value) else None
 
 
+# Audit record type numbers (linux/audit.h, libaudit) of the records the audit normalizers group, for journald
+# copies that carry only the number (_AUDIT_TYPE) and not its name (_AUDIT_TYPE_NAME).
+AUDIT_TYPE_NUMBERS = {
+    "1100": "USER_AUTH", "1101": "USER_ACCT", "1102": "USER_MGMT", "1103": "CRED_ACQ", "1104": "CRED_DISP",
+    "1105": "USER_START", "1106": "USER_END", "1108": "USER_CHAUTHTOK", "1110": "CRED_REFR", "1112": "USER_LOGIN",
+    "1113": "USER_LOGOUT", "1114": "ADD_USER", "1115": "DEL_USER", "1116": "ADD_GROUP", "1117": "DEL_GROUP",
+    "1127": "SYSTEM_BOOT", "1128": "SYSTEM_SHUTDOWN", "1129": "SYSTEM_RUNLEVEL", "1130": "SERVICE_START",
+    "1131": "SERVICE_STOP", "1132": "GRP_MGMT", "1133": "GRP_CHAUTHTOK", "1135": "ACCT_LOCK", "1136": "ACCT_UNLOCK",
+    "1300": "SYSCALL", "1302": "PATH", "1305": "CONFIG_CHANGE", "1306": "SOCKADDR", "1307": "CWD", "1309": "EXECVE",
+    "1327": "PROCTITLE",
+}
+
+
+def _decimal(value) -> int | None:
+    """A non-negative decimal integer written in ASCII digits, else None (str.isdigit also accepts '²')."""
+    return int(value) if isinstance(value, str) and value.isascii() and value.isdigit() else None
+
+
 def _audit_copy_key(hit: dict, j: dict) -> tuple[tuple[str, int, int], str, str] | None:
     """((host, audit time in ms, audit serial), audit record type, boot id) of a journald copy of an audit record,
     from journald's own fields: _AUDIT_ID is the record's serial and _SOURCE_REALTIME_TIMESTAMP its audit
-    timestamp (whole milliseconds, in microseconds). None when any of them is missing or malformed."""
-    serial, micros, boot = j.get("_AUDIT_ID"), j.get("_SOURCE_REALTIME_TIMESTAMP"), _journal_boot(j)
+    timestamp (whole milliseconds, in microseconds); the type is _AUDIT_TYPE_NAME, else the name of the number in
+    _AUDIT_TYPE. None when any of them, or the shipper's host name, is missing or malformed."""
+    serial, micros, boot = _decimal(j.get("_AUDIT_ID")), _decimal(j.get("_SOURCE_REALTIME_TIMESTAMP")), _journal_boot(j)
     kind = j.get("_AUDIT_TYPE_NAME")
-    if not (isinstance(serial, str) and serial.isdigit() and isinstance(micros, str) and micros.isdigit()
-            and int(micros) % 1000 == 0 and boot and isinstance(kind, str) and kind):
+    if not (isinstance(kind, str) and kind):
+        kind = AUDIT_TYPE_NUMBERS.get(j.get("_AUDIT_TYPE")) if isinstance(j.get("_AUDIT_TYPE"), str) else None
+    host = _get(hit["_source"], "host.name") or ""
+    if serial is None or micros is None or micros % 1000 or not boot or not kind or not isinstance(host, str):
         return None
-    return (_get(hit["_source"], "host.name") or "", int(micros) // 1000, int(serial)), kind, boot
+    return (host, micros // 1000, serial), kind, boot
 
 
 def _boot_partners(copies: list[tuple[tuple[str, int, int], str, str, str]]
