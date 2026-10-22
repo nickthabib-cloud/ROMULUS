@@ -90,8 +90,9 @@ def test_gpasswd_removal_command_is_a_lead():
 
 def test_incomplete_argv_is_partial_and_not_evaluated_for_tools():
     e = acct_ex(["passwd", "root"], exe="/usr/bin/passwd", process__argv_complete=False)
-    pb, out = run(AccountOrGroupChange, [e])
-    assert out == [] and pb.missing_required == 1
+    pb, out = run(AccountOrGroupChange, [e])      # a lost -S could make it read-only: a lead, worded incomplete
+    assert [m.proposed_lane for m in out] == ["lead"] and "incomplete" in out[0].claim
+    assert pb.missing_required == 1
 
 
 def test_package_marker_requires_a_system_binary():

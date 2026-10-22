@@ -77,6 +77,15 @@ NON_TERMINATING = {"0", "HUP", "SIGHUP", "1", "USR1", "SIGUSR1", "10", "USR2", "
                    "WINCH", "SIGWINCH", "28", "CHLD", "SIGCHLD", "URG", "SIGURG"}
 
 
+# Daemon process names whose unit has another name.
+DAEMON_UNITS = {"rsyslogd": "rsyslog", "syslogd": "syslog", "wazuh-agentd": "wazuh-agent", "ossec-agentd": "ossec",
+                "falcond": "falcon-sensor", "wdavdaemon": "mdatp", "clamd": "clamav-daemon"}
+
+
+def unit_of(name: str) -> str:
+    return DAEMON_UNITS.get(name, name)
+
+
 def service_category(name: str) -> str:
     key = service_name(name)
     if key in SERVICE_CATEGORIES:
@@ -197,13 +206,14 @@ def _terminating(signal: str | None) -> bool:
     return signal.upper().removeprefix("SIG") not in {s.removeprefix("SIG") for s in NON_TERMINATING}
 
 
-def _pattern_targets(operand: str, exact: bool, whole: bool) -> list[str]:
-    """Watched daemon names a pkill/killall operand selects. killall names a process exactly unless -r; pkill's
-    operand is an extended regular expression searched in the process name (with -f, in the command line, whose
-    first word is the program), anchored whole with -x. A pattern that does not compile is read literally."""
+def _pattern_targets(operand: str, exact: bool, whole: bool) -> list[tuple[str, bool]]:
+    """(watched daemon name, named in full) for each name a pkill/killall operand selects. killall names a process
+    exactly unless -r; pkill's operand is an extended regular expression searched in the process name (with -f, in
+    the command line, whose first word is the program), anchored whole with -x. A pattern that does not compile is
+    read literally. A name the pattern only matches in part (`agent` in elastic-agent) is not named in full."""
     if exact:
         name = basename(operand)
-        return [service_name(name)] if service_category(name) else []
+        return [(service_name(name), True)] if service_category(name) else []
     first = operand.split()[0] if operand.split() else ""
     candidates = {operand, first, basename(first.removeprefix("^").removesuffix("$"))}
     try:
@@ -212,8 +222,10 @@ def _pattern_targets(operand: str, exact: bool, whole: bool) -> list[str]:
         compiled = [re.compile(re.escape(c)) for c in candidates if c]
     out = []
     for daemon in sorted(SERVICE_CATEGORIES):
-        if any((rx.fullmatch(daemon) if whole else rx.search(daemon)) for rx in compiled):
-            out.append(daemon)
+        if any(rx.fullmatch(daemon) for rx in compiled):
+            out.append((daemon, True))
+        elif not whole and any(rx.search(daemon) for rx in compiled):
+            out.append((daemon, False))
     return out
 
 
@@ -289,8 +301,10 @@ def service_requests(name: str, args: list[str]) -> list[tuple[str, str, str]]:
         exact = name == "killall" and not ({"-r", "--regexp"} & set(args))
         whole = name == "pkill" and ({"-x", "--exact"} & set(args))
         for operand in operands_after_options(args, values):
-            for daemon in _pattern_targets(operand, exact=exact, whole=bool(whole)):
-                out.append(("kill", daemon, f"'{name} {operand}'" + (f" with signal {signal}" if signal else "")))
+            for daemon, full in _pattern_targets(operand, exact=exact, whole=bool(whole)):
+                how = f"'{name} {operand}'" + (f" with signal {signal}" if signal else "")
+                # a partial match is a candidate, keyed by the pattern until an exec record shows that daemon ran
+                out.append(("kill" if full else f"killpattern {operand}", daemon, how))
     elif name in SHELLS and args and is_under(normalize_path(args[0]) or args[0], ("/etc/init.d", "/etc/rc.d/init.d")):
         unit = basename(args[0])
         if len(args) >= 2 and args[1] in {"stop", "force-stop"} and service_category(unit):
@@ -383,7 +397,7 @@ class _TamperRule(Playbook):
 
 class SecurityOrLoggingServiceStop(_TamperRule):
     id = "host.security_or_logging_service_stop"
-    version = "1"
+    version = "2"
     title = "Logging, audit or security service stopped, disabled or killed (command or service manager record)"
     families = ("process_exec", "service_change", "system_state")
     severity, lane = "high", "high"
@@ -427,6 +441,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         super().__init__()
         self.stops: list[TypedEvent] = []
         self.starts: dict[tuple, list[float]] = defaultdict(list)
+        self.ran: dict[tuple, list[float]] = defaultdict(list)   # watched daemons' exec records per host
 
     def _event(self, e):
         if e.family == "process_exec":
@@ -436,6 +451,8 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                 return
             self.evaluated += 1
             name, args, from_exe = ident
+            if from_exe and service_category(name):
+                self.ran[(e.host, name)].append(e.ts.timestamp())
             # An incomplete argv cannot settle absent tokens (--user, a later -s HUP): only the shell text, a whole
             # argument when present, is read.
             found = [] if argv_incomplete(e) else self._requests(name, args) + self._kill_by_pid(e, name, args)
@@ -486,6 +503,9 @@ class SecurityOrLoggingServiceStop(_TamperRule):
     def _requests(name, args):
         out = []
         for verb, unit, how in service_requests(name, args):
+            if verb.startswith("killpattern "):
+                out.append((f"pattern:{verb.split(' ', 1)[1]}", unit, how, "lead"))
+                continue
             out.append((f"{verb.split()[0]}:{unit}", unit, f"{how} ({service_category(unit)} service)", "high"))
         for key, target, how in mac_requests(name, args):
             out.append((key, target, how, "high" if key == "apparmor_unload" else "lead"))
@@ -497,9 +517,11 @@ class SecurityOrLoggingServiceStop(_TamperRule):
     def finalize(self):
         restarts = 0
         typed: dict[tuple, list[tuple[TypedEvent, str, float | None]]] = defaultdict(list)
+        self._confirm_patterns()
         commands_by_unit: dict[tuple, list[_Item]] = defaultdict(list)
         for item in self.items:
-            commands_by_unit[(item.host, item.target)].append(item)
+            if not item.group[3].startswith("pattern:"):     # an unconfirmed pattern names no unit to link
+                commands_by_unit[(item.host, unit_of(item.target))].append(item)
         for stop in sorted(self.stops, key=lambda e: (e.ts, e.id)):
             ts = stop.ts.timestamp()
             name = str(stop.get("service.name"))
@@ -538,7 +560,22 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                                    "were restarts and are not reported")
         return out
 
+    def _confirm_patterns(self) -> None:
+        """A partial pattern match becomes that daemon's own high candidate when an exec record shows the daemon
+        ran on the host before the command; the rest stay one lead per (host, actor, lineage, pattern)."""
+        kept = []
+        for item in self.items:
+            if item.group[3].startswith("pattern:") and any(
+                    t <= item.ts for t in self.ran.get((item.host, item.target), ())):
+                item = _Item(item.host, item.ts, (*item.group[:3], f"kill:{item.target}"),
+                             f"{item.form}; an exec record shows '{item.target}' ran on the host earlier "
+                             f"({service_category(item.target)} service)", item.target, "high", item.event,
+                             item.lineage, item.actor, from_text=item.from_text)
+            kept.append(item)
+        self.items = kept
+
     def _restart_gap(self, host: str | None, name: str, ts: float) -> float | None:
+        name = unit_of(name)
         later = [t for t in self.starts.get((host, name), ()) if t >= ts]
         return min(later) - ts if later else None
 
@@ -550,12 +587,20 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         first = items[0]
         restart_gap = (self._restart_gap(host, first.target, first.ts)
                        if form.split(":")[0] in {"stop", "kill", "disable", "mask"} else None)
+        linked = [] if form.startswith("pattern:") else linked
         text = any(i.from_text for i in items)
         hows = list(dict.fromkeys(i.form for i in items))
         claim = (f"On {host}, account '{actor}' ran {len(commands)} command(s)"
                  + (" (some as shell command text)" if text else "") + f" to {'; '.join(hows[:4])}"
                  + (f" and {len(hows) - 4} more" if len(hows) > 4 else "")
                  + f" (e.g. {_argv_summary(commands[0].get('process.argv'), 120)}); {_outcome_tally(commands)}.")
+        if form.startswith("pattern:"):
+            names = sorted({i.target for i in items})
+            shown = ", ".join(f"'{n}'" for n in names[:10]) + (f" and {len(names) - 10} more" if len(names) > 10
+                                                               else "")
+            claim += (f" The pattern '{form.split(':', 1)[1]}' matches part of the watched name(s) {shown}; no exec "
+                      "record shows any of them ran on the host before the command, so which process it ended, if "
+                      "any, is not established.")
         if linked:
             claim += (f" The service manager recorded '{first.target}' stopping {len(linked)} time(s), the first at "
                       f"{linked[0].ts.isoformat()}, within {COMMAND_LINK_BEFORE:.0f} s after such a command (linked "
@@ -677,7 +722,7 @@ def auditctl_requests(args: list[str]) -> list[tuple[str, str, str]]:
 
 class AuditRulesTamper(_TamperRule):
     id = "host.audit_rules_tamper"
-    version = "1"
+    version = "2"
     title = "Audit rules deleted, auditing switched off or audit configuration changed (command or kernel record)"
     families = ("process_exec", "audit_config", "service_change", "system_state")
     severity, lane = "high", "high"
@@ -1102,7 +1147,7 @@ def _history_assignments(words: list[str]) -> list[tuple[str, str, str, str]]:
 
 class LogOrHistoryClearing(_TamperRule):
     id = "host.log_or_history_clearing"
-    version = "1"
+    version = "2"
     title = "Log or shell history deleted, truncated, overwritten or switched off (command or shell text)"
     families = ("process_exec",)
     severity, lane = "high", "high"
