@@ -130,6 +130,18 @@ def test_flow_rules_are_registered_with_cards_and_existing_attack_ids():
     assert OutboundVolumeAsymmetry.severity == "high" and OutboundVolumeAsymmetry.lane == "lead"
 
 
+def test_flow_rule_releases_connection_and_stage_indexes():
+    rule = HorizontalSweep()
+    rule.consume(events(eve("release-1")))
+    assert rule.sweeps and rule._seen and rule._staged
+
+    rule.release_state()
+
+    assert rule.sweeps == {}
+    assert rule._seen == set()
+    assert rule._staged == set()
+
+
 def test_port_ranges_compress_runs():
     assert port_ranges({22}) == "22" and port_ranges({5900, 5901, 5902, 6000}) == "5900-5902, 6000"
 

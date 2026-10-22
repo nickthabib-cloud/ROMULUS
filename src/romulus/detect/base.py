@@ -161,6 +161,9 @@ class Playbook:
         groups = getattr(self, "groups", {}) or {}
         return [e for evs in groups.values() for e in evs]
 
+    def release_state(self) -> None:
+        """Release aggregate working state after its findings and coverage are persisted."""
+
 
 class ContextPlaybook(Playbook):
     """A rule that may evaluate only evidence reached through an explicit anchor link."""

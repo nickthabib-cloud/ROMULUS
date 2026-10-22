@@ -313,6 +313,8 @@ class Sweep:
                        [WINDOW_ROLLUP_PARTIAL] if any_partial else [])
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
                                     len(ms) + consumed_matches, evaluated, {"reasons": reasons})
+            pb.release_state()
+        agg_raw.clear()
         self.close_stage()
 
     def close_stage(self) -> None:

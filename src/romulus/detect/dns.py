@@ -224,21 +224,24 @@ def _short(name: str, limit: int = 80) -> str:
 
 
 class _Examples:
-    """The earliest `limit` records of a group by (time, id), whatever order they arrive in, in time order."""
+    """Compact identities of the earliest records of a group, whatever order they arrive in."""
 
     __slots__ = ("items", "limit")
 
     def __init__(self, limit: int = EXAMPLE_LIMIT):
         self.limit = limit
-        self.items: dict[str, TypedEvent] = {}
+        self.items: dict[str, datetime] = {}
 
     def add(self, event: TypedEvent) -> None:
-        self.items[event.id] = event
+        self.items[event.id] = event.ts
         if len(self.items) > self.limit * 4:
-            self.items = {e.id: e for e in self.sorted()}
+            self.items = dict(self.refs())
 
-    def sorted(self) -> list[TypedEvent]:
-        return sorted(self.items.values(), key=lambda e: (e.ts, e.id))[: self.limit]
+    def refs(self) -> list[tuple[str, datetime]]:
+        return sorted(self.items.items(), key=lambda item: (item[1], item[0]))[: self.limit]
+
+    def ids(self) -> list[str]:
+        return [event_id for event_id, _ts in self.refs()]
 
 
 def _fill(first: list[TypedEvent], rest: list[TypedEvent], limit: int = EXAMPLE_LIMIT) -> list[TypedEvent]:
@@ -272,17 +275,47 @@ class _DnsAggregate(Playbook):
     anchor_class = "network_observation"
     claim_type = "aggregate_observation"
     families = ("dns_query",)
+    staged = True
 
     def __init__(self):
         super().__init__()
         self._prev_query_flows: set = set()
         self.examples: dict[tuple, _Examples] = defaultdict(_Examples)
+        self._staged: set[str] = set()
+        self._pending: list[TypedEvent] = []
+        self.load = lambda ids: []
 
     def retained_events(self) -> list[TypedEvent]:
-        return [e for store in self.examples.values() for e in store.items.values()]
+        return []
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        return out
+
+    def _stage(self, event: TypedEvent) -> None:
+        if event.id not in self._staged:
+            self._staged.add(event.id)
+            self._pending.append(event)
+
+    def _remember(self, store: _Examples, event: TypedEvent) -> None:
+        store.add(event)
+        self._stage(event)
+
+    def _events(self, ids: list[str]) -> list[TypedEvent]:
+        wanted = list(dict.fromkeys(ids))
+        loaded = self.load(wanted)
+        if len(loaded) != len(wanted):
+            raise RuntimeError(f"{self.id}: {len(wanted) - len(loaded)} cited event(s) absent from the stage")
+        return sorted(loaded, key=lambda event: (event.ts, event.id))
 
     def _cite(self, key: tuple) -> list[TypedEvent]:
-        return self.examples[key].sorted()
+        return self._events(self.examples[key].ids())
+
+    def release_state(self) -> None:
+        self.load = lambda ids: []
+        for value in vars(self).values():
+            if isinstance(value, (dict, list, set)):
+                value.clear()
 
     def _questions(self, events: list[TypedEvent]):
         """Yield (event, client, server, names) for every question record. An answer record whose (flow, question
@@ -371,12 +404,11 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         self.transports: dict[tuple, set] = defaultdict(set)
         self.any_names: dict[tuple, set[str]] = defaultdict(set)
         self.spans: dict[tuple, _Span] = defaultdict(_Span)
-        self.deciding: dict[tuple, TypedEvent] = {}      # earliest NOERROR transfer answer over TCP per group
-        self.asked_by_flow: dict[tuple, dict] = defaultdict(dict)   # group -> flow -> earliest question record
+        self.deciding: dict[tuple, tuple[datetime, str]] = {}
+        self.asked_by_flow: dict[tuple, dict] = defaultdict(dict)
 
     def retained_events(self) -> list[TypedEvent]:
-        held = super().retained_events() + list(self.deciding.values())
-        return held + [e for flows in self.asked_by_flow.values() for e in flows.values()]
+        return []
 
     def consume(self, events):
         for event in events:
@@ -409,19 +441,23 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
             flows = self.asked_by_flow[key] if question_type in self.TRANSFER_TYPES else None
             if flows is not None and flow is not None and (flow in flows or len(flows) < self.QUERY_CAP):
                 held = flows.get(flow)
-                if held is None or (event.ts, event.id) < (held.ts, held.id):
-                    flows[flow] = event
+                ref = (event.ts, event.id)
+                if held is None or ref < held:
+                    flows[flow] = ref
+                    self._stage(event)
         if record_role == "answer" or (record_role == "transaction" and event.has("dns.response_code")):
             code = rcode(event.get("dns.response_code")) or "not recorded"
             self.replies[key][(question_type, code)] += 1
             if code == "NOERROR" and question_type in self.TRANSFER_TYPES and transport == "tcp":
                 held = self.deciding.get(key)
-                if held is None or (event.ts, event.id) < (held.ts, held.id):
-                    self.deciding[key] = event
+                ref = (event.ts, event.id)
+                if held is None or ref < held:
+                    self.deciding[key] = ref
+                    self._stage(event)
         if transport:
             self.transports[key].add(transport)
         self.spans[key].add(event.ts)
-        self.examples[key].add(event)
+        self._remember(self.examples[key], event)
 
     def finalize(self):
         out = []
@@ -461,14 +497,16 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
             if "ANY" in types and client_internal is False and "tcp" not in self.transports.get(key, set()):
                 notes.append("an ANY question over UDP from outside the internal ranges may carry a spoofed source "
                              "address (the request shape of DNS reflection, T1498.002)")
-            deciding = self.deciding.get(key)
+            deciding_ref = self.deciding.get(key)
+            deciding = self._events([deciding_ref[1]])[0] if deciding_ref is not None else None
             if accepted and deciding is None:
                 claim += (" None of the NOERROR answers is recorded over TCP, the transport a zone transfer that "
                           "carries data uses; an answer over UDP can go to a spoofed source.")
             first: list[TypedEvent] = []
             if transfer and client_internal is False and server_internal and deciding is not None:
                 lane, severity = "high", "high"
-                asked_event = self.asked_by_flow.get(key, {}).get(flow_key(deciding))
+                asked_ref = self.asked_by_flow.get(key, {}).get(flow_key(deciding))
+                asked_event = self._events([asked_ref[1]])[0] if asked_ref is not None else None
                 first = [deciding] + ([asked_event] if asked_event is not None else [])
                 claim += (f" The client is outside the internal address ranges and the server ({server}) is inside "
                           f"them; the earliest NOERROR answer over TCP was recorded at {deciding.ts.isoformat()}"
@@ -549,9 +587,7 @@ class DnsReverseLookupSweep(_DnsAggregate):
         self.spans: dict[str, _Span] = defaultdict(_Span)
 
     def retained_events(self) -> list[TypedEvent]:
-        held = super().retained_events()
-        return held + [e for stores in self.block_examples.values() for store in stores.values()
-                       for e in store.items.values()]
+        return []
 
     def consume(self, events):
         for event, client, _server, all_names in self._questions(events):
@@ -561,7 +597,7 @@ class DnsReverseLookupSweep(_DnsAggregate):
             self.queries[client] += 1
             self.types[client][qtype(event.get("dns.question.type")) or "type not recorded"] += 1
             self.spans[client].add(event.ts)
-            self.examples[(client,)].add(event)
+            self._remember(self.examples[(client,)], event)
             for name in reverse:
                 self._name(event, client, name)
         return []
@@ -573,7 +609,7 @@ class DnsReverseLookupSweep(_DnsAggregate):
             block = ipaddress.ip_network(f"{address}/{prefix}", strict=False)
             stores = self.block_examples[client]
             if block in stores or len(stores) < self.BLOCK_STORES:
-                stores.setdefault(block, _Examples(self.BLOCK_CITE)).add(event)
+                self._remember(stores.setdefault(block, _Examples(self.BLOCK_CITE)), event)
         names = self.names[client]
         if name in names or len(names) >= NAME_CAP:
             return
@@ -620,7 +656,8 @@ class DnsReverseLookupSweep(_DnsAggregate):
                           f"are the shape of a server resolving its peers' names as well as of a sparse sweep.")
             claim += " The question records do not show whether names were returned."
             dense_store = self.block_examples.get(client, {}).get(ranked[0][0]) if ranked else None
-            evs = _fill(dense_store.sorted() if dense_store else [], self._cite((client,)))
+            dense = self._events(dense_store.ids()) if dense_store else []
+            evs = _fill(dense, self._cite((client,)))
             e0 = evs[0]
             notes = ["ATT&CK context: " + ("T1018 (the client is in an internal range)" if _internal(client)
                                            else "T1590.002 (the client is outside the internal ranges)")]
@@ -704,7 +741,7 @@ class DnsNxdomainBurst(_DnsAggregate):
         self.nx_sent_total: Counter = Counter()
 
     def retained_events(self) -> list[TypedEvent]:
-        return [e for buckets in self.buckets.values() for store in buckets.values() for e in store.items.values()]
+        return []
 
     def consume(self, events):
         batch = [e for e in events if e.family in self.families]
@@ -747,18 +784,21 @@ class DnsNxdomainBurst(_DnsAggregate):
                 self.servers[client][server] += 1
             self.spans[client].add(event.ts)
             bucket = micros // (self.WINDOW // _US)
-            self.buckets[client].setdefault(bucket, _Examples()).add(event)
+            self._remember(self.buckets[client].setdefault(bucket, _Examples()), event)
         return []
 
     def _peak_records(self, client: str, start: int) -> list[TypedEvent]:
         window = self.WINDOW // _US
-        candidates = {}
+        candidates: dict[str, datetime] = {}
         for bucket in (start // window, start // window + 1):
             store = self.buckets[client].get(bucket)
-            for event in store.items.values() if store else ():
-                if start <= _micros(event.ts) < start + window:
-                    candidates[event.id] = event
-        return sorted(candidates.values(), key=lambda e: (e.ts, e.id))[:EXAMPLE_LIMIT]
+            for event_id, ts in store.refs() if store else ():
+                if start <= _micros(ts) < start + window:
+                    candidates[event_id] = ts
+        ids = [event_id for event_id, _ts in sorted(
+            candidates.items(), key=lambda item: (item[1], item[0]),
+        )[:EXAMPLE_LIMIT]]
+        return self._events(ids)
 
     def _peak(self, times: list[int]) -> tuple[int, int]:
         """Most records in any half-open interval [t, t + WINDOW), and that interval's start."""
@@ -933,8 +973,7 @@ class DnsTunnelShape(_DnsAggregate):
         self.untyped: dict[tuple, int] = defaultdict(int)
 
     def retained_events(self) -> list[TypedEvent]:
-        return super().retained_events() + [e for store in self.strong_examples.values()
-                                            for e in store.items.values()]
+        return []
 
     @classmethod
     def unusual(cls, kind: str) -> bool:
@@ -966,7 +1005,7 @@ class DnsTunnelShape(_DnsAggregate):
         if kind is None:
             self.untyped[key] += 1
         self.spans[key].add(event.ts)
-        self.examples[key].add(event)
+        self._remember(self.examples[key], event)
         sub = subdomain_part(name, domain)
         if not sub:
             return
@@ -975,7 +1014,7 @@ class DnsTunnelShape(_DnsAggregate):
         long_name = self.is_long(sub)
         if long_name and kind is not None and self.strong(kind):
             self.strong_long[key] += 1
-            self.strong_examples[key].add(event)
+            self._remember(self.strong_examples[key], event)
         subs = self.subdomains[key]
         if sub in subs or len(subs) >= NAME_CAP:
             return
@@ -1028,7 +1067,7 @@ class DnsTunnelShape(_DnsAggregate):
         return out
 
     def _cited(self, key: tuple, found: dict) -> list[TypedEvent]:
-        strong = self.strong_examples[key].sorted() if found["lane"] == "high" else []
+        strong = self._events(self.strong_examples[key].ids()) if found["lane"] == "high" else []
         return _fill(strong, self._cite(key))
 
     def _single(self, client: str, domain: str, found: dict) -> Match:

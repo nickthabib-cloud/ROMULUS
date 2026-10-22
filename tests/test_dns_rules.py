@@ -44,9 +44,14 @@ def pair(client=CLIENT, server=RESOLVER, name="www.example.test", qtype="A", rco
 
 def run(cls, *batches):
     pb = cls()
+    stage = {}
     out = []
     for batch in batches:
         out += pb.consume(batch)
+        if pb.staged:
+            stage.update({event.id: event for event in pb.drain_staged()})
+    if pb.staged:
+        pb.bind_loader(lambda ids: [stage[event_id] for event_id in ids if event_id in stage])
     return pb, out + pb.finalize()
 
 
@@ -82,6 +87,23 @@ def test_network_targets_are_retrieved_without_field_filters():
     evaluators reads is retrieved."""
     from romulus.hunt.sweep import Sweep
     assert Sweep._filters_for(None, "suricata-net") == []
+
+
+def test_dns_examples_stage_whole_events_and_release_compact_state():
+    rule = dns.DnsReverseLookupSweep()
+    event = rec(name="1.0.0.10.in-addr.arpa", qtype="PTR")
+
+    rule.consume([event])
+
+    assert rule.staged is True
+    assert rule.retained_events() == []
+    assert rule.drain_staged() == [event]
+    assert all(not isinstance(value, TypedEvent)
+               for store in rule.examples.values() for value in store.items.values())
+    rule.release_state()
+    assert rule.examples == {}
+    assert rule.names == {}
+    assert rule._staged == set()
 
 
 @pytest.mark.parametrize("raw, expected", [
@@ -779,6 +801,8 @@ def test_nxdomain_citations_always_fill_from_inside_the_peak(seed):
               for i, s in enumerate(offsets)]
     pb = dns.DnsNxdomainBurst()
     pb.consume(events)
+    staged = {event.id: event for event in pb.drain_staged()}
+    pb.bind_loader(lambda ids: [staged[event_id] for event_id in ids if event_id in staged])
     peak, start = pb._peak(list(pb.times[CLIENT]))
     out = pb.finalize()
     if peak < pb.MIN_BURST:
