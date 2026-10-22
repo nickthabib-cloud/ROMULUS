@@ -10,6 +10,7 @@ from romulus.decide.policy import POLICY_VERSION
 from romulus.detect.registry import PACK_VERSION, pack_manifest
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.packets import PACKET_NORMALIZER
+from romulus.site import SiteFacts
 from romulus.sources.models import Window
 from romulus.store.db import digest
 
@@ -20,9 +21,9 @@ def new_hunt_id() -> str:
 
 def build_manifest(s: Settings, window: Window, original_input: dict, style: str, targets: list[str],
                    profiles: dict[str, dict], hypothesis: str = "", budgets: dict | None = None,
-                   ai_agent: dict | None = None) -> dict:
+                   ai_agent: dict | None = None, site_facts: SiteFacts | None = None) -> dict:
     safe_cfg = {k: v for k, v in s.redacted().items() if k not in ("secret_key",)}
-    return {
+    manifest = {
         "schema": "hunt-manifest@1",
         "romulus_version": __version__,
         "style": style,
@@ -45,3 +46,7 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         "ai_agent": ai_agent or {"requested": False, "state": "not_configured", "reason": "not evaluated"},
         "config_digest": digest(safe_cfg),
     }
+    site = site_facts.manifest_entry() if site_facts is not None else None
+    if site is not None:
+        manifest["site"] = site
+    return manifest

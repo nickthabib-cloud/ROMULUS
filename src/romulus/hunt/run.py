@@ -15,6 +15,7 @@ from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.stage import clear_stale_stages
 from romulus.hunt.sweep import Sweep
+from romulus.site import ensure_site_unchanged, load_site_facts
 from romulus.sources.es import ElasticClient
 from romulus.sources.models import Window
 from romulus.sources.profile import build_profile
@@ -65,8 +66,10 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
             prof, _contract = build_profile(client, target)
             profiles[target] = prof.model_dump(mode="json")
             targets.append(target)
+    site_facts = load_site_facts(s.home)
     manifest = build_manifest(s, window, original_input or {"start": start.isoformat(), "end": end.isoformat()},
-                              style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent))
+                              style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent),
+                              site_facts=site_facts)
     manifest["expansion"] = {"enabled": expand, "max_depth": 3, "max_source_queries": 180}
     hid = new_hunt_id()
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
@@ -288,6 +291,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     if hunt is None:
         raise KeyError(hunt_id)
     initial_manifest = hunt["manifest"]
+    ensure_site_unchanged(s.home, initial_manifest.get("site"))
     if expand is not None and bool((initial_manifest.get("expansion") or {}).get("enabled", True)) != expand:
         raise ValueError("expansion mode is immutable after hunt creation")
     claimed = repo.claim_hunt(hunt_id, _lease_seconds(s))
@@ -378,6 +382,7 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
     if hunt is None:
         raise KeyError(hunt_id)
     recorded_manifest = hunt.get("manifest") or {}
+    ensure_site_unchanged(s.home, recorded_manifest.get("site"))
     recorded = recorded_manifest.get("normalizer")
     packets_recorded = recorded_manifest.get("packet_normalizer")
     if packets_recorded and packets_recorded != PACKET_NORMALIZER:
