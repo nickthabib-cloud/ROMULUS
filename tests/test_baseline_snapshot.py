@@ -9,6 +9,7 @@ from sqlalchemy import insert, select
 from romulus.baseline.lookback import HistoryGap, LookbackBudget, LookbackWriter
 from romulus.baseline.snapshot import SnapshotPlanner
 from romulus.baseline.spec import SPEC_BY_ID
+from romulus.evidence.typed import fv
 from romulus.store import schema as t
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -141,6 +142,26 @@ def test_history_gap_reasons_reach_the_snapshot():
         {"start": (START - timedelta(hours=3)).isoformat(), "end": (START - timedelta(hours=2)).isoformat(),
          "state": "failed", "reason": "shard failure"},
     ]
+
+
+def test_scope_series_from_two_specs_over_one_event_has_one_row_per_hour():
+    specs = [SPEC_BY_ID["bl.exec_path"], SPEC_BY_ID["bl.cmd_shape"]]
+    event = _event(1, LOOKBACK_START - timedelta(minutes=30))
+    event.fields["process.argv"] = fv(["ls", "-l"], "fixture")
+    repo = _lookback_repo("h")
+    result = LookbackWriter(
+        repo, FakeHistory([event]), site="site", specs=specs, normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=10, seconds=60), now=lambda: LOOKBACK_START,
+    ).fill(hunt_id="h", targets=["t"], start=LOOKBACK_START - timedelta(hours=1), end=LOOKBACK_START)
+    assert result.gaps == ()
+    SnapshotPlanner(repo).freeze(
+        hunt_id="h", window_start=LOOKBACK_START, lookback=timedelta(hours=1), min_live_hours=1,
+        site="site", targets=["t"], specs=specs,
+    )
+    for spec in specs:
+        rows = repo.baseline_scope_series("host", "host:web01", "h", spec.id)
+        assert [(row["hour"], row["events"]) for row in rows] == [(LOOKBACK_START - timedelta(hours=1), 1)]
+        assert repo.baseline_peer_scopes("host", "h", spec.id) == 1
 
 
 def test_budget_truncated_lookback_is_gaps_and_empty_source_is_absent():

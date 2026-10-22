@@ -450,12 +450,16 @@ baseline_snapshot = Table(
 )
 
 # Snapshot membership is normalized so every baseline probe joins the frozen hunt cut instead of
-# interpolating a potentially huge list of segment ids into SQL.
+# interpolating a potentially huge list of segment ids into SQL. Probes are per spec: two specs keyed from
+# the same events each hold a scope-hour row, so a hunt-wide join would double a scope's series and mix peers.
+# The segment's spec and target are copied here (segments are immutable) so the join stays on the key.
 baseline_snapshot_segment = Table(
     "baseline_snapshot_segment", metadata,
     Column("hunt_id", String, ForeignKey("baseline_snapshot.hunt_id", ondelete="CASCADE"), nullable=False),
+    Column("spec_id", String, nullable=False),
     Column("segment_id", String, ForeignKey("baseline_segment.id", ondelete="RESTRICT"), nullable=False),
-    PrimaryKeyConstraint("hunt_id", "segment_id", name="pk_baseline_snapshot_segment"),
+    Column("target", String, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "spec_id", "segment_id", name="pk_baseline_snapshot_segment"),
 )
 Index("ix_baseline_snapshot_segment_segment", baseline_snapshot_segment.c.segment_id)
 

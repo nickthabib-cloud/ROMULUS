@@ -16,6 +16,7 @@ from sqlalchemy import (
     Integer,
     String,
     and_,
+    bindparam,
     case,
     cast,
     func,
@@ -92,28 +93,34 @@ def raw_id(target: str, native_id: str) -> str:
 # ---- baseline probes ------------------------------------------------------------------------
 # Each probe ranges over a data index and probes the frozen snapshot membership primary key. Snapshot
 # membership is data, never a Python-generated SQL IN list, so probe shape stays bounded at mission scale.
-def baseline_prevalence_query(key_id: str, scope_kind: str, hunt_id: str):
-    """Distinct scopes of `scope_kind` holding `key_id` in one hunt's frozen snapshot."""
-    c, m = t.baseline_count.c, t.baseline_snapshot_segment.c
+def _snapshot_member(segment_id, hunt_id: str, spec_id: str):
+    """Join condition onto one hunt's frozen membership for one spec (the membership primary key)."""
+    m = t.baseline_snapshot_segment.c
+    return and_(m.segment_id == segment_id, m.hunt_id == hunt_id, m.spec_id == spec_id)
+
+
+def baseline_prevalence_query(key_id: str, scope_kind: str, hunt_id: str, spec_id: str):
+    """Distinct scopes of `scope_kind` holding `key_id` in one hunt's frozen snapshot of one spec."""
+    c = t.baseline_count.c
     return (select(func.count(c.scope.distinct()))
-            .join(t.baseline_snapshot_segment, and_(m.segment_id == c.segment_id, m.hunt_id == hunt_id))
+            .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
             .where(c.key_id == key_id, c.scope_kind == scope_kind))
 
 
-def baseline_key_history_query(key_id: str, scope_kind: str, scope: str, hunt_id: str):
+def baseline_key_history_query(key_id: str, scope_kind: str, scope: str, hunt_id: str, spec_id: str):
     """Every count row of one key in one scope across the segments (ix_baseline_count_key)."""
-    c, m = t.baseline_count.c, t.baseline_snapshot_segment.c
+    c = t.baseline_count.c
     return (select(c.segment_id, c.bucket, c.count, c.first_ts, c.last_ts)
-            .join(t.baseline_snapshot_segment, and_(m.segment_id == c.segment_id, m.hunt_id == hunt_id))
+            .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
             .where(c.key_id == key_id, c.scope_kind == scope_kind, c.scope == scope)
             .order_by(c.key_id, c.scope_kind, c.scope, c.segment_id))
 
 
-def baseline_peer_scopes_query(scope_kind: str, hunt_id: str):
-    """Distinct live scopes of `scope_kind` in the segments (ix_baseline_scope_hour_lookup, covering)."""
-    c, m = t.baseline_scope_hour.c, t.baseline_snapshot_segment.c
+def baseline_peer_scopes_query(scope_kind: str, hunt_id: str, spec_id: str):
+    """Distinct live scopes of `scope_kind` in one spec's segments (ix_baseline_scope_hour_lookup, covering)."""
+    c = t.baseline_scope_hour.c
     return (select(func.count(c.scope.distinct()))
-            .join(t.baseline_snapshot_segment, and_(m.segment_id == c.segment_id, m.hunt_id == hunt_id))
+            .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
             .where(c.scope_kind == scope_kind))
 
 
@@ -128,11 +135,11 @@ def observation_citations_query(hunt_id: str):
             .group_by(ev.id))
 
 
-def baseline_scope_series_query(scope_kind: str, scope: str, hunt_id: str):
-    """One scope's live hours and event totals across the segments (ix_baseline_scope_hour_lookup)."""
-    c, m = t.baseline_scope_hour.c, t.baseline_snapshot_segment.c
+def baseline_scope_series_query(scope_kind: str, scope: str, hunt_id: str, spec_id: str):
+    """One scope's live hours and event totals across one spec's segments (ix_baseline_scope_hour_lookup)."""
+    c = t.baseline_scope_hour.c
     return (select(c.segment_id, c.hour, c.events)
-            .join(t.baseline_snapshot_segment, and_(m.segment_id == c.segment_id, m.hunt_id == hunt_id))
+            .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
             .where(c.scope_kind == scope_kind, c.scope == scope)
             .order_by(c.scope_kind, c.scope, c.segment_id, c.hour))
 
@@ -1854,28 +1861,28 @@ class Repo:
         return self._keyset(t.baseline_scope_hour, [t.baseline_scope_hour.c.segment_id == segment_id],
                             ("scope", "hour"), ("hour",), page_size)
 
-    def baseline_key_prevalence(self, key_id: str, scope_kind: str, hunt_id: str) -> int:
-        """How many distinct scopes hold `key_id` in the hunt's frozen snapshot."""
+    def baseline_key_prevalence(self, key_id: str, scope_kind: str, hunt_id: str, spec_id: str) -> int:
+        """How many distinct scopes hold `key_id` in the hunt's frozen snapshot of `spec_id`."""
         with self.engine.connect() as c:
-            return int(c.execute(baseline_prevalence_query(key_id, scope_kind, hunt_id)).scalar_one())
+            return int(c.execute(baseline_prevalence_query(key_id, scope_kind, hunt_id, spec_id)).scalar_one())
 
-    def baseline_peer_scopes(self, scope_kind: str, hunt_id: str) -> int:
-        """How many distinct scopes were live in the hunt snapshot (the prevalence denominator)."""
+    def baseline_peer_scopes(self, scope_kind: str, hunt_id: str, spec_id: str) -> int:
+        """How many distinct scopes were live in one spec's snapshot (the prevalence denominator)."""
         with self.engine.connect() as c:
-            return int(c.execute(baseline_peer_scopes_query(scope_kind, hunt_id)).scalar_one())
+            return int(c.execute(baseline_peer_scopes_query(scope_kind, hunt_id, spec_id)).scalar_one())
 
     def baseline_key_history(self, key_id: str, scope_kind: str, scope: str,
-                             hunt_id: str) -> list[dict]:
+                             hunt_id: str, spec_id: str) -> list[dict]:
         """One key's count rows in one scope; at most one row per segment bucket of the snapshot span."""
         with self.engine.connect() as c:
             return [_with_utc(row, ("bucket", "first_ts", "last_ts")) for row in c.execute(
-                baseline_key_history_query(key_id, scope_kind, scope, hunt_id)).mappings()]
+                baseline_key_history_query(key_id, scope_kind, scope, hunt_id, spec_id)).mappings()]
 
-    def baseline_scope_series(self, scope_kind: str, scope: str, hunt_id: str) -> list[dict]:
-        """One scope's live hours; at most one row per hour of the snapshot span."""
+    def baseline_scope_series(self, scope_kind: str, scope: str, hunt_id: str, spec_id: str) -> list[dict]:
+        """One scope's live hours in one spec's snapshot; at most one row per hour per target."""
         with self.engine.connect() as c:
             return [_with_utc(row, ("hour",)) for row in c.execute(
-                baseline_scope_series_query(scope_kind, scope, hunt_id)).mappings()]
+                baseline_scope_series_query(scope_kind, scope, hunt_id, spec_id)).mappings()]
 
     def save_baseline_snapshot(self, row: dict) -> bool:
         """Atomically freeze the first snapshot and normalized membership for a hunt."""
@@ -1888,10 +1895,17 @@ class Repo:
             ))
             if not result.rowcount:
                 return False
-            if segment_ids:
-                c.execute(t.baseline_snapshot_segment.insert(), [
-                    {"hunt_id": row["hunt_id"], "segment_id": segment_id} for segment_id in segment_ids
-                ])
+            # Membership copies each segment's spec and target from the segment row itself, one keyed
+            # insert-select per id in bounded chunks; an id with no segment rolls the whole snapshot back.
+            s = t.baseline_segment.c
+            member = insert(t.baseline_snapshot_segment).from_select(
+                ["hunt_id", "spec_id", "segment_id", "target"],
+                select(literal(row["hunt_id"]), s.spec_id, s.id, s.target).where(s.id == bindparam("sid")),
+            )
+            for chunk in _chunks(({"sid": segment_id} for segment_id in segment_ids), BASELINE_CHUNK):
+                inserted = c.execute(member, chunk).rowcount
+                if inserted != len(chunk):
+                    raise ValueError("snapshot names an unknown baseline segment")
             return True
 
     def baseline_snapshot(self, hunt_id: str) -> dict | None:
