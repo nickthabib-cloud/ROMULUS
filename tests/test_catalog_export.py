@@ -1,0 +1,80 @@
+"""JSON-serializable public catalog export schema."""
+
+from __future__ import annotations
+
+import json
+
+from romulus.catalog import build_catalog, export
+
+
+def test_catalog_export_has_the_public_ui_schema_and_round_trips_json():
+    document = export()
+
+    assert set(document) == {
+        "schema_version",
+        "attack_version",
+        "pack_version",
+        "rules",
+        "techniques",
+        "tactics",
+        "telemetry",
+        "gaps",
+        "metadata_issues",
+    }
+    assert document["schema_version"] == 1
+    assert document["attack_version"] == "20.0"
+    assert document["pack_version"] == "pack@17"
+    assert json.loads(json.dumps(document)) == document
+
+
+def test_catalog_export_contains_sorted_rules_techniques_strengths_and_telemetry():
+    document = export(build_catalog())
+    rules = document["rules"]
+    techniques = document["techniques"]
+    telemetry = document["telemetry"]
+
+    assert [item["id"] for item in rules] == sorted(item["id"] for item in rules)
+    assert [item["id"] for item in techniques] == sorted(item["id"] for item in techniques)
+    assert [item["family"] for item in telemetry] == sorted(item["family"] for item in telemetry)
+    guessing = next(item for item in techniques if item["id"] == "T1110.001")
+    assert guessing["strength"] == "positive-only"
+    assert "host.ssh_password_guessing" in guessing["rule_ids"]
+    assert guessing["telemetry_families"] == ["auth"]
+    assert set(guessing) >= {
+        "data_sources",
+        "data_components",
+        "platforms",
+        "tactics",
+        "status",
+    }
+
+
+def test_catalog_export_marks_every_uncovered_technique_as_a_gap():
+    document = export()
+    expected = [item["id"] for item in document["techniques"] if item["status"] == "not covered"]
+
+    assert [item["id"] for item in document["gaps"]] == expected
+    assert expected
+    assert all(item["status"] == "not covered" for item in document["gaps"])
+    assert all("telemetry" in item for item in document["gaps"])
+
+
+def test_catalog_export_is_byte_deterministic_and_reports_metadata_issues():
+    first = json.dumps(export(), sort_keys=True, separators=(",", ":"))
+    second = json.dumps(export(), sort_keys=True, separators=(",", ":"))
+    issues = export()["metadata_issues"]
+
+    assert first == second
+    assert issues["missing_attack_ids"] == ["ioc.indicator_match", "net.suricata_alert_stack"]
+    assert issues["invalid_attack_ids"] == [
+        {
+            "rule_id": "host.firewall_rule_change_command",
+            "attack_id": "T0815",
+            "reason": "unknown",
+        },
+        {
+            "rule_id": "host.firewall_rule_change_command",
+            "attack_id": "T1562.004",
+            "reason": "revoked",
+        },
+    ]

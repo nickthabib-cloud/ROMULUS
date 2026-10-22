@@ -2,6 +2,7 @@
 
 from .attack import DEFAULT_ATTACK_BUNDLE, load_attack_bundle
 from .build import build_catalog, strength_for_rule
+from .export import export
 from .models import (
     AttackDataComponent,
     AttackDataSource,
@@ -30,6 +31,7 @@ __all__ = [
     "TacticRollup",
     "TechniqueCoverage",
     "build_catalog",
+    "export",
     "load_attack_bundle",
     "strength_for_rule",
 ]
