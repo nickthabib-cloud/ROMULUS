@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from romulus.baseline.lookback import HistoryGap
 from romulus.baseline.spec import BaselineSpec
 from romulus.store.repo import Repo
 
@@ -34,19 +36,42 @@ def _hours(start: datetime, end: datetime) -> list[datetime]:
     return [start + index * _HOUR for index in range(int((end - start) / _HOUR))]
 
 
-def _gaps(covered: set[datetime], earliest: datetime | None, end: datetime) -> list[dict]:
-    """Coalesce holes after the first available record; leading absence is reported separately."""
-    if earliest is None:
-        return []
-    missing = [hour for hour in _hours(earliest, end) if hour not in covered]
+# When several history gaps name one hour, the state that says most about why it is missing wins.
+_GAP_STATE_ORDER = {"failed": 0, "partial": 1, "omitted_budget": 2}
+_NO_SEGMENT = ("missing", "no complete segment")
+
+
+def _gap_causes(history_gaps: Iterable[HistoryGap], target: str, spec_id: str,
+                start: datetime, end: datetime) -> dict[datetime, tuple[str, str]]:
+    """The recorded (state, reason) of each history hour of one target and spec, inside [start, end)."""
+    found: dict[datetime, set[tuple[str, str]]] = {}
+    for gap in history_gaps:
+        if gap.target != target or spec_id not in gap.spec_ids:
+            continue
+        for hour in _hours(max(gap.start, start), min(gap.end, end)):
+            found.setdefault(hour, set()).add((gap.state, gap.reason))
+    causes: dict[datetime, tuple[str, str]] = {}
+    for hour, items in found.items():
+        state = min((state for state, _ in items), key=lambda value: (_GAP_STATE_ORDER.get(value, 9), value))
+        causes[hour] = (state, "; ".join(sorted({reason for _, reason in items})))
+    return causes
+
+
+def _gaps(covered: set[datetime], start: datetime, end: datetime,
+          causes: dict[datetime, tuple[str, str]]) -> list[dict]:
+    """Every uncovered history hour is a gap with its recorded cause; adjacent hours with one cause coalesce.
+
+    A missing segment is never evidence that the source was empty: only a complete zero-record segment is.
+    """
     out: list[dict] = []
-    for hour in missing:
-        if out and out[-1]["end"] == _iso(hour):
+    for hour in _hours(start, end):
+        if hour in covered:
+            continue
+        state, reason = causes.get(hour, _NO_SEGMENT)
+        if out and out[-1]["end"] == _iso(hour) and (out[-1]["state"], out[-1]["reason"]) == (state, reason):
             out[-1]["end"] = _iso(hour + _HOUR)
         else:
-            out.append({
-                "start": _iso(hour), "end": _iso(hour + _HOUR), "reason": "no complete segment",
-            })
+            out.append({"start": _iso(hour), "end": _iso(hour + _HOUR), "state": state, "reason": reason})
     return out
 
 
@@ -58,7 +83,17 @@ class SnapshotPlanner:
 
     def freeze(self, *, hunt_id: str, window_start: datetime, lookback: timedelta,
                min_live_hours: int, site: str, targets: list[str],
-               specs: list[BaselineSpec]) -> dict:
+               specs: list[BaselineSpec], history_gaps: Iterable[HistoryGap] = ()) -> dict:
+        """Freeze the cover once per hunt.
+
+        `history_gaps` are the lookback's coverage facts; they give uncovered hours their real reason.
+        Coverage per (target, spec):
+        - the effective span is the contiguous covered run ending at the window start, beginning at its first
+          segment holding records; complete zero-record segments before that are evidence of absence
+          (`absent_before`), and a run with no records at all is `absent`, never resolved;
+        - every uncovered hour of [history_start, window_start) is a gap, never absence.
+        """
+        history_gaps = tuple(history_gaps)
         existing = self.repo.baseline_snapshot(hunt_id)
         if existing is not None:
             return existing
@@ -91,33 +126,46 @@ class SnapshotPlanner:
                 ranked = sorted(eligible, key=lambda row: (
                     0 if row["origin"] == "hunt" else 1, -row["created_at"].timestamp(), row["id"],
                 ))
-                claimed: set[datetime] = set()
+                claimed: dict[datetime, dict] = {}
                 chosen: list[dict] = []
                 for row in ranked:
-                    span = set(_hours(row["start"], row["end"]))
-                    if span and not (span & claimed):
+                    span = _hours(row["start"], row["end"])
+                    if span and not any(hour in claimed for hour in span):
                         chosen.append(row)
-                        claimed.update(span)
+                        claimed.update(dict.fromkeys(span, row))
                         selected_ids.add(row["id"])
-                earliest = min((row["start"] for row in eligible), default=None)
                 cursor = window_start
                 while cursor - _HOUR in claimed:
                     cursor -= _HOUR
-                effective_hours = int((window_start - cursor) / _HOUR)
-                if effective_hours < min_live_hours:
+                # The first record within the run: the oldest covering segment that holds any. Earlier hours of
+                # the run are complete and empty, which is the only evidence of absence.
+                first_record = next((hour for hour in _hours(cursor, window_start)
+                                     if claimed[hour]["events_total"] > 0), None)
+                if first_record is None:
+                    effective_start = window_start
+                    absent_before = _iso(window_start) if cursor < window_start else None
+                else:
+                    effective_start = claimed[first_record]["start"]
+                    absent_before = _iso(effective_start) if effective_start > cursor else None
+                effective_hours = int((window_start - effective_start) / _HOUR)
+                if first_record is None and cursor < window_start:
+                    status = "absent"
+                elif effective_hours < min_live_hours:
                     status = "unresolved"
                 elif effective_hours == int(lookback / _HOUR):
                     status = "resolved"
                 else:
                     status = "shortened"
                 statuses.append(status)
+                causes = _gap_causes(history_gaps, target, spec.id, history_start, window_start)
                 coverage[f"{target}|{spec.id}"] = {
-                    "effective_start": _iso(cursor), "effective_hours": effective_hours,
-                    "gaps": _gaps(claimed, earliest, window_start),
-                    "absent_before": _iso(earliest) if earliest is not None and earliest > history_start else None,
+                    "effective_start": _iso(effective_start), "effective_hours": effective_hours,
+                    "gaps": _gaps(set(claimed), history_start, window_start, causes),
+                    "absent_before": absent_before,
                     "status": status, "segment_ids": sorted(row["id"] for row in chosen),
                 }
-        status = ("unresolved" if "unresolved" in statuses else
+        # Absent history resolves nothing, so it is unresolved at the snapshot level.
+        status = ("unresolved" if {"unresolved", "absent"} & set(statuses) else
                   "shortened" if "shortened" in statuses else "resolved")
         segment_ids = sorted(selected_ids)
         store_cut = {

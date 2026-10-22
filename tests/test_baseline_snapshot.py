@@ -6,13 +6,23 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import insert, select
 
+from romulus.baseline.lookback import HistoryGap, LookbackBudget, LookbackWriter
 from romulus.baseline.snapshot import SnapshotPlanner
 from romulus.baseline.spec import SPEC_BY_ID
 from romulus.store import schema as t
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
+from tests.test_baseline_lookback import START as LOOKBACK_START
+from tests.test_baseline_lookback import FakeHistory, _event
 
 START = datetime(2026, 1, 8, tzinfo=UTC)
+
+
+def _lookback_repo(hunt_id="h1"):
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt(hunt_id, {}, "digest", "test")
+    return repo
 
 
 def _repo(hunt_id="hunt"):
@@ -22,13 +32,13 @@ def _repo(hunt_id="hunt"):
     return repo
 
 
-def _segment(repo, segment_id, start, end, *, origin="lookback", created=START, target="host"):
+def _segment(repo, segment_id, start, end, *, origin="lookback", created=START, target="host", events=1):
     repo.save_baseline_segment({
         "id": segment_id, "site": "site", "target": target, "spec_id": "bl.exec_path",
         "spec_version": "1", "key_version": "1", "normalizer": "fixture@1",
         "start": start, "end": end, "bucket": "day", "origin": origin,
         "source_hunt_id": None, "built_by_hunt_id": None, "exclusion_digest": "none",
-        "excluded_keys": [], "hunted": int(origin == "hunt"), "events_total": 0,
+        "excluded_keys": [], "hunted": int(origin == "hunt"), "events_total": events,
         "status": "active", "created_at": created,
     }, [], [])
 
@@ -58,7 +68,7 @@ def test_cover_prefers_hunt_then_newest_then_id_without_overlap():
     assert snapshot["status"] == "resolved"
 
 
-def test_gaps_stop_effective_span_and_before_first_record_is_absent():
+def test_gaps_stop_effective_span_and_carry_their_reason():
     repo = _repo()
     _segment(repo, "latest", START - timedelta(hours=1), START)
     _segment(repo, "older", START - timedelta(hours=4), START - timedelta(hours=2))
@@ -71,17 +81,103 @@ def test_gaps_stop_effective_span_and_before_first_record_is_absent():
     assert coverage["gaps"] == [{
         "start": (START - timedelta(hours=2)).isoformat(),
         "end": (START - timedelta(hours=1)).isoformat(),
-        "reason": "no complete segment",
+        "state": "missing", "reason": "no complete segment",
     }]
+    assert coverage["absent_before"] is None
     assert coverage["status"] == "shortened"
 
-    absent_repo = _repo("absent")
-    _segment(absent_repo, "only", START - timedelta(hours=2), START)
-    absent = _freeze(absent_repo, "absent", min_live_hours=2)
-    absent_coverage = absent["coverage"]["host|bl.exec_path"]
-    assert absent_coverage["effective_hours"] == 2
-    assert absent_coverage["status"] == "shortened"
-    assert absent_coverage["absent_before"] == (START - timedelta(hours=2)).isoformat()
+
+def test_missing_segments_before_the_first_one_are_gaps_never_absence():
+    repo = _repo()
+    _segment(repo, "only", START - timedelta(hours=2), START)
+    snapshot = _freeze(repo, min_live_hours=2)
+    coverage = snapshot["coverage"]["host|bl.exec_path"]
+    assert coverage["absent_before"] is None
+    assert coverage["gaps"] == [{
+        "start": (START - timedelta(hours=4)).isoformat(),
+        "end": (START - timedelta(hours=2)).isoformat(),
+        "state": "missing", "reason": "no complete segment",
+    }]
+    assert coverage["effective_hours"] == 2 and coverage["status"] == "shortened"
+
+
+def test_complete_empty_segments_are_the_evidence_of_absence():
+    repo = _repo()
+    _segment(repo, "empty", START - timedelta(hours=4), START - timedelta(hours=2), events=0)
+    _segment(repo, "records", START - timedelta(hours=2), START)
+    snapshot = _freeze(repo, min_live_hours=2)
+    coverage = snapshot["coverage"]["host|bl.exec_path"]
+    assert coverage["gaps"] == []
+    assert coverage["absent_before"] == (START - timedelta(hours=2)).isoformat()
+    assert coverage["effective_start"] == (START - timedelta(hours=2)).isoformat()
+    assert coverage["effective_hours"] == 2 and coverage["status"] == "shortened"
+
+
+def test_complete_span_without_records_is_absent_never_resolved():
+    repo = _repo()
+    _segment(repo, "empty", START - timedelta(hours=4), START, events=0)
+    snapshot = _freeze(repo, min_live_hours=2)
+    coverage = snapshot["coverage"]["host|bl.exec_path"]
+    assert coverage["status"] == "absent" and coverage["effective_hours"] == 0
+    assert coverage["absent_before"] == START.isoformat()
+    assert snapshot["status"] == "unresolved"
+
+
+def test_history_gap_reasons_reach_the_snapshot():
+    repo = _repo()
+    _segment(repo, "latest", START - timedelta(hours=2), START)
+    gaps = [
+        HistoryGap("host", START - timedelta(hours=4), START - timedelta(hours=3), "omitted_budget",
+                   "lookback query or wall-clock budget exhausted", ("bl.exec_path",)),
+        HistoryGap("host", START - timedelta(hours=3), START - timedelta(hours=2), "failed",
+                   "shard failure", ("bl.exec_path",)),
+        HistoryGap("other", START - timedelta(hours=3), START - timedelta(hours=2), "failed",
+                   "elsewhere", ("bl.exec_path",)),
+    ]
+    snapshot = _freeze(repo, min_live_hours=2, history_gaps=gaps)
+    assert snapshot["coverage"]["host|bl.exec_path"]["gaps"] == [
+        {"start": (START - timedelta(hours=4)).isoformat(), "end": (START - timedelta(hours=3)).isoformat(),
+         "state": "omitted_budget", "reason": "lookback query or wall-clock budget exhausted"},
+        {"start": (START - timedelta(hours=3)).isoformat(), "end": (START - timedelta(hours=2)).isoformat(),
+         "state": "failed", "reason": "shard failure"},
+    ]
+
+
+def test_budget_truncated_lookback_is_gaps_and_empty_source_is_absent():
+    spec = SPEC_BY_ID["bl.exec_path"]
+    hours = 72
+    events = [_event(index, LOOKBACK_START - timedelta(hours=index, minutes=30)) for index in range(hours)]
+    repo = _lookback_repo()
+    result = LookbackWriter(
+        repo, FakeHistory(events), site="site", specs=[spec], normalizer="fixture@1",
+        budget=LookbackBudget(queries=100, records=10**6, seconds=600), now=lambda: LOOKBACK_START,
+    ).fill(hunt_id="h1", targets=["host-index"], start=LOOKBACK_START - timedelta(hours=hours),
+           end=LOOKBACK_START)
+    assert result.complete == 50
+    snapshot = SnapshotPlanner(repo).freeze(
+        hunt_id="h1", window_start=LOOKBACK_START, lookback=timedelta(hours=hours), min_live_hours=48,
+        site="site", targets=["host-index"], specs=[spec], history_gaps=result.gaps,
+    )
+    coverage = snapshot["coverage"]["host-index|bl.exec_path"]
+    assert coverage["absent_before"] is None
+    assert coverage["effective_hours"] == 50 and coverage["status"] == "shortened"
+    assert [(gap["state"], gap["start"], gap["end"]) for gap in coverage["gaps"]] == [(
+        "omitted_budget", (LOOKBACK_START - timedelta(hours=hours)).isoformat(),
+        (LOOKBACK_START - timedelta(hours=50)).isoformat(),
+    )]
+
+    empty = _lookback_repo("h2")
+    LookbackWriter(
+        empty, FakeHistory([]), site="site", specs=[spec], normalizer="fixture@1",
+        budget=LookbackBudget(queries=1000, records=10**6, seconds=600), now=lambda: LOOKBACK_START,
+    ).fill(hunt_id="h2", targets=["host-index"], start=LOOKBACK_START - timedelta(hours=hours),
+           end=LOOKBACK_START)
+    nothing = SnapshotPlanner(empty).freeze(
+        hunt_id="h2", window_start=LOOKBACK_START, lookback=timedelta(hours=hours), min_live_hours=48,
+        site="site", targets=["host-index"], specs=[spec],
+    )
+    assert nothing["status"] == "unresolved"
+    assert nothing["coverage"]["host-index|bl.exec_path"]["status"] == "absent"
 
 
 def test_min_live_hours_and_resume_write_once():
@@ -121,7 +217,7 @@ def test_planner_filters_a_store_of_ten_thousand_segments_in_bounded_time():
             "normalizer": "fixture@1", "start": start, "end": start + timedelta(hours=1),
             "bucket": "day", "origin": "lookback", "source_hunt_id": None,
             "built_by_hunt_id": None, "exclusion_digest": "none", "excluded_keys": [],
-            "hunted": 0, "events_total": 0, "rows_digest": "0:0:0", "status": "active",
+            "hunted": 0, "events_total": 1, "rows_digest": "0:0:0", "status": "active",
             "created_at": START,
         })
     with repo.engine.begin() as connection:
