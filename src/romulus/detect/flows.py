@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import KeyedStore, RecentIds
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.evidence.typed import TypedEvent
 
@@ -640,8 +640,8 @@ class HorizontalSweep(_FlowRule):
     # (about 600 bytes each with runs and up to 64 connection hashes) are held in keyed stores: HOT in memory, the
     # rest on disk; only their disk budget refuses a record needing a new one. Finalize reads one group's
     # destinations at a time, and only for groups with enough destinations to qualify.
-    HOT_GROUPS = 50_000
-    HOT_DESTINATIONS = 200_000
+    HOT_GROUPS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    HOT_DESTINATIONS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -733,6 +733,9 @@ class HorizontalSweep(_FlowRule):
         states = Counter(d.state for d in dests.values())
         connections = sum(len(d.connections) for d in dests.values())
         capped = any(len(d.connections) >= self.CONNECTIONS_PER_DESTINATION for d in dests.values())
+        if capped:
+            self.note_limit("connections", f"a destination passed {self.CONNECTIONS_PER_DESTINATION:,} distinct "
+                                           f"connections held; its connection count is a lower bound")
         src_scope = "internal" if internal_address(src) else "external" if external(src) else "non-routable"
         label = {True: "lane window", False: "deciding window"}[high]
         span = "5 minutes" if deciding.width == 300 else "hour"
@@ -911,8 +914,8 @@ class ProtocolPortMismatch(_FlowRule):
     # connections, mismatch groups (connections per group capped, worded "at least") and per-server tallies are held
     # in keyed stores: HOT in memory, the rest on disk; only their disk budget refuses a record needing a new entry.
     CONNECTIONS_PER_MISMATCH = 100_000
-    HOT = 100_000
-    HOT_GROUPS = 10_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    HOT_GROUPS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -957,6 +960,8 @@ class ProtocolPortMismatch(_FlowRule):
                     group.sources.setdefault(view.src, set()).add(view.key)
                 else:
                     group.capped = True
+                    self.note_limit("connections", f"a mismatch group passed {self.CONNECTIONS_PER_MISMATCH:,} "
+                                                   f"distinct connections held; its connection count is a lower bound")
                 group.records[view.sensor] += 1
                 group.first, group.last = min(group.first, view.start), max(group.last, view.end)
                 if len(group.cited) < self.STAGE_PER_GROUP:
@@ -1218,7 +1223,7 @@ class LongUnidentifiedSession(_FlowRule):
     # 150 bytes each, held per connection identity in a keyed store (HOT identities in memory, the rest on disk);
     # only its disk budget refuses. Finalize reads only identities with a record that can be reported, one at a time,
     # and folds their connections into per-(server, port) groups held in a second store.
-    HOT = 50_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -1386,8 +1391,8 @@ class OutboundVolumeAsymmetry(_FlowRule):
     # Connections are counted once across sensors, from the sensor that recorded the most bytes, so every
     # internal-to-external connection's per-sensor tally (about 200 bytes) is held to the end, beside the pairs'
     # summaries (about 1 KB each), in keyed stores: HOT in memory, the rest on disk; only their disk budget refuses.
-    HOT_PAIRS = 50_000
-    HOT_CONNECTIONS = 200_000
+    HOT_PAIRS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    HOT_CONNECTIONS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()

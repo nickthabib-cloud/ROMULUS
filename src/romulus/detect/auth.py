@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.bounded import KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList
 from romulus.detect.host import (
     UNBUDGETED,
     Lineage,
@@ -121,7 +121,7 @@ class _SshAttemptStream(Playbook):
     # sliding windows, accepted-login counts, found logins) lives in keyed stores: HOT keys in memory, the rest on
     # the rule's disk spill, never forgotten. Only a store's disk budget refuses, and coverage says so.
     staged = True
-    HOT = 50_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -1100,7 +1100,7 @@ class AccountOrGroupChange(Playbook):
     # HOT in memory and the rest on the rule's disk spill. Changes and records have their own disk budgets; only
     # a spent budget refuses, and coverage says so.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
     CHANGES_DISK = 2 * 2**30
     RECORDS_DISK = 2 * 2**30
     FINALIZE_TRIM = 10_000

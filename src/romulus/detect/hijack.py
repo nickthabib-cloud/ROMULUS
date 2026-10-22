@@ -46,7 +46,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, pf
-from romulus.detect.bounded import ExecHistory, KeyedStore, RecentIds
+from romulus.detect.bounded import HOT_COUNT, ExecHistory, KeyedStore, RecentIds
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict
 from romulus.detect.host import _FLAG_ONLY, SCRIPT_FILE_INTERPRETERS, WEB_SERVICE_USERS
 from romulus.detect.linux_argv import canonical, is_under, normalize_path, program, write_targets
@@ -325,8 +325,8 @@ class NonRootWriteRootExecutedFile(Playbook):
     # attributed to the scheduler that opened it; joining a run reads the session back and makes it recent. Only a
     # store's disk byte budget refuses a record, and coverage says so. A scheduler session's own record is staged when
     # read, so a run joined to it can cite it however much later the run comes.
-    HOT = 50_000
-    DAEMON_CAPACITY = 300_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    DAEMON_CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()

@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HeldExamples, KeyedStore, RecentIds
+from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
 from romulus.detect.correlation import canon_ip, external
 from romulus.evidence.typed import TypedEvent
 
@@ -104,7 +104,7 @@ class _CertificateRule(Playbook):
     staged = True
     SOURCES_PER_GROUP = 10_000
     CONNS_PER_GROUP = 20_000
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -194,6 +194,8 @@ class _CertificateRule(Playbook):
                     g[name].add(value)
                 elif name == "conns":
                     g["capped"] = True              # more sources than the cap are already "and others"
+                    self.note_limit("connections", f"a certificate group passed {cap:,} distinct connections held; "
+                                                   f"its connection count is a lower bound")
         g["ports"].add(str(e.get("destination.port")))
         g["reasons"].update(reasons)
         g["first"], g["last"] = min(g["first"], e.ts), max(g["last"], e.ts)

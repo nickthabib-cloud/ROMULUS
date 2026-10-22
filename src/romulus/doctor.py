@@ -167,7 +167,23 @@ def check_paths(s: Settings, env_file: Path | None) -> list[Check]:
     s.home.mkdir(parents=True, exist_ok=True)
     free_gb = shutil.disk_usage(s.home).free / 1e9
     out.append(Check("disk.free", "ok" if free_gb > 10 else "warn", f"{free_gb:.1f} GB free at {s.home}"))
+    out.append(check_state_budget(s))
     return out
+
+
+def check_state_budget(s: Settings) -> Check:
+    """The sweep's detector-state budget on the stage volume: fail when its free space is already at the reserve
+    (rules that keep state would evaluate nothing), warn when the hunt's disk total is under 1 GiB."""
+    from romulus.hunt.sweep import state_budget
+    budget = state_budget(s, s.home / "stage")
+    free = budget.free()
+    detail = (f"disk total {budget.disk_total / 2**30:.1f} GiB, reserve {budget.reserve / 2**30:.1f} GiB, "
+              f"memory {budget.memory_total / 2**20:.0f} MiB; stage volume "
+              + (f"{free / 2**30:.1f} GiB free" if free is not None else "free space unreadable"))
+    if budget.preflight():
+        return Check("state.budget", "fail", detail + "; free space is below the reserve: rules that keep state "
+                                                      "would evaluate no records")
+    return Check("state.budget", "warn" if budget.disk_total < 2**30 else "ok", detail)
 
 
 def check_db(s: Settings) -> Check:

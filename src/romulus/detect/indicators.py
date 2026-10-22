@@ -29,7 +29,7 @@ from pathlib import Path
 import yaml
 
 from romulus.detect.base import LANES, SEVERITIES, Match, Playbook, basename, pf
-from romulus.detect.bounded import HeldExamples, KeyedStore
+from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore
 from romulus.detect.host import (
     AWK_INTERPRETERS,
     SCRIPT_FILE_INTERPRETERS,
@@ -203,7 +203,7 @@ class IndicatorMatch(Playbook):
     # disk spill. Once the groups' disk budget is spent, a match of a new value is still found: it joins its
     # (indicator, role, host) overflow group, whose claim counts the records with other values.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
     GROUPS_DISK = 4 * 2**30
     SAMPLE_VALUES = 10
 

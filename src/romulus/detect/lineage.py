@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.bounded import KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList
 from romulus.detect.correlation import (
     PidTable,
     StageMissing,
@@ -269,7 +269,7 @@ class ReverseShellByLineage(Playbook):
     # Shells, sockets and the exec history are held to finalize, as the join needs them all (a target is read whole
     # before the next, so a shell's socket or ancestor may be read after it). Each lives in a keyed store or list
     # over the rule's on-disk spill: HOT entries in memory, the rest on disk, never forgotten.
-    HOT = 100_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
     TRIM_EVERY = 10_000
 
     def __init__(self):

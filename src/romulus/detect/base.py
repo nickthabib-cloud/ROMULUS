@@ -188,13 +188,31 @@ class Playbook:
     # stage directory; None (tests, ad hoc runs) uses the system temporary directory.
     spill_dir = None
     _spill = None
+    # The hunt's state budget (romulus.detect.bounded.StateBudget), shared by every playbook of a sweep; a playbook
+    # outside a sweep makes its own on first use.
+    budget = None
+    # True once the playbook keeps per-key state (a KeyedStore, SpillList or spill): when the hunt's state budget is
+    # spent, the sweep refuses its later records instead of letting that state grow.
+    holds_state = False
+
+    def state_budget(self):
+        if self.budget is None:
+            from romulus.detect.bounded import StateBudget
+            self.budget = StateBudget(self.spill_dir)
+        return self.budget
 
     def spill(self):
         """This playbook's private on-disk tables (created on first use)."""
         if self._spill is None:
             from romulus.detect.bounded import Spill
-            self._spill = Spill(self.spill_dir)
+            self._spill = Spill(self.spill_dir, self.state_budget())
         return self._spill
+
+    def refuse_batch(self, events: list[TypedEvent], text: str) -> None:
+        """The hunt's state budget is spent: none of these records of this rule's families is evaluated."""
+        records = sum(1 for e in events if e.family in self.families)
+        if records:
+            self.refuse("state_disk", text, records)
 
     def close_spill(self) -> None:
         """Remove any on-disk spill. The sweep calls it on every exit path it controls."""

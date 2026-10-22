@@ -12,13 +12,14 @@ import bisect
 import heapq
 import ipaddress
 import json
+import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 
 from romulus.detect.base import Match, Playbook, basename, pf
-from romulus.detect.bounded import ExecHistory, HeldExamples, KeyedStore, RecentIds, Spill, scalar
+from romulus.detect.bounded import HOT_COUNT, ExecHistory, HeldExamples, KeyedStore, RecentIds, Spill, scalar
 from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
     INTERPRETERS,
     WEB_SERVICE_USERS,
@@ -156,7 +157,7 @@ class PidTable:
     # A detector rule (`owner`) holds the CAPACITY most recently used processes in memory (about 250 bytes each, so
     # 75 MB) and the rest in its on-disk spill, read back when a walk reaches them: every lookup is exact. Callers
     # without an owner (an expansion fetch, a baseline period) hold everything they were given in memory.
-    CAPACITY = 300_000
+    CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self, capacity: int | None = None, owner=None):
         self.execs = ExecHistory(capacity if capacity is not None else _UNBOUNDED, _UNBOUNDED, owner, "pid_table")
@@ -276,7 +277,7 @@ class InterpreterExternalConnection(Playbook):
     # Per (host, program, account, port) of notable processes: counts, destinations and the first cited calls (as ids
     # once staged), in a keyed store: the HOT most recent groups in memory, the rest on disk, never forgotten.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -468,7 +469,10 @@ class ProcessNetworkLink(Playbook):
     read whole before the next, so the two sides cannot be streamed against each other); the full events are
     staged. Finalize links them with SQL and builds each (host, program, account, endpoint) group by streaming its
     rows: memory holds a bounded sample of the group (its first cited calls and records, counts), and the group's
-    distinct records sit in spill tables emptied when it is done. Only the spill's disk byte budget refuses a record.
+    distinct records sit in spill tables emptied when it is done. Only disk refuses a record: the rule's own byte
+    budget for its rows, and the hunt's state budget (the sweep refuses later records once it is spent). Every write,
+    finalize's join tables included, is charged to the hunt's budget; a finalize that would need disk below the
+    stage volume's free-space reserve stops with StateExhausted, and its window cell says so.
 
     Attribution: a host's local address on a sensor (per IP version) is inferred from its unique joins.
     A record whose local address is established for another host is never linked. A record whose local
@@ -492,9 +496,12 @@ class ProcessNetworkLink(Playbook):
                    "peer activity for the remote address across hosts and sessions")
     HEARTBEAT_EVERY = 1000
     # Bytes of spilled rows (socket calls, network records and their endpoint index) after which a further record is
-    # refused through the coverage ledger. A network record is about 150 bytes, so this is about 100 million records;
-    # the join's own tables at finalize take a similar amount again.
+    # refused through the coverage ledger, counted at ROW_BYTES per row (about what a row takes on disk), so this is
+    # about 100 million records; the join's own tables at finalize take a similar amount again. The spill file's real
+    # growth is charged to the hunt's state budget.
     DISK_BUDGET = 16 * 2**30
+    ROW_BYTES = 160
+    holds_state = True
 
     def __init__(self):
         super().__init__()
@@ -512,7 +519,7 @@ class ProcessNetworkLink(Playbook):
 
     def _store(self) -> Spill:
         if self._spill is None:
-            spill = self._spill = Spill(self.spill_dir)
+            spill = self._spill = Spill(self.spill_dir, self.state_budget())
             spill.table("sock", "id, host, ts, ip, port, exe, user, pid, outcome, reason, lane, grp, claimant")
             spill.table("net", 'id, family, observer, start, "end", src, sport, dst, dport, cid, sev, cat, sig, '
                                "seq INTEGER PRIMARY KEY")
@@ -527,14 +534,14 @@ class ProcessNetworkLink(Playbook):
     def release_state(self) -> None:
         self.close_spill()
 
-    def _room(self, *rows: tuple) -> bool:
+    def _room(self, rows: int) -> bool:
         """Count the rows against the disk budget. Once it is spent the record is refused (not evaluated) instead."""
         if self.spilled_bytes >= self.DISK_BUDGET:
             self.evaluated -= 1
             self.refuse("disk", f"the join's spilled rows reached their disk budget of {self.DISK_BUDGET:,} bytes; "
                                 f"later socket calls and network records are not evaluated")
             return False
-        self.spilled_bytes += sum(len(value) if isinstance(value, str) else 8 for row in rows for value in row)
+        self.spilled_bytes += rows * self.ROW_BYTES
         return True
 
     def _sock(self, e: TypedEvent) -> None:
@@ -552,7 +559,7 @@ class ProcessNetworkLink(Playbook):
                  str(e.get("process.user")), scalar(e.get("process.pid")), str(e.outcome), reason, lane)
         row = (s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.process_lane, s.group,
                _claimant_key(s.claimant))
-        if not self._room(row):
+        if not self._room(1):
             return
         self._store().add("sock", row)
         self._pending.append(e)
@@ -576,7 +583,7 @@ class ProcessNetworkLink(Playbook):
                scalar(e.get("network.community_id")) or None, sev if isinstance(sev, int) else None,
                scalar(e.get("alert.category")), scalar(e.get("alert.signature")), seq)
         endpoints = [(dst, dport, start, seq)] + ([(src, sport, start, seq)] if (src, sport) != (dst, dport) else [])
-        if not self._room(row, *endpoints):
+        if not self._room(1 + len(endpoints)):
             return
         self._net_seq = seq
         store = self._store()
@@ -613,6 +620,7 @@ class ProcessNetworkLink(Playbook):
         db.execute("INSERT OR IGNORE INTO link SELECT s.rowid, ep.net, 1 FROM sock s JOIN ep ON ep.ip = s.ip "
                    "AND ep.port = s.port AND ep.start >= s.ts - ? AND ep.start <= s.ts + ?",
                    (JOIN_BEFORE, JOIN_AFTER))
+        spill.check()
         self.heartbeat()
         db.execute('INSERT OR IGNORE INTO link SELECT l.sock, m.seq, 0 FROM link l JOIN net d ON d.seq = l.net '
                    'JOIN net m ON m.cid = d.cid WHERE l.direct = 1 AND d.cid IS NOT NULL '
@@ -620,6 +628,7 @@ class ProcessNetworkLink(Playbook):
                    'AND ((m.src = d.src AND m.sport = d.sport AND m.dst = d.dst AND m.dport = d.dport) '
                    'OR (m.src = d.dst AND m.sport = d.dport AND m.dst = d.src AND m.dport = d.sport))',
                    (FLOW_SLACK, JOIN_AFTER, FLOW_SLACK))
+        spill.check()
         self.heartbeat()
         db.execute("CREATE INDEX link_net ON link (net)")
         # how many distinct processes claim each linked record
@@ -663,8 +672,15 @@ class ProcessNetworkLink(Playbook):
     def finalize(self):
         if self._spill is None:
             return []
+        try:
+            return self._finalize()
+        except sqlite3.OperationalError as exc:
+            raise self._spill.failed(exc) from exc
+
+    def _finalize(self):
         self._spill.flush()
         self._link(self._spill)
+        self._spill.check()
         # pass 1: each host's local address per (sensor, IP version), from calls whose records nobody else claims
         seen: dict[tuple[str, str, int], Counter] = defaultdict(Counter)
         for rows in self._socket_rows("ORDER BY l.sock, n.start, n.id"):
@@ -696,6 +712,7 @@ class ProcessNetworkLink(Playbook):
             if group is None or s.group != group.key:
                 if group is not None:
                     out += self._finish(group, address)
+                    self._spill.check()
                 group = _Group(s.group, self._spill.db)
             kept = []
             for _r, _s, n, claimed, seq in rows:

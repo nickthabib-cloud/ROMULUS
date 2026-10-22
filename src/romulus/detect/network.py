@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import KeyedStore
+from romulus.detect.bounded import HOT_COUNT, KeyedStore
 from romulus.detect.correlation import StageMissing
 from romulus.evidence.typed import TypedEvent
 
@@ -52,7 +52,7 @@ class _Grouped(Playbook):
     staged = True
     # Group states held in memory between batches: a few hundred bytes each, up to tens of kilobytes for a group
     # whose per-rule sets have filled (their caps are per group), so the hot set stays small.
-    HOT: ClassVar[int] = 5_000
+    HOT: ClassVar[int] = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -391,7 +391,7 @@ class PortScan(_Grouped):
     # Ports are counted per (source, destination) over the whole hunt window, however slow the scan: a pair's state
     # is held on the rule's disk spill while it is quiet. The index of requests to services (the earliest start of
     # each 4-tuple, to tell an answer from a probe) is a keyed store too, HOT entries in memory.
-    REQUESTS_HOT = 200_000
+    REQUESTS_HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
     version = "7"
 
     def __init__(self):

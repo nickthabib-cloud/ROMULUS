@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import ExecHistory, HeldExamples, KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import HOT_COUNT, ExecHistory, HeldExamples, KeyedStore, RecentIds, SpillList
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
 from romulus.detect.host import WEB_SERVICE_USERS
@@ -193,7 +193,7 @@ class RootExecNonRootModifiableFile(Playbook):
     # reads one file's session runs at a time. Citations are staged; only a store's disk byte budget refuses a run,
     # and coverage says so.
     staged = True
-    HOT = 50_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -614,8 +614,8 @@ class PersistencePathChange(Playbook):
     # rule's disk spill. Changes in persistence locations (rare except package upgrades, about 600 bytes each) and
     # finalize's groups of them hold HOT in memory and the rest on disk. Only a disk byte budget refuses a change, and
     # coverage says so.
-    EXEC_CAPACITY = 300_000
-    HOT = 50_000
+    EXEC_CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
     TRIM_EVERY = 10_000
 
     def __init__(self):

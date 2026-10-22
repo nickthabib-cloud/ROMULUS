@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.bounded import KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList
 from romulus.detect.host import (
     UNBUDGETED,
     Lineage,
@@ -154,7 +154,7 @@ class _Item:
 class _ShutdownMarkers:
     """Typed shutdown or reboot markers per host, from the service manager, the kernel audit trail and commands."""
 
-    HOT = 10_000            # hosts whose markers are in memory; the rest are on the owner's disk spill
+    HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
 
     def __init__(self, owner=None):
         self.marks = KeyedStore(owner, "tamper_marks", self.HOT)     # host -> [(time, what, record)]
@@ -381,7 +381,7 @@ class _TamperRule(Playbook):
     # records each have their own list and disk budget, so routine records can never use up the room of a command
     # match. Per-key time lists (unit starts, rule additions, daemon registrations) are keyed stores, uncapped.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
     COMMANDS_DISK = 2 * 2**30
     ROUTINE_DISK = 2 * 2**30
 

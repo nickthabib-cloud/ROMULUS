@@ -6,12 +6,13 @@ import ipaddress
 import itertools
 import posixpath
 import re
+from bisect import insort
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
-from romulus.detect.bounded import HeldExamples, KeyedStore, RecentIds, SpillList
+from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds, SpillList
 from romulus.detect.linux_argv import canonical, read_operand_paths
 from romulus.evidence.shellparse import (
     SHELLS,
@@ -301,7 +302,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     # and their first 20 runs cited (staged, held as ids). Shapes live in a keyed store, HOT in memory and the rest
     # on the rule's disk spill; only its disk budget refuses a new shape, and coverage says so.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
     CITE = 20
 
     def __init__(self):
@@ -449,7 +450,7 @@ class DownloaderFeedsInterpreter(Playbook):
     # paired interpreter. Pairs are held on a list, HOT in memory and the rest on the rule's disk spill; only its
     # disk budget refuses, and coverage says so.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
     FINALIZE_TRIM = 10_000
 
     def __init__(self):
@@ -749,7 +750,7 @@ class FirewallRuleChange(Playbook):
     # on the rule's disk spill (only its disk budget refuses, and coverage says so). Weakening and routine groups
     # hold at most 20 and 10 records per (host, tool, form). Every record a finding may cite is staged when kept.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -1045,7 +1046,7 @@ class SshLoginFromExternal(Playbook):
     # costs references, not every login. Groups live in a keyed store, HOT in memory and the rest on the rule's
     # disk spill; only its disk budget refuses a new group, and coverage says so.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -1194,7 +1195,7 @@ class UnbackedExecutable(Playbook):
     # live in a keyed store, HOT in memory and the rest on the rule's disk spill; only its disk budget refuses a new
     # group, and coverage says so.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -1322,13 +1323,18 @@ class ProcessLineage:
     recently used processes are held in memory and the rest on the owning rule's disk spill, read back when a walk
     reaches them, so nothing is forgotten. The walk is only as complete as the retrieved exec records: a parent that
     did not exec inside the window (a daemon started earlier) ends the chain. Lineage can therefore raise or explain
-    a lane, but its absence proves nothing."""
+    a lane, but its absence proves nothing.
+
+    In a sweep one lineage is shared by every rule that keeps one (`share_lineage`): the first rule to read a batch
+    observes each exec record, the others find it observed already."""
     DEPTH = 16
-    CAPACITY = 100_000
+    CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
     PER_PID = 4
 
-    def __init__(self, owner=None):
+    def __init__(self, owner=None, members: list | None = None):
         self.records = KeyedStore(owner, "process_lineage", self.CAPACITY)
+        self.members = members if members is not None else [owner] if owner is not None else []
+        self._observed = RecentIds()            # exec records already observed (by any rule sharing this lineage)
 
     def trim(self) -> None:
         """Move the least recently used processes beyond CAPACITY to disk (when a batch ends)."""
@@ -1358,12 +1364,20 @@ class ProcessLineage:
         pid = event.get("process.pid")
         if event.family != "process_exec" or not isinstance(pid, int):
             return
+        if event.id in self._observed:
+            return
+        self._observed.add(event.id)
         key = (event.host, pid)
-        entries = self.records.pop(key, [])
-        entries = sorted([*entries, self.entry(event)], key=lambda a: (a.ts, a.event_id))[-self.PER_PID:]
-        if not self.records.put(key, entries) and self.records.owner is not None:
-            self.records.owner.note_limit("lineage", "exec records on disk reached the disk budget; a later "
-                                                     "process's lineage is not recorded")
+        entries = self.records.get(key)
+        if entries is None:
+            if not self.records.put(key, [self.entry(event)]):
+                for member in self.members:
+                    member.note_limit("lineage", "exec records on disk reached the disk budget; a later process's "
+                                                 "lineage is not recorded")
+            return
+        insort(entries, self.entry(event), key=_ancestor_order)      # in place: the store holds this list
+        if len(entries) > self.PER_PID:
+            del entries[0]
 
     def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None) -> Ancestor | None:
         """The latest exec of `ppid` no later than `ts`, unless it was recorded in a boot other than `boot`: the
@@ -1400,6 +1414,21 @@ class ProcessLineage:
                 break
             current = found
         return nearest or Lineage("", None, 0)
+
+
+def _ancestor_order(entry: Ancestor) -> tuple[float, str]:
+    return entry.ts, entry.event_id
+
+
+def share_lineage(pack: list) -> None:
+    """Give every rule of a pack that keeps an exec lineage the same one, so each exec record is observed and held
+    once. Its rows live on the first such rule's spill; a disk refusal is noted on every rule that shares it."""
+    members = [pb for pb in pack if isinstance(getattr(pb, "lineage", None), ProcessLineage)]
+    if len(members) < 2:
+        return
+    shared = ProcessLineage(members[0], members)
+    for pb in members:
+        pb.lineage = shared
 
 
 def lineage_phrase(lineage: Lineage) -> str:

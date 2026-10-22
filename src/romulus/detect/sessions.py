@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HeldExamples, KeyedStore, RecentIds
+from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.evidence.typed import TypedEvent
 
@@ -79,7 +79,7 @@ class _Stitched(Playbook):
     required_fields = ("source.ip", "destination.ip", "flow.start", "flow.end")
     IDLE = 3600.0
     CONN_IDS = EXAMPLE_LIMIT        # record ids held (and staged) per connection
-    HOT = 50_000                    # connections in memory (about 2 KB each); the rest are on disk
+    HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
 
     def __init__(self):
         super().__init__()
@@ -343,7 +343,7 @@ class RareClientFingerprint(_Stitched):
     # A value is reported only while one source used it on at most MAX_CONNECTIONS connections, so a value holds at
     # most two sources and MAX_CONNECTIONS + 1 connections; once it cannot be rare its citations are dropped. Values
     # (about 600 bytes each) are held in a keyed store: HOT in memory, the rest on disk; only its disk budget refuses.
-    HOT = 100_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -465,7 +465,7 @@ class ArkimeSshReverseShellTag(Playbook):
     # rest on disk, only its disk budget refuses. A pair remembers at most PAIR_CONNS_CAP SSH connections for the
     # untagged count (the claim says "at least" above it); a tagged pair also holds its context and cited references.
     staged = True
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -585,6 +585,9 @@ class ArkimeSshReverseShellTag(Playbook):
             text += f" Other Arkime tags on these records: {', '.join(sorted(g['tags']))}."
         others = len(known - g["conns"])
         at_least = "at least " if len(known) >= self.PAIR_CONNS_CAP else ""
+        if at_least:
+            self.note_limit("connections", f"a pair passed {self.PAIR_CONNS_CAP:,} SSH connections held; its untagged "
+                                           f"count is a lower bound")
         text += (f" Arkime recorded {at_least}{others} other SSH connection(s) from {src} to {dst} port {port} without "
                  "the tag "
                  "in the window." if others else

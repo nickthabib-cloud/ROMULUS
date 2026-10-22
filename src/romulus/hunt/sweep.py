@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
+from romulus.detect.bounded import StateBudget, StateExhausted
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
@@ -67,6 +68,19 @@ def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
     return BootIntervals.from_json((row or {}).get("detail") or {})
 
 
+def state_budget(settings, stage_dir) -> StateBudget:
+    """The hunt's state budget from the settings (defaults when a setting is absent)."""
+    disk_gb = float(getattr(settings, "state_disk_gb", 0) or 0)
+    reserve_gb = getattr(settings, "state_disk_reserve_gb", None)
+    memory_mb = getattr(settings, "state_memory_mb", None)
+    kwargs = {}
+    if reserve_gb is not None:
+        kwargs["reserve"] = int(float(reserve_gb) * 2**30)
+    if memory_mb is not None:
+        kwargs["memory_total"] = int(memory_mb) * 2**20
+    return StateBudget(stage_dir, disk_total=int(disk_gb * 2**30) or None, **kwargs)
+
+
 def plan_partitions(client: ElasticClient, target: str, contract: FieldContract, window: Window,
                     filters: list[Predicate]) -> list[tuple[Window, int]]:
     """5-minute histogram with exact counts; merge consecutive buckets up to PARTITION_MAX_DOCS.
@@ -110,12 +124,26 @@ class Sweep:
         self._pool: ThreadPoolExecutor | None = None
         self.contracts = contracts
         self.on_candidate = on_candidate or (lambda c: None)
-        self.heartbeat = heartbeat or (lambda: None)
+        beat = heartbeat or (lambda: None)
+
+        def heartbeat_and_touch():
+            beat()
+            for pb in self.pack:                # a live spill is never mistaken for a killed process's leftover
+                if pb._spill is not None:
+                    pb._spill.touch()
+        self.heartbeat = heartbeat_and_touch
         self.stage_dir = stage_dir
+        # One state budget for the hunt: the disk every playbook's spill may use (and the free space left on the
+        # stage volume), and the memory their hot sets share. Read the stage volume's free space before the sweep.
+        self.budget = state_budget(settings, stage_dir)
         self.pack: list[Playbook] = fresh_pack()
         for pb in self.pack:
             pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
+            pb.budget = self.budget
         self.partial_reasons: list[str] = []
+        preflight = self.budget.preflight()
+        if preflight:
+            self.partial_reasons.append(f"state budget: {preflight}; rules that keep state evaluate no records")
         # Built as partitions are read, in time order per target: each batch's events are placed with what has
         # been observed so far. Expansion and the context pass use the whole map, recorded at finalize.
         self.boots = BootIntervals()
@@ -336,7 +364,20 @@ class Sweep:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
             before_limits = {name: limit.records for name, limit in pb.limits.items()}
-            matches = pb.consume(events)
+            spent = self.budget.spent if pb.holds_state else ""
+            if spent:
+                # the hunt's state budget is spent: this rule's state may not grow, so its records are refused
+                matches = []
+                pb.refuse_batch(events, f"the hunt's state budget is spent ({spent}); later records of this rule "
+                                        f"are not evaluated")
+            else:
+                try:
+                    matches = pb.consume(events)
+                except StateExhausted as exc:
+                    # a write to the stage volume failed mid-batch: the batch is not counted as evaluated
+                    matches = []
+                    pb.refuse_batch(events, f"the hunt's state budget is spent ({exc}); later records of this "
+                                            f"rule are not evaluated")
             for m in matches:
                 self._publish(m, tid, raw_sources)
             if pb.staged:
@@ -456,6 +497,7 @@ class Sweep:
 
     def finalize(self):
         self.heartbeat()
+        self.budget.finalizing = True           # finalize re-reads kept state: only the free-space reserve applies
         # Every partition has been read: record the whole map once, for expansion, the context pass and resume.
         self.repo.audit("system", BOOT_INTERVALS_AUDIT, self.hunt_id, self.boots.to_json())
         self._boot_summary()
@@ -468,11 +510,11 @@ class Sweep:
                 stage = self._event_stage()
                 pb.bind_loader(stage.load)
                 pb.heartbeat = self.heartbeat
-                ms = pb.finalize()
+                ms = self._finalize_rule(pb)
                 for m in ms:
                     self._publish(m, None, {**agg_raw, **stage.raw_sources(m.events)})
             else:
-                ms = pb.finalize()
+                ms = self._finalize_rule(pb)
                 for m in ms:
                     self._publish(m, None, agg_raw)
             cells = [c for c in self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
@@ -504,7 +546,22 @@ class Sweep:
                                     len(ms) + consumed_matches, evaluated, {"reasons": reasons})
             pb.release_state()
         agg_raw.clear()
+        if self.budget.spent:
+            self.partial_reasons.append(f"state budget: {self.budget.spent}")
+            self.stats["state_budget"] = {"spent": self.budget.spent, "disk_bytes": self.budget.disk_used,
+                                          "disk_total": self.budget.disk_total, "reserve": self.budget.reserve}
         self.close_stage()
+
+    @staticmethod
+    def _finalize_rule(pb: Playbook) -> list[Match]:
+        """A rule's finalize; when it needs disk the stage volume cannot give, its results are not computed and its
+        window cell says so (the hunt goes on)."""
+        try:
+            return pb.finalize()
+        except StateExhausted as exc:
+            pb.note_limit("state_disk", f"finalize stopped: {exc}; this rule's whole-window results were not "
+                                        f"computed")
+            return []
 
     def close_stage(self) -> None:
         """Remove the disk stage (raw telemetry copies) and the playbooks' spills. Called by finalize and on every
