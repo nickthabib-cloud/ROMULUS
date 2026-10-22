@@ -173,12 +173,25 @@ def test_0013_backfills_snapshot_membership_and_downgrades_without_losing_snapsh
             "(hunt_id, plan, store_cut, segment_ids, coverage, status, digest) VALUES "
             "('h1', '{}', '{}', '[\"s1\"]', '{}', 'resolved', 'd')"
         )
+        conn.exec_driver_sql(
+            "INSERT INTO baseline_count "
+            "(segment_id, scope_kind, scope, key_id, key_digest, key, bucket, count, first_ts, last_ts) "
+            "VALUES ('s1', 'host', 'host:h', 'k', 'd', '{}', '2026-01-01', 1, "
+            "'2026-01-01 01:00:00', '2026-01-01 01:00:00')"
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO baseline_scope_hour (segment_id, scope_kind, scope, hour, events) "
+            "VALUES ('s1', 'host', 'host:h', '2026-01-01 01:00:00', 1)"
+        )
         command.upgrade(_alembic_config(conn), "0013")
         assert conn.exec_driver_sql(
             "SELECT hunt_id || ':' || segment_id FROM baseline_snapshot_segment"
         ).scalar_one() == "h1:s1"
+        assert conn.exec_driver_sql("SELECT count(*) FROM baseline_count").scalar_one() == 1
+        assert conn.exec_driver_sql("SELECT count(*) FROM baseline_scope_hour").scalar_one() == 1
         command.downgrade(_alembic_config(conn), "0009")
         assert conn.exec_driver_sql("SELECT segment_ids FROM baseline_snapshot").scalar_one() == '["s1"]'
+        assert conn.exec_driver_sql("SELECT count(*) FROM baseline_count").scalar_one() == 1
 
 
 def test_segment_is_insert_only_except_for_status_and_children_are_stable():

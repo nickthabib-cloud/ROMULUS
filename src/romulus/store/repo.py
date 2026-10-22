@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -919,6 +920,107 @@ class Repo:
                 t.baseline_segment.c.id == segment_id,
             ).values(status=status))
             return bool(result.rowcount)
+
+    def usable_baseline_segment_id(self, base_id: str) -> str:
+        """Return the stable usable generation for content, advancing only after revocation.
+
+        Revocation is permanent: the original id is never reactivated. A rewrite therefore gets ``-rN``;
+        retries reuse the first non-revoked generation, while another revocation advances N.
+        """
+        s = t.baseline_segment.c
+        with self.engine.connect() as c:
+            rows = list(c.execute(select(s.id, s.status).where(or_(
+                s.id == base_id, s.id.like(f"{base_id}-r%"),
+            ))).mappings())
+        if not rows:
+            return base_id
+        usable = sorted(row["id"] for row in rows if row["status"] != "revoked")
+        if usable:
+            return usable[0]
+        generations = [0]
+        for row in rows:
+            suffix = row["id"].removeprefix(f"{base_id}-r")
+            if suffix.isdigit():
+                generations.append(int(suffix))
+        return f"{base_id}-r{max(generations) + 1}"
+
+    def begin_baseline_segment(self, row: dict) -> bool:
+        """Create an invisible building segment in a short transaction."""
+        segment = _baseline_segment_row(row)
+        if segment["status"] != "building":
+            raise ValueError("a chunked baseline segment must begin with status building")
+        with write_txn(self.engine) as c:
+            existing = c.execute(select(t.baseline_segment).where(
+                t.baseline_segment.c.id == segment["id"],
+            )).mappings().first()
+            if existing is not None:
+                stored = _with_utc(existing, ("start", "end", "created_at"))
+                if any(stored[name] != segment[name] for name in _SEGMENT_IDENTITY):
+                    raise ValueError(f"baseline segment {segment['id']} exists with different content")
+                return False
+            c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
+            return True
+
+    def append_baseline_segment_rows(self, segment_id: str, counts: Iterable[dict],
+                                     scope_hours: Iterable[dict], *,
+                                     chunk_size: int = BASELINE_CHUNK) -> float:
+        """Append validated rows to a building segment, one bounded write transaction per chunk.
+
+        Returns the longest measured write-lock hold for operational verification; it is never persisted or
+        used in content identity.
+        """
+        if chunk_size < 1:
+            raise ValueError("chunk size must be positive")
+        with self.engine.connect() as c:
+            stored = c.execute(select(t.baseline_segment).where(
+                t.baseline_segment.c.id == segment_id,
+            )).mappings().first()
+        if stored is None or stored["status"] != "building":
+            raise ValueError(f"baseline segment {segment_id} is not building")
+        segment = _with_utc(stored, ("start", "end", "created_at"))
+        longest = 0.0
+        for table, rows, check in (
+                (t.baseline_count, counts, _baseline_count_row),
+                (t.baseline_scope_hour, scope_hours, _baseline_hour_row)):
+            for chunk in _chunks((check(item, segment) for item in rows), chunk_size):
+                started = time.perf_counter()
+                with write_txn(self.engine) as c:
+                    state = c.execute(select(t.baseline_segment.c.status).where(
+                        t.baseline_segment.c.id == segment_id,
+                    )).scalar_one_or_none()
+                    if state != "building":
+                        raise ValueError(f"baseline segment {segment_id} stopped building")
+                    c.execute(table.insert(), chunk)
+                longest = max(longest, time.perf_counter() - started)
+        return longest
+
+    def finalize_baseline_segment(self, segment_id: str) -> str:
+        """Digest a completed build without a write lock, then expose it in one metadata update."""
+        digest = _RowsDigest()
+        for kind, columns, rows in (
+                ("count", _COUNT_COLUMNS, self.baseline_counts(segment_id)),
+                ("hour", _HOUR_COLUMNS, self.baseline_scope_hours(segment_id))):
+            for chunk in _chunks(rows, BASELINE_PAGE):
+                digest.add(kind, columns, chunk)
+        value = digest.hexdigest()
+        with write_txn(self.engine) as c:
+            result = c.execute(t.baseline_segment.update().where(
+                t.baseline_segment.c.id == segment_id,
+                t.baseline_segment.c.status == "building",
+            ).values(rows_digest=value, status="active"))
+            if not result.rowcount:
+                raise ValueError(f"baseline segment {segment_id} is not building")
+        return value
+
+    def cleanup_baseline_building(self, *, before: datetime) -> int:
+        """Delete abandoned builds and their cascading child rows before history work resumes."""
+        before = _utc(before, "building cleanup time")
+        with write_txn(self.engine) as c:
+            result = c.execute(t.baseline_segment.delete().where(
+                t.baseline_segment.c.status == "building",
+                t.baseline_segment.c.created_at < before,
+            ))
+            return int(result.rowcount or 0)
 
     def baseline_segments(self, *, site: str | None = None, target: str | None = None,
                           spec_id: str | None = None, statuses: Iterable[str] | None = None) -> list[dict]:

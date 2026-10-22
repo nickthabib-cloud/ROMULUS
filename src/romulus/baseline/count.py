@@ -64,6 +64,14 @@ class KeyCounter:
     def token_entries(self) -> int:
         return sum(len(tokens) for tokens in self._tokens.values())
 
+    def bind_segment(self, segment_id: str) -> None:
+        """Bind staged counts to their content-derived segment id before persistence."""
+        if not segment_id:
+            raise ValueError("segment id must be non-empty")
+        self.segment_id = segment_id
+        for row in self._counts.values():
+            row["segment_id"] = segment_id
+
     def consume(self, event: TypedEvent, context: KeyContext) -> None:
         result = self.spec.keys(event, context)
         if isinstance(result, Missing):

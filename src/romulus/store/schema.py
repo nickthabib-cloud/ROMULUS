@@ -352,7 +352,7 @@ baseline_segment = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("origin IN ('lookback', 'hunt')", name="ck_baseline_segment_origin"),
     CheckConstraint("bucket IN ('day', 'hour')", name="ck_baseline_segment_bucket"),
-    CheckConstraint("status IN ('active', 'stale', 'revoked')", name="ck_baseline_segment_status"),
+    CheckConstraint("status IN ('building', 'active', 'stale', 'revoked')", name="ck_baseline_segment_status"),
     CheckConstraint("hunted IN (0, 1)", name="ck_baseline_segment_hunted"),
     CheckConstraint("events_total >= 0", name="ck_baseline_segment_events"),
 )

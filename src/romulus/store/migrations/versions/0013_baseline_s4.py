@@ -13,6 +13,19 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # SQLite follows the child CASCADE while Alembic recreates the checked parent table. Preserve child rows
+    # explicitly on this connection, then restore them after the metadata-only parent rewrite.
+    op.execute(sa.text("CREATE TEMP TABLE _baseline_count_0013 AS SELECT * FROM baseline_count"))
+    op.execute(sa.text("CREATE TEMP TABLE _baseline_scope_hour_0013 AS SELECT * FROM baseline_scope_hour"))
+    with op.batch_alter_table("baseline_segment", recreate="always") as batch:
+        batch.drop_constraint("ck_baseline_segment_status", type_="check")
+        batch.create_check_constraint(
+            "ck_baseline_segment_status", "status IN ('building', 'active', 'stale', 'revoked')",
+        )
+    op.execute(sa.text("INSERT INTO baseline_count SELECT * FROM _baseline_count_0013"))
+    op.execute(sa.text("INSERT INTO baseline_scope_hour SELECT * FROM _baseline_scope_hour_0013"))
+    op.execute(sa.text("DROP TABLE _baseline_count_0013"))
+    op.execute(sa.text("DROP TABLE _baseline_scope_hour_0013"))
     op.create_table(
         "baseline_snapshot_segment",
         sa.Column(
@@ -40,3 +53,15 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_baseline_snapshot_segment_segment", table_name="baseline_snapshot_segment")
     op.drop_table("baseline_snapshot_segment")
+    op.execute(sa.text("DELETE FROM baseline_segment WHERE status = 'building'"))
+    op.execute(sa.text("CREATE TEMP TABLE _baseline_count_0013 AS SELECT * FROM baseline_count"))
+    op.execute(sa.text("CREATE TEMP TABLE _baseline_scope_hour_0013 AS SELECT * FROM baseline_scope_hour"))
+    with op.batch_alter_table("baseline_segment", recreate="always") as batch:
+        batch.drop_constraint("ck_baseline_segment_status", type_="check")
+        batch.create_check_constraint(
+            "ck_baseline_segment_status", "status IN ('active', 'stale', 'revoked')",
+        )
+    op.execute(sa.text("INSERT INTO baseline_count SELECT * FROM _baseline_count_0013"))
+    op.execute(sa.text("INSERT INTO baseline_scope_hour SELECT * FROM _baseline_scope_hour_0013"))
+    op.execute(sa.text("DROP TABLE _baseline_count_0013"))
+    op.execute(sa.text("DROP TABLE _baseline_scope_hour_0013"))
