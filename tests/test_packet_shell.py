@@ -982,7 +982,7 @@ def test_a_retransmitted_earlier_segment_keeps_each_side_in_byte_order():
 
 def test_every_saved_document_of_a_judged_connection_is_fetched(tmp_path, monkeypatch):
     quiet = sdoc("241118-QUIETSEG0001", VICTIM, ATTACKER, cpk=1, spk=1, cb=0, sb=0, last=T0 + timedelta(minutes=30))
-    intents, packets = [], _Packets()
+    _intents, packets = [], _Packets()
     contract = _contract(**{"source.ip": "ip", "source.port": "long", "destination.ip": "ip",
                             "destination.port": "long"})
     monkeypatch.setattr(hp, "_connection_documents", lambda client, target, c, segs: ([quiet, *segs], None))
@@ -1008,7 +1008,7 @@ def test_the_connection_document_query_is_typed():
     import romulus.hunt.packets as mod
     original, mod.execute = mod.execute, execute
     try:
-        docs, error = hp._connection_documents(None, TARGET, contract, [REV_DOC])
+        _docs, error = hp._connection_documents(None, TARGET, contract, [REV_DOC])
         bad = sdoc("241118-BADIP0000001", ("10.0.0.1 || 1", 1), ATTACKER)
         assert hp._connection_documents(None, TARGET, contract, [bad])[1]
     finally:
