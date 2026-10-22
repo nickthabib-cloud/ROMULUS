@@ -53,6 +53,8 @@ BOOT_INTERVALS_AUDIT = "hunt.boot_intervals"
 # How many boot-placement items the sweep summary lists by name; the boot-interval map record holds every one.
 BOOT_LISTED = 100
 BOOT_BLIND_LISTED = 20
+# A rule-coverage cell recording that sweep-time boot placement was contradicted on some host
+BOOT_PLACEMENT_PARTITION = "boot-placement"
 
 
 def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
@@ -321,9 +323,15 @@ class Sweep:
             ranges = f"{len(conflicts)} range{'s' if len(conflicts) != 1 else ''}"
             where = f"{len(hosts)} host{'s' if len(hosts) != 1 else ''}"
             verb = "were" if len(conflicts) != 1 else "was"
-            self.partial_reasons.append(
-                f"boot placement: {ranges} on {where} placed during the sweep {verb} contradicted by records read "
-                f"later ({named}); a boot-keyed join there may have been refused (see the hunt's boot-interval map)")
+            reason = (f"boot placement: {ranges} on {where} placed during the sweep {verb} contradicted by records "
+                      f"read later ({named}); a boot-keyed join there may have been refused (see the hunt's "
+                      f"boot-interval map)")
+            self.partial_reasons.append(reason)
+            # each rule that reads boot-placed families cannot claim a complete negative over those ranges
+            for pb in self.pack:
+                if set(pb.families) & BOOT_FILL_FAMILIES:
+                    self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", BOOT_PLACEMENT_PARTITION,
+                                            "evaluated_partial", 0, 0, {"reasons": [reason]})
 
     def _event_stage(self) -> EventStage:
         stage = getattr(self, "_stage", None)
