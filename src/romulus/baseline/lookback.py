@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from romulus.baseline.carry import CarryInStore, HourParents, PendingResolver, exec_serial
+from romulus.baseline.carry import CarryInStore, HourParents, PendingResolver
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.protocol import HistorySource
-from romulus.baseline.spec import BaselineSpec, KeyContext
+from romulus.baseline.spec import BaselineSpec, KeyContext, exec_serial
 from romulus.store.db import utcnow
 from romulus.store.repo import Repo
 

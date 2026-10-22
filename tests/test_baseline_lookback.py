@@ -7,7 +7,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.baseline import CarryInStore, HistoryFetch, HistoryPartition, HistoryPlan, KeyContext
+from romulus.baseline import (
+    CarryInStore,
+    HistoryFetch,
+    HistoryPartition,
+    HistoryPlan,
+    KeyContext,
+    PendingResolver,
+)
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.lookback import LookbackBudget, LookbackWriter, segment_content_id
 from romulus.baseline.spec import SPEC_BY_ID, Pending
@@ -1000,3 +1007,56 @@ def test_the_hour_table_skips_failed_execs_and_never_answers_with_an_unknown_out
     assert _hour_parent([real, attempt], child) == {"/usr/bin/real"}
     attempt.outcome = Outcome.unknown
     assert isinstance(_hour_parent([real, attempt], child), Pending)
+
+
+def _race(at, *, serials):
+    """`sh -c 'x & exec y'` in one millisecond: sh (pid 10) forks a child, then execs cmd2 on pid 10."""
+    shell = _serial(_exec(2, at, 10, 500, "/bin/sh"), serials[0])
+    child = _serial(_exec(3, at, 11, 10, "/bin/sh"), serials[1])
+    cmd2 = _serial(_exec(4, at, 10, 500, "/usr/bin/cmd2"), serials[2])
+    return shell, child, cmd2
+
+
+def test_the_hour_table_orders_a_same_instant_child_against_its_parents_by_serial():
+    at = G_HOUR + timedelta(minutes=10)
+    shell, child, cmd2 = _race(at, serials=(5, 6, 7))
+    for parents in ([shell, cmd2], [cmd2, shell]):
+        assert _hour_parent(parents, child) == {"/bin/sh"}
+    later = _serial(_exec(5, at, 12, 10, "/bin/sh"), 8)
+    assert _hour_parent([shell, cmd2], later) == {"/usr/bin/cmd2"}
+    # Without serials the child's place among its parent's execs at that instant is unknown.
+    shell, child, cmd2 = _race(at, serials=(None, None, None))
+    assert isinstance(_hour_parent([shell, cmd2], child), Pending)
+    shell, child, cmd2 = _race(at, serials=(5, None, 7))
+    assert isinstance(_hour_parent([shell, cmd2], child), Pending)
+
+
+def test_the_hour_table_tie_with_a_missing_serial_and_differing_images_is_ambiguous_in_any_order():
+    from itertools import permutations
+
+    at = G_HOUR + timedelta(minutes=10)
+    tied = [_serial(_exec(1, at, 10, 500, "/x"), 5), _serial(_exec(2, at, 10, 500, "/x"), None),
+            _serial(_exec(4, at, 10, 500, "/y"), 7)]
+    child = _exec(3, at + timedelta(seconds=1), 11, 10, "/bin/sh")
+    for order in permutations(tied):
+        assert isinstance(_hour_parent(list(order), child), Pending)
+
+
+def test_a_same_instant_child_resolves_against_the_carry_by_serial():
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    at = G_HOUR + timedelta(minutes=10)
+    shell, _child, cmd2 = _race(at, serials=(5, 6, 7))
+    carry = CarryInStore(repo, "build", "host-index")
+    carry.observe_events([cmd2, shell])
+    carry.mark_observed(G_HOUR, H_HOUR)
+    resolver = PendingResolver(carry)
+
+    def resolve(serial):
+        pending = Pending("web01", "boot-a", 10, at, "child", "/bin/sh", serial)
+        return resolver.resolve(pending)
+
+    assert [key.key["parent_executable"] for key in resolve(6).keys] == ["/bin/sh"]
+    assert [key.key["parent_executable"] for key in resolve(8).keys] == ["/usr/bin/cmd2"]
+    unordered = resolve(None)
+    assert unordered.keys == () and unordered.reason == "an exec of the host between parent and child was not carried"

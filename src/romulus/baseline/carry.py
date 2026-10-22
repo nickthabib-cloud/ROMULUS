@@ -6,7 +6,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from romulus.baseline.spec import SPEC_BY_ID, BaselineKey, BaselineSpec, Pending, exec_pair_key
+from romulus.baseline.spec import (
+    SPEC_BY_ID,
+    BaselineKey,
+    BaselineSpec,
+    Pending,
+    exec_pair_key,
+    exec_serial,
+)
 from romulus.detect.correlation import boot_of, boots_conflict
 from romulus.evidence.typed import Outcome, TypedEvent
 from romulus.store.repo import Repo
@@ -30,24 +37,58 @@ class ParentExec:
     serial: int | None = None
 
 
-def exec_serial(event: TypedEvent) -> int | None:
-    value = event.get("audit.serial")
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def _same_instant(a_serial: int | None, b_serial: int | None) -> bool:
     """Two execs of one pid at one timestamp are only ordered when both carry distinct serials."""
     return a_serial is None or b_serial is None or a_serial == b_serial
 
 
+def _latest_image(tied: list[tuple]):
+    """One instant's generations (ts, serial, image, ...): the latest by serial, or None when unordered.
+
+    Distinct known serials order them. Without that (any serial missing, or repeated), they are one exec only
+    when every image matches; otherwise the image after that instant is unknown, whatever the input order.
+    """
+    serials = [entry[1] for entry in tied]
+    if None not in serials and len(set(serials)) == len(serials):
+        return max(tied, key=lambda entry: entry[1])
+    return tied[0] if len({entry[2] for entry in tied}) == 1 else None
+
+
+def place_child(generations: list[tuple], ts: float, serial: int | None):
+    """The generation that is a pid's image when a child is exec'd at (ts, serial), or None when unknown.
+
+    `generations` are (ts, serial, image, ...) tuples, image None when unknown. A generation at the child's
+    exact instant precedes the child only when both serials are known and its serial is lower; with either
+    serial missing the order is unknown, and the answer is None unless every such generation has the image the
+    child would otherwise get.
+    """
+    before, unsure = [], []
+    for entry in generations:
+        if entry[0] < ts or (entry[0] == ts and entry[1] is not None and serial is not None
+                             and entry[1] < serial):
+            before.append(entry)
+        elif entry[0] == ts and (entry[1] is None or serial is None):
+            unsure.append(entry)
+    answer = None
+    if before:
+        latest = max(entry[0] for entry in before)
+        answer = _latest_image([entry for entry in before if entry[0] == latest])
+        if answer is None:
+            return None
+    if unsure and (answer is None or any(entry[2] != answer[2] for entry in unsure)):
+        return None
+    return answer
+
+
 class HourParents:
     """ParentLookup over the execs of one completely fetched hour, for children in that hour.
 
-    The PID's meaning at `ts` is its latest successful exec at or before `ts`, ordered by (time, audit serial).
-    Execs of one pid at one instant without distinct serials are ambiguous when their images differ, and an exec
-    of unknown outcome or without an executable leaves the image unknown: both answer None, so the child stays
-    Pending and the carry (which records the same facts) leaves it unresolved. A failed exec never replaced the
-    image and is ignored.
+    The PID's meaning when a child is exec'd at (ts, serial) is its latest successful exec before the child,
+    ordered by (time, audit serial) (`place_child`). Execs of one pid at one instant without distinct serials
+    are ambiguous when their images differ; so is a child at its parent's exec instant without serials to order
+    them; and an exec of unknown outcome or without an executable leaves the image unknown. All of these answer
+    None, so the child stays Pending and the carry (which records the same facts) leaves it unresolved. A failed
+    exec never replaced the image and is ignored.
     """
 
     def __init__(self):
@@ -68,18 +109,11 @@ class HourParents:
         ))
 
     def lookup(self, host: str, pid: int, ts: float, boot: str | None = None):
-        before = [entry for entry in self._execs.get((host, pid), ()) if entry[0] <= ts]
-        if not before:
-            return None
-        latest = max(entry[0] for entry in before)
-        tied = [entry for entry in before if entry[0] == latest]
-        chosen = tied[0]
-        for entry in tied[1:]:
-            if not _same_instant(entry[1], chosen[1]):
-                chosen = max(chosen, entry, key=lambda item: item[1])
-            elif entry[2] != chosen[2]:
-                return None   # one instant, two images, no order between them
-        if chosen[2] is None or boots_conflict(boot, chosen[5]):
+        return self.lookup_ordered(host, pid, ts, boot, None)
+
+    def lookup_ordered(self, host: str, pid: int, ts: float, boot: str | None, serial: int | None):
+        chosen = place_child(self._execs.get((host, pid), []), ts, serial)
+        if chosen is None or chosen[2] is None or boots_conflict(boot, chosen[5]):
             return None
         return chosen[0], chosen[2], chosen[3], chosen[4], chosen[5]
 
@@ -173,16 +207,25 @@ class CarryInStore:
                 if hour is not None:
                     run_start = previous = hour
 
-    def parent(self, host: str, pid: int, ts: datetime,
-               boot: str | None = None) -> tuple[tuple | None, str | None]:
-        """The parent identity at `ts`, or None with the reason it cannot be known."""
+    def parent(self, host: str, pid: int, ts: datetime, boot: str | None = None,
+               serial: int | None = None) -> tuple[tuple | None, str | None]:
+        """The parent identity for a child exec'd at (ts, serial), or None with the reason it cannot be known."""
         if len(self.repo.baseline_parent_targets(self.hunt_id, host)) > 1:
             return None, SPANS_TARGETS
         child_hour = _hour(ts)
         child_end = child_hour + _HOUR
         # Observation must also run on to the horizon: a later hour could hold an earlier-typed exec.
         observed_end = max(child_end, self.horizon) if self.horizon is not None else child_end
-        entry = self.repo.baseline_parent_lookup(self.hunt_id, self.target, host, pid, ts.timestamp(), boot)
+        generations = [
+            (stored["exec_ts"].timestamp(), stored["serial"], stored["executable"], stored["parent_pid"],
+             stored["raw_id"], boot, stored["ambiguous"])
+            for stored in self.repo.baseline_parent_generations(self.hunt_id, self.target, host, pid, boot)
+        ]
+        at = ts.timestamp()
+        entry = place_child(generations, at, serial)
+        if entry is None and any(held[0] == at and (held[1] is None or serial is None) for held in generations):
+            # A held generation at the child's exact instant, with no order between them.
+            return None, UNCARRIED_EXEC
         if entry is None:
             # No stored generation precedes the child. An uncarried exec of the host before the child may be the
             # parent. Only when observation runs unbroken from the start of this target's ledger through the
@@ -197,15 +240,19 @@ class CarryInStore:
         exec_hour = _hour(datetime.fromtimestamp(entry[0], UTC))
         if not self.repo.baseline_parent_observed_covers(self.hunt_id, self.target, exec_hour, observed_end):
             return None, UNOBSERVED_HOUR
-        if entry[5] or self.repo.baseline_parent_break_overlaps(
+        if entry[6] or self.repo.baseline_parent_break_overlaps(
                 self.hunt_id, self.target, host, exec_hour, child_end):
             # An ambiguous generation (two images at one instant, unordered) is an uncarried exec too.
             return None, UNCARRIED_EXEC
-        return entry[:5], None
+        return (entry[0], entry[2], entry[3], entry[4], entry[5]), None
 
     def lookup(self, host: str, pid: int, ts: float, boot: str | None = None) -> tuple | None:
         """ParentLookup: the continuity-checked parent identity, else None."""
-        return self.parent(host, pid, datetime.fromtimestamp(ts, UTC), boot)[0]
+        return self.lookup_ordered(host, pid, ts, boot, None)
+
+    def lookup_ordered(self, host: str, pid: int, ts: float, boot: str | None,
+                       serial: int | None) -> tuple | None:
+        return self.parent(host, pid, datetime.fromtimestamp(ts, UTC), boot, serial)[0]
 
     def _marker(self, host: str) -> tuple[str, datetime] | None:
         key = (self.target, host)
@@ -354,7 +401,8 @@ class PendingResolver:
         if pending.ppid in (1, 2):
             return PendingResolution(pending.event_id, (), "parent pid 1/2 out of scope")
         if isinstance(self.parents, CarryInStore):
-            parent, reason = self.parents.parent(pending.host, pending.ppid, pending.ts, pending.boot)
+            parent, reason = self.parents.parent(
+                pending.host, pending.ppid, pending.ts, pending.boot, pending.serial)
         else:
             parent = self.parents.lookup(pending.host, pending.ppid, pending.ts.timestamp(), pending.boot)
             reason = None

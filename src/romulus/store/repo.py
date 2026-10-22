@@ -2117,12 +2117,11 @@ class Repo:
             with write_txn(self.engine) as c:
                 c.execute(stmt, chunk)
 
-    def baseline_parent_lookup(self, hunt_id: str, target: str, host: str, pid: int, ts: float,
-                               boot: str | None) -> tuple | None:
-        """The latest stored generation of `pid` at or before `ts`; continuity is the caller's check."""
+    def baseline_parent_generations(self, hunt_id: str, target: str, host: str, pid: int,
+                                    boot: str | None) -> list[dict]:
+        """The stored generations of `pid` (at most two, newest first); choosing one is the caller's job."""
         if isinstance(pid, bool) or not isinstance(pid, int) or pid < 0:
-            return None
-        at = datetime.fromtimestamp(ts, UTC)
+            return []
         table = t.baseline_parent_carry.c
         with self.engine.connect() as c:
             row = c.execute(select(t.baseline_parent_carry).where(
@@ -2130,19 +2129,16 @@ class Repo:
                 table.boot == (boot or ""), table.pid == pid,
             )).mappings().first()
         if row is None:
-            return None
-        # The sixth element says whether the generation is ambiguous (two images at one unordered instant).
-        exec_ts = _stored_utc(row["exec_ts"])
-        if exec_ts <= at and row["executable"]:
-            return (exec_ts.timestamp(), row["executable"], row["parent_pid"], row["raw_id"], boot,
-                    bool(row["ambiguous"]))
-        if row["previous_exec_ts"] is None or not row["previous_executable"]:
-            return None
-        previous_ts = _stored_utc(row["previous_exec_ts"])
-        if previous_ts > at:
-            return None
-        return (previous_ts.timestamp(), row["previous_executable"], row["previous_parent_pid"],
-                row["previous_raw_id"], boot, bool(row["previous_ambiguous"]))
+            return []
+        out = [{"exec_ts": _stored_utc(row["exec_ts"]), "serial": row["serial"], "executable": row["executable"],
+                "parent_pid": row["parent_pid"], "raw_id": row["raw_id"], "ambiguous": bool(row["ambiguous"])}]
+        if row["previous_exec_ts"] is not None and row["previous_executable"]:
+            out.append({
+                "exec_ts": _stored_utc(row["previous_exec_ts"]), "serial": row["previous_serial"],
+                "executable": row["previous_executable"], "parent_pid": row["previous_parent_pid"],
+                "raw_id": row["previous_raw_id"], "ambiguous": bool(row["previous_ambiguous"]),
+            })
+        return out
 
     def baseline_parent_count(self, hunt_id: str) -> int:
         with self.engine.connect() as c:
