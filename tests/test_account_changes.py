@@ -280,6 +280,38 @@ def test_a_login_sessions_change_at_boot_is_not_grouped_as_boot_time():
     assert all("Boot-time provisioning" not in m.claim for m in out)
 
 
+def test_a_daemons_shell_running_an_account_tool_at_boot_is_not_grouped_as_boot_time():
+    # the exec lineage is recorded (an unrecognised daemon, then a shell, then the tool): never the boot group
+    daemon = ex(["/opt/agentd/agentd"], exe="/opt/agentd/agentd", pid=700, ppid=1, ts=T0 + timedelta(seconds=20))
+    shell = ex(["sh", "-c", "useradd helper"], exe="/usr/bin/dash", pid=701, ppid=700, ts=T0 + timedelta(seconds=30))
+    tool = ex(["useradd", "helper"], pid=702, ppid=701, ts=T0 + timedelta(seconds=30, milliseconds=5))
+    rec = record("ADD_USER", "create_user", ts=T0 + timedelta(seconds=30, milliseconds=40), pid=702,
+                 account__name="helper", account__op="add-user", process__executable="/usr/sbin/useradd")
+    out = run([boot(), daemon, shell, tool, rec])[1]
+    assert [m.group_key.split("|")[0] for m in out] == ["actor"] and "Boot-time" not in out[0].claim
+    # a record whose own exec was retrieved (even with no recognised ancestry) is not grouped either
+    out = run([boot(), ex(["chpasswd"], pid=900, ppid=1, ts=T0 + timedelta(seconds=39)), *first_boot_passwords()])[1]
+    assert sorted(m.group_key.split("|")[0] for m in out) == ["actor", "boot"]
+
+
+@pytest.mark.parametrize("before,grouped", [(840, False), (121, False), (119, True)])
+def test_only_a_short_skew_before_the_boot_record_is_accepted(before, grouped):
+    recs = first_boot_passwords(start=T0 - timedelta(seconds=before), accounts=("ops",))
+    out = run([boot(), *recs])[1]
+    assert [m.group_key.split("|")[0] for m in out] == (["boot"] if grouped else ["actor"])
+
+
+def test_a_large_boot_group_cites_every_distinct_change_and_notes_every_detail():
+    accounts = tuple(f"user{i:02d}" for i in range(13))
+    recs = first_boot_passwords(accounts=accounts)
+    recs += first_boot_passwords(start=T0 + timedelta(seconds=90), accounts=("user00",))    # a repeat of one change
+    [m] = run([boot(), *recs])[1]
+    assert "14 account or group change(s)" in m.claim and "and 7 more (every change is in the notes)" in m.claim
+    cited = [e for e in m.events if e.family == "account_change"]
+    assert sorted(e.get("account.name") for e in cited) == sorted(accounts)
+    assert {f"change: a password was changed (account '{a}')" for a in accounts} <= set(m.notes)
+
+
 def test_privileged_or_web_changes_at_boot_are_never_grouped_away():
     uid0 = ex(["useradd", "-o", "-u", "0", "-m", "backdoor"], pid=950, ts=T0 + timedelta(seconds=50))
     web_shell = ex(["sh", "-c", "sudo useradd helper"], exe="/usr/bin/dash", uid="33", pid=960, ppid=959,
