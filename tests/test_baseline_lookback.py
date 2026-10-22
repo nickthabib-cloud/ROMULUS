@@ -775,3 +775,16 @@ def test_event_stamped_outside_its_retrieval_hour_counts_in_that_hour_and_never_
     again = Skewed()
     _writer(repo, again).fill(hunt_id="build", targets=["host"], start=hour, end=START)
     assert again.plans == []
+
+
+def test_an_hour_inside_a_multi_hour_segment_is_covered():
+    repo, source = _repo(), FakeHistory()
+    row = _writer(repo, source).segment_row(
+        hunt_id="hunt", target="host", spec=SPEC, start=START - timedelta(hours=3), end=START, events_total=0,
+    )
+    assert repo.save_baseline_segment({**row, "status": "active"}, [], [])
+    result = _writer(repo, source).fill(
+        hunt_id="build", targets=["host"], start=START - timedelta(hours=4), end=START,
+    )
+    assert source.plans == [("host", START - timedelta(hours=4))]
+    assert result.gaps == ()

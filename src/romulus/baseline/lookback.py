@@ -114,10 +114,11 @@ class LookbackWriter:
         }
 
     def _covered(self, target: str, spec: BaselineSpec, start: datetime, end: datetime) -> bool:
-        return bool(self.repo.baseline_segments_for_cover(
+        """An hour is covered by any active segment containing it, hourly or wider."""
+        return self.repo.baseline_segment_covers(
             site=self.site, target=target, spec_id=spec.id, spec_version=spec.version,
             key_version=spec.key_version, start=start, end=end,
-        ))
+        )
 
     def fill(self, *, hunt_id: str, targets: list[str], start: datetime, end: datetime) -> LookbackResult:
         start, end = start.astimezone(UTC), end.astimezone(UTC)

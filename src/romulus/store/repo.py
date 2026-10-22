@@ -1886,6 +1886,19 @@ class Repo:
         with self.engine.connect() as c:
             return [_with_utc(item, ("start", "end", "created_at")) for item in c.execute(query).mappings()]
 
+    def baseline_segment_covers(self, *, site: str, target: str, spec_id: str, spec_version: str,
+                                key_version: str, start: datetime, end: datetime) -> bool:
+        """Whether one active segment of the spec's versions contains [start, end), whatever its width."""
+        start, end = _utc(start, "cover start"), _utc(end, "cover end")
+        s = t.baseline_segment.c
+        query = select(s.id).where(
+            s.site == site, s.target == target, s.spec_id == spec_id,
+            s.spec_version == spec_version, s.key_version == key_version,
+            s.status == "active", s.start <= start, s.end >= end,
+        ).limit(1)
+        with self.engine.connect() as c:
+            return c.execute(query).first() is not None
+
     def _keyset(self, table, where, order: tuple[str, ...], times: tuple[str, ...], page_size: int) -> Iterator[dict]:
         """Rows in `order` (a unique key), one page per short-lived read: nothing holds a cursor open."""
         if page_size < 1:
