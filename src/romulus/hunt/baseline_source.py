@@ -18,13 +18,23 @@ MAX_HISTORY_PARTITIONS = 10_000
 
 
 class HuntHistorySource:
-    """Exact source adapter shared with sweep planning and normalization."""
+    """Exact source adapter shared with sweep planning and normalization.
+
+    Boot placement uses one boot-interval map per planned hour, never one map across the lookback. History is
+    read newest-first and a segment is written as soon as its hour completes, so a map shared across hours
+    would let an older hour's records re-place (or refuse) boots already placed in a newer hour whose segment
+    is written. With a map per hour, an event's boot rests only on records of its own hour; an event the hour
+    cannot place keeps an unknown boot (never guessed). When a later partition of the same hour refuses a
+    placement made from an earlier one (a sweep conflict), the hour's fetch is partial, so no segment is built
+    from the hour.
+    """
 
     def __init__(self, client, contracts: dict[str, FieldContract], *,
-                 boots: BootIntervals | None = None,
+                 boots: Callable[[], BootIntervals] = BootIntervals,
                  clock: Callable[[], float] = time.monotonic):
         self.client, self.contracts = client, contracts
-        self.boots = boots or BootIntervals()
+        self._new_boots = boots
+        self.boots = boots()
         self.clock = clock
 
     @staticmethod
@@ -33,6 +43,8 @@ class HuntHistorySource:
                 if "host" in target else [])
 
     def plan(self, target: str, start: datetime, end: datetime, *, query_budget: int) -> HistoryPlan:
+        # Every hour is planned before its partitions are fetched: start this hour's boot map.
+        self.boots = self._new_boots()
         contract, filters = self.contracts[target], self._filters(target)
         planned: list[HistoryPartition] = []
         queries = 0
@@ -111,8 +123,11 @@ class HuntHistorySource:
             reasons.append(f"normalization_errors={len(errors)}")
         if unsupported:
             reasons.append(f"unsupported_records={unsupported}")
+        conflicted = sorted(self.boots.conflicts)
+        if conflicted:
+            reasons.append(f"boot placement conflict on {len(conflicted)} host(s): {', '.join(conflicted[:5])}")
         if (outcome.completeness != Completeness.complete or outcome.total_relation != "eq"
-                or outcome.returned != partition.expected_records or errors or unsupported):
+                or outcome.returned != partition.expected_records or errors or unsupported or conflicted):
             if outcome.returned != partition.expected_records:
                 reasons.append(
                     f"exact-count mismatch: planned {partition.expected_records}, received {outcome.returned}",

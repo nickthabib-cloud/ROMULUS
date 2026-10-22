@@ -101,3 +101,37 @@ def test_adapter_turns_normalization_errors_and_unsupported_records_partial(monk
     assert fetched.completeness == "partial"
     assert "normalization_errors=1" in fetched.reasons
     assert "unsupported_records=1" in fetched.reasons
+
+
+def _complete_outcome(records=2):
+    return SimpleNamespace(
+        completeness=Completeness.complete, reasons=[], error=None, total=records,
+        total_relation="eq", returned=records, records=[{"_id": str(index)} for index in range(records)],
+    )
+
+
+def test_boot_conflict_in_an_hour_makes_the_hour_partial_and_the_map_is_per_hour(monkeypatch):
+    monkeypatch.setattr(module, "plan_partitions", lambda client, target, contract, window, filters: [
+        (window, 2)])
+    monkeypatch.setattr(module, "execute", lambda *_args, **_kwargs: _complete_outcome())
+    maps = []
+
+    def normalize(records, boots):
+        maps.append(boots)
+        if len(maps) == 1:
+            # A later record of the same hour refused a placement made from an earlier one.
+            boots.conflicts.setdefault("web01", []).append(("boot-a", 0, 1))
+        return ["event"], {}, []
+
+    monkeypatch.setattr(module, "normalize_hits", normalize)
+    source = HuntHistorySource("client", {"host-index": "contract"})
+    newest = source.plan("host-index", START + timedelta(hours=1), START + timedelta(hours=2), query_budget=5)
+    fetched = source.fetch(newest.partitions[0])
+    assert fetched.completeness == "partial"
+    assert any("boot placement conflict" in reason and "web01" in reason for reason in fetched.reasons)
+
+    # The next (older) hour gets its own map: its records can never re-place events of the hour above,
+    # whose segment may already be written.
+    older = source.plan("host-index", START, START + timedelta(hours=1), query_budget=5)
+    assert source.fetch(older.partitions[0]).completeness == "complete"
+    assert maps[0] is not maps[1] and not maps[1].conflicts
