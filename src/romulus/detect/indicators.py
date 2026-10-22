@@ -194,7 +194,11 @@ class IndicatorMatch(Playbook):
     # ---- matching ---------------------------------------------------------------------------------
     def _keep(self, key: tuple, e: TypedEvent, meta: dict) -> None:
         self.counts[key] += 1
-        self.meta.setdefault(key, meta)
+        stored_meta = self.meta.setdefault(key, {**meta, "os_families": set()})
+        stored_meta["os_families"].add(
+            "windows" if e.get("host.os.family") == "windows"
+            or e.normalizer.startswith("windows-") else "linux"
+        )
         if len(self.groups[key]) < EXAMPLE_LIMIT:
             self.groups[key].append(e)
 
@@ -316,11 +320,7 @@ class IndicatorMatch(Playbook):
             e0 = evs[0]
             span = f"{evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}"
             listed = f"indicator {ind.id} ({ind.label}, list {ind.source})"
-            operating_systems = {
-                "windows" if event.get("host.os.family") == "windows"
-                or event.normalizer.startswith("windows-") else "linux"
-                for event in evs
-            }
+            operating_systems = meta["os_families"]
             process_record = ("Windows process-creation" if operating_systems == {"windows"} else
                               "auditd exec" if operating_systems == {"linux"} else "process-execution")
             executable_source = ("kernel-recorded executable" if operating_systems == {"linux"}

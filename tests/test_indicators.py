@@ -116,6 +116,17 @@ def test_mixed_os_program_group_uses_os_neutral_record_wording(rule):
     assert "auditd" not in match.claim and "Windows process-creation" not in match.claim
 
 
+def test_mixed_os_wording_tracks_matches_beyond_the_retained_example_limit(rule):
+    linux = [exec_event([], "/tmp/linpeas", f"linux-{number}", host="shared") for number in range(20)]
+    windows = exec_event([], r"C:\Tools\linpeas", "windows-late", host="shared")
+    windows.fields["host.os.family"] = fv("windows", "fixture:os")
+
+    [match] = run(rule, *linux, windows)
+
+    assert match.claim.startswith("21 process-execution record(s)")
+    assert len(match.events) == 20
+
+
 # ---- network indicators ------------------------------------------------------------------------
 
 def test_address_and_range_match_typed_address_fields(rule):
