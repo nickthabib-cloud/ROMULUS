@@ -319,7 +319,7 @@ def test_a_failed_check_leaves_no_complete_direction_negative_and_never_stops_th
 
 
 def test_a_confirmed_definition_leaves_the_negatives_complete(tmp_path, monkeypatch):
-    repo, result, summary = _run(tmp_path, monkeypatch, FakeES({HOST: ["198.51.100.10", "10.0.0.5"]}), **SITE)
+    repo, _result, summary = _run(tmp_path, monkeypatch, FakeES({HOST: ["198.51.100.10", "10.0.0.5"]}), **SITE)
     assert _windows(repo)["net.long_external_connection"]["state"] == "no_match_complete"
     assert summary["complete"] and summary["internal_networks"]["outside"] == 0
 

@@ -111,6 +111,13 @@ class _CertificateRule(Playbook):
         does not match, None when a field the judgement needs is missing."""
         raise NotImplementedError
 
+    @staticmethod
+    def skipped_for_direction(e: TypedEvent) -> bool:
+        """A first TLS record between two routable addresses that is not outbound: skipped for its direction alone."""
+        return (outbound(e) is False and e.get("arkime.continuation") is not True
+                and routable_remote(canon_ip(e.get("source.ip")))
+                and routable_remote(canon_ip(e.get("destination.ip"))))
+
     def consume(self, events):
         for e in self.applicable([e for e in events if e.id not in self._seen]):
             self._seen.add(e.id)               # a record read twice (split partitions) is judged once
@@ -125,8 +132,8 @@ class _CertificateRule(Playbook):
             if e.get("arkime.continuation") is True:
                 continue                        # a later Arkime record: the first holds the handshake
             if not direction:
-                if routable_remote(canon_ip(e.get("source.ip"))) and routable_remote(canon_ip(e.get("destination.ip"))):
-                    assume_direction(self)      # skipped for its direction alone
+                if self.skipped_for_direction(e):
+                    assume_direction(self)
                 continue                        # not outbound
             certs = e.get("tls.server.certificates")
             candidates = [c for c in certs if not c.get("issues_other")] if isinstance(certs, list) else []

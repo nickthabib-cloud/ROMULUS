@@ -65,7 +65,7 @@ def _recent_window(client, target: str, contract: FieldContract) -> dict | None:
     newest = ((d.get("aggregations") or {}).get("newest") or {}).get("value_as_string")
     if not newest:
         return None
-    end = datetime.fromisoformat(newest.replace("Z", "+00:00"))
+    end = datetime.fromisoformat(newest)
     return {"range": {contract.time_field: {"gte": (end - DOCTOR_LOOKBACK).isoformat(), "lte": end.isoformat()}}}
 
 

@@ -168,8 +168,9 @@ class ExpansionEngine:
                 victims.append((ip, host, reason))      # host records claim the address: it is the site's
             elif NO_HOST_RECORD not in (reason or ""):
                 unresolved.append(reason or f"victim host unknown for {ip}")
-        notes = ([f"endpoints outside the default internal ranges not resolved to a site host "
-                  f"({'; '.join(unresolved)}); {DIRECTION_ASSUMED_REASON}"] if unresolved else [])
+        note = (f"endpoints outside the default internal ranges not resolved to a site host "
+                f"({'; '.join(unresolved)}); {DIRECTION_ASSUMED_REASON}")
+        notes = [note] if unresolved else []
         out = [variant.model_copy(update={"host": host, "victim_ip": ip, "host_reason": reason})
                for variant in variants for ip, host, reason in victims]
         if not out:

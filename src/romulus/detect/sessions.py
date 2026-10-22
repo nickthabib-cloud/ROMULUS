@@ -149,10 +149,14 @@ class LongExternalConnection(_Stitched):
         "lanes": "lead; severity medium: a long connection is a channel, not an impact",
     }
 
+    @staticmethod
+    def skipped_for_direction(e: TypedEvent) -> bool:
+        """A TCP record between two routable addresses on the same side: skipped for its direction alone."""
+        return (e.get("network.transport") == "tcp" and _both_routable(e)
+                and _public(e.get("source.ip")) == _public(e.get("destination.ip")))
+
     def observe(self, e, conn):
-        # a TCP record between two routable addresses on the same side is skipped for its direction alone
-        if e.get("network.transport") == "tcp" and _both_routable(e) \
-                and _public(e.get("source.ip")) == _public(e.get("destination.ip")):
+        if self.skipped_for_direction(e):
             assume_direction(self)
 
     def finalize(self):
@@ -213,9 +217,13 @@ class Beaconing(_Stitched):
                  "design; severity medium",
     }
 
+    @staticmethod
+    def skipped_for_direction(e: TypedEvent) -> bool:
+        """Only internal-to-public series are judged: any other routable pair is skipped for its direction alone."""
+        return _both_routable(e) and not (_public(e.get("destination.ip")) and not _public(e.get("source.ip")))
+
     def observe(self, e, conn):
-        # only internal-to-public series are judged: any other routable pair is skipped for its direction alone
-        if _both_routable(e) and not (_public(e.get("destination.ip")) and not _public(e.get("source.ip"))):
+        if self.skipped_for_direction(e):
             assume_direction(self)
 
     def finalize(self):
@@ -315,10 +323,22 @@ class RareClientFingerprint(_Stitched):
             self.observe(e, None)
         return []
 
+    @staticmethod
+    def _judged(e: TypedEvent) -> bool:
+        """An internal source to a public destination: the only direction this rule reads."""
+        return (_public(e.get("destination.ip")) and not _public(e.get("source.ip"))
+                and canon_ip(e.get("source.ip")) is not None)
+
+    @classmethod
+    def skipped_for_direction(cls, e: TypedEvent) -> bool:
+        """A fingerprinted record between two routable addresses that is not internal-to-public."""
+        return (not cls._judged(e) and _both_routable(e)
+                and any(e.has(field) for _kind, field, _label in cls.KINDS))
+
     def observe(self, e, conn):
-        if not _public(e.get("destination.ip")) or _public(e.get("source.ip")) or canon_ip(e.get("source.ip")) is None:
-            if _both_routable(e) and any(e.has(field) for _kind, field, _label in self.KINDS):
-                assume_direction(self)              # a fingerprint skipped for its direction alone
+        if not self._judged(e):
+            if self.skipped_for_direction(e):
+                assume_direction(self)
             return
         for kind, field, _label in self.KINDS:
             value = e.get(field)
