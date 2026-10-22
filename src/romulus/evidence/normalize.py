@@ -212,6 +212,138 @@ def normalize_audit_auth_group(host: str, members: list[tuple[dict, AuditRecord]
     )
 
 
+# Account and group management records that shadow-utils, PAM and the adduser family write through libaudit. The
+# record type is the action the tool reports; `op` (when it is one clean token) is the tool's own detail.
+AUDIT_ACCOUNT_TYPES = {"ADD_USER": "create_user", "DEL_USER": "delete_user", "ADD_GROUP": "create_group",
+                       "DEL_GROUP": "delete_group", "USER_MGMT": "modify_user", "GRP_MGMT": "modify_group",
+                       "USER_CHAUTHTOK": "password_change", "GRP_CHAUTHTOK": "group_password_change",
+                       "ACCT_LOCK": "lock", "ACCT_UNLOCK": "unlock"}
+# The service manager's unit records, and the system state records systemd-update-utmp writes.
+AUDIT_SERVICE_TYPES = {"SERVICE_START": "start", "SERVICE_STOP": "stop"}
+AUDIT_SYSTEM_TYPES = {"SYSTEM_BOOT": "boot", "SYSTEM_SHUTDOWN": "shutdown", "SYSTEM_RUNLEVEL": "runlevel"}
+AUDIT_ADMIN_TYPES = set(AUDIT_ACCOUNT_TYPES) | set(AUDIT_SERVICE_TYPES) | set(AUDIT_SYSTEM_TYPES) | {"CONFIG_CHANGE"}
+ADMIN_COMPANIONS = {"SYSCALL", "PROCTITLE"}
+# Kernel audit settings a CONFIG_CHANGE `op=set` record (or an older record without op) names.
+AUDIT_SETTINGS = ("audit_enabled", "audit_pid", "audit_failure", "audit_rate_limit", "audit_backlog_limit",
+                  "audit_backlog_wait_time", "audit_lost")
+_PLACEHOLDERS = {None, "", "?", "(null)", "(none)", "unset", "(unknown)"}
+
+
+def _user_message_field(record: AuditRecord, key: str) -> str | None:
+    """A field of the quoted user message (`msg='key=value ...'`). The tokenizer reads its first pair as `msg`
+    with the opening quote and its last value with the closing quote; both are recovered here."""
+    opener = record.fields.get("msg", "")
+    value = opener[len(key) + 2:] if opener.startswith(f"'{key}=") else record.fields.get(key)
+    value = value.strip("'") if isinstance(value, str) else value
+    return None if value in _PLACEHOLDERS else value
+
+
+def _record_outcome(record: AuditRecord) -> Outcome:
+    result = (_user_message_field(record, "res") or "").strip("'\"").lower()
+    return (Outcome.success if result in {"success", "yes", "1"}
+            else Outcome.failure if result in {"failed", "failure", "no", "0"} else Outcome.unknown)
+
+
+def _header_process_fields(origin: str, record: AuditRecord) -> dict:
+    """Actor identity from a user-space record's own header and enrichment (absent stays absent)."""
+    fields = {}
+    pid = record.fields.get("pid")
+    if pid and pid.isdigit():
+        fields["process.pid"] = fv(int(pid), f"{origin}.pid")
+    if "uid" in record.fields:
+        fields["process.uid"] = fv(record.fields["uid"], f"{origin}.uid")
+    auid = record.fields.get("auid")
+    if auid not in {None, "", "-1", "4294967295"}:
+        fields["process.auid"] = fv(auid, f"{origin}.auid")
+    session_id = record.fields.get("ses")
+    if session_id and session_id.isdigit() and session_id != "4294967295":
+        fields["process.session_id"] = fv(int(session_id), f"{origin}.ses")
+    for name, key in (("process.user", "UID"), ("process.login_user", "AUID")):
+        if record.enriched.get(key) not in _PLACEHOLDERS:
+            fields[name] = fv(record.enriched[key], f"{origin}:enriched.{key}")
+    executable = _user_message_field(record, "exe")
+    if executable:
+        fields["process.executable"] = fv(executable, f"{origin}.exe")
+    return fields
+
+
+def service_name(unit: str) -> str:
+    """A unit's service name for matching: lower case, without the unit type suffix or template instance."""
+    name = unit.lower()
+    for suffix in (".service", ".socket"):
+        name = name.removesuffix(suffix)
+    return name.split("@", 1)[0]
+
+
+def normalize_audit_admin_group(host: str, members: list[tuple[dict, AuditRecord]]) -> list[TypedEvent]:
+    """One typed event per account, service, system-state or audit-configuration record of a group. A SYSCALL
+    record of the same group (the netlink send that carried a configuration change) adds the sender's identity."""
+    companions = [(hit, record) for hit, record in members if record.type in ADMIN_COMPANIONS]
+    syscall = next(((hit, record) for hit, record in companions if record.type == "SYSCALL"), None)
+    out = []
+    for hit, record in sorted(((h, r) for h, r in members if r.type in AUDIT_ADMIN_TYPES),
+                              key=lambda item: item[0]["_id"]):
+        origin = f"{hit['_id']}:event.original#auditd:{record.type}"
+        refs = [_ref(hit)] + [_ref(item_hit) for item_hit, _record in companions]
+        fields = {"audit.record_type": fv(record.type, f"{origin}.type"), **_audit_boot_field(members)}
+        fields.update(_header_process_fields(origin, record))
+        outcome = _record_outcome(record)
+        if record.type in AUDIT_ACCOUNT_TYPES:
+            family = "account_change"
+            fields["account.action"] = fv(AUDIT_ACCOUNT_TYPES[record.type], f"{origin}.type")
+            op = _user_message_field(record, "op")
+            if op and " " not in op:
+                fields["account.op"] = fv(op, f"{origin}.op")
+            for name, key in (("account.name", "acct"), ("account.id", "id"), ("account.group", "grp")):
+                value = _user_message_field(record, key)
+                if value:
+                    fields[name] = fv(value, f"{origin}.{key}")
+            address = _user_message_field(record, "addr")
+            if address:
+                fields["source.ip"] = fv(address, f"{origin}.addr")
+        elif record.type in AUDIT_SERVICE_TYPES:
+            family = "service_change"
+            unit = _user_message_field(record, "unit")
+            if not unit:
+                raise ValueError(f"{record.type} record without a unit")
+            fields.update({"service.unit": fv(unit, f"{origin}.unit"),
+                           "service.name": fv(service_name(unit), f"{origin}.unit"),
+                           "service.job": fv(AUDIT_SERVICE_TYPES[record.type], f"{origin}.type"),
+                           "service.job_phase": fv("done", f"{origin}.type"),
+                           "service.scope": fv("system", f"{origin}.type"),
+                           "service.source": fv("audit", f"{origin}.type")})
+        elif record.type in AUDIT_SYSTEM_TYPES:
+            family = "system_state"
+            fields["system.event"] = fv(AUDIT_SYSTEM_TYPES[record.type], f"{origin}.type")
+            for name, key in (("system.runlevel", "new-level"), ("system.previous_runlevel", "old-level")):
+                value = _user_message_field(record, key)
+                if value:
+                    fields[name] = fv(value, f"{origin}.{key}")
+        else:
+            family = "audit_config"
+            setting = next((key for key in AUDIT_SETTINGS if key in record.fields), None)
+            op = (record.fields.get("op") or "").strip("'\"") or ("set" if setting else "")
+            if not op:
+                raise ValueError("CONFIG_CHANGE record names neither an operation nor a setting")
+            fields["audit.config.op"] = fv(op, f"{origin}.op")
+            if setting:
+                fields["audit.config.setting"] = fv(setting, f"{origin}.{setting}")
+                fields["audit.config.value"] = fv(record.fields[setting], f"{origin}.{setting}")
+                if "old" in record.fields:
+                    # numeric: the parser's hex decoding of `old` (meant for other record types) must not apply
+                    fields["audit.config.old"] = fv(record.raw_fields["old"][0], f"{origin}.old")
+            if record.fields.get("key") not in _PLACEHOLDERS:
+                fields["audit.key"] = fv(record.fields["key"], f"{origin}.key")
+            if record.fields.get("list", "").isdigit():
+                fields["audit.config.list"] = fv(record.fields["list"], f"{origin}.list")
+            if syscall is not None:
+                fields.update(_syscall_process_fields(syscall[0]["_id"], syscall[1]))
+        out.append(TypedEvent(id=event_id(family, refs), family=family, ts=datetime.fromtimestamp(record.ts, UTC),
+                              host=host or None, outcome=outcome, fields=fields, raw=refs,
+                              normalizer=NORMALIZER_VERSION))
+    return out
+
+
 def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], syscall: str) -> TypedEvent:
     """One net_socket event from a socket SYSCALL plus its SOCKADDR. connect() records the remote
     endpoint, accept() the peer, bind() the local address. A non-blocking connect that returns
@@ -553,9 +685,37 @@ def normalize_file_group(host: str, members: list[tuple[dict, AuditRecord]], cal
 
 _SSH_OK = re.compile(r"^Accepted (?P<method>password|publickey|keyboard-interactive/pam|gssapi-with-mic) for "
                      r"(?P<user>\S+) from (?P<ip>[0-9a-fA-F:.]+) port (?P<port>\d+)")
-_SSH_FAIL = re.compile(r"^Failed (?P<method>password|publickey|none) for (?:invalid user )?(?P<user>\S+) from "
-                       r"(?P<ip>[0-9a-fA-F:.]+) port (?P<port>\d+)")
-_SSH_INVALID = re.compile(r"^Invalid user (?P<user>\S+) from (?P<ip>[0-9a-fA-F:.]+)")
+# sshd prints an attempted account name verbatim, so the name is matched greedily and the source is the last
+# "from <ip> port <n>" before the fixed suffix: a name such as "x from 192.0.2.1 port 1" cannot move the source.
+_SSH_FAIL = re.compile(r"^Failed (?P<method>[\w/-]+) for (?P<invalid>invalid user )?(?P<user>.*) from "
+                       r"(?P<ip>[0-9a-fA-F:.]+) port (?P<port>\d+)(?: ssh2)?(?:: .*)?$")
+_SSH_INVALID = re.compile(r"^Invalid user (?P<user>.*) from (?P<ip>[0-9a-fA-F:.]+)(?: port (?P<port>\d+))?$")
+_SSH_PREAUTH = re.compile(r"^(?:Connection closed by|Disconnected from) (?P<kind>authenticating|invalid) user "
+                          r"(?P<user>.*) (?P<ip>[0-9a-fA-F:.]+) port (?P<port>\d+) \[preauth\]$")
+_SSH_MAXTRIES = re.compile(r"^(?:error: )?maximum authentication attempts exceeded for (?P<invalid>invalid user )?"
+                           r"(?P<user>.*) from (?P<ip>[0-9a-fA-F:.]+) port (?P<port>\d+)(?: ssh2)? \[preauth\]$")
+# (pattern, outcome, phase). An attempt's phase: an authentication decision ("Accepted"/"Failed"), a lookup of an
+# account name that does not exist, a connection closed before authentication completed, or sshd ending a
+# connection that used up its authentication attempts.
+_SSH_FORMS = ((_SSH_OK, Outcome.success, "authentication"), (_SSH_FAIL, Outcome.failure, "authentication"),
+              (_SSH_INVALID, Outcome.failure, "user_lookup"), (_SSH_PREAUTH, Outcome.failure, "preauth_disconnect"),
+              (_SSH_MAXTRIES, Outcome.failure, "max_attempts"))
+# systemd catalog message ids of unit job messages: (job type, phase).
+_UNIT_JOB_IDS = {"9d1aaa27d60140bd96365438aad20286": ("stop", "done"),
+                 "de5b426a63be47a7b6ac3eaac82e2f6f": ("stop", "begun"),
+                 "39f53479d3a045ac8e11786248231fbf": ("start", "done"),
+                 "7d4958e842da4a758f6c1cdc7b36dcc5": ("start", "begun")}
+# Newer systemd names the unit in the message ("Stopped auditd.service - Security Auditing Service.").
+_UNIT_JOB_TEXT = re.compile(r"^(?P<verb>Stopped|Stopping|Started|Starting|Reached target|Stopped target) "
+                            r"(?P<unit>[\w@:.\\-]+\.(?:service|socket|target|timer|path|mount|scope|slice))"
+                            r"(?: - .*|\.\.\.|\.)?$")
+_UNIT_EXIT = re.compile(r"^(?P<unit>[\w@:.\\-]+): (?:Main process exited, code=(?P<code>killed|dumped), "
+                        r"status=\S+|Failed with result '(?P<result>signal|core-dump)')\.?$")
+# Process names sshd runs as (OpenSSH 9.8 splits per-session work into sshd-session and sshd-auth).
+_SSHD_COMMS = ("sshd",)
+_UNIT_JOB_VERBS = {"Stopped": ("stop", "done"), "Stopping": ("stop", "begun"), "Started": ("start", "done"),
+                   "Starting": ("start", "begun"), "Reached target": ("start", "done"),
+                   "Stopped target": ("stop", "done")}
 _SUDO = re.compile(r"^\s*(?P<user>\S+) : (?:(?P<fail>.*?incorrect password attempts?|command not allowed|"
                    r"user NOT in sudoers) ; )?TTY=(?P<tty>\S+) ; PWD=(?P<pwd>.*?) ; USER=(?P<target>\S+) ;"
                    r"(?: COMMAND=(?P<cmd>.*))?$")
@@ -583,21 +743,33 @@ def normalize_journal(hit: dict) -> TypedEvent:
     base = {"journal.identifier": fv(ident, f"{nid}:event.original#journal:SYSLOG_IDENTIFIER"),
             "journal.unit": fv(j.get("_SYSTEMD_UNIT"), f"{nid}:event.original#journal:_SYSTEMD_UNIT")}
     if ident == "sshd":
-        for rx, outcome in ((_SSH_OK, Outcome.success), (_SSH_FAIL, Outcome.failure), (_SSH_INVALID, Outcome.failure)):
+        # SYSLOG_IDENTIFIER is chosen by the writer; journald's own _COMM/_EXE/_SYSTEMD_UNIT are not. When any of
+        # them is recorded, one must name sshd, or the line came from another program.
+        trusted = [str(v) for v in (j.get("_COMM"), basename_of(j.get("_EXE")), j.get("_SYSTEMD_UNIT")) if v]
+        if trusted and not any(v.startswith(_SSHD_COMMS) or v.startswith(("ssh.service", "ssh@", "sshd@"))
+                               for v in trusted):
+            raise Skip("sshd-identified journal line written by another program")
+        for rx, outcome, phase in _SSH_FORMS:
             m = rx.match(msg)
             if m:
                 g = m.groupdict()
+                origin = f"{nid}:event.original#journal:MESSAGE~sshd"
                 f = {**base,
                      "auth.service": fv("sshd", f"{nid}:event.original#journal:SYSLOG_IDENTIFIER"),
-                     "auth.method": fv(g.get("method"), f"{nid}:event.original#journal:MESSAGE~sshd"),
-                     "auth.phase": fv("authentication", f"{nid}:event.original#journal:MESSAGE~sshd"),
-                     "user.name": fv(g["user"], f"{nid}:event.original#journal:MESSAGE~sshd"),
-                     "source.ip": fv(g["ip"], f"{nid}:event.original#journal:MESSAGE~sshd")}
+                     "auth.method": fv(g.get("method"), origin),
+                     "auth.phase": fv(phase, origin),
+                     "auth.user_valid": fv(not (g.get("invalid") or g.get("kind") == "invalid"
+                                                or rx is _SSH_INVALID), origin),
+                     "source.ip": fv(g["ip"], origin)}
+                if g["user"]:
+                    f["user.name"] = fv(g["user"], origin)
                 if g.get("port"):
-                    f["source.port"] = fv(int(g["port"]), f"{nid}:event.original#journal:MESSAGE~sshd")
+                    f["source.port"] = fv(int(g["port"]), origin)
                 return TypedEvent(id=event_id("auth", [ref]), family="auth", ts=_ts(src["@timestamp"]), host=host,
                                   outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION)
         raise Skip("sshd message without an authentication outcome")
+    if ident == "systemd":
+        return _unit_job(hit, j, msg, base, host)
     if ident == "sudo":
         m = _SUDO.match(msg)
         if m:
@@ -613,6 +785,52 @@ def normalize_journal(hit: dict) -> TypedEvent:
                               host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION)
         raise Skip("sudo message not a command record")
     raise Skip(f"journal identifier {ident!r} is not normalized")
+
+
+def basename_of(path) -> str:
+    return str(path).rsplit("/", 1)[-1] if path else ""
+
+
+def _unit_job(hit: dict, j: dict, msg: str, base: dict, host: str | None) -> TypedEvent:
+    """A service manager's unit job message: which unit, which job (stop/start/...) and its phase (begun, done or
+    another job result). The unit comes from the structured UNIT/USER_UNIT field, or from newer systemd's message
+    that names it; the job from JOB_TYPE/JOB_RESULT, the catalog MESSAGE_ID, or that message's verb. A message
+    that names no unit or no job (a description-only "Stopped ...", a resource summary) is not typed."""
+    nid = hit["_id"]
+    o = f"{nid}:event.original#journal"
+    unit, scope, unit_origin = j.get("UNIT"), "system", f"{o}:UNIT"
+    if not unit and j.get("USER_UNIT"):
+        unit, scope, unit_origin = j["USER_UNIT"], "user", f"{o}:USER_UNIT"
+    text = _UNIT_JOB_TEXT.match(msg)
+    if not unit and text:
+        unit, unit_origin = text.group("unit"), f"{o}:MESSAGE~systemd"
+    job = phase = None
+    if j.get("JOB_TYPE"):
+        job, phase, job_origin = j["JOB_TYPE"], j.get("JOB_RESULT") or "begun", f"{o}:JOB_TYPE+JOB_RESULT"
+    elif j.get("MESSAGE_ID") in _UNIT_JOB_IDS:
+        (job, phase), job_origin = _UNIT_JOB_IDS[j["MESSAGE_ID"]], f"{o}:MESSAGE_ID"
+    elif text and unit == text.group("unit"):
+        (job, phase), job_origin = _UNIT_JOB_VERBS[text.group("verb")], f"{o}:MESSAGE~systemd"
+    else:
+        # The service manager's record of a unit's main process ending by signal or core dump (no job involved).
+        exited = _UNIT_EXIT.match(msg)
+        if unit and exited and exited.group("unit") == unit:
+            job, phase = "exit", exited.group("code") or exited.group("result")
+            job_origin = f"{o}:MESSAGE~systemd"
+    if not unit or not job:
+        raise Skip("systemd message is not a unit job record")
+    fields = {**base,
+              "service.unit": fv(unit, unit_origin), "service.name": fv(service_name(unit), unit_origin),
+              "service.job": fv(job, job_origin), "service.job_phase": fv(phase, job_origin),
+              "service.scope": fv(scope, unit_origin), "service.source": fv("journal", f"{o}:SYSLOG_IDENTIFIER")}
+    pid = j.get("_PID")
+    if isinstance(pid, str) and pid.isdigit():
+        fields["process.pid"] = fv(int(pid), f"{o}:_PID")
+    outcome = (Outcome.success if phase == "done" else Outcome.unknown if phase in {"begun", "skipped"}
+               else Outcome.failure)
+    ref = _ref(hit)
+    return TypedEvent(id=event_id("service_change", [ref]), family="service_change", ts=_ts(hit["_source"]["@timestamp"]),
+                      host=host, outcome=outcome, fields=fields, raw=[ref], normalizer=NORMALIZER_VERSION)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1189,6 +1407,12 @@ def normalize_hits(hits: list[dict]) -> tuple[list[TypedEvent], dict[str, int], 
                 events.append(normalize_audit_auth_group(host, members))
             except (ValueError, KeyError, TypeError) as e:
                 errors.append((members[0][0]["_id"], f"linux.audit.auth: {e}"))
+            continue
+        if types & AUDIT_ADMIN_TYPES:
+            try:
+                events.extend(normalize_audit_admin_group(host, members))
+            except (ValueError, KeyError, TypeError) as e:
+                errors.append((members[0][0]["_id"], f"linux.audit.admin: {e}"))
             continue
         if "EXECVE" not in types:
             sys_rec = next((r for _, r in members if r.type == "SYSCALL"), None)

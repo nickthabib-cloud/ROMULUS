@@ -1,6 +1,7 @@
 """The active playbook pack and per-source applicability."""
 from __future__ import annotations
 
+from romulus.detect.auth import AUTH_PLAYBOOKS
 from romulus.detect.base import Playbook
 from romulus.detect.context import CONTEXT_PLAYBOOKS
 from romulus.detect.correlation import CORRELATION_PLAYBOOKS
@@ -10,14 +11,16 @@ from romulus.detect.hijack import HIJACK_PLAYBOOKS
 from romulus.detect.host import HOST_PLAYBOOKS
 from romulus.detect.indicators import INDICATOR_PLAYBOOKS
 from romulus.detect.kernel_files import KERNEL_FILE_PLAYBOOKS
+from romulus.detect.lineage import LINEAGE_PLAYBOOKS
 from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
+from romulus.detect.tamper import TAMPER_PLAYBOOKS
 from romulus.detect.tls import TLS_PLAYBOOKS
 
-PACK_VERSION = "pack@9"
-ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + NETWORK_PLAYBOOKS + DNS_PLAYBOOKS
-                 + SESSION_PLAYBOOKS + TLS_PLAYBOOKS + FLOW_PLAYBOOKS
+PACK_VERSION = "pack@14"
+ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LINEAGE_PLAYBOOKS + AUTH_PLAYBOOKS
+                 + TAMPER_PLAYBOOKS + NETWORK_PLAYBOOKS + DNS_PLAYBOOKS + SESSION_PLAYBOOKS + TLS_PLAYBOOKS + FLOW_PLAYBOOKS
                  + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 

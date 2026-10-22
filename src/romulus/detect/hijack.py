@@ -52,7 +52,9 @@ from romulus.detect.linux_argv import canonical, is_under, normalize_path, progr
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
+    classify_redirect,
     parse_script,
+    shell_dialect,
     shell_script_file_of,
     shell_script_of,
 )
@@ -91,7 +93,6 @@ _ELEVATION = {"sudo", "su", "doas", "pkexec", "run0"}
 _USR_ALIASES = (("/bin/", "/usr/bin/"), ("/sbin/", "/usr/sbin/"), ("/lib/", "/usr/lib/"),
                 ("/lib64/", "/usr/lib64/"), ("/lib32/", "/usr/lib32/"))
 _PSEUDO_FS = ("/dev", "/proc", "/sys")
-_REDIRECT_WRITE = {">", ">>", "2>", "2>>"}
 _FAMILY_ORDER = {"auth": 0, "file_change": 1, "process_exec": 2}
 # What a kernel file-change record shows was done to the file, in claim wording.
 CHANGE_WORDS = {"content": "opened it for writing", "create": "created it", "rename_target": "renamed a file onto it",
@@ -159,11 +160,11 @@ def _interpreter_script(name: str, args: list[str]) -> str | None:
     return args[index]
 
 
-def _text_commands(script: str, cwd: str | None):
+def _text_commands(script: str, cwd: str | None, dialect: str = "bash"):
     """(command, working directory) for each parsed command of shell text, following `cd DIR`; and whether the
     text was only partly modelled. A `cd` the parser cannot place (`cd`, `cd -`, `cd ~`) leaves the directory
     unknown, so later relative operands are unresolved, never guessed."""
-    parsed = parse_script(script)
+    parsed = parse_script(script, dialect)
     if not parsed.ok and not parsed.partial:
         return [], True
     out = []
@@ -211,7 +212,7 @@ class _Series:
 
 class NonRootWriteRootExecutedFile(Playbook):
     id = "host.nonroot_write_root_executed_file"
-    version = "3"
+    version = "5"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -385,7 +386,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             if isinstance(script, UnknownShellScript):
                 incomplete = True
             elif script:
-                text_found, text_incomplete = self._text_writes(script, cwd)
+                text_found, text_incomplete = self._text_writes(
+                    script, cwd, shell_dialect(event.get("process.executable"), argv))
                 found += text_found
                 incomplete = incomplete or text_incomplete
         if incomplete:
@@ -413,14 +415,16 @@ class NonRootWriteRootExecutedFile(Playbook):
                                            event.get("process.user") in WEB_SERVICE_USERS, assumed))
 
     @staticmethod
-    def _text_writes(script: str, cwd: str | None) -> tuple[list[tuple[str, str, bool]], bool]:
-        commands, incomplete = _text_commands(script, cwd)
+    def _text_writes(script: str, cwd: str | None,
+                     dialect: str = "bash") -> tuple[list[tuple[str, str, bool]], bool]:
+        commands, incomplete = _text_commands(script, cwd, dialect)
         found: list[tuple[str, str, bool]] = []
         for command, current in commands:
             for op, target in command.redirects:
-                if op not in _REDIRECT_WRITE:
+                written = classify_redirect(op, target).writes_file
+                if written is None:                 # a read, duplication or close writes no file
                     continue
-                path = normalize_path(target, current)
+                path = normalize_path(written, current)
                 if not path:
                     incomplete = True
                 elif not is_under(path, _PSEUDO_FS):
@@ -455,7 +459,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             if isinstance(script, UnknownShellScript):
                 incomplete = True
             elif script:
-                text_runs, text_incomplete = self._text_runs(script, cwd)
+                text_runs, text_incomplete = self._text_runs(
+                    script, cwd, shell_dialect(event.get("process.executable")))
                 runs += text_runs
                 incomplete = incomplete or text_incomplete
         elif name in SCRIPT_FILE_INTERPRETERS:
@@ -496,8 +501,8 @@ class NonRootWriteRootExecutedFile(Playbook):
                     self._stage(auth)
 
     @staticmethod
-    def _text_runs(script: str, cwd: str | None) -> tuple[list[tuple[str, str]], bool]:
-        commands, incomplete = _text_commands(script, cwd)
+    def _text_runs(script: str, cwd: str | None, dialect: str = "bash") -> tuple[list[tuple[str, str]], bool]:
+        commands, incomplete = _text_commands(script, cwd, dialect)
         runs: list[tuple[str, str]] = []
         for command, current in commands:
             if not command.argv or command.name in _ELEVATION:
@@ -588,6 +593,7 @@ class NonRootWriteRootExecutedFile(Playbook):
 
     def finalize(self):
         out = []
+        own: dict[tuple[str, str], list[tuple[str, Match]]] = defaultdict(list)
         for key in sorted(set(self.writes) | set(self.kernel_writes)):
             by_account: dict[str, list[_Write]] = defaultdict(list)
             for write in (*self.writes.get(key, ()), *self.kernel_writes.get(key, ())):
@@ -596,9 +602,47 @@ class NonRootWriteRootExecutedFile(Playbook):
                 actors = sorted(by_account[account], key=lambda w: (w.ts, w.event_id))
                 match = self._finding(key[0], key[1], account, [w for w in actors if not w.kernel],
                                       [w for w in actors if w.kernel])
-                if match is not None:
+                if match is None:
+                    continue
+                if getattr(match, "own_path", None):
+                    own[(key[0], account)].append((match.own_path, match))
+                else:
                     out.append(match)
+        out += [self._own_group(host, account, own[(host, account)]) for host, account in sorted(own)]
         return out
+
+    def _own_group(self, host: str, account: str, items: list[tuple[str, Match]]) -> Match:
+        """Own-elevation-only leads of one writer on one host, as one lead (configuration management writes and
+        then runs many one-off files this way). Every per-file finding is kept: its path in the claim or notes,
+        its first record cited up to the cap, its total in the counts."""
+        items = sorted(items, key=lambda item: (item[1].ts, item[0]))
+        if len(items) == 1:
+            return items[0][1]
+        paths = [path for path, _m in items]
+        directories = sorted({posixpath.dirname(path) for path in paths})
+        cited: dict[str, TypedEvent] = {}
+        for _path, m in items:
+            first = min(m.events, key=lambda e: (e.ts, e.id))
+            if len(cited) < WRITE_CITE:
+                cited[first.id] = first
+        events = sorted(cited.values(), key=lambda e: (e.ts, e.id))
+        start, end = items[0][1].ts, max(m.ts for _p, m in items)
+        shown = paths[:WRITE_CITE]
+        claim = (f"On {host}, account '{account}' ran write-capable commands on, or changed (per kernel records), "
+                 f"{len(paths)} files in {len(directories)} director(ies) "
+                 f"from {start.isoformat()} to {end.isoformat()}, and each was then run as root only by the "
+                 f"account's own elevation (its own audit session or login uid): {'; '.join(shown)}"
+                 + (f"; and {len(paths) - len(shown)} more (every path is in the notes)" if len(paths) > len(shown)
+                    else "") + ". Configuration management that writes a module and runs it with privilege "
+                 "escalation looks like this; so does a sudo or su rule that runs files the account can edit, which "
+                 f"gives that account root. The first record of {len(events)} of the files is cited.")
+        notes = sorted({n for _p, m in items for n in m.notes if n.startswith("T")})
+        notes += [n for n in items[0][1].notes if n.startswith("own elevation")]
+        notes += [f"file: {path}" for path in paths]
+        match = Match(self.id, claim, self.claim_type, events, _predicate(events), events[0].ts, self.severity,
+                      "lead", "high", events[0].entities(), group_key=f"{host}|{account}|own-elevation")
+        match.notes = notes
+        return match
 
     def _finding(self, host: str, pkey: str, account: str, writes: list[_Write],
                  kernel: list[_Write] = ()) -> Match | None:
@@ -722,6 +766,8 @@ class NonRootWriteRootExecutedFile(Playbook):
                       self.severity, lane, confidence, writer_events[0].entities(),
                       group_key=f"{host}|{account}|{pkey}")
         match.notes = notes + sorted(techniques)
+        if own_only:
+            match.own_path = first.path
         return match
 
 

@@ -19,11 +19,28 @@ from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
 EVIDENCE_FILES = ("__init__.py", "auditd.py", "normalize.py", "typed.py")
-PINNED_EVIDENCE = {6: "3f98ac20164b4ae4953c18fff130811b4737aced880ab9547e1741358a19c731"}
-# The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events.
+PINNED_EVIDENCE = {7: "bbafff7a62b96d02f84b4bb22b68ae72ff715efe61b06ae6430fde5284608c8f"}
+# The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
+# from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).
 PACKET_FUNCTIONS = (packet_stage._body_event, packet_rules.analyze_body, packet_rules._text, packet_rules._shebang,
-                    packet_sources.decode_hex_body)
-PINNED_PACKETS = {"tshark-http@4": "ef5e1478246e695dc7b70cc178b431669728f0497c61b86f297724b7c8722492"}
+                    packet_sources.decode_hex_body, packet_stage._stream_event, packet_sources.addresses,
+                    packet_sources._endpoint, packet_sources.reassemble_tcp, packet_sources.TcpStreams,
+                    packet_sources._flag, packet_stage._StreamTarget._judge,
+                    packet_rules._echo, packet_sources._address, packet_sources._port, packet_sources.stream_key,
+                    packet_sources._first, packet_sources._last, packet_stage._first, packet_stage._canon,
+                    packet_rules.analyze_stream, packet_rules._Side, packet_rules._clean, packet_rules._lines,
+                    packet_rules._bursts, packet_rules._texty, packet_rules._tokens, packet_rules._args_fit,
+                    packet_rules._command_name, packet_rules.ShellIndicator)
+PACKET_TABLES = (packet_sources.STREAM_PREFS, packet_sources.QUERIES["tcp_payload"],
+                 [p.pattern for p in (*packet_rules.PROMPTS, *packet_rules.BANNERS, *packet_rules.SHELL_ERRORS,
+                                      packet_rules.BARE_PROMPT, packet_rules.LOGIN_PROMPT,
+                                      packet_rules.PASSWORD_PROMPT, packet_rules._IAC, packet_rules._ANSI,
+                                      packet_rules._LINE_END)],
+                 packet_rules.OUTPUT_SIGNATURES, sorted(packet_rules.WINDOWS_COMMANDS), packet_rules.OPENING_BYTES,
+                 packet_rules.OUTPUT_WINDOW_BYTES, packet_rules.MAX_COMMAND_CHARS, packet_rules.MAX_COMMANDS,
+                 packet_rules.PROMPT_SCAN_BYTES, packet_rules.MIN_INDICATORS, sorted(packet_rules.TYPED_TEXT_KINDS),
+                 packet_sources.MAX_ADDRESS_CHARS, packet_stage.STREAM_DIRECTION_BYTES)
+PINNED_PACKETS = {"tshark-packets@5": "1d6045c6230687d41dd4c0d6b541dd16b23031598fa5eb2fea1bc17e7388054d"}
 
 
 def _files_digest() -> str:
@@ -38,6 +55,7 @@ def _functions_digest() -> str:
     h = hashlib.sha256()
     for fn in PACKET_FUNCTIONS:
         h.update(fn.__qualname__.encode() + b"\0" + inspect.getsource(fn).replace("\r\n", "\n").encode() + b"\0")
+    h.update(repr(PACKET_TABLES).encode())
     return h.hexdigest()
 
 
@@ -60,3 +78,4 @@ def test_event_ids_carry_the_producer_and_version():
     legacy = hashlib.sha256(b"process_exec|" + ref.key.encode()).hexdigest()[:24]
     assert event_id("process_exec", [ref]) != legacy                    # never collides with pre-versioned rows
     assert event_id("http_body", [ref], "tshark-http@3") != event_id("http_body", [ref], "tshark-http@4")
+    assert event_id("http_body", [ref], "tshark-http@4") != event_id("http_body", [ref], "tshark-packets@5")

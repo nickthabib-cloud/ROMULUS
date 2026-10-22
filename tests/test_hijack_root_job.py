@@ -353,6 +353,28 @@ def test_writer_elevating_own_file_in_own_login_is_not_matched():
     assert len(out) == 1 and out[0].proposed_lane == "lead" and "the writer's own elevation" in out[0].claim
 
 
+def test_own_elevation_only_leads_are_one_lead_per_host_and_writer():
+    # configuration management: the remote account writes one-off modules, then runs each with privilege escalation
+    out_files = [f"/home/deploy/.ansible/tmp/ansible-tmp-{i}/AnsiballZ_mod.py" for i in range(12)]
+    records = []
+    for i, path in enumerate(out_files):
+        ts = T0 + timedelta(minutes=i)
+        records.append(ex(["cp", "/tmp/m", path], "/usr/bin/cp", 1001, ts, user="deploy", auid=1001, ses=5,
+                          pid=700 + i, ppid=699))
+        records.append(ex(["/usr/bin/python3", path], "/usr/bin/python3.11", 0, ts + timedelta(seconds=2), auid=1001,
+                          ses=5, pid=800 + i, ppid=799))
+    other = ex(["vi", JOB], "/usr/bin/vim.basic", 1001, T0, user="deploy", auid=1001, ses=5, pid=900, ppid=899)
+    _pb, out = run([*records, other, *cron_runs(T0 + timedelta(hours=1))])
+    keys = sorted(m.group_key for m in out)
+    assert keys == ["app01|deploy|/srv/tasks/rotate.sh", "app01|deploy|own-elevation"]
+    m = next(m for m in out if m.group_key.endswith("own-elevation"))
+    assert m.proposed_lane == "lead" and " wrote " not in m.claim
+    assert "ran write-capable commands on, or changed (per kernel records), 12 files in 12 director(ies)" in m.claim
+    assert "and 2 more (every path is in the notes)" in m.claim and len(m.events) == 10
+    assert {f"file: {p}" for p in out_files} <= set(m.notes) and "T1548.003" in m.notes
+    assert len({e.id for e in m.events}) == 10 and all(e.get("process.uid") == "1001" for e in m.events)
+
+
 def test_another_hosts_root_job_does_not_join():
     writer = web(*VI)
     assert run([writer, *cron_runs(T0 + timedelta(minutes=10), host="db01")])[1] == []
@@ -456,8 +478,17 @@ def test_downloads_without_a_file_name_or_to_stdout_are_not_writes():
     assert out == [] and pb.missing_required == 1          # the download's directory is unknown: partial
 
 
+def test_editor_with_stderr_dup_now_parses_and_the_write_is_found():
+    # `2>&1` used to make the whole script unevaluable; the editor write on JOB is now recovered.
+    _pb, out = run([web(["sh", "-c", f"vi {JOB} 2>&1 | true"], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
+    assert len(out) == 1 and out[0].proposed_lane == "high"
+    assert f"on {JOB} " in out[0].claim and "the editor 'vi'" in out[0].claim
+
+
 def test_unmodelled_editor_redirect_text_is_counted_partial():
-    pb, out = run([web(["sh", "-c", f"vi {JOB} 2>&1 | true"], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
+    # A still-unmodelled construct (here-string) keeps the write-side evaluation partial, never a
+    # clean negative.
+    pb, out = run([web(["sh", "-c", f"vi {JOB} <<< edits"], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
     assert out == [] and pb.missing_required == 1
 
 
@@ -515,11 +546,25 @@ def test_relative_root_script_without_cwd_is_partial():
     assert out == [] and pb.missing_required == 1
 
 
-@pytest.mark.parametrize("script", [f"echo $(id) > {JOB}", f"for f in a; do echo $f >> {JOB}; done",
-                                    f"echo x &> {JOB}"])
+@pytest.mark.parametrize("script", [f"echo $(id) > {JOB}", f"for f in a; do echo $f >> {JOB}; done"])
 def test_unmodelled_shell_text_is_partial(script):
     pb, _out = run([web(["sh", "-c", script], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
     assert pb.missing_required >= 1
+
+
+@pytest.mark.parametrize("script", [f"echo x &> {JOB}", f"echo x &>> {JOB}", f"echo x >& {JOB}"])
+def test_combined_stream_redirect_into_a_root_run_file_is_a_write(script):
+    # bash: `&>` / `&>>` / `>&FILE` parse, and a redirect that writes the file root runs is detected.
+    _pb, out = run([web(["bash", "-c", script], "/usr/bin/bash"), *cron_runs(T0 + timedelta(minutes=10))])
+    assert len(out) == 1 and out[0].proposed_lane == "high"
+    assert f"on {JOB} " in out[0].claim
+
+
+@pytest.mark.parametrize("script", [f"echo x &> {JOB}", f"echo x &>> {JOB}", f"echo x >& {JOB}"])
+def test_bash_only_redirect_under_dash_is_partial(script):
+    # dash reads these differently (or rejects them), so the text is unevaluable rather than guessed.
+    pb, out = run([web(["sh", "-c", script], "/usr/bin/dash"), *cron_runs(T0 + timedelta(minutes=10))])
+    assert out == [] and pb.missing_required >= 1
 
 
 def test_auth_record_without_service_is_missing():
