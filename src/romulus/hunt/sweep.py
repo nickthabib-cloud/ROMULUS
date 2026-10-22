@@ -245,7 +245,7 @@ class Sweep:
                            if unmapped else "")) if errors else ""
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
-            before_eval, before_missing = pb.evaluated, pb.missing_required
+            before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
             matches = pb.consume(events)
             for m in matches:
                 self._publish(m, tid, raw_sources)
@@ -257,27 +257,35 @@ class Sweep:
                 self._retain_aggregate_raw(pb, raw_sources)
             evaluated = pb.evaluated - before_eval
             missing = pb.missing_required - before_missing
+            # records a full state budget kept from evaluation: never a clean evaluation of this partition
+            capped = pb.capped - before_capped
+            incomplete = rule_partial or bool(missing) or bool(capped)
             if not (set(pb.families) & families) and evaluated == 0:
-                state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
+                state = "not_applicable_no_events" if not (rule_partial or capped) else "evaluated_partial"
             elif pb.kind == "aggregate" and matches:
                 # aggregate rules may publish indicator events during consume(); those are matches
-                state = "match_on_partial" if (rule_partial or missing) else "matched"
+                state = "match_on_partial" if incomplete else "matched"
             elif pb.kind == "aggregate":
-                state = "evaluated_partial" if (rule_partial or missing) else "evaluated_complete"
+                state = "evaluated_partial" if incomplete else "evaluated_complete"
             elif matches:
-                state = "match_on_partial" if (rule_partial or missing) else "matched"
+                state = "match_on_partial" if incomplete else "matched"
             elif not pb.assures_negative:
                 # script-text rules can show intent but never prove absence (spec section 1)
-                state = "positive_only_partial" if (rule_partial or missing) else "positive_only"
+                state = "positive_only_partial" if incomplete else "positive_only"
             else:
-                state = "evaluated_partial" if (rule_partial or missing) else "no_match_complete"
+                state = "evaluated_partial" if incomplete else "no_match_complete"
             reasons = list(base_reasons)
             if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
                 reasons.append(error_reason)
             if missing:
                 reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
+            detail = {"missing_required": missing, "reasons": reasons}
+            if capped:
+                reasons.append(f"state_capped={capped}: records not evaluated because a state budget of this rule "
+                               f"was full; " + "; ".join(pb.limit_reasons()))
+                detail["state_capped"] = capped
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, state, len(matches), evaluated,
-                                    {"missing_required": missing, "reasons": reasons})
+                                    detail)
         self.repo.update_task(tid, "evaluated")
 
     def _count_boots(self, events) -> None:
@@ -373,6 +381,10 @@ class Sweep:
                      if c["rule_id"] == pb.id and c["target"] != "*" and c["state"] != "split"]
             any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")
                               for c in cells)
+            # A state budget reached at any point (in consume or at finalize) makes the whole-window result partial
+            # and is named on the window cell.
+            limits = pb.limit_reasons()
+            any_partial = any_partial or bool(limits)
             evaluated = sum(c["evaluated"] or 0 for c in cells)
             consumed_matches = sum(c["matched"] or 0 for c in cells)
             matched_any = bool(ms) or consumed_matches > 0
@@ -389,7 +401,7 @@ class Sweep:
             else:
                 state = "no_match_complete"
             reasons = (["no source partition of this rule was evaluated"] if not cells else
-                       [WINDOW_ROLLUP_PARTIAL] if any_partial else [])
+                       [WINDOW_ROLLUP_PARTIAL] if any_partial else []) + limits
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
                                     len(ms) + consumed_matches, evaluated, {"reasons": reasons})
             pb.release_state()

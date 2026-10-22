@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar, Literal
 
+from romulus.detect.bounded import Limit
 from romulus.evidence.typed import Outcome, TypedEvent
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
@@ -114,6 +115,28 @@ class Playbook:
     def __init__(self) -> None:
         self.evaluated = 0
         self.missing_required = 0
+        # Records a full state budget kept from evaluation (see romulus.detect.bounded): the sweep makes the
+        # partition's coverage partial with the limit named, exactly as for a record missing a required field.
+        self.capped = 0
+        self.limits: dict[str, Limit] = {}
+
+    def refuse(self, name: str, text: str, records: int = 1) -> None:
+        """A state budget is full: `records` record(s) were not evaluated. Coverage becomes partial and says why."""
+        self.capped += records
+        self.note_limit(name, text, records)
+
+    def note_limit(self, name: str, text: str, records: int = 0) -> None:
+        """A state budget was reached. With `records` 0 nothing went unevaluated, but what the rule can state became
+        less exact (a count became a lower bound, an older record was released); the window cell is partial."""
+        limit = self.limits.get(name)
+        if limit is None:
+            limit = self.limits[name] = Limit(text)
+        limit.records += records
+        limit.hits += 1
+
+    def limit_reasons(self) -> list[str]:
+        """Every state budget this playbook reached, worded for the coverage ledger."""
+        return [self.limits[name].reason() for name in sorted(self.limits)]
 
     def applicable(self, events: list[TypedEvent]) -> list[TypedEvent]:
         """Events of the right family. Events missing required fields are counted (they make a
