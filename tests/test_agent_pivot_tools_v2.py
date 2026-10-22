@@ -284,6 +284,8 @@ def test_hunt_executor_persists_reach_reruns_context_and_direct_findings_keep_la
     assert direct["lane"] == "high"
     assert direct["source_case_id"] == "session-7"
     assert direct["source_anchor_id"] == "anchor-finding"
+    assert "agent-requested" in direct["claim"] and "hypothesis" in direct["claim"]
+    assert any("agent-requested" in note for note in direct["gate_results"]["_notes"])
     assert all(row["lane"] != "context" for row in repo.candidates("h1")
                if row["rule_id"] == "host.credential_store_read")
     assert repo.expansion_links("h1")

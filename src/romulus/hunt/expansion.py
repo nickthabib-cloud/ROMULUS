@@ -23,7 +23,7 @@ from romulus.hunt.links import (
     LinkWindow,
     usable_key,
 )
-from romulus.hunt.publish import publish_match
+from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
@@ -239,13 +239,12 @@ class ExpansionEngine:
         events = self._events(result.event_ids)
         for playbook in fresh_direct_pack():
             for match in playbook.consume(events):
-                if result.strength == "inferred":
-                    # The finding stands on its own cited records and keeps its own lane (strong indicators are
-                    # reported on their own). Only its relation to the anchor is inferred.
-                    match.claim += (f" Its relation to {candidate['id']} rests on inferred {result.link_type} link "
-                                    f"{result.id} and is a hypothesis; the actor is not proven identical.")
-                    match.notes.append("reached through an inferred expansion link: the relation to the anchor "
-                                       "is a hypothesis, the finding itself is not")
+                # The finding stands on its own cited records and keeps its machine lane. Only its relation to
+                # the anchor may be a hypothesis.
+                mark_hypothesis_relation(
+                    match, anchor_id=candidate["id"], link_type=result.link_type,
+                    link_id=result.id, strength=result.strength,
+                )
                 publish_match(
                     self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                     source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,

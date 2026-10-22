@@ -11,7 +11,7 @@ from romulus.evidence.typed import TypedEvent
 from romulus.hunt.expansion import ExpansionEngine, expansion_windows
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
 from romulus.hunt.pivot import PivotExecutor
-from romulus.hunt.publish import publish_match
+from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.sources.models import Window
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -130,6 +130,10 @@ class HuntToolExecutor:
         candidate_ids = []
         for playbook in fresh_direct_pack():
             for match in playbook.consume(events):
+                mark_hypothesis_relation(
+                    match, anchor_id=candidate["id"], link_type=result.link_type,
+                    link_id=result.id, strength=result.strength,
+                )
                 row = publish_match(
                     self.repo, self.hunt_id, playbook, match,
                     result.task_ids[0] if result.task_ids else None, {},
