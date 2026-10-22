@@ -32,6 +32,7 @@ from romulus.evidence.auditd import (
     syscall_arg,
 )
 from romulus.evidence.typed import EVIDENCE_VERSION, Outcome, RawRef, TypedEvent, event_id, fv
+from romulus.evidence.windows import WindowsNotNormalized, is_windows_source, normalize_windows
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
 # Caveat on a process_exec event whose EXECVE arguments did not all arrive (its process.argv_complete is false).
@@ -1888,6 +1889,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 events.append(normalize_arkime_session(h))
             elif ds == "linux.audit":
                 audit_hits.append(h)
+            elif is_windows_source(h["_source"]):
+                events.append(normalize_windows(h))
             elif ds.startswith("suricata.eve"):
                 events.append(normalize_suricata(h))
             elif ds == "systemd.journal":
@@ -1901,6 +1904,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             found = _audit_copy_key(h, copy.record)
             if found is not None:
                 audit_copies.append((*found, h["_id"]))
+        except WindowsNotNormalized as unsupported:
+            skips[unsupported.reason] += 1
         except Skip as s:
             skips[s.reason] += 1
         except (ValueError, KeyError, TypeError, AttributeError) as e:   # malformed telemetry: an error, never a crash

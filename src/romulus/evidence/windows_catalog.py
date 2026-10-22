@@ -1,0 +1,94 @@
+"""Authoritative Windows event classes keyed by channel, provider, and event id."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class WindowsEventClass:
+    channel: str
+    provider: str
+    event_id: int
+    family: str
+    name: str
+
+    @property
+    def key(self) -> tuple[str, str, int]:
+        return (self.channel.casefold(), self.provider.casefold(), self.event_id)
+
+
+SECURITY = "Microsoft-Windows-Security-Auditing"
+SYSMON = "Microsoft-Windows-Sysmon"
+SYSMON_CHANNEL = "Microsoft-Windows-Sysmon/Operational"
+
+
+def _security(event_id: int, family: str, name: str) -> WindowsEventClass:
+    return WindowsEventClass("Security", SECURITY, event_id, family, name)
+
+
+def _sysmon(event_id: int, family: str, name: str) -> WindowsEventClass:
+    return WindowsEventClass(SYSMON_CHANNEL, SYSMON, event_id, family, name)
+
+
+EVENT_CLASSES = (
+    _security(4688, "process_exec", "process created"),
+    _security(4689, "process_termination", "process terminated"),
+    _sysmon(1, "process_exec", "process created"),
+    _sysmon(3, "net_socket", "network connection"),
+    _sysmon(5, "process_termination", "process terminated"),
+    _security(4624, "auth", "logon succeeded"),
+    _security(4625, "auth", "logon failed"),
+    _security(4648, "auth", "explicit credentials used"),
+    _security(4672, "auth", "special privileges assigned"),
+    _security(4634, "auth", "logoff completed"),
+    _security(4647, "auth", "user initiated logoff"),
+    _security(4720, "account_change", "account created"),
+    _security(4722, "account_change", "account enabled"),
+    _security(4724, "account_change", "password reset attempted"),
+    _security(4726, "account_change", "account deleted"),
+    _security(4728, "account_change", "member added to global group"),
+    _security(4732, "account_change", "member added to local group"),
+    _security(4756, "account_change", "member added to universal group"),
+    _security(4738, "account_change", "account changed"),
+    _security(4740, "account_change", "account locked out"),
+    _security(4697, "service_change", "service installed"),
+    WindowsEventClass("System", "Service Control Manager", 7045, "service_change", "service installed"),
+    _security(4698, "scheduled_task", "scheduled task created"),
+    _security(4702, "scheduled_task", "scheduled task updated"),
+    _security(1102, "audit_config", "security log cleared"),
+    WindowsEventClass("System", "Microsoft-Windows-Eventlog", 104, "audit_config", "event log cleared"),
+    _security(4719, "audit_config", "audit policy changed"),
+    WindowsEventClass("System", "Microsoft-Windows-Kernel-General", 12, "system_state", "operating system started"),
+    WindowsEventClass("System", "Microsoft-Windows-Kernel-General", 13, "system_state", "operating system stopped"),
+    WindowsEventClass("System", "EventLog", 6005, "system_state", "event log service started"),
+    WindowsEventClass("System", "EventLog", 6006, "system_state", "event log service stopped"),
+)
+
+_BY_KEY = {event_class.key: event_class for event_class in EVENT_CLASSES}
+if len(_BY_KEY) != len(EVENT_CLASSES):  # pragma: no cover - import-time catalog invariant
+    raise RuntimeError("duplicate Windows event class")
+
+WINDOWS_DATASETS = frozenset(
+    {
+        "system.security",
+        "system.system",
+        "windows.forwarded",
+        "windows.powershell_operational",
+        "windows.security",
+        "windows.sysmon_operational",
+        "windows.system",
+    }
+)
+
+
+def lookup_event_class(channel: object, provider: object, event_id: object) -> WindowsEventClass | None:
+    """Return a catalog row only when all three shipper-written type fields agree."""
+    if not isinstance(channel, str) or not isinstance(provider, str):
+        return None
+    try:
+        numeric_id = int(event_id)
+    except (TypeError, ValueError):
+        return None
+    return _BY_KEY.get((channel.casefold(), provider.casefold(), numeric_id))
+
