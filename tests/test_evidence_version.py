@@ -26,6 +26,8 @@ PACKET_FUNCTIONS = (packet_stage._body_event, packet_rules.analyze_body, packet_
                     packet_sources.decode_hex_body, packet_stage._stream_event, packet_sources.addresses,
                     packet_sources._endpoint, packet_sources.reassemble_tcp, packet_sources.TcpStreams,
                     packet_sources._flag, packet_stage._StreamTarget._judge,
+                    packet_rules._echo, packet_sources._address, packet_sources._port, packet_sources.stream_key,
+                    packet_sources._first, packet_sources._last, packet_stage._first, packet_stage._canon,
                     packet_rules.analyze_stream, packet_rules._Side, packet_rules._clean, packet_rules._lines,
                     packet_rules._bursts, packet_rules._texty, packet_rules._tokens, packet_rules._args_fit,
                     packet_rules._command_name, packet_rules.ShellIndicator)

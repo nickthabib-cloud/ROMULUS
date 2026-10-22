@@ -113,9 +113,15 @@ COUNTERS = ("candidates", "logical_sessions", "multi_segment_sessions", "fetched
 # Cleartext streams.
 STREAM_PURPOSE = "packet-stage stream candidates"
 REMOTE_LOGIN_PROTOCOLS = ["telnet", "rlogin", "rsh", "rexec"]   # Arkime protocol names of cleartext logins
-STREAM_MIN_PACKETS = 20              # each way, for a connection with no recognised protocol
+STREAM_MIN_PACKETS = 4               # each way, for a connection with no recognised protocol (`nc -e` running
+                                     # three commands is 8-12 packets; content analysis is the discriminator)
 LOGIN_MIN_PACKETS = 4                # each way, for a recognised remote-login protocol
-STREAM_MIN_SECONDS = 30
+# Not floors: within the per-target connection cap, connections this long and this busy are judged first.
+RANK_PACKETS = 20
+RANK_SECONDS = 30
+STREAM_CONNECTION_PURPOSE = "packet-stage stream connection documents"
+MAX_CONNECTION_DOCS = 500            # saved documents read for one connection
+CONNECTION_FIELDS = ("source.ip", "source.port", "destination.ip", "destination.port")
 STREAM_MAX_MEAN_PAYLOAD = 1024       # payload bytes per packet, each way (bulk transfer fills packets)
 STREAM_MAX_DOCS = 2000               # session documents read per target
 STREAM_MAX_CONNECTIONS = 200         # connections judged per target
@@ -127,7 +133,8 @@ STREAM_FIELDS = {"protocol": ("eq", "in"), "client.bytes": ("gte",), "server.byt
                  "source.packets": ("gte",), "destination.packets": ("gte",)}
 STREAM_COUNTERS = ("candidates", "connections", "shaped", "not_shaped", "shape_unknown", "judged",
                    "unjudged_over_cap", "failed", "capture_incomplete", "analysis_cut", "stream_incomplete",
-                   "no_payload_rebuilt", "with_indicators", "single_indicator", "outside_window", "missing_required", "fetched_bytes",
+                   "no_payload_rebuilt", "documents_incomplete", "with_indicators", "single_indicator",
+                   "outside_window", "missing_required", "fetched_bytes",
                    "matched")
 # Why a connection was not judged, or was judged on incomplete content: counter -> what to say.
 STREAM_LOSSES = {
@@ -140,6 +147,7 @@ STREAM_LOSSES = {
     "stream_incomplete": ("connection(s) with holes, retransmissions that disagree, segments without their "
                           "payload, or rows with unreadable addresses"),
     "no_payload_rebuilt": "connection(s) where no payload was rebuilt although Arkime counted some",
+    "documents_incomplete": "connection(s) whose other saved documents could not all be read",
 }
 
 
@@ -530,7 +538,7 @@ class _Target:
 
 # ---- cleartext streams ----------------------------------------------------------------------------------------
 
-def stream_selection(overlap: bool, exact: bool) -> str:
+def stream_selection(overlap: bool, exact: bool, complete: bool = False) -> str:
     """What the stream selection examines, in words, for the mode actually used."""
     protocol = ("protocol list exactly 'tcp' (protocolCnt 1)" if exact else
                 f"protocol 'tcp' and at least {STREAM_MIN_PACKETS} packets each way in that document (this "
@@ -544,12 +552,16 @@ def stream_selection(overlap: bool, exact: bool) -> str:
             f"remote-login protocol ({', '.join(REMOTE_LOGIN_PROTOCOLS)}), {when}; grouped into connections and "
             f"kept when the connection, over all its documents, carries payload both ways with at least "
             f"{LOGIN_MIN_PACKETS} packets each way for a remote-login protocol, or for no recognised protocol at "
-            f"least {STREAM_MIN_PACKETS} packets each way, at least {STREAM_MIN_SECONDS} s and at most "
-            f"{STREAM_MAX_MEAN_PAYLOAD} payload bytes per packet each way. Up to {STREAM_MAX_CONNECTIONS} "
-            f"connections are judged per target (external endpoints first) within "
+            f"least {STREAM_MIN_PACKETS} packets each way and at most {STREAM_MAX_MEAN_PAYLOAD} payload bytes per "
+            f"packet each way. Up to {STREAM_MAX_CONNECTIONS} connections are judged per target (external "
+            f"endpoints first, then remote-login protocols, then connections of at least {RANK_PACKETS} packets "
+            f"each way and {RANK_SECONDS} s) within "
             f"{STREAM_BUDGET_BYTES // (1024 * 1024)} MiB of packets, each from at most "
             f"{STREAM_FETCH_BYTES // (1024 * 1024)} MiB of packets and {STREAM_DIRECTION_BYTES // 1024} KiB of "
-            f"rebuilt payload per direction")
+            f"rebuilt payload per direction; "
+            + ("every saved document of a judged connection is read (same endpoints and firstPacket)" if complete
+               else "only the selected documents of a connection are fetched (this target cannot be queried by "
+                    "endpoint)"))
 
 
 def _stream_candidates(client, target: str, contract, window: Window) -> tuple[list[dict], list[str], str, list[str]]:
@@ -576,15 +588,42 @@ def _stream_candidates(client, target: str, contract, window: Window) -> tuple[l
         intent = SearchIntent(kind="raw", target=target, window=window, max_records=STREAM_MAX_DOCS + 1,
                               purpose=STREAM_PURPOSE, any_of=groups)
     records, partial = _select(client, target, contract, intent, STREAM_MAX_DOCS, f"{target}: streams: ")
-    return records, partial, stream_selection(overlap, exact), []
+    return records, partial, stream_selection(overlap, exact, _can_complete(contract)), []
+
+
+def _can_complete(contract) -> bool:
+    return all(contract.supports(f, "eq") for f in CONNECTION_FIELDS)
+
+
+def _connection_documents(client, target: str, contract, segs: list[dict]) -> tuple[list[dict], str | None]:
+    """Every saved document of one connection (same endpoints and original firstPacket), by typed equality on
+    validated values: a quiet document the selection skipped still holds that connection's packets. Returns
+    the documents and why the read is incomplete, if it is."""
+    src = segs[0]["_source"]
+    first = src.get("firstPacket")
+    client_side, server_side = src.get("source") or {}, src.get("destination") or {}
+    values = (client_side.get("ip"), client_side.get("port"), server_side.get("ip"), server_side.get("port"))
+    try:
+        key = stream_key(*values)
+        start = datetime.fromtimestamp(int(first) / 1000, UTC)
+    except (PacketError, TypeError, ValueError, OverflowError):
+        return [], "the connection's endpoints or firstPacket are not typed values"
+    intent = SearchIntent(kind="raw", target=target, max_records=MAX_CONNECTION_DOCS + 1,
+                          purpose=STREAM_CONNECTION_PURPOSE,
+                          window=Window(start=start, end=start + timedelta(milliseconds=1)),
+                          filters=[Predicate(field=f, op="eq", value=v) for f, v in zip(
+                              CONNECTION_FIELDS, (key.client_ip, key.client_port, key.server_ip, key.server_port))])
+    records, partial = _select(client, target, contract, intent, MAX_CONNECTION_DOCS, "")
+    return records, "; ".join(partial) or None
 
 
 def _count(value) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
-def _shape(segs: list[dict]) -> tuple[str, bool]:
-    """('shaped' | 'not_shaped' | 'unknown', remote-login protocol) over all documents of one connection."""
+def _shape(segs: list[dict]) -> tuple[str, bool, bool]:
+    """('shaped' | 'not_shaped' | 'unknown', remote-login protocol, long and busy) over all documents of one
+    connection."""
     protocols: set[str] = set()
     totals = [0, 0, 0, 0]                    # client packets, server packets, client bytes, server bytes
     first, last = None, None
@@ -596,19 +635,19 @@ def _shape(segs: list[dict]) -> tuple[str, bool]:
                   _count((src.get("client") or {}).get("bytes")), _count((src.get("server") or {}).get("bytes"))]
         lo, hi = _epoch(src.get("firstPacket")), _epoch(src.get("lastPacket"))
         if None in values or lo is None or hi is None:
-            return "unknown", False
+            return "unknown", False, False
         totals = [a + b for a, b in zip(totals, values)]
         first, last = min(lo, first if first is not None else lo), max(hi, last if last is not None else hi)
     cpk, spk, cb, sb = totals
+    busy = cpk >= RANK_PACKETS and spk >= RANK_PACKETS and last - first >= RANK_SECONDS
     if protocols & set(REMOTE_LOGIN_PROTOCOLS):
         ok = cpk >= LOGIN_MIN_PACKETS and spk >= LOGIN_MIN_PACKETS and cb > 0 and sb > 0
-        return ("shaped" if ok else "not_shaped"), True
+        return ("shaped" if ok else "not_shaped"), True, busy
     if protocols != {"tcp"}:
-        return "not_shaped", False
+        return "not_shaped", False, busy
     ok = (cpk >= STREAM_MIN_PACKETS and spk >= STREAM_MIN_PACKETS and cb > 0 and sb > 0
-          and last - first >= STREAM_MIN_SECONDS
           and cb / cpk <= STREAM_MAX_MEAN_PAYLOAD and sb / spk <= STREAM_MAX_MEAN_PAYLOAD)
-    return ("shaped" if ok else "not_shaped"), False
+    return ("shaped" if ok else "not_shaped"), False, busy
 
 
 def _external_endpoint(src: dict) -> bool:
@@ -678,9 +717,10 @@ def _stream_event(key: StreamKey, streams: TcpStreams, analysis: ShellAnalysis, 
 class _StreamTarget:
     """One Arkime target's cleartext-stream run: connections, their judgement, counters and losses."""
 
-    def __init__(self, s: Settings, name: str, window: Window, work: Path, packets, heartbeat):
+    def __init__(self, s: Settings, name: str, window: Window, work: Path, packets, heartbeat, complete=None):
         self.s, self.name, self.window, self.work, self.packets, self.heartbeat = s, name, window, work, packets, \
             heartbeat
+        self.complete = complete                   # segs -> (every document of the connection, error), or None
         self.c = dict.fromkeys(STREAM_COUNTERS, 0)
         self.partial: list[str] = []
         self.lost: dict[str, list[str]] = {}
@@ -700,7 +740,7 @@ class _StreamTarget:
         self.c["connections"] = len(conns)
         shaped = []
         for segs in conns.values():
-            verdict, login = _shape(segs)
+            verdict, login, busy = _shape(segs)
             if verdict == "unknown":
                 self._lose("shape_unknown", segs)
             elif verdict == "not_shaped":
@@ -708,7 +748,7 @@ class _StreamTarget:
             else:
                 segs = sorted(segs, key=lambda x: (_last_packet(x), x["_id"]))
                 src = segs[0]["_source"]
-                shaped.append(((0 if _external_endpoint(src) else 1, 0 if login else 1,
+                shaped.append(((0 if _external_endpoint(src) else 1, 0 if login else 1, 0 if busy else 1,
                                 _epoch(src.get("firstPacket")) or 0.0, segs[0]["_id"]), segs))
         shaped.sort(key=lambda x: x[0])
         self.c["shaped"] = len(shaped)
@@ -730,6 +770,13 @@ class _StreamTarget:
         return {label: sorted(ids)[:MAX_LISTED_IDS] for label, ids in sorted(self.lost.items()) if ids}
 
     def _judge(self, n: int, segs: list[dict]) -> None:
+        if self.complete is not None:
+            more, error = self.complete(segs)
+            if error:
+                self._lose("documents_incomplete", segs)
+            known = {seg["_id"] for seg in segs}
+            segs = sorted([*segs, *(d for d in more if d.get("_id") not in known)],
+                          key=lambda x: (_last_packet(x), x["_id"]))
         src = segs[0]["_source"]
         client, server = src.get("source") or {}, src.get("destination") or {}
         try:
@@ -814,7 +861,9 @@ def _run_streams(s: Settings, repo, client, hunt_id: str, window: Window, target
             repo.set_rule_cell(hunt_id, cls.id, cls.version, cell_target, window.key(), "not_applicable_no_events",
                                0, 0, {"reason": reason})
         return {"status": "not_applicable", "reason": reason, "partial_reasons": []}
-    run = _StreamTarget(s, target, window, work, packets, heartbeat)
+    complete = ((lambda segs: _connection_documents(client, target, contract, segs)) if _can_complete(contract)
+                else None)
+    run = _StreamTarget(s, target, window, work, packets, heartbeat, complete)
     run.c["candidates"] = len(docs)
     run.partial += partial
     run.run(docs)
@@ -827,7 +876,7 @@ def _run_streams(s: Settings, repo, client, hunt_id: str, window: Window, target
         state = ("match_on_partial" if run.partial else "matched") if matches else \
             ("positive_only_partial" if run.partial else "positive_only")
         repo.set_rule_cell(hunt_id, pb.id, pb.version, cell_target, window.key(), state, len(matches), pb.evaluated,
-                           {**run.c, "selection": selection, "reasons": run.partial[:20],
+                           {**run.c, "selection": selection, "reasons": list(run.partial),
                             "unexamined_sessions": run.unexamined(),
                             "single_indicator_sessions": sorted(run.single)[:MAX_LISTED_IDS]})
     return {"status": "partial" if run.partial else "complete", **run.c, "selection": selection,

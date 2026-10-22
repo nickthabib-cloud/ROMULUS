@@ -20,7 +20,8 @@ Cleartext streams. `analyze_stream` reads both rebuilt directions of one TCP con
 independent signs of an interactive command shell, each tied to the conversation's turn-taking (which side
 spoke when), never to text anywhere in the bytes:
 
-- `prompt`: an output burst ends in a shell prompt, and the other side's next bytes are typed text;
+- `prompt` / `bare_prompt`: output bursts end in a full-form shell prompt (or a bare `$`, `#`, `%`), and the
+  other side's next bytes are typed text;
 - `banner`: a shell's start-up message in the shell side's opening text (every byte before it printable);
 - `login_dialogue`: a login prompt and then a password prompt, each answered with text;
 - `output:<command>`: a command line from one side, then that command's characteristic output from the other
@@ -442,7 +443,7 @@ PROMPT_SCAN_BYTES = 512              # a prompt is the tail of the shell side's 
 MIN_INDICATORS = 2                   # independent kinds for the full claim and its lanes
 # One of these alone still stands as a lead: each is the shell's own output in answer to the other side (a banner
 # counts only when the other side then typed). A prompt or a login dialogue alone does not.
-STRONG_KINDS = ("banner", "shell_error", "output:")
+STRONG_KINDS = ("banner", "shell_error", "output:", "prompt")   # "prompt" is full-form only; not "bare_prompt"
 SINGLE_MIN_TURNS = 4                 # a lone indicator needs a conversation, not one question and one answer
 TYPED_TEXT_KINDS = {"shell_error"}   # matched bytes repeat what the operator typed: no digest is kept
 
@@ -673,8 +674,11 @@ class _Side:
                 break
         out = []
         if len(strong) >= 2 or len(strong) + len(bare) >= 3:
+            # Full-form prompts (user@host:path$, C:\path>) are their own indicator; bare `$ `, `# ` and `% ` are
+            # weaker and never stand alone.
             first = min({**bare, **strong})
-            out.append(self.indicator("prompt", first, {**bare, **strong}[first], len(strong) + len(bare)))
+            kind = "prompt" if len(strong) >= 2 else "bare_prompt"
+            out.append(self.indicator(kind, first, {**bare, **strong}[first], len(strong) + len(bare)))
         for i, start, end in logins:
             if any(j > i for j, _s, _e in passwords):
                 out.append(self.indicator("login_dialogue", start, end))
@@ -799,6 +803,8 @@ def _label(ind: dict) -> str:
     kind, count = ind.get("kind"), ind.get("count") or 1
     if kind == "prompt":
         what = f"a shell prompt ended {count} output burst(s), each answered with typed input"
+    elif kind == "bare_prompt":
+        what = f"a bare shell prompt ($, # or %) ended {count} output burst(s), each answered with typed input"
     elif kind == "banner":
         what = "a shell start-up message in the shell side's opening text"
     elif kind == "login_dialogue":
@@ -939,7 +945,7 @@ class CleartextInteractiveShell(Playbook):
             preds = [pf(e, f) for f in ("stream.shell.kinds", "stream.shell.side", "stream.shell.indicators",
                                         "source.ip", "destination.ip") if e.has(f)]
             if single:
-                confidence = "low" if kinds == ["banner"] else "medium"
+                confidence = "low" if kinds in (["banner"], ["prompt"]) else "medium"
             else:
                 confidence = "high" if len(kinds) >= 3 else "medium"
             m = Match(self.id, claim, self.claim_type, [e], preds, e.ts, self.severity, lane, confidence,

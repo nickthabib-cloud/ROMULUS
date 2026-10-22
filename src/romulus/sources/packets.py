@@ -122,7 +122,7 @@ class Chunk:
     length: int
     seq: int               # relative TCP sequence number of the first byte
     time: float            # capture time of the segment that carried it
-    frame: int
+    frame: int             # ordering frame: the capture frame, never below the previous chunk of its direction
     after_gap: bool        # bytes are missing just before this chunk
 
 
@@ -436,7 +436,7 @@ def reassemble_tcp(rows: list[dict[str, list[str]]], key: StreamKey, cap: int) -
     chunks: list[Chunk] = []
     for direction, items in segments.items():
         items.sort(key=lambda x: (x[0], x[1]))
-        buf, expected, gap_at, last_time = bytearray(), None, 0, float("-inf")
+        buf, expected, gap_at, last_time, last_frame = bytearray(), None, 0, float("-inf"), -1
         for seq, frame, when, payload in items:
             if expected is None:
                 expected = seq
@@ -461,8 +461,10 @@ def reassemble_tcp(rows: list[dict[str, list[str]]], key: StreamKey, cap: int) -
                 break
             if len(new) > room:
                 new, cut[direction] = new[:room], True
-            last_time = max(last_time, when)
-            chunks.append(Chunk(direction, len(buf), len(new), expected, last_time, frame, after_gap))
+            # A retransmitted earlier segment arrives later than the bytes that follow it: time and frame are
+            # both held monotone within a direction, so the merge below can never reverse one side's bytes.
+            last_time, last_frame = max(last_time, when), max(last_frame, frame)
+            chunks.append(Chunk(direction, len(buf), len(new), expected, last_time, last_frame, after_gap))
             buf += new
             expected += len(new)
             if cut[direction]:

