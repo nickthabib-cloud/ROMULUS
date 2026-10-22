@@ -23,13 +23,14 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import os
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from romulus.detect.base import LANES, SEVERITIES, Match, Playbook, basename, pf
+from romulus.detect.bounded import HeldExamples
 from romulus.detect.host import (
     AWK_INTERPRETERS,
     SCRIPT_FILE_INTERPRETERS,
@@ -187,16 +188,40 @@ class IndicatorMatch(Playbook):
                     self.domains[v.lower().rstrip(".")] = ind
                 else:
                     self.prints[(ind.kind, v.lower())] = ind
-        self.groups: dict[tuple, list[TypedEvent]] = defaultdict(list)
+        self.groups: dict[tuple, HeldExamples] = {}
         self.counts: Counter = Counter()
         self.meta: dict[tuple, dict] = {}
+        self._pending: list[TypedEvent] = []
+        self._fresh: list[HeldExamples] = []
+        self.load = lambda ids: []
+
+    # Groups (indicator, role, host, value): the first 20 records cited (staged, held as ids) and a count. A listed
+    # domain's subdomains are each a value, so the groups are budgeted; a match of a new group beyond it is not
+    # evaluated and coverage says so.
+    staged = True
+    MAX_KEYS = 100_000
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        for store in self._fresh:
+            store.staged()
+        self._fresh = []
+        return out
 
     # ---- matching ---------------------------------------------------------------------------------
     def _keep(self, key: tuple, e: TypedEvent, meta: dict) -> None:
+        store = self.groups.get(key)
+        if store is None:
+            if len(self.groups) >= self.MAX_KEYS:
+                self.refuse("groups", f"indicator match groups reached {self.MAX_KEYS:,}; a match of a new group is "
+                                      f"not evaluated")
+                return
+            store = self.groups[key] = HeldExamples(EXAMPLE_LIMIT)
         self.counts[key] += 1
         self.meta.setdefault(key, meta)
-        if len(self.groups[key]) < EXAMPLE_LIMIT:
-            self.groups[key].append(e)
+        if store.offer(e):
+            self._pending.append(e)
+            self._fresh.append(store)
 
     def _programs(self, e: TypedEvent) -> None:
         exe = e.get("process.executable")
@@ -294,14 +319,14 @@ class IndicatorMatch(Playbook):
         return []
 
     def retained_events(self) -> list[TypedEvent]:
-        return [e for evs in self.groups.values() for e in evs]
+        return [item[1] for store in self.groups.values() for item in store.items if item[1] is not None]
 
     # ---- publishing -------------------------------------------------------------------------------
     def finalize(self):
         out = []
         for key in sorted(self.groups, key=str):
             _iid, role, host, value = key
-            evs = sorted(self.groups[key], key=lambda x: (x.ts, x.id))
+            evs = sorted(self.groups[key].events(self.load), key=lambda x: (x.ts, x.id))
             meta, n = self.meta[key], self.counts[key]
             ind: Indicator = meta["ind"]
             e0 = evs[0]

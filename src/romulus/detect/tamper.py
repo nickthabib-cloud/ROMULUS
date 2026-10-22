@@ -402,8 +402,33 @@ class _TamperRule(Playbook):
         return ([i.event for i in self.items] + [e for i in self.items for e in i.linked]
                 + [m[2] for marks in self.markers.marks.values() for m in marks])
 
+    # Matching records (commands, unit stops, audit configuration changes) are held as events until finalize, where
+    # they are joined and cited: about 8 KB each, so 160 MB at the budget. Per-key time lists (unit starts, rule
+    # additions, daemon registrations) hold at most TIMES_PER_KEY each. Beyond either, coverage says so.
+    MAX_HELD = 20_000
+    TIMES_PER_KEY = 10_000
+
+    def _held(self) -> int:
+        return len(self.items)
+
+    def _room(self) -> bool:
+        if self._held() < self.MAX_HELD:
+            return True
+        self.refuse("held", f"matching records held reached {self.MAX_HELD:,}; a later one is not evaluated")
+        return False
+
+    def _time(self, table: dict, key, ts: float) -> None:
+        times = table[key]
+        if len(times) < self.TIMES_PER_KEY:
+            times.append(ts)
+        else:
+            self.note_limit("times", f"a per-key time list (unit starts, rule additions or audit daemon "
+                                     f"registrations) reached {self.TIMES_PER_KEY:,}; later times are not joined")
+
     def _exec_items(self, e: TypedEvent, found: list[tuple[str, str, str, str]], from_text: bool) -> None:
         """found: (group form key, target, how, proposed lane before lineage and shutdown)."""
+        if found and not self._room():
+            return
         lineage = self.lineage.classify(e)
         actor = _actor(e)
         for key, target, how, lane in found:
@@ -485,7 +510,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         super().__init__()
         self.stops: list[TypedEvent] = []
         self.starts: dict[tuple, list[float]] = defaultdict(list)
-        self.ran: dict[tuple, list[float]] = defaultdict(list)   # watched daemons' exec records per host
+        self.ran: dict[tuple, float] = {}       # watched daemon -> its earliest exec record per host
 
     def _process_relevant(self, event: TypedEvent) -> bool:
         name = program_name_hint(event)
@@ -501,7 +526,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             self.evaluated += 1
             name, args, from_exe = ident
             if from_exe and service_category(name):
-                self.ran[(e.host, name)].append(e.ts.timestamp())
+                self.ran[(e.host, name)] = min(self.ran.get((e.host, name), e.ts.timestamp()), e.ts.timestamp())
             # An incomplete argv cannot settle absent tokens (--user, a later -s HUP): only the shell text, a whole
             # argument when present, is read.
             found = [] if argv_incomplete(e) else self._requests(name, args) + self._kill_by_pid(e, name, args)
@@ -525,9 +550,10 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             if e.get("service.source") == "journal" and e.has("process.pid") and e.get("process.pid") != 1:
                 return              # any process can write a journal entry shaped like the service manager's
             if (job == "stop" and e.get("service.job_phase") not in {"begun"}) or job == "exit":
-                self.stops.append(e)        # "exit": the main process ended by a signal or a core dump
+                if self._room():
+                    self.stops.append(e)    # "exit": the main process ended by a signal or a core dump
             elif job == "start" and e.get("service.job_phase") == "done":
-                self.starts[(e.host, name)].append(e.ts.timestamp())
+                self._time(self.starts, (e.host, name), e.ts.timestamp())
         else:
             self.evaluated += 1
 
@@ -562,6 +588,9 @@ class SecurityOrLoggingServiceStop(_TamperRule):
 
     def retained_events(self):
         return super().retained_events() + self.stops
+
+    def _held(self) -> int:
+        return len(self.items) + len(self.stops)
 
     def finalize(self):
         restarts = 0
@@ -628,7 +657,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             if units & named[item.event.id]:
                 continue                                         # an alias of a daemon this command names in full
             why = ""
-            if any(t <= item.ts for t in self.ran.get((item.host, item.target), ())):
+            if self.ran.get((item.host, item.target), float("inf")) <= item.ts:
                 why = f"an exec record shows '{item.target}' ran on the host earlier"
             else:
                 stop = next((e for e in self.stops if e.host == item.host and e.get("service.name") in units
@@ -872,10 +901,10 @@ class AuditRulesTamper(_TamperRule):
             self.evaluated += 1
             ts = e.ts.timestamp()
             if e.get("audit.config.setting") == "audit_pid" and str(e.get("audit.config.value")) != "0":
-                self.registrations[e.host].append(ts)
+                self._time(self.registrations, e.host, ts)
             if e.get("audit.config.op") in {"add_rule", "add rule"} and e.outcome != Outcome.failure:
-                self.adds[(e.host, e.get("process.auid"), e.get("process.session_id"))].append(ts)
-            if self._config_kind(e) is not None:
+                self._time(self.adds, (e.host, e.get("process.auid"), e.get("process.session_id")), ts)
+            if self._config_kind(e) is not None and self._room():
                 self.configs.append(e)
         else:
             self.evaluated += 1
@@ -898,6 +927,9 @@ class AuditRulesTamper(_TamperRule):
 
     def retained_events(self):
         return super().retained_events() + self.configs
+
+    def _held(self) -> int:
+        return len(self.items) + len(self.configs)
 
     def finalize(self):
         by_pid: dict[tuple, list[_Item]] = defaultdict(list)
