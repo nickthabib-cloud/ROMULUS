@@ -17,18 +17,24 @@ from romulus.detect.dns import role as dns_role
 from romulus.detect.host import WEB_SERVICE_USERS
 from romulus.evidence.typed import Outcome, TypedEvent
 
-type Scope = Literal["host", "account", "host_account", "internal_host", "site"]
+type Scope = Literal["host", "account", "host_account", "internal_ip", "site"]
 type Measure = Literal["presence", "prevalence", "rate"]
 type Bucket = Literal["day", "hour"]
 
 
 @dataclass(frozen=True)
 class BaselineKey:
-    """One canonical key within an explicit scope, with its durable content digest."""
+    """One canonical key within an explicit scope.
 
+    `key_digest` identifies the key within its scope (sha256 of spec, key version, scope and key); `key_id`
+    identifies the key regardless of scope (sha256 of spec, key version and key), so prevalence counts the
+    distinct scopes of one `scope_kind` that hold a `key_id` without parsing scope strings."""
+
+    scope_kind: Scope
     scope: str
     key: dict[str, Any]
     key_digest: str
+    key_id: str
 
 
 @dataclass(frozen=True)
@@ -88,20 +94,39 @@ def _contains_missing(value: Any) -> bool:
     return False
 
 
-def _key(spec: BaselineSpec, scope: str, key: dict[str, Any]) -> BaselineKey:
-    if not scope or _contains_missing(key):
+def _sha256(material: str) -> str:
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def key_id_of(spec_id: str, key_version: str, key: dict[str, Any]) -> str:
+    """Scope-free key identity: sha256(spec_id|key_version|canonical-json(key))."""
+    return _sha256(f"{spec_id}|{key_version}|{canonical_json(key)}")
+
+
+def key_digest_of(spec_id: str, key_version: str, scope: str, key: dict[str, Any]) -> str:
+    """Scoped key identity: sha256(spec_id|key_version|scope|canonical-json(key))."""
+    return _sha256(f"{spec_id}|{key_version}|{scope}|{canonical_json(key)}")
+
+
+def _key(spec: BaselineSpec, scope: tuple[Scope, str], key: dict[str, Any]) -> BaselineKey:
+    kind, label = scope
+    if not label or _contains_missing(key):
         raise ValueError("baseline keys cannot contain missing values")
     ordered = {name: key[name] for name in sorted(key)}
-    material = f"{spec.id}|{spec.key_version}|{scope}|{canonical_json(ordered)}"
-    return BaselineKey(scope=scope, key=ordered, key_digest=hashlib.sha256(material.encode()).hexdigest())
+    return BaselineKey(
+        scope_kind=kind, scope=label, key=ordered,
+        key_digest=key_digest_of(spec.id, spec.key_version, label, ordered),
+        key_id=key_id_of(spec.id, spec.key_version, ordered),
+    )
 
 
-def _scope(kind: Scope, **values: str) -> str:
+def _scope(kind: Scope, **values: str) -> tuple[Scope, str]:
+    """(scope kind, scope label). The label is unique across kinds; consumers group by the kind column."""
     if kind == "site":
-        return "site"
-    if kind in {"host", "account", "internal_host"}:
-        return f"{kind}:{next(iter(values.values()))}"
-    return f"host_account:{canonical_json(values)}"
+        return "site", "site"
+    if kind in {"host", "account", "internal_ip"}:
+        return kind, f"{kind}:{next(iter(values.values()))}"
+    return kind, f"host_account:{canonical_json(values)}"
 
 
 def _canon_ip(value: Any) -> tuple[str, str] | None:
@@ -132,13 +157,15 @@ def _ssh_tuple(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> K
         return None
     ip, network = address
     account = str(account)
+    site = _scope("site")
     return [
-        _key(spec, "site", {
+        _key(spec, site, {
             "kind": "tuple", "host": host, "source_ip": ip, "source_network": network, "user": account,
         }),
-        _key(spec, "site", {"kind": "host", "host": host}),
-        _key(spec, "site", {"kind": "source", "source_ip": ip, "source_network": network}),
-        _key(spec, "site", {"kind": "user", "user": account}),
+        _key(spec, site, {"kind": "host", "host": host}),
+        _key(spec, site, {"kind": "source_ip", "source_ip": ip}),
+        _key(spec, site, {"kind": "source_network", "source_network": network}),
+        _key(spec, site, {"kind": "user", "user": account}),
     ]
 
 
@@ -211,34 +238,38 @@ def _cmd_shape(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> K
     if (not event.host or executable in (None, "") or event.get("process.argv_complete") is False
             or not isinstance(argv, list) or not argv or not all(isinstance(token, str) for token in argv)):
         return None
-    return [_key(spec, "site", {
+    return [_key(spec, _scope("host", host=event.host), {
         "executable": str(executable), "argv_shape": [mask_argv_token(token) for token in argv],
     })]
 
 
 def _destination(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
-    names: list[str] = []
     if event.family == "dns_query":
         record_role = dns_role(event)
         if record_role is None:
             return None
-        source, destination = dns_endpoints(event, record_role)
+        source, _resolver = dns_endpoints(event, record_role)
         names = question_names(event) or []
-        if not names:
+        source_ip = _canon_ip(source)
+        if not names or source_ip is None:
             return None
-    else:
-        source, destination = event.get("source.ip"), event.get("destination.ip")
-    source_ip, destination_ip = _canon_ip(source), _canon_ip(destination)
+        # A lookup's destination is the name asked, never the resolver that answered it.
+        scope = _scope("internal_ip", address=source_ip[0])
+        return [_key(spec, scope, {"kind": "registered_domain", "registered_domain": registered_domain(name)})
+                for name in names]
+    source_ip, destination_ip = _canon_ip(event.get("source.ip")), _canon_ip(event.get("destination.ip"))
     if source_ip is None or destination_ip is None:
         return None
-    scope = _scope("internal_host", address=source_ip[0])
-    base = {"destination_ip": destination_ip[0], "destination_network": destination_ip[1]}
-    if event.family == "dns_query":
-        return [_key(spec, scope, {**base, "registered_domain": registered_domain(name)}) for name in names]
+    scope = _scope("internal_ip", address=source_ip[0])
+    keys = [
+        _key(spec, scope, {"kind": "dest_ip", "dest_ip": destination_ip[0]}),
+        _key(spec, scope, {"kind": "dest_network", "dest_network": destination_ip[1]}),
+    ]
     sni = _canon_dns(event.get("tls.client.server_name"))
     if sni is not None:
-        base.update({"sni": sni, "registered_domain": registered_domain(sni)})
-    return [_key(spec, scope, base)]
+        keys.append(_key(spec, scope, {"kind": "sni", "sni": sni}))
+        keys.append(_key(spec, scope, {"kind": "registered_domain", "registered_domain": registered_domain(sni)}))
+    return keys
 
 
 def _service_rate(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
@@ -256,19 +287,19 @@ BASELINE_SPECS = (
     ),
     BaselineSpec(
         id="bl.exec_path", version="1", key_version="1", families=("process_exec",),
-        datasets=("linux.audit",), scope=("host", "account"), measure="presence", bucket="day",
+        datasets=("linux.audit",), scope=("host", "account"), measure="prevalence", bucket="day",
         required_fields={
             "process_exec": ("process.executable", "process.exec_file.path", "process.user"),
         }, _extract=_exec_path,
     ),
     BaselineSpec(
         id="bl.exec_pair", version="1", key_version="1", families=("process_exec",),
-        datasets=("linux.audit",), scope="host", measure="presence", bucket="day",
+        datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
         required_fields={"process_exec": ("process.executable", "process.ppid")}, _extract=_exec_pair,
     ),
     BaselineSpec(
         id="bl.cmd_shape", version="1", key_version="1", families=("process_exec",),
-        datasets=("linux.audit",), scope="site", measure="presence", bucket="day",
+        datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
         required_fields={"process_exec": ("process.executable", "process.argv")}, _extract=_cmd_shape,
     ),
     BaselineSpec(
@@ -278,7 +309,7 @@ BASELINE_SPECS = (
             "suricata.eve.flow", "suricata.eve.netflow", "suricata.eve.dns", "suricata.eve.tls",
             "arkime.session",
         ),
-        scope="internal_host", measure="presence", bucket="day",
+        scope="internal_ip", measure="prevalence", bucket="day",
         required_fields={
             "net_flow": ("source.ip", "destination.ip"),
             "dns_query": ("source.ip", "destination.ip", "dns.question.name"),
