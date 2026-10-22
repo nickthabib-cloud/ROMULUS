@@ -206,6 +206,76 @@ def test_record_outside_the_join_window_is_its_own_finding():
     assert len(run([cmd, rec_in])[1]) == 1
 
 
+# ---------------------------------------------------------------- boot-time provisioning (no exec lineage)
+def boot(ts=T0, host="app01"):
+    return ev("system_state", ts, host=host, audit__record_type="SYSTEM_BOOT", system__event="boot")
+
+
+def first_boot_passwords(start=T0 + timedelta(seconds=40), host="app01", accounts=("root", "ops"), **kw):
+    """A provisioning agent's bulk password tool at first boot, before exec auditing was in place: the tool's own
+    records arrive, its exec records do not."""
+    return [record("USER_CHAUTHTOK", "password_change", ts=start + timedelta(seconds=i), pid=900 + i, host=host,
+                   account__op="PAM:chauthtok", account__name=name, process__executable="/usr/sbin/chpasswd",
+                   process__user="root", **kw) for i, name in enumerate(accounts)]
+
+
+def test_boot_time_changes_outside_any_login_are_one_lead_per_host_and_boot_worded_as_provisioning():
+    marker = boot()
+    out = run([marker, *first_boot_passwords()])[1]
+    assert len(out) == 1
+    m = out[0]
+    assert m.proposed_lane == "lead" and m.severity == "high" and m.group_key == f"boot|app01|{marker.id}"
+    assert ("On app01, 2 account or group change(s) were made from 40 s to 41 s after the host's recorded boot at "
+            "2030-01-06T09:00:00+00:00 (audit SYSTEM_BOOT), with no audit login uid recorded on any of them") in m.claim
+    assert "a password was changed (account 'root'); a password was changed (account 'ops')" in m.claim
+    assert "written by '/usr/sbin/chpasswd'" in m.claim
+    assert "No exec record of the changing process was retrieved" in m.claim
+    assert "Boot-time provisioning (cloud-init or a first-boot script setting initial passwords" in m.claim
+    assert "so does a job an intruder set to run at boot" in m.claim
+    assert marker.id in {e.id for e in m.events}
+
+
+def test_each_host_and_each_boot_is_its_own_group():
+    late_boot = boot(T0 + timedelta(hours=3))
+    out = run([boot(), boot(host="app02"), late_boot, *first_boot_passwords(),
+               *first_boot_passwords(host="app02"),
+               *first_boot_passwords(start=T0 + timedelta(hours=3, seconds=30), accounts=("ops",))])[1]
+    assert sorted(m.group_key.rsplit("|", 1)[0] for m in out) == ["boot|app01", "boot|app01", "boot|app02"]
+
+
+def test_boot_window_is_half_open_and_far_or_missing_boots_keep_the_ordinary_findings():
+    edge = first_boot_passwords(start=T0 + timedelta(seconds=AccountOrGroupChange.BOOT_SECONDS), accounts=("ops",))
+    out = run([boot(), *edge])[1]
+    assert [m.group_key.split("|")[0] for m in out] == ["actor"]
+    inside = first_boot_passwords(start=T0 + timedelta(seconds=AccountOrGroupChange.BOOT_SECONDS)
+                                  - timedelta(microseconds=1), accounts=("ops",))
+    assert [m.group_key.split("|")[0] for m in run([boot(), *inside])[1]] == ["boot"]
+    # no boot record at all: one finding per account, worded with what is and is not known
+    out = run(first_boot_passwords())[1]
+    assert len(out) == 2 and all(m.group_key.startswith("actor|") for m in out)
+    assert all("No exec record of the changing process was retrieved, so what started it is unknown" in m.claim
+               and "no audit login uid is recorded on it" in m.claim for m in out)
+
+
+def test_a_login_sessions_change_at_boot_is_not_grouped_as_boot_time():
+    recs = first_boot_passwords(process__login_user="alice", process__auid="1000")
+    out = run([boot(), *recs])[1]
+    assert len(out) == 2 and all(m.group_key.startswith("actor|") for m in out)
+    assert all("Boot-time provisioning" not in m.claim for m in out)
+
+
+def test_privileged_or_web_changes_at_boot_are_never_grouped_away():
+    uid0 = ex(["useradd", "-o", "-u", "0", "-m", "backdoor"], pid=950, ts=T0 + timedelta(seconds=50))
+    web_shell = ex(["sh", "-c", "sudo useradd helper"], exe="/usr/bin/dash", uid="33", pid=960, ppid=959,
+                   ts=T0 + timedelta(seconds=60))
+    web_child = ex(["useradd", "helper"], pid=961, ppid=960, ts=T0 + timedelta(seconds=60, milliseconds=5))
+    out = run([boot(), *first_boot_passwords(), uid0, web_shell, web_child])[1]
+    lanes = sorted((m.group_key.split("|")[0], m.proposed_lane) for m in out)
+    assert lanes == [("actor", "high"), ("actor", "high"), ("boot", "lead")]
+    backdoor = next(m for m in out if "backdoor" in m.claim)
+    assert "user id 0" in backdoor.claim and "Boot-time" not in backdoor.claim
+
+
 @pytest.mark.parametrize("argv,exe,lane,text", [
     (["bash", "-c", "echo 'evil:x:0:0::/root:/bin/bash' >> /etc/passwd"], "/usr/bin/bash", "high",
      "write /etc/passwd with a shell redirect ('>>')"),

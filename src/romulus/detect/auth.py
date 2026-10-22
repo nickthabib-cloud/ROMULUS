@@ -932,6 +932,25 @@ class _Change:
     actor: str
     command: TypedEvent | None = None
     records: list[TypedEvent] = field(default_factory=list)
+    login: str | None = None       # the audit login user or uid recorded on the command or record, if any
+    exec_seen: bool = True         # an exec record of the changing process was retrieved
+
+
+def _login(e: TypedEvent) -> str | None:
+    """The audit login user (or login uid) recorded on a record; None when neither is recorded."""
+    value = e.get("process.login_user") or e.get("process.auid")
+    return str(value) if value not in (None, "") else None
+
+
+def _offsets(seconds: list[float]) -> str:
+    """'from 40 s to 41 s after', '12 s before', 'from 5 s before to 30 s after'."""
+    low, high = min(seconds), max(seconds)
+    if low >= 0:
+        return f"{low:.0f} s after" if round(low) == round(high) else f"from {low:.0f} s to {high:.0f} s after"
+    if high <= 0:
+        return (f"{-high:.0f} s before" if round(low) == round(high)
+                else f"from {-low:.0f} s to {-high:.0f} s before")
+    return f"from {-low:.0f} s before to {high:.0f} s after"
 
 
 _GRANT_OPS = re.compile(r"(?:^|[-:_])add(?:$|[-:_])")
@@ -964,11 +983,11 @@ def _record_text(e: TypedEvent) -> str:
 
 class AccountOrGroupChange(Playbook):
     id = "host.account_or_group_change"
-    version = "2"
+    version = "3"
     title = "Account or group created, deleted or modified (command or account-management audit record)"
     anchor_class = "persistence"
     kind = "aggregate"
-    families = ("process_exec", "account_change")
+    families = ("process_exec", "account_change", "system_state")
     claim_type = "aggregate_observation"
     assures_negative = False
     positive_only_reason = (
@@ -982,6 +1001,10 @@ class AccountOrGroupChange(Playbook):
     next_checks = ("the account's first authentication after the change", "auth_activity for the actor's session",
                    "the account files' current content for the named accounts and groups")
     JOIN_SECONDS = 10.0
+    # A first-boot provisioning agent (cloud-init's users and set-passwords modules, a first-boot script) changes
+    # accounts within minutes of the boot, often before exec auditing is in place, so its exec lineage is missing.
+    BOOT_SECONDS = 900.0
+    BOOTS_KEPT = 64                 # boot records kept per host for the join and the citation
     card: ClassVar[dict] = {
         "behavior": "an account or group tool was run to create, delete or modify an account, group membership, "
                     "password or expiry; a command or shell text wrote /etc/passwd, /etc/shadow, /etc/group or "
@@ -989,11 +1012,14 @@ class AccountOrGroupChange(Playbook):
         "telemetry": "auditd EXECVE+SYSCALL as process_exec (process.executable, process.argv, process.pid, "
                      "process.ppid, process.user): present (root execs captured); audit ADD_USER/DEL_USER/ADD_GROUP/"
                      "DEL_GROUP/USER_MGMT/GRP_MGMT/USER_CHAUTHTOK/GRP_CHAUTHTOK/ACCT_LOCK/ACCT_UNLOCK as "
-                     "account_change: typed; the lab profile holds password-change records only",
+                     "account_change: typed; the lab profile holds password-change records only. Audit SYSTEM_BOOT as "
+                     "system_state (system.event) places a change relative to the host's boot",
         "fidelity": "exec: the command was run (outcome stated), never that the change happened; record: the tool "
                     "reports the change and its result",
         "benign_and_cost": "routine provisioning and package-created system accounts (grouped per host under "
-                           "package or cloud-init lineage)",
+                           "package or cloud-init lineage); first-boot provisioning whose exec lineage was not "
+                           "recorded is one lead per (host, boot) when every change is within 15 minutes of a "
+                           "recorded boot and carries no audit login uid",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the account's first login and what that session ran",
         "adds": "no earlier rule covers account or group changes",
@@ -1002,6 +1028,8 @@ class AccountOrGroupChange(Playbook):
                           "format",
         "lanes": "high for a web-service account in the exec lineage, or a request for user/group id 0 or "
                  "membership of a root-equivalent group; package/cloud-init lineage is one grouped lead per host; "
+                 "unprivileged changes with no exec lineage and no login uid within 15 minutes of a recorded boot "
+                 "are one grouped lead per (host, boot), worded as boot-time provisioning or a boot-time job; "
                  "everything else is a lead",
         "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter "
                      "only), a superset of what this evaluator reads",
@@ -1013,6 +1041,7 @@ class AccountOrGroupChange(Playbook):
         self.changes: list[_Change] = []
         self.by_pid: dict[tuple, list[_Change]] = defaultdict(list)
         self.records: list[TypedEvent] = []
+        self.boots: dict[str | None, list[TypedEvent]] = defaultdict(list)
         self._seen: set[str] = set()
 
     def consume(self, events):
@@ -1022,6 +1051,10 @@ class AccountOrGroupChange(Playbook):
             if e.family == "process_exec":
                 self.lineage.observe(e)
                 self._exec(e)
+            elif e.family == "system_state":
+                # context only (where a change sits relative to a boot); never a change itself
+                if e.get("system.event") == "boot" and len(self.boots[e.host]) < self.BOOTS_KEPT:
+                    self.boots[e.host].append(e)
             else:
                 self._record(e)
         return []
@@ -1062,7 +1095,7 @@ class AccountOrGroupChange(Playbook):
         actor = str(e.get("process.user") or f"uid {e.get('process.uid')}")
         for form in forms:
             change = _Change(e.host, e.ts.timestamp(), form.action, form.accounts, form.groups, form.detail,
-                             form.privileged, lineage, actor, command=e)
+                             form.privileged, lineage, actor, command=e, login=_login(e))
             self.changes.append(change)
             if isinstance(e.get("process.pid"), int):
                 self.by_pid[(e.host, e.get("process.pid"))].append(change)
@@ -1075,7 +1108,13 @@ class AccountOrGroupChange(Playbook):
         self.records.append(e)
 
     def retained_events(self):
-        return [c.command for c in self.changes if c.command is not None] + self.records
+        return ([c.command for c in self.changes if c.command is not None] + self.records
+                + [e for boots in self.boots.values() for e in boots])
+
+    def _boot(self, change: _Change) -> TypedEvent | None:
+        """The host's recorded boot nearest the change, if it lies within BOOT_SECONDS (half-open) of it."""
+        near = [b for b in self.boots.get(change.host, ()) if abs(b.ts.timestamp() - change.ts) < self.BOOT_SECONDS]
+        return min(near, key=lambda b: (abs(b.ts.timestamp() - change.ts), b.ts, b.id)) if near else None
 
     def finalize(self):
         # Join each tool record to the command of the same process (same host and pid, close in time).
@@ -1097,15 +1136,24 @@ class AccountOrGroupChange(Playbook):
                             else "an unrecorded account"))
             name = record.get("account.name")
             group = record.get("account.group")
+            pid = record.get("process.pid")
+            exec_seen = isinstance(pid, int) and self.lineage.parent(record.host, pid, ts) is not None
             self.changes.append(_Change(record.host, ts, str(record.get("account.action")),
                                         (str(name),) if name else (), (str(group),) if group else (),
                                         _RECORD_PHRASE.get(str(record.get("account.action")), "an account change"),
-                                        _record_privilege(record), lineage, actor, records=[record]))
+                                        _record_privilege(record), lineage, actor, records=[record],
+                                        login=_login(record), exec_seen=exec_seen))
         groups: dict[tuple, list[_Change]] = defaultdict(list)
+        self._boot_events: dict[str, TypedEvent] = {}
         for change in self.changes:
             privileged = change.privileged or any(_record_privilege(r) for r in change.records)
+            no_login = change.login is None and not any(_login(r) for r in change.records)
+            marker = self._boot(change) if not privileged and not change.lineage.kind and no_login else None
             if change.lineage.kind in {"package", "cloud-init"} and not privileged:
                 key = ("lineage", change.host, change.lineage.kind)
+            elif marker is not None:
+                self._boot_events[marker.id] = marker
+                key = ("boot", change.host, marker.id)
             else:
                 key = ("actor", change.host, change.actor, change.action, change.accounts, change.groups,
                        change.command is None)
@@ -1121,7 +1169,26 @@ class AccountOrGroupChange(Playbook):
         privileged = sorted({c.privileged for c in items if c.privileged}
                             | {p for c in items for p in map(_record_privilege, c.records) if p})
         web = next((c.lineage for c in items if c.lineage.kind == "web"), None)
-        if key[0] == "lineage":
+        marker = self._boot_events.get(key[2]) if key[0] == "boot" else None
+        unexplained = [c for c in items if c.command is None and not c.exec_seen]
+        if marker is not None:
+            boot_ts = marker.ts.timestamp()
+            details = [c.detail + (f" (account '{c.accounts[0]}')" if c.command is None and c.accounts else "")
+                       + (f" (group '{c.groups[0]}')" if c.command is None and c.groups else "") for c in items]
+            details = list(dict.fromkeys(details))
+            claim = (f"On {host}, {len(items)} account or group change(s) were made "
+                     f"{_offsets([c.ts - boot_ts for c in items])} the host's recorded boot at "
+                     f"{marker.ts.isoformat()} (audit SYSTEM_BOOT), with no audit login uid recorded on any of them: "
+                     f"{'; '.join(details[:6])}" + (f"; and {len(details) - 6} more" if len(details) > 6 else "")
+                     + ".")
+            writers = sorted({str(r.get("process.executable") or "an unrecorded program") for r in records})
+            if records and not commands:
+                claim += (f" The record(s) were written by {', '.join(repr(w) for w in writers)} as "
+                          f"{', '.join(sorted({c.actor for c in items}))}.")
+            elif commands:
+                claim += (f" {len(commands)} command(s) were run (e.g. "
+                          f"{_argv_summary(commands[0].get('process.argv'), 120)}); {_outcome_tally(commands)}.")
+        elif key[0] == "lineage":
             what = "package management" if key[2] == "package" else "cloud-init"
             claim = (f"On {host}, {len(items)} account or group change request(s) were made under {what}: "
                      f"{'; '.join(dict.fromkeys(c.detail for c in items[:6]))}"
@@ -1146,6 +1213,18 @@ class AccountOrGroupChange(Playbook):
                       "account database changed is not established.")
         else:
             claim += f" Recorded: {'; '.join(_record_text(r) for r in records[:4])}."
+        if unexplained and marker is None and not commands:
+            them = "it" if len(records) == 1 else "them"
+            claim += (" No exec record of the changing process was retrieved, so what started it is unknown"
+                      + (f", and no audit login uid is recorded on {them}." if not any(_login(r) for r in records)
+                         else "."))
+        elif unexplained:
+            claim += (" No exec record of the changing process was retrieved for "
+                      + ("any of them, so what started them is unknown." if len(unexplained) == len(items)
+                         else f"{len(unexplained)} of them."))
+        if marker is not None:
+            claim += (" Boot-time provisioning (cloud-init or a first-boot script setting initial passwords or "
+                      "creating accounts) looks like this; so does a job an intruder set to run at boot.")
         if privileged:
             claim += f" It requests or reports {'; '.join(privileged)}."
         mentions = sorted({m for c in items for m in map(_record_mention, c.records) if m})
@@ -1167,9 +1246,11 @@ class AccountOrGroupChange(Playbook):
                                                                                for r in records))):
             lane = "lead"
             notes.append("lane lowered: every recorded exec or tool result failed")
-        events = sorted(_unique([*commands[:10], *records[:10]]), key=lambda e: (e.ts, e.id))
+        events = sorted(_unique([*commands[:10], *records[:10], *([marker] if marker is not None else [])]),
+                        key=lambda e: (e.ts, e.id))
         predicate = [pf(e, n) for e in events[:4] for n in ("process.argv", "process.executable", "audit.record_type",
-                                                             "account.action", "account.name", "account.group")
+                                                             "account.action", "account.name", "account.group",
+                                                             "system.event")
                      if e.has(n)]
         techniques = {_ACTION_TECHNIQUE.get(c.action, "T1098") for c in items}
         notes += sorted(techniques)
