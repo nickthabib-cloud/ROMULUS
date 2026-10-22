@@ -86,6 +86,8 @@ _PROTOCOL_TABLE: tuple[tuple[str, tuple[str, ...], frozenset[int]], ...] = (
     ("pop3", _TCP, _ports(110)),
     ("imap", _TCP, _ports(143)),
     ("dns", _BOTH, _ports(53, 5353, 5355)),
+    ("mdns", _UDP, _ports(5353)),             # multicast DNS (RFC 6762), as Arkime names it
+    ("llmnr", _BOTH, _ports(5355)),           # link-local multicast name resolution (RFC 4795)
     ("krb5", _BOTH, _ports(88, 464)),
     ("ldap", _BOTH, _ports(389, 3268)),
     ("smb", _TCP, _ports(139, 445)),
@@ -160,8 +162,19 @@ def canonical_protocol(name: str) -> str:
     return ALIASES.get(name, name)
 
 
+# Protocols built on another protocol's message syntax, so that protocol's parser labels them with its own name. RTSP
+# (RFC 2326, RFC 7826) uses HTTP/1.1 request and response syntax and defines tunnelling through HTTP: an HTTP label on
+# a port registered for RTSP does not show a protocol other than the registered one. Keyed by the registered protocol.
+SYNTAX_SIBLINGS: dict[str, frozenset[str]] = {"rtsp": frozenset({"http"})}
+
+
 def standard_on(protocol: str, transport: str, port: int | None) -> bool:
-    return port is not None and port in PROTOCOL_PORTS.get(protocol, {}).get(transport, frozenset())
+    """The protocol is registered on this port, or is the syntax sibling a parser reports for a protocol that is."""
+    if port is None:
+        return False
+    if port in PROTOCOL_PORTS.get(protocol, {}).get(transport, frozenset()):
+        return True
+    return any(protocol in SYNTAX_SIBLINGS.get(registered, ()) for registered in expected_protocols(transport, port))
 
 
 def expected_protocols(transport: str, port: int | None) -> frozenset[str]:
@@ -759,7 +772,7 @@ class ProtocolPortMismatch(_FlowRule):
     data-carrying connection to a registered port had no protocol identified although the sensor can parse the
     protocol registered there."""
     id = "net.protocol_port_mismatch"
-    version = "3"
+    version = "4"
     title = "Application protocol and port disagree on a connection"
     severity, lane = "medium", "lead"
     attack = ("T1571", "T1572", "T1095")
@@ -782,7 +795,10 @@ class ProtocolPortMismatch(_FlowRule):
                     "by a sensor that parses the protocol registered there; a record whose initiator is on a "
                     "registered port and whose other end is a client port (a reversed or mid-stream view, or a "
                     "program bound to the service port) is judged against its source port, and cleared when a "
-                    "forward record of the same connection had its protocol identified",
+                    "forward record of the same connection had its protocol identified. Multicast name "
+                    "resolution under its own name (Arkime's mdns on udp/5353, llmnr on 5355) is registered on its "
+                    "port, and an HTTP label on a port registered for RTSP is RTSP's own HTTP-based syntax, not a "
+                    "different protocol",
         "telemetry": "Suricata EVE flow records (network.app_proto, ports, transport, flow.bytes_* and flow.pkts_* "
                      "per direction) and Arkime sessions (network.protocols, ports, transport, client.bytes/"
                      "server.bytes, or source/destination bytes and packets): present in the lab profile, app_proto "
@@ -793,7 +809,9 @@ class ProtocolPortMismatch(_FlowRule):
                     "ports) are consistent. Positive-only",
         "benign_and_cost": "custom service ports, proxies, mid-stream pickups and sensor parser gaps (Kafka without "
                            "a Suricata parser is excluded by the parser table; partial Arkime Kafka recognition "
-                           "stays visible as a grouped lead with the destination's identified share). One item "
+                           "stays visible as a grouped lead with the destination's identified share). Plain HTTP "
+                           "on an RTSP port is not told apart from RTSP and is not reported by this rule (the HTTP "
+                           "and beaconing rules still read it). One item "
                            "per (destination, port, protocol), or per (destination, port) for unidentified traffic, "
                            "listing every source with its connection count",
         "query_cost": "none beyond the sweep",
@@ -802,7 +820,8 @@ class ProtocolPortMismatch(_FlowRule):
                 "identity with the port",
         "research_basis": "ATT&CK Enterprise 20.0 T1571 (detection: traffic patterns on ports not associated with "
                           "the protocol), T1572 and T1095; IANA service name and port registry for the port table; "
-                          "Suricata and Arkime documentation for the default parser sets",
+                          "Suricata and Arkime documentation for the default parser sets; RFC 6762 (mDNS), RFC 4795 "
+                          "(LLMNR), RFC 2326 and RFC 7826 (RTSP's HTTP-based syntax and HTTP tunnelling)",
         "retrieval": "the sweep retrieves every record of the network flow datasets and the Arkime session index in "
                      "each partition (dataset filter only), a superset of what this evaluator reads",
         "lanes": "lead: a parser's judgement against a port convention is ambiguous by nature. Severity medium",

@@ -329,6 +329,34 @@ def test_consistent_protocol_and_port_shapes_are_not_mismatches(hit):
     assert run(rule, events(hit)) == [] and rule.evaluated == 1
 
 
+@pytest.mark.parametrize("hit", [
+    # multicast service discovery as Arkime names it, to the IPv4 and IPv6 groups, on its registered port
+    ark("mdns4", proto=17, src="10.0.0.20", sport=5353, dst="224.0.0.251", dport=5353, protocols=["mdns"], c2s=300),
+    ark("mdns6", proto=17, src="fe80::20", sport=5353, dst="ff02::fb", dport=5353, protocols=["mdns"], c2s=300),
+    ark("llmnr", proto=17, src="10.0.0.20", sport=55000, dst="224.0.0.252", dport=5355, protocols=["llmnr"], c2s=90),
+    # RTSP uses HTTP's message syntax: an HTTP parser's label on the RTSP port is not a different protocol
+    eve("rtsp-as-http", dst="10.0.7.40", dport=554, app_proto="http", c2s=900, s2c=90000, pkts_s=80),
+    eve("rtsp-alt-as-http", dst="10.0.7.40", dport=8554, app_proto="http", c2s=900, s2c=90000, pkts_s=80),
+])
+def test_service_discovery_names_and_rtsp_read_as_http_are_consistent_with_their_ports(hit):
+    rule = ProtocolPortMismatch()
+    assert run(rule, events(hit)) == [] and rule.evaluated == 1
+
+
+@pytest.mark.parametrize("hit,protocol,port", [
+    # the multicast name on a port that is not its own is still a disagreement
+    (ark("mdns-off", proto=17, dst="10.0.1.9", dport=4444, protocols=["mdns"], c2s=300, s2c=300), "mdns", "udp/4444"),
+    # a different protocol on the RTSP port is still a disagreement
+    (eve("ssh554", dst=ATTACKER, dport=554, app_proto="ssh", c2s=4000, s2c=9000, pkts_s=12), "ssh", "tcp/554"),
+    # HTTP's leniency is limited to RTSP's ports
+    (eve("http5353", proto="TCP", dst=ATTACKER, dport=5353, app_proto="http", c2s=4000, s2c=9000, pkts_s=12), "http",
+     "tcp/5353"),
+])
+def test_real_disagreements_stay_reported(hit, protocol, port):
+    [m] = run(ProtocolPortMismatch(), events(hit))
+    assert f"identified {protocol} on 1 connection" in m.claim and port in m.claim
+
+
 def test_data_carrying_flow_to_a_registered_port_with_no_protocol_is_a_lead():
     hits = [eve(f"u{i}", sport=50000 + i, dst=ATTACKER, dport=80, c2s=3000, s2c=8000, pkts_s=8,
                 start=T0 + timedelta(minutes=i)) for i in range(3)]
