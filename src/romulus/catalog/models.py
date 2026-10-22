@@ -16,6 +16,39 @@ class CoverageStrength(str, Enum):
     NONE = "none"
 
 
+TECHNIQUE_STRENGTH_POLICY = (
+    "A technique's strength is the strongest strength among its active covering rules."
+)
+
+COVERAGE_STRENGTH_LEGEND: tuple[tuple[CoverageStrength, str], ...] = (
+    (
+        CoverageStrength.NEGATIVE_CAPABLE,
+        (
+            "A covering rule can report a complete negative for its own predicate when runtime "
+            "coverage is complete; this never means the ATT&CK technique is absent."
+        ),
+    ),
+    (
+        CoverageStrength.POSITIVE_ONLY,
+        (
+            "A covering rule can report matching evidence, but a non-match cannot support a "
+            "complete negative."
+        ),
+    ),
+    (
+        CoverageStrength.CONTEXT_ONLY,
+        (
+            "A covering rule is judged only on evidence reached through an explicit investigation "
+            "context and cannot support a technique-wide negative."
+        ),
+    ),
+    (
+        CoverageStrength.NONE,
+        "No active rule explicitly maps to the technique.",
+    ),
+)
+
+
 @dataclass(frozen=True)
 class AttackTactic:
     id: str

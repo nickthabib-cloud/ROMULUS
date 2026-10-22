@@ -47,6 +47,19 @@ def test_public_matrix_contains_versions_tactic_rollups_and_rule_card_links():
     assert "Coverage strength: **context-only**" in fingerprint_card
 
 
+def test_public_matrix_explains_strength_and_labels_each_covering_rule():
+    text = render_public(build_catalog())
+
+    assert "## Strength legend" in text
+    assert "for its own predicate" in text
+    assert "never means the ATT&CK technique is absent" in text
+    assert "strongest covering rule's strength" in text
+    assert (
+        "[net.rare_client_fingerprint](#rule-net-rare-client-fingerprint) (context-only)"
+        in text
+    )
+
+
 def test_public_matrix_keeps_every_active_technique_visible_when_subtechniques_collapse():
     catalog = build_catalog()
     text = render_public(catalog)

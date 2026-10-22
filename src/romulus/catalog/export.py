@@ -5,7 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from .build import build_catalog, strength_for_rule
-from .models import Catalog, CoverageStrength, RuleMetadata
+from .models import (
+    COVERAGE_STRENGTH_LEGEND,
+    TECHNIQUE_STRENGTH_POLICY,
+    Catalog,
+    CoverageStrength,
+    RuleMetadata,
+)
 
 
 def _rule_strength(rule: RuleMetadata) -> str:
@@ -53,6 +59,13 @@ def _techniques(catalog: Catalog) -> list[dict[str, Any]]:
             "data_components": list(item.technique.data_components),
             "strength": item.strength.value,
             "rule_ids": list(item.rule_ids),
+            "covering_rules": [
+                {
+                    "rule_id": rule_id,
+                    "strength": strength_for_rule(catalog.rule(rule_id)).value,
+                }
+                for rule_id in item.rule_ids
+            ],
             "telemetry_families": list(item.telemetry_families),
             "status": "not covered" if item.strength is CoverageStrength.NONE else "covered",
         }
@@ -116,6 +129,10 @@ def export(catalog: Catalog | None = None) -> dict[str, Any]:
         "schema_version": 1,
         "attack_version": catalog.attack_version,
         "pack_version": catalog.pack_version,
+        "coverage_strength_legend": {
+            strength.value: description for strength, description in COVERAGE_STRENGTH_LEGEND
+        },
+        "technique_strength_policy": TECHNIQUE_STRENGTH_POLICY,
         "rules": _rules(catalog),
         "techniques": techniques,
         "tactics": _tactics(catalog),

@@ -14,6 +14,8 @@ def test_catalog_export_has_the_public_ui_schema_and_round_trips_json():
         "schema_version",
         "attack_version",
         "pack_version",
+        "coverage_strength_legend",
+        "technique_strength_policy",
         "rules",
         "techniques",
         "tactics",
@@ -57,6 +59,22 @@ def test_catalog_export_contains_sorted_rules_techniques_strengths_and_telemetry
     fingerprint = next(item for item in rules if item["id"] == "net.rare_client_fingerprint")
     assert fingerprint["coverage_strength"] == "context-only"
     assert "lead-capped" not in {item["coverage_strength"] for item in rules}
+
+
+def test_catalog_export_explains_strength_and_labels_each_covering_rule():
+    document = export()
+    web_protocols = next(item for item in document["techniques"] if item["id"] == "T1071.001")
+
+    assert document["technique_strength_policy"] == (
+        "A technique's strength is the strongest strength among its active covering rules."
+    )
+    assert document["coverage_strength_legend"]["negative-capable"] == (
+        "A covering rule can report a complete negative for its own predicate when runtime "
+        "coverage is complete; this never means the ATT&CK technique is absent."
+    )
+    assert web_protocols["covering_rules"] == [
+        {"rule_id": "net.rare_client_fingerprint", "strength": "context-only"}
+    ]
 
 
 def test_catalog_export_marks_every_uncovered_technique_as_a_gap():

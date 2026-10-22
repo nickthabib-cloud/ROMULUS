@@ -6,7 +6,14 @@ import re
 from collections import defaultdict
 
 from .build import strength_for_rule
-from .models import Catalog, CoverageStrength, RuleMetadata, TechniqueCoverage
+from .models import (
+    COVERAGE_STRENGTH_LEGEND,
+    TECHNIQUE_STRENGTH_POLICY,
+    Catalog,
+    CoverageStrength,
+    RuleMetadata,
+    TechniqueCoverage,
+)
 
 
 def _esc(value: object) -> str:
@@ -30,8 +37,33 @@ def _join(values: tuple[str, ...] | list[str]) -> str:
     return "<br>".join(_esc(value) for value in values) if values else "—"
 
 
-def _rule_links(rule_ids: tuple[str, ...]) -> str:
-    return "<br>".join(_rule_link(rule_id) for rule_id in rule_ids) if rule_ids else "—"
+def _rule_links(rule_ids: tuple[str, ...], catalog: Catalog) -> str:
+    return (
+        "<br>".join(
+            f"{_rule_link(rule_id)} ({strength_for_rule(catalog.rule(rule_id)).value})"
+            for rule_id in rule_ids
+        )
+        if rule_ids
+        else "—"
+    )
+
+
+def _strength_legend() -> list[str]:
+    lines = ["## Strength legend", ""]
+    lines.extend(
+        f"- **{strength.value}** — {_esc(description)}"
+        for strength, description in COVERAGE_STRENGTH_LEGEND
+    )
+    lines += [
+        "",
+        TECHNIQUE_STRENGTH_POLICY,
+        (
+            "Each row therefore shows the strongest covering rule's strength; the covering-rules "
+            "cell shows every rule's own strength."
+        ),
+        "",
+    ]
+    return lines
 
 
 def _summary(catalog: Catalog) -> list[str]:
@@ -74,10 +106,10 @@ def _subtechnique_cell(
     return "<br>".join(parts) if parts else "—"
 
 
-def _technique_row(item: TechniqueCoverage, subtechniques: str) -> str:
+def _technique_row(item: TechniqueCoverage, subtechniques: str, catalog: Catalog) -> str:
     return (
         f"| {_technique_link(item.technique.id)} | {_esc(item.technique.name)} | {subtechniques} "
-        f"| {item.strength.value} | {_rule_links(item.rule_ids)} | {_join(item.telemetry_families)} |"
+        f"| {item.strength.value} | {_rule_links(item.rule_ids, catalog)} | {_join(item.telemetry_families)} |"
     )
 
 
@@ -109,11 +141,15 @@ def _tactic_tables(catalog: Catalog) -> list[str]:
                 for item in children.get(parent.technique.id, ())
                 if tactic.shortname in item.technique.tactics
             ]
-            lines.append(_technique_row(parent, _subtechnique_cell(in_tactic)))
+            lines.append(_technique_row(parent, _subtechnique_cell(in_tactic), catalog))
             for child in in_tactic:
                 if child.strength is not CoverageStrength.NONE:
                     lines.append(
-                        _technique_row(child, f"sub-technique of {_technique_link(parent.technique.id)}")
+                        _technique_row(
+                            child,
+                            f"sub-technique of {_technique_link(parent.technique.id)}",
+                            catalog,
+                        )
                     )
         lines.append("")
     return lines
@@ -192,6 +228,7 @@ def render_public(catalog: Catalog) -> str:
         "Every collapsed id and name remains listed and is marked not covered.",
         "",
     ]
+    lines += _strength_legend()
     lines += _summary(catalog)
     lines += _tactic_tables(catalog)
     lines += _metadata_issues(catalog)
