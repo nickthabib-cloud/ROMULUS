@@ -1166,6 +1166,16 @@ class ProcessLineage:
 
     def __init__(self):
         self.records: OrderedDict[tuple[str | None, int], list[Ancestor]] = OrderedDict()
+        # Processes released to stay within CAPACITY (about 400 bytes each, so 40 MB): a walk through one of them
+        # stops early. A process found as a parent becomes recent, so a parent that keeps starting children stays.
+        self.evicted = 0
+
+    def note(self, playbook) -> None:
+        """State on the owning rule's coverage that lineage walks may have stopped early."""
+        if self.evicted:
+            playbook.note_limit("lineage", f"exec records of {self.evicted} process(es) were released to hold at most "
+                                           f"{self.CAPACITY:,}; a lineage walk through one stops early, so a "
+                                           f"lineage-based lane or wording may be missing")
 
     @staticmethod
     def entry(event: TypedEvent) -> Ancestor:
@@ -1197,6 +1207,7 @@ class ProcessLineage:
         self.records[key] = entries
         while len(self.records) > self.CAPACITY:
             self.records.popitem(last=False)
+            self.evicted += 1
 
     def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None) -> Ancestor | None:
         """The latest exec of `ppid` no later than `ts`, unless it was recorded in a boot other than `boot`: the
@@ -1204,9 +1215,12 @@ class ProcessLineage:
         if ppid is None or ppid <= 1:
             return None
         best = None
-        for entry in self.records.get((host, ppid), ()):
+        entries = self.records.get((host, ppid))
+        for entry in entries or ():
             if entry.ts <= ts:
                 best = entry
+        if entries:
+            self.records.move_to_end((host, ppid))
         return None if best is not None and boots_conflict(boot, best.boot) else best
 
     def classify(self, event: TypedEvent) -> Lineage:

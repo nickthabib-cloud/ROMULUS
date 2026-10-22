@@ -13,6 +13,8 @@ This module holds the shared pieces: the re-delivery guard and the limit record 
 """
 from __future__ import annotations
 
+from bisect import insort
+from collections import OrderedDict
 from dataclasses import dataclass
 
 # Ids remembered by the re-delivery guard per generation (two generations are kept). The sweep reads each raw record
@@ -123,3 +125,72 @@ class HeldExamples:
         if missing:
             raise LookupError(f"{len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
         return [item[1] if item[1] is not None else found[item[0][1]] for item in self.items]
+
+
+class ExecHistory:
+    """Exec records per (host, pid), for lineage. A hunt over weeks on thousands of hosts sees a new pid for almost
+    every exec, so the history is held for at most `capacity` processes, least recently used first out: adding an
+    exec or finding a process as an ancestor makes it recent, so a long-lived parent that keeps starting children
+    stays. Each process keeps its latest `per_key` execs (pids are reused). A rule can `pin` the entries a record's
+    lineage rested on when it read the record, so a finding made at finalize still sees them after release.
+
+    A released process makes later lineage walks stop early; `evicted` counts releases so the rule can say so. An
+    entry is a tuple whose first element is its time; entries of one process are kept in time order (stable)."""
+
+    __slots__ = ("capacity", "entries", "evicted", "per_key", "pinned")
+
+    def __init__(self, capacity: int, per_key: int):
+        self.capacity = capacity
+        self.per_key = per_key
+        self.entries: OrderedDict[tuple, list[tuple]] = OrderedDict()
+        self.pinned: dict[tuple, list[tuple]] = {}
+        self.evicted = 0
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def add(self, key: tuple, entry: tuple) -> None:
+        held = self.entries.get(key)
+        if held is None:
+            held = self.entries[key] = []
+        else:
+            self.entries.move_to_end(key)
+        insort(held, entry, key=_first)
+        if len(held) > self.per_key:
+            del held[0]
+        while len(self.entries) > self.capacity:
+            self.entries.popitem(last=False)
+            self.evicted += 1
+
+    def get(self, key: tuple, *, touch: bool = False) -> list[tuple]:
+        """The process's entries in time order (held and pinned); `touch` makes it recent."""
+        held = self.entries.get(key)
+        if held is not None and touch:
+            self.entries.move_to_end(key)
+        pinned = self.pinned.get(key)
+        if not pinned:
+            return held or []
+        if not held:
+            return pinned
+        merged = list(held)
+        for entry in pinned:
+            if entry not in merged:
+                insort(merged, entry, key=_first)
+        return merged
+
+    def pin(self, key: tuple, entries: list[tuple]) -> None:
+        """Keep these entries of a process beyond its release (a cited record's lineage)."""
+        if not entries:
+            return
+        kept = self.pinned.setdefault(key, [])
+        for entry in entries:
+            if entry not in kept:
+                insort(kept, entry, key=_first)
+
+    def clear(self) -> None:
+        self.entries.clear()
+        self.pinned.clear()
+
+
+def _first(entry: tuple):
+    return entry[0]

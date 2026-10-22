@@ -387,6 +387,10 @@ class _TamperRule(Playbook):
 
     program_prefilter = True
 
+    def limit_reasons(self) -> list[str]:
+        self.lineage.note(self)
+        return super().limit_reasons()
+
     def _process_relevant(self, event: TypedEvent) -> bool:
         name = program_name_hint(event)
         return (name is None or name in self.process_programs or name in SHELLS

@@ -204,6 +204,19 @@ class _SshAttemptStream(Playbook):
         self._attempt(_Attempt(ts, e.host, str(e.get("source.ip")), str(account) if account else None,
                                e.get("auth.user_valid"), new, e))
 
+    # Per-key tallies (sources, accounts) are held for the whole window because a key's totals are stated when it
+    # crosses: about 500 bytes each, so 250 MB at the budget. An attempt of a new key beyond it is not counted and
+    # coverage says so. The sliding windows themselves are pruned to their span.
+    MAX_KEYS = 500_000
+
+    def _admit(self, tallies: dict, key: tuple) -> bool:
+        if key in tallies or len(tallies) < self.MAX_KEYS:
+            return True
+        self.evaluated -= 1
+        self.refuse("keys", f"attempt tallies reached {self.MAX_KEYS:,}; an attempt of a new source or account is "
+                            f"not counted")
+        return False
+
     def finalize(self):
         self._drain(float("inf"))
         return self._findings()
@@ -300,6 +313,8 @@ class SshPasswordGuessing(_SshAttemptStream):
         if a.account is None:
             return
         key = (a.host, a.ip, a.account)
+        if not self._admit(self.tallies, key):
+            return
         tally = self.tallies.setdefault(key, _Tally(first=a.ts))
         tally.add(a)
         window = self.windows.setdefault(key, deque())
@@ -375,20 +390,27 @@ class SshPasswordSpraying(_SshAttemptStream):
                      "only), a superset of what this evaluator reads",
     }
 
+    NAMES_BUDGET = 2_000_000         # account names held over all sources (a source's later names are counted only)
+
     def __init__(self):
         super().__init__()
         self.windows: dict[tuple, deque[_Attempt]] = {}
         self.in_window: dict[tuple, Counter] = {}
         self.tallies: dict[tuple, _Tally] = {}
         self.successes: Counter = Counter()
+        self.names_held = 0
 
     def _attempt(self, a):
         key = (a.host, a.ip)
+        if not self._admit(self.tallies, key):
+            return
         tally = self.tallies.setdefault(key, _Tally(first=a.ts))
         tally.add(a)
         if a.account is None:
             return
-        if a.account in tally.names or len(tally.names) < self.NAME_CAP:
+        if a.account in tally.names or (len(tally.names) < self.NAME_CAP and self.names_held < self.NAMES_BUDGET):
+            if a.account not in tally.names:
+                self.names_held += 1
             tally.names.add(a.account)
         else:
             tally.more_names += 1
@@ -1058,6 +1080,21 @@ class AccountOrGroupChange(Playbook):
         self.boots: dict[str | None, list[TypedEvent]] = defaultdict(list)
         self._seen = RecentIds()        # bounded re-read guard
 
+    # Account changes and tool records are held as events until finalize (they are the findings' citations): at
+    # about 8 KB each, 20,000 is 160 MB. A change beyond it is not evaluated and coverage says so.
+    MAX_HELD = 20_000
+
+    def limit_reasons(self) -> list[str]:
+        self.lineage.note(self)
+        return super().limit_reasons()
+
+    def _room(self) -> bool:
+        if len(self.changes) + len(self.records) < self.MAX_HELD:
+            return True
+        self.refuse("held", f"account changes and tool records held reached {self.MAX_HELD:,}; a later one is not "
+                            f"evaluated")
+        return False
+
     @staticmethod
     def _process_relevant(event: TypedEvent) -> bool:
         name = program_name_hint(event)
@@ -1111,6 +1148,9 @@ class AccountOrGroupChange(Playbook):
             self.missing_required += 1
         if not forms:
             return
+        if not self._room():
+            self.evaluated -= 1
+            return
         if incomplete:
             forms = [f._replace(detail=f"{f.detail}" + (f", requesting {f.privileged}" if f.privileged else "")
                                 + " (read from an incomplete command line; later arguments are unknown)",
@@ -1127,6 +1167,8 @@ class AccountOrGroupChange(Playbook):
     def _record(self, e: TypedEvent) -> None:
         if not e.has("account.action"):
             self.missing_required += 1
+            return
+        if not self._room():
             return
         self.evaluated += 1
         self.records.append(e)
