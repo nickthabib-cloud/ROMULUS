@@ -14,6 +14,7 @@ from romulus.agent.tools import (
     AuthActivityRequest,
     EntityTimelineRequest,
     IdsAlertsRequest,
+    ProcessTreeArgs,
     ProcessTreeRequest,
     ToolRequest,
 )
@@ -576,7 +577,11 @@ class PivotExecutor:
             elif isinstance(request, ProcessTreeRequest):
                 if network or not (_supports(contract, "event.dataset") and _supports(contract, "host.name")):
                     continue
-                for dataset in _host_datasets(contract, {"process_exec"}):
+                families = (
+                    {"process_exec", "process_termination", "system_state"}
+                    if contract.os_family == "windows" else {"process_exec"}
+                )
+                for dataset in _host_datasets(contract, families):
                     intents.append(SearchIntent(
                         kind="raw", target=target, window=window,
                         filters=[
@@ -1108,7 +1113,11 @@ class PivotExecutor:
             return (event.host == entity.value if entity.kind == "host" else
                     any(item.kind == "account" and item.value == entity.value for item in _event_entities(event)))
         if isinstance(request, ProcessTreeRequest):
-            return (event.family == "process_exec" and event.host == args.host
+            if event.host != args.host:
+                return False
+            if event.get("host.os.family") == "windows":
+                return event.family in {"process_exec", "process_termination", "system_state"}
+            return (event.family == "process_exec"
                     and args.process_id in {event.get("process.pid"), event.get("process.ppid")})
         if isinstance(request, IdsAlertsRequest):
             if event.family != "net_alert":
@@ -1117,6 +1126,62 @@ class PivotExecutor:
             return (event.host == entity.value if entity.kind == "host" else
                     any(item.kind == "ip" and item.value == entity.value for item in _event_entities(event)))
         return False
+
+    @staticmethod
+    def _select_windows_process_tree(
+        events: list[TypedEvent], args: ProcessTreeArgs, anchor_ts: datetime | None,
+    ) -> tuple[list[TypedEvent], str | None]:
+        candidates = sorted(
+            (event for event in events if event.host == args.host),
+            key=lambda event: (event.ts, event.id),
+        )
+        roots = [
+            event for event in candidates
+            if event.family == "process_exec" and event.get("process.pid") == args.process_id
+        ]
+        pivot_time = anchor_ts or (roots[0].ts if roots else args.start)
+        root = min(roots, key=lambda event: abs((event.ts - pivot_time).total_seconds())) if roots else None
+        root_guid = root.get("process.guid") if root is not None else None
+        if root_guid:
+            guids = {str(root_guid).casefold()}
+            selected: dict[str, TypedEvent] = {}
+            changed = True
+            while changed:
+                changed = False
+                for event in candidates:
+                    if event.family != "process_exec":
+                        continue
+                    guid = str(event.get("process.guid") or "").casefold()
+                    parent = str(event.get("process.parent.guid") or "").casefold()
+                    if guid in guids or parent in guids:
+                        selected[event.id] = event
+                        if guid and guid not in guids:
+                            guids.add(guid)
+                            changed = True
+            return list(selected.values()), None
+        fences = [
+            event for event in candidates
+            if event.get("process.fence") == "boot"
+            or (event.get("process.fence") == "termination" and event.get("process.pid") == args.process_id)
+        ]
+        if not fences:
+            selected = [
+                event for event in candidates
+                if event.family == "process_exec"
+                and args.process_id in {event.get("process.pid"), event.get("process.ppid")}
+            ]
+            return selected, "process_tree PID fence evidence unavailable"
+        lower, upper = args.start, args.end
+        for fence in fences:
+            if fence.ts <= pivot_time:
+                lower = max(lower, fence.ts)
+            else:
+                upper = min(upper, fence.ts)
+        return [
+            event for event in candidates
+            if event.family == "process_exec" and lower <= event.ts < upper
+            and args.process_id in {event.get("process.pid"), event.get("process.ppid")}
+        ], None
 
     def run(self, case_id: str, request: ToolRequest, *,
             anchor_ts: datetime | None = None) -> PivotResult:
@@ -1248,6 +1313,22 @@ class PivotExecutor:
                 task_id, "executed", outcome=outcome_digest, owner_token=self.owner_token,
             )
             self.repo.update_task(task_id, "evaluated", owner_token=self.owner_token)
+
+        if isinstance(request, ProcessTreeRequest) and any(
+            self.contracts[intent.target].os_family == "windows" for intent in intents
+        ):
+            retained, fence_reason = self._select_windows_process_tree(
+                retained, request.arguments, anchor_ts,
+            )
+            if fence_reason:
+                incomplete = True
+                reasons.append(fence_reason)
+                coverage = [cell.model_copy(update={
+                    "status": "partial",
+                    "reasons": sorted(set(cell.reasons + [fence_reason])),
+                    "covered_ranges": [],
+                    "unresolved_ranges": [_range(cell.start, cell.end, fence_reason)],
+                }) for cell in coverage]
 
         candidate_ids: list[str] = []
         for playbook in fresh_direct_pack():

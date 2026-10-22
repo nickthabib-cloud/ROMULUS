@@ -35,6 +35,7 @@ AGGREGATABLE = {
 
 class FieldSpec(BaseModel):
     native: str
+    natives: tuple[str, ...] = ()
     type: str
     ops: list[str]
     aggregatable: bool
@@ -48,6 +49,7 @@ class FieldContract(BaseModel):
     role: Literal["host", "network"] = "host"
     os_family: Literal["linux", "windows", "unknown"] = "linux"
     hosts: tuple[str, ...] = ()
+    host_inventory_complete: bool = True
 
     def spec(self, typed: str) -> FieldSpec | None:
         return self.fields.get(typed)
@@ -111,6 +113,10 @@ WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
     "process.parent.guid": ("winlog.event_data.ParentProcessGuid",),
     "auth.session_id": ("winlog.event_data.TargetLogonId", "winlog.event_data.SubjectLogonId"),
     "user.name": ("winlog.event_data.SubjectUserName",),
+    "user.entity_id": (
+        "winlog.event_data.SubjectUserSid", "winlog.event_data.SubjectUserName", "winlog.event_data.User",
+    ),
+    "auth.target_account": ("winlog.event_data.TargetUserSid", "winlog.event_data.TargetUserName"),
     "source.ip": ("winlog.event_data.SourceIp", "winlog.event_data.IpAddress"),
     "source.port": ("winlog.event_data.SourcePort", "winlog.event_data.IpPort"),
     "destination.ip": ("winlog.event_data.DestinationIp",),
@@ -166,10 +172,17 @@ def contract_from_types(
     os_family: Literal["linux", "windows", "unknown"] | None = None,
     field_mappings: dict[str, tuple[str, ...] | str] | None = None,
     hosts: tuple[str, ...] = (),
+    host_inventory_complete: bool = True,
 ) -> FieldContract:
     """Build a typed contract, adding explicit aliases for native schemas such as Windows event data."""
     fields = {
-        name: FieldSpec(native=name, type=t, ops=sorted(OPS_BY_TYPE.get(t, set())), aggregatable=t in AGGREGATABLE)
+        name: FieldSpec(
+            native=name,
+            natives=(name,),
+            type=t,
+            ops=sorted(OPS_BY_TYPE.get(t, set())),
+            aggregatable=t in AGGREGATABLE,
+        )
         for name, t in field_types.items()
     }
     mappings = dict(field_mappings or {})
@@ -177,23 +190,28 @@ def contract_from_types(
         mappings = {**WINDOWS_FIELD_MAPPINGS, **mappings}
     for typed, candidates in mappings.items():
         native_candidates = (candidates,) if isinstance(candidates, str) else candidates
-        for native in native_candidates:
-            native_type = _native_type(field_types, native)
-            if native_type is None:
-                continue
-            fields[typed] = FieldSpec(
-                native=native,
-                type=native_type,
-                ops=sorted(OPS_BY_TYPE.get(native_type, set())),
-                aggregatable=native_type in AGGREGATABLE,
-            )
-            break
+        available = [
+            (native, native_type)
+            for native in native_candidates
+            if (native_type := _native_type(field_types, native)) is not None
+        ]
+        if not available:
+            continue
+        common_ops = set.intersection(*(OPS_BY_TYPE.get(native_type, set()) for _, native_type in available))
+        native, native_type = available[0]
+        fields[typed] = FieldSpec(
+            native=native,
+            natives=tuple(item[0] for item in available),
+            type=native_type,
+            ops=sorted(common_ops),
+            aggregatable=len(available) == 1 and native_type in AGGREGATABLE,
+        )
     time_field = "firstPacket" if schema_of(field_types) == "arkime_sessions" else "@timestamp"
     resolved_role = role or source_role(field_types)
     resolved_os = os_family or source_os_family(field_types, resolved_role)
     return FieldContract(
         target=target, fields=fields, time_field=time_field, role=resolved_role, os_family=resolved_os,
-        hosts=hosts,
+        hosts=hosts, host_inventory_complete=host_inventory_complete,
     )
 
 
@@ -236,4 +254,10 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
     }
     pid = digest({k: v for k, v in prof.items() if k != "captured_at"})[:16]
     profile = SourceProfile(id=pid, **prof)
-    return profile, contract_from_types(target, field_types, role=role, hosts=tuple(sorted(profile.hosts)))
+    return profile, contract_from_types(
+        target,
+        field_types,
+        role=role,
+        hosts=tuple(sorted(profile.hosts)),
+        host_inventory_complete=not any(note.startswith("hosts inventory truncated") for note in notes),
+    )

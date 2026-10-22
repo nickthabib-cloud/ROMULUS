@@ -268,6 +268,7 @@ def interpreter_indicators(argv: list[str]) -> list[str]:
 
 
 class WebServiceSpawnsInterpreter(Playbook):
+    os_families = ("linux",)
     """Stack-counted: routine shapes collapse into one context item; rare shapes become leads and
     are escalated only when typed argv indicators are present (rarity alone is not suspicion)."""
     id = "host.web_service_spawns_interpreter"
@@ -381,6 +382,7 @@ class WebServiceSpawnsInterpreter(Playbook):
 
 
 class DownloaderFeedsInterpreter(Playbook):
+    os_families = ("linux",)
     """Sequence: a downloader exec and a stdin-reading interpreter exec with the same parent on the
     same host within MAX_GAP seconds (the shape of `curl URL | sh` typed into a shell or a script)."""
     id = "host.downloader_feeds_interpreter"
@@ -471,6 +473,7 @@ class DownloaderFeedsInterpreter(Playbook):
 
 
 class DownloadPipedToShell(Playbook):
+    os_families = ("linux",)
     """Script-text indicator: a shell was started with a script containing downloader | interpreter.
     Positive-only: whether the pipeline ran is shown by process-level evidence
     (host.downloader_feeds_interpreter), never inferred from text."""
@@ -516,6 +519,7 @@ class DownloadPipedToShell(Playbook):
 
 
 class PtyUpgrade(Playbook):
+    os_families = ("linux",)
     id = "host.python_pty_spawn"
     argv_prefix_safe = True
     # argv/text-identified programs and actions: findings only, never a complete negative
@@ -543,6 +547,7 @@ class PtyUpgrade(Playbook):
 
 
 class ExecFromTempDir(Playbook):
+    os_families = ("linux",)
     id = "host.exec_from_temp_dir"
     argv_prefix_safe = True
     # argv/text-identified programs and actions: findings only, never a complete negative
@@ -577,6 +582,7 @@ _DEBCONF_ACTIONS = {"configure", "reconfigure"}
 
 
 class ScriptFromTempDir(Playbook):
+    os_families = ("linux",)
     """Positive-only argv indicator: an interpreter was given a temp-directory script operand."""
     id = "host.script_from_temp_dir"
     argv_prefix_safe = True
@@ -644,6 +650,7 @@ def _flag_value(args: list[str], *flags: str) -> str | None:
 
 
 class FirewallRuleChange(Playbook):
+    os_families = ("linux",)
     """Direct findings for commands that block or unblock a specific address on a built-in chain, leads for
     commands that weaken the firewall (disable, flush, accept-by-default, open a port, remove a block); other
     rule-change commands are grouped per host as context."""
@@ -824,6 +831,7 @@ def _firewall_weakening(name: str, args: list[str], chain: str | None, target: s
 
 
 class CredentialStoreRead(Playbook):
+    os_families = ("linux",)
     id = "host.credential_store_read"
     argv_prefix_safe = True
     anchor_class = "credential_access"
@@ -868,6 +876,7 @@ class CredentialStoreRead(Playbook):
 
 
 class AuthorizedKeysWrite(Playbook):
+    os_families = ("linux",)
     """Indicator of an authorized_keys write: a tee/cp/mv/install exec naming the file (observed action),
     or a shell script containing a redirect into it (script content). Positive-only: shell-builtin
     redirects create no process, so absence can only be assured by file-access telemetry."""
@@ -923,6 +932,7 @@ class AuthorizedKeysWrite(Playbook):
 
 
 class SshLoginFromExternal(Playbook):
+    os_families = ("linux",)
     id = "host.ssh_login_external_source"
     anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
@@ -1009,6 +1019,7 @@ def unbacked_executable(exe: str) -> tuple[str, str] | None:
 
 
 class UnbackedExecutable(Playbook):
+    os_families = ("linux",)
     """A process whose kernel-recorded executable is memory-backed, deleted or in an in-memory runtime directory,
     seen on any audit record that carries the executable (exec, socket or file-change calls)."""
     id = "host.unbacked_or_deleted_executable"

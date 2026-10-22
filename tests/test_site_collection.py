@@ -27,6 +27,7 @@ collection:
       Logon: both
     defender_operational: true
     task_scheduler_operational: false
+    system_event_log: true
 domain_controllers: [DC01.EXAMPLE.TEST]
 directory_sync_accounts: [S-1-5-21-111-222-333-444, EXAMPLE\\SyncSvc]
 """
@@ -76,6 +77,10 @@ def test_valid_site_file_is_canonical_strict_and_host_scoped(tmp_path):
         (VALID.replace("S-1-5-21-111-222-333-444", "S-1-bad"), "directory_sync_accounts"),
         (VALID.replace("collection:\n", "collection:\n  - hosts: [dc01]\n    sysmon: {installed: true, event_ids: [1]}\n"), "duplicate host group"),
         (VALID.replace("schema: romulus-site-collection@1", "schema: romulus-site-collection@1\nschema: old"), "duplicate key"),
+        (VALID.replace("installed: true", "installed: 1"), "boolean"),
+        (VALID.replace("security_4688_command_line: true", "security_4688_command_line: 'true'"), "boolean"),
+        (VALID.replace("event_ids: [1, 3, 5]", "event_ids: ['1', 3, 5]"), "integer"),
+        (VALID.replace("hosts: [WS-*.example.test, dc01]", "hosts: ['*']\n  - hosts: all"), "catch-all|duplicate"),
     ],
 )
 def test_invalid_site_files_fail_with_a_clear_validation_error(tmp_path, body, message):
@@ -160,3 +165,13 @@ def test_resume_hunt_checks_site_provenance_before_claiming_work(tmp_path, monke
 
     with pytest.raises(SiteChangedError, match="changed since the hunt was created"):
         hunt_run.resume_hunt(Settings(home=tmp_path), "h1")
+
+
+def test_web_service_startup_rejects_an_invalid_present_site_file(tmp_path, monkeypatch):
+    from romulus.web import app as web_app
+
+    _write(tmp_path, VALID.replace("installed: true", "installed: 1"))
+    monkeypatch.setattr(web_app, "open_repo", lambda _settings: pytest.fail("opened store before site validation"))
+
+    with pytest.raises(SiteValidationError, match="boolean"):
+        web_app.create_app(Settings(home=tmp_path, secret_key="test-secret"))

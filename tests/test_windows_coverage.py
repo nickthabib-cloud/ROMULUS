@@ -5,10 +5,17 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from romulus.detect.base import Playbook
+from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent
 from romulus.evidence.windows import RecordIdContinuity
-from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL, lookup_event_class
+from romulus.evidence.windows_catalog import (
+    EVENT_CLASSES,
+    SYSMON,
+    SYSMON_CHANNEL,
+    collection_requirements,
+    lookup_event_class,
+)
 from romulus.hunt.sweep import Sweep
 from romulus.site import load_site_facts
 from romulus.sources.models import Completeness, SearchOutcome, Window
@@ -92,6 +99,19 @@ def test_record_id_gap_scan_is_streaming_duplicate_safe_and_names_each_gap():
     assert len(continuity.last) == 1
 
 
+def test_record_id_continuity_refuses_singletons_and_bounds_host_channel_state():
+    continuity = RecordIdContinuity(max_keys=1)
+
+    singleton = continuity.observe("target", [_hit(10)])
+    second_host = _hit(20)
+    second_host["_source"]["winlog"]["computer_name"] = "ws02.example.test"
+    overflow = continuity.observe("target", [second_host])
+
+    assert any("fewer than two" in reason for reason in singleton)
+    assert any("capacity" in reason for reason in overflow)
+    assert len(continuity.last) == 1
+
+
 def test_windows_coverage_gate_requires_inventory_continuity_and_matching_attestation(tmp_path):
     contract = _contract()
     rule = WindowsProcessRule()
@@ -102,7 +122,7 @@ def test_windows_coverage_gate_requires_inventory_continuity_and_matching_attest
     sweep._windows_inventory[contract.target] = {event_class.token}
     sweep._windows_inventory_reasons[contract.target] = []
 
-    assert sweep._windows_rule_reasons(contract.target, contract, rule, [_hit(10)], []) == []
+    assert sweep._windows_rule_reasons(contract.target, contract, rule, [_hit(10), _hit(11)], []) == []
     assert sweep._windows_rule_reasons(
         contract.target,
         contract,
@@ -120,6 +140,33 @@ def test_windows_coverage_gate_requires_inventory_continuity_and_matching_attest
     unattested._windows_inventory_reasons[contract.target] = []
     missing = unattested._windows_rule_reasons(contract.target, contract, rule, [_hit(10)], [])
     assert missing == ["collection not attested: Sysmon event id 1 on ws01.example.test"]
+
+    truncated = contract.model_copy(update={"host_inventory_complete": False})
+    missing = sweep._windows_rule_reasons(
+        truncated.target, truncated, rule, [_hit(10), _hit(11)], [],
+    )
+    assert "collection not attested: source host inventory truncated" in missing
+
+
+def test_skip_reason_state_is_bounded_without_losing_the_total_count():
+    sweep = object.__new__(Sweep)
+    sweep.stats = {"skips": {}}
+    additions = {f"Windows event class unknown-{number}": number + 1 for number in range(400)}
+
+    sweep._record_skips("windows-target", additions)
+
+    assert len(sweep.stats["skips"]) == 257
+    assert len(sweep.stats["skips_by_target"]["windows-target"]) == 257
+    assert sum(sweep.stats["skips"].values()) == sum(additions.values())
+
+
+def test_system_channel_collection_requires_an_explicit_event_log_attestation():
+    event_class = lookup_event_class("System", "Service Control Manager", 7045)
+
+    assert event_class is not None
+    assert collection_requirements(event_class) == (
+        ("system_event_log", {}, "Windows System event log"),
+    )
 
 
 def test_event_class_inventory_is_a_bounded_aggregate_over_the_full_hunt_window(monkeypatch):
@@ -189,11 +236,58 @@ def test_playbook_os_families_filter_before_required_field_evaluation():
     assert rule.evaluated == 1 and rule.missing_required == 0
 
 
+def test_existing_linux_rules_do_not_silently_widen_to_windows_events():
+    windows_families = {event.family for event in EVENT_CLASSES}
+    windows_enabled = {
+        playbook.id
+        for playbook in ALL_PLAYBOOKS
+        if windows_families.intersection(playbook.families) and "windows" in playbook.os_families
+    }
+
+    assert windows_enabled == {"ioc.indicator_match"}
+
+
+def test_wrong_os_same_family_is_not_a_complete_negative(monkeypatch):
+    from romulus.hunt import sweep as sweep_module
+    from tests.test_sweep import _repo
+
+    linux = TypedEvent(
+        id="linux",
+        family="process_exec",
+        ts=START,
+        host="host1",
+        fields={},
+        raw=[RawRef(target="linux", native_id="1")],
+        normalizer="lab-ecs@9",
+    )
+    monkeypatch.setattr(sweep_module, "normalize_hits", lambda *_args, **_kwargs: ([linux], {}, []))
+    monkeypatch.setattr(sweep_module, "execute", lambda _client, intent, _contract: SearchOutcome(
+        target=intent.target,
+        fingerprint="linux",
+        started_at=START,
+        ended_at=START,
+        completeness=Completeness.complete,
+        total=1,
+        total_relation="eq",
+        returned=1,
+        records=[{"_index": "linux", "_id": "1", "_source": {}}],
+    ))
+    contract = contract_from_types("linux", {"@timestamp": "date"}, role="host", os_family="linux")
+    window = Window(start=START, end=START + timedelta(minutes=5))
+    repo = _repo()
+    sweep = Sweep(repo, None, "h1", window, {contract.target: contract})
+    sweep.pack = [WindowsProcessRule()]
+
+    sweep.run_partition(contract.target, contract, [], window, est=1)
+
+    assert repo.rule_cells("h1")[0]["state"] == "not_applicable_no_events"
+
+
 def test_sweep_cell_can_be_complete_only_after_all_windows_gates_pass(tmp_path, monkeypatch):
     from romulus.hunt import sweep as sweep_module
     from tests.test_sweep import _repo
 
-    record = _hit(10)
+    records = [_hit(10), _hit(11)]
 
     def execute(_client, intent, _contract):
         return SearchOutcome(
@@ -202,10 +296,10 @@ def test_sweep_cell_can_be_complete_only_after_all_windows_gates_pass(tmp_path, 
             started_at=START,
             ended_at=START,
             completeness=Completeness.complete,
-            total=1,
+            total=2,
             total_relation="eq",
-            returned=1,
-            records=[record],
+            returned=2,
+            records=records,
         )
 
     monkeypatch.setattr(sweep_module, "execute", execute)
@@ -220,7 +314,7 @@ def test_sweep_cell_can_be_complete_only_after_all_windows_gates_pass(tmp_path, 
         sweep.pack = [WindowsProcessRule()]
         sweep._windows_inventory[contract.target] = {event_class.token}
         sweep._windows_inventory_reasons[contract.target] = []
-        sweep.run_partition(contract.target, contract, [], window, est=1)
+        sweep.run_partition(contract.target, contract, [], window, est=2)
         return repo.rule_cells("h1")[0]
 
     complete = run(_site(tmp_path))

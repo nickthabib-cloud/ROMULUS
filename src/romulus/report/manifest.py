@@ -185,10 +185,18 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                             "count_scope": "whole index at source preflight, not only the hunt window",
                             "reason": "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
                                       "evaluates it"})
-    for reason, count in sorted((stats.get("skips") or {}).items()):
-        out.append({"target": "all sweep targets", "dataset": None, "records": count,
-                    "count_scope": "records retrieved in the hunt window",
-                    "reason": f"retrieved but not turned into a typed event: {reason}"})
+    scoped_skips = stats.get("skips_by_target") or {}
+    if scoped_skips:
+        for target, reasons in sorted(scoped_skips.items()):
+            for reason, count in sorted(reasons.items()):
+                out.append({"target": target, "dataset": None, "records": count,
+                            "count_scope": "records retrieved in the hunt window",
+                            "reason": f"retrieved but not turned into a typed event: {reason}"})
+    else:
+        for reason, count in sorted((stats.get("skips") or {}).items()):
+            out.append({"target": "all sweep targets", "dataset": None, "records": count,
+                        "count_scope": "records retrieved in the hunt window",
+                        "reason": f"retrieved but not turned into a typed event: {reason}"})
     return out
 
 

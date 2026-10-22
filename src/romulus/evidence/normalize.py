@@ -32,7 +32,12 @@ from romulus.evidence.auditd import (
     syscall_arg,
 )
 from romulus.evidence.typed import EVIDENCE_VERSION, Outcome, RawRef, TypedEvent, event_id, fv
-from romulus.evidence.windows import WindowsNotNormalized, is_windows_source, normalize_windows
+from romulus.evidence.windows import (
+    WindowsNotNormalized,
+    is_windows_source,
+    normalize_windows,
+    windows_record_key,
+)
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
 # Caveat on a process_exec event whose EXECVE arguments did not all arrive (its process.argv_complete is false).
@@ -1878,6 +1883,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     its audit header time in (an incremental placement, see `BootIntervals`). Otherwise it stays unknown: never
     guessed."""
     events, skips, errors = [], defaultdict(int), []
+    windows_events: dict[tuple[str, str, str], TypedEvent] = {}
     audit_hits = []
     audit_copies: list[tuple[tuple[str, int, int], str, str, str]] = []
     journal_boots: list[tuple[str, str, int | None, str, bool]] = []
@@ -1887,10 +1893,20 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             if not ds and is_arkime_session(h["_source"]):
                 ds = "arkime.session"
                 events.append(normalize_arkime_session(h))
+            elif is_windows_source(h["_source"]):
+                windows_event = normalize_windows(h)
+                logical_key = windows_record_key(h)
+                prior = windows_events.get(logical_key) if logical_key is not None else None
+                if prior is None:
+                    events.append(windows_event)
+                    if logical_key is not None:
+                        windows_events[logical_key] = windows_event
+                else:
+                    known = {raw.key for raw in prior.raw}
+                    prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)
+                    skips["duplicate Windows event copy (computer/channel/record_id)"] += 1
             elif ds == "linux.audit":
                 audit_hits.append(h)
-            elif is_windows_source(h["_source"]):
-                events.append(normalize_windows(h))
             elif ds.startswith("suricata.eve"):
                 events.append(normalize_suricata(h))
             elif ds == "systemd.journal":

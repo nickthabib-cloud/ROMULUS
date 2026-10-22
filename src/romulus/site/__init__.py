@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
 
 COLLECTION_SCHEMA = "romulus-site-collection@1"
 COLLECTION_PATH = Path("site") / "collection.yaml"
@@ -74,8 +74,8 @@ def canonical_account(value: str) -> str:
 class SysmonFacts(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    installed: bool
-    event_ids: tuple[int, ...] = ()
+    installed: StrictBool
+    event_ids: tuple[StrictInt, ...] = ()
 
     @field_validator("event_ids")
     @classmethod
@@ -98,11 +98,12 @@ class CollectionGroup(BaseModel):
 
     hosts: Literal["all"] | tuple[str, ...]
     sysmon: SysmonFacts | None = None
-    security_4688_command_line: bool = False
-    powershell_script_block: bool = False
+    security_4688_command_line: StrictBool = False
+    powershell_script_block: StrictBool = False
     audit_policy: dict[str, Literal["success", "failure", "both"]] = Field(default_factory=dict)
-    defender_operational: bool = False
-    task_scheduler_operational: bool = False
+    defender_operational: StrictBool = False
+    task_scheduler_operational: StrictBool = False
+    system_event_log: StrictBool = False
 
     @field_validator("hosts", mode="before")
     @classmethod
@@ -113,7 +114,11 @@ class CollectionGroup(BaseModel):
             return "all"
         if not isinstance(value, (list, tuple)) or not value:
             raise ValueError("hosts must be a non-empty list of host globs or the string 'all'")
-        normalized = tuple(_host_glob(str(item)) for item in value)
+        if any(not isinstance(item, str) for item in value):
+            raise ValueError("host globs must be text")
+        normalized = tuple(_host_glob(item) for item in value)
+        if "*" in normalized:
+            raise ValueError("catch-all host selector must use hosts: all")
         if len(set(normalized)) != len(normalized):
             raise ValueError("duplicate host glob within collection group")
         return normalized
@@ -151,7 +156,9 @@ class _SiteDocument(BaseModel):
     @field_validator("domain_controllers")
     @classmethod
     def _domain_controllers(cls, value):
-        normalized = tuple(_canonical_host(str(item)) for item in value)
+        if any(not isinstance(item, str) for item in value):
+            raise ValueError("domain_controllers entries must be text")
+        normalized = tuple(_canonical_host(item) for item in value)
         if any(not item or "*" in item or "?" in item or not _HOST_GLOB.fullmatch(item) for item in normalized):
             raise ValueError("domain_controllers must contain host names, not globs")
         if len(set(normalized)) != len(normalized):
@@ -161,7 +168,9 @@ class _SiteDocument(BaseModel):
     @field_validator("directory_sync_accounts")
     @classmethod
     def _directory_sync_accounts(cls, value):
-        normalized = tuple(canonical_account(str(item)) for item in value)
+        if any(not isinstance(item, str) for item in value):
+            raise ValueError("directory_sync_accounts entries must be text")
+        normalized = tuple(canonical_account(item) for item in value)
         if len(set(normalized)) != len(normalized):
             raise ValueError("directory_sync_accounts must not contain duplicates")
         return normalized
@@ -220,6 +229,7 @@ class SiteFacts:
                 "powershell_script_block",
                 "defender_operational",
                 "task_scheduler_operational",
+                "system_event_log",
             }:
                 values.append(bool(getattr(group, fact)))
             else:

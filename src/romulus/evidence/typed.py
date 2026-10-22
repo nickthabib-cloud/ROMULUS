@@ -59,10 +59,23 @@ class TypedEvent(BaseModel):
         if self.host:
             role = "observer" if self.family in NETWORK_OBSERVER_FAMILIES else "host"
             out.append(("host", self.host, role))
-        for name, kind, role in (("user.name", "account", "actor"), ("process.user", "account", "actor"),
-                                 ("source.ip", "ip", "src"), ("destination.ip", "ip", "dst"),
-                                 ("dns.question.name", "domain", "subject"), ("url.domain", "domain", "subject"),
-                                 ("auth.target_user", "account", "subject")):
+        if self.get("user.entity_id") or self.get("auth.target_account"):
+            actor = self.get("user.entity_id")
+            if actor:
+                out.append(("account", str(actor), "actor"))
+            subject = self.get("auth.target_account")
+            if subject:
+                out.append(("account", str(subject), "subject"))
+            entity_fields = (("source.ip", "ip", "src"), ("destination.ip", "ip", "dst"),
+                             ("dns.question.name", "domain", "subject"),
+                             ("url.domain", "domain", "subject"))
+        else:
+            entity_fields = (("user.name", "account", "actor"), ("process.user", "account", "actor"),
+                             ("source.ip", "ip", "src"), ("destination.ip", "ip", "dst"),
+                             ("dns.question.name", "domain", "subject"),
+                             ("url.domain", "domain", "subject"),
+                             ("auth.target_user", "account", "subject"))
+        for name, kind, role in entity_fields:
             v = self.get(name)
             if v:
                 out.append((kind, str(v).lower() if kind == "domain" else str(v), role))

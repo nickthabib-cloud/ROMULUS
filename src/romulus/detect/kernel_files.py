@@ -98,6 +98,7 @@ class _ModifiableFile:
 
 
 class RootExecNonRootModifiableFile(Playbook):
+    os_families = ("linux",)
     id = "host.root_exec_nonroot_modifiable_file"
     version = "1"
     title = "Root executed a file that a non-root account owns or can write"
@@ -461,6 +462,7 @@ class _Change:
 
 
 class PersistencePathChange(Playbook):
+    os_families = ("linux",)
     id = "host.persistence_path_change"
     version = "3"
     title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"

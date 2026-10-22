@@ -355,6 +355,7 @@ def _actor(e: TypedEvent) -> str:
 
 
 class _TamperRule(Playbook):
+    os_families = ("linux",)
     kind = "aggregate"
     claim_type = "aggregate_observation"
     assures_negative = False

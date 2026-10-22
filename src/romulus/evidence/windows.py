@@ -48,11 +48,15 @@ class RecordIdContinuity:
     """Streaming gap counter with one integer per (target, computer, channel), never one entry per record."""
 
     last: dict[tuple[str, str, str], int] = field(default_factory=dict)
+    samples: dict[tuple[str, str, str], int] = field(default_factory=dict)
+    max_keys: int = 4096
 
     def observe(self, target: str, records: list[dict]) -> list[str]:
         gaps: dict[tuple[str, str], int] = {}
         unordered: set[tuple[str, str]] = set()
         malformed: set[tuple[str, str]] = set()
+        touched: set[tuple[str, str, str]] = set()
+        overflowed = False
         for record in records:
             source = record.get("_source") or {}
             if not is_windows_source(source):
@@ -71,15 +75,22 @@ class RecordIdContinuity:
                 malformed.add(group)
                 continue
             key = (target, *group)
+            if key not in self.last and len(self.last) >= self.max_keys:
+                overflowed = True
+                continue
             prior = self.last.get(key)
             if prior is None:
                 self.last[key] = record_id
+                self.samples[key] = 1
+                touched.add(key)
             elif record_id == prior:
                 continue
             elif record_id > prior:
                 if record_id > prior + 1:
                     gaps[group] = gaps.get(group, 0) + record_id - prior - 1
                 self.last[key] = record_id
+                self.samples[key] = min(2, self.samples.get(key, 1) + 1)
+                touched.add(key)
             else:
                 # Time-ordered source results are not record-id ordered for this group. Refuse completeness
                 # rather than retaining an event-count-sized set to reconstruct the sequence.
@@ -96,6 +107,13 @@ class RecordIdContinuity:
             f"shipper gaps unresolved: non-numeric record_id on {channel} for {computer}"
             for computer, channel in sorted(malformed)
         ]
+        reasons += [
+            f"shipper gaps unresolved: fewer than two record_id samples on {channel} for {computer}"
+            for _target, computer, channel in sorted(touched)
+            if self.samples.get((_target, computer, channel), 0) < 2
+        ]
+        if overflowed:
+            reasons.append(f"shipper gaps unresolved: continuity state capacity {self.max_keys} exceeded")
         return reasons
 
 
@@ -115,6 +133,18 @@ def is_windows_source(source: dict) -> bool:
     return (isinstance(dataset, str) and dataset.casefold() in WINDOWS_DATASETS) or (
         winlogbeat and isinstance(source.get("winlog"), dict)
     )
+
+
+def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
+    """Logical shipper identity used to deduplicate copies without trusting index or document ids."""
+    source = hit.get("_source") or {}
+    winlog = source.get("winlog") or {}
+    computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+    channel = str(winlog.get("channel") or "").strip().casefold()
+    record_id = winlog.get("record_id")
+    if not computer or not channel or record_id in (None, "") or isinstance(record_id, bool):
+        return None
+    return computer, channel, str(record_id)
 
 
 def _xml_data(original: str, native_id: str) -> dict[str, FieldValue]:
@@ -220,7 +250,10 @@ def windows_path_key(path: object) -> str:
 
 def _guid(value: object) -> str:
     match = _GUID.fullmatch(str(value).strip())
-    return match.group(1).casefold() if match else str(value).strip().strip("{}").casefold()
+    if match is None:
+        return ""
+    normalized = match.group(1).casefold()
+    return "" if normalized == "00000000-0000-0000-0000-000000000000" else normalized
 
 
 def _integer(value: object) -> int:
@@ -244,6 +277,8 @@ def _put(fields: dict[str, FieldValue], record: WindowsRecord, typed: str, *nati
             value = transform(item.value) if transform else item.value
         except (TypeError, ValueError) as exc:
             raise WindowsInputError(f"{name} is malformed: {exc}") from exc
+        if value in (None, ""):
+            continue
         fields[typed] = fv(value, item.origin)
         return
 
@@ -450,8 +485,12 @@ def normalize_windows(hit: dict) -> TypedEvent:
         f"{hit['_id']}:@timestamp",
     )
     outcome = _semantic_fields(fields, record, host)
+    logical_key = windows_record_key(hit)
+    identity_refs = [ref] if logical_key is None else [RawRef(
+        target=f"windows:{logical_key[0]}:{logical_key[1]}", native_id=logical_key[2]
+    )]
     return TypedEvent(
-        id=event_id(record.event_class.family, [ref], WINDOWS_NORMALIZER),
+        id=event_id(record.event_class.family, identity_refs, WINDOWS_NORMALIZER),
         family=record.event_class.family,
         ts=timestamp,
         host=host,

@@ -155,6 +155,17 @@ def test_process_identity_prefers_guid_and_4688_uses_a_fenced_pid_key():
     assert fallback.get("process.id_kind") == "fenced_pid"
 
 
+@pytest.mark.parametrize("guid", ["not-a-guid", "{00000000-0000-0000-0000-000000000000}"])
+def test_unusable_process_guids_fall_back_to_the_fenced_pid(guid):
+    event = normalize_hits(
+        [_hit(1, channel=SYSMON_CHANNEL, provider=SYSMON, data={"ProcessGuid": guid, "ProcessId": "512"})]
+    )[0][0]
+
+    assert event.get("process.guid") is None
+    assert event.get("process.entity_id") == "pid:ws01:512"
+    assert event.get("process.id_kind") == "fenced_pid"
+
+
 def test_termination_and_boot_events_are_explicit_pid_reuse_fences():
     termination = normalize_hits([_hit(4689, data={"ProcessId": "0x200"})])[0][0]
     boot = normalize_hits([_hit(6005, channel="System", provider="EventLog")])[0][0]
@@ -191,6 +202,7 @@ def test_sysmon_process_user_is_a_case_insensitive_account_identity():
     assert event.get("user.entity_id") == r"name:example\alice"
     assert event.get("user.domain") == "example"
     assert event.get("user.name") == "alice"
+    assert ("account", r"name:example\alice", "actor") in event.entities()
 
 
 def test_sessions_are_host_scoped_and_keep_logon_guid():

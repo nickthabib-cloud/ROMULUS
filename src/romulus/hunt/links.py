@@ -592,7 +592,11 @@ class LinkFetcher:
                 planning_coverage)
 
     def _account(self, anchor: LinkAnchor, window: LinkWindow):
-        field = "user.name" if _value(anchor, "user.name") is not None else "process.auid"
+        os_family = _os_family(anchor)
+        fields = (["user.entity_id", "auth.target_account"] if os_family == "windows" else [
+            "user.name" if _value(anchor, "user.name") is not None else "process.auid"
+        ])
+        field = next((name for name in fields if _value(anchor, name) is not None), fields[-1])
         account = _value(anchor, field)
         key = {field: account, "actor": "inferred"}
         if not usable_key(account):
@@ -601,17 +605,20 @@ class LinkFetcher:
         forward = LinkWindow(label=window.label, start=max(anchor.ts, window.start), end=window.end)
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
-            if _is_network(target, contract) or not _supports(contract, field):
+            if _is_network(target, contract):
                 continue
-            intents.append(SearchIntent(
-                kind="raw", target=target, window=Window(start=forward.start, end=forward.end),
-                filters=[Predicate(field=field, op="eq", value=account)],
-                max_records=MAX_PIVOT_RECORDS, purpose="expansion:account",
-            ))
+            for query_field in fields:
+                if not _supports(contract, query_field):
+                    continue
+                intents.append(SearchIntent(
+                    kind="raw", target=target, window=Window(start=forward.start, end=forward.end),
+                    filters=[Predicate(field=query_field, op="eq", value=account)],
+                    max_records=MAX_PIVOT_RECORDS, purpose="expansion:account",
+                ))
 
         def matches(event):
-            return (event.ts >= anchor.ts and event.host != anchor.host
-                    and event.get(field) == account)
+            values = {event.get(name) for name in fields}
+            return event.ts >= anchor.ts and event.host != anchor.host and account in values
 
         reason = None if intents else "key not pushable; full-dataset scan refused"
         return (key, "inferred", intents, matches,

@@ -90,6 +90,7 @@ WINDOWS_HOST_DATASETS = (
     "windows.security",
     "system.system",
     "windows.system",
+    "windows.forwarded",
 )
 _SECURITY_FAMILIES = frozenset(
     {event.family for event in EVENT_CLASSES if event.channel.casefold() == "security"}
@@ -106,6 +107,7 @@ WINDOWS_DATASET_FAMILIES = {
     "windows.security": _SECURITY_FAMILIES,
     "system.system": _SYSTEM_FAMILIES,
     "windows.system": _SYSTEM_FAMILIES,
+    "windows.forwarded": frozenset(event.family for event in EVENT_CLASSES),
 }
 
 
@@ -157,8 +159,7 @@ def collection_requirements(event: WindowsEventClass) -> tuple[tuple[str, dict, 
         subcategory, outcome = audit_subcategories[event.event_id]
         return (("audit_policy", {"subcategory": subcategory, "outcome": outcome},
                  f"audit policy {subcategory} {outcome}"),)
-    # System-channel boot/service/log-clear records still require an explicit matching collection group.
-    return (("host_group", {}, "host collection group"),)
+    return (("system_event_log", {}, "Windows System event log"),)
 
 
 def lookup_event_class(channel: object, provider: object, event_id: object) -> WindowsEventClass | None:

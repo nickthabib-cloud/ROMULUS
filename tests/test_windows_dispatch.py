@@ -83,6 +83,15 @@ def test_unmarked_lookalike_and_unknown_triple_are_counted_not_guessed():
     assert skips[reason] == 1
 
 
+def test_windows_shipper_marker_wins_over_a_conflicting_linux_dataset_label():
+    hit = _hit(dataset="linux.audit", agent_type="winlogbeat")
+
+    events, skips, errors = normalize_hits([hit])
+
+    assert len(events) == 1 and events[0].normalizer == "windows-ecs@1"
+    assert skips == {} and errors == []
+
+
 def test_message_is_never_parsed_and_structured_fields_win_over_xml():
     xml = _xml(command_line="xml-payload.exe")
     hit = _hit(

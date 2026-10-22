@@ -7,7 +7,14 @@ from datetime import UTC, datetime, timedelta
 from romulus.agent.models import EntityRef
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest, ProcessTreeArgs, ProcessTreeRequest
 from romulus.evidence.normalize import normalize_hits
-from romulus.evidence.windows_catalog import SECURITY, SYSMON, SYSMON_CHANNEL, WINDOWS_HOST_DATASETS
+from romulus.evidence.windows_catalog import (
+    EVENT_CLASSES,
+    SECURITY,
+    SYSMON,
+    SYSMON_CHANNEL,
+    WINDOWS_DATASET_FAMILIES,
+    WINDOWS_HOST_DATASETS,
+)
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
 from romulus.hunt.pivot import PivotExecutor, _is_network
 from romulus.hunt.sweep import LINUX_HOST_DATASETS, Sweep
@@ -97,6 +104,46 @@ def test_flattened_fields_and_explicit_native_to_typed_aliases_compile():
     assert {"term": {"winlog.event_data.CommandLine": "whoami.exe"}} in query["bool"]["filter"]
 
 
+def test_windows_alias_predicates_query_every_native_representation():
+    contract = contract_from_types("idx", _windows_types(), role="host")
+
+    pid_query = build_query(SearchIntent(
+        kind="raw", target="idx", window=Window(start=START, end=END),
+        filters=[Predicate(field="process.pid", op="eq", value=512)],
+    ), contract)
+    source_query = build_query(SearchIntent(
+        kind="raw", target="idx", window=Window(start=START, end=END),
+        filters=[Predicate(field="source.ip", op="eq", value="192.0.2.1")],
+    ), contract)
+
+    assert {next(iter(clause["term"])) for clause in pid_query["bool"]["filter"][1]["bool"]["should"]} == {
+        "winlog.event_data.ProcessId", "winlog.event_data.NewProcessId",
+    }
+    assert {next(iter(clause["term"])) for clause in source_query["bool"]["filter"][1]["bool"]["should"]} == {
+        "winlog.event_data.SourceIp", "winlog.event_data.IpAddress",
+    }
+
+
+def test_short_windows_host_predicate_is_a_case_insensitive_fqdn_superset():
+    contract = contract_from_types("idx", _windows_types(), role="host")
+    query = build_query(SearchIntent(
+        kind="raw", target="idx", window=Window(start=START, end=END),
+        filters=[Predicate(field="host.name", op="eq", value="ws01")],
+    ), contract)
+
+    host_filter = query["bool"]["filter"][1]
+    patterns = [next(iter(item["wildcard"].values()))["value"] for item in host_filter["bool"]["should"]]
+    assert patterns == ["ws01", "ws01.*"]
+    assert all(next(iter(item["wildcard"].values()))["case_insensitive"] for item in host_filter["bool"]["should"])
+
+
+def test_forwarded_events_are_retrieved_and_mapped_to_every_w0_windows_family():
+    assert "windows.forwarded" in WINDOWS_HOST_DATASETS
+    assert WINDOWS_DATASET_FAMILIES["windows.forwarded"] == frozenset(
+        event.family for event in EVENT_CLASSES
+    )
+
+
 def test_live_profile_records_the_typed_role_and_profiles_the_event_computer():
     class Client:
         version = "8.0"
@@ -155,11 +202,12 @@ def test_windows_host_timeline_and_process_tree_use_catalog_datasets_and_native_
         WINDOWS_HOST_DATASETS
     )
     assert next(item.value for item in timeline_intent.filters if item.field == "host.name") == "ws01"
-    assert {next(item.value for item in intent.filters if item.field == "event.dataset") for intent in process_intents} == {
-        "system.security",
-        "windows.security",
-        "windows.sysmon_operational",
+    process_datasets = {
+        next(item.value for item in intent.filters if item.field == "event.dataset")
+        for intent in process_intents
     }
+    assert {"system.security", "windows.security", "windows.sysmon_operational", "system.system",
+            "windows.system", "windows.forwarded"} <= process_datasets
 
 
 def test_windows_lineage_session_and_flow_host_links_select_os_specific_keys_and_datasets():
@@ -211,3 +259,64 @@ def test_windows_lineage_session_and_flow_host_links_select_os_specific_keys_and
     for planned in (lineage[2], session[2], flow[2]):
         assert planned
         assert all("linux.audit" not in str(intent.model_dump(mode="json")) for intent in planned)
+
+
+def test_windows_account_links_use_the_canonical_sid_or_domain_name_identity():
+    contract = contract_from_types("windows", _windows_types(), role="host")
+    executor = PivotExecutor(None, None, "h1", {contract.target: contract})
+    fetcher = LinkFetcher(executor, START, END)
+    process = _event(1, data={"ProcessId": "512", "User": r"EXAMPLE\Alice"})
+
+    planned = fetcher._account(
+        LinkAnchor(finding_id="account", ts=process.ts, host=process.host, events=[process]),
+        LinkWindow(label="after", start=START, end=END),
+    )
+
+    assert planned[0]["user.entity_id"] == r"name:example\alice"
+    assert planned[2]
+    assert all(intent.filters[0].value == r"name:example\alice" for intent in planned[2])
+    assert all(build_query(intent, contract)["bool"]["filter"] for intent in planned[2])
+
+
+def test_windows_process_tree_honors_pid_fences_and_reports_when_they_are_missing():
+    root = _event(1, data={"ProcessId": "512"}).model_copy(update={"id": "root", "ts": START + timedelta(minutes=10)})
+    child = _event(1, data={"ProcessId": "600", "ParentProcessId": "512"}).model_copy(
+        update={"id": "child", "ts": START + timedelta(minutes=15)}
+    )
+    terminated = _event(5, data={"ProcessId": "512"}).model_copy(
+        update={"id": "terminated", "ts": START + timedelta(minutes=20)}
+    )
+    reused = _event(1, data={"ProcessId": "700", "ParentProcessId": "512"}).model_copy(
+        update={"id": "reused", "ts": START + timedelta(minutes=30)}
+    )
+    args = ProcessTreeArgs(host="ws01", process_id=512, start=START, end=END)
+
+    selected, reason = PivotExecutor._select_windows_process_tree(
+        [root, child, terminated, reused], args, root.ts,
+    )
+    unfenced, missing = PivotExecutor._select_windows_process_tree([root, child, reused], args, root.ts)
+
+    assert {event.id for event in selected} == {"root", "child"}
+    assert reason is None
+    assert {event.id for event in unfenced} == {"root", "child", "reused"}
+    assert missing == "process_tree PID fence evidence unavailable"
+
+
+def test_windows_process_tree_prefers_process_guid_lineage_over_pid_reuse():
+    root = _event(1, data={
+        "ProcessGuid": "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}", "ProcessId": "512",
+    }).model_copy(update={"id": "root", "ts": START + timedelta(minutes=10)})
+    child = _event(1, data={
+        "ProcessGuid": "{11111111-2222-3333-4444-555555555555}",
+        "ParentProcessGuid": "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}",
+        "ProcessId": "600", "ParentProcessId": "512",
+    }).model_copy(update={"id": "child", "ts": START + timedelta(minutes=30)})
+    unrelated = _event(1, data={"ProcessId": "700", "ParentProcessId": "512"}).model_copy(
+        update={"id": "unrelated", "ts": START + timedelta(minutes=20)}
+    )
+    args = ProcessTreeArgs(host="ws01", process_id=512, start=START, end=END)
+
+    selected, reason = PivotExecutor._select_windows_process_tree([root, child, unrelated], args, root.ts)
+
+    assert {event.id for event in selected} == {"root", "child"}
+    assert reason is None

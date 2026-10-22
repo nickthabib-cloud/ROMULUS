@@ -101,6 +101,7 @@ class _SshAttemptStream(Playbook):
     """Shared settling of sshd records into failed attempts and accepted logins (see the module docstring)."""
     kind = "aggregate"
     families = ("auth",)
+    os_families = ("linux",)
     claim_type = "aggregate_observation"
     assures_negative = False
     positive_only_reason = (
@@ -996,6 +997,7 @@ class AccountOrGroupChange(Playbook):
     anchor_class = "persistence"
     kind = "aggregate"
     families = ("process_exec", "account_change", "system_state")
+    os_families = ("linux",)
     claim_type = "aggregate_observation"
     assures_negative = False
     positive_only_reason = (

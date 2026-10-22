@@ -20,13 +20,8 @@ def _escape_wildcard(s: str) -> str:
     return _WILDCARD_META.sub(r"\\\1", s)
 
 
-def _pred(p: Predicate, contract: FieldContract) -> dict:
-    spec = contract.spec(p.field)
-    if spec is None:
-        raise CompileError(f"field {p.field!r} not in field contract for {contract.target}")
-    if p.op not in spec.ops:
-        raise CompileError(f"op {p.op!r} not supported on {p.field} ({spec.type}) with superset guarantee")
-    f = spec.native
+def _pred_native(p: Predicate, native: str) -> dict:
+    f = native
     v = p.value
     if p.op == "eq":
         return {"term": {f: v}}
@@ -53,6 +48,51 @@ def _pred(p: Predicate, contract: FieldContract) -> dict:
         ipaddress.ip_network(str(v), strict=False)  # validates
         return {"term": {f: str(v)}}
     raise CompileError(f"unknown op {p.op}")
+
+
+def _pred(p: Predicate, contract: FieldContract) -> dict:
+    spec = contract.spec(p.field)
+    if spec is None:
+        raise CompileError(f"field {p.field!r} not in field contract for {contract.target}")
+    if p.op not in spec.ops:
+        raise CompileError(f"op {p.op!r} not supported on {p.field} ({spec.type}) with superset guarantee")
+    natives = spec.natives or (spec.native,)
+    if p.op == "eq" and p.field in {"user.entity_id", "auth.target_account"}:
+        value = str(p.value)
+        if value.startswith("sid:"):
+            raw_value = value.removeprefix("sid:")
+            selected = [(native, raw_value) for native in natives if native.casefold().endswith("sid")]
+        elif value.startswith("name:"):
+            full_name = value.removeprefix("name:")
+            short_name = full_name.rsplit("\\", 1)[-1]
+            selected = [
+                (native, full_name if native.casefold().endswith(".user") else short_name)
+                for native in natives if not native.casefold().endswith("sid")
+            ]
+        else:
+            selected = []
+        if not selected:
+            raise CompileError(f"canonical account value {value!r} has no compatible native mapping")
+        clauses = [
+            {"wildcard": {native: {"value": _escape_wildcard(raw), "case_insensitive": True}}}
+            for native, raw in selected
+        ]
+        return clauses[0] if len(clauses) == 1 else {
+            "bool": {"should": clauses, "minimum_should_match": 1}
+        }
+    if p.field == "host.name" and p.op == "eq" and spec.native == "winlog.computer_name":
+        value = _escape_wildcard(str(p.value).strip().rstrip("."))
+        clauses = [
+            {"wildcard": {spec.native: {"value": pattern, "case_insensitive": True}}}
+            for pattern in (value, f"{value}.*")
+        ]
+        return {"bool": {"should": clauses, "minimum_should_match": 1}}
+    clauses = [_pred_native(p, native) for native in natives]
+    if len(clauses) == 1:
+        return clauses[0]
+    if p.op == "missing":
+        return {"bool": {"filter": clauses}}
+    return {"bool": {"should": clauses, "minimum_should_match": 1}}
 
 
 def build_query(intent: SearchIntent, contract: FieldContract) -> dict:

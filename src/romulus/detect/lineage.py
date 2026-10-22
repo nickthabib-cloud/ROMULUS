@@ -211,6 +211,7 @@ class _Hit:
 
 
 class ReverseShellByLineage(Playbook):
+    os_families = ("linux",)
     id = "host.shell_spawned_by_connected_process"
     anchor_class = "execution"
     version = "4"

@@ -211,6 +211,7 @@ class _Series:
 
 
 class NonRootWriteRootExecutedFile(Playbook):
+    os_families = ("linux",)
     id = "host.nonroot_write_root_executed_file"
     version = "6"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"

@@ -75,6 +75,8 @@ BOOT_LISTED = 100
 BOOT_BLIND_LISTED = 20
 # A rule-coverage cell recording that sweep-time boot placement was contradicted on some host
 BOOT_PLACEMENT_PARTITION = "boot-placement"
+MAX_SKIP_REASONS = 256
+SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category limit"
 
 
 def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
@@ -248,10 +250,24 @@ class Sweep:
                 )
         reasons.extend(gap_reasons)
         hosts = self._windows_hosts(contract, records)
+        if not contract.host_inventory_complete:
+            reasons.append("collection not attested: source host inventory truncated")
         if not hosts:
             reasons.append("collection not attested: source host inventory unavailable")
+        observed_channels = {
+            (
+                str(((record.get("_source") or {}).get("winlog") or {}).get("computer_name") or "")
+                .strip().rstrip(".").casefold(),
+                str(((record.get("_source") or {}).get("winlog") or {}).get("channel") or "").casefold(),
+            )
+            for record in records
+        }
         for host in hosts:
             for event_class in required:
+                if (host, event_class.channel.casefold()) not in observed_channels:
+                    reasons.append(
+                        f"shipper gaps unresolved: no records on {event_class.channel} for {host} in partition"
+                    )
                 for fact, arguments, label in collection_requirements(event_class):
                     if not self.site_facts.attests(host, fact, **arguments):
                         reasons.append(f"collection not attested: {label} on {host}")
@@ -264,6 +280,23 @@ class Sweep:
             reason: count for reason, count in skips.items()
             if reason.startswith(("dataset:", "suricata event_type"))
         }
+
+    @staticmethod
+    def _bounded_counts(target: dict[str, int], additions: dict[str, int]) -> None:
+        for reason, count in additions.items():
+            key = reason if reason in target or len(target) < MAX_SKIP_REASONS else SKIP_REASON_OVERFLOW
+            target[key] = target.get(key, 0) + count
+
+    def _record_skips(self, target: str, skips: dict[str, int]) -> None:
+        """Keep exact totals with a bounded number of telemetry-controlled reason strings, scoped by target."""
+        self._bounded_counts(self.stats["skips"], skips)
+        windows_skips = {
+            reason: count for reason, count in skips.items()
+            if reason.startswith(("Windows event class", "duplicate Windows event copy"))
+        }
+        if windows_skips:
+            by_target = self.stats.setdefault("skips_by_target", {}).setdefault(target, {})
+            self._bounded_counts(by_target, windows_skips)
 
     # -------------------------------------------------------------------------------------
     def _cell(self, pb: Playbook, target: str, pkey: str, state: str, matched: int = 0, evaluated: int = 0,
@@ -421,8 +454,7 @@ class Sweep:
         self.stats["events"] += len(events)
         self._count_boots(events)
         self.stats["errors"] += len(errors)
-        for k, v in skips.items():
-            self.stats["skips"][k] = self.stats["skips"].get(k, 0) + v
+        self._record_skips(target, skips)
         raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
         # records retrieved but of a dataset/event type no normalizer supports: we cannot say what
         # they contain, so no rule may claim a complete negative over this partition
@@ -468,15 +500,23 @@ class Sweep:
         # events the joining aggregates may cite later, by id: several playbooks stage the same events, and each
         # is serialized to the stage once per partition (the first staged copy of an id is kept)
         staged: dict[str, TypedEvent] = {}
+        target_os = contract.os_family if contract is not None else "linux"
         for pb in self.pack:
+            target_applicable = target_os == "unknown" or target_os in pb.os_families
             windows_reasons = self._windows_rule_reasons(
                 target, contract, pb, out.records, gap_reasons,
             )
             windows_gate_reasons.update(windows_reasons)
-            rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
-                            or bool(windows_reasons))
+            rule_partial = target_applicable and (
+                affected is ALL_FAMILIES or bool(set(pb.families) & affected) or bool(windows_reasons)
+            )
             before_eval, before_missing = pb.evaluated, pb.missing_required
-            matches = pb.consume(events)
+            scoped_events = [
+                event for event in events
+                if (event.get("host.os.family")
+                    or ("windows" if event.normalizer.startswith("windows-") else "linux")) in pb.os_families
+            ]
+            matches = pb.consume(scoped_events)
             for m in matches:
                 self._publish(m, tid, raw_sources)
             if pb.staged:
@@ -488,7 +528,9 @@ class Sweep:
                 self._retain_aggregate_raw(pb, raw_sources)
             evaluated = pb.evaluated - before_eval
             missing = pb.missing_required - before_missing
-            if not (set(pb.families) & families) and evaluated == 0:
+            if not target_applicable:
+                state = "not_applicable_no_events"
+            elif not (set(pb.families) & families) and evaluated == 0:
                 state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
             elif pb.kind == "aggregate" and matches:
                 # aggregate rules may publish indicator events during consume(); those are matches

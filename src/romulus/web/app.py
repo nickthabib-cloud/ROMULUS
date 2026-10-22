@@ -20,6 +20,7 @@ from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.run import open_repo
 from romulus.report.manifest import investigations_for_hunt, publish_revision
 from romulus.report.markdown import render as render_md
+from romulus.site import load_site_facts
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 
 HERE = Path(__file__).resolve().parent
@@ -34,6 +35,7 @@ SECURITY_HEADERS = {
 
 
 def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
+    load_site_facts(s.home)
     repo = open_repo(s)
     sessions = Sessions(s.secret_key.get_secret_value())
     limiter = RateLimiter()

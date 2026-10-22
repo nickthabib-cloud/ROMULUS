@@ -37,6 +37,21 @@ def test_each_logical_event_has_identical_typed_semantics_in_all_three_shapes():
         assert normalized[1:] == normalized[:-1], logical
 
 
+def test_cross_shipper_copies_are_deduplicated_with_every_raw_reference_retained():
+    logical = all_logical_events()[0]
+    hits = [windows_hit(logical, shape) for shape in SHAPES]
+    for ordinal, hit in enumerate(hits):
+        hit["_index"] = f"logs-{ordinal}"
+        hit["_id"] = f"copy-{ordinal}"
+
+    events, skips, errors = normalize_hits(hits)
+
+    assert errors == [] and len(events) == 1
+    assert len(events[0].raw) == len(SHAPES)
+    assert sum(skips.values()) == len(SHAPES) - 1
+    assert any("duplicate Windows event copy" in reason for reason in skips)
+
+
 def test_benign_admin_negatives_are_structured_cataloged_events():
     logical = benign_admin_events()
     events, skips, errors = normalize_hits([windows_hit(event, "elastic_agent") for event in logical])

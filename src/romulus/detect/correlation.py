@@ -254,6 +254,7 @@ class InterpreterExternalConnection(Playbook):
     title = "Shell, interpreter, relay tool or web-service process made connect() calls to non-private addresses"
     kind = "aggregate"
     families = ("net_socket", "process_exec")
+    os_families = ("linux",)
     required_fields = ()
     assures_negative = False
     severity, lane = "high", "lead"
@@ -440,6 +441,7 @@ class ProcessNetworkLink(Playbook):
     staged = True
     claim_type = "correlated_observation"
     families = ("net_socket",) + NETWORK_JOIN_FAMILIES
+    os_families = ("linux",)
     required_fields = ()
     # a join that finds nothing proves nothing: sensors and audit rules each see only part of the traffic
     assures_negative = False
