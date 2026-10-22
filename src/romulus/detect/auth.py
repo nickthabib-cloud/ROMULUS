@@ -964,7 +964,7 @@ def _record_text(e: TypedEvent) -> str:
 
 class AccountOrGroupChange(Playbook):
     id = "host.account_or_group_change"
-    version = "1"
+    version = "2"
     title = "Account or group created, deleted or modified (command or account-management audit record)"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -1028,10 +1028,14 @@ class AccountOrGroupChange(Playbook):
 
     def _exec(self, e: TypedEvent) -> None:
         argv = e.get("process.argv")
-        if not isinstance(argv, list) or not argv or argv_incomplete(e):
-            # an incomplete argv cannot settle read-only flags (passwd -S) or the last operand (the login)
+        if not isinstance(argv, list) or not argv:
             self.missing_required += 1
             return
+        # An incomplete argv cannot settle read-only flags (passwd -S) or the last operand (the login): the prefix
+        # still yields a lead, worded as incomplete and never raised by what it appears to request.
+        incomplete = argv_incomplete(e)
+        if incomplete:
+            self.missing_required += 1
         prog = program(e)
         if prog is None:
             name, args, busybox = canonical(basename(str(argv[0]))), [str(a) for a in argv[1:]], False
@@ -1042,12 +1046,18 @@ class AccountOrGroupChange(Playbook):
         self.evaluated += 1
         if name in ACCOUNT_TOOLS:
             forms, uncertain = account_command(name, args, busybox, e.get("process.user"))
+        elif incomplete:
+            return
         else:
             forms, uncertain = account_file_writes(name, args, e.get("process.cwd"))
-        if uncertain:
+        if uncertain and not incomplete:
             self.missing_required += 1
         if not forms:
             return
+        if incomplete:
+            forms = [f._replace(detail=f"{f.detail}" + (f", requesting {f.privileged}" if f.privileged else "")
+                                + " (read from an incomplete command line; later arguments are unknown)",
+                                privileged="") for f in forms]
         lineage = self.lineage.classify(e)
         actor = str(e.get("process.user") or f"uid {e.get('process.uid')}")
         for form in forms:
