@@ -14,6 +14,7 @@ from romulus.evidence.normalize import (
     BootIntervals,
     normalize_hits,
 )
+from romulus.evidence.typed import TypedEvent
 from romulus.hunt.publish import publish_match
 from romulus.hunt.stage import EventStage
 from romulus.sources.es import ElasticClient
@@ -125,10 +126,15 @@ class Sweep:
         return []
 
     # -------------------------------------------------------------------------------------
+    def _cell(self, pb: Playbook, target: str, pkey: str, state: str, matched: int = 0, evaluated: int = 0,
+              detail: dict | None = None) -> dict:
+        return {"rule_id": pb.id, "version": pb.version, "target": target, "partition": pkey, "state": state,
+                "matched": matched, "evaluated": evaluated, "detail": detail or {}}
+
     def _mark_all(self, target: str, pkey: str, state: str, detail: dict | None = None):
-        """Write the same coverage state for every rule on one (target, partition)."""
-        for pb in self.pack:
-            self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, state, 0, 0, detail or {})
+        """Write the same coverage state for every rule on one (target, partition), in one transaction."""
+        self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, pkey, state, detail=detail)
+                                                for pb in self.pack])
 
     def _split(self, target: str, w: Window) -> tuple[Window, Window]:
         """Record children as planned *before* the parent is superseded, so a crash between the two
@@ -154,8 +160,8 @@ class Sweep:
             return
         # persist every planned (rule x target x partition) cell first: anything never executed
         # stays visibly 'planned' and can never be read as a complete negative
-        for w, _est in parts:
-            self._mark_all(target, w.key(), "planned")
+        self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, w.key(), "planned")
+                                                for w, _est in parts for pb in self.pack])
         for w, est in parts:
             self.run_partition(target, contract, filters, w, est)
 
@@ -198,9 +204,7 @@ class Sweep:
                                                         "total": out.total, "returned": out.returned})
         if out.completeness == Completeness.failed:
             self.partial_reasons.append(f"{target} {pkey}: {out.error}")
-            for pb in self.pack:
-                self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, "executed_failed", 0, 0,
-                                        {"error": out.error})
+            self._mark_all(target, pkey, "executed_failed", {"error": out.error})
             self.repo.update_task(tid, "failed", error=out.error)
             return
         events, skips, errors = normalize_hits(out.records, self.boots)
@@ -243,6 +247,10 @@ class Sweep:
         error_reason = (f"normalization_errors={len(errors)} in {', '.join(tags)}"
                         + (f"; {', '.join(unmapped)} feeds no known event family, so every rule is partial"
                            if unmapped else "")) if errors else ""
+        cells: list[dict] = []
+        # events the joining aggregates may cite later, by id: several playbooks stage the same events, and each
+        # is serialized to the stage once per partition (the first staged copy of an id is kept, as before)
+        staged: dict[str, TypedEvent] = {}
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing = pb.evaluated, pb.missing_required
@@ -251,7 +259,8 @@ class Sweep:
                 self._publish(m, tid, raw_sources)
             if pb.staged:
                 # joining aggregates: full events and their raw copies go to disk, not memory
-                self._event_stage().put(pb.drain_staged(), raw_sources)
+                for event in pb.drain_staged():
+                    staged.setdefault(event.id, event)
             elif pb.kind == "aggregate":
                 # aggregates retain examples: stash raw copies of their retained events now
                 self._retain_aggregate_raw(pb, raw_sources)
@@ -276,8 +285,13 @@ class Sweep:
                 reasons.append(error_reason)
             if missing:
                 reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
-            self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, state, len(matches), evaluated,
-                                    {"missing_required": missing, "reasons": reasons})
+            cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated,
+                                    {"missing_required": missing, "reasons": reasons}))
+        if any(pb.staged for pb in self.pack):
+            self._event_stage().put(list(staged.values()), raw_sources)
+        staged.clear()
+        # the partition's cells together: a crash before this leaves them all visibly `planned`
+        self.repo.set_rule_cells(self.hunt_id, cells)
         self.repo.update_task(tid, "evaluated")
 
     def _count_boots(self, events) -> None:
@@ -328,10 +342,9 @@ class Sweep:
                       f"boot-interval map)")
             self.partial_reasons.append(reason)
             # each rule that reads boot-placed families cannot claim a complete negative over those ranges
-            for pb in self.pack:
-                if set(pb.families) & BOOT_FILL_FAMILIES:
-                    self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", BOOT_PLACEMENT_PARTITION,
-                                            "evaluated_partial", 0, 0, {"reasons": [reason]})
+            self.repo.set_rule_cells(self.hunt_id, [
+                self._cell(pb, "*", BOOT_PLACEMENT_PARTITION, "evaluated_partial", detail={"reasons": [reason]})
+                for pb in self.pack if set(pb.families) & BOOT_FILL_FAMILIES])
 
     def _event_stage(self) -> EventStage:
         stage = getattr(self, "_stage", None)
@@ -369,8 +382,8 @@ class Sweep:
                 ms = pb.finalize()
                 for m in ms:
                     self._publish(m, None, agg_raw)
-            cells = [c for c in self.repo.rule_cells(self.hunt_id)
-                     if c["rule_id"] == pb.id and c["target"] != "*" and c["state"] != "split"]
+            cells = [c for c in self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
+                     if c["target"] != "*" and c["state"] != "split"]
             any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")
                               for c in cells)
             evaluated = sum(c["evaluated"] or 0 for c in cells)

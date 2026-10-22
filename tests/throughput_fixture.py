@@ -45,7 +45,7 @@ def _iso(value: datetime) -> str:
 
 
 def _ms(value: datetime) -> int:
-    return int(round(value.timestamp() * 1000))
+    return round(value.timestamp() * 1000)
 
 
 def _hex(text: str) -> str:
@@ -373,10 +373,10 @@ def _ns(value) -> int | None:
     text = str(value)
     if text.isdigit():
         return int(text) * 1_000_000
-    when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    when = datetime.fromisoformat(text)
     if when.tzinfo is None:
         when = when.replace(tzinfo=UTC)
-    return int(round(when.timestamp() * 1_000_000)) * 1000
+    return round(when.timestamp() * 1_000_000) * 1000
 
 
 def _ns_text(value: int) -> str:
@@ -399,9 +399,8 @@ def _matches(clause: dict, source: dict, time_field: str) -> bool:
         if any(_matches(c, source, time_field) for c in spec.get("must_not", [])):
             return False
         should = spec.get("should", [])
-        if should and sum(_matches(c, source, time_field) for c in should) < spec.get("minimum_should_match", 1):
-            return False
-        return True
+        return not should or sum(_matches(c, source, time_field) for c in should) >= spec.get(
+            "minimum_should_match", 1)
     if kind == "range":
         (field, bounds), = spec.items()
         value = _ns(_path(source, field))

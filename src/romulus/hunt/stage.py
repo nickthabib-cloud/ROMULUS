@@ -54,11 +54,15 @@ class EventStage:
         self.events = 0
 
     def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
-        """Stage events and the raw copies they cite. Idempotent: re-reading a partition is safe."""
+        """Stage events and the raw copies they cite. Idempotent: re-reading a partition is safe. The first staged
+        copy of an event id is kept; a repeated id is not serialized again."""
         if not events:
             return
+        first: dict[str, TypedEvent] = {}
+        for e in events:
+            first.setdefault(e.id, e)
         self.db.executemany("INSERT OR IGNORE INTO event VALUES (?, ?)",
-                            [(e.id, e.model_dump_json()) for e in events])
+                            [(eid, e.model_dump_json()) for eid, e in first.items()])
         raws = {r.key: raw_sources[r.key] for e in events for r in e.raw if r.key in raw_sources}
         self.db.executemany("INSERT OR IGNORE INTO raw VALUES (?, ?)",
                             [(k, json.dumps(v, sort_keys=True)) for k, v in raws.items()])
