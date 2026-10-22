@@ -25,13 +25,14 @@ from __future__ import annotations
 
 import ipaddress
 import math
-from bisect import bisect_left
+import sys
+from bisect import bisect_left, insort
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import KeyedStore
+from romulus.detect.bounded import HOT_COUNT, KeyedStore
 from romulus.detect.host import is_internal
 from romulus.evidence.typed import TypedEvent
 
@@ -277,6 +278,43 @@ class _Span:
         return f"{self.first.isoformat()} – {self.last.isoformat()}"
 
 
+_COMPENSATED_SUM = sys.version_info >= (3, 12)
+
+
+class _FloatSum:
+    """A running sum of floats equal, bit for bit, to the builtin `sum` over the same values in the same order (the
+    builtin compensates its float sums since Python 3.12), so a mean kept as a running total reads exactly as one
+    computed over every value held at once."""
+
+    __slots__ = ("c", "n", "s")
+
+    def __init__(self):
+        self.s = 0.0
+        self.c = 0.0
+        self.n = 0
+
+    def add(self, x: float) -> None:
+        self.n += 1
+        s = self.s
+        t = s + x
+        if _COMPENSATED_SUM:
+            self.c += (s - t) + x if abs(s) >= abs(x) else (x - t) + s
+        self.s = t
+
+    def total(self) -> float:
+        if not self.n:
+            return 0
+        return self.s + self.c if self.c and math.isfinite(self.c) else self.s
+
+
+def _top(kept: list[str], name: str, n: int = 3) -> None:
+    """Keep the `n` longest distinct names, ties by name: the examples a claim shows."""
+    if len(kept) >= n and (-len(name), name) >= (-len(kept[-1]), kept[-1]):
+        return
+    insort(kept, name, key=lambda s: (-len(s), s))
+    del kept[n:]
+
+
 # ------------------------------------------------------------------------------------------------ base
 class _DnsAggregate(Playbook):
     """Per-group state lives in keyed stores: the HOT most recently used groups in memory, the rest on the rule's
@@ -329,6 +367,46 @@ class _DnsAggregate(Playbook):
         self.evaluated -= 1
         self.refuse("disk", "the rule's disk budget for group state is spent; a record of a new group is not "
                             "evaluated")
+
+    def _names_full(self) -> None:
+        self.evaluated -= 1
+        self.refuse("names", "the rule's disk budget for distinct names is spent; a record naming a new distinct "
+                             "name of a large group is not evaluated")
+
+    # A group's distinct items (names, addresses) decide its counts, so they are never capped: while a group has at
+    # most the rule's NAMES_INLINE of them they are a set in its state; beyond that they move to a keyed store on
+    # the rule's disk spill (key: the group's prefix and the item), most recently used in memory.
+    @staticmethod
+    def _first_time(store: KeyedStore, state, prefix: tuple, item: tuple, limit: int) -> bool | None:
+        """True when `item` is new among the group's distinct items, False when it was seen before, None when the
+        disk budget refuses to hold a new one (nothing is changed then)."""
+        held = state.inline
+        if held is not None:
+            if item in held:
+                return False
+            if len(held) < limit:
+                held.add(item)
+                return True
+            moved = [*sorted(held), item]
+            for at, each in enumerate(moved):
+                if not store.put(prefix + each, 1):
+                    for done in moved[:at]:
+                        store.pop(prefix + done)
+                    return None
+            state.inline = None
+            return True
+        key = prefix + item
+        if store.get(key) is not None:
+            return False
+        return True if store.put(key, 1) else None
+
+    @staticmethod
+    def _forget(store: KeyedStore, state, prefix: tuple, item: tuple) -> None:
+        """Undo `_first_time` of a new item (when a later part of the same record was refused)."""
+        if state.inline is not None:
+            state.inline.discard(item)
+        else:
+            store.pop(prefix + item)
 
     def release_state(self) -> None:
         self.load = lambda ids: []
@@ -389,7 +467,7 @@ class _ZoneGroup:
 
 class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     id = "net.dns_zone_transfer_or_any_request"
-    version = "2"
+    version = "3"
     title = "DNS zone-transfer (AXFR/IXFR) or ANY question sent by one client to one server"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -434,7 +512,7 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     QUERY_CAP = 1024        # question records per transfer group kept for pairing with the deciding answer
     # Groups exist only for AXFR, IXFR and ANY questions, which are rare; a flood of spoofed-source ANY questions
     # (about 3 KB per group with its citation candidates) overflows to disk.
-    HOT = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
@@ -471,8 +549,12 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         group = self.groups.setdefault(key, _ZoneGroup)
         if group is None:
             return False
-        if question_type not in self.TRANSFER_TYPES and name and len(group.any_names) < NAME_CAP:
-            group.any_names.add(name)
+        if question_type not in self.TRANSFER_TYPES and name and name not in group.any_names:
+            if len(group.any_names) < NAME_CAP:
+                group.any_names.add(name)
+            else:
+                self.note_limit("names", f"an ANY-question group passed {NAME_CAP:,} distinct names held; its name "
+                                         f"count is a lower bound")
         transport = str(event.get("network.transport") or "").lower()
         if record_role in ("query", "transaction"):
             group.requests[question_type] += 1
@@ -513,7 +595,9 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                 names = sorted(group.any_names)
                 shown = ", ".join(f"'{_short(n)}'" for n in names[:5]) + (f" and {len(names) - 5} more"
                                                                          if len(names) > 5 else "")
-                subject = f"for {len(names)} distinct name(s) ({shown})" if names else "for names not recorded"
+                at_least = "at least " if len(names) >= NAME_CAP else ""
+                subject = (f"for {at_least}{len(names)} distinct name(s) ({shown})" if names
+                           else "for names not recorded")
             if asked:
                 claim = (f"{client} sent {sum(asked.values())} DNS question record(s) ({_tally(asked)}) {subject} "
                          f"to {server} ({group.span.text()}).")
@@ -574,24 +658,42 @@ def _tally(counts: Counter) -> str:
 
 # ---------------------------------------------------------------------------------------- reverse-lookup sweep
 class _ReverseClient:
-    """Everything the reverse-lookup sweep rule holds for one client."""
+    """Everything the reverse-lookup sweep rule holds for one client: counters over every distinct reverse name, and
+    its distinct names, addresses and blocks (in this state while few, on the rule's keyed stores beyond that)."""
 
-    __slots__ = ("block_examples", "blocks", "examples", "names", "queries", "span", "types", "zone_names")
+    __slots__ = ("addresses", "block_examples", "blocks", "densest", "examples", "inline", "internal", "n_blocks",
+                 "n_names", "queries", "span", "types", "vspan", "zone_names")
 
     def __init__(self):
-        self.names: set[str] = set()
-        self.blocks: dict = {}                      # block -> addresses named in it
+        self.n_names = 0                            # distinct reverse names
+        self.inline: set | None = set()             # ("n", name) and ("a", address) seen, while few; else on disk
+        self.blocks: dict | None = {}               # block -> [block, addresses, lowest, highest], while few
         self.block_examples: dict = {}              # block -> its earliest records (up to BLOCK_STORES blocks)
         self.zone_names = 0
         self.types: dict[str, int] = {}
         self.queries = 0
         self.span = _Span()
         self.examples = _Examples()
+        self.addresses = 0                          # distinct addresses named
+        self.internal = 0                           # of them, in internal ranges
+        self.n_blocks = 0
+        self.densest = 0                            # addresses in the densest block
+        self.vspan: dict[int, list] = {}            # IP version -> [lowest, highest] address
+
+    @property
+    def names(self) -> range:
+        """The distinct reverse names as a sized view: they are counted exactly, not listed."""
+        return range(self.n_names)
+
+
+def _block_rank(entry: list) -> tuple:
+    """Densest first, then IPv4 before IPv6, then by block."""
+    return -entry[1], entry[0].version, entry[0]
 
 
 class DnsReverseLookupSweep(_DnsAggregate):
     id = "net.dns_reverse_lookup_sweep"
-    version = "2"
+    version = "3"
     title = "Many distinct reverse-lookup (in-addr.arpa / ip6.arpa) names queried by one client"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -629,21 +731,31 @@ class DnsReverseLookupSweep(_DnsAggregate):
                       "names is reported here at that rule's lane)",
         "citations": "the earliest records naming addresses in the densest block, then the client's earliest "
                      "reverse-lookup records",
+        "state": "per client, exact counts over every distinct reverse name of the hunt window: distinct names and "
+                 "addresses and per-block address counts are never capped (a client's own set while small, the "
+                 "rule's keyed stores on its disk spill beyond that), so a dense block named after any number of "
+                 "scattered names is still found and the density statement covers every name",
     }
     BLOCK_CITE = 10          # cited records per block
     BLOCK_STORES = 2048      # blocks per client holding citation candidates
     # State grows with distinct clients and their distinct reverse names, never with lookups: a server resolving the
-    # same peers all day holds each name once. A client's state is up to a few megabytes at the name cap, so few are
-    # held in memory; the rest wait on disk.
-    HOT = 2_000
+    # same peers all day holds each name once. A client keeps its distinct names and addresses (NAMES_INLINE) and
+    # blocks (BLOCKS_INLINE) in its own state while few; beyond that they move to the keyed stores below, so a
+    # client's state stays small however many names it asks for.
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    NAMES_INLINE = 1024
+    BLOCKS_INLINE = 2048
 
     def __init__(self):
         super().__init__()
         self.clients = KeyedStore(self, "dns_reverse_clients", self.HOT, candidate=self.reportable)
+        # (client, "n", name) and (client, "a", address) -> 1, for clients beyond NAMES_INLINE distinct items
+        self.names_seen = KeyedStore(self, "dns_reverse_seen", self.HOT)
+        # (client, block) -> [block, addresses, lowest, highest], for clients beyond BLOCKS_INLINE blocks
+        self.blocks = KeyedStore(self, "dns_reverse_blocks", self.HOT, group=lambda key: key[0])
 
     def reportable(self, state: _ReverseClient) -> bool:
-        return len(state.names) >= self.MIN_DISTINCT or any(len(found) >= self.DENSE_BLOCK
-                                                            for found in state.blocks.values())
+        return state.n_names >= self.MIN_DISTINCT or state.densest >= self.DENSE_BLOCK
 
     @property
     def examples(self) -> dict[tuple, _Examples]:
@@ -651,8 +763,8 @@ class DnsReverseLookupSweep(_DnsAggregate):
         return {(client,): state.examples for client, state in self.clients.items()}
 
     @property
-    def names(self) -> dict[str, set[str]]:
-        """Every client's distinct reverse names (reads the whole store: for tests and small hunts)."""
+    def names(self) -> dict[str, range]:
+        """Every client's distinct reverse names, as sized views (reads the whole store: for tests and small hunts)."""
         return {client: state.names for client, state in self.clients.items()}
 
     def retained_events(self) -> list[TypedEvent]:
@@ -667,63 +779,162 @@ class DnsReverseLookupSweep(_DnsAggregate):
             if state is None:
                 self._disk_full()
                 continue
+            fresh = self._admit(client, state, reverse)
+            if fresh is None:
+                self._names_full()
+                continue
             state.queries += 1
             kind = qtype(event.get("dns.question.type")) or "type not recorded"
             state.types[kind] = state.types.get(kind, 0) + 1
             state.span.add(event.ts)
             self._remember(state.examples, event)
             for name in reverse:
-                self._name(event, state, name)
+                self._cite_block(event, state, name)
+            for kind, address, entry in fresh:
+                self._count(state, kind, address, entry)
         self._trim()
         return []
 
-    def _name(self, event: TypedEvent, state: _ReverseClient, name: str) -> None:
+    def _cite_block(self, event: TypedEvent, state: _ReverseClient, name: str) -> None:
         address = reverse_address(name)
-        if address is not None:
-            prefix = 24 if address.version == 4 else 64
-            block = ipaddress.ip_network(f"{address}/{prefix}", strict=False)
-            stores = state.block_examples
-            if block in stores or len(stores) < self.BLOCK_STORES:
-                self._remember(stores.setdefault(block, _Examples(self.BLOCK_CITE)), event)
-        names = state.names
-        if name in names or len(names) >= NAME_CAP:
-            return
-        names.add(name)
         if address is None:
+            return
+        block = _block_of(address)
+        stores = state.block_examples
+        if block in stores or len(stores) < self.BLOCK_STORES:
+            self._remember(stores.setdefault(block, _Examples(self.BLOCK_CITE)), event)
+
+    def _admit(self, client: str, state: _ReverseClient, reverse: list[str]) -> list | None:
+        """The record's new distinct names, as (kind, address, block entry): "zone" for a name of a reverse zone,
+        "name" for a new name of an address already named, "address" for a new address. Every new name, address and
+        block is already held; None (and nothing held) when the disk budget refuses one of them."""
+        undo, fresh = [], []
+        prefix = (client,)
+        for name in reverse:
+            new = self._first_time(self.names_seen, state, prefix, ("n", name), self.NAMES_INLINE)
+            if new is None:
+                break
+            if not new:
+                continue
+            undo.append(lambda item=("n", name): self._forget(self.names_seen, state, prefix, item))
+            address = reverse_address(name)
+            if address is None:
+                fresh.append(("zone", None, None))
+                continue
+            new_address = self._first_time(self.names_seen, state, prefix, ("a", str(address)), self.NAMES_INLINE)
+            if new_address is None:
+                break
+            if not new_address:
+                fresh.append(("name", address, None))          # a new name for an address already named
+                continue
+            undo.append(lambda item=("a", str(address)): self._forget(self.names_seen, state, prefix, item))
+            entry = self._block_entry(client, state, _block_of(address), undo)
+            if entry is None:
+                break
+            fresh.append(("address", address, entry))
+        else:
+            return fresh
+        for step in reversed(undo):
+            step()
+        return None
+
+    def _block_entry(self, client: str, state: _ReverseClient, block, undo: list) -> list | None:
+        """The block's [block, addresses, lowest, highest], created when new; None when the disk budget refuses."""
+        blocks = state.blocks
+        if blocks is not None:
+            entry = blocks.get(block)
+            if entry is not None:
+                return entry
+            if len(blocks) < self.BLOCKS_INLINE:
+                entry = blocks[block] = [block, 0, None, None]
+                undo.append(lambda: blocks.pop(block, None))
+                return entry
+            moved = [*blocks.values()]
+            for at, each in enumerate(moved):
+                if not self.blocks.put((client, str(each[0])), each):
+                    for done in moved[:at]:
+                        self.blocks.pop((client, str(done[0])))
+                    return None
+            state.blocks = None
+            undo.append(lambda: self._unspill_blocks(client, state, moved))
+        key = (client, str(block))
+        entry = self.blocks.get(key)
+        if entry is not None:
+            return entry
+        entry = [block, 0, None, None]
+        if not self.blocks.put(key, entry):
+            return None
+        undo.append(lambda: self.blocks.pop(key))
+        return entry
+
+    def _unspill_blocks(self, client: str, state: _ReverseClient, moved: list) -> None:
+        for each in moved:
+            self.blocks.pop((client, str(each[0])))
+        state.blocks = {each[0]: each for each in moved}
+
+    @staticmethod
+    def _count(state: _ReverseClient, kind: str, address, entry: list | None) -> None:
+        state.n_names += 1
+        if kind == "zone":
             state.zone_names += 1
             return
-        state.blocks.setdefault(block, set()).add(address)
+        if kind == "name":
+            return
+        state.addresses += 1
+        if is_internal(address):
+            state.internal += 1
+        span = state.vspan.get(address.version)
+        if span is None:
+            state.vspan[address.version] = [address, address]
+        else:
+            span[0], span[1] = min(span[0], address), max(span[1], address)
+        if entry[1] == 0:
+            state.n_blocks += 1
+        entry[1] += 1
+        entry[2] = address if entry[2] is None else min(entry[2], address)
+        entry[3] = address if entry[3] is None else max(entry[3], address)
+        state.densest = max(state.densest, entry[1])
+
+    def _ranked_on_disk(self, wanted: set[str]) -> dict[str, list]:
+        """The five densest blocks of each wanted client whose blocks are on the store, read a client at a time."""
+        ranked: dict[str, list] = {}
+        for (client, _block), entry in self.blocks.grouped():
+            if client not in wanted or not entry[1]:
+                continue
+            top = ranked.setdefault(client, [])
+            insort(top, entry, key=_block_rank)
+            del top[5:]
+        return ranked
 
     def finalize(self):
         out = []
-        for client in sorted(self.clients.keys(candidates=True)):
+        candidates = sorted(self.clients.keys(candidates=True))
+        spilled = {client for client in candidates if self.clients.peek(client).blocks is None}
+        on_disk = self._ranked_on_disk(spilled) if spilled else {}
+        for client in candidates:
             state = self.clients.peek(client)
-            names = state.names
-            blocks = state.blocks
-            ranked = sorted(blocks.items(), key=lambda item: (-len(item[1]), item[0].version, item[0]))
-            densest = len(ranked[0][1]) if ranked else 0
-            if densest < self.DENSE_BLOCK and len(names) < self.MIN_DISTINCT:
+            if state.blocks is not None:
+                ranked = sorted((e for e in state.blocks.values() if e[1]), key=_block_rank)[:5]
+            else:
+                ranked = on_disk.get(client, [])
+            densest = state.densest
+            if densest < self.DENSE_BLOCK and state.n_names < self.MIN_DISTINCT:
                 continue
-            addresses = sum(len(a) for a in blocks.values())
-            capped = " at least" if len(names) >= NAME_CAP else ""
-            claim = (f"{client} sent {state.queries} DNS question record(s) for{capped} {len(names)} distinct "
+            addresses = state.addresses
+            claim = (f"{client} sent {state.queries} DNS question record(s) for {state.n_names} distinct "
                      f"reverse-lookup name(s) ({state.span.text()}; question types: "
                      f"{_tally(Counter(state.types))}). {addresses} of the names stand for single addresses in "
-                     f"{len(blocks)} block(s)")
+                     f"{state.n_blocks} block(s)")
             if state.zone_names:
                 claim += f"; {state.zone_names} name a reverse zone rather than one address"
-            shown = []
-            for block, members in ranked[:5]:
-                low, high = min(members), max(members)
-                shown.append(f"{block} ({len(members)} address(es), {low} – {high})")
+            shown = [f"{block} ({count} address(es), {low} – {high})" for block, count, low, high in ranked]
             claim += (f". Densest: {'; '.join(shown)}." if shown else ".")
             for version in (4, 6):
-                members = [a for block, found in blocks.items() if block.version == version for a in found]
-                if len(blocks) > 1 and members:
-                    claim += f" IPv{version} addresses span {min(members)} – {max(members)}."
-            internal = sum(1 for members in blocks.values() for a in members if is_internal(a))
-            if blocks:
-                claim += f" {internal} of the {addresses} addresses are in internal ranges."
+                span = state.vspan.get(version)
+                if state.n_blocks > 1 and span:
+                    claim += f" IPv{version} addresses span {span[0]} – {span[1]}."
+            if state.n_blocks:
+                claim += f" {state.internal} of the {addresses} addresses are in internal ranges."
             if densest >= self.DENSE_BLOCK:
                 claim += (" Questions for the names of many addresses packed into one block are the shape of a "
                           "reverse-DNS sweep (host discovery by name).")
@@ -742,6 +953,11 @@ class DnsReverseLookupSweep(_DnsAggregate):
             out.append(Match(self.id, claim, self.claim_type, evs, predicate, e0.ts, self.severity, self.lane,
                              "high", e0.entities(), notes=notes, group_key=client))
         return out
+
+
+def _block_of(address):
+    """The IPv4 /24 or IPv6 /64 holding an address."""
+    return ipaddress.ip_network(f"{address}/{24 if address.version == 4 else 64}", strict=False)
 
 
 # ---------------------------------------------------------------------------------------- NXDOMAIN burst
@@ -806,7 +1022,7 @@ class DnsNxdomainBurst(_DnsAggregate):
     # is settled once the newest record read is this much past the end of the next interval. Records that still
     # arrive into a settled interval (another sensor target read later) are counted and stated (`late`).
     SETTLE = timedelta(hours=1)
-    HOT = 20_000                # address states held in memory between batches; the rest wait on disk
+    HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
     card: ClassVar[dict] = {
         "behavior": "one client received many NXDOMAIN (name does not exist) answers within a ten-minute "
                     "interval, the shape of algorithmically generated domain lookups",
@@ -1089,18 +1305,23 @@ class DnsNxdomainBurst(_DnsAggregate):
 
 # ---------------------------------------------------------------------------------------- tunnel shape
 class _TunnelKey:
-    """Everything the tunnel-shape rule holds for one (client, registered domain)."""
+    """Everything the tunnel-shape rule holds for one (client, registered domain): counters over every distinct
+    subdomain, and the distinct subdomains themselves while few (the rule's keyed store holds them beyond that)."""
 
-    __slots__ = ("examples", "long", "max_label", "queries", "span", "strong_examples", "strong_long", "subdomains",
-                 "types", "untyped")
+    __slots__ = ("entropy", "examples", "inline", "max_label", "n_long", "queries", "span", "strong_examples",
+                 "strong_long", "top_any", "top_long", "types", "unique", "untyped")
 
     def __init__(self):
         self.queries = 0
         self.untyped = 0
         self.span = _Span()
         self.examples = _Examples()
-        self.subdomains: set[str] = set()
-        self.long: dict[str, float] = {}
+        self.inline: set[tuple] | None = set()       # (subdomain,) seen, while few; None once they are on disk
+        self.unique = 0                              # distinct subdomains
+        self.n_long = 0                              # of them, long
+        self.entropy = _FloatSum()                   # character entropy summed over the distinct long subdomains
+        self.top_any: list[str] = []                 # the three longest distinct subdomains
+        self.top_long: list[str] = []                # the three longest distinct long subdomains
         self.max_label = 0
         self.types: dict[str, int] = {}              # question types of questions that carry a subdomain
         self.strong_long = 0                         # strong-type questions for long names
@@ -1109,7 +1330,7 @@ class _TunnelKey:
 
 class DnsTunnelShape(_DnsAggregate):
     id = "net.dns_tunnel_shape"
-    version = "3"
+    version = "4"
     title = "Query names under one registered domain from one client with a DNS-tunnel shape"
     required_fields = ()
     severity, lane = "high", "lead"
@@ -1178,18 +1399,24 @@ class DnsTunnelShape(_DnsAggregate):
                        "under .local and .arpa are not evaluated (no outside endpoint can answer them)",
         "state": "one record per (client, registered domain), counted over the whole hunt window however long its "
                  "pauses (a beacon that asks once a day is still one group): the most recently used records in "
-                 "memory, the rest on the rule's disk spill, read back when the pair is asked again",
+                 "memory, the rest on the rule's disk spill, read back when the pair is asked again. Every "
+                 "indicator is counted over every distinct subdomain of the pair, never a capped sample: a pair's "
+                 "distinct subdomains are a set in its record while few and on the rule's keyed store beyond that, "
+                 "so a tunnel that starts after any number of ordinary names under the same domain still counts",
     }
-    HOT = 10_000                # pair records held in memory between batches (usually a few hundred bytes each)
-    ASKERS_HOT = 50_000         # registered domains whose client counts are held in memory
+    HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
+    ASKERS_HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
+    NAMES_INLINE = 256          # distinct subdomains a pair keeps in its own record; beyond, they are on `names`
 
     def __init__(self):
         super().__init__()
         self.pairs = KeyedStore(self, "dns_tunnel_pairs", self.HOT, candidate=self.reportable)
         self.askers = KeyedStore(self, "dns_tunnel_askers", self.ASKERS_HOT)     # domain -> clients that asked
+        # (client, domain, subdomain) -> 1, for pairs beyond NAMES_INLINE distinct subdomains
+        self.names = KeyedStore(self, "dns_tunnel_names", self.HOT)
 
     def reportable(self, record: _TunnelKey) -> bool:
-        return len(record.subdomains) >= self.MIN_UNIQUE
+        return record.unique >= self.MIN_UNIQUE
 
     def retained_events(self) -> list[TypedEvent]:
         return []
@@ -1211,8 +1438,10 @@ class DnsTunnelShape(_DnsAggregate):
             if kind is None:
                 self.missing_required += 1          # the type mix cannot be measured for this record
             taken = [self._name(event, client, name, kind) for name in names]     # every name, no short circuit
-            if not all(taken):
+            if any(t is False for t in taken):
                 self._disk_full()                   # a name of the record was refused: never a clean evaluation
+            elif any(t is None for t in taken):
+                self._names_full()
         self._trim()
         return []
 
@@ -1229,7 +1458,9 @@ class DnsTunnelShape(_DnsAggregate):
                                       "client count is a lower bound")
         return record
 
-    def _name(self, event: TypedEvent, client: str, name: str, kind: str | None) -> bool:
+    def _name(self, event: TypedEvent, client: str, name: str, kind: str | None) -> bool | None:
+        """Count one question name: True when counted, False when the group budget refused a new pair, None when
+        the names budget refused a new distinct name (nothing of the name is counted then)."""
         labels = name.split(".")
         if labels[-1] in self.NOT_DELEGATED or len(labels) < 2:
             return True
@@ -1237,12 +1468,15 @@ class DnsTunnelShape(_DnsAggregate):
         record = self._record(client, domain)
         if record is None:
             return False
+        sub = subdomain_part(name, domain)
+        new = self._first_time(self.names, record, (client, domain), (sub,), self.NAMES_INLINE) if sub else False
+        if new is None:
+            return None                             # a new distinct name the disk budget cannot hold
         record.queries += 1
         if kind is None:
             record.untyped += 1
         record.span.add(event.ts)
         self._remember(record.examples, event)
-        sub = subdomain_part(name, domain)
         if not sub:
             return True
         if kind is not None:
@@ -1253,23 +1487,24 @@ class DnsTunnelShape(_DnsAggregate):
             if record.strong_examples is None:
                 record.strong_examples = _Examples(self.STRONG_CITE)
             self._remember(record.strong_examples, event)
-        subs = record.subdomains
-        if sub in subs or len(subs) >= NAME_CAP:
+        if not new:
             return True
-        subs.add(sub)
+        record.unique += 1
         record.max_label = max(record.max_label, max(len(label) for label in sub.split(".")))
+        _top(record.top_any, sub)
         if long_name:
-            record.long[sub] = entropy(sub.replace(".", ""))
+            record.n_long += 1
+            record.entropy.add(entropy(sub.replace(".", "")))
+            _top(record.top_long, sub)
         return True
 
     def _assess(self, record: _TunnelKey) -> dict | None:
         """The shape of one (client, registered domain) group, or None when it is not reported."""
-        unique = len(record.subdomains)
+        unique = record.unique
         if unique < self.MIN_UNIQUE:
             return None
-        long_names = record.long
-        n_long = len(long_names)
-        mean_entropy = sum(long_names.values()) / n_long if n_long else 0.0
+        n_long = record.n_long
+        mean_entropy = record.entropy.total() / n_long if n_long else 0.0
         typed = Counter(record.types)
         n_typed = sum(typed.values())
         unusual = sum(n for kind, n in typed.items() if self.unusual(kind))
@@ -1314,8 +1549,7 @@ class DnsTunnelShape(_DnsAggregate):
     def _single(self, client: str, domain: str, found: dict) -> Match:
         record = self.pairs.peek((client, domain))
         unique, typed = found["unique"], found["typed"]
-        capped = "at least " if unique >= NAME_CAP else ""
-        claim = (f"{client} sent {record.queries} DNS question(s) for {capped}{unique} distinct subdomain(s) "
+        claim = (f"{client} sent {record.queries} DNS question(s) for {unique} distinct subdomain(s) "
                  f"under '{domain}' ({record.span.text()}). {found['n_long']} of the distinct names have a label "
                  f"of {self.LONG_LABEL}+ characters or {self.LONG_SUBDOMAIN}+ characters left of the domain "
                  f"(longest label {record.max_label}); mean character entropy of those names "
@@ -1328,7 +1562,7 @@ class DnsTunnelShape(_DnsAggregate):
                   f"names (DNS tunnelling or exfiltration); reputation and anti-virus lookups that encode hashes look "
                   f"the same, so it is a deviation, not proof. The registered domain is the last two labels (three "
                   f"under a listed country suffix).")
-        sample = sorted(record.long or record.subdomains, key=lambda s: (-len(s), s))[:3]
+        sample = record.top_long or record.top_any
         claim += f" Examples: {', '.join(_short(s + '.' + domain) for s in sample)}."
         if found["lane"] == "high":
             claim += (f" {found['strong']} questions for long names are NULL, CNAME, MX or private-use types, which "
