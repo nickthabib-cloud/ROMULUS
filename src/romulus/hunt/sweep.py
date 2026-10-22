@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
@@ -14,9 +15,10 @@ from romulus.evidence.normalize import (
     BootIntervals,
     normalize_hits,
 )
+from romulus.evidence.typed import TypedEvent
 from romulus.hunt.publish import publish_match
 from romulus.hunt.stage import EventStage
-from romulus.sources.es import ElasticClient
+from romulus.sources.es import ElasticClient, fetch_limit
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, Window
 from romulus.sources.profile import FieldContract
@@ -26,6 +28,8 @@ from romulus.store.repo import Repo
 log = logging.getLogger("romulus.sweep")
 
 PARTITION_MAX_DOCS = 120_000
+# planned cells are written before any partition runs, this many partitions per transaction
+PLANNED_CHUNK = 500
 HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
@@ -95,8 +99,15 @@ def plan_partitions(client: ElasticClient, target: str, contract: FieldContract,
 class Sweep:
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
                  contracts: dict[str, FieldContract], on_candidate: Callable[[dict], None] | None = None,
-                 heartbeat: Callable[[], None] | None = None, stage_dir=None):
+                 heartbeat: Callable[[], None] | None = None, stage_dir=None, prefetch: bool | None = None):
         self.repo, self.client, self.hunt_id, self.window = repo, client, hunt_id, window
+        # Fetch the next partition while this one is evaluated (the client's setting unless given). It changes
+        # when a partition's records are read, never what is read or the order partitions are evaluated in.
+        settings = getattr(client, "settings", None)
+        self.prefetch = bool(getattr(settings, "sweep_prefetch", False)) if prefetch is None else prefetch
+        self._next: tuple | None = None            # the partition after the current top-level one
+        self._ahead: tuple[str, Future] | None = None
+        self._pool: ThreadPoolExecutor | None = None
         self.contracts = contracts
         self.on_candidate = on_candidate or (lambda c: None)
         self.heartbeat = heartbeat or (lambda: None)
@@ -125,10 +136,15 @@ class Sweep:
         return []
 
     # -------------------------------------------------------------------------------------
+    def _cell(self, pb: Playbook, target: str, pkey: str, state: str, matched: int = 0, evaluated: int = 0,
+              detail: dict | None = None) -> dict:
+        return {"rule_id": pb.id, "version": pb.version, "target": target, "partition": pkey, "state": state,
+                "matched": matched, "evaluated": evaluated, "detail": detail or {}}
+
     def _mark_all(self, target: str, pkey: str, state: str, detail: dict | None = None):
-        """Write the same coverage state for every rule on one (target, partition)."""
-        for pb in self.pack:
-            self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, state, 0, 0, detail or {})
+        """Write the same coverage state for every rule on one (target, partition), in one transaction."""
+        self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, pkey, state, detail=detail)
+                                                for pb in self.pack])
 
     def _split(self, target: str, w: Window) -> tuple[Window, Window]:
         """Record children as planned *before* the parent is superseded, so a crash between the two
@@ -154,43 +170,112 @@ class Sweep:
             return
         # persist every planned (rule x target x partition) cell first: anything never executed
         # stays visibly 'planned' and can never be read as a complete negative
-        for w, _est in parts:
-            self._mark_all(target, w.key(), "planned")
-        for w, est in parts:
-            self.run_partition(target, contract, filters, w, est)
+        for start in range(0, len(parts), PLANNED_CHUNK):
+            self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, w.key(), "planned")
+                                                    for w, _est in parts[start:start + PLANNED_CHUNK]
+                                                    for pb in self.pack])
+        try:
+            for index, (w, est) in enumerate(parts):
+                following = parts[index + 1] if index + 1 < len(parts) else None
+                self._next = (target, contract, filters, *following) if following else None
+                self.run_partition(target, contract, filters, w, est)
+        finally:
+            self._next = None
+            self._stop_prefetch()
 
-    def run_partition(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window, est: int):
-        self.heartbeat()
+    @staticmethod
+    def _raw_intent(target: str, filters: list[Predicate], w: Window, est: int) -> SearchIntent:
+        cap = max(PARTITION_MAX_DOCS, int(est * 1.2) + 1000)
+        return SearchIntent(kind="raw", target=target, window=w, filters=filters, max_records=cap, purpose="sweep")
+
+    def _fetch(self, intent: SearchIntent, contract: FieldContract):
+        """The partition's records: the prefetched outcome when it is this very intent, else fetched now."""
+        if self._ahead is not None and self._ahead[0] == intent.model_dump_json():
+            future = self._ahead[1]
+            self._ahead = None
+            return future.result()
+        return execute(self.client, intent, contract)
+
+    def _start_prefetch(self) -> None:
+        """Begin fetching the next top-level partition on the background thread, when it will be fetched whole."""
+        if not self.prefetch or self._next is None or self._ahead is not None:
+            return
+        target, contract, filters, w, est = self._next
+        self._next = None
         if est > PARTITION_MAX_DOCS and (w.end - w.start) > MIN_SPLIT * 2:
+            return                                   # it is split before anything is fetched
+        intent = self._raw_intent(target, filters, w, est)
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="romulus-sweep-prefetch")
+        client = self.client
+        self._ahead = (intent.model_dump_json(), self._pool.submit(lambda: execute(client, intent, contract)))
+
+    def _stop_prefetch(self) -> None:
+        """Drop a prefetch nobody will use (the target stopped early) and release the thread."""
+        if self._ahead is not None:
+            self._ahead[1].cancel()
+            self._ahead = None
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+
+    def _count(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window) -> int | None:
+        """The exact number of records in a window, or None when the source does not say exactly."""
+        out = execute(self.client, SearchIntent(kind="histogram", target=target, window=w, filters=filters,
+                                                interval_seconds=BUCKET_SECONDS, purpose="sweep count"), contract)
+        if out.completeness == Completeness.complete and out.total_relation == "eq" and out.total is not None:
+            return out.total
+        return None
+
+    def run_partition(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window, est: int,
+                      *, estimated: bool = False):
+        """Evaluate one partition. `est` is the histogram's exact count for a planned partition; for a half of a
+        split one (`estimated`) it is only an estimate, so the half is counted before it is fetched."""
+        self.heartbeat()
+        splittable = (w.end - w.start) > MIN_SPLIT * 2
+        if est > PARTITION_MAX_DOCS and splittable:
             # exact histogram count already exceeds the limit: subdivide before fetching anything
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, est // 2)
-            self.run_partition(target, contract, filters, b, est - est // 2)
+            self.run_partition(target, contract, filters, a, est // 2, estimated=True)
+            self.run_partition(target, contract, filters, b, est - est // 2, estimated=True)
             return
         pkey = w.key()
-        cap = max(PARTITION_MAX_DOCS, int(est * 1.2) + 1000)
-        intent = SearchIntent(kind="raw", target=target, window=w, filters=filters, max_records=cap, purpose="sweep")
+        intent = self._raw_intent(target, filters, w, est)
+        cap = intent.max_records
         tid = "t-" + digest({"h": self.hunt_id, "target": target, "w": pkey})[:20]
         self.repo.upsert_task(tid, self.hunt_id, "sweep", "sweep", intent.model_dump(mode="json"), tid)
         # No skip-on-resume: aggregate playbooks must consume every partition again or their
         # coverage would claim completeness over a subset. Writes are idempotent, so re-reading
         # is safe (attempts are counted and visible).
         self.repo.update_task(tid, "leased", attempt=True)
-        out = execute(self.client, intent, contract)
+        mid = w.start + (w.end - w.start) / 2
+        children = [f"{w.start.isoformat()}/{mid.isoformat()}", f"{mid.isoformat()}/{w.end.isoformat()}"]
+        counted = self._count(target, contract, filters, w) if estimated and splittable else None
+        if counted is not None and counted > fetch_limit(cap):
+            # The fetch would stop at its cap and be split: split now, without reading records only to drop them.
+            # The cap is the same, so the halves and their estimates are those a capped fetch would have given.
+            self.heartbeat()
+            self.repo.update_task(tid, "split", outcome={"completeness": Completeness.partial,
+                                                         "reasons": [f"cap:{cap}<total:{counted}"], "total": counted,
+                                                         "returned": 0, "counted": True, "children": children})
+            a, b = self._split(target, w)
+            self.run_partition(target, contract, filters, a, counted // 2, estimated=True)
+            self.run_partition(target, contract, filters, b, counted // 2, estimated=True)
+            return
+        out = self._fetch(intent, contract)
+        self._start_prefetch()
         self.heartbeat()
         capped = any(r.startswith("cap:") for r in out.reasons)
-        if capped and (w.end - w.start) > MIN_SPLIT * 2:
+        if capped and splittable:
             # Capped: never accept a partial partition when it can be subdivided. Split in half
             # and evaluate each half; this task is recorded as superseded by its children.
-            mid = w.start + (w.end - w.start) / 2
             self.repo.update_task(tid, "split", outcome={"completeness": out.completeness, "reasons": out.reasons,
                                                          "total": out.total, "returned": out.returned,
-                                                         "children": [f"{w.start.isoformat()}/{mid.isoformat()}",
-                                                                      f"{mid.isoformat()}/{w.end.isoformat()}"]})
+                                                         "children": children})
             half = (out.total or est) // 2
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, half)
-            self.run_partition(target, contract, filters, b, half)
+            self.run_partition(target, contract, filters, a, half, estimated=True)
+            self.run_partition(target, contract, filters, b, half, estimated=True)
             return
         self.stats["partitions"] += 1
         self.stats["records"] += out.returned
@@ -198,9 +283,7 @@ class Sweep:
                                                         "total": out.total, "returned": out.returned})
         if out.completeness == Completeness.failed:
             self.partial_reasons.append(f"{target} {pkey}: {out.error}")
-            for pb in self.pack:
-                self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, "executed_failed", 0, 0,
-                                        {"error": out.error})
+            self._mark_all(target, pkey, "executed_failed", {"error": out.error})
             self.repo.update_task(tid, "failed", error=out.error)
             return
         events, skips, errors = normalize_hits(out.records, self.boots)
@@ -243,6 +326,10 @@ class Sweep:
         error_reason = (f"normalization_errors={len(errors)} in {', '.join(tags)}"
                         + (f"; {', '.join(unmapped)} feeds no known event family, so every rule is partial"
                            if unmapped else "")) if errors else ""
+        cells: list[dict] = []
+        # events the joining aggregates may cite later, by id: several playbooks stage the same events, and each
+        # is serialized to the stage once per partition (the first staged copy of an id is kept)
+        staged: dict[str, TypedEvent] = {}
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing = pb.evaluated, pb.missing_required
@@ -251,7 +338,8 @@ class Sweep:
                 self._publish(m, tid, raw_sources)
             if pb.staged:
                 # joining aggregates: full events and their raw copies go to disk, not memory
-                self._event_stage().put(pb.drain_staged(), raw_sources)
+                for event in pb.drain_staged():
+                    staged.setdefault(event.id, event)
             elif pb.kind == "aggregate":
                 # aggregates retain examples: stash raw copies of their retained events now
                 self._retain_aggregate_raw(pb, raw_sources)
@@ -276,8 +364,13 @@ class Sweep:
                 reasons.append(error_reason)
             if missing:
                 reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
-            self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, target, pkey, state, len(matches), evaluated,
-                                    {"missing_required": missing, "reasons": reasons})
+            cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated,
+                                    {"missing_required": missing, "reasons": reasons}))
+        if any(pb.staged for pb in self.pack):
+            self._event_stage().put(list(staged.values()), raw_sources)
+        staged.clear()
+        # the partition's cells together: a crash before this leaves them all visibly `planned`
+        self.repo.set_rule_cells(self.hunt_id, cells)
         self.repo.update_task(tid, "evaluated")
 
     def _count_boots(self, events) -> None:
@@ -328,10 +421,9 @@ class Sweep:
                       f"boot-interval map)")
             self.partial_reasons.append(reason)
             # each rule that reads boot-placed families cannot claim a complete negative over those ranges
-            for pb in self.pack:
-                if set(pb.families) & BOOT_FILL_FAMILIES:
-                    self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", BOOT_PLACEMENT_PARTITION,
-                                            "evaluated_partial", 0, 0, {"reasons": [reason]})
+            self.repo.set_rule_cells(self.hunt_id, [
+                self._cell(pb, "*", BOOT_PLACEMENT_PARTITION, "evaluated_partial", detail={"reasons": [reason]})
+                for pb in self.pack if set(pb.families) & BOOT_FILL_FAMILIES])
 
     def _event_stage(self) -> EventStage:
         stage = getattr(self, "_stage", None)
@@ -369,8 +461,8 @@ class Sweep:
                 ms = pb.finalize()
                 for m in ms:
                     self._publish(m, None, agg_raw)
-            cells = [c for c in self.repo.rule_cells(self.hunt_id)
-                     if c["rule_id"] == pb.id and c["target"] != "*" and c["state"] != "split"]
+            cells = [c for c in self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
+                     if c["target"] != "*" and c["state"] != "split"]
             any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")
                               for c in cells)
             evaluated = sum(c["evaluated"] or 0 for c in cells)
