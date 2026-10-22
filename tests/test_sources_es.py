@@ -7,7 +7,16 @@ import pytest
 
 from romulus.config import Settings
 from romulus.sources.compile import CompileError, compile_es
-from romulus.sources.es import ElasticClient, WriteAttemptBlocked, check_allowed
+from romulus.sources.es import (
+    FIELD_CAPS_FILTER_PATH,
+    MAPPING_FILTER_PATH,
+    PIT_CLOSE_FILTER_PATH,
+    PIT_OPEN_FILTER_PATH,
+    SEARCH_FILTER_PATH,
+    ElasticClient,
+    WriteAttemptBlocked,
+    check_allowed,
+)
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, Window
 from romulus.sources.profile import contract_from_types
@@ -143,6 +152,48 @@ def test_execute_calls_can_share_one_rotating_pit_session():
     assert opened == ["/idx/_pit"]
     assert searched_pits == ["pit1", "pit2"]
     assert deleted == ["pit3"]
+
+
+def test_raw_search_limits_source_and_every_transport_envelope():
+    requests = []
+
+    def handler(req: httpx.Request):
+        requests.append(req)
+        if req.url.path == "/idx/_mapping":
+            return httpx.Response(200, json={"idx": {"mappings": {"properties": {}}}})
+        if req.url.path == "/idx/_field_caps":
+            return httpx.Response(200, json={"fields": {"@timestamp": {"date": {"type": "date"}}}})
+        if req.url.path == "/idx/_pit" and req.method == "POST":
+            return httpx.Response(200, json={"id": "pit1"})
+        if req.url.path == "/_search":
+            return httpx.Response(200, json={
+                "pit_id": "pit1", "timed_out": False, "_shards": {"failed": 0},
+                "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []},
+            })
+        if req.url.path == "/_pit" and req.method == "DELETE":
+            return httpx.Response(200, json={"succeeded": True})
+        raise AssertionError(f"unexpected request {req.method} {req.url.path}")
+
+    client = ElasticClient(Settings(es_url="http://es"), transport=httpx.MockTransport(handler))
+    assert "idx" in client.mapping("idx")
+    assert "@timestamp" in client.field_caps("idx")["fields"]
+    query = compile_es(SearchIntent(kind="raw", target="idx", window=W), C)
+    assert list(client.iterate(query, max_records=10)) == [([], {
+        "problems": [], "total": 0, "total_relation": "eq",
+    })]
+
+    by_path = {(request.method, request.url.path): request for request in requests}
+    assert by_path[("GET", "/idx/_mapping")].url.params["filter_path"] == MAPPING_FILTER_PATH
+    field_caps = by_path[("GET", "/idx/_field_caps")]
+    assert field_caps.url.params["filter_path"] == FIELD_CAPS_FILTER_PATH
+    assert field_caps.url.params["fields"] == "*"
+    pit_open = by_path[("POST", "/idx/_pit")]
+    assert pit_open.url.params["filter_path"] == PIT_OPEN_FILTER_PATH
+    search = by_path[("POST", "/_search")]
+    assert search.url.params["filter_path"] == SEARCH_FILTER_PATH
+    # the raw copy and its digest are the whole _source: trimming it would change citation identity
+    assert "_source" not in json.loads(search.content)
+    assert by_path[("DELETE", "/_pit")].url.params["filter_path"] == PIT_CLOSE_FILTER_PATH
 
 
 def _pit_transport(pages, total, relation="eq", shard_fail=False):

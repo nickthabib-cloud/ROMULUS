@@ -36,6 +36,11 @@ OBSERVED_FLOW_SPAN = timedelta(minutes=10)
 UNUSABLE_TEXT_KEYS = {"", "-1", "4294967295", "(null)", "(none)", "unset", "(unknown)"}
 # Links that need a host identity: they search one host's own records.
 HOST_SIDE_LINKS = frozenset({"process_lineage", "login_session", "host_after_anchor"})
+RAW_FAMILIES_BY_LINK = {
+    "process_lineage": {"process_exec"},
+    "network_flow": {"net_flow", "net_alert", "net_session"},
+    "flow_host_side": {"net_socket"},
+}
 
 
 def usable_key(value: Any) -> bool:
@@ -206,9 +211,15 @@ class LinkFetcher:
             self._cache[fetch_key] = result
             return result
         query_start = getattr(self.executor, "source_queries", 0)
+        fetch_options = {
+            "anchor_ts": anchor.ts,
+            "query_cap": query_cap,
+            "planning_coverage": planning_coverage,
+        }
+        if getattr(self.executor, "raw_family_prefilter", False):
+            fetch_options["raw_families"] = RAW_FAMILIES_BY_LINK.get(link_type)
         batch = self.executor.fetch_intents(
-            anchor.finding_id, fetch_key, intents, retain, anchor_ts=anchor.ts, query_cap=query_cap,
-            planning_coverage=planning_coverage,
+            anchor.finding_id, fetch_key, intents, retain, **fetch_options,
         )
         linked = select(batch.events)
         linked = sorted(

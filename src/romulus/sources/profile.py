@@ -78,7 +78,7 @@ def flatten_mapping(mapping: dict) -> dict[str, str]:
             for sub, sspec in spec.get("fields", {}).items():
                 out[f"{full}.{sub}"] = sspec.get("type", "object")
 
-    for _index, body in mapping.items():
+    for body in mapping.values():
         walk("", body.get("mappings", {}).get("properties", {}))
     return out
 
@@ -120,20 +120,22 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
             "hosts": {"terms": {"field": host_field, "size": 500}},
         },
     }
-    d = client.request("POST", f"/{target}/_search", body)
+    d = client.search(target, body)
     aggs = d.get("aggregations", {})
     notes = []
     for k in ("ds", "hosts"):
         if aggs.get(k, {}).get("sum_other_doc_count"):
             notes.append(f"{k} inventory truncated (sum_other_doc_count>0)")
-    prof = dict(
-        target=target, kind="es_index" if schema == "lab_ecs" else schema, backend=client.settings.es_flavor, backend_version=client.version,
-        captured_at=datetime.now(UTC), field_types=field_types,
-        datasets={b["key"]: b["doc_count"] for b in aggs.get("ds", {}).get("buckets", [])},
-        hosts={b["key"]: b["doc_count"] for b in aggs.get("hosts", {}).get("buckets", [])},
-        time_min=aggs.get("tmin", {}).get("value_as_string"), time_max=aggs.get("tmax", {}).get("value_as_string"),
-        doc_count=d.get("hits", {}).get("total", {}).get("value"), notes=notes,
-    )
+    prof = {
+        "target": target, "kind": "es_index" if schema == "lab_ecs" else schema,
+        "backend": client.settings.es_flavor, "backend_version": client.version,
+        "captured_at": datetime.now(UTC), "field_types": field_types,
+        "datasets": {b["key"]: b["doc_count"] for b in aggs.get("ds", {}).get("buckets", [])},
+        "hosts": {b["key"]: b["doc_count"] for b in aggs.get("hosts", {}).get("buckets", [])},
+        "time_min": aggs.get("tmin", {}).get("value_as_string"),
+        "time_max": aggs.get("tmax", {}).get("value_as_string"),
+        "doc_count": d.get("hits", {}).get("total", {}).get("value"), "notes": notes,
+    }
     pid = digest({k: v for k, v in prof.items() if k != "captured_at"})[:16]
     profile = SourceProfile(id=pid, **prof)
     return profile, contract_from_types(target, field_types)
