@@ -488,6 +488,20 @@ baseline_parent_observed = Table(
     CheckConstraint("end > start", name="ck_baseline_parent_observed_span"),
 )
 
+# Per host, the hours holding an exec the carry could not store (no pid or executable, an unknown boot against
+# a recorded one, a typed time outside its retrieval hour). Coalesced ranges, like the observed ledger; a break
+# between a generation and a child makes the child's parent unknown for that host only.
+baseline_parent_break = Table(
+    "baseline_parent_break", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("host", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "host", "start", name="pk_baseline_parent_break"),
+    CheckConstraint("end > start", name="ck_baseline_parent_break_span"),
+)
+
 baseline_parent_carry = Table(
     "baseline_parent_carry", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),

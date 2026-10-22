@@ -2132,33 +2132,54 @@ class Repo:
                 t.baseline_parent_carry.c.hunt_id == hunt_id,
             )).scalar_one())
 
-    def mark_baseline_parent_observed(self, hunt_id: str, target: str, start: datetime,
-                                      end: datetime) -> None:
-        """Record that every record of `target` in [start, end) was fed to the carry.
-
-        Overlapping or touching ranges are coalesced in the same transaction, so the ledger holds one row per
-        continuous observed run.
-        """
-        start, end = _utc(start, "observed start"), _utc(end, "observed end")
+    def _coalesce_range(self, table, keys: dict, start: datetime, end: datetime) -> None:
+        """Add [start, end) to a range ledger keyed by `keys`, merging overlapping or touching rows in the
+        same transaction, so the ledger holds one row per continuous run."""
+        start, end = _utc(start, "range start"), _utc(end, "range end")
         if end <= start:
-            raise ValueError("observed range must be nonempty")
-        table = t.baseline_parent_observed.c
+            raise ValueError("ledger range must be nonempty")
+        columns = table.c
+        scope = [columns[name] == value for name, value in keys.items()]
         with write_txn(self.engine) as c:
-            touching = c.execute(select(table.start, table.end).where(
-                table.hunt_id == hunt_id, table.target == target,
-                table.start <= end, table.end >= start,
+            touching = c.execute(select(columns.start, columns.end).where(
+                *scope, columns.start <= end, columns.end >= start,
             )).all()
             for row in touching:
                 start = min(start, _stored_utc(row.start))
                 end = max(end, _stored_utc(row.end))
             if touching:
-                c.execute(t.baseline_parent_observed.delete().where(
-                    table.hunt_id == hunt_id, table.target == target,
-                    table.start.in_([row.start for row in touching]),
-                ))
-            c.execute(t.baseline_parent_observed.insert().values(
-                hunt_id=hunt_id, target=target, start=start, end=end,
-            ))
+                c.execute(table.delete().where(*scope, columns.start.in_([row.start for row in touching])))
+            c.execute(table.insert().values(**keys, start=start, end=end))
+
+    def mark_baseline_parent_observed(self, hunt_id: str, target: str, start: datetime,
+                                      end: datetime) -> None:
+        """Record that every record of `target` in [start, end) was fed to the carry."""
+        self._coalesce_range(t.baseline_parent_observed, {"hunt_id": hunt_id, "target": target}, start, end)
+
+    def mark_baseline_parent_break(self, hunt_id: str, target: str, host: str, start: datetime,
+                                   end: datetime) -> None:
+        """Record that `host` had an exec in [start, end) whose identity the carry does not hold."""
+        self._coalesce_range(t.baseline_parent_break,
+                             {"hunt_id": hunt_id, "target": target, "host": host}, start, end)
+
+    def baseline_parent_break_overlaps(self, hunt_id: str, target: str, host: str, start: datetime,
+                                       end: datetime) -> bool:
+        """Whether any break of `host` intersects [start, end) (a primary-key range search)."""
+        start, end = _utc(start, "break start"), _utc(end, "break end")
+        table = t.baseline_parent_break.c
+        with self.engine.connect() as c:
+            row = c.execute(select(table.end).where(
+                table.hunt_id == hunt_id, table.target == target, table.host == host, table.start < end,
+            ).order_by(table.start.desc()).limit(1)).first()
+        return row is not None and _stored_utc(row.end) > start
+
+    def baseline_parent_breaks(self, hunt_id: str, target: str, host: str) -> list[tuple[datetime, datetime]]:
+        table = t.baseline_parent_break.c
+        with self.engine.connect() as c:
+            rows = c.execute(select(table.start, table.end).where(
+                table.hunt_id == hunt_id, table.target == target, table.host == host,
+            ).order_by(table.start)).all()
+        return [(_stored_utc(row.start), _stored_utc(row.end)) for row in rows]
 
     def baseline_parent_observed_covers(self, hunt_id: str, target: str, start: datetime,
                                         end: datetime) -> bool:

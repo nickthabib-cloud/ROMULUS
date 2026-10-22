@@ -73,6 +73,16 @@ def upgrade() -> None:
         sa.CheckConstraint("end > start", name="ck_baseline_parent_observed_span"),
     )
     op.create_table(
+        "baseline_parent_break",
+        sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("target", sa.String(), nullable=False),
+        sa.Column("host", sa.String(), nullable=False),
+        sa.Column("start", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("end", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("hunt_id", "target", "host", "start", name="pk_baseline_parent_break"),
+        sa.CheckConstraint("end > start", name="ck_baseline_parent_break_span"),
+    )
+    op.create_table(
         "baseline_parent_carry",
         sa.Column("hunt_id", sa.String(), sa.ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
         sa.Column("target", sa.String(), nullable=False),
@@ -97,6 +107,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("baseline_parent_carry")
+    op.drop_table("baseline_parent_break")
     op.drop_table("baseline_parent_observed")
     op.drop_index("ix_baseline_parent_host_boot_host", table_name="baseline_parent_host_boot")
     op.drop_table("baseline_parent_host_boot")

@@ -788,3 +788,116 @@ def test_an_hour_inside_a_multi_hour_segment_is_covered():
     )
     assert source.plans == [("host", START - timedelta(hours=4))]
     assert result.gaps == ()
+
+
+def _exec_unbooted(index, ts, pid, ppid, executable):
+    event = _exec(index, ts, pid, ppid, executable)
+    del event.fields["host.boot.id"]
+    return event
+
+
+def _exec_without_pid(index, ts, ppid, executable):
+    event = _exec(index, ts, 0, ppid, executable)
+    del event.fields["process.pid"]
+    return event
+
+
+@pytest.mark.parametrize("uncarried", [
+    lambda: _exec_unbooted(2, G_HOUR + timedelta(minutes=10), 10, 500, "/true_parent"),
+    lambda: _exec_without_pid(2, G_HOUR + timedelta(minutes=10), 500, "/true_parent"),
+], ids=["unknown-boot", "no-pid"])
+def test_an_exec_the_carry_cannot_store_breaks_that_hosts_continuity(uncarried):
+    """Every hour is complete, but G holds an exec of the host the carry could not store: it may be the reuse."""
+    events = [
+        _exec(1, F_HOUR + timedelta(minutes=10), 10, 500, "/old"),
+        uncarried(),
+        _exec(3, H_HOUR + timedelta(minutes=10), 11, 10, "/bin/sh"),
+        # Another host in the same hours resolves normally: one host's break never blanks the others.
+        _exec(4, F_HOUR + timedelta(minutes=10), 10, 500, "/usr/sbin/parent", host="web02"),
+        _exec(5, H_HOUR + timedelta(minutes=10), 11, 10, "/bin/sh", host="web02"),
+    ]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    for _ in range(2):
+        result = _pair_writer(repo, FakeHistory(events), carry).fill(
+            hunt_id="build", targets=["host-index"], start=F_HOUR, end=START,
+        )
+    assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
+    child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
+    assert child_gap and "e3: an exec of the host between parent and child was not carried" in child_gap[0].reason
+    assert "e5:" not in child_gap[0].reason
+
+
+def test_an_exec_retrieved_in_an_unobserved_later_hour_breaks_continuity():
+    """The parent's reuse is typed inside G but retrieved in H, which fails: G's children stay unresolved."""
+    placed = [
+        (_exec(1, F_HOUR + timedelta(minutes=10), 10, 500, "/old"), F_HOUR),
+        (_exec(2, G_HOUR + timedelta(minutes=30), 10, 500, "/true_parent"), H_HOUR),
+        (_exec(3, G_HOUR + timedelta(minutes=40), 11, 10, "/bin/sh"), G_HOUR),
+    ]
+
+    class Skewed(FakeHistory):
+        def plan(self, target, start, end, *, query_budget):
+            self.plans.append((target, start))
+            count = sum(start <= hour < end for _, hour in placed)
+            return HistoryPlan((HistoryPartition(target, start, end, count, start.isoformat()),), 1, "complete", ())
+
+        def fetch(self, partition, **kwargs):
+            if partition.start == H_HOUR:
+                return HistoryFetch((), "failed", ("shard failure",), 0)
+            found = tuple(event for event, hour in placed if partition.start <= hour < partition.end)
+            return HistoryFetch(found, "complete", (), len(found))
+
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    for _ in range(2):
+        result = _pair_writer(repo, Skewed(), carry).fill(
+            hunt_id="build", targets=["host-index"], start=F_HOUR, end=START,
+        )
+    assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
+    child_gap = [gap for gap in result.gaps if gap.start == G_HOUR]
+    assert child_gap and "e3: parent exec in an unobserved hour" in child_gap[0].reason
+
+
+def test_an_exec_typed_outside_its_retrieval_hour_breaks_the_hosts_continuity():
+    """Tripwire: if exec time ever stops being the retrieval field, the skewed hours never vouch for the host."""
+    placed = [
+        (_exec(1, F_HOUR + timedelta(minutes=10), 10, 500, "/old"), F_HOUR),
+        (_exec(2, G_HOUR + timedelta(minutes=30), 12, 500, "/skewed"), H_HOUR),
+        (_exec(3, G_HOUR + timedelta(minutes=40), 11, 10, "/bin/sh"), G_HOUR),
+    ]
+
+    class Skewed(FakeHistory):
+        def plan(self, target, start, end, *, query_budget):
+            count = sum(start <= hour < end for _, hour in placed)
+            return HistoryPlan((HistoryPartition(target, start, end, count, start.isoformat()),), 1, "complete", ())
+
+        def fetch(self, partition, **kwargs):
+            found = tuple(event for event, hour in placed if partition.start <= hour < partition.end)
+            return HistoryFetch(found, "complete", (), len(found))
+
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    for _ in range(2):
+        result = _pair_writer(repo, Skewed(), carry).fill(
+            hunt_id="build", targets=["host-index"], start=F_HOUR, end=START,
+        )
+    assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
+    child_gap = [gap for gap in result.gaps if gap.start == G_HOUR]
+    assert child_gap and "e3: an exec of the host between parent and child was not carried" in child_gap[0].reason
+    assert repo.baseline_parent_breaks("build", "host-index", "web01") == [(G_HOUR, START)]
+
+
+def test_an_exec_without_a_host_keeps_its_hour_out_of_the_observed_ledger():
+    hostless = _exec(2, G_HOUR + timedelta(minutes=10), 10, 500, "/somewhere")
+    hostless.host = None
+    events = [_exec(1, H_HOUR + timedelta(minutes=10), 11, 1, "/bin/sh"), hostless]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    _pair_writer(repo, FakeHistory(events), CarryInStore(repo, "build")).fill(
+        hunt_id="build", targets=["host-index"], start=G_HOUR, end=START,
+    )
+    assert repo.baseline_parent_observed_ranges("build", "host-index") == [(H_HOUR, START)]

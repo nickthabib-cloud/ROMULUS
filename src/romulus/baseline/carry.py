@@ -36,6 +36,7 @@ class PendingResolution:
 _HOUR = timedelta(hours=1)
 
 UNOBSERVED_HOUR = "parent exec in an unobserved hour"
+UNCARRIED_EXEC = "an exec of the host between parent and child was not carried"
 BEFORE_HISTORY = "parent exec before history"
 SPANS_TARGETS = "host exec history spans targets"
 
@@ -52,28 +53,67 @@ class CarryInStore:
     latest two execs for each PID. Romulus currently normalizes execs but not process-exit records, so "live" means
     not superseded by a PID reuse or reboot as far as available telemetry shows.
 
-    A stored generation is the PID's meaning at a later time only when nothing between them went unseen. The
-    observed ledger records the hours whose every record was fed here; a lookup answers only when one
-    continuous observed run spans the generation's exec hour through the child's hour. A failed, partial,
-    budget-omitted or skipped hour in between could hold a later exec of the same PID, so the answer is unknown.
+    A stored generation is the PID's meaning at a later time only when nothing between them went unseen:
+    - the observed ledger records the target's hours whose every record was fed here. A lookup needs one
+      continuous observed run from the generation's exec hour through the child's hour, and on through the
+      `horizon` (the end of the history being filled) when one is set. A failed, partial, budget-omitted or
+      skipped hour could hold a later exec of the same PID, including one whose typed time is earlier than the
+      hour it is retrieved in, so the answer is then unknown;
+    - the break ledger records, per host, the hours holding an exec that was fed but not stored: no pid or
+      executable, an unknown boot against a recorded one (or a recorded boot not provably older than an
+      unknown one), or a typed time outside the hour it was retrieved in. Such an exec may be the PID's
+      reuse, so a break between the generation and the child makes that host's answer unknown. Breaks are
+      per host, so one host's unstorable exec never blanks the others. Only an exec of a recorded boot that is
+      provably older than the host's recorded current boot is dropped without a break: no child of the
+      current boot can descend from it.
+    An exec with no host could belong to any host, so its hour never joins the observed ledger.
     """
 
-    def __init__(self, repo: Repo, hunt_id: str, target: str = "", *,
+    def __init__(self, repo: Repo, hunt_id: str, target: str = "", *, horizon: datetime | None = None,
                  _markers: dict[tuple[str, str], tuple[str, datetime]] | None = None,
                  _dirty: set[tuple[str, str]] | None = None):
-        self.repo, self.hunt_id, self.target = repo, hunt_id, target
+        self.repo, self.hunt_id, self.target, self.horizon = repo, hunt_id, target, horizon
         # Shared across the per-target views of one hunt, so the cache cap bounds the whole hunt.
         self._markers: dict[tuple[str, str], tuple[str, datetime]] = {} if _markers is None else _markers
         # Cached markers advanced in memory but not yet on disk; a flush writes only these.
         self._dirty: set[tuple[str, str]] = set() if _dirty is None else _dirty
+        # Fed but not stored since the last take_uncarried(): host -> typed hours, and whether any had no host.
+        self._uncarried: dict[str, set[datetime]] = {}
+        self._hostless = False
 
-    def for_target(self, target: str) -> CarryInStore:
+    def for_target(self, target: str, *, horizon: datetime | None = None) -> CarryInStore:
         """The same hunt's carry for another target; the marker cache and its cap are shared."""
-        return CarryInStore(self.repo, self.hunt_id, target, _markers=self._markers, _dirty=self._dirty)
+        return CarryInStore(self.repo, self.hunt_id, target, horizon=horizon,
+                            _markers=self._markers, _dirty=self._dirty)
 
     def mark_observed(self, start: datetime, end: datetime) -> None:
         """Record that every record of this target in [start, end) has been fed to the carry."""
         self.repo.mark_baseline_parent_observed(self.hunt_id, self.target, start, end)
+
+    def _uncarry(self, host: str | None, ts: datetime) -> None:
+        if not host:
+            self._hostless = True
+        else:
+            self._uncarried.setdefault(host, set()).add(_hour(ts))
+
+    def take_uncarried(self) -> tuple[dict[str, set[datetime]], bool]:
+        """Return and reset the execs fed but not stored: {host: typed hours}, and whether one had no host."""
+        found, hostless = self._uncarried, self._hostless
+        self._uncarried, self._hostless = {}, False
+        return found, hostless
+
+    def record_breaks(self, uncarried: dict[str, set[datetime]]) -> None:
+        """Write each host's uncarried hours to its break ledger, adjacent hours as one range."""
+        for host in sorted(uncarried):
+            hours = sorted(uncarried[host])
+            run_start = previous = hours[0]
+            for hour in [*hours[1:], None]:
+                if hour is not None and hour == previous + _HOUR:
+                    previous = hour
+                    continue
+                self.repo.mark_baseline_parent_break(self.hunt_id, self.target, host, run_start, previous + _HOUR)
+                if hour is not None:
+                    run_start = previous = hour
 
     def parent(self, host: str, pid: int, ts: datetime,
                boot: str | None = None) -> tuple[tuple | None, str | None]:
@@ -81,19 +121,26 @@ class CarryInStore:
         if len(self.repo.baseline_parent_targets(self.hunt_id, host)) > 1:
             return None, SPANS_TARGETS
         child_hour = _hour(ts)
+        child_end = child_hour + _HOUR
+        # Observation must also run on to the horizon: a later hour could hold an earlier-typed exec.
+        observed_end = max(child_end, self.horizon) if self.horizon is not None else child_end
         entry = self.repo.baseline_parent_lookup(self.hunt_id, self.target, host, pid, ts.timestamp(), boot)
         if entry is None:
-            # No stored generation precedes the child. Only when observation runs unbroken from the start of
-            # this target's ledger through the child is the exec before history; otherwise it may sit in an
-            # unobserved hour.
+            # No stored generation precedes the child. An uncarried exec of the host before the child may be the
+            # parent. Only when observation runs unbroken from the start of this target's ledger through the
+            # child (and horizon) is the exec before history; otherwise it may sit in an unobserved hour.
+            if self.repo.baseline_parent_break_overlaps(
+                    self.hunt_id, self.target, host, datetime.fromtimestamp(0, UTC), child_end):
+                return None, UNCARRIED_EXEC
             ranges = self.repo.baseline_parent_observed_ranges(self.hunt_id, self.target)
-            if not ranges or (ranges[0][0] <= child_hour and child_hour + _HOUR <= ranges[0][1]):
+            if not ranges or (ranges[0][0] <= child_hour and observed_end <= ranges[0][1]):
                 return None, BEFORE_HISTORY
             return None, UNOBSERVED_HOUR
         exec_hour = _hour(datetime.fromtimestamp(entry[0], UTC))
-        if not self.repo.baseline_parent_observed_covers(
-                self.hunt_id, self.target, exec_hour, child_hour + _HOUR):
+        if not self.repo.baseline_parent_observed_covers(self.hunt_id, self.target, exec_hour, observed_end):
             return None, UNOBSERVED_HOUR
+        if self.repo.baseline_parent_break_overlaps(self.hunt_id, self.target, host, exec_hour, child_end):
+            return None, UNCARRIED_EXEC
         return entry, None
 
     def lookup(self, host: str, pid: int, ts: float, boot: str | None = None) -> tuple | None:
@@ -115,15 +162,28 @@ class CarryInStore:
         if key in self._markers or len(self._markers) < MARKER_CACHE_CAP:
             self._markers[key] = marker
 
-    def observe_events(self, events: Iterable[TypedEvent], *, chunk_size: int = 100_000) -> int:
+    def observe_events(self, events: Iterable[TypedEvent], *, chunk_size: int = 100_000,
+                       hour: tuple[datetime, datetime] | None = None) -> int:
+        """Feed execs; `hour` is the retrieval interval they came from, when known.
+
+        A failed exec never replaced the PID's image, so it is skipped. Every other exec is stored, or recorded
+        as uncarried (see the class note). With `hour`, an exec typed outside it is stored and also recorded as
+        uncarried at both its typed and retrieval hours: the hours then no longer vouch for that host.
+        """
         def rows():
             for event in events:
-                if event.family != "process_exec" or event.outcome == Outcome.failure or not event.host:
+                if event.family != "process_exec" or event.outcome == Outcome.failure:
                     continue
+                if not event.host:
+                    self._uncarry(None, event.ts)
+                    continue
+                if hour is not None and not hour[0] <= event.ts < hour[1]:
+                    self._uncarry(event.host, event.ts)
+                    self._uncarry(event.host, hour[0])
                 pid, executable = event.get("process.pid"), event.get("process.executable")
-                if isinstance(pid, bool) or not isinstance(pid, int) or pid < 0:
-                    continue
-                if not isinstance(executable, str) or not executable:
+                if (isinstance(pid, bool) or not isinstance(pid, int) or pid < 0
+                        or not isinstance(executable, str) or not executable):
+                    self._uncarry(event.host, event.ts)
                     continue
                 ppid = event.get("process.ppid")
                 yield ParentExec(
@@ -159,21 +219,28 @@ class CarryInStore:
                 raise ValueError("parent exec timestamp must carry a timezone")
             if (not item.host or isinstance(item.pid, bool) or not isinstance(item.pid, int)
                     or item.pid < 0 or not item.executable):
+                self._uncarry(item.host, item.ts)
                 continue
             timestamp, boot = item.ts.astimezone(UTC), item.boot or ""
             marker = self._marker(item.host)
             if marker is None:
                 if not self.repo.set_baseline_parent_boot(
                         self.hunt_id, self.target, item.host, boot, timestamp):
+                    self._uncarry(item.host, timestamp)
                     continue
                 self._remember_marker(item.host, (boot, timestamp))
             elif marker[0] != boot:
                 if marker[1] >= timestamp:
+                    # Dropped silently only when both boots are recorded: then the exec is provably in an older
+                    # boot. An unknown boot on either side may be the current one.
+                    if not (boot and marker[0]):
+                        self._uncarry(item.host, timestamp)
                     continue
                 # A newer reboot supersedes every process in the former boot, including buffered rows.
                 pending = {key: value for key, value in pending.items() if key[0] != item.host}
                 if not self.repo.set_baseline_parent_boot(
                         self.hunt_id, self.target, item.host, boot, timestamp):
+                    self._uncarry(item.host, timestamp)
                     continue
                 self._remember_marker(item.host, (boot, timestamp))
             elif timestamp > marker[1]:
@@ -182,6 +249,7 @@ class CarryInStore:
                     self._dirty.add((self.target, item.host))
                 elif not self.repo.set_baseline_parent_boot(
                         self.hunt_id, self.target, item.host, boot, timestamp):
+                    self._uncarry(item.host, timestamp)
                     continue
             key = (item.host, boot, item.pid)
             row = {

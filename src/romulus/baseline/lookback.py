@@ -190,7 +190,10 @@ class LookbackWriter:
                 ))
                 continue
             counters = {spec.id: KeyCounter("pending", spec, span=(hour_start, hour_end)) for spec in missing}
-            carry = self.parent_carry.for_target(target) if self.parent_carry is not None else None
+            # The horizon is the end of the history being filled: a child resolves only while observation runs
+            # unbroken from its parent's exec through every later history hour.
+            carry = (self.parent_carry.for_target(target, horizon=end)
+                     if self.parent_carry is not None else None)
             hour_parents = PidTable()
             hour_context = KeyContext(
                 pid_table=hour_parents,
@@ -235,13 +238,17 @@ class LookbackWriter:
                     break
                 events_total += len(fetched.events)
                 if carry is not None:
-                    carry.observe_events(fetched.events)
+                    carry.observe_events(fetched.events, hour=(hour_start, hour_end))
                 ordered_events = sorted(fetched.events, key=lambda item: (item.ts, item.id))
                 for event in ordered_events:
                     hour_parents.add(event)
                 for event in ordered_events:
                     for counter in counters.values():
                         counter.consume(event, hour_context)
+            # Execs fed but not stored are breaks for their hosts whether or not the hour completes.
+            uncarried, hostless = carry.take_uncarried() if carry is not None else ({}, False)
+            if carry is not None:
+                carry.record_breaks(uncarried)
             if failure is not None:
                 gaps.append(HistoryGap(
                     target, hour_start, hour_end, failure[0], failure[1], tuple(counter for counter in counters),
@@ -249,8 +256,9 @@ class LookbackWriter:
                 continue
             # Every partition of the hour was fetched completely and fed to the carry, so the hour joins the
             # carry's continuity ledger before its children are resolved against it. Failed, partial,
-            # budget-omitted and skipped (already covered) hours never do, and so break parent continuity.
-            if carry is not None:
+            # budget-omitted and skipped (already covered) hours never do, and so break parent continuity;
+            # neither does an hour with an exec of no host, which could be any host's.
+            if carry is not None and not hostless:
                 carry.mark_observed(hour_start, hour_end)
             for counter in counters.values():
                 # A resolved child gets its counter's own spec key (id and key version).
