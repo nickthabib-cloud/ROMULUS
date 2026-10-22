@@ -8,7 +8,6 @@ from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings
 from romulus.detect.registry import fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
-from romulus.hunt.context import finalize_context
 from romulus.hunt.expansion import ExpansionEngine, expansion_windows
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
 from romulus.hunt.pivot import PivotExecutor
@@ -32,7 +31,7 @@ def _utc(value: datetime) -> datetime:
 
 
 class HuntToolExecutor:
-    """Own source access, direct detection, reach persistence, and safe context re-finalization."""
+    """Own source access, direct detection, and agent-hypothesis reach persistence."""
 
     def __init__(self, repo: Repo, hunt_id: str, pivot: PivotExecutor, fetcher: LinkFetcher,
                  hunt_start: datetime, hunt_end: datetime, *, owner_token: str | None = None):
@@ -124,8 +123,6 @@ class HuntToolExecutor:
             query_spend=max(0, int(getattr(self.pivot, "source_queries", query_start)) - query_start),
             key=link_key,
         )
-        # Safe and idempotent: the finalizer recomputes context only from persisted, evaluated reaches.
-        finalize_context(self.repo, self.hunt_id, owner_token=self.owner_token)
         return result
 
     def _publish_direct(self, session_id: str, candidate: dict, result: LinkResult,
@@ -194,7 +191,6 @@ class HuntToolExecutor:
         events = self._events(result.event_ids)
         candidate_ids = self._publish_direct(session_id, candidate, agent_result, events)
         self.repo.mark_expansion_link_evaluated(agent_result.id, owner_token=self.owner_token)
-        finalize_context(self.repo, self.hunt_id, owner_token=self.owner_token)
         entities = {
             (kind, value, role): EntityRef(kind=kind, value=value, role=role)
             for event in events for kind, value, role in event.entities()

@@ -378,6 +378,31 @@ def test_process_tree_evidence_must_belong_to_its_anchor():
     assert fake.calls == []
 
 
+def test_agent_phase_never_lowers_or_withdraws_an_existing_candidate():
+    repo = _repo(linked_attack=True)
+    repo.save_candidate({
+        "id": "existing-context", "hunt_id": "h1", "rule_id": "context.entry_point_promotion",
+        "rule_version": "3", "claim": "existing deterministic context conclusion",
+        "claim_type": "correlated_observation", "event_ids": ["anchor"],
+        "predicate_fields": [], "entities": [["host", "web01", "host"]], "ts": T,
+        "severity": "high", "confidence": "high", "lane": "high", "priority": 80.0,
+        "priority_reasons": [], "gate_results": {"_context_reaches": []},
+        "benign_alternatives": [], "next_checks": [], "group_key": "entry|web01||7",
+        "source_case_id": None, "source_anchor_id": "anchor-finding",
+        "source_link_id": "deterministic-link",
+    })
+    before = {row["id"]: (row["lane"], row["claim"]) for row in repo.candidates("h1")}
+    executor = HuntToolExecutor(repo, "h1", FakePivot(), FakeFetcher("attack"), T, END)
+
+    Toolbox(repo, "h1", executor=executor, session_id="session-7").execute(
+        "entity_timeline", _args(repo),
+    )
+
+    after = {row["id"]: (row["lane"], row["claim"]) for row in repo.candidates("h1")}
+    assert all(after[candidate_id] == state for candidate_id, state in before.items())
+    assert all(not row["claim"].startswith("withdrawn:") for row in repo.candidates("h1"))
+
+
 def test_twin_hunt_executors_publish_identical_candidate_content():
     outputs = []
     for _ in range(2):
