@@ -212,7 +212,7 @@ class _Series:
 
 class NonRootWriteRootExecutedFile(Playbook):
     id = "host.nonroot_write_root_executed_file"
-    version = "5"
+    version = "6"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -247,7 +247,10 @@ class NonRootWriteRootExecutedFile(Playbook):
         "fidelity": "direct action for 'a write-capable command was started on the file' and 'root ran the file'; "
                     "the file's change is established only by a file_change record; exec outcomes are stated",
         "benign_and_cost": "deployment accounts owning root-run scripts; admins opening root's crontab without "
-                           "sudo. One grouped finding per (host, account, file)",
+                           "sudo. One grouped finding per (host, account, file); files the writer only ran through "
+                           "its own elevation are one lead per (host, account), and one lead across hosts when the "
+                           "same account name does so on several hosts under the same parent directories of the "
+                           "per-run directories (configuration management run against many hosts)",
         "query_cost": "none beyond the sweep: it reads the host partitions every host rule reads",
         "next_pivot": "the file's content now, and the first root run after the write (its children and sockets)",
         "adds": "no other rule joins a lower-privileged write with a root execution of the same file",
@@ -608,8 +611,57 @@ class NonRootWriteRootExecutedFile(Playbook):
                     own[(key[0], account)].append((match.own_path, match))
                 else:
                     out.append(match)
-        out += [self._own_group(host, account, own[(host, account)]) for host, account in sorted(own)]
+        # The same account name elevating its own files under the same layout on several hosts (configuration
+        # management run against each of them) is one lead; a host whose layout differs keeps its own.
+        layouts: dict[tuple[str, frozenset[str]], list[str]] = defaultdict(list)
+        for host, account in sorted(own):
+            layouts[(account, _layout(own[(host, account)]))].append(host)
+        for (account, layout), hosts in sorted(layouts.items(), key=lambda kv: (kv[0][0], sorted(kv[0][1]))):
+            if len(hosts) == 1:
+                out.append(self._own_group(hosts[0], account, own[(hosts[0], account)]))
+            else:
+                out.append(self._own_across(account, layout, {host: own[(host, account)] for host in hosts}))
         return out
+
+    def _own_across(self, account: str, layout: frozenset[str],
+                    by_host: dict[str, list[tuple[str, Match]]]) -> Match:
+        """Own-elevation-only leads of one account name on several hosts with the same layout, as one lead. Every
+        per-file finding is kept: its host and path in the notes, its count in the claim; the first record of
+        each host's earliest file is cited before any host's second."""
+        hosts = sorted(by_host)
+        items = {host: sorted(by_host[host], key=lambda item: (item[1].ts, item[0])) for host in hosts}
+        total = sum(len(v) for v in items.values())
+        firsts = {host: [min(m.events, key=lambda e: (e.ts, e.id)) for _p, m in items[host]] for host in hosts}
+        cited: dict[str, TypedEvent] = {}
+        for rank in range(max(len(v) for v in firsts.values())):
+            for host in hosts:
+                if rank < len(firsts[host]) and len(cited) < WRITE_CITE:
+                    cited.setdefault(firsts[host][rank].id, firsts[host][rank])
+        events = sorted(cited.values(), key=lambda e: (e.ts, e.id))
+        start = min(m.ts for v in items.values() for _p, m in v)
+        end = max(m.ts for v in items.values() for _p, m in v)
+        shown = [f"{host}:{path}" for host in hosts for path, _m in items[host]]
+        claim = (f"Across {len(hosts)} hosts, account '{account}' (an account of that name on each host) ran "
+                 f"write-capable commands on, or changed (per kernel records), {total} files "
+                 f"({', '.join(f'{host}: {len(items[host])}' for host in hosts)}), all in per-run directories under "
+                 f"{', '.join(sorted(layout))}, from {start.isoformat()} to {end.isoformat()}; each file was then "
+                 f"run as root on its own host only by the account's own elevation (its own audit session or login "
+                 f"uid): {'; '.join(shown[:WRITE_CITE])}"
+                 + (f"; and {len(shown) - WRITE_CITE} more (every host and path is in the notes)"
+                    if len(shown) > WRITE_CITE else "")
+                 + ". Configuration management that writes a module on every host it manages and runs it with "
+                 "privilege escalation looks like this; so does a sudo or su rule that runs files the account can "
+                 f"edit, which gives that account root on that host. The first record of {len(events)} of the files "
+                 "is cited, the earliest file of each host first.")
+        all_matches = [m for v in items.values() for _p, m in v]
+        notes = sorted({n for m in all_matches for n in m.notes if n.startswith("T")})
+        notes += [n for n in all_matches[0].notes if n.startswith("own elevation")]
+        notes += [f"file: {path}" for path in shown]
+        entities = list(dict.fromkeys(entity for e in events for entity in e.entities()))
+        match = Match(self.id, claim, self.claim_type, events, _predicate(events), events[0].ts, self.severity,
+                      "lead", "high", entities, group_key=f"{'+'.join(hosts)}|{account}|own-elevation")
+        match.notes = notes
+        return match
 
     def _own_group(self, host: str, account: str, items: list[tuple[str, Match]]) -> Match:
         """Own-elevation-only leads of one writer on one host, as one lead (configuration management writes and
@@ -769,6 +821,12 @@ class NonRootWriteRootExecutedFile(Playbook):
         if own_only:
             match.own_path = first.path
         return match
+
+
+def _layout(items: list[tuple[str, Match]]) -> frozenset[str]:
+    """Where a writer's own-elevation files sit: the parents of their directories (per-run directories such as a
+    configuration-management temporary directory differ each run; the directory holding them does not)."""
+    return frozenset(posixpath.dirname(posixpath.dirname(path)) for path, _m in items)
 
 
 def _own_elevation(executor: tuple, writes: list[_Write]) -> bool:
