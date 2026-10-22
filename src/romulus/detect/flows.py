@@ -417,18 +417,27 @@ class _FlowRule(Playbook):
             if view is None:
                 self.missing_required += 1
                 continue
-            if self.take(view, event):
+            taken = self.take(view, event)
+            if taken:
                 self.evaluated += 1
-            else:
+            elif taken is not None:             # None: a state budget refused the record (counted as capped)
                 self.missing_required += 1
         for observer, count in netflow.items():
             if observer not in flow_observers:
                 self.missing_required += count
         return []
 
-    def take(self, view: FlowView, event: TypedEvent) -> bool:
-        """Record one typed view. False when a field this rule needs is absent (counted as missing)."""
+    def take(self, view: FlowView, event: TypedEvent) -> bool | None:
+        """Record one typed view. False when a field this rule needs is absent (counted as missing); None when a
+        state budget refused it (counted as capped)."""
         raise NotImplementedError
+
+    def _full(self, name: str, held: int, limit: int, what: str) -> bool:
+        """Whether a budget is full; if so the record is refused and coverage names the budget."""
+        if held < limit:
+            return False
+        self.refuse(name, f"{what} held reached {limit:,}; a record needing a new one is not evaluated")
+        return True
 
 
 def _entities(events: list[TypedEvent]) -> list[tuple[str, str, str]]:
@@ -623,21 +632,34 @@ class HorizontalSweep(_FlowRule):
                  "impact",
     }
 
+    # Whole-window distinct destinations need every (group, destination) for the window; the sensors' records of one
+    # connection arrive in different targets, so they cannot be released early. Groups and destinations are budgeted
+    # (about 600 bytes per destination with its runs and up to 64 connection hashes: 300 MB at the budget); a record
+    # needing a new one beyond it is not evaluated and coverage says so.
+    MAX_GROUPS = 200_000
+    MAX_DESTINATIONS = 500_000
+
     def __init__(self):
         super().__init__()
         self.sweeps: dict[tuple, _SweepGroup] = {}
+        self.destinations_held = 0
 
-    def take(self, view: FlowView, event: TypedEvent) -> bool:
+    def take(self, view: FlowView, event: TypedEvent) -> bool | None:
         if not routable_remote(view.dst):
             return True                 # multicast, broadcast, loopback or link-local: not a host being reached
         scope = "external" if external(view.dst) else "internal"
         key = (view.src, view.transport, view.dport, scope)
         group = self.sweeps.get(key)
         if group is None:
+            if self._full("groups", len(self.sweeps), self.MAX_GROUPS, "(source, transport, port) groups"):
+                return None
             group = self.sweeps[key] = _SweepGroup()
         destination = group.destinations.get(view.dst)
         new = destination is None
         if new:
+            if self._full("destinations", self.destinations_held, self.MAX_DESTINATIONS, "destinations"):
+                return None
+            self.destinations_held += 1
             destination = group.destinations[view.dst] = _Destination(runs={w: _Clusters() for w in self.WINDOWS})
         started = {width: destination.runs[width].add(view.start, width) for width in self.WINDOWS}
         if view.s2c_packets is not None:
@@ -646,7 +668,7 @@ class HorizontalSweep(_FlowRule):
             else:
                 destination.silent = True
         if len(destination.connections) < self.CONNECTIONS_PER_DESTINATION:
-            destination.connections.add(view.key)
+            destination.connections.add(hash(view.key))      # a connection identity, counted (8 bytes, not a tuple)
         destination.records += 1
         group.records[view.sensor] += 1
         group.first, group.last = min(group.first, view.start), max(group.last, view.start)
@@ -755,6 +777,7 @@ class _Unidentified:
 @dataclass
 class _Mismatch:
     connections: set = field(default_factory=set)
+    capped: bool = False                                      # connections beyond the per-group cap were not held
     sources: dict[str, set] = field(default_factory=dict)     # source address -> its connections
     records: Counter = field(default_factory=Counter)
     first: float = float("inf")
@@ -838,6 +861,17 @@ class ProtocolPortMismatch(_FlowRule):
         "lanes": "lead: a parser's judgement against a port convention is ambiguous by nature. Severity medium",
     }
 
+    # Connection identities a sensor identified on a registered port are held to clear the other sensor's
+    # unidentified record of the same connection (read from another target); above IDENTIFIED_BUDGET they are not
+    # held, so such a record may be reported unidentified: more leads, never fewer, and coverage says so. Candidate
+    # connections, mismatch groups (connections per group capped, worded "at least") and per-server tallies are
+    # budgeted; a record needing a new one beyond them is not evaluated.
+    IDENTIFIED_BUDGET = 2_000_000
+    MAX_UNIDENTIFIED = 500_000
+    MAX_MISMATCHES = 100_000
+    CONNECTIONS_PER_MISMATCH = 100_000
+    MAX_PAIRS = 500_000
+
     def __init__(self):
         super().__init__()
         self.identified: dict[tuple, dict[str, set[str]]] = {}
@@ -845,7 +879,7 @@ class ProtocolPortMismatch(_FlowRule):
         self.mismatches: dict[tuple, _Mismatch] = {}
         self.pairs: dict[tuple, dict[str, Counter]] = {}
 
-    def take(self, view: FlowView, event: TypedEvent) -> bool:
+    def take(self, view: FlowView, event: TypedEvent) -> bool | None:
         if view.protocols is None:
             return False
         if view.transport not in ("tcp", "udp"):
@@ -853,7 +887,11 @@ class ProtocolPortMismatch(_FlowRule):
         expected = expected_protocols(view.transport, view.dport)
         registered = bool(expected) or bool(expected_protocols(view.transport, view.sport))
         if expected:
-            counts = self.pairs.setdefault((view.dst, view.dport, view.transport), {})
+            pair_key = (view.dst, view.dport, view.transport)
+            if pair_key not in self.pairs and self._full("pairs", len(self.pairs), self.MAX_PAIRS,
+                                                         "(server, port) tallies"):
+                return None
+            counts = self.pairs.setdefault(pair_key, {})
             tally = counts.setdefault(view.sensor, Counter())
             tally["records"] += 1
             for protocol in view.protocols:
@@ -865,12 +903,23 @@ class ProtocolPortMismatch(_FlowRule):
                              for p in view.protocols for port in (view.sport, view.dport))
             judged = expected or any(p in PROTOCOL_PORTS for p in view.protocols)
             if registered or (not consistent and judged):
-                self.identified.setdefault(view.key, {}).setdefault(view.sensor, set()).update(view.protocols)
+                if view.key in self.identified or len(self.identified) < self.IDENTIFIED_BUDGET:
+                    self.identified.setdefault(view.key, {}).setdefault(view.sensor, set()).update(view.protocols)
+                else:
+                    self.note_limit("identified", f"identified connections held reached {self.IDENTIFIED_BUDGET:,}; "
+                                                  f"another sensor's unidentified record of a later one may be "
+                                                  f"reported (more leads, never fewer)")
             if not consistent and judged:
                 group_key = (view.dst, view.dport, view.transport, tuple(sorted(view.protocols)))
+                if group_key not in self.mismatches and self._full("mismatches", len(self.mismatches),
+                                                                   self.MAX_MISMATCHES, "mismatch groups"):
+                    return None
                 group = self.mismatches.setdefault(group_key, _Mismatch())
-                group.connections.add(view.key)
-                group.sources.setdefault(view.src, set()).add(view.key)
+                if view.key in group.connections or len(group.connections) < self.CONNECTIONS_PER_MISMATCH:
+                    group.connections.add(view.key)
+                    group.sources.setdefault(view.src, set()).add(view.key)
+                else:
+                    group.capped = True
                 group.records[view.sensor] += 1
                 group.first, group.last = min(group.first, view.start), max(group.last, view.end)
                 if len(group.cited) < self.STAGE_PER_GROUP:
@@ -893,6 +942,9 @@ class ProtocolPortMismatch(_FlowRule):
         if not view.payload:
             return True
         entry = self.unidentified.get(view.key)
+        if entry is None and self._full("unidentified", len(self.unidentified), self.MAX_UNIDENTIFIED,
+                                        "candidate connections"):
+            return None
         if entry is None:
             # every candidate connection keeps its first record on the stage, so whichever connections stay
             # unidentified after the other sensor's records are in can be cited
@@ -939,7 +991,8 @@ class ProtocolPortMismatch(_FlowRule):
                 if extra:
                     others[sensor].update(extra)
         sources = _sources_phrase({src: len(keys) for src, keys in group.sources.items()})
-        claim = (f"{sensors} identified {names} on {_plural(len(group.connections), 'connection')} to {dst} on "
+        claim = (f"{sensors} identified {names} on {'at least ' if group.capped else ''}"
+                 f"{_plural(len(group.connections), 'connection')} to {dst} on "
                  f"{transport}/{port} {sources} ({_iso(group.first)} – {_iso(group.last)}; "
                  f"{_sensor_counts(group.records)}). {port_phrase}; {'; '.join(protocol_phrases)}.")
         if others:
@@ -1079,9 +1132,14 @@ class LongUnidentifiedSession(_FlowRule):
         "lanes": "lead: long unidentified traffic is ambiguous without the owning process. Severity medium",
     }
 
+    # Every record of a candidate connection is a piece (stitching needs them, from both sensors' targets): about
+    # 150 bytes each, so 300 MB at the budget; a record beyond it is not evaluated and coverage says so.
+    PIECES_BUDGET = 2_000_000
+
     def __init__(self):
         super().__init__()
         self.pieces: dict[tuple, list[_Piece]] = defaultdict(list)
+        self.pieces_held = 0
         self.staged_per_key: Counter = Counter()
         self.last_staged: dict[tuple, float] = {}
 
@@ -1101,6 +1159,9 @@ class LongUnidentifiedSession(_FlowRule):
         if view.payload is None:
             return False
         capable = bool(expected & PARSERS[view.sensor])
+        if self._full("pieces", self.pieces_held, self.PIECES_BUDGET, "connection records"):
+            return None
+        self.pieces_held += 1
         staged = False
         if not view.protocols and view.payload and not capable:
             # the first few candidate records of an identity, and the first of any later connection that reuses it
@@ -1240,9 +1301,16 @@ class OutboundVolumeAsymmetry(_FlowRule):
                  "bulk backup volumes; a 10:1 ratio excludes interactive and download-heavy traffic",
     }
 
+    # Connections are counted once across sensors, from the sensor that recorded the most bytes, so every
+    # internal-to-external connection's per-sensor tally is held to the end: about 200 bytes each, so 400 MB at
+    # the budget (pairs about 1 KB each). A record needing a new pair or connection beyond it is not evaluated.
+    MAX_PAIRS = 500_000
+    MAX_CONNECTIONS = 2_000_000
+
     def __init__(self):
         super().__init__()
         self.pairs: dict[tuple[str, str], _Pair] = {}
+        self.connections_held = 0
 
     def take(self, view: FlowView, event: TypedEvent) -> bool:
         if view.c2s_bytes is None or view.s2c_bytes is None:
@@ -1251,7 +1319,13 @@ class OutboundVolumeAsymmetry(_FlowRule):
             return True
         pair = self.pairs.get((view.src, view.dst))
         if pair is None:
+            if self._full("pairs", len(self.pairs), self.MAX_PAIRS, "(internal, external) pairs"):
+                return None
             pair = self.pairs[(view.src, view.dst)] = _Pair()
+        if view.key not in pair.connections:
+            if self._full("connections", self.connections_held, self.MAX_CONNECTIONS, "connections"):
+                return None
+            self.connections_held += 1
         per_sensor = pair.connections.setdefault(view.key, {})
         tally = per_sensor.setdefault(view.sensor, [0, 0, 0])
         tally[0] += view.c2s_bytes
