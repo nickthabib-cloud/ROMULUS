@@ -225,6 +225,14 @@ class Repo:
             rm("analyst_links", t.analyst_link.delete().where(t.analyst_link.c.hunt_id == hunt_id))
             rm("expansion_links", t.expansion_link.delete().where(t.expansion_link.c.hunt_id == hunt_id))
             rm("expansion_anchors", t.expansion_anchor.delete().where(t.expansion_anchor.c.hunt_id == hunt_id))
+            rm("baseline_observations", t.baseline_observation.delete().where(
+                t.baseline_observation.c.hunt_id == hunt_id,
+            ))
+            rm("baseline_snapshots", t.baseline_snapshot.delete().where(t.baseline_snapshot.c.hunt_id == hunt_id))
+            rm("baseline_segments_revoked", t.baseline_segment.update().where(or_(
+                t.baseline_segment.c.source_hunt_id == hunt_id,
+                t.baseline_segment.c.built_by_hunt_id == hunt_id,
+            )).values(status="revoked"))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
             rm("candidates", t.candidate.delete().where(t.candidate.c.hunt_id == hunt_id))
             rm("case_steps", t.case_step.delete().where(t.case_step.c.case_id.in_(case_ids)))
@@ -618,6 +626,101 @@ class Repo:
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(select(t.disposition_event).where(
                 t.disposition_event.c.candidate_id == cid).order_by(t.disposition_event.c.id)).mappings()]
+
+    # ---- baseline store --------------------------------------------------------------------
+    def save_baseline_segment(self, row: dict, counts: Iterable[dict], scope_hours: Iterable[dict]) -> bool:
+        """Insert one immutable, complete segment and its rows; an existing content id is untouched."""
+        start, end = row["start"], row["end"]
+        if any((value.minute, value.second, value.microsecond) != (0, 0, 0) for value in (start, end)):
+            raise ValueError("baseline segment span must be hour-aligned")
+        if start >= end:
+            raise ValueError("baseline segment start before end is required")
+        count_rows = list(counts)
+        hour_rows = list(scope_hours)
+        if any(item.get("segment_id") != row["id"] for item in [*count_rows, *hour_rows]):
+            raise ValueError("baseline child row belongs to a different segment")
+        with write_txn(self.engine) as c:
+            result = c.execute(insert(t.baseline_segment).values(**row).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            if not result.rowcount:
+                return False
+            if count_rows:
+                c.execute(t.baseline_count.insert(), count_rows)
+            if hour_rows:
+                c.execute(t.baseline_scope_hour.insert(), hour_rows)
+            return True
+
+    def set_baseline_segment_status(self, segment_id: str, status: str) -> bool:
+        if status not in {"active", "stale", "revoked"}:
+            raise ValueError(f"invalid baseline segment status: {status}")
+        with write_txn(self.engine) as c:
+            result = c.execute(t.baseline_segment.update().where(
+                t.baseline_segment.c.id == segment_id,
+            ).values(status=status))
+            return bool(result.rowcount)
+
+    def baseline_segments(self, *, site: str | None = None, target: str | None = None,
+                          spec_id: str | None = None, statuses: Iterable[str] | None = None) -> list[dict]:
+        query = select(t.baseline_segment)
+        if site is not None:
+            query = query.where(t.baseline_segment.c.site == site)
+        if target is not None:
+            query = query.where(t.baseline_segment.c.target == target)
+        if spec_id is not None:
+            query = query.where(t.baseline_segment.c.spec_id == spec_id)
+        if statuses is not None:
+            query = query.where(t.baseline_segment.c.status.in_(list(statuses)))
+        query = query.order_by(
+            t.baseline_segment.c.site, t.baseline_segment.c.target, t.baseline_segment.c.spec_id,
+            t.baseline_segment.c.start, t.baseline_segment.c.end, t.baseline_segment.c.id,
+        )
+        with self.engine.connect() as c:
+            return [dict(item) for item in c.execute(query).mappings()]
+
+    def baseline_counts(self, segment_id: str) -> list[dict]:
+        query = (select(t.baseline_count).where(t.baseline_count.c.segment_id == segment_id)
+                 .order_by(t.baseline_count.c.scope, t.baseline_count.c.bucket,
+                           t.baseline_count.c.key_digest))
+        with self.engine.connect() as c:
+            return [dict(item) for item in c.execute(query).mappings()]
+
+    def baseline_scope_hours(self, segment_id: str) -> list[dict]:
+        query = (select(t.baseline_scope_hour).where(t.baseline_scope_hour.c.segment_id == segment_id)
+                 .order_by(t.baseline_scope_hour.c.scope, t.baseline_scope_hour.c.hour))
+        with self.engine.connect() as c:
+            return [dict(item) for item in c.execute(query).mappings()]
+
+    def save_baseline_snapshot(self, row: dict) -> bool:
+        """Freeze the first snapshot for a hunt; resume observes but never replaces it."""
+        with write_txn(self.engine) as c:
+            result = c.execute(insert(t.baseline_snapshot).values(**row).on_conflict_do_nothing(
+                index_elements=["hunt_id"],
+            ))
+            return bool(result.rowcount)
+
+    def baseline_snapshot(self, hunt_id: str) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.baseline_snapshot).where(
+                t.baseline_snapshot.c.hunt_id == hunt_id,
+            )).mappings().first()
+            return dict(row) if row else None
+
+    def upsert_baseline_observation(self, row: dict) -> None:
+        keys = ("hunt_id", "spec_id", "spec_version", "scope", "key_digest")
+        values = {name: value for name, value in row.items() if name not in keys}
+        with write_txn(self.engine) as c:
+            stmt = insert(t.baseline_observation).values(**row).on_conflict_do_update(
+                index_elements=list(keys), set_=values,
+            )
+            c.execute(stmt)
+
+    def baseline_observations(self, hunt_id: str) -> list[dict]:
+        query = (select(t.baseline_observation).where(t.baseline_observation.c.hunt_id == hunt_id)
+                 .order_by(t.baseline_observation.c.spec_id, t.baseline_observation.c.spec_version,
+                           t.baseline_observation.c.scope, t.baseline_observation.c.key_digest))
+        with self.engine.connect() as c:
+            return [dict(item) for item in c.execute(query).mappings()]
 
     # ---- investigator state ----------------------------------------------------------------
     def create_case(self, row: dict, *, owner_token: str | None = None) -> bool:
