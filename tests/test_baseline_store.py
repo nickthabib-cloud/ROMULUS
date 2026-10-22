@@ -126,16 +126,16 @@ def _alembic_config(connection) -> Config:
     return cfg
 
 
-def test_0010_upgrade_and_downgrade_preserve_existing_data(tmp_path):
+def test_0009_upgrade_and_downgrade_preserve_existing_data(tmp_path):
     engine = make_engine(tmp_path / "migration.db")
     with engine.begin() as conn:
-        command.upgrade(_alembic_config(conn), "0009")
+        command.upgrade(_alembic_config(conn), "0008")
         conn.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
             "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'planned')"
         )
     with engine.begin() as conn:
-        command.upgrade(_alembic_config(conn), "0010")
+        command.upgrade(_alembic_config(conn), "0009")
     names = set(inspect(engine).get_table_names())
     assert {"baseline_segment", "baseline_count", "baseline_scope_hour",
             "baseline_snapshot", "baseline_observation"} <= names
@@ -148,7 +148,7 @@ def test_0010_upgrade_and_downgrade_preserve_existing_data(tmp_path):
             "'lookback', 'none', '[]', 0, 1, 'd', 'active', '2026-01-03')"
         )
     with engine.begin() as conn:
-        command.downgrade(_alembic_config(conn), "0009")
+        command.downgrade(_alembic_config(conn), "0008")
         assert conn.exec_driver_sql("SELECT id FROM hunt").scalar_one() == "h1"
     assert "baseline_segment" not in set(inspect(engine).get_table_names())
 

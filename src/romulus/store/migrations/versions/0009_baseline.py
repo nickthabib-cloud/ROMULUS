@@ -1,13 +1,13 @@
 """immutable baseline segments, hunt snapshots, and observations
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0009
+Revises: 0008
 """
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0010"
-down_revision = "0009"
+revision = "0009"
+down_revision = "0008"
 branch_labels = None
 depends_on = None
 
