@@ -211,7 +211,7 @@ class _Series:
 
 class NonRootWriteRootExecutedFile(Playbook):
     id = "host.nonroot_write_root_executed_file"
-    version = "4"
+    version = "5"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -623,7 +623,8 @@ class NonRootWriteRootExecutedFile(Playbook):
         events = sorted(cited.values(), key=lambda e: (e.ts, e.id))
         start, end = items[0][1].ts, max(m.ts for _p, m in items)
         shown = paths[:WRITE_CITE]
-        claim = (f"On {host}, account '{account}' wrote {len(paths)} files in {len(directories)} director(ies) "
+        claim = (f"On {host}, account '{account}' ran write-capable commands on, or changed (per kernel records), "
+                 f"{len(paths)} files in {len(directories)} director(ies) "
                  f"from {start.isoformat()} to {end.isoformat()}, and each was then run as root only by the "
                  f"account's own elevation (its own audit session or login uid): {'; '.join(shown)}"
                  + (f"; and {len(paths) - len(shown)} more (every path is in the notes)" if len(paths) > len(shown)

@@ -20,6 +20,8 @@ from romulus.detect.host import WEB_SERVICE_USERS
 from romulus.evidence.typed import Outcome, TypedEvent
 
 CITE = 10                       # records cited per finding; claims give exact totals
+# Records of one (pid, executable) further apart than this are not read as one process run: process ids are reused.
+PROCESS_GAP_SECONDS = 300
 LINEAGE_DEPTH = 16
 
 
@@ -450,6 +452,7 @@ class _Change:
     own: bool               # a per-account location, in a file the actor's own uid owns
     setuid: bool            # a non-root account through a setuid-root program (effective uid 0)
     exe: str
+    boot: str | None
     pid: int | None
     ppid: int | None
     auid: str | None
@@ -459,7 +462,7 @@ class _Change:
 
 class PersistencePathChange(Playbook):
     id = "host.persistence_path_change"
-    version = "2"
+    version = "3"
     title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -575,6 +578,7 @@ class PersistencePathChange(Playbook):
             setuid=uid != "0" and _str(event.get("process.euid")) == "0",
             exe=str(event.get("process.executable") or ""), pid=event.get("process.pid"),
             ppid=event.get("process.ppid"), auid=_str(event.get("process.auid")), tty=_str(event.get("process.tty")),
+            boot=_str(event.get("host.boot.id")),
             outcome=event.outcome))
 
     # ---------------------------------------------------------------- finalize
@@ -610,14 +614,35 @@ class PersistencePathChange(Playbook):
             if manager:
                 key = ("package", change.host, manager)
             elif isinstance(change.pid, int):
-                key = ("account", change.host, posixpath.dirname(change.path), change.uid, change.pid)
+                key = ("account", change.host, posixpath.dirname(change.path), change.uid, change.pid, change.exe,
+                       change.boot)
             else:
-                key = ("account", change.host, change.path, change.uid, None)
+                key = ("account", change.host, change.path, change.uid, None, change.exe, change.boot)
             groups[key].append(change)
+        groups = self._split_runs(groups)
         out = []
         for key in sorted(groups, key=lambda k: tuple(str(part) for part in k)):
             items = sorted(groups[key], key=lambda c: (c.ts, c.event_id))
             out.append(self._package_finding(key, items) if key[0] == "package" else self._finding(key, items))
+        return out
+
+    @staticmethod
+    def _split_runs(groups: dict[tuple, list[_Change]]) -> dict[tuple, list[_Change]]:
+        """Split a per-process group where its records are more than PROCESS_GAP_SECONDS apart: a process id
+        reused later (by another program run, possibly hours later) must not join an earlier run."""
+        out: dict[tuple, list[_Change]] = {}
+        for key, items in groups.items():
+            if key[0] != "account" or key[4] is None:
+                out[key] = items
+                continue
+            items = sorted(items, key=lambda c: (c.ts, c.event_id))
+            run = [items[0]]
+            for change in items[1:]:
+                if change.ts - run[-1].ts > PROCESS_GAP_SECONDS:
+                    out[(*key, run[0].ts)] = run
+                    run = []
+                run.append(change)
+            out[(*key, run[0].ts)] = run
         return out
 
     def _cite(self, items: list[_Change]) -> tuple[list[TypedEvent], list]:
@@ -643,7 +668,7 @@ class PersistencePathChange(Playbook):
         return text + (f"; and {len(parts) - CITE} more" if len(parts) > CITE else "")
 
     def _finding(self, key: tuple, items: list[_Change]) -> Match:
-        _kind, host, place, uid, pid = key
+        _kind, host, place, uid, pid = key[:5]
         first = items[0]
         files = sorted({c.path for c in items})
         cited, predicate = self._cite(items)
@@ -680,7 +705,8 @@ class PersistencePathChange(Playbook):
         claim += (" The records show the system call on the file, not the content written; the files here are "
                   "read or run by the system (scheduler, init, the login path or the loader).")
         if len(files) > 1:
-            claim += f" The {len(files)} files were changed by one process (pid {pid})."
+            claim += (f" The {len(files)} files were changed by process id {pid} running {first.exe} (records no more "
+                      f"than {PROCESS_GAP_SECONDS} seconds apart).")
         if len(items) > len(cited):
             claim += f" {len(cited)} records are cited (the first of each file first)."
         # A non-root account changing what the system or another account acts on is high; a web-service account
@@ -697,7 +723,8 @@ class PersistencePathChange(Playbook):
         confidence = "high" if ok and all(c.outcome == Outcome.success for c in ok) else "medium"
         match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, lane,
                       confidence, cited[0].entities(),
-                      group_key=f"{host}|{uid}|{place}" + (f"|pid {pid}" if pid is not None else ""))
+                      group_key=f"{host}|{uid}|{place}" + (f"|pid {pid}" if pid is not None else "")
+                      + (f"|{first.exe}|{_iso(first.ts)}" if pid is not None else ""))
         match.notes = notes + [f"file: {path}" for path in files]
         return match
 

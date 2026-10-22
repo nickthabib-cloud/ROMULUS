@@ -269,7 +269,7 @@ def test_web_account_creating_a_cron_file_is_high():
     assert "account 'www-data' (uid 33), a web-service account," in m.claim
     assert "a file in a system cron table directory (/etc/cron.d)" in m.claim
     assert "/etc/cron.d/job: created it" in m.claim and "not the content written" in m.claim
-    assert "T1053.003" in m.notes and m.group_key == "app01|33|/etc/cron.d|pid 4000"
+    assert "T1053.003" in m.notes and m.group_key == "app01|33|/etc/cron.d|pid 4000|/usr/bin/dash|2030-01-06T09:00:00+00:00"
     assert [e.id for e in m.events] == [record.id] and all(p.origin for p in m.predicate)
 
 
@@ -278,10 +278,10 @@ def test_root_editor_in_an_interactive_login_is_a_lead_per_file():
     records = [change("/etc/pam.d/.sshd.swp", change_="create", **kw),
                change("/etc/pam.d/sshd", ts=T0 + timedelta(seconds=40), change_="rename_target", **kw)]
     _pb, out = run_persist(records)
-    assert [m.group_key for m in out] == ["app01|0|/etc/pam.d|pid 4000"]
+    assert [m.group_key for m in out] == ["app01|0|/etc/pam.d|pid 4000|/usr/bin/vim.basic|2030-01-06T09:00:00+00:00"]
     m = out[0]
     assert "/etc/pam.d/.sshd.swp" in m.claim and "/etc/pam.d/sshd" in m.claim and len(m.events) == 2
-    assert "The 2 files were changed by one process (pid 4000)" in m.claim
+    assert "The 2 files were changed by process id 4000 running /usr/bin/vim.basic" in m.claim
     assert {"file: /etc/pam.d/.sshd.swp", "file: /etc/pam.d/sshd"} <= set(m.notes)
     assert m.proposed_lane == "lead" and "root (uid 0)" in m.claim
     assert "in an interactive login session (audit login uid 1001 on terminal pts0)" in m.claim
@@ -334,12 +334,12 @@ def test_package_lineage_needs_the_parent_exec_at_or_before_the_write():
     later = [pexec("/usr/bin/dpkg", 100, 90, ts=T0 + timedelta(microseconds=1)),
              change("/etc/init.d/x", ts=T0, uid="0", exe="/usr/bin/cp", pid=102, ppid=100)]
     _pb, out = run_persist(later)
-    assert out[0].group_key == "app01|0|/etc/init.d|pid 102"
+    assert out[0].group_key == "app01|0|/etc/init.d|pid 102|/usr/bin/cp|2030-01-06T09:00:00+00:00"
 
 
 def test_a_package_manager_name_outside_system_directories_is_not_package_activity():
     _pb, out = run_persist([change("/etc/cron.d/x", uid="0", exe="/tmp/dpkg", pid=7, ppid=1)])
-    assert out[0].group_key == "app01|0|/etc/cron.d|pid 7" and "package activity" not in out[0].claim
+    assert out[0].group_key == "app01|0|/etc/cron.d|pid 7|/tmp/dpkg|2030-01-06T09:00:00+00:00" and "package activity" not in out[0].claim
 
 
 def test_non_root_changes_mixed_with_package_activity_stay_separate_and_high():
@@ -349,7 +349,7 @@ def test_non_root_changes_mixed_with_package_activity_stay_separate_and_high():
                      exe="/usr/bin/tee")]
     _pb, out = run_persist(writes)
     assert sorted((m.group_key, m.proposed_lane) for m in out) == [
-        ("app01|1002|/etc/profile.d|pid 4000", "high"), ("app01|package:dpkg", "lead")]
+        ("app01|1002|/etc/profile.d|pid 4000|/usr/bin/tee|2030-01-06T09:00:05+00:00", "high"), ("app01|package:dpkg", "lead")]
 
 
 def test_failed_attempts_only_are_a_lead_and_any_success_keeps_high():
@@ -440,6 +440,28 @@ def test_many_changes_cite_ten_with_exact_totals():
     assert "10 records are cited" in m.claim and "(14 records)" in m.claim
 
 
+def test_a_reused_pid_hours_later_is_a_separate_finding_and_wording_names_the_executable():
+    daemon = [change("/etc/cron.d/agent", uid="0", exe="/usr/sbin/agentd", pid=4242),
+              change("/etc/cron.d/agent.tmp", ts=T0 + timedelta(seconds=30), uid="0", exe="/usr/sbin/agentd",
+                     pid=4242)]
+    later_same_exe = change("/etc/cron.d/agent2", ts=T0 + timedelta(hours=3), uid="0", exe="/usr/sbin/agentd",
+                            pid=4242)
+    shell = change("/etc/cron.d/zz", ts=T0 + timedelta(hours=3), uid="0", exe="/usr/bin/bash", pid=4242,
+                   auid="1001", tty="pts1")
+    _pb, out = run_persist([*daemon, later_same_exe, shell])
+    assert len(out) == 3
+    first = next(m for m in out if "/etc/cron.d/agent.tmp" in m.claim)
+    assert "by process id 4242 running /usr/sbin/agentd" in first.claim and "/etc/cron.d/zz" not in first.claim
+    assert "agent2" not in first.claim
+    assert any("/etc/cron.d/zz" in m.claim and "agent" not in m.claim.split("show")[1].split(")")[0] for m in out)
+    # the same process id on another boot is another process
+    a = change("/etc/cron.d/b1", uid="0", exe="/usr/bin/bash", pid=7, host__boot__id="boot-1")
+    b = change("/etc/cron.d/b2", ts=T0 + timedelta(seconds=5), uid="0", exe="/usr/bin/bash", pid=7,
+               host__boot__id="boot-2")
+    _pb, out = run_persist([a, b])
+    assert len(out) == 2
+
+
 def test_without_a_pid_each_file_is_its_own_finding():
     _pb, out = run_persist([change("/etc/cron.d/a", pid=None), change("/etc/cron.d/b", pid=None)])
     assert [m.group_key for m in out] == ["app01|33|/etc/cron.d/a", "app01|33|/etc/cron.d/b"]
@@ -464,7 +486,7 @@ def test_an_attackers_file_among_many_routine_changes_has_its_own_finding():
                   tty="pts3", pid=6000)
     _pb, out = run_persist(routine + [evil])
     assert len(out) == 13
-    m = next(m for m in out if m.group_key == "app01|0|/etc/cron.d|pid 6000")
+    m = next(m for m in out if m.group_key.startswith("app01|0|/etc/cron.d|pid 6000|"))
     assert "/etc/cron.d/zevil" in m.claim and [e.id for e in m.events] == [evil.id]
     assert "interactive login session" in m.claim and m.proposed_lane == "lead"
 

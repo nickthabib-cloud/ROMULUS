@@ -368,7 +368,8 @@ def test_own_elevation_only_leads_are_one_lead_per_host_and_writer():
     keys = sorted(m.group_key for m in out)
     assert keys == ["app01|deploy|/srv/tasks/rotate.sh", "app01|deploy|own-elevation"]
     m = next(m for m in out if m.group_key.endswith("own-elevation"))
-    assert m.proposed_lane == "lead" and "wrote 12 files in 12 director(ies)" in m.claim
+    assert m.proposed_lane == "lead" and " wrote " not in m.claim
+    assert "ran write-capable commands on, or changed (per kernel records), 12 files in 12 director(ies)" in m.claim
     assert "and 2 more (every path is in the notes)" in m.claim and len(m.events) == 10
     assert {f"file: {p}" for p in out_files} <= set(m.notes) and "T1548.003" in m.notes
     assert len({e.id for e in m.events}) == 10 and all(e.get("process.uid") == "1001" for e in m.events)
