@@ -47,6 +47,13 @@ def test_catalog_export_contains_sorted_rules_techniques_strengths_and_telemetry
         "tactics",
         "status",
     }
+    lateral = next(item for item in rules if item["id"] == "context.lateral_movement")
+    assert lateral["required_by_family"] == {
+        "net_socket": ["destination.ip", "destination.port"],
+        "process_exec": ["process.argv", "process.executable"],
+    }
+    net_socket = next(item for item in telemetry if item["family"] == "net_socket")
+    assert {"destination.ip", "destination.port"} <= set(net_socket["required_fields"])
 
 
 def test_catalog_export_marks_every_uncovered_technique_as_a_gap():

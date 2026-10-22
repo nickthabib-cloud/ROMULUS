@@ -169,6 +169,12 @@ def _rule_card(rule: RuleMetadata) -> list[str]:
         f"- Telemetry families: {_join(rule.families)}",
         f"- Required typed fields: {_join(rule.required_fields)}",
     ]
+    if rule.required_by_family:
+        by_family = "; ".join(
+            f"`{_esc(family)}`: {_join(fields)}"
+            for family, fields in rule.required_by_family.items()
+        )
+        lines.append(f"- Required typed fields by family: {by_family}")
     if rule.behavior:
         lines.append(f"- Behavior: {_esc(rule.behavior)}")
     if rule.positive_only_reason:

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from collections.abc import Iterable
+from pathlib import Path
 from types import MappingProxyType
-
-from romulus.detect.registry import ALL_PLAYBOOKS, PACK_VERSION
 
 from .attack import load_attack_bundle
 from .models import (
@@ -27,6 +27,29 @@ _STRENGTH_RANK = {
     CoverageStrength.NEGATIVE_CAPABLE: 4,
 }
 
+_PUBLIC_INDICATOR_DIR = Path(__file__).resolve().parents[3] / "content" / "indicators"
+
+
+def _public_pack() -> tuple[tuple[type, ...], str]:
+    """Import the pack without allowing a runtime indicator override into public metadata."""
+    override = os.environ.pop("ROMULUS_INDICATOR_DIR", None)
+    try:
+        from romulus.detect.registry import ALL_PLAYBOOKS, PACK_VERSION
+    finally:
+        if override is not None:
+            os.environ["ROMULUS_INDICATOR_DIR"] = override
+    return tuple(ALL_PLAYBOOKS), PACK_VERSION
+
+
+def _public_version(playbook: type) -> str:
+    version = str(getattr(playbook, "version", "1"))
+    if str(getattr(playbook, "id", "")) != "ioc.indicator_match":
+        return version
+    from romulus.detect.indicators import load_indicators
+
+    base = version.split("+", maxsplit=1)[0]
+    return f"{base}+{load_indicators(_PUBLIC_INDICATOR_DIR).digest}"
+
 
 def strength_for_rule(playbook: type) -> CoverageStrength:
     """Classify coverage only from the rule's declared execution and assurance properties."""
@@ -44,9 +67,16 @@ def _rule_metadata(playbook: type) -> RuleMetadata:
     card = getattr(playbook, "card", {}) or {}
     if not isinstance(card, dict):
         card = {}
+    required_by_family = getattr(playbook, "required_by_family", {}) or {}
+    stable_requirements = MappingProxyType(
+        {
+            str(family): tuple(sorted(map(str, fields)))
+            for family, fields in sorted(required_by_family.items())
+        }
+    )
     return RuleMetadata(
         id=str(playbook.id),
-        version=str(getattr(playbook, "version", "1")),
+        version=_public_version(playbook),
         title=str(getattr(playbook, "title", playbook.id)),
         kind=str(getattr(playbook, "kind", "direct")),
         lane=str(getattr(playbook, "lane", "lead")),
@@ -56,6 +86,7 @@ def _rule_metadata(playbook: type) -> RuleMetadata:
         families=tuple(sorted(map(str, getattr(playbook, "families", ())))),
         datasets=tuple(sorted(map(str, getattr(playbook, "datasets", ())))),
         required_fields=tuple(sorted(map(str, getattr(playbook, "required_fields", ())))),
+        required_by_family=stable_requirements,
         telemetry=str(card.get("telemetry", "")),
         attack_ids=tuple(sorted(map(str, getattr(playbook, "attack", ())))),
         status=str(getattr(playbook, "status", "active")),
@@ -86,12 +117,13 @@ def _rule_issues(rules: tuple[RuleMetadata, ...], attack: AttackKnowledge) -> tu
 def build_catalog(
     *,
     attack: AttackKnowledge | None = None,
-    playbooks: Iterable[type] = ALL_PLAYBOOKS,
+    playbooks: Iterable[type] | None = None,
     strict: bool = False,
 ) -> Catalog:
     """Return a sorted catalog; strict mode makes invalid ATT&CK mappings fail."""
+    public_playbooks, pack_version = _public_pack()
     attack = attack or load_attack_bundle()
-    classes = tuple(playbooks)
+    classes = tuple(playbooks) if playbooks is not None else public_playbooks
     rules = tuple(sorted((_rule_metadata(playbook) for playbook in classes), key=lambda item: item.id))
     invalid = _rule_issues(rules, attack)
     if strict and invalid:
@@ -138,7 +170,7 @@ def build_catalog(
         rollups.append(TacticRollup(tactic=tactic, total=len(rows), strength_counts=stable_counts))
     return Catalog(
         attack_version=attack.version,
-        pack_version=PACK_VERSION,
+        pack_version=pack_version,
         tactics=tuple(
             sorted(
                 (item for item in attack.tactics if not item.revoked and not item.deprecated),

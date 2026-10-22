@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
@@ -80,6 +83,40 @@ def test_catalog_loads_sorted_rule_metadata_and_reports_unmapped_active_rules():
     assert ssh.positive_only_reason
     assert ssh.telemetry
     assert ssh.attack_ids == ("T1110.001",)
+
+
+def test_catalog_preserves_required_fields_declared_per_event_family():
+    rule = build_catalog().rule("context.lateral_movement")
+
+    assert rule.required_fields == ()
+    assert dict(rule.required_by_family) == {
+        "net_socket": ("destination.ip", "destination.port"),
+        "process_exec": ("process.argv", "process.executable"),
+    }
+
+
+def test_public_catalog_ignores_runtime_indicator_directory(tmp_path):
+    malformed = tmp_path / "private.yaml"
+    malformed.write_text("not: [valid", encoding="utf-8")
+    expected_version = build_catalog().rule("ioc.indicator_match").version
+    code = (
+        "import json; "
+        "from romulus.catalog import build_catalog; "
+        "print(json.dumps(build_catalog().rule('ioc.indicator_match').version))"
+    )
+    env = os.environ.copy()
+    env["ROMULUS_INDICATOR_DIR"] = str(tmp_path)
+
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == expected_version
 
 
 def test_catalog_maps_rules_to_techniques_and_tactic_rollups_deterministically():

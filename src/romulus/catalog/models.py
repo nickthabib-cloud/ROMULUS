@@ -90,6 +90,7 @@ class RuleMetadata:
     families: tuple[str, ...]
     datasets: tuple[str, ...]
     required_fields: tuple[str, ...]
+    required_by_family: Mapping[str, tuple[str, ...]]
     telemetry: str
     attack_ids: tuple[str, ...]
     status: str

@@ -464,6 +464,7 @@ Invalid mappings are excluded from coverage:
 - ATT&CK: [`T1003`](https://attack.mitre.org/techniques/T1003/), [`T1003.008`](https://attack.mitre.org/techniques/T1003/008/), [`T1552.001`](https://attack.mitre.org/techniques/T1552/001/), [`T1552.003`](https://attack.mitre.org/techniques/T1552/003/), [`T1552.004`](https://attack.mitre.org/techniques/T1552/004/), [`T1555.003`](https://attack.mitre.org/techniques/T1555/003/), [`T1555.005`](https://attack.mitre.org/techniques/T1555/005/)
 - Telemetry families: process_exec
 - Required typed fields: —
+- Required typed fields by family: `process_exec`: process.argv<br>process.executable
 - Positive-only reason: the reader and the credential file are identified from argv, not from a file-access record, and a credential store can be opened in ways argv does not show; absence proves nothing
 
 <a id="rule-context-entry-point-promotion"></a>
@@ -475,6 +476,7 @@ Invalid mappings are excluded from coverage:
 - ATT&CK: [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1078`](https://attack.mitre.org/techniques/T1078/)
 - Telemetry families: auth
 - Required typed fields: auth.service
+- Required typed fields by family: `auth`: auth.service
 - Positive-only reason: the entry point is recognised from the linked session's audit login records (USER_LOGIN/USER_START) and sshd authentication records, only within that session; absence of an external entry point in that scope proves nothing
 
 <a id="rule-context-lateral-movement"></a>
@@ -486,6 +488,7 @@ Invalid mappings are excluded from coverage:
 - ATT&CK: [`T1021`](https://attack.mitre.org/techniques/T1021/), [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/), [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/), [`T1570`](https://attack.mitre.org/techniques/T1570/)
 - Telemetry families: net_socket<br>process_exec
 - Required typed fields: —
+- Required typed fields by family: `net_socket`: destination.ip<br>destination.port; `process_exec`: process.argv<br>process.executable
 - Positive-only reason: the remote-service client and its target are identified from argv, and the socket connect path depends on the audit rule set recording that syscall; a session can move laterally in ways these records do not show, so absence proves nothing
 
 <a id="rule-context-post-access-discovery"></a>
@@ -497,6 +500,7 @@ Invalid mappings are excluded from coverage:
 - ATT&CK: [`T1007`](https://attack.mitre.org/techniques/T1007/), [`T1016`](https://attack.mitre.org/techniques/T1016/), [`T1033`](https://attack.mitre.org/techniques/T1033/), [`T1049`](https://attack.mitre.org/techniques/T1049/), [`T1057`](https://attack.mitre.org/techniques/T1057/), [`T1069`](https://attack.mitre.org/techniques/T1069/), [`T1082`](https://attack.mitre.org/techniques/T1082/), [`T1083`](https://attack.mitre.org/techniques/T1083/), [`T1087`](https://attack.mitre.org/techniques/T1087/), [`T1120`](https://attack.mitre.org/techniques/T1120/), [`T1135`](https://attack.mitre.org/techniques/T1135/), [`T1201`](https://attack.mitre.org/techniques/T1201/), [`T1518`](https://attack.mitre.org/techniques/T1518/), [`T1680`](https://attack.mitre.org/techniques/T1680/)
 - Telemetry families: process_exec
 - Required typed fields: —
+- Required typed fields by family: `process_exec`: process.argv<br>process.executable
 - Positive-only reason: discovery commands are identified from the executable and argv tokens and are only evaluated on records reached through an anchor link; absence outside that linked scope, or in records with no exec, proves nothing
 
 <a id="rule-context-privilege-probing"></a>
@@ -508,6 +512,7 @@ Invalid mappings are excluded from coverage:
 - ATT&CK: [`T1068`](https://attack.mitre.org/techniques/T1068/), [`T1548`](https://attack.mitre.org/techniques/T1548/), [`T1548.001`](https://attack.mitre.org/techniques/T1548/001/), [`T1548.003`](https://attack.mitre.org/techniques/T1548/003/)
 - Telemetry families: process_exec
 - Required typed fields: —
+- Required typed fields by family: `process_exec`: process.argv<br>process.executable
 - Positive-only reason: the probing commands and the setuid/sudo/capability operands are identified from argv, and a root process is visible only when its exec was recorded; absence proves neither that privileges were not probed nor that none were gained
 
 <a id="rule-context-staging-and-transfer"></a>
@@ -519,6 +524,7 @@ Invalid mappings are excluded from coverage:
 - ATT&CK: [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1027.013`](https://attack.mitre.org/techniques/T1027/013/), [`T1048`](https://attack.mitre.org/techniques/T1048/), [`T1074.001`](https://attack.mitre.org/techniques/T1074/001/), [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1560.001`](https://attack.mitre.org/techniques/T1560/001/), [`T1570`](https://attack.mitre.org/techniques/T1570/)
 - Telemetry families: process_exec
 - Required typed fields: —
+- Required typed fields by family: `process_exec`: process.argv<br>process.executable
 - Positive-only reason: the archiver, encoder or transfer tool and its operands are identified from argv and shell script text; the command line shows intent and direction but not that bytes were staged or moved, so absence proves nothing
 
 <a id="rule-corr-process-network-link"></a>

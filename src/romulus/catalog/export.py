@@ -36,6 +36,9 @@ def _rules(catalog: Catalog) -> list[dict[str, Any]]:
             "families": list(rule.families),
             "datasets": list(rule.datasets),
             "required_fields": list(rule.required_fields),
+            "required_by_family": {
+                family: list(fields) for family, fields in rule.required_by_family.items()
+            },
             "behavior": rule.behavior,
             "fidelity": rule.fidelity,
         }
@@ -83,7 +86,12 @@ def _telemetry(catalog: Catalog) -> list[dict[str, Any]]:
             "family": family,
             "rule_ids": [rule.id for rule in catalog.rules if family in rule.families],
             "required_fields": sorted(
-                {field for rule in catalog.rules if family in rule.families for field in rule.required_fields}
+                {
+                    field
+                    for rule in catalog.rules
+                    if family in rule.families
+                    for field in (*rule.required_fields, *rule.required_by_family.get(family, ()))
+                }
             ),
         }
         for family in families
