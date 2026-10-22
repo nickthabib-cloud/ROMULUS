@@ -194,3 +194,59 @@ class ExecHistory:
 
 def _first(entry: tuple):
     return entry[0]
+
+
+SPILL_PREFIX = "romulus-stage-spill-"     # the sweep clears stale stage directories by this prefix
+SPILL_BATCH = 5000
+
+
+class Spill:
+    """A playbook's private on-disk tables for compact rows it must join over the whole hunt (cross-target joins
+    cannot be streamed: one target is read whole before the next). Rows are buffered and written in batches; queries
+    flush first. It lives in its own directory (mode 0700) under the sweep's stage directory, holds telemetry-derived
+    values, and is removed by `close` (the sweep closes it on every exit path it controls; a killed process leaves it
+    to the stale-stage cleanup)."""
+
+    def __init__(self, directory=None):
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+        if directory is not None:
+            Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._dir = tempfile.mkdtemp(prefix=SPILL_PREFIX, dir=directory)
+        self.db = sqlite3.connect(Path(self._dir) / "spill.db")
+        for pragma in ("journal_mode=OFF", "synchronous=OFF", "temp_store=FILE", "cache_size=-32768"):
+            self.db.execute(f"PRAGMA {pragma}")
+        self._buffers: dict[str, tuple[str, list[tuple]]] = {}
+
+    def table(self, name: str, columns: str) -> None:
+        self.db.execute(f"CREATE TABLE {name} ({columns})")
+        width = len(columns.split(","))
+        self._buffers[name] = (f"INSERT INTO {name} VALUES ({','.join('?' * width)})", [])
+
+    def add(self, name: str, row: tuple) -> None:
+        sql, rows = self._buffers[name]
+        rows.append(row)
+        if len(rows) >= SPILL_BATCH:
+            self.db.executemany(sql, rows)
+            rows.clear()
+
+    def flush(self) -> None:
+        for sql, rows in self._buffers.values():
+            if rows:
+                self.db.executemany(sql, rows)
+                rows.clear()
+        self.db.commit()
+
+    def execute(self, sql: str, params: tuple = ()):
+        self.flush()
+        return self.db.execute(sql, params)
+
+    def close(self) -> None:
+        import contextlib
+        import shutil
+        if self.db is not None:
+            with contextlib.suppress(Exception):
+                self.db.close()
+            self.db = None
+        shutil.rmtree(self._dir, ignore_errors=True)

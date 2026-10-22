@@ -184,6 +184,13 @@ class Playbook:
         groups = getattr(self, "groups", {}) or {}
         return [e for evs in groups.values() for e in evs]
 
+    # Where a playbook that spills rows to disk (romulus.detect.bounded.Spill) puts its private directory: the sweep's
+    # stage directory; None (tests, ad hoc runs) uses the system temporary directory.
+    spill_dir = None
+
+    def close_spill(self) -> None:
+        """Remove any on-disk spill. The sweep calls it on every exit path it controls."""
+
     def release_state(self) -> None:
         """Release aggregate working state after its findings and coverage are persisted."""
 

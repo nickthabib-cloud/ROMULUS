@@ -113,6 +113,8 @@ class Sweep:
         self.heartbeat = heartbeat or (lambda: None)
         self.stage_dir = stage_dir
         self.pack: list[Playbook] = fresh_pack()
+        for pb in self.pack:
+            pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
         self.partial_reasons: list[str] = []
         # Built as partitions are read, in time order per target: each batch's events are placed with what has
         # been observed so far. Expansion and the context pass use the whole map, recorded at finalize.
@@ -500,8 +502,11 @@ class Sweep:
         self.close_stage()
 
     def close_stage(self) -> None:
-        """Remove the disk stage (raw telemetry copies). Called by finalize and on every failure path."""
+        """Remove the disk stage (raw telemetry copies) and the playbooks' spills. Called by finalize and on every
+        failure path."""
         stage = getattr(self, "_stage", None)
         if stage is not None:
             stage.close()
             self._stage = None
+        for pb in self.pack:
+            pb.close_spill()
