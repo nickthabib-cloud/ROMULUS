@@ -416,6 +416,13 @@ class ExpansionEngine:
 
         final_links = self.repo.expansion_links(self.hunt_id)
         for row in self.repo.expansion_anchors(self.hunt_id):
+            # Only anchors this run worked are finalized: those still pending. An anchor a previous run finalized
+            # (resume re-runs expansion) was never scheduled here, so its recorded status and reasons stand; above
+            # all, an unexpanded or partial anchor is never upgraded to complete. Budget-stopped anchors are left
+            # as recorded rather than re-attempted: the source-query and wall-clock budgets are hunt-wide and
+            # persist across a resume, so the budget that stopped them is still spent.
+            if row["status"] != "pending":
+                continue
             links = [link for link in final_links if link["anchor_id"] == row["id"]]
             reasons = sorted(set(anchor_reasons[row["id"]] + [
                 reason for link in links if link["status"] != "complete"
@@ -432,9 +439,23 @@ class ExpansionEngine:
         anchors = self.repo.expansion_anchors(self.hunt_id)
         if source_failed and stop_reason != "source_failure":
             stop_reason = f"{stop_reason}; source_failure"
+        status = ("completed" if not source_failed and stop_reason in {"fixpoint", "depth_limit", "budget"}
+                  else "partial")
+        # Expansion is complete only when every anchor is, whichever run recorded it. Status and stop reason
+        # come from the anchor rows, so a resumed run that reached a fixpoint over its own work still reports the
+        # anchors an earlier run left unexpanded or partial, and why.
+        unfinished = [row for row in anchors if row["status"] in {"unexpanded", "expanded_partial"}]
+        if unfinished:
+            status = "partial"
+            kinds = sorted({"keys not expanded" if reason.startswith("keys_not_expanded:") else reason
+                            for row in unfinished for reason in row["reasons"]})
+            shown = "; ".join(kinds[:5]) + (f"; +{len(kinds) - 5} more" if len(kinds) > 5 else "")
+            unexpanded_count = sum(row["status"] == "unexpanded" for row in unfinished)
+            accounting = (f"anchors not fully expanded: {unexpanded_count} unexpanded, "
+                          f"{len(unfinished) - unexpanded_count} partial" + (f" ({shown})" if shown else ""))
+            stop_reason = accounting if stop_reason == "fixpoint" else f"{stop_reason}; {accounting}"
         summary = {
-            "status": ("completed" if not source_failed and stop_reason in {"fixpoint", "depth_limit", "budget"}
-                       else "partial"),
+            "status": status,
             "stop_reason": stop_reason, "anchors": len(anchors),
             "expanded_complete": sum(row["status"] == "expanded_complete" for row in anchors),
             "expanded_partial": sum(row["status"] == "expanded_partial" for row in anchors),
