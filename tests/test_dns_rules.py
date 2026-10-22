@@ -390,6 +390,54 @@ def test_numeric_rcode_is_understood():
     assert len(out) == 1
 
 
+RESOLVER_SAYS = "it acts as a DNS server for other addresses"
+
+
+def forwarded(count, clients, step=timedelta(seconds=5), start=T0):
+    """A resolver forwarding failed lookups: the upstream server's NXDOMAIN answers to the resolver, then the
+    resolver's own NXDOMAIN answers to the client that asked, round-robin over `clients`."""
+    out = []
+    for i in range(count):
+        ts = start + i * step
+        name = f"host{i:04d}.corp.example.test"
+        out.append(rec("answer", client=RESOLVER, server=OUTSIDE, name=name, rcode="NXDOMAIN", ts=ts))
+        out.append(rec("answer", client=clients[i % len(clients)], server=RESOLVER, name=name, rcode="NXDOMAIN",
+                       ts=ts + timedelta(milliseconds=2)))
+    return out
+
+
+def test_resolver_burst_from_mixed_clients_says_so_and_names_the_clients_that_asked():
+    clients = [f"10.20.1.{i}" for i in range(1, 7)]
+    events = forwarded(60, clients) + pair(client="10.20.1.9", server=RESOLVER)
+    pb, out = run(dns.DnsNxdomainBurst, events)
+    assert [m.group_key for m in out] == [RESOLVER]          # no single client reached the threshold
+    m = out[0]
+    assert m.proposed_lane == "lead" and m.severity == "high"
+    assert f"{RESOLVER} was sent 60 NXDOMAIN answer(s)" in m.claim and f"Answering server(s): {OUTSIDE} x60" in m.claim
+    assert RESOLVER_SAYS in m.claim
+    assert "it sent 61 DNS answer record(s) to 7 other address(es)" in m.claim
+    assert "In the peak interval it sent 60 NXDOMAIN answer(s) to 6 client(s) (" in m.claim
+    assert all(f"{c}: 10" in m.claim for c in clients)
+    assert "No client it answered reached the burst threshold on its own." in m.claim
+
+
+def test_workstation_dga_behind_a_resolver_keeps_its_own_finding_and_the_resolver_points_to_it():
+    workstation = "10.20.1.77"
+    events = forwarded(300, [workstation], step=timedelta(seconds=1))
+    _pb, out = run(dns.DnsNxdomainBurst, events)
+    by_key = {m.group_key: m for m in out}
+    assert set(by_key) == {RESOLVER, workstation}
+    ws = by_key[workstation]
+    assert ws.proposed_lane == "lead" and ws.severity == "high" and RESOLVER_SAYS not in ws.claim
+    assert "at most 300 of them fell within one ten-minute interval" in ws.claim
+    assert f"{workstation}: 300 (it has its own finding)" in by_key[RESOLVER].claim
+
+
+def test_an_address_that_only_asks_is_not_called_a_resolver():
+    _pb, out = run(dns.DnsNxdomainBurst, nx_answers(60))
+    assert len(out) == 1 and RESOLVER_SAYS not in out[0].claim
+
+
 # ================================================================ tunnel shape
 HEX = "0123456789abcdef"
 B32 = "abcdefghijklmnopqrstuvwxyz234567"
