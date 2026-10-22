@@ -353,6 +353,28 @@ def test_writer_elevating_own_file_in_own_login_is_not_matched():
     assert len(out) == 1 and out[0].proposed_lane == "lead" and "the writer's own elevation" in out[0].claim
 
 
+def test_own_elevation_only_leads_are_one_lead_per_host_and_writer():
+    # configuration management: the remote account writes one-off modules, then runs each with privilege escalation
+    out_files = [f"/home/deploy/.ansible/tmp/ansible-tmp-{i}/AnsiballZ_mod.py" for i in range(12)]
+    records = []
+    for i, path in enumerate(out_files):
+        ts = T0 + timedelta(minutes=i)
+        records.append(ex(["cp", "/tmp/m", path], "/usr/bin/cp", 1001, ts, user="deploy", auid=1001, ses=5,
+                          pid=700 + i, ppid=699))
+        records.append(ex(["/usr/bin/python3", path], "/usr/bin/python3.11", 0, ts + timedelta(seconds=2), auid=1001,
+                          ses=5, pid=800 + i, ppid=799))
+    other = ex(["vi", JOB], "/usr/bin/vim.basic", 1001, T0, user="deploy", auid=1001, ses=5, pid=900, ppid=899)
+    _pb, out = run([*records, other, *cron_runs(T0 + timedelta(hours=1))])
+    keys = sorted(m.group_key for m in out)
+    assert keys == ["app01|deploy|/srv/tasks/rotate.sh", "app01|deploy|own-elevation"]
+    m = next(m for m in out if m.group_key.endswith("own-elevation"))
+    assert m.proposed_lane == "lead" and " wrote " not in m.claim
+    assert "ran write-capable commands on, or changed (per kernel records), 12 files in 12 director(ies)" in m.claim
+    assert "and 2 more (every path is in the notes)" in m.claim and len(m.events) == 10
+    assert {f"file: {p}" for p in out_files} <= set(m.notes) and "T1548.003" in m.notes
+    assert len({e.id for e in m.events}) == 10 and all(e.get("process.uid") == "1001" for e in m.events)
+
+
 def test_another_hosts_root_job_does_not_join():
     writer = web(*VI)
     assert run([writer, *cron_runs(T0 + timedelta(minutes=10), host="db01")])[1] == []
