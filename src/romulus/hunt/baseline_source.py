@@ -1,6 +1,8 @@
 """Hunt-layer adapter from source retrieval to the baseline HistorySource protocol."""
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from datetime import datetime
 
 from romulus.baseline.protocol import HistoryFetch, HistoryPartition, HistoryPlan
@@ -19,9 +21,11 @@ class HuntHistorySource:
     """Exact source adapter shared with sweep planning and normalization."""
 
     def __init__(self, client, contracts: dict[str, FieldContract], *,
-                 boots: BootIntervals | None = None):
+                 boots: BootIntervals | None = None,
+                 clock: Callable[[], float] = time.monotonic):
         self.client, self.contracts = client, contracts
         self.boots = boots or BootIntervals()
+        self.clock = clock
 
     @staticmethod
     def _filters(target: str) -> list[Predicate]:
@@ -69,21 +73,37 @@ class HuntHistorySource:
             queries, "complete", (),
         )
 
-    def fetch(self, partition: HistoryPartition, *, record_budget: int | None = None) -> HistoryFetch:
+    def fetch(self, partition: HistoryPartition, *, record_budget: int | None = None,
+              query_budget: int | None = None, deadline: float | None = None) -> HistoryFetch:
+        if partition.expected_records == 0:
+            return HistoryFetch((), "complete", (), 0, 0)
+        if record_budget is not None and record_budget < partition.expected_records:
+            return HistoryFetch((), "partial", ("lookback record budget exhausted",), 0, 0)
         contract = self.contracts[partition.target]
         cap = min(2_000_000, max(PARTITION_MAX_DOCS, int(partition.expected_records * 1.2) + 1000))
         if record_budget is not None:
             cap = min(cap, max(0, record_budget))
+        queries = 0
+
+        def reserve_query() -> bool:
+            nonlocal queries
+            if query_budget is not None and queries >= query_budget:
+                return False
+            queries += 1
+            return True
+
         outcome = execute(self.client, SearchIntent(
             kind="raw", target=partition.target,
             window=Window(start=partition.start, end=partition.end),
             filters=self._filters(partition.target), max_records=cap, purpose="baseline lookback",
-        ), contract)
+        ), contract, on_query=reserve_query, deadline=deadline, clock=self.clock)
         reasons = list(outcome.reasons)
         if outcome.error:
             reasons.append(outcome.error)
         if outcome.completeness == Completeness.failed:
-            return HistoryFetch((), "failed", tuple(reasons or ["source fetch failed"]), outcome.returned)
+            return HistoryFetch(
+                (), "failed", tuple(reasons or ["source fetch failed"]), outcome.returned, queries,
+            )
         events, skips, errors = normalize_hits(outcome.records, self.boots)
         unsupported = sum(value for key, value in skips.items()
                           if key.startswith(("dataset:", "suricata event_type")))
@@ -98,5 +118,5 @@ class HuntHistorySource:
                     f"exact-count mismatch: planned {partition.expected_records}, received {outcome.returned}",
                 )
             return HistoryFetch(tuple(events), "partial", tuple(reasons or ["incomplete retrieval"]),
-                                outcome.returned)
-        return HistoryFetch(tuple(events), "complete", (), outcome.returned)
+                                outcome.returned, queries)
+        return HistoryFetch(tuple(events), "complete", (), outcome.returned, queries)

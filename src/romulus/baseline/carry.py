@@ -120,7 +120,10 @@ class CarryInStore:
                     continue
                 self._remember_marker(item.host, (boot, timestamp))
             elif timestamp > marker[1]:
-                self._remember_marker(item.host, (boot, timestamp))
+                if item.host in self._markers:
+                    self._remember_marker(item.host, (boot, timestamp))
+                elif not self.repo.set_baseline_parent_boot(self.hunt_id, item.host, boot, timestamp):
+                    continue
             key = (item.host, boot, item.pid)
             row = {
                 "hunt_id": self.hunt_id, "host": item.host, "boot": boot, "pid": item.pid,

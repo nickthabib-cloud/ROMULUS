@@ -223,6 +223,37 @@ def test_raw_retrieval_complete_only_when_everything_fetched():
     assert any(r.startswith("cap:") for r in out.reasons)
 
 
+def test_raw_retrieval_stops_at_physical_page_and_deadline_budgets():
+    client = ElasticClient(
+        Settings(es_url="http://es"), transport=_pit_transport([list(range(2000)), [2000]], 2001),
+    )
+    spent = 0
+
+    def reserve():
+        nonlocal spent
+        if spent >= 1:
+            return False
+        spent += 1
+        return True
+
+    out = execute(
+        client, SearchIntent(kind="raw", target="idx", window=W, max_records=3000), C,
+        on_query=reserve,
+    )
+    assert spent == 1 and out.returned == 2000
+    assert out.completeness == Completeness.partial
+    assert "source query budget exhausted" in out.reasons
+
+    ticks = iter((0.0, 11.0))
+    timed = execute(
+        ElasticClient(Settings(es_url="http://es"), transport=_pit_transport([[1]], 1)),
+        SearchIntent(kind="raw", target="idx", window=W, max_records=1), C,
+        deadline=10.0, clock=lambda: next(ticks),
+    )
+    assert timed.completeness == Completeness.partial
+    assert "source wall-clock budget exhausted" in timed.reasons
+
+
 def test_shard_failure_and_lower_bound_totals_are_partial():
     client = ElasticClient(Settings(es_url="http://es"), transport=_pit_transport([[1]], 1, shard_fail=True))
     out = execute(client, SearchIntent(kind="raw", target="idx", window=W), C)

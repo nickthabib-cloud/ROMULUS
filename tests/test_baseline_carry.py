@@ -52,6 +52,23 @@ def test_newest_first_observation_does_not_roll_back_to_an_older_boot():
     assert store.lookup("host", 10, (START + timedelta(seconds=30)).timestamp(), "boot-b")[1] == "/new"
 
 
+def test_marker_cache_overflow_persists_advances_before_reboot_comparison(monkeypatch):
+    from romulus.baseline import carry as module
+
+    monkeypatch.setattr(module, "MARKER_CACHE_CAP", 1)
+    repo, store = _store()
+    store.observe_rows([_row(1, 1, "/cached")])
+    store.observe_rows([
+        ParentExec("overflow", "boot-a", 10, START + timedelta(seconds=1), "/a1", 1, "a1"),
+        ParentExec("overflow", "boot-a", 10, START + timedelta(seconds=3), "/a3", 1, "a3"),
+        ParentExec("overflow", "boot-b", 10, START + timedelta(seconds=2), "/b2", 1, "b2"),
+    ])
+
+    assert repo.baseline_parent_boot("hunt", "overflow") == ("boot-a", START + timedelta(seconds=3))
+    assert store.lookup("overflow", 10, (START + timedelta(seconds=4)).timestamp(), "boot-a")[1] == "/a3"
+    assert store.lookup("overflow", 10, (START + timedelta(seconds=4)).timestamp(), "boot-b") is None
+
+
 def test_deleting_hunt_cascades_its_disk_carry_state():
     repo, store = _store()
     store.observe_rows([_row(10, 1, "/parent")])

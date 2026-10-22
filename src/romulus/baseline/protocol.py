@@ -29,6 +29,7 @@ class HistoryFetch:
     completeness: FetchState
     reasons: tuple[str, ...]
     record_count: int
+    query_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -47,4 +48,5 @@ class HistorySource(Protocol):
 
     def plan(self, target: str, start: datetime, end: datetime, *, query_budget: int) -> HistoryPlan: ...
 
-    def fetch(self, partition: HistoryPartition, *, record_budget: int | None = None) -> HistoryFetch: ...
+    def fetch(self, partition: HistoryPartition, *, record_budget: int | None = None,
+              query_budget: int | None = None, deadline: float | None = None) -> HistoryFetch: ...

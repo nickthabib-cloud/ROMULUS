@@ -47,7 +47,7 @@ class FakeHistory:
             HistoryPartition(target, start, end, expected, f"{target}:{start.isoformat()}"),
         ), 1, "complete", ())
 
-    def fetch(self, partition, *, record_budget=None):
+    def fetch(self, partition, *, record_budget=None, query_budget=None, deadline=None):
         self.fetches.append(partition)
         if self.outcomes:
             return self.outcomes.pop(0)
@@ -164,8 +164,10 @@ def test_wall_budget_is_rechecked_after_a_slow_fetch():
             return self.value
 
     class SlowFetch(FakeHistory):
-        def fetch(self, partition, *, record_budget=None):
-            result = super().fetch(partition, record_budget=record_budget)
+        def fetch(self, partition, *, record_budget=None, query_budget=None, deadline=None):
+            result = super().fetch(
+                partition, record_budget=record_budget, query_budget=query_budget, deadline=deadline,
+            )
             clock.value = 11.0
             return result
 
@@ -236,6 +238,28 @@ def test_building_segment_is_invisible_and_stale_cleanup_removes_its_rows():
     ) == []
     assert repo.cleanup_baseline_building(before=START + timedelta(days=1)) == 1
     assert repo.baseline_segments() == [] and list(repo.baseline_counts(row["id"])) == []
+
+
+def test_resume_reclaims_its_own_crashed_build_immediately():
+    repo = _repo()
+    writer = _writer(repo, FakeHistory([_event(1, START - timedelta(minutes=1))]))
+    row = writer.segment_row(
+        hunt_id="build", target="host", spec=SPEC,
+        start=START - timedelta(hours=1), end=START, events_total=1,
+    )
+    assert repo.begin_baseline_segment(row)
+    partial = KeyCounter(row["id"], SPEC)
+    partial.consume(_event(99, START - timedelta(minutes=1)), KeyContext())
+    repo.append_baseline_segment_rows(row["id"], partial.count_rows(), partial.scope_hour_rows())
+
+    result = writer.fill(
+        hunt_id="build", targets=["host"], start=START - timedelta(hours=1), end=START,
+    )
+
+    assert result.complete == 1 and result.gaps == ()
+    segments = repo.baseline_segments()
+    assert len(segments) == 1 and segments[0]["status"] == "active"
+    assert len(list(repo.baseline_counts(row["id"]))) == 2
 
 
 def test_fresh_building_segment_is_not_cleaned_by_a_concurrent_writer():
@@ -361,6 +385,43 @@ def test_exec_pair_writer_matches_direct_counter_with_same_hour_parent():
     expected = [{key: value for key, value in row.items() if key != "segment_id"}
                 for row in direct.count_rows()]
     assert result.complete == 1 and stored == expected
+
+
+def test_exec_pair_resolves_children_before_three_pid_reuses_are_compacted():
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    events = []
+    for index, executable in enumerate(("/p1", "/p3", "/p5"), start=1):
+        events.append(TypedEvent(
+            id=f"parent-{index}", family="process_exec",
+            ts=START - timedelta(minutes=10) + timedelta(seconds=index * 2), host="web01",
+            fields={
+                "process.pid": fv(10, "fixture"), "process.ppid": fv(1, "fixture"),
+                "process.executable": fv(executable, "fixture"),
+                "host.boot.id": fv("boot-a", "fixture"),
+            }, raw=[], normalizer="fixture@1",
+        ))
+        events.append(TypedEvent(
+            id=f"child-{index}", family="process_exec",
+            ts=events[-1].ts + timedelta(seconds=1), host="web01",
+            fields={
+                "process.pid": fv(20 + index, "fixture"), "process.ppid": fv(10, "fixture"),
+                "process.executable": fv("/bin/sh", "fixture"),
+                "host.boot.id": fv("boot-a", "fixture"),
+            }, raw=[], normalizer="fixture@1",
+        ))
+    carry = CarryInStore(repo, "build")
+    result = LookbackWriter(
+        repo, FakeHistory(events), site="site", specs=[SPEC_BY_ID["bl.exec_pair"]],
+        normalizer="fixture@1", budget=LookbackBudget(queries=10, records=20, seconds=10),
+        parent_carry=carry, now=lambda: START,
+    ).fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=1), end=START)
+
+    assert result.complete == 0
+    # PID 1 parents remain explicitly unresolved, but all three child generations were resolved rather than
+    # adding a "parent exec before history" omission after carry compaction.
+    assert "parent pid 1/2 out of scope" in result.gaps[0].reason
+    assert "parent exec before history" not in result.gaps[0].reason
 
 
 @pytest.mark.slow

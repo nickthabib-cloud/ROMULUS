@@ -13,6 +13,7 @@ from romulus.baseline.carry import CarryInStore, PendingResolver
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.protocol import HistorySource
 from romulus.baseline.spec import BaselineSpec, KeyContext
+from romulus.detect.correlation import PidTable
 from romulus.store.db import utcnow
 from romulus.store.repo import Repo
 
@@ -181,6 +182,13 @@ class LookbackWriter:
                 ))
                 continue
             counters = {spec.id: KeyCounter("pending", spec) for spec in missing}
+            hour_parents = PidTable()
+            hour_context = KeyContext(
+                pid_table=hour_parents,
+                service_accounts=self.context.service_accounts,
+                system_uid_range=self.context.system_uid_range,
+                is_internal=self.context.is_internal,
+            )
             events_total = 0
             failure: tuple[str, str] | None = None
             for partition in planned.partitions:
@@ -193,8 +201,10 @@ class LookbackWriter:
                 try:
                     fetched = self.source.fetch(
                         partition, record_budget=self.budget.records - records,
+                        query_budget=self.budget.queries - queries,
+                        deadline=begun + self.budget.seconds,
                     )
-                    queries += 1
+                    queries += fetched.query_count
                 except Exception as error:  # noqa: BLE001 - adapter error is a coverage fact
                     failure = ("failed", f"partition fetch failed: {error}"[:300])
                     break
@@ -217,9 +227,12 @@ class LookbackWriter:
                 events_total += len(fetched.events)
                 if self.parent_carry is not None:
                     self.parent_carry.observe_events(fetched.events)
-                for event in sorted(fetched.events, key=lambda item: (item.ts, item.id)):
+                ordered_events = sorted(fetched.events, key=lambda item: (item.ts, item.id))
+                for event in ordered_events:
+                    hour_parents.add(event)
+                for event in ordered_events:
                     for counter in counters.values():
-                        counter.consume(event, self.context)
+                        counter.consume(event, hour_context)
             if failure is not None:
                 gaps.append(HistoryGap(
                     target, hour_start, hour_end, failure[0], failure[1], tuple(counter for counter in counters),
@@ -253,7 +266,7 @@ class LookbackWriter:
                 )
                 counter.bind_segment(row["id"])
                 try:
-                    if not self.repo.begin_baseline_segment(row):
+                    if not self.repo.begin_baseline_segment(row, reclaim_owner=True):
                         continue
                     longest = max(longest, self.repo.append_baseline_segment_rows(
                         row["id"], counter.count_rows(), counter.scope_hour_rows(),

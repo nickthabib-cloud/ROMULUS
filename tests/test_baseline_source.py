@@ -30,11 +30,15 @@ def test_adapter_reuses_partition_planner_execute_and_normalizer(monkeypatch):
         completeness=Completeness.complete, reasons=[], error=None, total=2,
         total_relation="eq", returned=2, records=[{"_id": "1"}, {"_id": "2"}],
     )
-    monkeypatch.setattr(module, "execute", lambda client, intent, contract: outcome)
+    def one_page(_client, _intent, _contract, *, on_query, **_kwargs):
+        assert on_query()
+        return outcome
+
+    monkeypatch.setattr(module, "execute", one_page)
     monkeypatch.setattr(module, "normalize_hits", lambda records, boots: (["event"], {}, []))
     fetched = source.fetch(parts[0])
     assert fetched.completeness == "complete"
-    assert fetched.events == ("event",) and fetched.record_count == 2
+    assert fetched.events == ("event",) and fetched.record_count == 2 and fetched.query_count == 1
 
 
 def test_recursive_planning_stops_at_the_physical_query_budget(monkeypatch):
@@ -54,6 +58,30 @@ def test_recursive_planning_stops_at_the_physical_query_budget(monkeypatch):
     assert result.reasons == ("planning query budget exhausted",)
 
 
+def test_zero_partition_skips_source_and_fetch_reports_physical_spend(monkeypatch):
+    called = []
+    source = HuntHistorySource("client", {"network": "contract"})
+    zero = module.HistoryPartition("network", START, START + timedelta(hours=1), 0, "zero")
+    monkeypatch.setattr(module, "execute", lambda *_args, **_kwargs: called.append(True))
+    assert source.fetch(zero, record_budget=0, query_budget=1).query_count == 0
+    assert called == []
+
+    outcome = SimpleNamespace(
+        completeness=Completeness.partial, reasons=["source query budget exhausted"], error=None,
+        total=4_000, total_relation="eq", returned=2_000, records=[],
+    )
+
+    def bounded(_client, _intent, _contract, *, on_query, **_kwargs):
+        assert on_query() is True
+        assert on_query() is False
+        return outcome
+
+    monkeypatch.setattr(module, "execute", bounded)
+    part = module.HistoryPartition("network", START, START + timedelta(hours=1), 4_000, "paged")
+    fetched = source.fetch(part, record_budget=4_000, query_budget=1)
+    assert fetched.query_count == 1 and fetched.completeness == "partial"
+
+
 def test_adapter_turns_normalization_errors_and_unsupported_records_partial(monkeypatch):
     source = HuntHistorySource("client", {"network": "contract"})
     partition = module.HistoryPartition(
@@ -64,7 +92,7 @@ def test_adapter_turns_normalization_errors_and_unsupported_records_partial(monk
         total_relation="eq", returned=1,
         records=[{"_id": "1", "_source": {"event": {"dataset": "unknown"}}}],
     )
-    monkeypatch.setattr(module, "execute", lambda client, intent, contract: outcome)
+    monkeypatch.setattr(module, "execute", lambda client, intent, contract, **_kwargs: outcome)
     monkeypatch.setattr(
         module, "normalize_hits",
         lambda records, boots: ([], {"dataset:unknown is not normalized": 1}, [("1", "bad")]),

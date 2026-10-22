@@ -941,8 +941,12 @@ class Repo:
                 generations.append(int(suffix))
         return f"{base_id}-r{max(generations) + 1}"
 
-    def begin_baseline_segment(self, row: dict) -> bool:
-        """Create an invisible building segment in a short transaction."""
+    def begin_baseline_segment(self, row: dict, *, reclaim_owner: bool = False) -> bool:
+        """Create an invisible building segment, optionally restarting this hunt's crashed build.
+
+        The hunt lease serializes one writer per hunt. Reclamation is therefore safe only for the same
+        ``built_by_hunt_id``; a building row owned by another hunt remains protected.
+        """
         segment = _baseline_segment_row(row)
         if segment["status"] != "building":
             raise ValueError("a chunked baseline segment must begin with status building")
@@ -954,7 +958,10 @@ class Repo:
                 stored = _with_utc(existing, ("start", "end", "created_at"))
                 if any(stored[name] != segment[name] for name in _SEGMENT_IDENTITY):
                     raise ValueError(f"baseline segment {segment['id']} exists with different content")
-                return False
+                if not (reclaim_owner and stored["status"] == "building"
+                        and stored["built_by_hunt_id"] == segment["built_by_hunt_id"]):
+                    return False
+                c.execute(t.baseline_segment.delete().where(t.baseline_segment.c.id == segment["id"]))
             c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
             return True
 

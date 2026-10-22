@@ -1,10 +1,12 @@
 """Execute compiled intents against a source and produce complete-or-explicitly-partial outcomes."""
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from romulus.sources.compile import compile_es
-from romulus.sources.es import ElasticClient, SourceError
+from romulus.sources.es import ElasticClient, SourceBudgetExhausted, SourceError
 from romulus.sources.models import Completeness, SearchIntent, SearchOutcome
 from romulus.sources.profile import FieldContract
 
@@ -21,7 +23,9 @@ def _record(hit: dict) -> dict:
     return {"_id": hit["_id"], "_index": hit["_index"], "_source": hit["_source"], "_sort": hit.get("sort")}
 
 
-def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract, *, pit=None) -> SearchOutcome:
+def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract, *, pit=None,
+            on_query: Callable[[], bool] | None = None, deadline: float | None = None,
+            clock: Callable[[], float] = time.monotonic) -> SearchOutcome:
     q = compile_es(intent, contract, client.settings.es_flavor)
     started = datetime.now(UTC)
 
@@ -32,10 +36,16 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
     try:
         if intent.kind == "raw":
             records, reasons, total, rel = [], [], None, "unknown"
-            for hits, meta in client.iterate(q, intent.max_records, pit=pit):
-                reasons += meta["problems"]
-                total, rel = meta["total"], meta["total_relation"]
-                records += [_record(h) for h in hits]
+            try:
+                iterate_kwargs = {"pit": pit}
+                if on_query is not None or deadline is not None:
+                    iterate_kwargs.update(on_query=on_query, deadline=deadline, clock=clock)
+                for hits, meta in client.iterate(q, intent.max_records, **iterate_kwargs):
+                    reasons += meta["problems"]
+                    total, rel = meta["total"], meta["total_relation"]
+                    records += [_record(h) for h in hits]
+            except SourceBudgetExhausted as error:
+                reasons.append(str(error))
             if total is not None and len(records) < total:
                 reasons.append(f"cap:{intent.max_records}<total:{total}")
             if rel != "eq":
