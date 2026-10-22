@@ -78,12 +78,17 @@ NON_TERMINATING = {"0", "HUP", "SIGHUP", "1", "USR1", "SIGUSR1", "10", "USR2", "
 
 
 # Daemon process names whose unit has another name.
-DAEMON_UNITS = {"rsyslogd": "rsyslog", "syslogd": "syslog", "wazuh-agentd": "wazuh-agent", "ossec-agentd": "ossec",
-                "falcond": "falcon-sensor", "wdavdaemon": "mdatp", "clamd": "clamav-daemon"}
+# Daemon process names whose unit has another name (some agents ship under more than one unit name).
+DAEMON_UNITS: dict[str, tuple[str, ...]] = {
+    "rsyslogd": ("rsyslog",), "syslogd": ("syslog",), "wazuh-agentd": ("wazuh-agent",),
+    "ossec-agentd": ("wazuh-agent", "ossec-hids", "ossec"), "falcond": ("falcon-sensor",), "wdavdaemon": ("mdatp",),
+    "clamd": ("clamav-daemon",), "splunkd": ("splunkforwarder", "splunkd"),
+}
 
 
-def unit_of(name: str) -> str:
-    return DAEMON_UNITS.get(name, name)
+def units_of(name: str) -> tuple[str, ...]:
+    """The service names a daemon or unit name can appear under in service-manager records."""
+    return DAEMON_UNITS.get(name, (name,))
 
 
 def service_category(name: str) -> str:
@@ -521,7 +526,8 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         commands_by_unit: dict[tuple, list[_Item]] = defaultdict(list)
         for item in self.items:
             if not item.group[3].startswith("pattern:"):     # an unconfirmed pattern names no unit to link
-                commands_by_unit[(item.host, unit_of(item.target))].append(item)
+                for unit in units_of(item.target):
+                    commands_by_unit[(item.host, unit)].append(item)
         for stop in sorted(self.stops, key=lambda e: (e.ts, e.id)):
             ts = stop.ts.timestamp()
             name = str(stop.get("service.name"))
@@ -561,22 +567,43 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         return out
 
     def _confirm_patterns(self) -> None:
-        """A partial pattern match becomes that daemon's own high candidate when an exec record shows the daemon
-        ran on the host before the command; the rest stay one lead per (host, actor, lineage, pattern)."""
+        """A partial pattern match becomes that daemon's own high candidate when an exec record shows the daemon ran
+        on the host before the command, or the service manager recorded its unit stopping or ending within the link
+        window after it. A candidate whose unit the same command already names in full, or that is confirmed, leaves
+        no lead behind; the rest stay one lead per (host, actor, lineage, pattern)."""
+        named: dict[str, set[str]] = defaultdict(set)          # command event id -> units named in full
+        for item in self.items:
+            if item.group[3].startswith("kill:"):
+                named[item.event.id].update(units_of(item.target))
         kept = []
         for item in self.items:
-            if item.group[3].startswith("pattern:") and any(
-                    t <= item.ts for t in self.ran.get((item.host, item.target), ())):
+            if not item.group[3].startswith("pattern:"):
+                kept.append(item)
+                continue
+            units = set(units_of(item.target))
+            if units & named[item.event.id]:
+                continue                                         # an alias of a daemon this command names in full
+            why = ""
+            if any(t <= item.ts for t in self.ran.get((item.host, item.target), ())):
+                why = f"an exec record shows '{item.target}' ran on the host earlier"
+            else:
+                stop = next((e for e in self.stops if e.host == item.host and e.get("service.name") in units
+                             and -COMMAND_LINK_AFTER <= e.ts.timestamp() - item.ts <= COMMAND_LINK_BEFORE), None)
+                if stop is not None:
+                    why = (f"the service manager recorded '{stop.get('service.name')}' stopping "
+                           f"{stop.ts.timestamp() - item.ts:.0f} s later")
+            if why:
+                named[item.event.id].update(units)
                 item = _Item(item.host, item.ts, (*item.group[:3], f"kill:{item.target}"),
-                             f"{item.form}; an exec record shows '{item.target}' ran on the host earlier "
-                             f"({service_category(item.target)} service)", item.target, "high", item.event,
-                             item.lineage, item.actor, from_text=item.from_text)
+                             f"{item.form}; {why} ({service_category(item.target)} service)", item.target, "high",
+                             item.event, item.lineage, item.actor, from_text=item.from_text)
             kept.append(item)
-        self.items = kept
+        # a confirmation can come after an alias was kept: drop leftovers whose units are now named
+        self.items = [i for i in kept if not (i.group[3].startswith("pattern:")
+                                              and set(units_of(i.target)) & named[i.event.id])]
 
     def _restart_gap(self, host: str | None, name: str, ts: float) -> float | None:
-        name = unit_of(name)
-        later = [t for t in self.starts.get((host, name), ()) if t >= ts]
+        later = [t for unit in units_of(name) for t in self.starts.get((host, unit), ()) if t >= ts]
         return min(later) - ts if later else None
 
     def _describe_commands(self, key, items: list[_Item]) -> Match:
@@ -598,8 +625,10 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             names = sorted({i.target for i in items})
             shown = ", ".join(f"'{n}'" for n in names[:10]) + (f" and {len(names) - 10} more" if len(names) > 10
                                                                else "")
-            claim += (f" The pattern '{form.split(':', 1)[1]}' matches part of the watched name(s) {shown}; no exec "
-                      "record shows any of them ran on the host before the command, so which process it ended, if "
+            claim += (f" The pattern '{form.split(':', 1)[1]}' could match watched name(s) {shown} in part; no exec "
+                      "record before the command and no service-manager stop record within "
+                      f"{COMMAND_LINK_BEFORE:.0f} s after it shows any of them, and a daemon started before the window "
+                      "has no exec record here, so this stays a lead; which process it ended, if "
                       "any, is not established.")
         if linked:
             claim += (f" The service manager recorded '{first.target}' stopping {len(linked)} time(s), the first at "
