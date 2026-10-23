@@ -7,8 +7,10 @@ import json
 import ntpath
 import re
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from xml.etree import ElementTree
 
 from romulus.evidence.typed import FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
@@ -58,19 +60,24 @@ class WindowsRecord:
 
 
 class RecordIdContinuity:
-    """Streaming gap state spilled to a SQLite temporary file.
+    """Streaming record-id and timestamp gap state spilled to a private SQLite file.
 
-    State remains one row per (target, computer, channel), never one entry per record. SQLite's empty filename
-    creates an OS-backed temporary database that is removed on close, avoiding a fleet-size completeness cap
-    without holding every host/channel key in Python memory.
+    State remains one row per (target, computer, channel), never one entry per record. A caller-owned directory
+    puts the file under the hunt stage; standalone uses get its own private temporary directory.
     """
 
-    def __init__(self) -> None:
-        self._db = sqlite3.connect("")
+    def __init__(self, directory: str | Path | None = None) -> None:
+        self._tempdir = tempfile.TemporaryDirectory(prefix="romulus-windows-continuity-") if directory is None else None
+        root = Path(self._tempdir.name) if self._tempdir is not None else Path(directory)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        root.chmod(0o700)
+        self.path = root / "windows-continuity.db"
+        self._db = sqlite3.connect(self.path)
+        self.path.chmod(0o600)
         self._db.execute(
             "CREATE TABLE continuity ("
             "target TEXT NOT NULL, computer TEXT NOT NULL, channel TEXT NOT NULL, "
-            "last_id INTEGER NOT NULL, samples INTEGER NOT NULL, signature TEXT NOT NULL, "
+            "last_id INTEGER NOT NULL, samples INTEGER NOT NULL, signature TEXT NOT NULL, last_time TEXT, "
             "PRIMARY KEY (target, computer, channel)) WITHOUT ROWID"
         )
 
@@ -80,9 +87,19 @@ class RecordIdContinuity:
 
     def close(self) -> None:
         self._db.close()
+        if self._tempdir is not None:
+            self._tempdir.cleanup()
+            self._tempdir = None
 
-    def observe(self, target: str, records: list[dict]) -> list[str]:
+    def observe(
+        self,
+        target: str,
+        records: list[dict],
+        *,
+        liveness_tolerance=None,
+    ) -> list[str]:
         gaps: dict[tuple[str, str], int] = {}
+        time_gaps: dict[tuple[str, str], tuple[float, str, str]] = {}
         unordered: set[tuple[str, str]] = set()
         malformed: set[tuple[str, str]] = set()
         reused: set[tuple[str, str]] = set()
@@ -106,33 +123,53 @@ class RecordIdContinuity:
                 continue
             key = (target, *group)
             signature = windows_record_signature(record)
+            raw_time = winlog.get("time_created") or source.get("@timestamp")
+            try:
+                when = datetime.fromisoformat(str(raw_time)).astimezone(UTC)
+            except (TypeError, ValueError):
+                when = None
             row = self._db.execute(
-                "SELECT last_id, samples, signature FROM continuity "
+                "SELECT last_id, samples, signature, last_time FROM continuity "
                 "WHERE target = ? AND computer = ? AND channel = ?", key,
             ).fetchone()
             if row is None:
                 self._db.execute(
-                    "INSERT INTO continuity VALUES (?, ?, ?, ?, ?, ?)",
-                    (*key, record_id, 1, signature),
+                    "INSERT INTO continuity VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (*key, record_id, 1, signature, when.isoformat() if when is not None else None),
                 )
                 touched.add(key)
                 continue
-            prior, samples, prior_signature = row
+            prior, samples, prior_signature, prior_time_text = row
+            prior_time = None
+            if prior_time_text:
+                try:
+                    prior_time = datetime.fromisoformat(prior_time_text).astimezone(UTC)
+                except ValueError:  # only this class writes the column; fail closed if storage is damaged
+                    prior_time = None
+            if when is not None and prior_time is not None and when > prior_time:
+                elapsed = when - prior_time
+                if liveness_tolerance is not None and elapsed > liveness_tolerance:
+                    candidate = (elapsed.total_seconds(), prior_time.isoformat(), when.isoformat())
+                    if group not in time_gaps or candidate[0] > time_gaps[group][0]:
+                        time_gaps[group] = candidate
+            latest_time = when if when is not None and (prior_time is None or when > prior_time) else prior_time
             if record_id == prior:
                 if prior_signature != signature:
                     reused.add(group)
-                    self._db.execute(
-                        "UPDATE continuity SET signature = ? "
-                        "WHERE target = ? AND computer = ? AND channel = ?", (signature, *key),
-                    )
+                self._db.execute(
+                    "UPDATE continuity SET signature = ?, last_time = ? "
+                    "WHERE target = ? AND computer = ? AND channel = ?",
+                    (signature, latest_time.isoformat() if latest_time is not None else None, *key),
+                )
                 continue
             if record_id > prior:
                 if record_id > prior + 1:
                     gaps[group] = gaps.get(group, 0) + record_id - prior - 1
                 self._db.execute(
-                    "UPDATE continuity SET last_id = ?, samples = ?, signature = ? "
+                    "UPDATE continuity SET last_id = ?, samples = ?, signature = ?, last_time = ? "
                     "WHERE target = ? AND computer = ? AND channel = ?",
-                    (record_id, min(2, samples + 1), signature, *key),
+                    (record_id, min(2, samples + 1), signature,
+                     latest_time.isoformat() if latest_time is not None else None, *key),
                 )
                 touched.add(key)
             else:
@@ -142,6 +179,10 @@ class RecordIdContinuity:
         reasons = [
             f"shipper gaps: {count} records missing on {channel} for {computer}"
             for (computer, channel), count in sorted(gaps.items())
+        ]
+        reasons += [
+            f"no records from {computer}/{channel} between {start} and {end}"
+            for (computer, channel), (_seconds, start, end) in sorted(time_gaps.items())
         ]
         reasons += [
             f"record_id reused (log cleared or reverted) on {channel} for {computer}"

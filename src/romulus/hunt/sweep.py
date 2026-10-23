@@ -18,6 +18,7 @@ from romulus.evidence.normalize import (
 from romulus.evidence.typed import TypedEvent
 from romulus.evidence.windows import RecordIdContinuity
 from romulus.evidence.windows_catalog import (
+    COLLECTION_CHANGE_EVENTS,
     WINDOWS_CHANNELS,
     WINDOWS_DATASET_FAMILIES,
     WINDOWS_HOST_DATASETS,
@@ -138,7 +139,7 @@ class Sweep:
         self.windows_liveness_tolerance = windows_liveness_tolerance
         self._windows_inventory: dict[str, set[str]] = {}
         self._windows_inventory_reasons: dict[str, list[str]] = {}
-        self._windows_record_ids = RecordIdContinuity()
+        self._windows_record_ids: RecordIdContinuity | None = None
         self.on_candidate = on_candidate or (lambda c: None)
         self.heartbeat = heartbeat or (lambda: None)
         self.stage_dir = stage_dir
@@ -309,7 +310,8 @@ class Sweep:
             )
             for record in records
         }
-        observed_times: dict[tuple[str, str], list[datetime]] = {}
+        observed_times: dict[tuple[str, str], tuple[datetime, datetime]] = {}
+        collection_changes: set[str] = set()
         for record in records:
             source = record.get("_source") or {}
             winlog = source.get("winlog") or {}
@@ -320,7 +322,20 @@ class Sweep:
                 when = datetime.fromisoformat(str(raw_time)).astimezone(UTC)
             except (TypeError, ValueError):
                 continue
-            observed_times.setdefault((host, channel), []).append(when)
+            key = (host, channel)
+            prior = observed_times.get(key)
+            observed_times[key] = (when, when) if prior is None else (min(prior[0], when), max(prior[1], when))
+            try:
+                event_id = int(winlog.get("event_id"))
+            except (TypeError, ValueError):
+                continue
+            provider = str(winlog.get("provider_name") or "").strip()
+            change = COLLECTION_CHANGE_EVENTS.get((channel, provider.casefold(), event_id))
+            if change and host:
+                collection_changes.add(
+                    f"collection changed on {host}: {winlog.get('channel')}|{provider}|{event_id} ({change})"
+                )
+        reasons.extend(sorted(collection_changes))
         def summarize(label: str, affected: list[str], event_class) -> str | None:
             affected = sorted(set(affected))
             if not affected:
@@ -342,7 +357,7 @@ class Sweep:
                 if channel_key not in observed_channels:
                     absent_hosts.append(host)
                 elif partition is not None and observed_times.get(channel_key):
-                    first, last = min(observed_times[channel_key]), max(observed_times[channel_key])
+                    first, last = observed_times[channel_key]
                     if first > partition.start + self.windows_liveness_tolerance:
                         late_start_hosts.append(host)
                         single_edge_details[("before", host)] = first.isoformat()
@@ -588,7 +603,9 @@ class Sweep:
             if record_id is None or record_id.type not in {"long", "integer", "short"}:
                 gap_reasons = ["shipper gaps unresolved: winlog.record_id mapping is not numeric"]
             else:
-                gap_reasons = self._windows_record_ids.observe(target, out.records)
+                gap_reasons = self._windows_continuity().observe(
+                    target, out.records, liveness_tolerance=self.windows_liveness_tolerance,
+                )
         partial = out.completeness != Completeness.complete or bool(errors) or bool(unsupported)
         if partial:
             self.partial_reasons.append(f"{target} {pkey}: {out.reasons or ''} normalization_errors={len(errors)}"
@@ -743,6 +760,12 @@ class Sweep:
             stage = self._stage = EventStage(self.stage_dir)
         return stage
 
+    def _windows_continuity(self) -> RecordIdContinuity:
+        continuity = self._windows_record_ids
+        if continuity is None:
+            continuity = self._windows_record_ids = RecordIdContinuity(self._event_stage().directory)
+        return continuity
+
     def _retain_aggregate_raw(self, pb: Playbook, raw_sources: dict[str, dict]):
         keep = getattr(self, "_agg_raw", None)
         if keep is None:
@@ -805,11 +828,11 @@ class Sweep:
 
     def close_stage(self) -> None:
         """Remove the disk stage (raw telemetry copies). Called by finalize and on every failure path."""
-        stage = getattr(self, "_stage", None)
-        if stage is not None:
-            stage.close()
-            self._stage = None
         continuity = getattr(self, "_windows_record_ids", None)
         if continuity is not None:
             continuity.close()
             self._windows_record_ids = None
+        stage = getattr(self, "_stage", None)
+        if stage is not None:
+            stage.close()
+            self._stage = None

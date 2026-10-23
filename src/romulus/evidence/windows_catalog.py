@@ -26,6 +26,15 @@ SECURITY = "Microsoft-Windows-Security-Auditing"
 SYSMON = "Microsoft-Windows-Sysmon"
 SYSMON_CHANNEL = "Microsoft-Windows-Sysmon/Operational"
 
+# Native events that invalidate a clean collection interval. Kept together so later coverage work can add
+# sources such as Sysmon service/configuration changes without duplicating sweep policy.
+COLLECTION_CHANGE_EVENTS = {
+    ("security", SECURITY.casefold(), 4719): "audit policy changed",
+    ("security", "microsoft-windows-eventlog", 1102): "security log cleared",
+    ("system", "microsoft-windows-eventlog", 104): "event log cleared",
+    ("system", "eventlog", 6006): "event log service stopped",
+}
+
 
 def _security(event_id: int, family: str, name: str) -> WindowsEventClass:
     return WindowsEventClass("Security", SECURITY, event_id, family, name)
@@ -86,7 +95,7 @@ EVENT_CLASSES = (
     _security(4702, "scheduled_task", "scheduled task updated"),
     # https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1102
     WindowsEventClass("Security", "Microsoft-Windows-Eventlog", 1102, "audit_config", "security log cleared"),
-    # https://learn.microsoft.com/answers/questions/2550635/event-viewer-application-error
+    # https://learn.microsoft.com/windows/security/operating-system-security/device-management/use-windows-event-forwarding-to-assist-in-intrusion-detection
     WindowsEventClass("System", "Microsoft-Windows-Eventlog", 104, "audit_config", "event log cleared"),
     # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4719
     _security(4719, "audit_config", "audit policy changed"),

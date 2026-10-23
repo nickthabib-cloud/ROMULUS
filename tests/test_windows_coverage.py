@@ -10,6 +10,7 @@ from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent
 from romulus.evidence.windows import RecordIdContinuity
 from romulus.evidence.windows_catalog import (
+    COLLECTION_CHANGE_EVENTS,
     EVENT_CLASSES,
     SECURITY,
     SYSMON,
@@ -17,6 +18,7 @@ from romulus.evidence.windows_catalog import (
     collection_requirements,
     lookup_event_class,
 )
+from romulus.hunt.stage import EventStage
 from romulus.hunt.sweep import Sweep
 from romulus.site import load_site_facts
 from romulus.sources.models import Completeness, SearchOutcome, Window
@@ -122,6 +124,27 @@ def test_record_id_continuity_spills_5000_host_channels_without_a_count_cap():
     assert continuity.state_count == 5_000
 
 
+def test_record_time_continuity_spills_under_stage_and_names_the_largest_gap(tmp_path):
+    stage = EventStage(tmp_path)
+    continuity = RecordIdContinuity(stage.directory)
+    records = []
+    for record_id, offset in ((10, 5), (11, 10), (12, 350), (13, 355)):
+        hit = _hit(record_id)
+        hit["_source"]["@timestamp"] = (START + timedelta(minutes=offset)).isoformat()
+        records.append(hit)
+
+    reasons = continuity.observe("target", records, liveness_tolerance=timedelta(minutes=15))
+
+    assert continuity.path.parent == stage.directory
+    assert continuity.state_count == 1
+    assert reasons == [
+        ("no records from ws01.example.test/Microsoft-Windows-Sysmon/Operational "
+         "between 2026-01-02T00:10:00+00:00 and 2026-01-02T05:50:00+00:00")
+    ]
+    continuity.close()
+    stage.close()
+
+
 def test_windows_coverage_gate_requires_inventory_continuity_and_matching_attestation(tmp_path):
     contract = _contract()
     rule = WindowsProcessRule()
@@ -185,6 +208,89 @@ def test_windows_partition_requires_channel_liveness_at_both_edges(tmp_path):
          "before 2026-01-02T05:55:00+00:00")
     ]
     assert live_reasons == []
+
+
+def test_mid_partition_collection_outage_cannot_be_a_complete_negative(tmp_path, monkeypatch):
+    from romulus.hunt import sweep as sweep_module
+    from tests.test_sweep import _repo
+
+    records = []
+    for record_id, offset in ((10, 5), (11, 10), (12, 350), (13, 355)):
+        hit = _hit(record_id)
+        hit["_source"]["@timestamp"] = (START + timedelta(minutes=offset)).isoformat()
+        records.append(hit)
+
+    monkeypatch.setattr(sweep_module, "execute", lambda _client, intent, _contract: SearchOutcome(
+        target=intent.target,
+        fingerprint="mid-outage",
+        started_at=START,
+        ended_at=START,
+        completeness=Completeness.complete,
+        total=len(records),
+        total_relation="eq",
+        returned=len(records),
+        records=records,
+    ))
+    contract = _contract()
+    event_class = lookup_event_class(SYSMON_CHANNEL, SYSMON, 1)
+    assert event_class is not None
+    window = Window(start=START, end=START + timedelta(hours=6))
+    repo = _repo()
+    sweep = Sweep(
+        repo, None, "h1", window, {contract.target: contract},
+        site_facts=_site(tmp_path), stage_dir=tmp_path,
+    )
+    sweep.pack = [WindowsProcessRule()]
+    sweep._windows_inventory[contract.target] = {event_class.token}
+    sweep._windows_inventory_reasons[contract.target] = []
+
+    sweep.run_partition(contract.target, contract, [], window, est=len(records))
+
+    cell = repo.rule_cells("h1")[0]
+    assert cell["state"] == "evaluated_partial"
+    assert cell["detail"]["reasons"] == [
+        ("no records from ws01.example.test/Microsoft-Windows-Sysmon/Operational "
+         "between 2026-01-02T00:10:00+00:00 and 2026-01-02T05:50:00+00:00")
+    ]
+    assert sweep._windows_record_ids.path.parent == sweep._event_stage().directory
+    sweep.close_stage()
+
+
+def test_in_window_audit_policy_changes_make_windows_cells_partial(tmp_path):
+    contract = _contract()
+    rule = WindowsProcessRule()
+    window = Window(start=START, end=START + timedelta(minutes=30))
+    sweep = Sweep(None, None, "h1", window, {contract.target: contract}, site_facts=_site(tmp_path))
+    event_class = lookup_event_class(SYSMON_CHANNEL, SYSMON, 1)
+    assert event_class is not None
+    sweep._windows_inventory[contract.target] = {event_class.token}
+    sweep._windows_inventory_reasons[contract.target] = []
+    records = [_hit(10), _hit(11)]
+    records[1]["_source"]["@timestamp"] = (START + timedelta(minutes=25)).isoformat()
+    for record_id, offset in ((20, 10), (21, 20)):
+        change = _hit(record_id, event_id=4719)
+        change["_source"]["@timestamp"] = (START + timedelta(minutes=offset)).isoformat()
+        change["_source"]["winlog"].update({
+            "channel": "Security",
+            "provider_name": SECURITY,
+        })
+        records.append(change)
+
+    reasons = sweep._windows_rule_reasons(contract.target, contract, rule, records, [], window)
+
+    assert reasons == [
+        ("collection changed on ws01.example.test: Security|Microsoft-Windows-Security-Auditing|4719 "
+         "(audit policy changed)")
+    ]
+
+
+def test_collection_change_events_are_centralized_for_future_catalog_growth():
+    assert COLLECTION_CHANGE_EVENTS == {
+        ("security", "microsoft-windows-security-auditing", 4719): "audit policy changed",
+        ("security", "microsoft-windows-eventlog", 1102): "security log cleared",
+        ("system", "microsoft-windows-eventlog", 104): "event log cleared",
+        ("system", "eventlog", 6006): "event log service stopped",
+    }
 
 
 def test_rule_without_declared_classes_requires_every_catalog_class_for_its_family(tmp_path):

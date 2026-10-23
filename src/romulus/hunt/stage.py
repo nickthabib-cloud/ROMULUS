@@ -46,15 +46,17 @@ class EventStage:
         if directory is not None:
             Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
         self._dir = tempfile.mkdtemp(prefix=PREFIX, dir=directory)
+        self.directory = Path(self._dir)
+        self.directory.chmod(0o700)
         self.path = Path(self._dir) / "stage.db"
         self.db: sqlite3.Connection | None = sqlite3.connect(self.path)
         self.db.execute("PRAGMA journal_mode=OFF")
         self.db.execute("PRAGMA synchronous=OFF")
         self.db.execute("CREATE TABLE event (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
         self.db.execute("CREATE TABLE raw (key TEXT PRIMARY KEY, body TEXT NOT NULL)")
-        # One bounded-width key per normalized Windows event. The row count is bounded by the hunt's retrieved
-        # Windows records; unlike aggregate staging this seam never serializes event bodies or raw telemetry.
-        # The bounded-state branch can place this table under its shared disk budget when W0 rebases onto it.
+        # One bounded-width key per normalized Windows event. The row count follows the hunt's retrieved Windows
+        # records; unlike aggregate staging this seam never serializes event bodies or raw telemetry. Keeping the
+        # table in the stage gives all transient sweep state the same private lifecycle and cleanup behavior.
         self.db.execute(
             f"CREATE TABLE windows_seen (id TEXT PRIMARY KEY CHECK(length(id) <= "
             f"{WINDOWS_STABLE_ID_MAX_CHARS})) WITHOUT ROWID"

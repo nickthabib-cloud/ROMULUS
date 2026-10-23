@@ -11,6 +11,7 @@ PRIVATE_REFERENCE = re.compile(
     r"|\b(?:CLAUDE|ENGINEERING[_ -]MASTER[_ -]PROMPT|STATUS|TEAM|MILESTONES)\.md\b"
     r"|\bm\d+[\\/][a-z][a-z0-9-]*\b"
     r"|\b(?:thin[-_ ]slice|windows[-_ ]w\d+)\b"
+    r"|\b(?:bounded[-_ ]state|site[-_ ]networks)(?:[-_ ](?:branch|slice))?\b"
     r"|\bwindows[-_ ]negatives[-_ ]under[-_ ]attestation\b"
     r")",
     re.IGNORECASE,
@@ -25,6 +26,8 @@ def test_private_reference_pattern_covers_paths_ids_design_notes_and_slice_names
         "docs/project/MILESTONES.md",
         "m1/thin-slice",
         "Windows W0",
+        "the bounded-state branch",
+        "the site-networks slice",
     )
 
     assert all(PRIVATE_REFERENCE.search(sample) for sample in samples)
