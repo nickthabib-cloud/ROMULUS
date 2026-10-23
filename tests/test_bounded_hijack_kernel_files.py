@@ -66,18 +66,22 @@ def test_root_exec_runs_spill_to_disk_and_finalize_matches_the_unbounded_result(
     assert "2 time(s)" in own.claim and small.limit_reasons() == []
 
 
-def test_root_exec_disk_budget_refuses_a_new_session_and_says_so(monkeypatch, tmp_path):
+def test_a_root_run_the_disk_budget_cannot_hold_is_judged_on_its_own_and_published(monkeypatch, tmp_path):
     first = [root_exec(ts=T0, ses=1), root_exec(path="/srv/other/a.sh", ts=T0, ses=1)]
     filler = [root_exec(path=f"/srv/other/f{i}.sh", ts=T0 + timedelta(seconds=i), ses=2) for i in range(20)]
     later = [root_exec(ts=T0 + timedelta(hours=1), ses=3)]
+    published = []
     pb, out = _staged_run(RootExecNonRootModifiableFile, [first, filler, later], tmp_path, hot=2,
-                          monkeypatch=monkeypatch, budgets={"runs": 1})
-    # which runs are refused depends on how many reached disk (the hot size); every refused run is not evaluated,
-    # and the run of the next hour, a new session, is refused
-    assert pb.capped >= 1 and pb.evaluated + pb.capped == len(first) + len(filler) + len(later)
-    assert any("disk budget" in reason for reason in pb.limit_reasons())
+                          monkeypatch=monkeypatch, budgets={"runs": 1}, published=published)
+    # a run is evident from its own record: which runs had no room depends on the hot size, but none is refused;
+    # each is published on its own, once per file, and coverage says the runs were not counted together
+    assert pb.capped == 0 and pb.evaluated == len(first) + len(filler) + len(later)
+    assert published and all(m.group_key.endswith("|unheld") for m in published)
+    assert len({m.group_key for m in published}) == len(published)
+    assert any("runs_alone" in name for name in pb.limits)
     [job] = [m for m in out if m.group_key == f"app01|33|{JOB}"]
     assert "executed /srv/tasks/rotate.sh as the #! script once" in job.claim      # its session-1 run is kept
+    assert any(m.group_key == f"app01|33|{JOB}|unheld" for m in published)       # its later run, on its own
 
 
 def _persistence_hunt():

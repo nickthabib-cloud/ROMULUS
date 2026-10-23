@@ -372,7 +372,7 @@ def _actor(e: TypedEvent) -> str:
 
 
 class _TamperRule(Playbook):
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     kind = "aggregate"
     claim_type = "aggregate_observation"
     assures_negative = False

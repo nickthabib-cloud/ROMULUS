@@ -26,15 +26,15 @@ from tests import throughput_fixture as tf
 GOLDEN_STACK = {
     "anchors": "5bfad42385ad92785c91d770613dff8e893f140c4f8d1606128b7ea0f170c120",
     "audit": "2fd12fa42a64f8c3bb7a8079c056f68e24d4c371b69644eaf02688e6c706ab6a",
-    "candidates": "20ce186d033f7990348a800b46bc5a3091f07d2f491bf0bdbfc94dc1b9f76a6f",
+    "candidates": "ada7ff1865ef0adcd151b3ce0ce5d727b2f912f611921c527c563c8209eebf08",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_entities": "af8053b6219447233c1329e280f0ca64054ceceeea79d5d84bfa12af8e067a23",
     "events": "7cb68efe39e15155efa9b2f8edc22e79b93fb3804ba23981e97fbde26c5b0664",
     "expansion": "5a12fe7c7f06127db41f5229bda524a0c9e21e101f8d87dc32d10e5589358770",
     "links": "204e7ff86b5e7785a6eba0ac4bc4ed4187a0095ddcf1dc7d9ce8a55d459a5ed5",
-    "manifest": "e8027a7ca6bbb7766ee2dedcbc2aa7f2f463f84d92f66dee9d5914322eee6874",
+    "manifest": "e45a2fa0ba8721aed135f5c7fd21fa700df092029fd118edd6e0e3bc23fa1998",
     "raw": "1b5eb4a23e51d23ba7b032ca69c4d879d2884ae338a137aca44d30580051c347",
-    "rule_cells": "e8032e37b0afe44f6a250fc798d39b6be764f4e928f4e252f8ac5b9082f5b1cd",
+    "rule_cells": "e4427778bfd7d66958534c2b1e8b5ad86fd32d7cc8b20f10bc6f169d4be45055",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "06e1c9c6b4e5134a66c7f122289b8a7537a0cfc704e9623f59be2c0bf03679db",
 }

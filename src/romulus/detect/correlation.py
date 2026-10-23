@@ -21,18 +21,20 @@ from functools import lru_cache
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.bounded import (
     HOT_COUNT,
-    ExecHistory,
     HeldExamples,
     KeyedStore,
     RecentIds,
     Spill,
     StateExhausted,
-    _budget_refuses,
+    register_store,
     scalar,
+    store_refuses,
 )
 from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
     INTERPRETERS,
     WEB_SERVICE_USERS,
+    ExecLineage,
+    ExecRecord,
     add_unheld,
     alone,
     boot_of,
@@ -160,48 +162,37 @@ def merge_unknown_boot(groups: dict[tuple, list], index: int) -> dict[tuple, lis
 
 
 class PidTable:
-    """Kernel-recorded exec history per (host, pid), for lineage questions about a socket's process. Holds
-    compact tuples `(exec_ts, exe, parent_pid, raw_id, boot)`; a pid's meaning at time t is its latest exec at or
-    before t (pids are reused). A lookup in a recorded boot never returns an exec recorded in a different boot: the
-    pid restarted at the reboot, and its exec in the new boot is not in the window. An exec or a lookup without a
-    recorded boot is boot-blind (see `boots_conflict`)."""
+    """Kernel-recorded exec history per (host, pid), for lineage questions about a socket's process: a view of an
+    ExecLineage (the hunt's one exec store in a sweep, see `share_lineage`) over the exec records that name their
+    executable, each read as `(exec_ts, exe, parent_pid, raw_id, boot)`; a pid's meaning at time t is its latest
+    exec at or before t (pids are reused). A lookup in a recorded boot never returns an exec recorded in a
+    different boot: the pid restarted at the reboot, and its exec in the new boot is not in the window. An exec or
+    a lookup without a recorded boot is boot-blind (see `boots_conflict`)."""
 
-    # A detector rule (`owner`) holds the CAPACITY most recently used processes in memory (about 250 bytes each, so
-    # 75 MB) and the rest in its on-disk spill, read back when a walk reaches them: every lookup is exact. Callers
-    # without an owner (an expansion fetch, a baseline period) hold everything they were given in memory.
+    # A detector rule (`owner`) holds its most recently used processes in memory and the rest in its on-disk
+    # spill, read back when a walk reaches them: every lookup is exact. Callers without an owner (an expansion
+    # fetch, a baseline period) hold everything they were given in memory.
     CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self, capacity: int | None = None, owner=None):
-        self.execs = ExecHistory(capacity if capacity is not None else _UNBOUNDED, _UNBOUNDED, owner, "pid_table")
+        self.execs = ExecLineage(owner, capacity if capacity is not None else _UNBOUNDED)
 
     def add(self, e: TypedEvent) -> None:
-        pid, exe = e.get("process.pid"), e.get("process.executable")
-        if not isinstance(pid, int) or not exe or e.host is None:
-            return
-        ppid = e.get("process.ppid")
-        self.execs.add((e.host, pid), (e.ts.timestamp(), str(exe), ppid if isinstance(ppid, int) else None,
-                                       e.raw[0].native_id if e.raw else "", boot_of(e)))
+        self.execs.observe(e)
 
     def trim(self) -> None:
         """Move the least recently used processes beyond the capacity to disk (when a batch ends)."""
         self.execs.trim()
 
-    def _entries(self, host: str, pid: int):
-        # read in place when the store does not bring a process back to memory (below the volume's reserve)
-        return self.execs.get((host, pid)) or self.execs.store.peek((host, pid), [])
-
     def _lookup(self, host: str, pid: int, ts: float, boot: str | None = None, *, strict: bool = False):
-        latest = None
-        for entry in self._entries(host, pid):     # one pid rarely has more than a few execs in a window
-            if entry[0] < ts or (entry[0] == ts and not strict):
-                latest = entry
-            else:
-                break
+        if host is None:
+            return None                         # a record without a host is never joined
+        latest = self.execs.latest(host, pid, ts, strict=strict, where=_named)
         # The latest exec of this pid before `ts` is in another boot: every earlier one is too (boots follow each
         # other in time), so this pid has no recorded exec in `boot` before `ts`.
-        if latest is not None and boots_conflict(boot, latest[4]):
+        if latest is None or boots_conflict(boot, latest.boot):
             return None
-        return latest
+        return latest.ts, latest.exe, latest.ppid, latest.raw_id, latest.boot
 
     def lookup(self, host: str, pid: int, ts: float, boot: str | None = None):
         """Latest exec identity for a PID at or before `ts` in `boot`; public for expansion lineage links."""
@@ -255,6 +246,10 @@ class PidTable:
         return "unknown", chain
 
 
+def _named(record: ExecRecord) -> bool:
+    return bool(record.exe)
+
+
 def lineage_lane(reason: str | None, lane: str, verdict: str, chain) -> tuple[str, list[str]]:
     """Lineage can only lower a lane. A web-service process whose ancestry provably reaches the service
     manager without a web server is a daemon of that account, not a request-driven child: lead. Unknown
@@ -270,7 +265,7 @@ class InterpreterExternalConnection(Playbook):
     """Positive-only: the audit rule set's scope (syscalls, families, ports) is not visible in telemetry,
     so a missing connect record never proves a connection did not happen. One item per (host, program,
     account, port), listing every destination, so routine update traffic is one lead, not one per address."""
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.interpreter_external_connection"
     version = "4"
     title = "Shell, interpreter, relay tool or web-service process made connect() calls to non-private addresses"
@@ -502,7 +497,7 @@ class ProcessNetworkLink(Playbook):
     address is not established for this host is linked but stated, and caps the lane at lead, as do
     multiple local addresses and records shared with another process."""
     id = "corr.process_network_link"
-    version = "3"
+    version = "4"
     title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
     staged = True
@@ -536,6 +531,14 @@ class ProcessNetworkLink(Playbook):
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
         self.heartbeat = lambda: None
+        self._rows_account = None
+        register_store(self, self)      # its rows are one store of the hunt's state budget
+
+    def account(self):
+        """The join rows' Account in the hunt's state budget."""
+        if self._rows_account is None:
+            self._rows_account = self.state_budget().account(f"{self.id}:rows")
+        return self._rows_account
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
@@ -543,7 +546,7 @@ class ProcessNetworkLink(Playbook):
 
     def _store(self) -> Spill:
         if self._spill is None:
-            spill = self._spill = Spill(self.spill_dir, self.state_budget(), self.state_slice)
+            spill = self._spill = Spill(self.spill_dir, self.state_budget())
             spill.table("sock", "id, host, ts, ip, port, exe, user, pid, outcome, reason, lane, grp, claimant")
             spill.table("net", 'id, family, observer, start, "end", src, sport, dst, dport, cid, sev, cat, sig, '
                                "seq INTEGER PRIMARY KEY")
@@ -559,12 +562,13 @@ class ProcessNetworkLink(Playbook):
         self.close_spill()
 
     def _room(self, rows: int) -> bool:
-        """Count the rows against the disk budget. Once it, or the rule's slice of the hunt's state budget, is spent
-        the record is refused (not evaluated) instead: every record here needs new rows."""
-        if _budget_refuses(self):
+        """Count the rows against the disk budget. Once it, or this store's share of the hunt's state budget (its
+        floor, once the shared headroom is spent), is spent the record is refused (not evaluated) instead: every
+        record here needs new rows."""
+        if store_refuses(self, self.account):
             self.evaluated -= 1
-            self.refuse("state_disk", "the hunt's state budget for this join is spent; later socket calls and network "
-                                      "records are not evaluated")
+            self.refuse("state_disk", "the join's rows took their share of the hunt's state budget; later socket calls "
+                                      "and network records are not evaluated")
             return False
         if self.spilled_bytes >= self.DISK_BUDGET:
             self.evaluated -= 1
@@ -572,6 +576,8 @@ class ProcessNetworkLink(Playbook):
                                 f"later socket calls and network records are not evaluated")
             return False
         self.spilled_bytes += rows * self.ROW_BYTES
+        if self.budget is not None:
+            self.budget.charge(self.account(), rows * self.ROW_BYTES)
         return True
 
     def _sock(self, e: TypedEvent) -> None:

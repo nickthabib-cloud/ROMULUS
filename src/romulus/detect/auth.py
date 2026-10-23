@@ -135,6 +135,7 @@ class _SshAttemptStream(Playbook):
         self._last_prune = float("-inf")
         self.probe_failures = 0     # failures inside connections that then succeeded (not counted)
         self._pending: list[TypedEvent] = []
+        self._alone: list[Match] = []   # findings published as they were judged (no room to hold them)
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
@@ -182,7 +183,8 @@ class _SshAttemptStream(Playbook):
             heapq.heappush(self._heap, (ts, e.id, e, conn))
             self._latest = max(self._latest, ts)
         self._drain(self._latest - SETTLE_SECONDS)
-        return []
+        out, self._alone = self._alone, []
+        return out
 
     @staticmethod
     def _without_duplicate_lookups(batch: list[TypedEvent]) -> list[TypedEvent]:
@@ -253,7 +255,8 @@ class _SshAttemptStream(Playbook):
 
     def finalize(self):
         self._drain(float("inf"))
-        return self._findings()
+        out, self._alone = self._alone, []
+        return out + self._findings()
 
     # subclass hooks
     def _attempt(self, a: _Attempt) -> None: ...
@@ -515,7 +518,7 @@ class _Followed:
 
 class SshSuccessAfterFailures(_SshAttemptStream):
     id = "host.ssh_success_after_failures"
-    version = "1"
+    version = "2"
     title = "Accepted sshd login after a burst of failed attempts"
     anchor_class = "remote_login"
     severity, lane = "high", "high"
@@ -589,12 +592,14 @@ class SshSuccessAfterFailures(_SshAttemptStream):
     def _record(self, key, success, failures, own):
         found = self.found.get(key)
         if found is None:
-            if not self.found.put(key, _Followed(success, [x.event for x in failures][-CITE:], len(failures),
-                                                 {x.account for x in failures if x.account},
-                                                 {x.ip for x in failures}, own,
-                                                 invalid=any(x.valid is False for x in failures))):
-                self.refuse("disk", "the found logins' disk budget is spent; a later login after failures is not "
-                                    "reported")
+            followed = _Followed(success, [x.event for x in failures][-CITE:], len(failures),
+                                 {x.account for x in failures if x.account}, {x.ip for x in failures}, own,
+                                 invalid=any(x.valid is False for x in failures))
+            if not self.found.put(key, followed):
+                # the failures are held and the login is read: judged now and published as it is, not refused
+                self.note_limit("found_alone", "the found logins' store took no new key; a later login after failures "
+                                               "is published as it is judged, without later logins of the same key")
+                add_unheld(self._alone, alone(self._match(key, followed), self, success))
             return
         found.repeats += 1
         if len(found.later) < self.LATER:
@@ -605,45 +610,44 @@ class SshSuccessAfterFailures(_SshAttemptStream):
         _prune_windows(self.by_account, now, self.WINDOW)
 
     def _findings(self):
-        out = []
-        for key in sorted(self.found.keys(), key=str):
-            variant, host, ip, account = key
-            f = self.found.peek(key)
-            s = f.success
-            method = s.get("auth.method") or "unrecorded-method"
-            when = s.ts.isoformat()
-            if variant == "source":
-                claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when} "
-                         f"after {f.count} failed attempt(s) from {ip} in the preceding {self.WINDOW / 60:.0f} "
-                         f"minutes (threshold {self.SOURCE_MIN}; accounts tried: {_names(f.accounts)}). The "
-                         "failures and the login share the source address; whether one actor made both is not "
-                         "established by the records.")
-                lane, confidence = "high", "high"
-                spraying = len(f.accounts) >= self.SPRAY_NAMES or f.invalid
-                if account not in f.accounts and not spraying:
-                    # e.g. a bastion's automation failing for one account while a person logs in as another
-                    claim += (f" None of the failures named '{account}', and they show neither several names nor "
-                              "invalid users, so they need not belong to this login.")
-                    lane, confidence = "lead", "medium"
-            else:
-                claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when}; in "
-                         f"the preceding {self.WINDOW / 60:.0f} minutes sshd recorded {f.count} failed attempt(s) "
-                         f"against '{account}' from {len(f.sources)} other source address(es) ({_names(f.sources)}; "
-                         f"threshold {self.ACCOUNT_MIN}), and {f.own} from {ip} itself. The login's source differs "
-                         "from the failing sources, so the records do not link them.")
+        return [self._match(key, self.found.peek(key)) for key in sorted(self.found.keys(), key=str)]
+
+    def _match(self, key, f: _Followed) -> Match:
+        variant, host, ip, account = key
+        s = f.success
+        method = s.get("auth.method") or "unrecorded-method"
+        when = s.ts.isoformat()
+        if variant == "source":
+            claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when} "
+                     f"after {f.count} failed attempt(s) from {ip} in the preceding {self.WINDOW / 60:.0f} "
+                     f"minutes (threshold {self.SOURCE_MIN}; accounts tried: {_names(f.accounts)}). The "
+                     "failures and the login share the source address; whether one actor made both is not "
+                     "established by the records.")
+            lane, confidence = "high", "high"
+            spraying = len(f.accounts) >= self.SPRAY_NAMES or f.invalid
+            if account not in f.accounts and not spraying:
+                # e.g. a bastion's automation failing for one account while a person logs in as another
+                claim += (f" None of the failures named '{account}', and they show neither several names nor "
+                          "invalid users, so they need not belong to this login.")
                 lane, confidence = "lead", "medium"
-            if f.repeats > 1:
-                claim += (f" Logins of this account from this source followed such failures {f.repeats} time(s); "
-                          f"the first and up to {self.LATER} later ones are cited.")
-            claim += " Failures inside connections that then logged in are not counted."
-            events = sorted(_unique([*f.failures, s, *f.later]), key=lambda e: (e.ts, e.id))
-            predicate = [pf(s, n) for n in ("auth.phase", "user.name", "source.ip", "source.port") if s.has(n)]
-            predicate += _ssh_predicate(f.failures[-2:])
-            m = Match(self.id, claim, "correlated_observation", events, predicate, s.ts, self.severity, lane,
-                      confidence, s.entities(), group_key=f"{variant}|{host}|{ip}|{account}")
-            m.notes.append("T1110.001" if len(f.accounts) <= 1 else "T1110.003")
-            out.append(m)
-        return out
+        else:
+            claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when}; in "
+                     f"the preceding {self.WINDOW / 60:.0f} minutes sshd recorded {f.count} failed attempt(s) "
+                     f"against '{account}' from {len(f.sources)} other source address(es) ({_names(f.sources)}; "
+                     f"threshold {self.ACCOUNT_MIN}), and {f.own} from {ip} itself. The login's source differs "
+                     "from the failing sources, so the records do not link them.")
+            lane, confidence = "lead", "medium"
+        if f.repeats > 1:
+            claim += (f" Logins of this account from this source followed such failures {f.repeats} time(s); "
+                      f"the first and up to {self.LATER} later ones are cited.")
+        claim += " Failures inside connections that then logged in are not counted."
+        events = sorted(_unique([*f.failures, s, *f.later]), key=lambda e: (e.ts, e.id))
+        predicate = [pf(s, n) for n in ("auth.phase", "user.name", "source.ip", "source.port") if s.has(n)]
+        predicate += _ssh_predicate(f.failures[-2:])
+        m = Match(self.id, claim, "correlated_observation", events, predicate, s.ts, self.severity, lane,
+                  confidence, s.entities(), group_key=f"{variant}|{host}|{ip}|{account}")
+        m.notes.append("T1110.001" if len(f.accounts) <= 1 else "T1110.003")
+        return m
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1040,7 +1044,7 @@ def _record_text(e: TypedEvent) -> str:
 
 
 class AccountOrGroupChange(Playbook):
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.account_or_group_change"
     version = "4"
     title = "Account or group created, deleted or modified (command or account-management audit record)"

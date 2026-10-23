@@ -46,9 +46,18 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, pf
-from romulus.detect.bounded import HOT_COUNT, ExecHistory, KeyedStore, RecentIds
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict
-from romulus.detect.host import _FLAG_ONLY, SCRIPT_FILE_INTERPRETERS, WEB_SERVICE_USERS
+from romulus.detect.host import (
+    _FLAG_ONLY,
+    DAEMON,
+    SCRIPT_FILE_INTERPRETERS,
+    WEB_SERVICE_USERS,
+    ExecLineage,
+    ExecRecord,
+    add_unheld,
+    alone,
+)
 from romulus.detect.linux_argv import canonical, is_under, normalize_path, program, write_targets
 from romulus.evidence.shellparse import (
     SHELLS,
@@ -125,6 +134,10 @@ def schedule_config(path: str) -> tuple[str, str] | None:
 def _uid(event: TypedEvent) -> str | None:
     uid = event.get("process.uid")
     return None if uid is None else str(uid)
+
+
+def _daemon(record: ExecRecord) -> bool:
+    return bool(record.flags & DAEMON)
 
 
 def _auid(event: TypedEvent) -> str | None:
@@ -270,7 +283,7 @@ def _written(state: _File) -> bool:
 
 
 class NonRootWriteRootExecutedFile(Playbook):
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.nonroot_write_root_executed_file"
     version = "7"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
@@ -334,14 +347,16 @@ class NonRootWriteRootExecutedFile(Playbook):
         self._seen = RecentIds()        # bounded re-read guard
         self._staged = RecentIds()      # bounded re-stage guard
         self._pending: list[TypedEvent] = []
+        self._alone: list[Match] = []   # schedule writes published as they were read (no room to hold their file)
         self.load = lambda ids: []
         # (host, file) -> _File; only files with a non-root write can be reported
         self.files = KeyedStore(self, "hijack_files", self.HOT, candidate=_written)
         # (host, audit session id) and (host, pid) -> entries whose last element is the record's boot id
         self.sessions = KeyedStore(self, "hijack_sessions", self.HOT)
         self.session_pids = KeyedStore(self, "hijack_session_pids", self.HOT)
-        # root execs outside any login, per (host, pid): the most recent in memory, the rest on disk
-        self.daemons = ExecHistory(self.DAEMON_CAPACITY, 2**62, self, "hijack_daemons")
+        # exec records per (host, pid), read for root execs outside any login (`DAEMON`): the hunt's one exec store
+        # in a sweep (`share_lineage`), the most recent in memory, the rest on disk
+        self.daemons = ExecLineage(self, self.DAEMON_CAPACITY)
         self.file_change_records = 0
 
     # ---------------------------------------------------------------- staging
@@ -371,14 +386,39 @@ class NonRootWriteRootExecutedFile(Playbook):
         for store in (self.files, self.sessions, self.session_pids):
             store.trim()
         self.daemons.trim()
-        return []
+        out, self._alone = self._alone, []
+        return out
 
-    def _file(self, key: tuple) -> _File | None:
-        """The file's state, created when new; None (the record refused) when the disk budget is spent."""
+    def _file(self, key: tuple, alone: bool = False) -> _File | None:
+        """The file's state, created when new; None when the disk budget is spent: the record is refused, unless it
+        is judged `alone` (the caller publishes it on its own)."""
         state = self.files.setdefault(key, _File)
-        if state is None:
+        if state is None and not alone:
             self.refuse("disk", "the per-file state's disk budget is spent; a record of a new file is not evaluated")
         return state
+
+    @staticmethod
+    def _schedule_write(pkey: str, items: list[tuple[str, str, bool]]) -> bool:
+        """A write to root's schedule or service configuration, by a path that is not assumed: a finding by itself."""
+        return schedule_config(pkey) is not None and any(not assumed for _path, _form, assumed in items)
+
+    def _write_alone(self, event: TypedEvent, pkey: str, items, account: str, own_session) -> None:
+        """A write to root's schedule whose file has no room in the per-file store: judged now, as a write of one
+        record (no run is needed to report it), and published on its own once per file."""
+        self.note_limit("writes_alone", "the per-file state took no new file; a later write to root's schedule is "
+                                        "published as it is read, not grouped with the file's other writes and runs")
+        forms = list(dict.fromkeys(form for _path, form, _assumed in items))
+        write = _Write(event.ts.timestamp(), event.id, items[0][0], " and ".join(forms), account, _uid(event),
+                       own_session, event.get("process.user") in WEB_SERVICE_USERS, False)
+        state = _File()
+        state.counts[account] = [1, int(event.outcome != Outcome.failure)]
+        load, self.load = self.load, lambda ids: [event] if event.id in ids else []
+        try:
+            m = self._finding(event.host or "", pkey, account, [write], state=state)
+        finally:
+            self.load = load
+        if m is not None:
+            add_unheld(self._alone, alone(m, self, event))
 
     def _auth(self, event: TypedEvent) -> None:
         service = event.get("auth.service")
@@ -442,6 +482,7 @@ class NonRootWriteRootExecutedFile(Playbook):
             series.count_after(state.kernel_writes[-1])
 
     def _exec(self, event: TypedEvent) -> None:
+        self.daemons.observe(event)             # held once, for every rule reading process ancestry
         argv = event.get("process.argv")
         if not event.get("process.executable") or not isinstance(argv, list) or not argv:
             self.missing_required += 1
@@ -456,9 +497,6 @@ class NonRootWriteRootExecutedFile(Playbook):
         if incomplete:
             self.missing_required += 1          # some arguments were lost: never a clean evaluation
         if root:
-            if _auid(event) is None and isinstance(event.get("process.pid"), int):
-                self.daemons.add((event.host, event.get("process.pid")),
-                                 (event.ts.timestamp(), event.get("process.ppid"), boot_of(event)))
             self._root_run(event, prog)
         elif str(event.get("process.euid", "")) != "0" and not incomplete:
             # a setuid-root program writes as root; a write target is often the last operand, which an incomplete
@@ -490,9 +528,12 @@ class NonRootWriteRootExecutedFile(Playbook):
         refused = False
         for pkey, items in by_key.items():
             key = (event.host or "", pkey)
-            state = self._file(key)
+            state = self._file(key, alone=self._schedule_write(pkey, items))
             if state is None:
-                refused = True
+                if self._schedule_write(pkey, items):
+                    self._write_alone(event, pkey, items, account, own_session)
+                else:
+                    refused = True
                 continue
             counts = state.counts.setdefault(account, [0, 0])
             counts[0] += 1
@@ -685,12 +726,11 @@ class NonRootWriteRootExecutedFile(Playbook):
                 return True
             if not isinstance(ppid, int) or ppid <= 1:
                 return False
-            parent = self._latest(self.daemons.get((event.host, ppid), touch=True)
-                                  or self.daemons.store.peek((event.host, ppid), []), ts, boot)
-            if parent is None:
+            parent = self.daemons.latest(event.host, ppid, ts, where=_daemon)
+            if parent is None or boots_conflict(boot, parent.boot):
                 return False
-            ts, ppid, parent_boot = parent
-            boot = boot if boot is not None else parent_boot
+            ts, ppid = parent.ts, parent.ppid
+            boot = boot if boot is not None else parent.boot
         return False
 
     # ---------------------------------------------------------------- finalize

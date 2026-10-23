@@ -16,7 +16,6 @@ from typing import ClassVar
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import (
     HOT_COUNT,
-    ExecHistory,
     HeldExamples,
     KeyedStore,
     RecentIds,
@@ -25,7 +24,7 @@ from romulus.detect.bounded import (
 )
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
-from romulus.detect.host import WEB_SERVICE_USERS, add_unheld, alone, need
+from romulus.detect.host import WEB_SERVICE_USERS, ExecLineage, ExecRecord, add_unheld, alone, need
 from romulus.evidence.typed import Outcome, TypedEvent
 
 CITE = 10                       # records cited per finding; claims give exact totals
@@ -151,7 +150,7 @@ class _RunTally:
 
 
 class RootExecNonRootModifiableFile(Playbook):
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.root_exec_nonroot_modifiable_file"
     version = "2"
     title = "Root executed a file that a non-root account owns or can write"
@@ -214,6 +213,7 @@ class RootExecNonRootModifiableFile(Playbook):
         self.owner_sessions = KeyedStore(self, "rx_owner_sessions", self.HOT)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
+        self._alone: list[Match] = []   # runs published as they were read (no room to hold them)
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
@@ -234,7 +234,8 @@ class RootExecNonRootModifiableFile(Playbook):
                             key=lambda e: (e.ts, e.id)):
             self._seen.add(event.id)
             self._exec(event)
-        return []
+        out, self._alone = self._alone, []
+        return out
 
     def _exec(self, event: TypedEvent) -> None:
         uid, euid = _str(event.get("process.uid")), _str(event.get("process.euid"))
@@ -268,10 +269,8 @@ class RootExecNonRootModifiableFile(Playbook):
             runs = None if entry is None else self.runs.setdefault((*key, tag),
                                                                    lambda: _Runs(first=event.ts.timestamp()))
             if runs is None:
-                self.evaluated -= 1
-                self.refuse("disk", "the root runs' disk budget is spent; a run of a new file or session is not "
-                                    "evaluated")
-                return
+                self._run_alone(event, key, entry or candidate, tag)
+                continue
             runs.auid = _str(event.get("process.auid"))
             runs.count += 1
             runs.failed += event.outcome == Outcome.failure
@@ -282,6 +281,25 @@ class RootExecNonRootModifiableFile(Playbook):
                 self._fresh.append(runs.cited)
             if event.id in runs.cited.ids():               # only a cited record's predicate is ever stated
                 runs.prefixes.setdefault(event.id, set()).add(candidate.prefix)
+
+    def _run_alone(self, event: TypedEvent, key: tuple, f: _ModifiableFile, tag) -> None:
+        """A root run the budget has no room to hold: the record shows by itself that root ran a file a non-root
+        account can change, so it is judged now (own session or not, from the sessions held) and published on its
+        own, once per file and session kind, instead of refused."""
+        self.note_limit("runs_alone", "the root runs' store took no new key; a later run of a new file or session is "
+                                      "published as it is read, not counted with the file's other runs")
+        ts = event.ts.timestamp()
+        runs = _Runs(count=1, failed=int(event.outcome == Outcome.failure), first=ts, last=ts,
+                     auid=_str(event.get("process.auid")))
+        runs.cited.offer(event)
+        runs.prefixes[event.id] = {f.prefix}
+        tally = _RunTally()
+        tally.add(runs)
+        if self._own(key[0], f, tag, runs.auid):
+            m = self._own_finding(key[0], f.owner, [(f, tally)])
+        else:
+            m = self._finding(key, f, tally)
+        add_unheld(self._alone, alone(m, self, event))
 
     def _modifiable(self, event: TypedEvent, prefix: str, role: str | None) -> _ModifiableFile | None:
         owner = _str(event.get(f"{prefix}.owner.id"))
@@ -565,7 +583,7 @@ class _Change:
 
 
 class PersistencePathChange(Playbook):
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.persistence_path_change"
     version = "4"
     title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"
@@ -635,8 +653,9 @@ class PersistencePathChange(Playbook):
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
         self.changes = SpillList(self, "persistence_changes", self.HOT)
-        # (time, parent pid, executable, boot) per (host, pid): the most recent in memory, the rest on disk
-        self.execs = ExecHistory(self.EXEC_CAPACITY, 2**62, self, "persistence_execs")
+        # exec records per (host, pid), read for the writer's lineage: the hunt's one exec store in a sweep
+        # (`share_lineage`), the most recent in memory, the rest on disk
+        self.execs = ExecLineage(self, self.EXEC_CAPACITY)
         self._alone: list[Match] = []   # changes published on their own (the budget refused holding them)
 
     def drain_staged(self) -> list[TypedEvent]:
@@ -662,11 +681,8 @@ class PersistencePathChange(Playbook):
         return out
 
     def _exec(self, event: TypedEvent) -> None:
-        """Process lineage only: (time, parent pid, kernel-recorded executable, boot id) per process id."""
-        pid, exe = event.get("process.pid"), event.get("process.executable")
-        if isinstance(pid, int) and exe:
-            self.execs.add((event.host or "", pid), (event.ts.timestamp(), event.get("process.ppid"), str(exe),
-                                                     boot_of(event)))
+        """Process lineage only: the exec record is held (once) in the exec store."""
+        self.execs.observe(event)
 
     def _change(self, event: TypedEvent) -> None:
         path, uid = event.get("file.path"), _str(event.get("process.uid"))
@@ -722,13 +738,20 @@ class PersistencePathChange(Playbook):
                 return name
             if not isinstance(ppid, int) or ppid <= 1:
                 return None
-            parent = _latest(self.execs.get((change.host, ppid), touch=True)
-                             or self.execs.store.peek((change.host, ppid), []), ts, boot)
-            if parent is None:
+            parent = self._parent(change.host, ppid, ts)
+            if parent is None or boots_conflict(boot, parent.boot):
                 return None
-            ts, ppid, exe, parent_boot = parent
+            ts, ppid, exe, parent_boot = parent.ts, parent.ppid, parent.exe, parent.boot
             boot = boot if boot is not None else parent_boot
         return None
+
+    def _parent(self, host: str, ppid: int, ts: float) -> ExecRecord | None:
+        """The latest exec naming its executable of `ppid` at or before `ts`. A change records its host as ""
+        when the record had none; that host's execs are held under None."""
+        found = self.execs.latest(host, ppid, ts, where=_named)
+        if found is None and host == "":
+            found = self.execs.latest(None, ppid, ts, where=_named)
+        return found
 
     def _events(self, ids: list[str]) -> dict[str, TypedEvent]:
         unique = sorted(set(ids))
@@ -913,14 +936,8 @@ class PersistencePathChange(Playbook):
         return match
 
 
-def _latest(entries, ts: float, boot: str | None = None):
-    """The latest entry at or before `ts`, unless it is in a boot other than `boot` (its last element): a pid
-    restarts at a reboot, so an earlier entry is in that other boot or an earlier one."""
-    best = None
-    for entry in entries:
-        if entry[0] <= ts and (best is None or entry[0] >= best[0]):
-            best = entry
-    return None if best is not None and boots_conflict(boot, best[-1]) else best
+def _named(record: ExecRecord) -> bool:
+    return bool(record.exe)
 
 
 def _root_session(items: list[_Change]) -> str:

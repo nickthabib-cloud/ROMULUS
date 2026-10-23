@@ -6,14 +6,14 @@ import ipaddress
 import itertools
 import posixpath
 import re
-from bisect import insort
+from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds, SpillList, StateExhausted
-from romulus.detect.linux_argv import canonical, read_operand_paths
+from romulus.detect.linux_argv import canonical, program, read_operand_paths
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
@@ -214,9 +214,13 @@ def alone(match: Match, rule: Playbook, record: TypedEvent) -> Match | None:
     """A strong match published from consume because the rule's state budget refused the state that would group it.
     It is identified per group (`<group key>|unheld`; a match without a group key is its own record's), so the first
     record of a group read after the budget was spent publishes it and later ones of the same group add nothing
-    (None here while the rule still remembers the group; the candidate store drops a later repeat in any case). It
-    cites only records of the batch being read (the sweep holds their raw copies now); a related record read earlier
-    is named in the claim but not cited."""
+    (None here while the rule still remembers the group; the candidate store drops a later repeat in any case).
+
+    It cites every record it states. A record of the batch being read is cited from the partition's raw copies; an
+    earlier record is cited from the event stage, where a staged rule put it when it held it (each strong rule stages
+    every record it holds as it reads it). Only when the stage could not take this rule's citations (`stage` limit)
+    is an earlier record dropped: its predicates go with it, and the claim says in its own text that it is not
+    cited."""
     key = f"{match.group_key or f'record:{record.id}'}|unheld"
     seen = rule.__dict__.get("_unheld")
     if seen is None:
@@ -224,18 +228,28 @@ def alone(match: Match, rule: Playbook, record: TypedEvent) -> Match | None:
     if key in seen:
         return None
     seen.add(key)
-    batch = getattr(rule, "_batch", None) or [record]
-    cache = getattr(rule, "_batch_ids", None)
-    if cache is None or cache[0] is not batch:
-        cache = rule._batch_ids = (batch, {e.id for e in batch})
-    kept = [e for e in match.events if e.id in cache[1]] or [record]
-    if len(kept) < len(match.events):
-        match.notes.append(f"{len(match.events) - len(kept)} related record(s) read in an earlier partition are named "
-                           f"in the claim but not cited")
-    match.events = kept
+    if not rule.staged or "stage" in rule.limits:
+        batch = getattr(rule, "_batch", None) or [record]
+        cache = getattr(rule, "_batch_ids", None)
+        if cache is None or cache[0] is not batch:
+            cache = rule._batch_ids = (batch, {e.id for e in batch})
+        kept = [e for e in match.events if e.id in cache[1]] or [record]
+        dropped = [e for e in match.events if e not in kept]
+        if dropped:
+            match.predicate = [p for p in match.predicate
+                               if not any(_stated_by(p, e) for e in dropped) or any(_stated_by(p, e) for e in kept)]
+            match.claim += (f" {len(dropped)} related record(s) named here were read in an earlier partition and "
+                            f"are (not cited): the event stage could not hold their citation.")
+            match.events = kept
     match.group_key = key
     match.notes.append(ALONE_NOTE)
     return match
+
+
+def _stated_by(predicate, event: TypedEvent) -> bool:
+    """Whether a predicate field is this record's own field value."""
+    held = event.fields.get(predicate.field)
+    return held is not None and held.origin == predicate.origin and held.value == predicate.value
 
 
 def add_unheld(out: list, match: Match | None) -> None:
@@ -324,7 +338,7 @@ def interpreter_indicators(argv: list[str]) -> list[str]:
 class WebServiceSpawnsInterpreter(Playbook):
     """Stack-counted: routine shapes collapse into one context item; rare shapes become leads and
     are escalated only when typed argv indicators are present (rarity alone is not suspicion)."""
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.web_service_spawns_interpreter"
     argv_prefix_safe = True
     anchor_class = "web_shell"
@@ -483,7 +497,7 @@ class WebServiceSpawnsInterpreter(Playbook):
 class DownloaderFeedsInterpreter(Playbook):
     """Sequence: a downloader exec and a stdin-reading interpreter exec with the same parent on the
     same host within MAX_GAP seconds (the shape of `curl URL | sh` typed into a shell or a script)."""
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.downloader_feeds_interpreter"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
@@ -800,7 +814,7 @@ class FirewallRuleChange(Playbook):
     """Direct findings for commands that block or unblock a specific address on a built-in chain, leads for
     commands that weaken the firewall (disable, flush, accept-by-default, open a port, remove a block); other
     rule-change commands are grouped per host as context."""
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.firewall_rule_change_command"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
@@ -1097,7 +1111,7 @@ class AuthorizedKeysWrite(Playbook):
 
 
 class SshLoginFromExternal(Playbook):
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.ssh_login_external_source"
     anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
@@ -1231,7 +1245,7 @@ def unbacked_executable(exe: str) -> tuple[str, str] | None:
 class UnbackedExecutable(Playbook):
     """A process whose kernel-recorded executable is memory-backed, deleted or in an in-memory runtime directory,
     seen on any audit record that carries the executable (exec, socket or file-change calls)."""
-    state_slice = "strong"           # a protected slice of the hunt's disk budget
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.unbacked_or_deleted_executable"
     version = "2"
     title = "Process running from a memory-backed, deleted or in-memory-directory executable"
@@ -1407,28 +1421,152 @@ class Lineage(NamedTuple):
     depth: int             # 0: the record itself; 1: its parent; ...
 
 
-class ProcessLineage:
-    """Exec-record ancestry on each host. Every process_exec record with a pid is remembered (its latest PER_PID per
-    pid); a record's parent is the latest exec of its parent pid that began no later than it did. The CAPACITY most
-    recently used processes are held in memory and the rest on the owning rule's disk spill, read back when a walk
-    reaches them, so nothing is forgotten. The walk is only as complete as the retrieved exec records: a parent that
-    did not exec inside the window (a daemon started earlier) ends the chain. Lineage can therefore raise or explain
-    a lane, but its absence proves nothing.
+class ExecRecord(NamedTuple):
+    """One process_exec record as every lineage view needs it, held once per exec. `name` and `marker` are what
+    `ProcessLineage.entry` derives; `flags` carries the derived facts a view filters on (DAEMON)."""
+    ts: float
+    event_id: str
+    ppid: int | None
+    exe: str                # the kernel-recorded executable ("" when not recorded)
+    name: str
+    user: str | None
+    marker: str
+    raw_id: str             # the first raw record's native id
+    boot: str | None
+    flags: int
 
-    In a sweep one lineage is shared by every rule that keeps one (`share_lineage`): the first rule to read a batch
-    observes each exec record, the others find it observed already."""
-    DEPTH = 16
-    CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
-    PER_PID = 4
 
-    def __init__(self, owner=None, members: list | None = None):
-        self.records = KeyedStore(owner, "process_lineage", self.CAPACITY)
+# A real-uid-0 exec outside any login session (no audit login uid), with its executable and argv recorded and a
+# program identity: the records the root-job rule's service-lineage walk may step through.
+DAEMON = 1
+
+
+def _record_order(record: ExecRecord) -> tuple[float, str]:
+    return record.ts, record.event_id
+
+
+def _record_ts(record: ExecRecord) -> float:
+    return record.ts
+
+
+def _daemon(event: TypedEvent) -> bool:
+    argv = event.get("process.argv")
+    if not event.get("process.executable") or not isinstance(argv, list) or not argv:
+        return False
+    uid = event.get("process.uid")
+    if uid is not None:
+        root = str(uid) == "0"
+    else:
+        user = event.get("process.user")
+        root = bool(user) and user == "root"
+    return root and event.get("process.auid") is None and program(event) is not None
+
+
+class ExecLineage:
+    """Every process_exec record with a pid, held once for every rule that needs process ancestry, per (host, pid)
+    in time order (pids are reused; a pid's history is unbounded and waits on disk when cold, so a lookup is exact
+    however old the process). The key keeps the host as recorded, and each record keeps its boot id instead of
+    the boot being part of the key: a record without a recorded boot id stays joinable from either side
+    (`boots_conflict`), which a (host, boot, pid) key could not express.
+
+    In a sweep one ExecLineage is shared by every rule that needs ancestry (`share_lineage`): its rows live on the
+    first such rule's spill, each record is observed once (the first rule to read a batch observes it, the others
+    find it observed), and a disk refusal is noted on every rule that shares it. A rule constructed alone (tests,
+    expansion and baseline callers of PidTable) keeps its own. Each rule reads its own view of the records."""
+
+    def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None):
+        self.store = KeyedStore(owner, "exec_lineage", capacity)
         self.members = members if members is not None else [owner] if owner is not None else []
-        self._observed = RecentIds()            # exec records already observed (by any rule sharing this lineage)
+        self._observed = RecentIds()            # exec records already observed (by any rule sharing this store)
+        # processes whose exec record the state budget refused to hold (recent ones): a rule may still judge a join
+        # whose other side it holds, saying the lineage was not recorded
+        self.refused = RecentIds()
+
+    @property
+    def records(self) -> KeyedStore:
+        return self.store
+
+    def __len__(self) -> int:
+        return len(self.store)
+
+    @property
+    def evicted(self) -> int:
+        """Processes whose records are on disk now (read back when needed; never forgotten)."""
+        return self.store.on_disk
 
     def trim(self) -> None:
-        """Move the least recently used processes beyond CAPACITY to disk (when a batch ends)."""
-        self.records.trim()
+        self.store.trim()
+
+    def clear(self) -> None:
+        self.store.clear()
+
+    @staticmethod
+    def record(event: TypedEvent) -> ExecRecord:
+        ancestor = ProcessLineage.entry(event)
+        exe = event.get("process.executable")
+        return ExecRecord(ancestor.ts, event.id, ancestor.ppid, str(exe) if exe else "", ancestor.name,
+                          ancestor.user, ancestor.marker, event.raw[0].native_id if event.raw else "",
+                          ancestor.boot, DAEMON if _daemon(event) else 0)
+
+    def observe(self, event: TypedEvent) -> None:
+        """Hold an exec record (once, however many rules hand it over)."""
+        pid = event.get("process.pid")
+        seen = (event.id, event.ts)             # a record handed over again (by another rule or a re-read batch)
+        if not isinstance(pid, int) or seen in self._observed:
+            return
+        self._observed.add(seen)
+        key = (event.host, pid)
+        entries = self.store.get(key)
+        if entries is None:
+            if not self.store.put(key, [self.record(event)]):
+                self.refused.add(key)
+                for member in self.members:
+                    member.note_limit("lineage", "the exec store took no new process (its share of the state budget "
+                                                 "is spent); a later process's lineage is not recorded")
+            return
+        insort(entries, self.record(event), key=_record_order)       # in place: the store holds this list
+
+    def entries(self, host: str | None, pid: int) -> list[ExecRecord]:
+        """The process's records in time order; read in place when the store does not bring a process back to
+        memory (below the stage volume's reserve)."""
+        found = self.store.get((host, pid))
+        return found if found is not None else self.store.peek((host, pid), None) or []
+
+    def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False,
+               where=None) -> ExecRecord | None:
+        """The latest record of `pid` at or before `ts` (strictly before with `strict`) that `where` accepts; among
+        records of the same time, the last in (time, event id) order."""
+        entries = self.entries(host, pid)
+        index = (bisect_left if strict else bisect_right)(entries, ts, key=_record_ts)
+        for position in range(index - 1, -1, -1):
+            if where is None or where(entries[position]):
+                return entries[position]
+        return None
+
+
+class ProcessLineage:
+    """Exec-record ancestry on each host: a record's parent is the latest exec of its parent pid that began no
+    later than it did. The records are an ExecLineage (every exec held once, its history unbounded per pid, cold
+    processes on disk and read back when a walk reaches them, so nothing is forgotten). The walk is only as
+    complete as the retrieved exec records: a parent that did not exec inside the window (a daemon started
+    earlier) ends the chain. Lineage can therefore raise or explain a lane, but its absence proves nothing.
+
+    In a sweep one ProcessLineage is shared by every rule that keeps one, over the hunt's one ExecLineage
+    (`share_lineage`)."""
+    DEPTH = 16
+    CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+
+    def __init__(self, owner=None, members: list | None = None):
+        self.execs = ExecLineage(owner, self.CAPACITY)
+        self.members = members if members is not None else [owner] if owner is not None else []
+
+    @property
+    def records(self) -> KeyedStore:
+        return self.execs.store
+
+    def trim(self) -> None:
+        """Move the least recently used processes to disk (when a batch ends)."""
+        self.execs.trim()
 
     @staticmethod
     def entry(event: TypedEvent) -> Ancestor:
@@ -1451,36 +1589,18 @@ class ProcessLineage:
                         event.get("process.user"), marker, event.id, boot_of(event))
 
     def observe(self, event: TypedEvent) -> None:
-        pid = event.get("process.pid")
-        if event.family != "process_exec" or not isinstance(pid, int):
-            return
-        if event.id in self._observed:
-            return
-        self._observed.add(event.id)
-        key = (event.host, pid)
-        entries = self.records.get(key)
-        if entries is None:
-            if not self.records.put(key, [self.entry(event)]):
-                for member in self.members:
-                    member.note_limit("lineage", "exec records on disk reached the disk budget; a later process's "
-                                                 "lineage is not recorded")
-            return
-        insort(entries, self.entry(event), key=_ancestor_order)      # in place: the store holds this list
-        if len(entries) > self.PER_PID:
-            del entries[0]
+        if event.family == "process_exec":
+            self.execs.observe(event)
 
     def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None) -> Ancestor | None:
         """The latest exec of `ppid` no later than `ts`, unless it was recorded in a boot other than `boot`: the
         pid restarted at the reboot, and every earlier exec of it is in that boot or an earlier one."""
         if ppid is None or ppid <= 1:
             return None
-        best = None
-        # below the stage volume's reserve a process on disk is not brought back to memory: it is read in place
-        entries = self.records.get((host, ppid))
-        for entry in (entries if entries is not None else self.records.peek((host, ppid))) or ():
-            if entry.ts <= ts:
-                best = entry
-        return None if best is not None and boots_conflict(boot, best.boot) else best
+        found = self.execs.latest(host, ppid, ts)
+        if found is None or boots_conflict(boot, found.boot):
+            return None
+        return Ancestor(found.ts, found.ppid, found.name, found.user, found.marker, found.event_id, found.boot)
 
     def classify(self, event: TypedEvent) -> Lineage:
         """The record's own account or nearest exec ancestor that is a web-service account (which wins at any
@@ -1508,19 +1628,29 @@ class ProcessLineage:
         return nearest or Lineage("", None, 0)
 
 
-def _ancestor_order(entry: Ancestor) -> tuple[float, str]:
-    return entry.ts, entry.event_id
-
-
 def share_lineage(pack: list) -> None:
-    """Give every rule of a pack that keeps an exec lineage the same one, so each exec record is observed and held
-    once. Its rows live on the first such rule's spill; a disk refusal is noted on every rule that shares it."""
-    members = [pb for pb in pack if isinstance(getattr(pb, "lineage", None), ProcessLineage)]
+    """Give every rule of a pack that reads process ancestry the hunt's one ExecLineage, so each exec record is
+    observed and held once (its rows on the first such rule's spill; a disk refusal noted on every rule that
+    shares it), and every rule that keeps a ProcessLineage the same one over it. A rule's ExecLineage is any
+    attribute of the rule, or of its `lineage` or `pids` view, holding one."""
+    holders = [pb for pb in pack if isinstance(getattr(pb, "lineage", None), ProcessLineage)]
+    if len(holders) >= 2:
+        shared_view = ProcessLineage(holders[0], holders)
+        for pb in holders:
+            pb.lineage = shared_view
+    sites, members = [], []
+    for pb in pack:
+        for holder in (pb, getattr(pb, "lineage", None), getattr(pb, "pids", None)):
+            for name, value in list(getattr(holder, "__dict__", {}).items()):
+                if isinstance(value, ExecLineage):
+                    sites.append((holder, name))
+                    if pb not in members:
+                        members.append(pb)
     if len(members) < 2:
         return
-    shared = ProcessLineage(members[0], members)
-    for pb in members:
-        pb.lineage = shared
+    shared = ExecLineage(members[0], HOT_COUNT, members)
+    for holder, name in sites:
+        setattr(holder, name, shared)
 
 
 def lineage_phrase(lineage: Lineage) -> str:
