@@ -543,6 +543,21 @@ def test_unknown_windows_event_classes_are_listed_but_do_not_poison_unrelated_ru
     assert item["records"] == 1
 
 
+def test_catalogued_windows_classes_without_a_rule_reader_are_listed_with_counts():
+    rows = _not_assessed({}, {"stats": {"windows_unassessed": {"windows-target": [{
+        "channel": "System", "provider": "Service Control Manager", "event_id": 7045,
+        "family": "service_change", "records": 9,
+    }]}}})
+
+    assert rows == [{
+        "target": "windows-target",
+        "dataset": "System|Service Control Manager|7045",
+        "records": 9,
+        "count_scope": "records retrieved in the hunt window",
+        "reason": "catalogued Windows service_change event class has no rule reader in this pack",
+    }]
+
+
 def test_scoped_windows_skips_do_not_hide_unscoped_linux_skips_in_mixed_hunts():
     detail = {"stats": {
         "skips": {"Windows unknown": 2, "journal noise": 3},

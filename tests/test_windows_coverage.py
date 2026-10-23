@@ -274,6 +274,38 @@ def test_event_class_inventory_is_a_bounded_aggregate_over_the_full_hunt_window(
     assert sweep._windows_inventory[contract.target] == {event_class.token}
 
 
+def test_catalogued_windows_class_with_no_reader_is_counted_as_not_assessed(monkeypatch):
+    from romulus.hunt import sweep as sweep_module
+
+    def execute(_client, intent, _contract):
+        return SearchOutcome(
+            target=intent.target, fingerprint="inventory", started_at=START, ended_at=START,
+            completeness=Completeness.complete, total=9, total_relation="eq", returned=1,
+            buckets=[{
+                "key": {
+                    "event.channel": "System",
+                    "event.provider": "Service Control Manager",
+                    "event.code": 7045,
+                },
+                "count": 9,
+            }],
+        )
+
+    monkeypatch.setattr(sweep_module, "execute", execute)
+    contract = _contract()
+    sweep = Sweep(None, object(), "h1", Window(start=START, end=START + timedelta(hours=1)), {
+        contract.target: contract,
+    })
+    sweep.pack = [WindowsProcessRule()]
+
+    sweep._prepare_windows_inventory(contract.target, contract)
+
+    assert sweep.stats["windows_unassessed"][contract.target] == [{
+        "channel": "System", "provider": "Service Control Manager", "event_id": 7045,
+        "family": "service_change", "records": 9,
+    }]
+
+
 def test_unknown_windows_classes_are_not_assessed_without_poisoning_every_rule():
     events, skips, errors = normalize_hits([_hit(10, event_id=9999)])
 

@@ -185,6 +185,19 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                             "count_scope": "whole index at source preflight, not only the hunt window",
                             "reason": "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
                                       "evaluates it"})
+    for target, classes in sorted((stats.get("windows_unassessed") or {}).items()):
+        for event_class in classes:
+            out.append({
+                "target": target,
+                "dataset": (
+                    f"{event_class['channel']}|{event_class['provider']}|{event_class['event_id']}"
+                ),
+                "records": event_class["records"],
+                "count_scope": "records retrieved in the hunt window",
+                "reason": (
+                    f"catalogued Windows {event_class['family']} event class has no rule reader in this pack"
+                ),
+            })
     scoped_skips = stats.get("skips_by_target") or {}
     if scoped_skips:
         scoped_totals: Counter = Counter()

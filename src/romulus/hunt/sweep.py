@@ -204,6 +204,8 @@ class Sweep:
             contract,
         )
         inventory = set()
+        counts: dict[str, int] = {}
+        classes_by_token = {}
         for bucket in outcome.buckets:
             key = bucket.get("key") or {}
             event_class = lookup_event_class(
@@ -211,6 +213,8 @@ class Sweep:
             )
             if event_class is not None:
                 inventory.add(event_class.token)
+                counts[event_class.token] = counts.get(event_class.token, 0) + int(bucket.get("count") or 0)
+                classes_by_token[event_class.token] = event_class
         reasons = []
         if outcome.completeness != Completeness.complete:
             reasons.append(
@@ -219,8 +223,33 @@ class Sweep:
         self._windows_inventory[target] = inventory
         self._windows_inventory_reasons[target] = reasons
         self.stats.setdefault("windows_inventory", {})[target] = {
-            "cataloged_classes": len(inventory), "reasons": reasons,
+            "cataloged_classes": len(inventory), "counts": dict(sorted(counts.items())), "reasons": reasons,
         }
+        read_tokens = set()
+        for playbook in self.pack:
+            if "windows" not in playbook.os_families:
+                continue
+            if playbook.windows_event_classes:
+                for channel, provider, event_id in playbook.windows_event_classes:
+                    event_class = lookup_event_class(channel, provider, event_id)
+                    if event_class is not None:
+                        read_tokens.add(event_class.token)
+            else:
+                read_tokens.update(
+                    event_class.token for event_class in event_classes_for_families(set(playbook.families))
+                )
+        unassessed = []
+        for token in sorted(inventory - read_tokens):
+            event_class = classes_by_token[token]
+            unassessed.append({
+                "channel": event_class.channel,
+                "provider": event_class.provider,
+                "event_id": event_class.event_id,
+                "family": event_class.family,
+                "records": counts[token],
+            })
+        if unassessed:
+            self.stats.setdefault("windows_unassessed", {})[target] = unassessed
 
     @staticmethod
     def _windows_hosts(contract: FieldContract, records: list[dict]) -> tuple[str, ...]:
