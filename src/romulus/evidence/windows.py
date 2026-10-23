@@ -541,6 +541,9 @@ def normalize_windows(hit: dict) -> TypedEvent:
     computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
     if not computer:
         raise WindowsInputError("Windows record is missing winlog.computer_name")
+    # Host keys intentionally use the short computer name so Windows events join the existing host-centric
+    # detectors and pivots. This merges same-named computers from different DNS/AD domains; the full source name
+    # remains in host.full_name and winlog.computer_name so the ambiguity is visible in cited evidence.
     host = computer.split(".", 1)[0]
     fields = {
         "event.code": fv(record.event_class.event_id, f"{hit['_id']}:winlog.event_id"),

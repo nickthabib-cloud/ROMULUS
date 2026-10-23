@@ -118,6 +118,15 @@ def test_host_identity_uses_computer_name_and_keeps_short_and_full_forms():
     assert "forwarder" not in event.model_dump_json()
 
 
+def test_same_short_computer_names_merge_but_each_event_keeps_its_full_name():
+    first = normalize_hits([_hit(4624, computer="WS01.EAST.EXAMPLE")])[0][0]
+    second = normalize_hits([_hit(4624, computer="WS01.WEST.EXAMPLE")])[0][0]
+
+    assert first.host == second.host == "ws01"
+    assert first.get("host.full_name") == "ws01.east.example"
+    assert second.get("host.full_name") == "ws01.west.example"
+
+
 def test_structured_winlog_time_created_is_the_typed_event_time():
     hit = _hit(4624)
     hit["_source"]["winlog"]["time_created"] = "2026-01-02T03:04:03.000Z"
