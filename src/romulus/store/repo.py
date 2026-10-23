@@ -1121,7 +1121,7 @@ class Repo:
 
     @staticmethod
     def _merge_citation_raw(c, hunt_id: str, events: list, foreign: dict[str, dict]) -> None:
-        """Overlay only new raw copies of events whose stable row belongs to another hunt."""
+        """Snapshot and merge only this hunt's raw copies of a foreign stable event."""
         ids = sorted(foreign)
         overlays = {
             row["event_id"]: dict(row)
@@ -1153,10 +1153,6 @@ class Repo:
                     t.event_citation.c.event_id == event.id,
                 ).values(event=stored, raw_ids=raw_ids))
             else:
-                global_raw = list((global_row["event"] or {}).get("raw") or [])
-                global_known = {(item.get("target"), item.get("native_id")) for item in global_raw}
-                if all((raw.target, raw.native_id) in global_known for raw in event.raw):
-                    continue
                 # This hunt's first overlay starts from what this hunt actually retrieved,
                 # never from the owning hunt's citation set.
                 stored = event.model_dump(mode="json")

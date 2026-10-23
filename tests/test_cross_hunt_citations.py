@@ -42,7 +42,7 @@ def test_cross_hunt_raw_merge_is_scoped_to_the_current_hunts_citations():
     assert _citation_count(repo) == 1
 
 
-def test_another_hunt_reuses_the_global_event_when_no_raw_copy_is_added():
+def test_another_hunt_snapshots_its_citation_when_no_raw_copy_is_added():
     repo = Repo(make_engine(":memory:"))
     migrate(repo.engine)
     repo.create_hunt("h1", {}, "d1", "test")
@@ -56,10 +56,84 @@ def test_another_hunt_reuses_the_global_event_when_no_raw_copy_is_added():
     repo.save_evidence("h1", [event], {ref.key: {"copy": 1}}, None)
     repo.save_evidence("h2", [event], {ref.key: {"copy": 1}}, None)
 
-    assert _citation_count(repo) == 0
+    assert _citation_count(repo) == 1
     assert [item["native_id"] for item in _citations(
         repo, {"hunt_id": "h2", "event_ids": [event.id]},
     )] == ["copy-1"]
+
+
+def test_foreign_hunt_snapshots_only_the_subset_of_owner_refs_it_retrieved():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {}, "d1", "test")
+    repo.create_hunt("h2", {}, "d2", "test")
+    first_ref = RawRef(target="windows-a", native_id="copy-1", digest="digest-1")
+    second_ref = RawRef(target="windows-b", native_id="copy-2", digest="digest-2")
+    owner = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host="ws01",
+        fields={}, raw=[first_ref, second_ref], normalizer="windows-ecs@1",
+    )
+    subset = owner.model_copy(update={"raw": [first_ref]})
+
+    repo.save_evidence("h1", [owner], {
+        first_ref.key: {"copy": 1}, second_ref.key: {"copy": 2},
+    }, None)
+    repo.save_evidence("h2", [subset], {first_ref.key: {"copy": 1}}, None)
+
+    assert [citation["native_id"] for citation in _citations(
+        repo, {"hunt_id": "h2", "event_ids": [owner.id]},
+    )] == ["copy-1"]
+
+
+def test_owner_later_raw_merge_does_not_rewrite_foreign_hunt_citations():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {}, "d1", "test")
+    repo.create_hunt("h2", {}, "d2", "test")
+    first_ref = RawRef(target="windows-a", native_id="copy-1", digest="digest-1")
+    second_ref = RawRef(target="windows-b", native_id="copy-2", digest="digest-2")
+    first = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host="ws01",
+        fields={}, raw=[first_ref], normalizer="windows-ecs@1",
+    )
+
+    repo.save_evidence("h1", [first], {first_ref.key: {"copy": 1}}, None)
+    repo.save_evidence("h2", [first], {first_ref.key: {"copy": 1}}, None)
+    repo.save_evidence(
+        "h1", [first.model_copy(update={"raw": [first_ref, second_ref]})],
+        {first_ref.key: {"copy": 1}, second_ref.key: {"copy": 2}}, None,
+    )
+
+    assert [citation["native_id"] for citation in _citations(
+        repo, {"hunt_id": "h2", "event_ids": [first.id]},
+    )] == ["copy-1"]
+    assert [ref["native_id"] for ref in repo.events_by_ids([first.id])[0]["event"]["raw"]] == [
+        "copy-1", "copy-2",
+    ]
+
+
+def test_foreign_hunt_merges_its_own_sequential_raw_observations():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {}, "d1", "test")
+    repo.create_hunt("h2", {}, "d2", "test")
+    first_ref = RawRef(target="windows-a", native_id="copy-1", digest="digest-1")
+    second_ref = RawRef(target="windows-b", native_id="copy-2", digest="digest-2")
+    first = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host="ws01",
+        fields={}, raw=[first_ref], normalizer="windows-ecs@1",
+    )
+
+    repo.save_evidence("h1", [first], {first_ref.key: {"copy": 1}}, None)
+    repo.save_evidence("h2", [first], {first_ref.key: {"copy": 1}}, None)
+    repo.save_evidence(
+        "h2", [first.model_copy(update={"raw": [second_ref]})],
+        {second_ref.key: {"copy": 2}}, None,
+    )
+
+    assert [citation["native_id"] for citation in _citations(
+        repo, {"hunt_id": "h2", "event_ids": [first.id]},
+    )] == ["copy-1", "copy-2"]
 
 
 def test_foreign_hunt_citation_contains_only_the_raw_copy_that_hunt_retrieved():
