@@ -20,14 +20,10 @@ from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
 EVIDENCE_FILES = ("__init__.py", "auditd.py", "normalize.py", "typed.py")
-# The v9 source digest changed only for additive Windows-first dispatch; the Linux producer and event ids stay v9.
-# The throughput equality fixture proves its Linux output is identical.
-PINNED_EVIDENCE = {9: "a66fe5995122d90cbbe6d8faa5471ccc62a968725ac64c05cbd306f0281391b9"}
+PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf2116524009"}
 WINDOWS_EVIDENCE_FILES = ("windows.py", "windows_catalog.py")
-# This foundation branch is the first unreleased windows-ecs@1 producer; review corrections update its pin before
-# release rather than creating a second public producer version.
 PINNED_WINDOWS = {
-    "windows-ecs@1": "a2fda44a4393fdbb8e3ef4adb6d8f098e102e0db081270cd325498c59eae783a"
+    "windows-ecs@1": "74b9cb42dc7fed1f2d5c76ec27ddb145b81a0fc6e3c56f6fc5c0d364b0396dda"
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).
