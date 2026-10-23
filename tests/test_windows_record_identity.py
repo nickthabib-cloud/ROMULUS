@@ -73,6 +73,29 @@ def test_snapshot_revert_with_earlier_time_is_not_treated_as_a_copy():
     assert skips == {"record_id reused (log cleared or reverted)": 1}
 
 
+def test_same_instant_records_use_structured_payload_to_distinguish_reuse_from_copy():
+    original = _winlogbeat(
+        4688, created="2026-01-02T00:01:00Z", image=r"C:\Windows\System32\notepad.exe"
+    )
+    reused = _winlogbeat(
+        4688, created="2026-01-02T00:01:00Z", image=r"C:\Windows\System32\whoami.exe"
+    )
+    copied = deepcopy(original)
+    copied["_index"] = "winlogbeat-copy"
+    copied["_id"] = "shipper-copy"
+
+    events, skips, errors = normalize_hits([original, reused, copied])
+
+    assert errors == [] and len(events) == 2 and len({event.id for event in events}) == 2
+    assert {event.get("process.executable") for event in events} == {
+        r"C:\Windows\System32\notepad.exe", r"C:\Windows\System32\whoami.exe",
+    }
+    assert skips == {
+        "record_id reused (log cleared or reverted)": 1,
+        "duplicate Windows event copy (computer/channel/record_id)": 1,
+    }
+
+
 def test_cross_family_record_id_reuse_keeps_each_event():
     process = _winlogbeat(
         4688, created="2026-01-02T00:01:00Z", image=r"C:\Windows\System32\notepad.exe"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from romulus.evidence.normalize import normalize_hits
-from romulus.evidence.windows import WindowsInputError, read_windows_event
+from romulus.evidence.windows import WINDOWS_NORMALIZER, WindowsInputError, read_windows_event
 from romulus.evidence.windows_catalog import lookup_event_class
 
 
@@ -88,7 +88,7 @@ def test_windows_shipper_marker_wins_over_a_conflicting_linux_dataset_label():
 
     events, skips, errors = normalize_hits([hit])
 
-    assert len(events) == 1 and events[0].normalizer == "windows-ecs@1"
+    assert len(events) == 1 and events[0].normalizer == WINDOWS_NORMALIZER
     assert skips == {} and errors == []
 
 
@@ -99,7 +99,7 @@ def test_each_dataset_marker_is_checked_independently_when_the_other_conflicts()
 
     events, skips, errors = normalize_hits([hit])
 
-    assert len(events) == 1 and events[0].normalizer == "windows-ecs@1"
+    assert len(events) == 1 and events[0].normalizer == WINDOWS_NORMALIZER
     assert skips == {} and errors == []
 
 
@@ -112,7 +112,7 @@ def test_windows_marker_wins_over_an_arkime_shaped_record():
 
     events, skips, errors = normalize_hits([hit])
 
-    assert len(events) == 1 and events[0].normalizer == "windows-ecs@1"
+    assert len(events) == 1 and events[0].normalizer == WINDOWS_NORMALIZER
     assert skips == {} and errors == []
 
 

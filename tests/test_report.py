@@ -181,6 +181,7 @@ def test_duplicate_partition_events_have_a_separate_not_assessed_explanation():
     rows = _not_assessed({}, {"stats": {"skips": {
         "duplicate typed event across source partitions": 3,
         "dataset: unsupported": 2,
+        "record_id reused (log cleared or reverted)": 1,
     }}})
     reasons = {row["records"]: row["reason"] for row in rows}
 
@@ -188,6 +189,9 @@ def test_duplicate_partition_events_have_a_separate_not_assessed_explanation():
         "typed event deduplicated across source partitions; its additional raw provenance was retained"
     )
     assert reasons[2] == "retrieved but not turned into a typed event: dataset: unsupported"
+    assert reasons[1] == (
+        "typed Windows events retained separately after record_id reuse (log cleared or reverted)"
+    )
 def test_revisions_are_append_only():
     repo, cid = _repo_with_finding()
     r1 = publish_revision(repo, "h1", "test")

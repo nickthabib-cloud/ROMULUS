@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from datetime import UTC, datetime, timedelta
 
 from romulus.detect.base import Playbook
@@ -143,6 +144,16 @@ def test_record_time_continuity_spills_under_stage_and_names_the_largest_gap(tmp
     ]
     continuity.close()
     stage.close()
+
+
+def test_standalone_continuity_closes_its_private_database_on_collection():
+    continuity = RecordIdContinuity()
+    path = continuity.path
+
+    del continuity
+    gc.collect()
+
+    assert not path.exists()
 
 
 def test_windows_coverage_gate_requires_inventory_continuity_and_matching_attestation(tmp_path):

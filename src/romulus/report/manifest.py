@@ -176,6 +176,8 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
     def skip_explanation(reason: str) -> str:
         if reason == "duplicate typed event across source partitions":
             return "typed event deduplicated across source partitions; its additional raw provenance was retained"
+        if reason == "record_id reused (log cleared or reverted)":
+            return "typed Windows events retained separately after record_id reuse (log cleared or reverted)"
         return f"retrieved but not turned into a typed event: {reason}"
     for target, retrieved in sorted((stats.get("dataset_filter") or {}).items()):
         inventory = (profiles.get(target) or {}).get("datasets")

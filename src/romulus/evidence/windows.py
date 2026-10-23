@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import ntpath
 import re
+import shutil
 import sqlite3
 import tempfile
 from dataclasses import dataclass
@@ -16,7 +18,7 @@ from xml.etree import ElementTree
 from romulus.evidence.typed import FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass, lookup_event_class
 
-WINDOWS_NORMALIZER = "windows-ecs@1"
+WINDOWS_NORMALIZER = "windows-ecs@2"
 _GUID = re.compile(r"^\{?([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\}?$")
 _SID = re.compile(r"^S-\d+(?:-\d+)+$", re.IGNORECASE)
 # Windows Security event schemas use these values when the logon has no network endpoint.
@@ -67,8 +69,8 @@ class RecordIdContinuity:
     """
 
     def __init__(self, directory: str | Path | None = None) -> None:
-        self._tempdir = tempfile.TemporaryDirectory(prefix="romulus-windows-continuity-") if directory is None else None
-        root = Path(self._tempdir.name) if self._tempdir is not None else Path(directory)
+        self._tempdir = Path(tempfile.mkdtemp(prefix="romulus-windows-continuity-")) if directory is None else None
+        root = self._tempdir if self._tempdir is not None else Path(directory)
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         root.chmod(0o700)
         self.path = root / "windows-continuity.db"
@@ -86,10 +88,17 @@ class RecordIdContinuity:
         return int(self._db.execute("SELECT count(*) FROM continuity").fetchone()[0])
 
     def close(self) -> None:
-        self._db.close()
-        if self._tempdir is not None:
-            self._tempdir.cleanup()
+        db = getattr(self, "_db", None)
+        if db is not None:
+            db.close()
+            self._db = None
+        if getattr(self, "_tempdir", None) is not None:
+            shutil.rmtree(self._tempdir, ignore_errors=True)
             self._tempdir = None
+
+    def __del__(self):
+        with contextlib.suppress(Exception):
+            self.close()
 
     def observe(
         self,
@@ -241,12 +250,13 @@ def windows_record_signature(hit: dict) -> str:
     """Stable content discriminator for copies that share a native record id.
 
     Shipper envelope fields such as index, document id, ingest time and agent metadata are deliberately
-    excluded. Native event time is preferred; when it is unavailable the structured Windows payload is
-    hashed so a log reset cannot collapse a different record onto an earlier event.
+    excluded. Native event time and a digest of the structured Windows payload are always included, so exact
+    copies merge while same-instant native records with different content do not.
     """
     source = hit.get("_source") or {}
     winlog = source.get("winlog") or {}
     event_data = winlog.get("event_data") if isinstance(winlog.get("event_data"), dict) else {}
+    user_data = winlog.get("user_data") if isinstance(winlog.get("user_data"), dict) else {}
     provider = str(winlog.get("provider_name") or "").strip().casefold()
     native_event_id = winlog.get("event_id")
     try:
@@ -259,16 +269,18 @@ def windows_record_signature(hit: dict) -> str:
         or event_data.get("SystemTime")
         or _get(source, "event.created")
     )
-    if native_time not in (None, ""):
-        identity = {"provider": provider, "event_id": native_event_id, "time_created": str(native_time)}
-    else:
-        identity = {
-            "provider": provider,
-            "event_id": native_event_id,
-            "event_data": event_data,
-            "user_data": winlog.get("user_data") if isinstance(winlog.get("user_data"), dict) else {},
-            "event_original": _get(source, "event.original") or "",
-        }
+    payload = {"event_data": event_data, "user_data": user_data}
+    if not event_data and not user_data:
+        payload["event_original"] = _get(source, "event.original") or ""
+    payload_digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+    identity = {
+        "provider": provider,
+        "event_id": native_event_id,
+        "time_created": str(native_time or ""),
+        "payload_digest": payload_digest,
+    }
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(encoded).hexdigest()
 
