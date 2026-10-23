@@ -23,10 +23,10 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from romulus.detect import netdef
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
 from romulus.detect.dns import registered_domain
 from romulus.detect.dns import role as dns_role
-from romulus.detect.host import is_internal
 from romulus.evidence.typed import Outcome, TypedEvent
 
 type Scope = Literal["host", "account", "host_account", "internal_ip", "site"]
@@ -77,6 +77,8 @@ class Pending:
     ts: datetime
     event_id: str
     child_executable: str
+    # The child's audit serial: it places the child among its parent's execs at the same instant.
+    serial: int | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,22 @@ class ParentLookup(Protocol):
     def lookup(self, host: str, pid: int, ts: float, boot: str | None = None) -> tuple | None: ...
 
 
+def exec_serial(event: TypedEvent) -> int | None:
+    """The record's audit serial, which increases within a boot; None when absent or not an integer."""
+    value = event.get("audit.serial")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def parent_at(table: ParentLookup, host: str, pid: int, ts: float, boot: str | None,
+              serial: int | None):
+    """The parent identity for a child at (ts, serial). A table that orders one instant's execs by audit serial
+    (`lookup_ordered`) is asked with the child's serial; any other table is asked by time alone."""
+    ordered = getattr(table, "lookup_ordered", None)
+    if ordered is not None:
+        return ordered(host, pid, ts, boot, serial)
+    return table.lookup(host, pid, ts, boot)
+
+
 # Accounts whose uid falls in this range are system (service) accounts: 1-999 is the default SYS_UID_MIN to
 # SYS_UID_MAX of login.defs on common Linux distributions, where package-created daemons (postgres, jenkins,
 # www-data) get their uids. uid 0 (root) is never a service account here: root's activity is every
@@ -122,13 +140,14 @@ class KeyContext:
     - `service_accounts`: account names configured as service accounts, keyed by `bl.svc_exec_rate`
       whatever their uid (empty by default: the uid range does the work);
     - `system_uid_range`: inclusive uid range of system accounts;
-    - `is_internal`: whether an address belongs to the site. The default is the RFC 1918 / ULA / loopback /
-      link-local / CGNAT test; a per-site internal-network setting replaces it here."""
+    - `is_internal`: whether an address belongs to the site. The default is the internal-network definition
+      installed when the context is built (romulus.detect.netdef: the site's configured ranges, or the RFC
+      1918 and reserved default), so one context answers with one definition throughout."""
 
     pid_table: ParentLookup = field(default_factory=PidTable)
     service_accounts: frozenset[str] = frozenset()
     system_uid_range: tuple[int, int] = DEFAULT_SYSTEM_UID_RANGE
-    is_internal: Callable[[IPAddress], bool] = is_internal
+    is_internal: Callable[[IPAddress], bool] = field(default_factory=lambda: netdef.current().is_internal)
 
 
 @dataclass(frozen=True)
@@ -151,6 +170,10 @@ class BaselineSpec:
     required_fields: dict[str, tuple[FieldRequirement, ...]]
     optional_fields: dict[str, tuple[str, ...]]
     _extract: Callable[[TypedEvent, KeyContext, BaselineSpec], KeyResult] = field(repr=False, compare=False)
+    # True when the spec's applicability is decided by the site's boundary (inside to outside): it may run only
+    # with an explicitly configured internal-network definition, and otherwise its result is unresolved, never
+    # "no match" (the default RFC 1918 view reads a site in public space as entirely outside).
+    requires_configured_networks: bool = False
 
     def keys(self, event: TypedEvent, context: KeyContext) -> KeyResult:
         if event.family not in self.families:
@@ -366,13 +389,18 @@ def _exec_pair(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> Ke
         return Missing("process.ppid is absent", ("process.ppid",))
     if isinstance(ppid, bool) or not isinstance(ppid, int) or ppid < 0:
         return Missing("process.ppid is not a process id", ("process.ppid",))
-    boot = boot_of(event)
-    parent = context.pid_table.lookup(event.host, ppid, event.ts.timestamp(), boot)
+    boot, serial = boot_of(event), exec_serial(event)
+    parent = parent_at(context.pid_table, event.host, ppid, event.ts.timestamp(), boot, serial)
     if parent is None or boots_conflict(boot, parent[4]):
-        return Pending(event.host, boot, ppid, event.ts, event.id, executable)
-    return [_key(spec, _scope("host", host=host), {
-        "parent_executable": parent[1], "child_executable": executable,
-    })]
+        return Pending(event.host, boot, ppid, event.ts, event.id, executable, serial)
+    return [exec_pair_key(spec, host, parent[1], executable)]
+
+
+def exec_pair_key(spec: BaselineSpec, host: str, parent_executable: str, child_executable: str) -> BaselineKey:
+    """The exec-pair key under `spec`'s id and key version; a Pending resolved later builds the same key."""
+    return _key(spec, _scope("host", host=host.strip().lower()), {
+        "parent_executable": parent_executable, "child_executable": child_executable,
+    })
 
 
 # A key is stored once per scope and bucket, so its size is bounded: the masked shape keeps at most this many
@@ -506,6 +534,8 @@ def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec)
     dns_id = event.get("dns.id")
     if isinstance(dns_id, (bool, list, dict)):
         dns_id = None
+    elif dns_id is not None:
+        dns_id = str(dns_id)
     token = None if flow is None else _sha256(canonical_json(["dns", flow, names, dns_id]))
     return _with_token(keys, token)
 
@@ -630,6 +660,7 @@ BASELINE_SPECS = (
             "net_session": ("tls.client.server_name", *_FLOW_IDS),
         },
         _extract=_destination,
+        requires_configured_networks=True,
     ),
     BaselineSpec(
         id="bl.svc_exec_rate", version="1", key_version="1", families=("process_exec",),

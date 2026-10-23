@@ -19,6 +19,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from romulus.detect.bounded import Account, StateBudget
 from romulus.evidence.typed import TypedEvent
 
 PREFIX = "romulus-stage-"
@@ -42,7 +43,8 @@ def clear_stale_stages(directory: str | Path, older_than: float = STALE_SECONDS)
 
 
 class EventStage:
-    def __init__(self, directory: str | Path | None = None):
+    def __init__(self, directory: str | Path | None = None, *, budget: StateBudget | None = None,
+                 windows_account: Account | None = None):
         if directory is not None:
             Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
         self._dir = tempfile.mkdtemp(prefix=PREFIX, dir=directory)
@@ -57,14 +59,45 @@ class EventStage:
         # One bounded-width key per normalized Windows event. The row count follows the hunt's retrieved Windows
         # records; unlike aggregate staging this seam never serializes event bodies or raw telemetry. Keeping the
         # table in the stage gives all transient sweep state the same private lifecycle and cleanup behavior.
-        self.db.execute(
+        self.windows_path = Path(self._dir) / "windows-seen.db"
+        self.windows_db: sqlite3.Connection | None = sqlite3.connect(self.windows_path)
+        self.windows_db.execute("PRAGMA journal_mode=OFF")
+        self.windows_db.execute("PRAGMA synchronous=OFF")
+        self.windows_db.execute(
             f"CREATE TABLE windows_seen (id TEXT PRIMARY KEY CHECK(length(id) <= "
             f"{WINDOWS_STABLE_ID_MAX_CHARS})) WITHOUT ROWID"
         )
+        self.windows_db.commit()
+        self._windows_page = self.windows_db.execute("PRAGMA page_size").fetchone()[0]
+        self._windows_size = 0
+        self.budget = budget
+        self.windows_account = windows_account
+        self.windows_refused = 0
+        self.windows_refusal_reason = ""
+        self._charge_windows_growth()
         self.events = 0
+
+    def _cap_windows(self) -> None:
+        if self.budget is None:
+            return
+        headroom = self.budget.headroom()
+        if headroom is None:
+            return
+        pages = self.windows_db.execute("PRAGMA page_count").fetchone()[0]
+        self.windows_db.execute(f"PRAGMA max_page_count = {pages + headroom // self._windows_page + 1}")
+
+    def _charge_windows_growth(self) -> None:
+        size = self.windows_db.execute("PRAGMA page_count").fetchone()[0] * self._windows_page
+        growth = size - self._windows_size
+        if growth > 0 and self.budget is not None and self.windows_account is not None:
+            self.budget.charge(self.windows_account, growth)
+            self.budget.grew(growth)
+        self._windows_size = size
 
     def unique_windows(self, events: list[TypedEvent]) -> tuple[list[TypedEvent], list[TypedEvent]]:
         """Deduplicate only Windows stable ids, storing no event body and no raw telemetry."""
+        self.windows_refused = 0
+        self.windows_refusal_reason = ""
         windows = [event for event in events if event.normalizer.startswith("windows-")]
         if any(len(event.id) > WINDOWS_STABLE_ID_MAX_CHARS for event in windows):
             raise ValueError("Windows stable event id exceeds the dedup table width")
@@ -75,7 +108,7 @@ class EventStage:
             if not chunk:
                 continue
             marks = ",".join("?" * len(chunk))
-            seen.update(row[0] for row in self.db.execute(
+            seen.update(row[0] for row in self.windows_db.execute(
                 f"SELECT id FROM windows_seen WHERE id IN ({marks})", chunk,
             ))
         fresh, duplicates, inserts = [], [], []
@@ -89,8 +122,27 @@ class EventStage:
                 seen.add(event.id)
                 inserts.append((event.id,))
                 fresh.append(event)
-        self.db.executemany("INSERT OR IGNORE INTO windows_seen VALUES (?)", inserts)
-        self.db.commit()
+        for start in range(0, len(inserts), 500):
+            chunk = inserts[start:start + 500]
+            reason = (self.budget.new_key_reason(self.windows_account)
+                      if self.budget is not None and self.windows_account is not None else "")
+            if reason:
+                self.windows_refused += len(inserts) - start
+                self.windows_refusal_reason = reason
+                break
+            try:
+                self._cap_windows()
+                self.windows_db.executemany("INSERT OR IGNORE INTO windows_seen VALUES (?)", chunk)
+                self.windows_db.commit()
+                self._charge_windows_growth()
+            except sqlite3.OperationalError as exc:
+                self.windows_db.rollback()
+                reason = f"writing the Windows dedup store failed ({exc})"
+                if self.budget is not None:
+                    self.budget.fail(reason)
+                self.windows_refused += len(inserts) - start
+                self.windows_refusal_reason = reason
+                break
         return fresh, duplicates
 
     def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
@@ -131,6 +183,9 @@ class EventStage:
 
     def close(self) -> None:
         """Close the database before removing its directory (Windows cannot delete an open file)."""
+        if self.windows_db is not None:
+            self.windows_db.close()
+            self.windows_db = None
         if self.db is not None:
             self.db.close()
             self.db = None

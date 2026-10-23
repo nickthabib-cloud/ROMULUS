@@ -490,8 +490,12 @@ def test_single_boot_full_pack_over_raw_records_equals_boot_blind():
         out = []
         for playbook in fresh_pack():
             out += playbook.consume(events)
-            if playbook.kind == "aggregate" and not playbook.staged:
+            if playbook.staged:                 # every joining rule too, from its own stage
+                stage = {event.id: event for event in playbook.drain_staged()}
+                playbook.bind_loader(lambda ids, stage=stage: [stage[i] for i in ids if i in stage])
+            if playbook.kind == "aggregate":
                 out += playbook.finalize()
+            playbook.close_spill()
         return _projection(out), events
 
     blind, _events = findings(None)

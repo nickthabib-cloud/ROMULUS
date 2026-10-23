@@ -14,8 +14,11 @@ import httpx
 from romulus.agent.provider import EGRESS_SWITCH_VALUE, agent_readiness, build_provider
 from romulus.agent.provider.egress import Resolver, system_resolver
 from romulus.config import Settings, redact_text
+from romulus.detect.netdef import INTERNAL_SETTING, SiteNetworks
+from romulus.hunt.site_networks import check_host_addresses
 from romulus.site import SiteValidationError, load_site_facts
 from romulus.sources.es import ElasticClient, SourceError
+from romulus.sources.profile import contract_from_types, flatten_mapping
 from romulus.store.db import integrity_check, make_engine, migrate, space_report
 
 
@@ -65,6 +68,35 @@ def check_es(s: Settings) -> list[Check]:
     except SourceError as e:
         out.append(Check("es.privileges", "warn", str(e)))
     return out
+
+
+def check_site_networks(s: Settings, client: ElasticClient | None = None) -> Check:
+    """The internal-network definition, checked against the addresses of the site's own hosts (host.ip in host
+    telemetry). Outside addresses, or no definition at all, are warnings that name the setting; never a failure."""
+    definition = SiteNetworks.from_settings(s)
+    notes = []
+    if not definition.configured:
+        notes.append(f"{INTERNAL_SETTING} is not set: {definition.summary()}; rules whose negative depends on "
+                     "traffic direction report partial coverage")
+    client = client or ElasticClient(s)
+    try:
+        contracts = {target: contract_from_types(target, flatten_mapping(client.mapping(target)))
+                     for pattern in s.es_index_patterns for target in client.resolve(pattern)}
+        result = check_host_addresses(client, contracts, definition, None)
+    except SourceError as e:
+        notes.append(f"{definition.summary()}; host addresses could not be checked: {e}")
+        return Check("site.internal_networks", "warn", "; ".join(notes))
+    if not result["values_present"]:
+        unchecked = "; ".join(f"{t}: {why}" for t, why in sorted(result["unchecked_targets"].items()))
+        notes.append(f"{definition.summary()}; no host.ip value in host telemetry ({result['window']}), so the "
+                     "definition could not be checked against the site's own hosts"
+                     + (f" ({unchecked})" if unchecked else ""))
+    elif not result["outside"]:
+        notes.append(f"{definition.summary()}; every host.ip value in host telemetry ({result['window']}) is inside")
+    if result["warning"]:
+        notes.append(result["warning"])
+    status = "warn" if result["warning"] or not definition.configured else "ok"
+    return Check("site.internal_networks", status, "; ".join(notes), data=result)
 
 
 def check_arkime(s: Settings) -> Check:
@@ -170,7 +202,79 @@ def check_paths(s: Settings, env_file: Path | None) -> list[Check]:
     s.home.mkdir(parents=True, exist_ok=True)
     free_gb = shutil.disk_usage(s.home).free / 1e9
     out.append(Check("disk.free", "ok" if free_gb > 10 else "warn", f"{free_gb:.1f} GB free at {s.home}"))
+    out.append(check_state_budget(s))
+    out.append(check_stage_volume(s))
     return out
+
+
+# Data directories of services that may share a host with ROMULUS: a stage on their volume can fill it (Elasticsearch
+# blocks writes to its indices at its flood-stage watermark). Only paths that exist are compared.
+SERVICE_DATA_PATHS = {
+    "Elasticsearch": ("/var/lib/elasticsearch", "/usr/share/elasticsearch/data", "/var/lib/opensearch",
+                      "/usr/share/opensearch/data"),
+    "Arkime": ("/opt/arkime/raw", "/data/arkime", "/opt/molochd/raw", "/data/moloch/raw"),
+    "docker": ("/var/lib/docker", "/var/lib/containerd"),
+}
+
+
+def _elasticsearch_data_paths() -> list[str]:
+    """`path.data` entries of a local Elasticsearch or OpenSearch configuration, when readable."""
+    found = []
+    for config in ("/etc/elasticsearch/elasticsearch.yml", "/etc/opensearch/opensearch.yml"):
+        try:
+            text = Path(config).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("path.data:"):
+                value = line.split(":", 1)[1].strip().strip("[]\"'")
+                found += [part.strip().strip("\"'") for part in value.split(",") if part.strip()]
+    return found
+
+
+def check_stage_volume(s: Settings, paths: dict[str, tuple[str, ...]] | None = None) -> Check:
+    """Warn when the stage directory is on the same filesystem as another service's data it can detect."""
+    stage = s.stage_path
+    probe = stage
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        device = probe.stat().st_dev
+    except OSError as exc:
+        return Check("stage.volume", "warn", f"cannot read the stage directory {stage}: {exc}")
+    services = dict(paths if paths is not None else SERVICE_DATA_PATHS)
+    if paths is None:
+        services["Elasticsearch"] = (*services["Elasticsearch"], *_elasticsearch_data_paths())
+    shared = []
+    for service, candidates in services.items():
+        for candidate in candidates:
+            try:
+                if Path(candidate).exists() and Path(candidate).stat().st_dev == device:
+                    shared.append(f"{service} ({candidate})")
+                    break
+            except OSError:
+                continue
+    if shared:
+        return Check("stage.volume", "warn", f"the stage directory {stage} is on the same filesystem as "
+                                             f"{', '.join(shared)}: point ROMULUS_STAGE_DIR at another volume, so a "
+                                             f"hunt's stage can never fill theirs")
+    return Check("stage.volume", "ok", f"{stage} shares no filesystem with a detected service's data")
+
+
+def check_state_budget(s: Settings) -> Check:
+    """The sweep's detector-state budget on the stage volume: fail when its free space is already at the reserve
+    (rules that keep state would evaluate nothing), warn when the hunt's disk total is under 1 GiB."""
+    from romulus.hunt.sweep import state_budget
+    budget = state_budget(s, s.stage_path)
+    free = budget.free()
+    detail = (f"disk total {budget.disk_total / 2**30:.1f} GiB, reserve {budget.reserve / 2**30:.1f} GiB, "
+              f"memory {budget.memory_total / 2**20:.0f} MiB; stage volume "
+              + (f"{free / 2**30:.1f} GiB free" if free is not None else "free space unreadable"))
+    if budget.preflight():
+        return Check("state.budget", "fail", detail + "; free space is below the reserve: rules that keep state "
+                                                      "would evaluate no records")
+    return Check("state.budget", "warn" if budget.disk_total < 2**30 else "ok", detail)
 
 
 def check_db(s: Settings) -> Check:
@@ -213,6 +317,7 @@ def check_site(s: Settings) -> Check:
 
 def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks = check_es(s)
+    checks.append(check_site_networks(s))
     checks.append(check_arkime(s))
     checks += check_ollama(s)
     checks += check_agent(s)

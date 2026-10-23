@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar, Literal
 
+from romulus.detect.bounded import Limit
 from romulus.evidence.typed import Outcome, TypedEvent, event_os_family
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
@@ -115,16 +116,48 @@ class Playbook:
     # arrived before a gap still support it. Otherwise an exec with an incomplete argv is counted as missing a
     # required field and not evaluated: a test for an absent token, or for a last operand, cannot be decided.
     argv_prefix_safe: ClassVar[bool] = False
+    # True when the rule skips records, or judges them by another standard, for their direction across the site's
+    # boundary. Each such record is counted in `direction_assumed` while the internal-network definition is the
+    # default (romulus.detect.netdef.assume_direction), and a cell holding any is never a complete negative.
+    direction_dependent: ClassVar[bool] = False
 
     def __init__(self) -> None:
         self.evaluated = 0
         self.missing_required = 0
         self.os_applicable = 0
         self._events_pre_scoped = False
+        self.direction_assumed = 0
+        # Records a full state budget kept from evaluation (see romulus.detect.bounded): the sweep makes the
+        # partition's coverage partial with the limit named, exactly as for a record missing a required field.
+        self.capped = 0
+        self.limits: dict[str, Limit] = {}
+
+    def refuse(self, name: str, text: str, records: int = 1) -> None:
+        """A state budget is full: `records` record(s) were not evaluated. Coverage becomes partial and says why."""
+        self.capped += records
+        self.note_limit(name, text, records)
+
+    def note_limit(self, name: str, text: str, records: int = 0) -> None:
+        """A state budget was reached. With `records` 0 nothing went unevaluated, but what the rule can state became
+        less exact (a count became a lower bound, an older record was released); the window cell is partial."""
+        limit = self.limits.get(name)
+        if limit is None:
+            limit = self.limits[name] = Limit(text)
+        limit.records += records
+        limit.hits += 1
+
+    def limit_reasons(self) -> list[str]:
+        """Every state budget this playbook reached, worded for the coverage ledger."""
+        return [self.limits[name].reason() for name in sorted(self.limits)]
 
     def event_in_os_scope(self, event: TypedEvent) -> bool:
         os_family = event_os_family(event)
         return os_family == "unknown" or os_family in self.os_families
+
+    def scope_partition(self, events: list[TypedEvent]) -> list[TypedEvent]:
+        """The records this rule may evaluate in one sweep partition, before required-field checks."""
+        return [event for event in events
+                if event.family in self.families and self.event_in_os_scope(event)]
 
     def applicable(self, events: list[TypedEvent]) -> list[TypedEvent]:
         """Events of the right family. Events missing required fields are counted (they make a
@@ -155,11 +188,14 @@ class Playbook:
         uses this wrapper so custom and context ``consume`` implementations receive only in-scope records and
         the common ``applicable`` helper does not repeat the same OS classification.
         """
-        scoped = []
-        for event in events:
-            if event.family not in self.families or not self.event_in_os_scope(event):
-                continue
-            scoped.append(event)
+        return self.consume_scoped_partition(self.scope_partition(events))
+
+    def consume_scoped_partition(self, scoped: list[TypedEvent]) -> list[Match]:
+        """Consume an already OS- and family-scoped partition.
+
+        The sweep keeps ``scoped`` so a bounded-state failure can count exactly the records the rule did not
+        evaluate; direct callers use :meth:`consume_partition`.
+        """
         self.os_applicable += len(scoped)
         self._events_pre_scoped = True
         try:
@@ -194,6 +230,52 @@ class Playbook:
         exactly these, so no published citation can point at a raw record that was never retained."""
         groups = getattr(self, "groups", {}) or {}
         return [e for evs in groups.values() for e in evs]
+
+    # Where a playbook that spills rows to disk (romulus.detect.bounded.Spill) puts its private directory: the sweep's
+    # stage directory; None (tests, ad hoc runs) uses the system temporary directory.
+    spill_dir = None
+    _spill = None
+    # The hunt's state budget (romulus.detect.bounded.StateBudget), shared by every playbook of a sweep; a playbook
+    # outside a sweep makes its own on first use.
+    budget = None
+    # True once the playbook keeps per-key state (a KeyedStore, SpillList or spill).
+    holds_state = False
+    # "strong" for strong-indicator rules: below the stage volume's reserve their stores still read keys they hold
+    # on disk back into memory (a read is not growth), and the event stage still takes their citations; "routine"
+    # otherwise. Every store, strong or routine, has the same guaranteed floor of the hunt's disk budget.
+    state_slice: ClassVar[str] = "routine"
+
+    def state_budget(self):
+        if self.budget is None:
+            from romulus.detect.bounded import StateBudget
+            self.budget = StateBudget(self.spill_dir)
+        return self.budget
+
+    def spill(self):
+        """This playbook's private on-disk tables (created on first use)."""
+        if self._spill is None:
+            from romulus.detect.bounded import Spill
+            self._spill = Spill(self.spill_dir, self.state_budget())
+        return self._spill
+
+    def refuse_unevaluated(self, events: list[TypedEvent], evaluated: int, text: str) -> None:
+        """A write to the stage volume failed while this rule read a batch: its records of this rule's families that
+        were not evaluated before the failure are refused (counted exactly), never counted as evaluated."""
+        records = sum(1 for e in events if e.family in self.families) - evaluated
+        if records > 0:
+            self.refuse("state_disk", text, records)
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Finalize could not get the disk it needs (`StateExhausted`): what can still be published from state that
+        is readable without writing to disk. Rules with strong per-record items publish them here; the default is
+        nothing. The window cell is partial with the reason either way."""
+        return []
+
+    def close_spill(self) -> None:
+        """Remove any on-disk spill. The sweep calls it on every exit path it controls."""
+        if self._spill is not None:
+            self._spill.close()
+            self._spill = None
 
     def release_state(self) -> None:
         """Release aggregate working state after its findings and coverage are persisted."""

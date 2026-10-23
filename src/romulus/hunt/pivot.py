@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import deque
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from romulus.agent.tools import (
     ProcessTreeRequest,
     ToolRequest,
 )
+from romulus.detect.host import ExecLineage
 from romulus.detect.registry import fresh_direct_pack
 from romulus.evidence.auditd import AuditParseError, AuditRecord, parse_record
 from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, normalize_hits
@@ -435,6 +437,8 @@ MAX_SAMPLE_QUERIES = 4
 
 # A host lookup refused for budget is not an answer: it is retried when budget allows.
 HOST_LOOKUP_BUDGET = "source query budget exhausted"
+NO_HOST_RECORD = "no host record carries host.ip"      # a complete lookup: no host claims the address
+HOST_AMBIGUOUS = "victim host ambiguous"               # a complete lookup: several hosts claim the address
 
 
 def _link_task_kind(executor) -> str:
@@ -820,9 +824,9 @@ class PivotExecutor:
         elif len(names) == 1:
             host, reason = next(iter(names)), None
         elif not names:
-            host, reason = None, f"victim host unknown for {ip}: no host record carries host.ip {ip}"
+            host, reason = None, f"victim host unknown for {ip}: {NO_HOST_RECORD} {ip}"
         else:
-            host, reason = None, f"victim host ambiguous for {ip}: {sorted(names)[:5]}"
+            host, reason = None, f"{HOST_AMBIGUOUS} for {ip}: {sorted(names)[:5]}"
         # An incomplete lookup (timeout, shard failure, budget) is not a final answer: it stays retryable.
         self.repo.update_task(task_id, "partial" if incomplete else "evaluated",
                               outcome={"host": host, "reason": reason}, owner_token=self.owner_token)
@@ -1241,7 +1245,24 @@ class PivotExecutor:
         ]
         pivot_time = anchor_ts or (roots[0].ts if roots else args.start)
         prior_roots = [event for event in roots if event.ts <= pivot_time]
-        root = max(prior_roots, key=lambda event: (event.ts, event.id)) if prior_roots else None
+        root = None
+        if prior_roots:
+            lineage = ExecLineage()
+            by_id = {}
+            for event in prior_roots:
+                lineage.observe(event)
+                by_id[event.id] = event
+            # Ask just after the anchor instant: every root at that instant is eligible, while ExecLineage orders
+            # records only inside one audit or (computer, channel) record-id sequence and refuses differing images
+            # across incomparable sequences.
+            latest = lineage.latest(
+                prior_roots[0].host,
+                args.process_id,
+                math.nextafter(pivot_time.timestamp(), math.inf),
+            )
+            if latest is None:
+                return [], "process_tree root at anchor instant is ambiguous"
+            root = by_id.get(latest.event_id)
         root_guid = root.get("process.guid") if root is not None else None
         if root_guid:
             guids = {str(root_guid).casefold()}

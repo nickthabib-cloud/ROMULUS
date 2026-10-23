@@ -6,6 +6,7 @@ import gc
 from datetime import UTC, datetime, timedelta
 
 from romulus.detect.base import Playbook
+from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent
@@ -61,6 +62,15 @@ class UndeclaredWindowsProcessRule(Playbook):
     title = "test"
     families = ("process_exec",)
     os_families = ("windows",)
+
+
+class ExhaustedWindowsProcessRule(WindowsProcessRule):
+    id = "test.windows.process.exhausted"
+
+    def consume(self, events):
+        if events:
+            self.evaluated += 1
+        raise StateExhausted("test stage failure")
 
 
 def _contract():
@@ -123,6 +133,36 @@ def test_record_id_continuity_spills_5000_host_channels_without_a_count_cap():
 
     assert reasons == []
     assert continuity.state_count == 5_000
+
+
+def test_record_id_continuity_has_its_own_floor_and_reports_refused_groups(tmp_path):
+    budget = StateBudget(tmp_path, disk_total=64 * 1024, reserve=0)
+    budget.plan(1)
+    account = budget.account("windows_continuity")
+    continuity = RecordIdContinuity(tmp_path, budget=budget, account=account)
+    budget.force_full("Windows continuity floor spent (test)", lambda candidate: candidate is account)
+
+    reasons = continuity.observe("target", [_hit(10)])
+
+    assert continuity.state_count == 0
+    assert any("continuity state refused" in reason and "floor spent" in reason for reason in reasons)
+    continuity.close()
+
+
+def test_record_id_continuity_summarizes_many_single_sample_groups(tmp_path):
+    continuity = RecordIdContinuity(tmp_path)
+    records = []
+    for host_number in range(5_000):
+        hit = _hit(10, native_id=f"single-{host_number}")
+        hit["_source"]["winlog"]["computer_name"] = f"ws{host_number:04d}.example.test"
+        records.append(hit)
+
+    reasons = continuity.observe("target", records)
+
+    assert len(reasons) == 1
+    assert "5,000 host/channel groups" in reasons[0]
+    assert sum(f"ws{number:04d}.example.test" in reasons[0] for number in range(5_000)) == 10
+    continuity.close()
 
 
 def test_record_time_continuity_spills_under_stage_and_names_the_largest_gap(tmp_path):
@@ -572,6 +612,37 @@ def test_wrong_os_same_family_is_not_a_complete_negative(monkeypatch):
     assert repo.rule_cells("h1")[0]["state"] == "not_applicable_no_events"
 
 
+def test_mid_batch_refusal_counts_only_os_scoped_records(tmp_path, monkeypatch):
+    from romulus.hunt import sweep as sweep_module
+    from tests.test_sweep import _repo
+
+    [windows_one], _skips, _errors = normalize_hits([_hit(10, native_id="windows-one")])
+    [windows_two], _skips, _errors = normalize_hits([_hit(11, native_id="windows-two")])
+    linux = TypedEvent(
+        id="linux", family="process_exec", ts=START, host="host1", fields={},
+        raw=[RawRef(target="linux", native_id="1")], normalizer="lab-ecs@9",
+    )
+    batch = [windows_one, linux, windows_two]
+    records = [_hit(10, native_id="windows-one"), _hit(11, native_id="windows-two")]
+    monkeypatch.setattr(sweep_module, "normalize_hits", lambda *_args, **_kwargs: (batch, {}, []))
+    monkeypatch.setattr(sweep_module, "execute", lambda _client, intent, _contract: SearchOutcome(
+        target=intent.target, fingerprint="mixed", started_at=START, ended_at=START,
+        completeness=Completeness.complete, total=3, total_relation="eq", returned=3, records=records,
+    ))
+    contract = _contract()
+    repo = _repo()
+    sweep = Sweep(repo, None, "h1", Window(start=START, end=START + timedelta(minutes=5)),
+                  {contract.target: contract}, stage_dir=tmp_path)
+    sweep.pack = [ExhaustedWindowsProcessRule()]
+
+    sweep.run_partition(contract.target, contract, [], sweep.window, est=3)
+
+    cell = repo.rule_cells("h1")[0]
+    assert cell["state"] == "evaluated_partial"
+    assert cell["detail"]["state_capped"] == 1
+    sweep.close_stage()
+
+
 def test_sweep_cell_can_be_complete_only_after_all_windows_gates_pass(tmp_path, monkeypatch):
     from romulus.hunt import sweep as sweep_module
     from tests.test_sweep import _repo
@@ -614,3 +685,48 @@ def test_sweep_cell_can_be_complete_only_after_all_windows_gates_pass(tmp_path, 
     assert unresolved["detail"]["reasons"] == [
         "collection not attested: Sysmon event id 1 on ws01.example.test"
     ]
+
+
+def test_5000_host_windows_sweep_refuses_bounded_state_without_crashing(tmp_path, monkeypatch):
+    from romulus.hunt import sweep as sweep_module
+    from tests.test_sweep import _repo
+
+    hosts = tuple(f"ws{number:04d}.example.test" for number in range(5_000))
+    records = []
+    for host_number, host_name in enumerate(hosts):
+        hit = _hit(10, native_id=f"host-{host_number}")
+        hit["_source"]["winlog"]["computer_name"] = host_name
+        records.append(hit)
+    monkeypatch.setattr(sweep_module, "execute", lambda _client, intent, _contract: SearchOutcome(
+        target=intent.target, fingerprint="5000-hosts", started_at=START, ended_at=START,
+        completeness=Completeness.complete, total=len(records), total_relation="eq",
+        returned=len(records), records=records,
+    ))
+    budget = StateBudget(tmp_path, disk_total=128 * 1024, reserve=0)
+    monkeypatch.setattr(sweep_module, "state_budget", lambda _settings, _stage_dir: budget)
+    contract = _contract().model_copy(update={"hosts": hosts})
+    repo = _repo()
+    sweep = Sweep(
+        repo, None, "h1", Window(start=START, end=START + timedelta(minutes=10)),
+        {contract.target: contract}, site_facts=_site(tmp_path), stage_dir=tmp_path,
+    )
+    sweep.pack = [WindowsProcessRule()]
+    for rule in sweep.pack:
+        rule.spill_dir, rule.budget = tmp_path, budget
+    budget.plan(live_stores(sweep.pack) + 3)
+    event_class = lookup_event_class(SYSMON_CHANNEL, SYSMON, 1)
+    assert event_class is not None
+    sweep._windows_inventory[contract.target] = {event_class.token}
+    sweep._windows_inventory_reasons[contract.target] = []
+
+    sweep.run_partition(contract.target, contract, [], sweep.window, est=len(records))
+
+    [cell] = repo.rule_cells("h1")
+    assert cell["state"] == "evaluated_partial"
+    assert cell["evaluated"] == 5_000
+    assert "state_capped" not in cell["detail"]
+    assert any("host/channel groups" in reason for reason in cell["detail"]["reasons"])
+    assert "windows_seen" in budget.full
+    assert sweep._event_stage().windows_refused > 0
+    assert len(cell["detail"]["reasons"]) < 10
+    sweep.close_stage()

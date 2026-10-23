@@ -29,13 +29,18 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
 from romulus.detect.host import (
+    UNBUDGETED,
     Lineage,
     ProcessLineage,
     _argv_summary,
     _outcome_tally,
+    add_unheld,
+    alone,
     boot_of,
     lineage_phrase,
+    need,
 )
 from romulus.detect.linux_argv import (
     canonical,
@@ -152,10 +157,13 @@ class _Item:
 class _ShutdownMarkers:
     """Typed shutdown or reboot markers per host, from the service manager, the kernel audit trail and commands."""
 
-    def __init__(self):
-        self.marks: dict[str | None, list[tuple[float, str, TypedEvent]]] = defaultdict(list)
+    HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
 
-    def observe(self, e: TypedEvent) -> None:
+    def __init__(self, owner=None):
+        self.marks = KeyedStore(owner, "tamper_marks", self.HOT)     # host -> [(time, what, record)]
+
+    def observe(self, e: TypedEvent) -> TypedEvent | None:
+        """Record a marker; returns the record when it became one (so the rule stages it)."""
         what = None
         if e.family == "system_state":
             if e.get("system.event") == "shutdown":
@@ -170,16 +178,18 @@ class _ShutdownMarkers:
             name_hint = program_name_hint(e)
             marker_programs = SHUTDOWN_COMMANDS | {"systemctl", "init", "telinit"} | SHELLS
             if name_hint is not None and name_hint not in marker_programs:
-                return
+                return None
             ident = _identity(e)
             if ident is not None and e.outcome != Outcome.failure:
                 name, args, _ = ident
                 if name == "shutdown" and "-c" in args:
                     # a cancelled scheduled shutdown is not one: drop the host's earlier shutdown requests
                     ts = e.ts.timestamp()
-                    self.marks[e.host] = [m for m in self.marks.get(e.host, [])
-                                          if not (m[2].family == "process_exec" and ts - SHUTDOWN_WINDOW <= m[0] <= ts)]
-                    return
+                    held = self.marks.get(e.host)
+                    if held:
+                        held[:] = [m for m in held
+                                   if not (m[2].family == "process_exec" and ts - SHUTDOWN_WINDOW <= m[0] <= ts)]
+                    return None
                 # warnings only, help, or (poweroff/halt/reboot -w) writing the wtmp record without shutting down
                 not_a_shutdown = {"-k", "--help", "--wall", "-w", "--wtmp-only"} & set(args)
                 if name in SHUTDOWN_COMMANDS and not not_a_shutdown:
@@ -192,11 +202,18 @@ class _ShutdownMarkers:
                 elif name in {"init", "telinit"} and args[:1] in (["0"], ["6"]):
                     what = f"an '{name} {args[0]}' command"
         if what:
-            self.marks[e.host].append((e.ts.timestamp(), what, e))
+            held = self.marks.setdefault(e.host, list)
+            if held is not None:
+                held.append((e.ts.timestamp(), what, e))
+                return e
+            # a missing marker only ever keeps a stop's lane higher; coverage still says so
+            self.marks.owner.note_limit("markers_disk", "the shutdown markers' disk budget is spent; a later "
+                                                        "host's shutdown marker is not held")
+        return None
 
     def near(self, host: str | None, ts: float) -> tuple[float, str, TypedEvent] | None:
         best = None
-        for mark in self.marks.get(host, ()):
+        for mark in self.marks.peek(host, ()):
             if abs(mark[0] - ts) <= SHUTDOWN_WINDOW and (best is None or abs(mark[0] - ts) < abs(best[0] - ts)
                                                          or (abs(mark[0] - ts) == abs(best[0] - ts)
                                                              and mark[2].id < best[2].id)):
@@ -356,6 +373,7 @@ def _actor(e: TypedEvent) -> str:
 
 class _TamperRule(Playbook):
     os_families = ("linux",)
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     kind = "aggregate"
     claim_type = "aggregate_observation"
     assures_negative = False
@@ -363,19 +381,59 @@ class _TamperRule(Playbook):
     process_programs: ClassVar[set[str]] = set()
     process_editors: ClassVar[bool] = False
 
+    # Every record the rule may cite is staged, and the rule keeps its own copies on lists that never forget: the
+    # HOT newest in memory, the rest on its disk spill. Command matches, unit stop records and audit configuration
+    # records each have their own list and disk budget, so routine records can never use up the room of a command
+    # match. Per-key time lists (unit starts, rule additions, daemon registrations) are keyed stores, uncapped.
+    staged = True
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    COMMANDS_DISK = 2 * 2**30
+    ROUTINE_DISK = 2 * 2**30
+
     def __init__(self):
         super().__init__()
-        self.lineage = ProcessLineage()
-        self.markers = _ShutdownMarkers()
-        self.items: list[_Item] = []
-        self._seen: set[str] = set()
+        self.lineage = ProcessLineage(self)
+        self.markers = _ShutdownMarkers(self)
+        self._items = SpillList(self, "tamper_items", self.HOT, disk_budget=self.COMMANDS_DISK)
+        self.items: list[_Item] = []         # the command matches, read back at finalize
+        self._alone: list[Match] = []        # command matches published on their own (the budget refused the list)
+        self._seen = RecentIds()        # bounded re-read guard
+        self._pending: list[TypedEvent] = []
+        self.load = lambda ids: []
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        self._trim()
+        return out
+
+    def retained_events(self) -> list[TypedEvent]:
+        return []                               # staged on disk instead
+
+    def _trim(self) -> None:
+        self.lineage.trim()
+        self.markers.marks.trim()
+        self._items.trim()
+
+    def _held_records(self, records: SpillList, e: TypedEvent, what: str) -> bool:
+        """Keep a record the rule may cite; False (refused, coverage says so) only when its list's disk budget is
+        spent."""
+        if records.append(e, (e.ts.timestamp(), e.id)):
+            self._pending.append(e)
+            return True
+        self.evaluated -= 1
+        self.refuse(f"{records.name}_disk", f"the {what} list's disk budget is spent; a later {what} record is "
+                                            f"not evaluated")
+        return False
 
     def consume(self, events):
         order = {"process_exec": 0, "system_state": 1, "service_change": 2, "audit_config": 3}
         fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
+        self._batch = events
         for e in sorted(fresh, key=lambda x: (x.ts, order.get(x.family, 9), x.id)):
             self._seen.add(e.id)
-            self.markers.observe(e)
+            marker = self.markers.observe(e)
+            if marker is not None:
+                self._pending.append(marker)
             if e.family == "process_exec":
                 self.lineage.observe(e)
                 if self.program_prefilter and not self._process_relevant(e):
@@ -383,9 +441,15 @@ class _TamperRule(Playbook):
                     self.missing_required += int(argv_incomplete(e))
                     continue
             self._event(e)
-        return []
+        self._batch = None
+        out, self._alone = self._alone, []
+        return out
 
     program_prefilter = True
+
+    def _describer(self):
+        """The function that words a group of command matches (one per rule)."""
+        return getattr(self, "_describe_commands", None) or self._describe
 
     def _process_relevant(self, event: TypedEvent) -> bool:
         name = program_name_hint(event)
@@ -394,17 +458,53 @@ class _TamperRule(Playbook):
 
     def _event(self, e: TypedEvent) -> None: ...
 
-    def retained_events(self):
-        return ([i.event for i in self.items] + [e for i in self.items for e in i.linked]
-                + [m[2] for marks in self.markers.marks.values() for m in marks])
+    def _time(self, table: KeyedStore, key, ts: float) -> None:
+        times = table.setdefault(key, list)
+        if times is None:
+            self.note_limit("times_disk", "a per-key time list's disk budget is spent; a later unit start, rule "
+                                          "addition or daemon registration is not joined")
+            return
+        times.append(ts)
 
     def _exec_items(self, e: TypedEvent, found: list[tuple[str, str, str, str]], from_text: bool) -> None:
         """found: (group form key, target, how, proposed lane before lineage and shutdown)."""
+        if not found:
+            return
         lineage = self.lineage.classify(e)
         actor = _actor(e)
+        kept = False
         for key, target, how, lane in found:
-            self.items.append(_Item(e.host, e.ts.timestamp(), (e.host, actor, lineage.kind, key), how, target,
-                                    lane, e, lineage, actor, from_text=from_text))
+            item = _Item(e.host, e.ts.timestamp(), (e.host, actor, lineage.kind, key), how, target, lane, e, lineage,
+                         actor, from_text=from_text)
+            if self._items.append(item):
+                kept = True
+            else:
+                # a command match is a finding by itself: published now as a one-command group, instead of refused
+                self.note_limit("commands_alone", "the command matches' disk budget is spent; later command matches "
+                                                  "are published one record at a time, not grouped or linked to unit "
+                                                  "stop or configuration records")
+                add_unheld(self._alone, alone(self._describer()(item.group, [item]), self, e))
+        if kept:
+            self._pending.append(e)
+
+    def _load_items(self) -> None:
+        """Finalize: the command matches, read back from their list."""
+        self.items = list(self._items)
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Every command match, grouped as usual (the matches are read, nothing is written), without the unit stop or
+        configuration records whose linking needed disk."""
+        try:
+            self.items = list(self._items)
+        except StateExhausted:
+            self.items = [item for _order, item in self._items.buffer]  # the list on disk cannot be read
+        for item in self.items:
+            item.linked.clear()
+        out = self._group_findings(self._describer())
+        for m in out:
+            m.notes.append(f"published without linked service-manager or configuration records: linking them "
+                           f"needed disk ({reason})")
+        return out
 
     def _group_findings(self, describe) -> list[Match]:
         groups: dict[tuple, list[_Item]] = defaultdict(list)
@@ -432,7 +532,7 @@ class _TamperRule(Playbook):
 
 class SecurityOrLoggingServiceStop(_TamperRule):
     id = "host.security_or_logging_service_stop"
-    version = "2"
+    version = "3"
     title = "Logging, audit or security service stopped, disabled or killed (command or service manager record)"
     families = ("process_exec", "service_change", "system_state")
     severity, lane = "high", "high"
@@ -479,9 +579,14 @@ class SecurityOrLoggingServiceStop(_TamperRule):
 
     def __init__(self):
         super().__init__()
-        self.stops: list[TypedEvent] = []
-        self.starts: dict[tuple, list[float]] = defaultdict(list)
-        self.ran: dict[tuple, list[float]] = defaultdict(list)   # watched daemons' exec records per host
+        self.stops = SpillList(self, "tamper_stops", self.HOT, disk_budget=self.ROUTINE_DISK)
+        self.starts = KeyedStore(self, "tamper_starts", self.HOT)      # (host, unit) -> start times
+        self.ran: dict[tuple, float] = {}       # watched daemon -> its earliest exec record per host
+
+    def _trim(self) -> None:
+        super()._trim()
+        self.stops.trim()
+        self.starts.trim()
 
     def _process_relevant(self, event: TypedEvent) -> bool:
         name = program_name_hint(event)
@@ -497,7 +602,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             self.evaluated += 1
             name, args, from_exe = ident
             if from_exe and service_category(name):
-                self.ran[(e.host, name)].append(e.ts.timestamp())
+                self.ran[(e.host, name)] = min(self.ran.get((e.host, name), e.ts.timestamp()), e.ts.timestamp())
             # An incomplete argv cannot settle absent tokens (--user, a later -s HUP): only the shell text, a whole
             # argument when present, is read.
             found = [] if argv_incomplete(e) else self._requests(name, args) + self._kill_by_pid(e, name, args)
@@ -521,9 +626,9 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             if e.get("service.source") == "journal" and e.has("process.pid") and e.get("process.pid") != 1:
                 return              # any process can write a journal entry shaped like the service manager's
             if (job == "stop" and e.get("service.job_phase") not in {"begun"}) or job == "exit":
-                self.stops.append(e)        # "exit": the main process ended by a signal or a core dump
+                self._held_records(self.stops, e, "unit stop")     # "exit": ended by a signal or a core dump
             elif job == "start" and e.get("service.job_phase") == "done":
-                self.starts[(e.host, name)].append(e.ts.timestamp())
+                self._time(self.starts, (e.host, name), e.ts.timestamp())
         else:
             self.evaluated += 1
 
@@ -536,7 +641,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             return []
         out = []
         for pid in pids:
-            daemon = self.lineage.parent(e.host, pid, e.ts.timestamp(), boot_of(e))
+            daemon = self.lineage.parent(e.host, pid, e.ts.timestamp(), boot_of(e), e.get("audit.serial"))
             if daemon is not None and service_category(daemon.name):
                 unit = service_name(daemon.name)
                 how = (f"'kill {' '.join(args)}' (pid {pid} is '{daemon.name}' by its exec record; "
@@ -556,19 +661,18 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             out.append((key, target, how, "high" if key == "apparmor_unload" else "lead"))
         return out
 
-    def retained_events(self):
-        return super().retained_events() + self.stops
-
     def finalize(self):
         restarts = 0
-        typed: dict[tuple, list[tuple[TypedEvent, str, float | None]]] = defaultdict(list)
+        # stop records not linked to a command, grouped per (host, unit, kind) on a disk-backed store
+        typed = KeyedStore(self, "tamper_typed_stops", self.HOT, disk_budget=UNBUDGETED)
+        self._load_items()
         self._confirm_patterns()
         commands_by_unit: dict[tuple, list[_Item]] = defaultdict(list)
         for item in self.items:
             if not item.group[3].startswith("pattern:"):     # an unconfirmed pattern names no unit to link
                 for unit in units_of(item.target):
                     commands_by_unit[(item.host, unit)].append(item)
-        for stop in sorted(self.stops, key=lambda e: (e.ts, e.id)):
+        for stop in self.stops.ordered():
             ts = stop.ts.timestamp()
             name = str(stop.get("service.name"))
             gap = self._restart_gap(stop.host, name, ts)
@@ -596,10 +700,13 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                 kind = "shutdown"
             else:
                 kind = "stopped"
-            typed[(stop.host, name, kind)].append((stop, kind, gap))
+            need(typed.setdefault((stop.host, name, kind), list), self, "the unit stop grouping").append(
+                (stop, kind, gap))
+            typed.trim()
         out = self._group_findings(self._describe_commands)
-        for key in sorted(typed, key=str):
-            out.append(self._describe_records(key, typed[key]))
+        for key in sorted(typed.keys(), key=str):
+            out.append(self._describe_records(key, typed.peek(key)))
+        typed.clear()
         if restarts:
             for match in out:
                 match.notes.append(f"{restarts} unit stop(s) followed by a start within {RESTART_SECONDS:.0f} s "
@@ -615,8 +722,20 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         for item in self.items:
             if item.group[3].startswith("kill:"):
                 named[item.event.id].update(units_of(item.target))
+        # each pattern match's first stop record (in arrival order) of a unit it may name, in one pass over the stops
+        wanted: dict[tuple, list[int]] = defaultdict(list)
+        for index, item in enumerate(self.items):
+            if item.group[3].startswith("pattern:"):
+                for unit in set(units_of(item.target)):
+                    wanted[(item.host, unit)].append(index)
+        first_stop: dict[int, TypedEvent] = {}
+        for e in self.stops if wanted else ():
+            for index in wanted.get((e.host, e.get("service.name")), ()):
+                if (index not in first_stop
+                        and -COMMAND_LINK_AFTER <= e.ts.timestamp() - self.items[index].ts <= COMMAND_LINK_BEFORE):
+                    first_stop[index] = e
         kept = []
-        for item in self.items:
+        for index, item in enumerate(self.items):
             if not item.group[3].startswith("pattern:"):
                 kept.append(item)
                 continue
@@ -624,11 +743,10 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             if units & named[item.event.id]:
                 continue                                         # an alias of a daemon this command names in full
             why = ""
-            if any(t <= item.ts for t in self.ran.get((item.host, item.target), ())):
+            if self.ran.get((item.host, item.target), float("inf")) <= item.ts:
                 why = f"an exec record shows '{item.target}' ran on the host earlier"
             else:
-                stop = next((e for e in self.stops if e.host == item.host and e.get("service.name") in units
-                             and -COMMAND_LINK_AFTER <= e.ts.timestamp() - item.ts <= COMMAND_LINK_BEFORE), None)
+                stop = first_stop.get(index)
                 if stop is not None:
                     why = (f"the service manager recorded '{stop.get('service.name')}' stopping "
                            f"{stop.ts.timestamp() - item.ts:.0f} s later")
@@ -643,7 +761,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                                               and set(units_of(i.target)) & named[i.event.id])]
 
     def _restart_gap(self, host: str | None, name: str, ts: float) -> float | None:
-        later = [t for unit in units_of(name) for t in self.starts.get((host, unit), ()) if t >= ts]
+        later = [t for unit in units_of(name) for t in self.starts.peek((host, unit), ()) if t >= ts]
         return min(later) - ts if later else None
 
     def _describe_commands(self, key, items: list[_Item]) -> Match:
@@ -791,7 +909,7 @@ def auditctl_requests(args: list[str]) -> list[tuple[str, str, str]]:
 
 class AuditRulesTamper(_TamperRule):
     id = "host.audit_rules_tamper"
-    version = "2"
+    version = "3"
     title = "Audit rules deleted, auditing switched off or audit configuration changed (command or kernel record)"
     families = ("process_exec", "audit_config", "service_change", "system_state")
     severity, lane = "high", "high"
@@ -832,9 +950,16 @@ class AuditRulesTamper(_TamperRule):
 
     def __init__(self):
         super().__init__()
-        self.configs: list[TypedEvent] = []                               # records of a reportable kind
-        self.registrations: dict[str | None, list[float]] = defaultdict(list)   # audit daemon (re)registrations
-        self.adds: dict[tuple, list[float]] = defaultdict(list)          # rule additions per (host, auid, session)
+        # records of a reportable kind
+        self.configs = SpillList(self, "tamper_configs", self.HOT, disk_budget=self.ROUTINE_DISK)
+        self.registrations = KeyedStore(self, "tamper_registrations", self.HOT)   # audit daemon (re)registrations
+        self.adds = KeyedStore(self, "tamper_adds", self.HOT)          # rule additions per (host, auid, session)
+
+    def _trim(self) -> None:
+        super()._trim()
+        self.configs.trim()
+        self.registrations.trim()
+        self.adds.trim()
 
     def _event(self, e):
         if e.family == "process_exec":
@@ -868,11 +993,11 @@ class AuditRulesTamper(_TamperRule):
             self.evaluated += 1
             ts = e.ts.timestamp()
             if e.get("audit.config.setting") == "audit_pid" and str(e.get("audit.config.value")) != "0":
-                self.registrations[e.host].append(ts)
+                self._time(self.registrations, e.host, ts)
             if e.get("audit.config.op") in {"add_rule", "add rule"} and e.outcome != Outcome.failure:
-                self.adds[(e.host, e.get("process.auid"), e.get("process.session_id"))].append(ts)
+                self._time(self.adds, (e.host, e.get("process.auid"), e.get("process.session_id")), ts)
             if self._config_kind(e) is not None:
-                self.configs.append(e)
+                self._held_records(self.configs, e, "audit configuration")
         else:
             self.evaluated += 1
 
@@ -892,17 +1017,16 @@ class AuditRulesTamper(_TamperRule):
                     out.append(("config_file", f"delete audit configuration file {path} ('{name}')", "lead"))
         return out
 
-    def retained_events(self):
-        return super().retained_events() + self.configs
-
     def finalize(self):
+        self._load_items()
         by_pid: dict[tuple, list[_Item]] = defaultdict(list)
         for item in self.items:
             if isinstance(item.event.get("process.pid"), int):
                 by_pid[(item.host, item.event.get("process.pid"))].append(item)
-        typed: dict[tuple, list[TypedEvent]] = defaultdict(list)
+        # configuration records not linked to a command, grouped on a disk-backed store
+        typed = KeyedStore(self, "tamper_typed_configs", self.HOT, disk_budget=UNBUDGETED)
         registrations, adds = self.registrations, self.adds
-        for config in sorted(self.configs, key=lambda e: (e.ts, e.id)):
+        for config in self.configs.ordered():
             kind = self._config_kind(config)
             ts = config.ts.timestamp()
             linked = [i for i in by_pid.get((config.host, config.get("process.pid")), ()) if abs(i.ts - ts) <= 10]
@@ -911,17 +1035,20 @@ class AuditRulesTamper(_TamperRule):
                     item.linked.append(config)
                 continue
             if kind == "unregistered":
-                back = [t for t in registrations.get(config.host, ()) if t >= ts]
+                back = [t for t in registrations.peek(config.host, ()) if t >= ts]
                 if back and min(back) - ts <= RESTART_SECONDS:
                     continue                                  # the daemon restarted
             actor = str(config.get("process.login_user") or config.get("process.user")
                         or (f"audit login uid {config.get('process.auid')}" if config.has("process.auid")
                             else "no login session"))
             session = (config.get("process.auid"), config.get("process.session_id"))
-            typed[(config.host, actor, kind, session)].append(config)
+            need(typed.setdefault((config.host, actor, kind, session), list), self,
+                 "the configuration record grouping").append(config)
+            typed.trim()
         out = self._group_findings(self._describe_commands)
-        for key in sorted(typed, key=str):
-            out.append(self._describe_records(key, typed[key], adds, registrations))
+        for key in sorted(typed.keys(), key=str):
+            out.append(self._describe_records(key, typed.peek(key), adds, registrations))
+        typed.clear()
         return out
 
     @staticmethod
@@ -990,12 +1117,12 @@ class AuditRulesTamper(_TamperRule):
         elif kind == "unregistered":
             claim = (f"On {host}, {len(configs)} kernel CONFIG_CHANGE record(s) show the audit daemon unregistering "
                      f"(audit_pid=0), the first at {first.ts.isoformat()}; {tally}.")
-            back = [t for t in registrations.get(host, ()) if t >= first.ts.timestamp()]
+            back = [t for t in registrations.peek(host, ()) if t >= first.ts.timestamp()]
             if back:
                 claim += f" A daemon registered again {min(back) - first.ts.timestamp():.0f} s later."
                 lane = "lead" if min(back) - first.ts.timestamp() <= RESTART_WINDOW else lane
         else:
-            readded = [t for t in adds.get((host, *session), ()) if 0 <= t - last.ts.timestamp() <= self.RELOAD_SECONDS]
+            readded = [t for t in adds.peek((host, *session), ()) if 0 <= t - last.ts.timestamp() <= self.RELOAD_SECONDS]
             claim = (f"On {host}, {len(configs)} kernel CONFIG_CHANGE record(s) show audit rules being removed{by} "
                      f"as {actor} ({first.ts.isoformat()} – {last.ts.isoformat()}; {tally}).")
             if readded:
@@ -1013,7 +1140,8 @@ class AuditRulesTamper(_TamperRule):
         if applied == 0 and lane == "high":
             lane = "lead"
             notes.append("lane lowered: no record shows the change applied")
-        lineage = self.lineage.classify_pid(host, first.get("process.pid"), first.ts.timestamp(), boot_of(first))
+        lineage = self.lineage.classify_pid(host, first.get("process.pid"), first.ts.timestamp(), boot_of(first),
+                                            first.get("audit.serial"))
         if lineage.kind == "web":
             lane = "high"
             claim += f" Exec lineage: {lineage_phrase(lineage)}."
@@ -1218,7 +1346,7 @@ def _history_assignments(words: list[str]) -> list[tuple[str, str, str, str]]:
 
 class LogOrHistoryClearing(_TamperRule):
     id = "host.log_or_history_clearing"
-    version = "2"
+    version = "3"
     title = "Log or shell history deleted, truncated, overwritten or switched off (command or shell text)"
     families = ("process_exec",)
     severity, lane = "high", "high"
@@ -1293,6 +1421,7 @@ class LogOrHistoryClearing(_TamperRule):
         self._exec_items(e, [(c, t, how, lane) for c, t, how, lane in text_found], True)
 
     def finalize(self):
+        self._load_items()
         return self._group_findings(self._describe)
 
     def _describe(self, key, items: list[_Item]) -> Match:

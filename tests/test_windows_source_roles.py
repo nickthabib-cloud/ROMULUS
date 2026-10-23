@@ -44,7 +44,7 @@ def _windows_types() -> dict[str, str]:
     }
 
 
-def _event(event_id: int, *, channel=SYSMON_CHANNEL, provider=SYSMON, data=None):
+def _event(event_id: int, *, channel=SYSMON_CHANNEL, provider=SYSMON, data=None, record_id=None):
     return normalize_hits(
         [
             {
@@ -59,7 +59,7 @@ def _event(event_id: int, *, channel=SYSMON_CHANNEL, provider=SYSMON, data=None)
                         "provider_name": provider,
                         "event_id": event_id,
                         "computer_name": "WS01.example.test",
-                        "record_id": 100 + event_id,
+                        "record_id": 100 + event_id if record_id is None else record_id,
                         "event_data": data or {},
                     },
                 },
@@ -544,6 +544,46 @@ def test_windows_process_tree_root_is_latest_at_or_before_anchor_not_later_pid_r
 
     assert {event.id for event in selected} == {"prior", "prior-child"}
     assert reason is None
+
+
+def test_windows_process_tree_orders_same_instant_roots_by_record_id_not_event_id():
+    earlier = _event(1, record_id=100, data={
+        "ProcessGuid": "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}", "ProcessId": "512",
+        "Image": r"C:\Tools\earlier.exe",
+    }).model_copy(update={"id": "z-earlier", "ts": START + timedelta(minutes=10)})
+    later = _event(1, record_id=101, data={
+        "ProcessGuid": "{BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF}", "ProcessId": "512",
+        "Image": r"C:\Tools\later.exe",
+    }).model_copy(update={"id": "a-later", "ts": earlier.ts})
+    child = _event(1, record_id=102, data={
+        "ProcessGuid": "{11111111-2222-3333-4444-555555555555}",
+        "ParentProcessGuid": "{BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF}",
+        "ProcessId": "600", "ParentProcessId": "512",
+    }).model_copy(update={"id": "child", "ts": START + timedelta(minutes=11)})
+    args = ProcessTreeArgs(host="ws01", process_id=512, start=START, end=END)
+
+    selected, reason = PivotExecutor._select_windows_process_tree(
+        [earlier, later, child], args, earlier.ts,
+    )
+
+    assert {event.id for event in selected} == {"a-later", "child"}
+    assert reason is None
+
+
+def test_windows_process_tree_treats_same_instant_cross_channel_images_as_ambiguous():
+    sysmon = _event(1, record_id=100, data={
+        "ProcessGuid": "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}", "ProcessId": "512",
+        "Image": r"C:\Tools\one.exe",
+    }).model_copy(update={"id": "sysmon", "ts": START + timedelta(minutes=10)})
+    security = _event(4688, channel="Security", provider=SECURITY, record_id=999, data={
+        "NewProcessId": "0x200", "NewProcessName": r"C:\Tools\two.exe",
+    }).model_copy(update={"id": "security", "ts": sysmon.ts})
+    args = ProcessTreeArgs(host="ws01", process_id=512, start=START, end=END)
+
+    selected, reason = PivotExecutor._select_windows_process_tree([sysmon, security], args, sysmon.ts)
+
+    assert selected == []
+    assert reason == "process_tree root at anchor instant is ambiguous"
 
 
 def test_pid_fallback_link_is_inferred_until_4689_collection_is_attested():

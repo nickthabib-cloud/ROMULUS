@@ -21,6 +21,7 @@ id) or a kernel file-change record shows the change.
 from __future__ import annotations
 
 import heapq
+import itertools
 import re
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
@@ -28,13 +29,18 @@ from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
 from romulus.detect.host import (
+    UNBUDGETED,
     Lineage,
     ProcessLineage,
     _argv_summary,
     _outcome_tally,
+    add_unheld,
+    alone,
     boot_of,
     lineage_phrase,
+    need,
 )
 from romulus.detect.linux_argv import (
     canonical,
@@ -115,14 +121,35 @@ class _SshAttemptStream(Playbook):
                    "ip_sessions for the source address: what else it reached",
                    "entity_timeline of the host after any accepted login from the source")
 
+    # Every evaluated sshd record is staged when read, as any of them may be cited later. Per-key state (tallies,
+    # sliding windows, accepted-login counts, found logins) lives in keyed stores: HOT keys in memory, the rest on
+    # the rule's disk spill, never forgotten. Only a store's disk budget refuses, and coverage says so.
+    staged = True
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+
     def __init__(self):
         super().__init__()
         self._heap: list[tuple[float, str, TypedEvent]] = []
         self._latest = float("-inf")
-        self._seen: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
         self._conns: dict[tuple, _Connection] = {}
         self._last_prune = float("-inf")
         self.probe_failures = 0     # failures inside connections that then succeeded (not counted)
+        self._pending: list[TypedEvent] = []
+        self._alone: list[Match] = []   # findings published as they were judged (no room to hold them)
+        self.load = lambda ids: []
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        for store in self._stores():
+            store.trim()
+        return out
+
+    def retained_events(self) -> list[TypedEvent]:
+        return list(self._pending)                      # the rest are staged on disk
+
+    def _stores(self) -> tuple[KeyedStore, ...]:
+        return ()
 
     @staticmethod
     def _conn_key(e: TypedEvent) -> tuple:
@@ -141,6 +168,7 @@ class _SshAttemptStream(Playbook):
                 self.missing_required += 1
                 continue
             self.evaluated += 1
+            self._pending.append(e)
             batch.append(e)
         for e in self._without_duplicate_lookups(sorted(batch, key=lambda x: (x.ts, x.id))):
             key, ts = self._conn_key(e), e.ts.timestamp()
@@ -156,7 +184,8 @@ class _SshAttemptStream(Playbook):
             heapq.heappush(self._heap, (ts, e.id, e, conn))
             self._latest = max(self._latest, ts)
         self._drain(self._latest - SETTLE_SECONDS)
-        return []
+        out, self._alone = self._alone, []
+        return out
 
     @staticmethod
     def _without_duplicate_lookups(batch: list[TypedEvent]) -> list[TypedEvent]:
@@ -204,24 +233,47 @@ class _SshAttemptStream(Playbook):
         self._attempt(_Attempt(ts, e.host, str(e.get("source.ip")), str(account) if account else None,
                                e.get("auth.user_valid"), new, e))
 
+    # A key's totals are stated when it crosses, so per-key state is held for the whole hunt (on disk when cold).
+    def _state(self, store: KeyedStore, key: tuple, factory):
+        """The key's state; None (the attempt is refused, coverage says so) only when the store's disk budget is
+        spent."""
+        state = store.setdefault(key, factory)
+        if state is None:
+            self.evaluated -= 1
+            self.refuse("disk", f"the {store.name} disk budget is spent; an attempt of a new source or account is "
+                                f"not counted")
+        return state
+
+    def _count(self, store: KeyedStore, key: tuple) -> None:
+        """One more accepted login for the key; a login the disk budget refuses makes every login count a lower
+        bound, and the claims say so."""
+        if not store.put(key, store.get(key, 0) + 1):
+            self.logins_uncounted = True
+            self.note_limit("logins_disk", f"the {store.name} disk budget is spent; a later accepted login is not "
+                                           f"counted")
+
+    logins_uncounted = False
+
     def finalize(self):
         self._drain(float("inf"))
-        return self._findings()
-
-    def retained_events(self):
-        return [item[2] for item in self._heap] + self._held()
+        out, self._alone = self._alone, []
+        return out + self._findings()
 
     # subclass hooks
     def _attempt(self, a: _Attempt) -> None: ...
     def _success(self, ts: float, e: TypedEvent) -> None: ...
     def _prune(self, now: float) -> None: ...
-    def _held(self) -> list[TypedEvent]: return []
     def _findings(self) -> list[Match]: return []
 
 
-def _prune_windows(windows: dict, now: float, span: float) -> None:
-    for key in [k for k, w in windows.items() if not w or now - w[-1].ts > span]:
-        del windows[key]
+def _prune_windows(windows: KeyedStore, now: float, span: float) -> None:
+    """Drop the in-memory windows that are past their span (a window on disk is trimmed when read back)."""
+    for key in [k for k, w in windows.hot.items() if not w or now - w[-1].ts > span]:
+        windows.pop(key)
+
+
+def _logins(n: int, uncounted: bool) -> int | str:
+    return f"at least {n}" if uncounted else n
 
 
 def _trim(window: deque, now: float, span: float) -> None:
@@ -248,6 +300,8 @@ class _Tally:
     names: set[str] = field(default_factory=set)
     invalid_names: set[str] = field(default_factory=set)
     more_names: int = 0
+    window: deque = field(default_factory=deque)
+    in_window: Counter = field(default_factory=Counter)
 
     def add(self, a: _Attempt) -> None:
         self.attempts += 1
@@ -292,17 +346,21 @@ class SshPasswordGuessing(_SshAttemptStream):
 
     def __init__(self):
         super().__init__()
-        self.windows: dict[tuple, deque[_Attempt]] = {}
-        self.tallies: dict[tuple, _Tally] = {}
-        self.successes: Counter = Counter()
+        self.tallies = KeyedStore(self, "ssh_guess_tallies", self.HOT, candidate=lambda t: t.crossed is not None)
+        self.successes = KeyedStore(self, "ssh_guess_logins", self.HOT)
+
+    def _stores(self):
+        return self.tallies, self.successes
 
     def _attempt(self, a):
         if a.account is None:
             return
         key = (a.host, a.ip, a.account)
-        tally = self.tallies.setdefault(key, _Tally(first=a.ts))
+        tally = self._state(self.tallies, key, lambda: _Tally(first=a.ts))
+        if tally is None:
+            return
         tally.add(a)
-        window = self.windows.setdefault(key, deque())
+        window = tally.window
         window.append(a)
         _trim(window, a.ts, self.WINDOW)
         tally.peak = max(tally.peak, len(window))
@@ -311,23 +369,22 @@ class SshPasswordGuessing(_SshAttemptStream):
             tally.cited = [x.event for x in window][-CITE:]
 
     def _success(self, ts, e):
-        self.successes[(e.host, str(e.get("source.ip")), str(e.get("user.name")))] += 1
+        self._count(self.successes, (e.host, str(e.get("source.ip")), str(e.get("user.name"))))
 
     def _prune(self, now):
-        _prune_windows(self.windows, now, self.WINDOW)
-
-    def _held(self):
-        # A crossing cites the window as it stands, which is at most the latest THRESHOLD attempts of that window.
-        return ([x.event for w in self.windows.values() for x in list(w)[-CITE:]]
-                + [e for t in self.tallies.values() for e in [*t.cited, t.last_event] if e is not None])
+        for tally in self.tallies.hot.values():
+            if tally.window and now - tally.window[-1].ts > self.WINDOW:
+                tally.window.clear()
 
     def _findings(self):
         out = []
-        for key in sorted((k for k, t in self.tallies.items() if t.crossed is not None), key=str):
+        for key in sorted(self.tallies.keys(candidates=True), key=str):
             host, ip, account = key
-            t = self.tallies[key]
+            t = self.tallies.peek(key)
+            if t.crossed is None:
+                continue
             events = sorted(_unique([*t.cited, t.last_event]), key=lambda e: (e.ts, e.id))
-            ok = self.successes[key]
+            ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
             claim = (f"On {host}, sshd recorded {t.attempts} failed authentication attempt(s) for account "
                      f"'{account}' from {ip} in {t.connections} connection(s) between {_iso(t.first)} and "
                      f"{_iso(t.last)}; the most within any {self.WINDOW / 60:.0f} minutes was {t.peak} (threshold "
@@ -377,25 +434,27 @@ class SshPasswordSpraying(_SshAttemptStream):
 
     def __init__(self):
         super().__init__()
-        self.windows: dict[tuple, deque[_Attempt]] = {}
-        self.in_window: dict[tuple, Counter] = {}
-        self.tallies: dict[tuple, _Tally] = {}
-        self.successes: Counter = Counter()
+        self.tallies = KeyedStore(self, "ssh_spray_tallies", self.HOT, candidate=lambda t: t.crossed is not None)
+        self.successes = KeyedStore(self, "ssh_spray_logins", self.HOT)
+
+    def _stores(self):
+        return self.tallies, self.successes
 
     def _attempt(self, a):
         key = (a.host, a.ip)
-        tally = self.tallies.setdefault(key, _Tally(first=a.ts))
+        tally = self._state(self.tallies, key, lambda: _Tally(first=a.ts))
+        if tally is None:
+            return
         tally.add(a)
         if a.account is None:
             return
         if a.account in tally.names or len(tally.names) < self.NAME_CAP:
             tally.names.add(a.account)
         else:
-            tally.more_names += 1
+            tally.more_names += 1           # a source's names beyond NAME_CAP are counted, not listed
         if a.valid is False and len(tally.invalid_names) < self.NAME_CAP:
             tally.invalid_names.add(a.account)
-        window = self.windows.setdefault(key, deque())
-        counts = self.in_window.setdefault(key, Counter())
+        window, counts = tally.window, tally.in_window
         window.append(a)
         counts[a.account] += 1
         while window and a.ts - window[0].ts > self.WINDOW:
@@ -412,32 +471,24 @@ class SshPasswordSpraying(_SshAttemptStream):
             tally.cited = list(first_per_name.values())[:CITE]
 
     def _success(self, ts, e):
-        self.successes[(e.host, str(e.get("source.ip")))] += 1
+        self._count(self.successes, (e.host, str(e.get("source.ip"))))
 
     def _prune(self, now):
-        for key in [k for k, w in self.windows.items() if not w or now - w[-1].ts > self.WINDOW]:
-            del self.windows[key]
-            del self.in_window[key]
-
-    def _held(self):
-        # A crossing cites the first attempt per name still in the window; before it there are fewer than
-        # THRESHOLD names in any window.
-        held = []
-        for window in self.windows.values():
-            first: dict[str | None, TypedEvent] = {}
-            for x in window:
-                first.setdefault(x.account, x.event)
-            held += list(first.values())
-        return held + [e for t in self.tallies.values() for e in [*t.cited, t.last_event] if e is not None]
+        for tally in self.tallies.hot.values():
+            if tally.window and now - tally.window[-1].ts > self.WINDOW:
+                tally.window.clear()
+                tally.in_window.clear()
 
     def _findings(self):
         out = []
-        for key in sorted((k for k, t in self.tallies.items() if t.crossed is not None), key=str):
+        for key in sorted(self.tallies.keys(candidates=True), key=str):
             host, ip = key
-            t = self.tallies[key]
+            t = self.tallies.peek(key)
+            if t.crossed is None:
+                continue
             events = sorted(_unique([*t.cited, t.last_event]), key=lambda e: (e.ts, e.id))
             total_names = len(t.names) + t.more_names
-            ok = self.successes[key]
+            ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
             claim = (f"On {host}, sshd recorded failed authentication attempts for {total_names} distinct account "
                      f"name(s) from {ip} between {_iso(t.first)} and {_iso(t.last)} ({t.attempts} attempt(s) in "
                      f"{t.connections} connection(s)); the most distinct names within any "
@@ -468,7 +519,7 @@ class _Followed:
 
 class SshSuccessAfterFailures(_SshAttemptStream):
     id = "host.ssh_success_after_failures"
-    version = "1"
+    version = "2"
     title = "Accepted sshd login after a burst of failed attempts"
     anchor_class = "remote_login"
     severity, lane = "high", "high"
@@ -508,28 +559,33 @@ class SshSuccessAfterFailures(_SshAttemptStream):
 
     def __init__(self):
         super().__init__()
-        self.by_source: dict[tuple, deque[_Attempt]] = {}
-        self.by_account: dict[tuple, deque[_Attempt]] = {}
-        self.found: dict[tuple, _Followed] = {}
+        self.by_source = KeyedStore(self, "ssh_after_sources", self.HOT)
+        self.by_account = KeyedStore(self, "ssh_after_accounts", self.HOT)
+        self.found = KeyedStore(self, "ssh_after_found", self.HOT)
+
+    def _stores(self):
+        return self.by_source, self.by_account, self.found
 
     def _attempt(self, a):
         for windows, key in ((self.by_source, (a.host, a.ip)), (self.by_account, (a.host, a.account))):
             if key[1] is None:
                 continue
-            window = windows.setdefault(key, deque())
+            window = self._state(windows, key, deque)
+            if window is None:
+                return
             window.append(a)
             _trim(window, a.ts, self.WINDOW)
 
     def _success(self, ts, e):
         host, ip, account = e.host, str(e.get("source.ip")), e.get("user.name")
-        own = list(self.by_source.get((host, ip), ()))
+        own = list(self.by_source.peek((host, ip), ()))
         own = [x for x in own if ts - x.ts <= self.WINDOW]
         if len(own) >= self.SOURCE_MIN:
             self._record(("source", host, ip, str(account)), e, own, len(own))
             return
         if account is None:
             return
-        others = [x for x in self.by_account.get((host, str(account)), ()) if ts - x.ts <= self.WINDOW
+        others = [x for x in self.by_account.peek((host, str(account)), ()) if ts - x.ts <= self.WINDOW
                   and x.ip != ip]
         if len(others) >= self.ACCOUNT_MIN:
             self._record(("account", host, ip, str(account)), e, others, len(own))
@@ -537,9 +593,14 @@ class SshSuccessAfterFailures(_SshAttemptStream):
     def _record(self, key, success, failures, own):
         found = self.found.get(key)
         if found is None:
-            self.found[key] = _Followed(success, [x.event for x in failures][-CITE:], len(failures),
-                                        {x.account for x in failures if x.account}, {x.ip for x in failures}, own,
-                                        invalid=any(x.valid is False for x in failures))
+            followed = _Followed(success, [x.event for x in failures][-CITE:], len(failures),
+                                 {x.account for x in failures if x.account}, {x.ip for x in failures}, own,
+                                 invalid=any(x.valid is False for x in failures))
+            if not self.found.put(key, followed):
+                # the failures are held and the login is read: judged now and published as it is, not refused
+                self.note_limit("found_alone", "the found logins' store took no new key; a later login after failures "
+                                               "is published as it is judged, without later logins of the same key")
+                add_unheld(self._alone, alone(self._match(key, followed), self, success))
             return
         found.repeats += 1
         if len(found.later) < self.LATER:
@@ -549,52 +610,45 @@ class SshSuccessAfterFailures(_SshAttemptStream):
         _prune_windows(self.by_source, now, self.WINDOW)
         _prune_windows(self.by_account, now, self.WINDOW)
 
-    def _held(self):
-        # A later login cites the latest CITE failures of a window, so only those can still be cited.
-        held = [x.event for windows in (self.by_source, self.by_account) for w in windows.values()
-                for x in list(w)[-CITE:]]
-        return held + [e for f in self.found.values() for e in [f.success, *f.failures, *f.later]]
-
     def _findings(self):
-        out = []
-        for key in sorted(self.found, key=str):
-            variant, host, ip, account = key
-            f = self.found[key]
-            s = f.success
-            method = s.get("auth.method") or "unrecorded-method"
-            when = s.ts.isoformat()
-            if variant == "source":
-                claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when} "
-                         f"after {f.count} failed attempt(s) from {ip} in the preceding {self.WINDOW / 60:.0f} "
-                         f"minutes (threshold {self.SOURCE_MIN}; accounts tried: {_names(f.accounts)}). The "
-                         "failures and the login share the source address; whether one actor made both is not "
-                         "established by the records.")
-                lane, confidence = "high", "high"
-                spraying = len(f.accounts) >= self.SPRAY_NAMES or f.invalid
-                if account not in f.accounts and not spraying:
-                    # e.g. a bastion's automation failing for one account while a person logs in as another
-                    claim += (f" None of the failures named '{account}', and they show neither several names nor "
-                              "invalid users, so they need not belong to this login.")
-                    lane, confidence = "lead", "medium"
-            else:
-                claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when}; in "
-                         f"the preceding {self.WINDOW / 60:.0f} minutes sshd recorded {f.count} failed attempt(s) "
-                         f"against '{account}' from {len(f.sources)} other source address(es) ({_names(f.sources)}; "
-                         f"threshold {self.ACCOUNT_MIN}), and {f.own} from {ip} itself. The login's source differs "
-                         "from the failing sources, so the records do not link them.")
+        return [self._match(key, self.found.peek(key)) for key in sorted(self.found.keys(), key=str)]
+
+    def _match(self, key, f: _Followed) -> Match:
+        variant, host, ip, account = key
+        s = f.success
+        method = s.get("auth.method") or "unrecorded-method"
+        when = s.ts.isoformat()
+        if variant == "source":
+            claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when} "
+                     f"after {f.count} failed attempt(s) from {ip} in the preceding {self.WINDOW / 60:.0f} "
+                     f"minutes (threshold {self.SOURCE_MIN}; accounts tried: {_names(f.accounts)}). The "
+                     "failures and the login share the source address; whether one actor made both is not "
+                     "established by the records.")
+            lane, confidence = "high", "high"
+            spraying = len(f.accounts) >= self.SPRAY_NAMES or f.invalid
+            if account not in f.accounts and not spraying:
+                # e.g. a bastion's automation failing for one account while a person logs in as another
+                claim += (f" None of the failures named '{account}', and they show neither several names nor "
+                          "invalid users, so they need not belong to this login.")
                 lane, confidence = "lead", "medium"
-            if f.repeats > 1:
-                claim += (f" Logins of this account from this source followed such failures {f.repeats} time(s); "
-                          f"the first and up to {self.LATER} later ones are cited.")
-            claim += " Failures inside connections that then logged in are not counted."
-            events = sorted(_unique([*f.failures, s, *f.later]), key=lambda e: (e.ts, e.id))
-            predicate = [pf(s, n) for n in ("auth.phase", "user.name", "source.ip", "source.port") if s.has(n)]
-            predicate += _ssh_predicate(f.failures[-2:])
-            m = Match(self.id, claim, "correlated_observation", events, predicate, s.ts, self.severity, lane,
-                      confidence, s.entities(), group_key=f"{variant}|{host}|{ip}|{account}")
-            m.notes.append("T1110.001" if len(f.accounts) <= 1 else "T1110.003")
-            out.append(m)
-        return out
+        else:
+            claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when}; in "
+                     f"the preceding {self.WINDOW / 60:.0f} minutes sshd recorded {f.count} failed attempt(s) "
+                     f"against '{account}' from {len(f.sources)} other source address(es) ({_names(f.sources)}; "
+                     f"threshold {self.ACCOUNT_MIN}), and {f.own} from {ip} itself. The login's source differs "
+                     "from the failing sources, so the records do not link them.")
+            lane, confidence = "lead", "medium"
+        if f.repeats > 1:
+            claim += (f" Logins of this account from this source followed such failures {f.repeats} time(s); "
+                      f"the first and up to {self.LATER} later ones are cited.")
+        claim += " Failures inside connections that then logged in are not counted."
+        events = sorted(_unique([*f.failures, s, *f.later]), key=lambda e: (e.ts, e.id))
+        predicate = [pf(s, n) for n in ("auth.phase", "user.name", "source.ip", "source.port") if s.has(n)]
+        predicate += _ssh_predicate(f.failures[-2:])
+        m = Match(self.id, claim, "correlated_observation", events, predicate, s.ts, self.severity, lane,
+                  confidence, s.entities(), group_key=f"{variant}|{host}|{ip}|{account}")
+        m.notes.append("T1110.001" if len(f.accounts) <= 1 else "T1110.003")
+        return m
 
 
 # ------------------------------------------------------------------------------------------------
@@ -991,8 +1045,9 @@ def _record_text(e: TypedEvent) -> str:
 
 
 class AccountOrGroupChange(Playbook):
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.account_or_group_change"
-    version = "3"
+    version = "4"
     title = "Account or group created, deleted or modified (command or account-management audit record)"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -1050,14 +1105,43 @@ class AccountOrGroupChange(Playbook):
                      "only), a superset of what this evaluator reads",
     }
 
+    # Commands' changes (per host and pid, for the join with the tools' records), the tools' records and the boot
+    # records are the findings' citations: each is staged when read and held to finalize in a keyed store or list,
+    # HOT in memory and the rest on the rule's disk spill. Changes and records have their own disk budgets; only
+    # a spent budget refuses, and coverage says so.
+    staged = True
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    CHANGES_DISK = 2 * 2**30
+    RECORDS_DISK = 2 * 2**30
+    FINALIZE_TRIM = 10_000
+
     def __init__(self):
         super().__init__()
-        self.lineage = ProcessLineage()
-        self.changes: list[_Change] = []
-        self.by_pid: dict[tuple, list[_Change]] = defaultdict(list)
-        self.records: list[TypedEvent] = []
-        self.boots: dict[str | None, list[TypedEvent]] = defaultdict(list)
-        self._seen: set[str] = set()
+        self.lineage = ProcessLineage(self)
+        self.by_pid = KeyedStore(self, "acct_by_pid", self.HOT, disk_budget=self.CHANGES_DISK)  # (host, pid) -> changes
+        self.loose = SpillList(self, "acct_loose", self.HOT, disk_budget=self.CHANGES_DISK)  # changes without a pid
+        self.records = SpillList(self, "acct_records", self.HOT, disk_budget=self.RECORDS_DISK)
+        self.boots = KeyedStore(self, "acct_boots", self.HOT)           # host -> boot records
+        self._seen = RecentIds()        # bounded re-read guard
+        self._pending: list[TypedEvent] = []
+        self._alone: list[Match] = []   # changes published on their own (the budget refused holding them)
+        self._boot_events: dict[str, TypedEvent] = {}
+        self.load = lambda ids: []
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        self._trim()
+        return out
+
+    def retained_events(self) -> list[TypedEvent]:
+        return []                                       # staged on disk instead
+
+    def _trim(self) -> None:
+        self.lineage.trim()
+        self.by_pid.trim()
+        self.loose.trim()
+        self.records.trim()
+        self.boots.trim()
 
     @staticmethod
     def _process_relevant(event: TypedEvent) -> bool:
@@ -1067,6 +1151,7 @@ class AccountOrGroupChange(Playbook):
 
     def consume(self, events):
         fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
+        self._batch = events
         for e in sorted(fresh, key=lambda x: (x.ts, x.family != "process_exec", x.id)):
             self._seen.add(e.id)
             if e.family == "process_exec":
@@ -1078,11 +1163,26 @@ class AccountOrGroupChange(Playbook):
                 self._exec(e)
             elif e.family == "system_state":
                 # context only (where a change sits relative to a boot); never a change itself
-                if e.get("system.event") == "boot" and len(self.boots[e.host]) < self.BOOTS_KEPT:
-                    self.boots[e.host].append(e)
+                boots = self.boots.setdefault(e.host, list) if e.get("system.event") == "boot" else None
+                if boots is not None and len(boots) < self.BOOTS_KEPT:
+                    boots.append(e)
+                    self._pending.append(e)
             else:
                 self._record(e)
-        return []
+        self._batch = None
+        out, self._alone = self._alone, []
+        return out
+
+    def _publish_alone(self, changes: list[_Change], record: TypedEvent) -> None:
+        """An account change the budget refused to hold is a finding by itself: published now, one finding per
+        group it would have joined, without the tool records a later join would have added."""
+        self.note_limit("changes_alone", "the account changes' disk budget is spent; later changes are published as "
+                                         "they are read, not grouped or joined to their tool records")
+        groups: dict[tuple, list[_Change]] = {}
+        for change in changes:
+            groups.setdefault(self._group(change), []).append(change)
+        for key, held in groups.items():
+            add_unheld(self._alone, alone(self._finding(key, held), self, record))
 
     def _exec(self, e: TypedEvent) -> None:
         argv = e.get("process.argv")
@@ -1118,46 +1218,91 @@ class AccountOrGroupChange(Playbook):
                                 privileged="") for f in forms]
         lineage = self.lineage.classify(e)
         actor = str(e.get("process.user") or f"uid {e.get('process.uid')}")
-        for form in forms:
-            change = _Change(e.host, e.ts.timestamp(), form.action, form.accounts, form.groups, form.detail,
-                             form.privileged, lineage, actor, command=e, login=_login(e))
-            self.changes.append(change)
-            if isinstance(e.get("process.pid"), int):
-                self.by_pid[(e.host, e.get("process.pid"))].append(change)
+        changes = [_Change(e.host, e.ts.timestamp(), form.action, form.accounts, form.groups, form.detail,
+                           form.privileged, lineage, actor, command=e, login=_login(e)) for form in forms]
+        if isinstance(e.get("process.pid"), int):
+            held = self.by_pid.setdefault((e.host, e.get("process.pid")), list)
+            if held is None:
+                self._publish_alone(changes, e)
+                return
+            held += changes
+        elif not self.loose.append(changes, (changes[0].ts, e.id)):
+            self._publish_alone(changes, e)
+            return
+        self._pending.append(e)
 
     def _record(self, e: TypedEvent) -> None:
         if not e.has("account.action"):
             self.missing_required += 1
             return
         self.evaluated += 1
-        self.records.append(e)
-
-    def retained_events(self):
-        return ([c.command for c in self.changes if c.command is not None] + self.records
-                + [e for boots in self.boots.values() for e in boots])
+        if not self.records.append(e, (e.ts.timestamp(), e.id)):
+            self._publish_alone(list(self._record_changes([e])), e)
+            return
+        self._pending.append(e)
 
     def _boot(self, change: _Change) -> TypedEvent | None:
         """The host's recorded boot nearest the change, when the change is at most PRE_BOOT_SECONDS before it or
         less than BOOT_SECONDS after it."""
-        near = [b for b in self.boots.get(change.host, ())
+        near = [b for b in self.boots.peek(change.host, ())
                 if -self.PRE_BOOT_SECONDS <= change.ts - b.ts.timestamp() < self.BOOT_SECONDS]
         return min(near, key=lambda b: (abs(b.ts.timestamp() - change.ts), b.ts, b.id)) if near else None
 
     def finalize(self):
         # Join each tool record to the command of the same process (same host and pid, close in time).
-        unjoined = []
-        for record in sorted(self.records, key=lambda x: (x.ts, x.id)):
+        unjoined = SpillList(self, "acct_unjoined", self.HOT, disk_budget=UNBUDGETED)
+        for i, record in enumerate(self.records.ordered()):
             ts = record.ts.timestamp()
             candidates = [c for c in self.by_pid.get((record.host, record.get("process.pid")), ())
                           if abs(c.ts - ts) <= self.JOIN_SECONDS]
             if candidates:
                 for change in candidates:
                     change.records.append(record)
-                continue
-            unjoined.append(record)
+            else:
+                need(unjoined.append(record), self, "the unjoined tool records")
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                self.by_pid.trim()
+                unjoined.trim()
+        groups = KeyedStore(self, "acct_groups", self.HOT, disk_budget=UNBUDGETED)
+        self._boot_events: dict[str, TypedEvent] = {}
+        changes = (c for _key, held in self.by_pid.items() for c in held)
+        loose = (c for held in self.loose for c in held)
+        for i, change in enumerate(itertools.chain(changes, loose, self._record_changes(unjoined))):
+            need(groups.setdefault(self._group(change), list), self, "the account change grouping").append(change)
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                groups.trim()
+        out = [self._finding(key, groups.peek(key)) for key in sorted(groups.keys(), key=str)]
+        groups.clear()
+        unjoined.clear()
+        return out
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Every held change on its own (grouping and joining needed disk): command changes by process, changes
+        without a pid, then each tool record as the change it reports."""
+        self._boot_events = {}
+        out: list[Match] = []
+
+        def each(changes) -> None:
+            for change in changes:
+                m = self._finding(self._group(change), [change])
+                m.group_key += f"|alone:{(change.command or change.records[0]).id}"
+                m.notes.append(f"published on its own: grouping and joining needed disk ({reason})")
+                out.append(m)
+        for source in (lambda: (c for _key, held in self.by_pid.items() for c in held),
+                       lambda: (c for held in self.loose for c in held),
+                       lambda: self._record_changes(self.records)):
+            try:
+                each(source())
+            except StateExhausted:
+                continue                            # a table on disk cannot be read: what was read stands
+        return out
+
+    def _record_changes(self, unjoined):
+        """A change for each tool record no command of its process explains."""
         for record in unjoined:
             ts = record.ts.timestamp()
-            lineage = self.lineage.classify_pid(record.host, record.get("process.pid"), ts, boot_of(record))
+            lineage = self.lineage.classify_pid(record.host, record.get("process.pid"), ts, boot_of(record),
+                                                record.get("audit.serial"))
             actor = str(record.get("process.login_user") or record.get("process.user")
                         or (f"audit login uid {record.get('process.auid')}" if record.has("process.auid")
                             else "an unrecorded account"))
@@ -1165,30 +1310,28 @@ class AccountOrGroupChange(Playbook):
             group = record.get("account.group")
             pid = record.get("process.pid")
             exec_seen = (isinstance(pid, int)
-                         and self.lineage.parent(record.host, pid, ts, boot_of(record)) is not None)
-            self.changes.append(_Change(record.host, ts, str(record.get("account.action")),
-                                        (str(name),) if name else (), (str(group),) if group else (),
-                                        _RECORD_PHRASE.get(str(record.get("account.action")), "an account change"),
-                                        _record_privilege(record), lineage, actor, records=[record],
-                                        login=_login(record), exec_seen=exec_seen))
-        groups: dict[tuple, list[_Change]] = defaultdict(list)
-        self._boot_events: dict[str, TypedEvent] = {}
-        for change in self.changes:
-            privileged = change.privileged or any(_record_privilege(r) for r in change.records)
-            no_login = change.login is None and not any(_login(r) for r in change.records)
-            # only a tool's own record whose process left no exec record: nothing shows what started it
-            record_only = change.command is None and not change.exec_seen
-            marker = self._boot(change) if not privileged and record_only and no_login else None
-            if change.lineage.kind in {"package", "cloud-init"} and not privileged:
-                key = ("lineage", change.host, change.lineage.kind)
-            elif marker is not None:
-                self._boot_events[marker.id] = marker
-                key = ("boot", change.host, marker.id)
-            else:
-                key = ("actor", change.host, change.actor, change.action, change.accounts, change.groups,
-                       change.command is None)
-            groups[key].append(change)
-        return [self._finding(key, items) for key, items in sorted(groups.items(), key=lambda kv: str(kv[0]))]
+                         and self.lineage.parent(record.host, pid, ts, boot_of(record),
+                                                             record.get("audit.serial")) is not None)
+            yield _Change(record.host, ts, str(record.get("account.action")),
+                          (str(name),) if name else (), (str(group),) if group else (),
+                          _RECORD_PHRASE.get(str(record.get("account.action")), "an account change"),
+                          _record_privilege(record), lineage, actor, records=[record],
+                          login=_login(record), exec_seen=exec_seen)
+
+    def _group(self, change: _Change) -> tuple:
+        privileged = change.privileged or any(_record_privilege(r) for r in change.records)
+        no_login = change.login is None and not any(_login(r) for r in change.records)
+        # only a tool's own record whose process left no exec record: nothing shows what started it
+        record_only = change.command is None and not change.exec_seen
+        marker = self._boot(change) if not privileged and record_only and no_login else None
+        if change.lineage.kind in {"package", "cloud-init"} and not privileged:
+            return ("lineage", change.host, change.lineage.kind)
+        if marker is not None:
+            self._boot_events[marker.id] = marker
+            return ("boot", change.host, marker.id)
+        return ("actor", change.host, change.actor, change.action, change.accounts, change.groups,
+                change.command is None)
+
 
     def _finding(self, key: tuple, items: list[_Change]) -> Match:
         items = sorted(items, key=lambda c: (c.ts, c.command.id if c.command else c.records[0].id))

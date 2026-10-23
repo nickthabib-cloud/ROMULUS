@@ -13,10 +13,14 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from xml.etree import ElementTree
 
 from romulus.evidence.typed import FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass, lookup_event_class
+
+if TYPE_CHECKING:
+    from romulus.detect.bounded import Account, StateBudget
 
 WINDOWS_NORMALIZER = "windows-ecs@2"
 _GUID = re.compile(r"^\{?([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\}?$")
@@ -68,7 +72,8 @@ class RecordIdContinuity:
     puts the file under the hunt stage; standalone uses get its own private temporary directory.
     """
 
-    def __init__(self, directory: str | Path | None = None) -> None:
+    def __init__(self, directory: str | Path | None = None, *, budget: StateBudget | None = None,
+                 account: Account | None = None) -> None:
         self._tempdir = Path(tempfile.mkdtemp(prefix="romulus-windows-continuity-")) if directory is None else None
         root = self._tempdir if self._tempdir is not None else Path(directory)
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -82,6 +87,34 @@ class RecordIdContinuity:
             "last_id INTEGER NOT NULL, samples INTEGER NOT NULL, signature TEXT NOT NULL, last_time TEXT, "
             "PRIMARY KEY (target, computer, channel)) WITHOUT ROWID"
         )
+        self._db.commit()
+        self._page = self._db.execute("PRAGMA page_size").fetchone()[0]
+        self._size = 0
+        self.budget = budget
+        self.account = account
+        self._charge_growth()
+
+    def _cap(self) -> None:
+        if self.budget is None:
+            return
+        headroom = self.budget.headroom()
+        if headroom is None:
+            return
+        pages = self._db.execute("PRAGMA page_count").fetchone()[0]
+        self._db.execute(f"PRAGMA max_page_count = {pages + headroom // self._page + 1}")
+
+    def _charge_growth(self) -> None:
+        size = self._db.execute("PRAGMA page_count").fetchone()[0] * self._page
+        growth = size - self._size
+        if growth > 0 and self.budget is not None and self.account is not None:
+            self.budget.charge(self.account, growth)
+            self.budget.grew(growth)
+        self._size = size
+
+    def _checkpoint(self) -> None:
+        self._db.commit()
+        self._charge_growth()
+        self._cap()
 
     @property
     def state_count(self) -> int:
@@ -112,7 +145,18 @@ class RecordIdContinuity:
         unordered: set[tuple[str, str]] = set()
         malformed: set[tuple[str, str]] = set()
         reused: set[tuple[str, str]] = set()
+        # Refusal reasons are controlled state-budget text, so aggregate groups by reason and retain only a sample.
+        # A 5,000-host outage must not manufacture a 5,000-line in-memory coverage report.
+        refused: dict[str, list] = {}
+
+        def record_refusal(group: tuple[str, str], reason: str) -> None:
+            state = refused.setdefault(reason, [0, []])
+            state[0] += 1
+            if len(state[1]) < 10:
+                state[1].append(group)
         touched: set[tuple[str, str, str]] = set()
+        new_rows = 0
+        self._cap()
         for record in records:
             source = record.get("_source") or {}
             if not is_windows_source(source):
@@ -142,11 +186,30 @@ class RecordIdContinuity:
                 "WHERE target = ? AND computer = ? AND channel = ?", key,
             ).fetchone()
             if row is None:
-                self._db.execute(
-                    "INSERT INTO continuity VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (*key, record_id, 1, signature, when.isoformat() if when is not None else None),
-                )
+                reason = (self.budget.new_key_reason(self.account)
+                          if self.budget is not None and self.account is not None else "")
+                if reason:
+                    record_refusal(group, reason)
+                    continue
+                try:
+                    self._db.execute(
+                        "INSERT INTO continuity VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (*key, record_id, 1, signature, when.isoformat() if when is not None else None),
+                    )
+                except sqlite3.OperationalError as exc:
+                    self._db.rollback()
+                    reason = f"writing Windows continuity state failed ({exc})"
+                    if self.budget is not None:
+                        self.budget.fail(reason)
+                    record_refusal(group, reason)
+                    continue
                 touched.add(key)
+                new_rows += 1
+                if new_rows % 128 == 0:
+                    self._checkpoint()
+                continue
+            if self.budget is not None and self.budget.hard:
+                record_refusal(group, self.budget.hard)
                 continue
             prior, samples, prior_signature, prior_time_text = row
             prior_time = None
@@ -185,6 +248,7 @@ class RecordIdContinuity:
                 # Time-ordered source results are not record-id ordered for this group. Refuse completeness
                 # rather than retaining an event-count-sized set to reconstruct the sequence.
                 unordered.add(group)
+        self._checkpoint()
         reasons = [
             f"shipper gaps: {count} records missing on {channel} for {computer}"
             for (computer, channel), count in sorted(gaps.items())
@@ -205,14 +269,40 @@ class RecordIdContinuity:
             f"shipper gaps unresolved: non-numeric record_id on {channel} for {computer}"
             for computer, channel in sorted(malformed)
         ]
-        reasons += [
-            f"shipper gaps unresolved: fewer than two record_id samples on {channel} for {computer}"
-            for _target, computer, channel in sorted(touched)
-            if self._db.execute(
+        for reason, (count, samples) in sorted(refused.items()):
+            if count <= 10:
+                reasons += [
+                    f"shipper gaps unresolved: continuity state refused on {channel} for {computer}: {reason}"
+                    for computer, channel in sorted(samples)
+                ]
+            else:
+                sample = ", ".join(f"{computer}/{channel}" for computer, channel in sorted(samples))
+                reasons.append(
+                    f"shipper gaps unresolved: continuity state refused for {count:,} host/channel groups "
+                    f"(sample: {sample}): {reason}"
+                )
+        short: list[tuple[str, str]] = []
+        short_count = 0
+        for _target, computer, channel in sorted(touched):
+            row = self._db.execute(
                 "SELECT samples FROM continuity WHERE target = ? AND computer = ? AND channel = ?",
                 (_target, computer, channel),
-            ).fetchone()[0] < 2
-        ]
+            ).fetchone()
+            if row is not None and row[0] < 2:
+                short_count += 1
+                if len(short) < 10:
+                    short.append((computer, channel))
+        if short_count <= 10:
+            reasons += [
+                f"shipper gaps unresolved: fewer than two record_id samples on {channel} for {computer}"
+                for computer, channel in short
+            ]
+        else:
+            sample = ", ".join(f"{computer}/{channel}" for computer, channel in short)
+            reasons.append(
+                f"shipper gaps unresolved: fewer than two record_id samples for {short_count:,} "
+                f"host/channel groups (sample: {sample})"
+            )
         return reasons
 
 

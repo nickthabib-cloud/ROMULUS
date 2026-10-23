@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Integer,
     String,
     and_,
+    bindparam,
     case,
     cast,
     func,
@@ -22,6 +24,7 @@ from sqlalchemy import (
     literal_column,
     or_,
     select,
+    text,
     true,
     tuple_,
 )
@@ -91,27 +94,37 @@ def raw_id(target: str, native_id: str) -> str:
 
 
 # ---- baseline probes ------------------------------------------------------------------------
-# Each probe is one range search on an index (tests hold the query plans). Segment lists come from a frozen
-# snapshot, so their length is bounded by the snapshot span.
-def baseline_prevalence_query(key_id: str, scope_kind: str, segment_ids: list[str]):
-    """Distinct scopes of `scope_kind` holding `key_id` in the segments (ix_baseline_count_key, covering)."""
+# Each probe ranges over a data index and probes the frozen snapshot membership primary key. Snapshot
+# membership is data, never a Python-generated SQL IN list, so probe shape stays bounded at mission scale.
+def _snapshot_member(segment_id, hunt_id: str, spec_id: str):
+    """Join condition onto one hunt's frozen membership for one spec (the membership primary key)."""
+    m = t.baseline_snapshot_segment.c
+    return and_(m.segment_id == segment_id, m.hunt_id == hunt_id, m.spec_id == spec_id)
+
+
+def baseline_prevalence_query(key_id: str, scope_kind: str, hunt_id: str, spec_id: str):
+    """Distinct scopes of `scope_kind` holding `key_id` in one hunt's frozen snapshot of one spec."""
     c = t.baseline_count.c
-    return select(func.count(c.scope.distinct())).where(
-        c.key_id == key_id, c.scope_kind == scope_kind, c.segment_id.in_(segment_ids))
+    return (select(func.count(c.scope.distinct()))
+            .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
+            .where(c.key_id == key_id, c.scope_kind == scope_kind))
 
 
-def baseline_key_history_query(key_id: str, scope_kind: str, scope: str, segment_ids: list[str]):
+def baseline_key_history_query(key_id: str, scope_kind: str, scope: str, hunt_id: str, spec_id: str):
     """Every count row of one key in one scope across the segments (ix_baseline_count_key)."""
     c = t.baseline_count.c
     return (select(c.segment_id, c.bucket, c.count, c.first_ts, c.last_ts)
-            .where(c.key_id == key_id, c.scope_kind == scope_kind, c.scope == scope, c.segment_id.in_(segment_ids))
+            .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
+            .where(c.key_id == key_id, c.scope_kind == scope_kind, c.scope == scope)
             .order_by(c.key_id, c.scope_kind, c.scope, c.segment_id))
 
 
-def baseline_peer_scopes_query(scope_kind: str, segment_ids: list[str]):
-    """Distinct live scopes of `scope_kind` in the segments (ix_baseline_scope_hour_lookup, covering)."""
+def baseline_peer_scopes_query(scope_kind: str, hunt_id: str, spec_id: str):
+    """Distinct live scopes of `scope_kind` in one spec's segments (ix_baseline_scope_hour_lookup, covering)."""
     c = t.baseline_scope_hour.c
-    return select(func.count(c.scope.distinct())).where(c.scope_kind == scope_kind, c.segment_id.in_(segment_ids))
+    return (select(func.count(c.scope.distinct()))
+            .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
+            .where(c.scope_kind == scope_kind))
 
 
 def observation_citations_query(hunt_id: str):
@@ -125,23 +138,31 @@ def observation_citations_query(hunt_id: str):
             .group_by(ev.id))
 
 
-def baseline_scope_series_query(scope_kind: str, scope: str, segment_ids: list[str]):
-    """One scope's live hours and event totals across the segments (ix_baseline_scope_hour_lookup)."""
+def baseline_scope_series_query(scope_kind: str, scope: str, hunt_id: str, spec_id: str):
+    """One scope's live hours and event totals across one spec's segments (ix_baseline_scope_hour_lookup)."""
     c = t.baseline_scope_hour.c
     return (select(c.segment_id, c.hour, c.events)
-            .where(c.scope_kind == scope_kind, c.scope == scope, c.segment_id.in_(segment_ids))
+            .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
+            .where(c.scope_kind == scope_kind, c.scope == scope)
             .order_by(c.scope_kind, c.scope, c.segment_id, c.hour))
 
 
 # ---- baseline rows ---------------------------------------------------------------------------
 BASELINE_CHUNK = 5000      # rows per executemany batch while streaming a segment or observations
 BASELINE_PAGE = 5000       # rows per keyset page on reads
+# Child rows deleted per write transaction when an abandoned build is removed. One chunk is about as costly as
+# one append chunk, so the write lock is released every fraction of a second however large the build was.
+BASELINE_DELETE_CHUNK = 5000
+# The builder recorded on a building segment while cleanup removes it: never a hunt id, so no owner reclaims it.
+CLEANUP_OWNER = "\x00cleanup"
 _BUCKET_WIDTH = {"day": timedelta(days=1), "hour": timedelta(hours=1)}
 _SEGMENT_COLUMNS = frozenset(column.name for column in t.baseline_segment.columns) - {"rows_digest"}
 _SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id"})
 # What makes two writes of one segment id the same segment: everything but its lifecycle status and the time
 # this copy was written (the rows are compared through rows_digest).
 _SEGMENT_IDENTITY = tuple(sorted(_SEGMENT_COLUMNS - {"status", "created_at"}))
+# Content identity of a building segment: who builds it is provenance, not content.
+_BUILD_CONTENT = tuple(name for name in _SEGMENT_IDENTITY if name != "built_by_hunt_id")
 _COUNT_COLUMNS = tuple(column.name for column in t.baseline_count.columns)
 _HOUR_COLUMNS = tuple(column.name for column in t.baseline_scope_hour.columns)
 _OBSERVATION_COLUMNS = tuple(column.name for column in t.baseline_observation.columns)
@@ -1003,6 +1024,13 @@ class Repo:
         # databases upgraded from link-only accounting without double-counting.
         return max(task_spend, link_spend)
 
+    def host_resolution_tasks(self, hunt_id: str) -> list[dict]:
+        """The hunt's durable host-address lookups (one per looked-up address and window), oldest first."""
+        with self.engine.connect() as c:
+            return [dict(r) for r in c.execute(select(t.task).where(
+                t.task.c.hunt_id == hunt_id, t.task.c.kind == "expansion_link",
+                t.task.c.owner == "host-resolution").order_by(t.task.c.created_at, t.task.c.id)).mappings()]
+
     def tasks(self, hunt_id: str) -> list[dict]:
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(select(t.task).where(t.task.c.hunt_id == hunt_id)
@@ -1841,6 +1869,159 @@ class Repo:
             ).values(status=status))
             return bool(result.rowcount)
 
+    def usable_baseline_segment_id(self, base_id: str) -> str:
+        """Return the stable usable generation for content, advancing only after revocation.
+
+        Revocation is permanent: the original id is never reactivated. A rewrite therefore gets ``-rN``;
+        retries reuse the first non-revoked generation, while another revocation advances N.
+        """
+        s = t.baseline_segment.c
+        with self.engine.connect() as c:
+            rows = list(c.execute(select(s.id, s.status).where(or_(
+                s.id == base_id, s.id.like(f"{base_id}-r%"),
+            ))).mappings())
+        if not rows:
+            return base_id
+        usable = sorted(row["id"] for row in rows if row["status"] != "revoked")
+        if usable:
+            return usable[0]
+        generations = [0]
+        for row in rows:
+            suffix = row["id"].removeprefix(f"{base_id}-r")
+            if suffix.isdigit():
+                generations.append(int(suffix))
+        return f"{base_id}-r{max(generations) + 1}"
+
+    def begin_baseline_segment(self, row: dict, *, reclaim_owner: bool = False) -> str:
+        """Create an invisible building segment, optionally restarting this hunt's crashed build.
+
+        Returns "begun" when the caller now owns an empty building row; "active" when the identical segment
+        is already active (another hunt finished it); "building_elsewhere" when another hunt, or cleanup,
+        holds it; otherwise the stored status (for example "stale" or "revoked"), which the caller must report.
+
+        The hunt lease serializes one writer per hunt. Reclamation is therefore safe only for the same
+        ``built_by_hunt_id``; a building row owned by another hunt, or claimed by cleanup, remains protected.
+        Reclaiming first refreshes the row's ``created_at`` so a concurrent cleanup cannot claim it, then drops
+        the crashed rows in bounded transactions, then replaces the row.
+        """
+        segment = _baseline_segment_row(row)
+        if segment["status"] != "building":
+            raise ValueError("a chunked baseline segment must begin with status building")
+        s = t.baseline_segment.c
+        owned = and_(s.id == segment["id"], s.status == "building",
+                     s.built_by_hunt_id == segment["built_by_hunt_id"])
+        with write_txn(self.engine) as c:
+            existing = c.execute(select(t.baseline_segment).where(s.id == segment["id"])).mappings().first()
+            if existing is None:
+                c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
+                return "begun"
+            stored = _with_utc(existing, ("start", "end", "created_at"))
+            if any(stored[name] != segment[name] for name in _BUILD_CONTENT):
+                raise ValueError(f"baseline segment {segment['id']} exists with different content")
+            if stored["status"] != "building":
+                return stored["status"]
+            if not (reclaim_owner and stored["built_by_hunt_id"] == segment["built_by_hunt_id"]):
+                return "building_elsewhere"
+            c.execute(t.baseline_segment.update().where(owned).values(created_at=segment["created_at"]))
+        self._drop_baseline_children(segment["id"])
+        with write_txn(self.engine) as c:
+            if not c.execute(t.baseline_segment.delete().where(owned)).rowcount:
+                return "building_elsewhere"
+            c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
+            return "begun"
+
+    def _drop_baseline_children(self, segment_id: str) -> None:
+        """Delete one segment's child rows, one short write transaction per bounded chunk."""
+        chunk = BASELINE_DELETE_CHUNK
+        for table in (t.baseline_count, t.baseline_scope_hour):
+            statement = text(
+                f"DELETE FROM {table.name} WHERE rowid IN "
+                f"(SELECT rowid FROM {table.name} WHERE segment_id = :segment_id LIMIT :chunk)"
+            )
+            while True:
+                with write_txn(self.engine) as c:
+                    deleted = c.execute(statement, {"segment_id": segment_id, "chunk": chunk}).rowcount
+                if deleted < chunk:
+                    break
+
+    def append_baseline_segment_rows(self, segment_id: str, counts: Iterable[dict],
+                                     scope_hours: Iterable[dict], *,
+                                     chunk_size: int = BASELINE_CHUNK) -> float:
+        """Append validated rows to a building segment, one bounded write transaction per chunk.
+
+        Returns the longest measured write-lock hold for operational verification; it is never persisted or
+        used in content identity.
+        """
+        if chunk_size < 1:
+            raise ValueError("chunk size must be positive")
+        with self.engine.connect() as c:
+            stored = c.execute(select(t.baseline_segment).where(
+                t.baseline_segment.c.id == segment_id,
+            )).mappings().first()
+        if stored is None or stored["status"] != "building":
+            raise ValueError(f"baseline segment {segment_id} is not building")
+        segment = _with_utc(stored, ("start", "end", "created_at"))
+        longest = 0.0
+        for table, rows, check in (
+                (t.baseline_count, counts, _baseline_count_row),
+                (t.baseline_scope_hour, scope_hours, _baseline_hour_row)):
+            for chunk in _chunks((check(item, segment) for item in rows), chunk_size):
+                started = time.perf_counter()
+                with write_txn(self.engine) as c:
+                    state = c.execute(select(t.baseline_segment.c.status).where(
+                        t.baseline_segment.c.id == segment_id,
+                    )).scalar_one_or_none()
+                    if state != "building":
+                        raise ValueError(f"baseline segment {segment_id} stopped building")
+                    c.execute(table.insert(), chunk)
+                longest = max(longest, time.perf_counter() - started)
+        return longest
+
+    def finalize_baseline_segment(self, segment_id: str) -> str:
+        """Digest a completed build without a write lock, then expose it in one metadata update."""
+        digest = _RowsDigest()
+        for kind, columns, rows in (
+                ("count", _COUNT_COLUMNS, self.baseline_counts(segment_id)),
+                ("hour", _HOUR_COLUMNS, self.baseline_scope_hours(segment_id))):
+            for chunk in _chunks(rows, BASELINE_PAGE):
+                digest.add(kind, columns, chunk)
+        value = digest.hexdigest()
+        with write_txn(self.engine) as c:
+            result = c.execute(t.baseline_segment.update().where(
+                t.baseline_segment.c.id == segment_id,
+                t.baseline_segment.c.status == "building",
+            ).values(rows_digest=value, status="active"))
+            if not result.rowcount:
+                raise ValueError(f"baseline segment {segment_id} is not building")
+        return value
+
+    def cleanup_baseline_building(self, *, before: datetime) -> int:
+        """Delete abandoned builds before history work resumes, never holding the write lock for long.
+
+        Each abandoned row is claimed in one small transaction (its builder becomes ``CLEANUP_OWNER``, so its
+        owner can no longer reclaim it), its child rows go in bounded chunks, and the row itself goes last. A
+        cleaner that crashes part way leaves a claimed row that the next cleanup finishes.
+        """
+        before = _utc(before, "building cleanup time")
+        s = t.baseline_segment.c
+        abandoned = and_(s.status == "building", s.created_at < before)
+        removed = 0
+        while True:
+            with self.engine.connect() as c:
+                segment_id = c.execute(select(s.id).where(abandoned).order_by(s.id).limit(1)).scalar_one_or_none()
+            if segment_id is None:
+                return removed
+            with write_txn(self.engine) as c:
+                claimed = c.execute(t.baseline_segment.update().where(s.id == segment_id, abandoned)
+                                    .values(built_by_hunt_id=CLEANUP_OWNER)).rowcount
+            if not claimed:
+                continue  # its owner refreshed it between the read and the claim; it is no longer abandoned
+            self._drop_baseline_children(segment_id)
+            with write_txn(self.engine) as c:
+                removed += c.execute(t.baseline_segment.delete().where(
+                    s.id == segment_id, s.status == "building", s.built_by_hunt_id == CLEANUP_OWNER,
+                )).rowcount
+
     def baseline_segments(self, *, site: str | None = None, target: str | None = None,
                           spec_id: str | None = None, statuses: Iterable[str] | None = None) -> list[dict]:
         query = select(t.baseline_segment)
@@ -1858,6 +2039,33 @@ class Repo:
         )
         with self.engine.connect() as c:
             return [_with_utc(item, ("start", "end", "created_at")) for item in c.execute(query).mappings()]
+
+    def baseline_segments_for_cover(self, *, site: str, target: str, spec_id: str,
+                                    spec_version: str, key_version: str, start: datetime,
+                                    end: datetime) -> list[dict]:
+        """Complete active segments wholly inside a requested history interval, already cover-ordered."""
+        start, end = _utc(start, "cover start"), _utc(end, "cover end")
+        s = t.baseline_segment.c
+        query = (select(t.baseline_segment).where(
+            s.site == site, s.target == target, s.spec_id == spec_id,
+            s.spec_version == spec_version, s.key_version == key_version,
+            s.status == "active", s.start >= start, s.end <= end,
+        ).order_by(s.start, s.end, s.id))
+        with self.engine.connect() as c:
+            return [_with_utc(item, ("start", "end", "created_at")) for item in c.execute(query).mappings()]
+
+    def baseline_segment_covers(self, *, site: str, target: str, spec_id: str, spec_version: str,
+                                key_version: str, start: datetime, end: datetime) -> bool:
+        """Whether one active segment of the spec's versions contains [start, end), whatever its width."""
+        start, end = _utc(start, "cover start"), _utc(end, "cover end")
+        s = t.baseline_segment.c
+        query = select(s.id).where(
+            s.site == site, s.target == target, s.spec_id == spec_id,
+            s.spec_version == spec_version, s.key_version == key_version,
+            s.status == "active", s.start <= start, s.end >= end,
+        ).limit(1)
+        with self.engine.connect() as c:
+            return c.execute(query).first() is not None
 
     def _keyset(self, table, where, order: tuple[str, ...], times: tuple[str, ...], page_size: int) -> Iterator[dict]:
         """Rows in `order` (a unique key), one page per short-lived read: nothing holds a cursor open."""
@@ -1887,48 +2095,52 @@ class Repo:
         return self._keyset(t.baseline_scope_hour, [t.baseline_scope_hour.c.segment_id == segment_id],
                             ("scope", "hour"), ("hour",), page_size)
 
-    def baseline_key_prevalence(self, key_id: str, scope_kind: str, segment_ids: Iterable[str]) -> int:
-        """How many distinct scopes of `scope_kind` hold `key_id` in the segments."""
-        segments = sorted(set(segment_ids))
-        if not segments:
-            return 0
+    def baseline_key_prevalence(self, key_id: str, scope_kind: str, hunt_id: str, spec_id: str) -> int:
+        """How many distinct scopes hold `key_id` in the hunt's frozen snapshot of `spec_id`."""
         with self.engine.connect() as c:
-            return int(c.execute(baseline_prevalence_query(key_id, scope_kind, segments)).scalar_one())
+            return int(c.execute(baseline_prevalence_query(key_id, scope_kind, hunt_id, spec_id)).scalar_one())
 
-    def baseline_peer_scopes(self, scope_kind: str, segment_ids: Iterable[str]) -> int:
-        """How many distinct scopes of `scope_kind` were live in the segments (the prevalence denominator)."""
-        segments = sorted(set(segment_ids))
-        if not segments:
-            return 0
+    def baseline_peer_scopes(self, scope_kind: str, hunt_id: str, spec_id: str) -> int:
+        """How many distinct scopes were live in one spec's snapshot (the prevalence denominator)."""
         with self.engine.connect() as c:
-            return int(c.execute(baseline_peer_scopes_query(scope_kind, segments)).scalar_one())
+            return int(c.execute(baseline_peer_scopes_query(scope_kind, hunt_id, spec_id)).scalar_one())
 
     def baseline_key_history(self, key_id: str, scope_kind: str, scope: str,
-                             segment_ids: Iterable[str]) -> list[dict]:
+                             hunt_id: str, spec_id: str) -> list[dict]:
         """One key's count rows in one scope; at most one row per segment bucket of the snapshot span."""
-        segments = sorted(set(segment_ids))
-        if not segments:
-            return []
         with self.engine.connect() as c:
             return [_with_utc(row, ("bucket", "first_ts", "last_ts")) for row in c.execute(
-                baseline_key_history_query(key_id, scope_kind, scope, segments)).mappings()]
+                baseline_key_history_query(key_id, scope_kind, scope, hunt_id, spec_id)).mappings()]
 
-    def baseline_scope_series(self, scope_kind: str, scope: str, segment_ids: Iterable[str]) -> list[dict]:
-        """One scope's live hours; at most one row per hour of the snapshot span."""
-        segments = sorted(set(segment_ids))
-        if not segments:
-            return []
+    def baseline_scope_series(self, scope_kind: str, scope: str, hunt_id: str, spec_id: str) -> list[dict]:
+        """One scope's live hours in one spec's snapshot; at most one row per hour per target."""
         with self.engine.connect() as c:
             return [_with_utc(row, ("hour",)) for row in c.execute(
-                baseline_scope_series_query(scope_kind, scope, segments)).mappings()]
+                baseline_scope_series_query(scope_kind, scope, hunt_id, spec_id)).mappings()]
 
     def save_baseline_snapshot(self, row: dict) -> bool:
-        """Freeze the first snapshot for a hunt; resume observes but never replaces it."""
+        """Atomically freeze the first snapshot and normalized membership for a hunt."""
+        row = dict(row)
+        segment_ids = sorted(set(row["segment_ids"]))
+        row["segment_ids"] = segment_ids
         with write_txn(self.engine) as c:
             result = c.execute(insert(t.baseline_snapshot).values(**row).on_conflict_do_nothing(
                 index_elements=["hunt_id"],
             ))
-            return bool(result.rowcount)
+            if not result.rowcount:
+                return False
+            # Membership copies each segment's spec and target from the segment row itself, one keyed
+            # insert-select per id in bounded chunks; an id with no segment rolls the whole snapshot back.
+            s = t.baseline_segment.c
+            member = insert(t.baseline_snapshot_segment).from_select(
+                ["hunt_id", "spec_id", "segment_id", "target"],
+                select(literal(row["hunt_id"]), s.spec_id, s.id, s.target).where(s.id == bindparam("sid")),
+            )
+            for chunk in _chunks(({"sid": segment_id} for segment_id in segment_ids), BASELINE_CHUNK):
+                inserted = c.execute(member, chunk).rowcount
+                if inserted != len(chunk):
+                    raise ValueError("snapshot names an unknown baseline segment")
+            return True
 
     def baseline_snapshot(self, hunt_id: str) -> dict | None:
         with self.engine.connect() as c:
@@ -1936,6 +2148,213 @@ class Repo:
                 t.baseline_snapshot.c.hunt_id == hunt_id,
             )).mappings().first()
             return dict(row) if row else None
+
+    def baseline_snapshot_segments(self, hunt_id: str) -> list[str]:
+        query = (select(t.baseline_snapshot_segment.c.segment_id)
+                 .where(t.baseline_snapshot_segment.c.hunt_id == hunt_id)
+                 .order_by(t.baseline_snapshot_segment.c.segment_id))
+        with self.engine.connect() as c:
+            return list(c.execute(query).scalars())
+
+    def baseline_parent_boot(self, hunt_id: str, target: str, host: str) -> tuple[str, datetime] | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(t.baseline_parent_host_boot).where(
+                t.baseline_parent_host_boot.c.hunt_id == hunt_id,
+                t.baseline_parent_host_boot.c.target == target,
+                t.baseline_parent_host_boot.c.host == host,
+            )).mappings().first()
+        if row is None:
+            return None
+        return row["boot"], _stored_utc(row["latest_ts"])
+
+    def set_baseline_parent_boot(self, hunt_id: str, target: str, host: str, boot: str,
+                                 latest_ts: datetime) -> bool:
+        """Advance one host's carry state; an older different boot is rejected."""
+        latest_ts = _utc(latest_ts, "parent boot latest_ts")
+        table = t.baseline_parent_host_boot.c
+        with write_txn(self.engine) as c:
+            current = c.execute(select(t.baseline_parent_host_boot).where(
+                table.hunt_id == hunt_id, table.target == target, table.host == host,
+            )).mappings().first()
+            if current is not None:
+                current_ts = _stored_utc(current["latest_ts"])
+                if current["boot"] != boot and current_ts >= latest_ts:
+                    return False
+                if current["boot"] != boot:
+                    c.execute(t.baseline_parent_carry.delete().where(
+                        t.baseline_parent_carry.c.hunt_id == hunt_id,
+                        t.baseline_parent_carry.c.target == target,
+                        t.baseline_parent_carry.c.host == host,
+                    ))
+                elif current_ts > latest_ts:
+                    latest_ts = current_ts
+            stmt = insert(t.baseline_parent_host_boot).values(
+                hunt_id=hunt_id, target=target, host=host, boot=boot, latest_ts=latest_ts,
+            ).on_conflict_do_update(
+                index_elements=["hunt_id", "target", "host"],
+                set_={"boot": boot, "latest_ts": latest_ts},
+            )
+            c.execute(stmt)
+            return True
+
+    def baseline_parent_targets(self, hunt_id: str, host: str) -> list[str]:
+        """Targets that delivered at least one exec for `host` in this hunt (ix_baseline_parent_host_boot_host)."""
+        table = t.baseline_parent_host_boot.c
+        with self.engine.connect() as c:
+            return sorted(c.execute(select(table.target).where(
+                table.hunt_id == hunt_id, table.host == host,
+            )).scalars())
+
+    def upsert_baseline_parents(self, rows: Iterable[dict]) -> None:
+        """Keep the latest two observed exec generations for each live PID, ordered by (time, audit serial).
+
+        An exec at the instant of a held generation is the same exec unless both carry distinct serials (then the
+        serial orders them). If it is "the same" instant but a different image, the generation is marked
+        ambiguous: without an order the PID's image after that instant is unknown, never guessed.
+        """
+        stmt = insert(t.baseline_parent_carry)
+        table, excluded = t.baseline_parent_carry.c, stmt.excluded
+
+        def ordered(ts_a, serial_a, ts_b, serial_b):
+            return and_(ts_a == ts_b, serial_a.is_not(None), serial_b.is_not(None), serial_a > serial_b)
+
+        def same_instant(ts_a, serial_a, ts_b, serial_b):
+            return and_(ts_a == ts_b, or_(serial_a.is_(None), serial_b.is_(None), serial_a == serial_b))
+
+        newer = or_(excluded.exec_ts > table.exec_ts,
+                    ordered(excluded.exec_ts, excluded.serial, table.exec_ts, table.serial))
+        at_current = same_instant(excluded.exec_ts, excluded.serial, table.exec_ts, table.serial)
+        older_candidate = and_(
+            ~newer, ~at_current,
+            or_(table.previous_exec_ts.is_(None), excluded.exec_ts > table.previous_exec_ts,
+                ordered(excluded.exec_ts, excluded.serial, table.previous_exec_ts, table.previous_serial)),
+        )
+        at_previous = and_(~newer, ~at_current, same_instant(
+            excluded.exec_ts, excluded.serial, table.previous_exec_ts, table.previous_serial))
+
+        def flag(held, ambiguous, held_executable):
+            return case((or_(held == 1, ambiguous == 1, excluded.executable != held_executable), 1), else_=0)
+
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["hunt_id", "target", "host", "boot", "pid"],
+            set_={
+                **{f"previous_{name}": case((newer, table[name]), (older_candidate, excluded[name]),
+                                            else_=table[f"previous_{name}"])
+                   for name in ("exec_ts", "executable", "parent_pid", "raw_id", "serial")},
+                "previous_ambiguous": case(
+                    (newer, table.ambiguous), (older_candidate, excluded.ambiguous),
+                    (at_previous, flag(table.previous_ambiguous, excluded.ambiguous, table.previous_executable)),
+                    else_=table.previous_ambiguous,
+                ),
+                **{name: case((newer, excluded[name]), else_=table[name])
+                   for name in ("exec_ts", "executable", "parent_pid", "raw_id", "serial")},
+                "ambiguous": case(
+                    (newer, excluded.ambiguous),
+                    (at_current, flag(table.ambiguous, excluded.ambiguous, table.executable)),
+                    else_=table.ambiguous,
+                ),
+            },
+        )
+        for chunk in _chunks(rows, BASELINE_CHUNK):
+            with write_txn(self.engine) as c:
+                c.execute(stmt, chunk)
+
+    def baseline_parent_generations(self, hunt_id: str, target: str, host: str, pid: int,
+                                    boot: str | None) -> list[dict]:
+        """The stored generations of `pid` (at most two, newest first); choosing one is the caller's job."""
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid < 0:
+            return []
+        table = t.baseline_parent_carry.c
+        with self.engine.connect() as c:
+            row = c.execute(select(t.baseline_parent_carry).where(
+                table.hunt_id == hunt_id, table.target == target, table.host == host,
+                table.boot == (boot or ""), table.pid == pid,
+            )).mappings().first()
+        if row is None:
+            return []
+        out = [{"exec_ts": _stored_utc(row["exec_ts"]), "serial": row["serial"], "executable": row["executable"],
+                "parent_pid": row["parent_pid"], "raw_id": row["raw_id"], "ambiguous": bool(row["ambiguous"])}]
+        if row["previous_exec_ts"] is not None and row["previous_executable"]:
+            out.append({
+                "exec_ts": _stored_utc(row["previous_exec_ts"]), "serial": row["previous_serial"],
+                "executable": row["previous_executable"], "parent_pid": row["previous_parent_pid"],
+                "raw_id": row["previous_raw_id"], "ambiguous": bool(row["previous_ambiguous"]),
+            })
+        return out
+
+    def baseline_parent_count(self, hunt_id: str) -> int:
+        with self.engine.connect() as c:
+            return int(c.execute(select(func.count()).select_from(t.baseline_parent_carry).where(
+                t.baseline_parent_carry.c.hunt_id == hunt_id,
+            )).scalar_one())
+
+    def _coalesce_range(self, table, keys: dict, start: datetime, end: datetime) -> None:
+        """Add [start, end) to a range ledger keyed by `keys`, merging overlapping or touching rows in the
+        same transaction, so the ledger holds one row per continuous run."""
+        start, end = _utc(start, "range start"), _utc(end, "range end")
+        if end <= start:
+            raise ValueError("ledger range must be nonempty")
+        columns = table.c
+        scope = [columns[name] == value for name, value in keys.items()]
+        with write_txn(self.engine) as c:
+            touching = c.execute(select(columns.start, columns.end).where(
+                *scope, columns.start <= end, columns.end >= start,
+            )).all()
+            for row in touching:
+                start = min(start, _stored_utc(row.start))
+                end = max(end, _stored_utc(row.end))
+            if touching:
+                c.execute(table.delete().where(*scope, columns.start.in_([row.start for row in touching])))
+            c.execute(table.insert().values(**keys, start=start, end=end))
+
+    def mark_baseline_parent_observed(self, hunt_id: str, target: str, start: datetime,
+                                      end: datetime) -> None:
+        """Record that every record of `target` in [start, end) was fed to the carry."""
+        self._coalesce_range(t.baseline_parent_observed, {"hunt_id": hunt_id, "target": target}, start, end)
+
+    def mark_baseline_parent_break(self, hunt_id: str, target: str, host: str, start: datetime,
+                                   end: datetime) -> None:
+        """Record that `host` had an exec in [start, end) whose identity the carry does not hold."""
+        self._coalesce_range(t.baseline_parent_break,
+                             {"hunt_id": hunt_id, "target": target, "host": host}, start, end)
+
+    def baseline_parent_break_overlaps(self, hunt_id: str, target: str, host: str, start: datetime,
+                                       end: datetime) -> bool:
+        """Whether any break of `host` intersects [start, end) (a primary-key range search)."""
+        start, end = _utc(start, "break start"), _utc(end, "break end")
+        table = t.baseline_parent_break.c
+        with self.engine.connect() as c:
+            row = c.execute(select(table.end).where(
+                table.hunt_id == hunt_id, table.target == target, table.host == host, table.start < end,
+            ).order_by(table.start.desc()).limit(1)).first()
+        return row is not None and _stored_utc(row.end) > start
+
+    def baseline_parent_breaks(self, hunt_id: str, target: str, host: str) -> list[tuple[datetime, datetime]]:
+        table = t.baseline_parent_break.c
+        with self.engine.connect() as c:
+            rows = c.execute(select(table.start, table.end).where(
+                table.hunt_id == hunt_id, table.target == target, table.host == host,
+            ).order_by(table.start)).all()
+        return [(_stored_utc(row.start), _stored_utc(row.end)) for row in rows]
+
+    def baseline_parent_observed_covers(self, hunt_id: str, target: str, start: datetime,
+                                        end: datetime) -> bool:
+        """Whether one continuous observed run contains [start, end) (a primary-key range search)."""
+        start, end = _utc(start, "observed start"), _utc(end, "observed end")
+        table = t.baseline_parent_observed.c
+        with self.engine.connect() as c:
+            row = c.execute(select(table.end).where(
+                table.hunt_id == hunt_id, table.target == target, table.start <= start,
+            ).order_by(table.start.desc()).limit(1)).first()
+        return row is not None and _stored_utc(row.end) >= end
+
+    def baseline_parent_observed_ranges(self, hunt_id: str, target: str) -> list[tuple[datetime, datetime]]:
+        table = t.baseline_parent_observed.c
+        with self.engine.connect() as c:
+            rows = c.execute(select(table.start, table.end).where(
+                table.hunt_id == hunt_id, table.target == target,
+            ).order_by(table.start)).all()
+        return [(_stored_utc(row.start), _stored_utc(row.end)) for row in rows]
 
     def upsert_baseline_observation(self, row: dict) -> None:
         self.upsert_baseline_observations([row])

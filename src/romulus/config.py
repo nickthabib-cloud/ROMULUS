@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+
+from romulus.detect.netdef import EXTERNAL_SETTING, INTERNAL_SETTING, SiteNetworks, parse_networks
 
 SECRET_KEYS = ("PASSWORD", "API_KEY", "SECRET", "TOKEN")
 
@@ -67,6 +69,15 @@ class Settings(BaseModel):
     # fetch the sweep's next partition on one background thread while the current one is evaluated; off by
     # default because it holds a second partition's decoded records in memory
     sweep_prefetch: bool = False
+    # Where a hunt stages events and detector state that does not fit in memory (default ROMULUS_HOME/stage). Put it
+    # on a volume no other service writes to: never the volume of Elasticsearch, Arkime or docker data.
+    stage_dir: Path | None = None
+    # The hunt's disk total for detector state (0: the smaller of half the stage volume's free space and 10% of its
+    # size), the least free space always left on that volume (the reserve is at least 15% of the volume), and the
+    # memory the in-memory parts of every rule share. Reaching a disk limit makes coverage partial, never a crash.
+    state_disk_gb: float = Field(default=0.0, ge=0.0)
+    state_disk_reserve_gb: float = Field(default=2.0, ge=0.0)
+    state_memory_mb: int = Field(default=1536, ge=64)
 
     arkime_url: str = "http://127.0.0.1:8005"
     arkime_username: str = ""
@@ -102,8 +113,13 @@ class Settings(BaseModel):
     model_egress: Literal["", "lab-public-data"] = ""
     # Extra hosts, addresses or CIDR networks treated as local (e.g. a team's model server on an enclave address).
     model_local_hosts: list[str] = []
+    # The site's internal address space (CIDRs) and carve-outs inside it that are outside the site (partner or
+    # VPN ranges). Unset, the default RFC 1918 and reserved ranges are used and labelled as the default.
+    internal_networks: list[str] = []
+    external_networks: list[str] = []
 
-    @field_validator("es_index_patterns", "pcap_allowed_dirs", "model_local_hosts", mode="before")
+    @field_validator("es_index_patterns", "pcap_allowed_dirs", "model_local_hosts", "internal_networks",
+                     "external_networks", mode="before")
     @classmethod
     def _split(cls, v):
         if isinstance(v, str):
@@ -131,6 +147,23 @@ class Settings(BaseModel):
         if v not in ("", "lab-public-data"):
             raise ValueError("ROMULUS_MODEL_EGRESS must be empty or lab-public-data")
         return v
+
+    @field_validator("internal_networks", "external_networks")
+    @classmethod
+    def _networks(cls, v: list[str], info) -> list[str]:
+        parse_networks(v, INTERNAL_SETTING if info.field_name == "internal_networks" else EXTERNAL_SETTING)
+        return v
+
+    @model_validator(mode="after")
+    def _site_networks(self):
+        # a carve-out must sit inside the internal set: checked once both lists are known
+        SiteNetworks.from_settings(self)
+        return self
+
+    @property
+    def stage_path(self) -> Path:
+        """The directory a hunt stages events and detector state in."""
+        return self.stage_dir if self.stage_dir is not None else self.home / "stage"
 
     @property
     def db_path(self) -> Path:
@@ -174,6 +207,8 @@ ENV_MAP = {
     "ES_API_KEY": "es_api_key", "ES_CA_CERT": "es_ca_cert", "ES_VERIFY_TLS": "es_verify_tls",
     "ES_INDEX_PATTERNS": "es_index_patterns", "ES_COMPRESSION": "es_compression",
     "ROMULUS_SWEEP_PREFETCH": "sweep_prefetch",
+    "ROMULUS_STAGE_DIR": "stage_dir", "ROMULUS_STATE_DISK_GB": "state_disk_gb", "ROMULUS_STATE_DISK_RESERVE_GB": "state_disk_reserve_gb",
+    "ROMULUS_STATE_MEMORY_MB": "state_memory_mb",
     "ARKIME_URL": "arkime_url", "ARKIME_USERNAME": "arkime_username", "ARKIME_PASSWORD": "arkime_password",
     "ARKIME_VERIFY_TLS": "arkime_verify_tls",
     "PCAP_ALLOWED_DIRS": "pcap_allowed_dirs", "TSHARK_BIN": "tshark_bin", "MISSION_TIMEZONE": "mission_timezone",
@@ -190,6 +225,7 @@ ENV_MAP = {
     "AGENT_MAX_SOURCE_QUERIES": "agent_max_source_queries",
     "AGENT_CONCURRENCY": "agent_concurrency",
     "ROMULUS_MODEL_EGRESS": "model_egress", "MODEL_LOCAL_HOSTS": "model_local_hosts",
+    "ROMULUS_INTERNAL_NETWORKS": "internal_networks", "ROMULUS_EXTERNAL_NETWORKS": "external_networks",
 }
 
 

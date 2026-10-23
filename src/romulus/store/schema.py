@@ -398,7 +398,7 @@ baseline_segment = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("origin IN ('lookback', 'hunt')", name="ck_baseline_segment_origin"),
     CheckConstraint("bucket IN ('day', 'hour')", name="ck_baseline_segment_bucket"),
-    CheckConstraint("status IN ('active', 'stale', 'revoked')", name="ck_baseline_segment_status"),
+    CheckConstraint("status IN ('building', 'active', 'stale', 'revoked')", name="ck_baseline_segment_status"),
     CheckConstraint("hunted IN (0, 1)", name="ck_baseline_segment_hunted"),
     CheckConstraint("events_total >= 0", name="ck_baseline_segment_events"),
 )
@@ -456,8 +456,87 @@ baseline_snapshot = Table(
     Column("status", String, nullable=False),
     Column("digest", String, nullable=False),
     CheckConstraint(
-        "status IN ('resolved', 'shortened', 'unresolved')", name="ck_baseline_snapshot_status",
+        "status IN ('resolved', 'shortened', 'gap_shortened', 'unresolved')", name="ck_baseline_snapshot_status",
     ),
+)
+
+# Snapshot membership is normalized so every baseline probe joins the frozen hunt cut instead of
+# interpolating a potentially huge list of segment ids into SQL. Probes are per spec: two specs keyed from
+# the same events each hold a scope-hour row, so a hunt-wide join would double a scope's series and mix peers.
+# The segment's spec and target are copied here (segments are immutable) so the join stays on the key.
+baseline_snapshot_segment = Table(
+    "baseline_snapshot_segment", metadata,
+    Column("hunt_id", String, ForeignKey("baseline_snapshot.hunt_id", ondelete="CASCADE"), nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("segment_id", String, ForeignKey("baseline_segment.id", ondelete="RESTRICT"), nullable=False),
+    Column("target", String, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "spec_id", "segment_id", name="pk_baseline_snapshot_segment"),
+)
+Index("ix_baseline_snapshot_segment_segment", baseline_snapshot_segment.c.segment_id)
+
+# Parent carry state is per (hunt, target): a child resolves only from execs its own target delivered, and only
+# across hours that target delivered completely (baseline_parent_observed).
+baseline_parent_host_boot = Table(
+    "baseline_parent_host_boot", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("host", String, nullable=False),
+    Column("boot", String, nullable=False),
+    Column("latest_ts", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "host", name="pk_baseline_parent_host_boot"),
+)
+Index("ix_baseline_parent_host_boot_host", baseline_parent_host_boot.c.hunt_id, baseline_parent_host_boot.c.host)
+
+# Hours whose every record was fed to the carry, stored as coalesced half-open ranges so the ledger grows with
+# the number of breaks, not the number of hours.
+baseline_parent_observed = Table(
+    "baseline_parent_observed", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "start", name="pk_baseline_parent_observed"),
+    CheckConstraint("end > start", name="ck_baseline_parent_observed_span"),
+)
+
+# Per host, the hours holding an exec the carry could not store (no pid or executable, an unknown boot against
+# a recorded one, a typed time outside its retrieval hour). Coalesced ranges, like the observed ledger; a break
+# between a generation and a child makes the child's parent unknown for that host only.
+baseline_parent_break = Table(
+    "baseline_parent_break", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("host", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "host", "start", name="pk_baseline_parent_break"),
+    CheckConstraint("end > start", name="ck_baseline_parent_break_span"),
+)
+
+baseline_parent_carry = Table(
+    "baseline_parent_carry", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("host", String, nullable=False),
+    Column("boot", String, nullable=False),
+    Column("pid", Integer, nullable=False),
+    Column("exec_ts", DateTime(timezone=True), nullable=False),
+    Column("executable", String, nullable=False),
+    Column("parent_pid", Integer),
+    Column("raw_id", String, nullable=False),
+    # Audit serial (orders execs of one instant) and whether the generation is ambiguous (two images at one
+    # instant with no order between them), for the latest and the previous generation.
+    Column("serial", Integer),
+    Column("ambiguous", Integer, nullable=False, server_default="0"),
+    Column("previous_exec_ts", DateTime(timezone=True)),
+    Column("previous_executable", String),
+    Column("previous_parent_pid", Integer),
+    Column("previous_raw_id", String),
+    Column("previous_serial", Integer),
+    Column("previous_ambiguous", Integer, nullable=False, server_default="0"),
+    PrimaryKeyConstraint("hunt_id", "target", "host", "boot", "pid", name="pk_baseline_parent_carry"),
+    CheckConstraint("pid >= 0", name="ck_baseline_parent_carry_pid"),
+    CheckConstraint("executable <> ''", name="ck_baseline_parent_carry_executable"),
 )
 
 baseline_observation = Table(

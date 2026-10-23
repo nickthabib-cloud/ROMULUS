@@ -17,7 +17,8 @@ order (the same identity a community ID hashes), so the same connection seen by 
 in several save-interval records, is counted once. A 5-tuple reused later is the same identity; rules that measure
 duration split it again where records are more than STITCH_GAP seconds apart.
 
-Internal and external are the built-in private-address boundary shared with the other network rules.
+Internal and external come from the site's internal-network definition (romulus.detect.netdef), shared with the
+other network rules.
 """
 from __future__ import annotations
 
@@ -29,7 +30,9 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
+from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
@@ -53,6 +56,8 @@ DEFAULT_HEADER_BYTES = 66
 MIN_PAYLOAD_BYTES = 64
 # Modern stacks pick client ports from 32768 upwards (Linux 32768-60999, Windows 49152-65535).
 EPHEMERAL_FLOOR = 32768
+# States folded at finalize are written out to disk every this many reads.
+FINALIZE_TRIM = 10_000
 
 
 # ---------------------------------------------------------------------------------------------
@@ -367,13 +372,16 @@ class _FlowRule(Playbook):
 
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
-        self._staged: set[str] = set()
+        self._seen = RecentIds()        # bounded re-read guard
+        self._staged = RecentIds()      # bounded re-stage guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
+        for value in list(vars(self).values()):
+            if isinstance(value, KeyedStore):
+                value.trim()                        # a batch has ended: states beyond the hot sets go to disk
         return out
 
     def retained_events(self) -> list[TypedEvent]:
@@ -381,9 +389,10 @@ class _FlowRule(Playbook):
 
     def release_state(self) -> None:
         self.load = lambda ids: []
-        for value in vars(self).values():
-            if isinstance(value, (dict, list, set)):
+        for value in list(vars(self).values()):
+            if isinstance(value, (dict, list, set, RecentIds, KeyedStore)):
                 value.clear()
+        self.close_spill()
 
     def _stage(self, event: TypedEvent) -> None:
         if event.id not in self._staged:
@@ -416,18 +425,24 @@ class _FlowRule(Playbook):
             if view is None:
                 self.missing_required += 1
                 continue
-            if self.take(view, event):
+            taken = self.take(view, event)
+            if taken:
                 self.evaluated += 1
-            else:
+            elif taken is not None:             # None: a disk budget refused the record (counted as capped)
                 self.missing_required += 1
         for observer, count in netflow.items():
             if observer not in flow_observers:
                 self.missing_required += count
         return []
 
-    def take(self, view: FlowView, event: TypedEvent) -> bool:
-        """Record one typed view. False when a field this rule needs is absent (counted as missing)."""
+    def take(self, view: FlowView, event: TypedEvent) -> bool | None:
+        """Record one typed view. False when a field this rule needs is absent (counted as missing); None when a
+        disk budget refused it (counted as capped)."""
         raise NotImplementedError
+
+    def _refused(self, what: str) -> None:
+        """A store's disk budget is spent: the record is refused and coverage says so."""
+        self.refuse("disk", f"the {what} disk budget is spent; a record needing a new one is not evaluated")
 
 
 def _entities(events: list[TypedEvent]) -> list[tuple[str, str, str]]:
@@ -482,6 +497,7 @@ class _Destination:
     silent: bool = False            # some record shows no packet back
     connections: set = field(default_factory=set)
     records: int = 0
+    staged: list[tuple[float, str]] = field(default_factory=list)       # (start, event id) on the stage
 
     @property
     def state(self) -> str:
@@ -492,11 +508,10 @@ class _Destination:
 
 @dataclass
 class _SweepGroup:
-    destinations: dict[str, _Destination] = field(default_factory=dict)
+    reached: int = 0                                                     # distinct destinations
     records: Counter = field(default_factory=Counter)
     first: float = float("inf")
     last: float = float("-inf")
-    staged: list[tuple[float, str, str]] = field(default_factory=list)   # (start, event id, destination)
     hour_budget: Counter = field(default_factory=Counter)                # staged re-contact records per hour
 
 
@@ -558,7 +573,8 @@ class HorizontalSweep(_FlowRule):
     """One source reaching many distinct addresses on the same transport and port (or by ICMP) within a short
     window: the shape of host discovery and service sweeps, and of worm-style propagation."""
     id = "net.horizontal_sweep"
-    version = "2"
+    version = "4"
+    direction_dependent = True
     title = "One source contacted many distinct addresses on the same port within minutes"
     severity, lane = "medium", "lead"
     attack = ("T1046", "T1018", "T1595.001")
@@ -600,7 +616,10 @@ class HorizontalSweep(_FlowRule):
                      "port as the destination port)",
         "fidelity": "aggregate observation over typed connection records; 'answered' means the responder sent at "
                     "least one packet on a recorded connection (a TCP reset counts as an answer), 'no reply' means "
-                    "every recorded connection shows zero packets from it",
+                    "every recorded connection shows zero packets from it. Internal or external destinations are "
+                    "decided by the site's internal-network definition; under the default (not configured for the "
+                    "site) a partition holding an external-scope record, judged by the stricter external standard, "
+                    "is partial with the reason 'direction assumed', never a complete negative",
         "benign_and_cost": "authorized scanners, monitoring and management servers polling internal hosts; external "
                            "fan-out from resolvers or relays only when most destinations stay silent. One grouped "
                            "item per (source, transport, port, internal or external destinations)",
@@ -622,22 +641,41 @@ class HorizontalSweep(_FlowRule):
                  "impact",
     }
 
+    # Whole-window distinct destinations need every (group, destination) for the window; the sensors' records of one
+    # connection arrive in different targets, so they cannot be released early. Group summaries and destinations
+    # (about 600 bytes each with runs and up to 64 connection hashes) are held in keyed stores: HOT in memory, the
+    # rest on disk; only their disk budget refuses a record needing a new one. Finalize reads one group's
+    # destinations at a time, and only for groups with enough destinations to qualify.
+    HOT_GROUPS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    HOT_DESTINATIONS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+
     def __init__(self):
         super().__init__()
-        self.sweeps: dict[tuple, _SweepGroup] = {}
+        self.sweeps = KeyedStore(self, "sweep_groups", self.HOT_GROUPS)
+        self.destinations = KeyedStore(self, "sweep_destinations", self.HOT_DESTINATIONS,
+                                       group=lambda key: repr(key[0]))      # (group key, destination address)
 
-    def take(self, view: FlowView, event: TypedEvent) -> bool:
+    def take(self, view: FlowView, event: TypedEvent) -> bool | None:
         if not routable_remote(view.dst):
             return True                 # multicast, broadcast, loopback or link-local: not a host being reached
         scope = "external" if external(view.dst) else "internal"
         key = (view.src, view.transport, view.dport, scope)
         group = self.sweeps.get(key)
         if group is None:
-            group = self.sweeps[key] = _SweepGroup()
-        destination = group.destinations.get(view.dst)
+            group = _SweepGroup()
+            if not self.sweeps.put(key, group):
+                return self._refused("sweep groups'")
+        destination = self.destinations.get((key, view.dst))
         new = destination is None
         if new:
-            destination = group.destinations[view.dst] = _Destination(runs={w: _Clusters() for w in self.WINDOWS})
+            destination = _Destination(runs={w: _Clusters() for w in self.WINDOWS})
+            if not self.destinations.put((key, view.dst), destination):
+                return self._refused("destinations'")
+            group.reached += 1
+        if scope == "external":
+            # judged (not refused) by the stricter external fan-out standard; on a site in public space it may be
+            # internal, so the direction is an assumption
+            assume_direction(self)
         started = {width: destination.runs[width].add(view.start, width) for width in self.WINDOWS}
         if view.s2c_packets is not None:
             if view.s2c_packets > 0:
@@ -645,7 +683,7 @@ class HorizontalSweep(_FlowRule):
             else:
                 destination.silent = True
         if len(destination.connections) < self.CONNECTIONS_PER_DESTINATION:
-            destination.connections.add(view.key)
+            destination.connections.add(hash(view.key))      # a connection identity, counted (8 bytes, not a tuple)
         destination.records += 1
         group.records[view.sensor] += 1
         group.first, group.last = min(group.first, view.start), max(group.last, view.start)
@@ -653,42 +691,61 @@ class HorizontalSweep(_FlowRule):
         if new or (started[self.WINDOWS[0]] and group.hour_budget[hour] < self.RECONTACT_STAGE_PER_HOUR):
             if not new:
                 group.hour_budget[hour] += 1
-            group.staged.append((view.start, event.id, view.dst))
+            destination.staged.append((view.start, event.id))
             self._stage(event)
         return True
 
+    def _groups(self):
+        """(group key, summary, destinations) for every group with enough destinations to qualify, one group's
+        destinations in memory at a time."""
+        key = summary = None
+        dests: dict[str, _Destination] = {}
+        for (group_key, ip), destination in self.destinations.grouped():
+            if group_key != key:
+                if dests:
+                    yield key, summary, dests
+                key, dests = group_key, {}
+                summary = self.sweeps.peek(key)
+                if summary is not None and summary.reached < min(self.THRESHOLDS[key[3]].values()):
+                    summary = None
+            if summary is not None:
+                dests[ip] = destination
+        if dests:
+            yield key, summary, dests
+
     def finalize(self):
         out = []
-        for key in sorted(self.sweeps, key=lambda k: (k[0], k[1], -1 if k[2] is None else k[2], k[3])):
+        for key, group, dests in self._groups():
             src, transport, _port, scope = key
-            group = self.sweeps[key]
             limits = self.THRESHOLDS[scope]
-            if len(group.destinations) < min(limits.values()):
-                continue
             share = self.EXTERNAL_MIN_SILENT_SHARE if scope == "external" else 0.0
-            qualifying = [busiest_window(group.destinations, width, min_size=limits[width], min_silent_share=share)
+            qualifying = [busiest_window(dests, width, min_size=limits[width], min_silent_share=share)
                           for width in self.WINDOWS]
             qualifying = [window for window in qualifying if window is not None]
             if not qualifying:
                 continue
             high = None
             if scope == "internal" and transport == "tcp" and internal_address(src):
-                high = busiest_window(group.destinations, 3600, min_size=self.HIGH_MIN_DESTINATIONS,
+                high = busiest_window(dests, 3600, min_size=self.HIGH_MIN_DESTINATIONS,
                                       min_silent_share=self.HIGH_MIN_SILENT_SHARE)
             # the window that decided the lane: the high window, else the widest qualifying window
             deciding = high or max(qualifying, key=lambda window: (window.width, window.size))
-            out.append(self._match(key, group, deciding, high is not None))
-        return out
+            out.append(((key[0], key[1], -1 if key[2] is None else key[2], key[3]),
+                        self._match(key, group, dests, deciding, high is not None)))
+        return [match for _order, match in sorted(out, key=lambda item: item[0])]
 
-    def _match(self, key, group: _SweepGroup, deciding: _Window, high: bool) -> Match:
+    def _match(self, key, group: _SweepGroup, dests: dict[str, _Destination], deciding: _Window,
+               high: bool) -> Match:
         src, transport, port, scope = key
         service = f"{transport}/{port}" if port is not None else transport
-        short = busiest_window(group.destinations, 300)
-        long = busiest_window(group.destinations, 3600)
-        dests = group.destinations
+        short = busiest_window(dests, 300)
+        long = busiest_window(dests, 3600)
         states = Counter(d.state for d in dests.values())
         connections = sum(len(d.connections) for d in dests.values())
         capped = any(len(d.connections) >= self.CONNECTIONS_PER_DESTINATION for d in dests.values())
+        if capped:
+            self.note_limit("connections", f"a destination passed {self.CONNECTIONS_PER_DESTINATION:,} distinct "
+                                           f"connections held; its connection count is a lower bound")
         src_scope = "internal" if internal_address(src) else "external" if external(src) else "non-routable"
         label = {True: "lane window", False: "deciding window"}[high]
         span = "5 minutes" if deciding.width == 300 else "hour"
@@ -707,9 +764,10 @@ class HorizontalSweep(_FlowRule):
                  f"answered. Addresses in the {label}: {listed}{more}.")
         members = set(deciding.members)
         end = deciding.start + deciding.width
-        inside = [(dests[ip].state != "no reply", ts, eid) for ts, eid, ip in group.staged
+        staged = [(ts, eid, ip) for ip, destination in dests.items() for ts, eid in destination.staged]
+        inside = [(dests[ip].state != "no reply", ts, eid) for ts, eid, ip in staged
                   if ip in members and deciding.start <= ts < end]
-        rest = [(ts, eid) for ts, eid, ip in group.staged if not (ip in members and deciding.start <= ts < end)]
+        rest = [(ts, eid) for ts, eid, ip in staged if not (ip in members and deciding.start <= ts < end)]
         ids = [eid for _answered, _ts, eid in sorted(inside)] + [eid for _ts, eid in sorted(rest)]
         evs = self._events(ids[:EXAMPLE_LIMIT])
         cited = next((e for e in evs if e.has("destination.port")), evs[0])
@@ -754,11 +812,35 @@ class _Unidentified:
 @dataclass
 class _Mismatch:
     connections: set = field(default_factory=set)
+    capped: bool = False                                      # connections beyond the per-group cap were not held
     sources: dict[str, set] = field(default_factory=dict)     # source address -> its connections
     records: Counter = field(default_factory=Counter)
     first: float = float("inf")
     last: float = float("-inf")
     cited: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _UnidentifiedGroup:
+    """The candidate connections of one (server, port, transport, side), folded as they are read at finalize."""
+    connections: int = 0
+    records: Counter = field(default_factory=Counter)
+    failed: int = 0
+    first: float = float("inf")
+    last: float = float("-inf")
+    addresses: Counter = field(default_factory=Counter)      # the other end -> its connections
+    cites: list[tuple[float, str]] = field(default_factory=list)    # (first, event id) of the earliest connections
+
+    def add(self, entry: _Unidentified, side: str) -> None:
+        self.connections += 1
+        self.records.update(entry.records)
+        self.failed += entry.failed
+        self.first, self.last = min(self.first, entry.first), max(self.last, entry.last)
+        self.addresses[entry.dst if side == "source" else entry.src] += 1
+        ref = (entry.first, entry.event_id)
+        if len(self.cites) < EXAMPLE_LIMIT or ref < self.cites[-1]:
+            bisect.insort(self.cites, ref)
+            del self.cites[EXAMPLE_LIMIT:]
 
 
 SOURCE_LIST_LIMIT = 30
@@ -781,7 +863,7 @@ class ProtocolPortMismatch(_FlowRule):
     data-carrying connection to a registered port had no protocol identified although the sensor can parse the
     protocol registered there."""
     id = "net.protocol_port_mismatch"
-    version = "4"
+    version = "5"
     title = "Application protocol and port disagree on a connection"
     severity, lane = "medium", "lead"
     attack = ("T1571", "T1572", "T1095")
@@ -837,14 +919,22 @@ class ProtocolPortMismatch(_FlowRule):
         "lanes": "lead: a parser's judgement against a port convention is ambiguous by nature. Severity medium",
     }
 
+    # Every connection a sensor identified on a registered port is held, so the other sensor's unidentified record of
+    # the same connection (read from another target) is always cleared. Identified connections, candidate
+    # connections, mismatch groups (connections per group capped, worded "at least") and per-server tallies are held
+    # in keyed stores: HOT in memory, the rest on disk; only their disk budget refuses a record needing a new entry.
+    CONNECTIONS_PER_MISMATCH = 100_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    HOT_GROUPS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+
     def __init__(self):
         super().__init__()
-        self.identified: dict[tuple, dict[str, set[str]]] = {}
-        self.unidentified: dict[tuple, _Unidentified] = {}
-        self.mismatches: dict[tuple, _Mismatch] = {}
-        self.pairs: dict[tuple, dict[str, Counter]] = {}
+        self.identified = KeyedStore(self, "ppm_identified", self.HOT)        # connection -> sensor -> protocols
+        self.unidentified = KeyedStore(self, "ppm_unidentified", self.HOT)    # connection -> _Unidentified
+        self.mismatches = KeyedStore(self, "ppm_mismatches", self.HOT_GROUPS)
+        self.pairs = KeyedStore(self, "ppm_pairs", self.HOT)                  # (server, port, transport) tallies
 
-    def take(self, view: FlowView, event: TypedEvent) -> bool:
+    def take(self, view: FlowView, event: TypedEvent) -> bool | None:
         if view.protocols is None:
             return False
         if view.transport not in ("tcp", "udp"):
@@ -852,7 +942,9 @@ class ProtocolPortMismatch(_FlowRule):
         expected = expected_protocols(view.transport, view.dport)
         registered = bool(expected) or bool(expected_protocols(view.transport, view.sport))
         if expected:
-            counts = self.pairs.setdefault((view.dst, view.dport, view.transport), {})
+            counts = self.pairs.setdefault((view.dst, view.dport, view.transport), dict)
+            if counts is None:
+                return self._refused("server tallies'")
             tally = counts.setdefault(view.sensor, Counter())
             tally["records"] += 1
             for protocol in view.protocols:
@@ -864,12 +956,22 @@ class ProtocolPortMismatch(_FlowRule):
                              for p in view.protocols for port in (view.sport, view.dport))
             judged = expected or any(p in PROTOCOL_PORTS for p in view.protocols)
             if registered or (not consistent and judged):
-                self.identified.setdefault(view.key, {}).setdefault(view.sensor, set()).update(view.protocols)
+                seen = self.identified.setdefault(view.key, dict)
+                if seen is None:
+                    return self._refused("identified connections'")
+                seen.setdefault(view.sensor, set()).update(view.protocols)
             if not consistent and judged:
-                group_key = (view.dst, view.dport, view.transport, tuple(sorted(view.protocols)))
-                group = self.mismatches.setdefault(group_key, _Mismatch())
-                group.connections.add(view.key)
-                group.sources.setdefault(view.src, set()).add(view.key)
+                group = self.mismatches.setdefault((view.dst, view.dport, view.transport,
+                                                    tuple(sorted(view.protocols))), _Mismatch)
+                if group is None:
+                    return self._refused("mismatch groups'")
+                if view.key in group.connections or len(group.connections) < self.CONNECTIONS_PER_MISMATCH:
+                    group.connections.add(view.key)
+                    group.sources.setdefault(view.src, set()).add(view.key)
+                else:
+                    group.capped = True
+                    self.note_limit("connections", f"a mismatch group passed {self.CONNECTIONS_PER_MISMATCH:,} "
+                                                   f"distinct connections held; its connection count is a lower bound")
                 group.records[view.sensor] += 1
                 group.first, group.last = min(group.first, view.start), max(group.last, view.end)
                 if len(group.cited) < self.STAGE_PER_GROUP:
@@ -895,9 +997,10 @@ class ProtocolPortMismatch(_FlowRule):
         if entry is None:
             # every candidate connection keeps its first record on the stage, so whichever connections stay
             # unidentified after the other sensor's records are in can be cited
-            entry = self.unidentified[view.key] = _Unidentified(view.src, view.sport, view.dst, view.dport,
-                                                                 view.transport, view.start, view.end, event.id,
-                                                                 on_source)
+            entry = _Unidentified(view.src, view.sport, view.dst, view.dport, view.transport, view.start, view.end,
+                                  event.id, on_source)
+            if not self.unidentified.put(view.key, entry):
+                return self._refused("candidate connections'")
             self._stage(event)
         entry.first, entry.last = min(entry.first, view.start), max(entry.last, view.end)
         entry.records[view.sensor] += 1
@@ -905,18 +1008,25 @@ class ProtocolPortMismatch(_FlowRule):
         return True
 
     def finalize(self):
-        out = [self._mismatch(key, group) for key, group in sorted(
-            self.mismatches.items(), key=lambda item: (ip_sort_key(item[0][0]),) + item[0][1:])]
-        groups: dict[tuple, list[_Unidentified]] = defaultdict(list)
-        for key, entry in self.unidentified.items():
+        out = [self._mismatch(key, self.mismatches.peek(key))
+               for key in sorted(self.mismatches.keys(), key=lambda k: (ip_sort_key(k[0]),) + k[1:])]
+        groups = KeyedStore(self, "ppm_unidentified_groups", self.HOT_GROUPS)
+        for i, (key, entry) in enumerate(self.unidentified.items()):
             if key in self.identified:
                 continue                # another record of the same connection had its protocol identified
-            if entry.on_source:
-                groups[(entry.src, entry.sport, entry.transport, "source")].append(entry)
-            else:
-                groups[(entry.dst, entry.dport, entry.transport, "destination")].append(entry)
-        for key in sorted(groups, key=lambda k: (ip_sort_key(k[0]),) + k[1:]):
-            out.append(self._unidentified(key, groups[key]))
+            side = "source" if entry.on_source else "destination"
+            group = groups.setdefault((entry.src, entry.sport, entry.transport, side) if entry.on_source else
+                                      (entry.dst, entry.dport, entry.transport, side), _UnidentifiedGroup)
+            if group is None:
+                self.refuse("disk", "the unidentified groups' disk budget is spent; a candidate connection is not "
+                                    "evaluated")
+                continue
+            group.add(entry, side)
+            if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
+                groups.trim()
+        for key in sorted(groups.keys(), key=lambda k: (ip_sort_key(k[0]),) + k[1:]):
+            out.append(self._unidentified(key, groups.peek(key)))
+        groups.clear()
         return out
 
     def _mismatch(self, key, group: _Mismatch) -> Match:
@@ -933,12 +1043,13 @@ class ProtocolPortMismatch(_FlowRule):
                                     f"{protocol} has no registered {transport} port in the table")
         others: dict[str, set[str]] = defaultdict(set)
         for connection in group.connections:
-            for sensor, seen in self.identified.get(connection, {}).items():
+            for sensor, seen in self.identified.peek(connection, {}).items():
                 extra = seen - set(protocols)
                 if extra:
                     others[sensor].update(extra)
         sources = _sources_phrase({src: len(keys) for src, keys in group.sources.items()})
-        claim = (f"{sensors} identified {names} on {_plural(len(group.connections), 'connection')} to {dst} on "
+        claim = (f"{sensors} identified {names} on {'at least ' if group.capped else ''}"
+                 f"{_plural(len(group.connections), 'connection')} to {dst} on "
                  f"{transport}/{port} {sources} ({_iso(group.first)} – {_iso(group.last)}; "
                  f"{_sensor_counts(group.records)}). {port_phrase}; {'; '.join(protocol_phrases)}.")
         if others:
@@ -955,15 +1066,10 @@ class ProtocolPortMismatch(_FlowRule):
                            "carries a different protocol")
         return match
 
-    def _unidentified(self, key, entries: list[_Unidentified]) -> Match:
+    def _unidentified(self, key, group: _UnidentifiedGroup) -> Match:
         server, port, transport, side = key
         expected = expected_protocols(transport, port)
-        records: Counter = Counter()
-        failed = 0
-        for entry in entries:
-            records.update(entry.records)
-            failed += entry.failed
-        first, last = min(e.first for e in entries), max(e.last for e in entries)
+        records, failed, first, last = group.records, group.failed, group.first, group.last
         how = []
         if records[SURICATA]:
             missing = records[SURICATA] - failed
@@ -978,7 +1084,7 @@ class ProtocolPortMismatch(_FlowRule):
         capable = sorted({SENSOR_NAMES[s] for s in records if expected & PARSERS[s]})
         parsable = sorted(expected & set().union(*(PARSERS[s] for s in records)))
         denominators = []
-        tallies = self.pairs.get((server, port, transport), {}) if side == "destination" else {}
+        tallies = self.pairs.peek((server, port, transport), {}) if side == "destination" else {}
         for sensor, tally in sorted(tallies.items()):
             identified = ", ".join(f"{p} {n}" for p, n in sorted(tally.items()) if p != "records")
             kind = "flow record" if sensor == SURICATA else "session record"
@@ -986,20 +1092,20 @@ class ProtocolPortMismatch(_FlowRule):
                                 f"this port" + (f", identified as {identified}" if identified else
                                                 ", none with an identified protocol"))
         if side == "source":
-            peers = _address_list(Counter(entry.dst for entry in entries), "peer")
-            subject = (f"{_plural(len(entries), 'connection')} from {server} port {transport}/{port} to {peers}; "
+            peers = _address_list(group.addresses, "peer")
+            subject = (f"{_plural(group.connections, 'connection')} from {server} port {transport}/{port} to {peers}; "
                        f"the registered port is the initiator's source port (a reversed or mid-stream view of a "
                        f"connection to that service, or a program bound to the service port to make outgoing "
                        f"connections)")
         else:
-            sources = _sources_phrase(Counter(entry.src for entry in entries))
-            subject = f"{_plural(len(entries), 'connection')} to {server} on {transport}/{port} {sources}"
+            sources = _sources_phrase(group.addresses)
+            subject = f"{_plural(group.connections, 'connection')} to {server} on {transport}/{port} {sources}"
         registered = f"{transport}/{port} is registered here for {', '.join(sorted(expected))}"
         claim = (f"{subject} ({_iso(first)} – {_iso(last)}) carried data in both directions with no application "
                  f"protocol identified: {'; '.join(how)}. {registered}, which {' and '.join(capable)} can parse "
                  f"({', '.join(parsable)}). " + (f"{'; '.join(denominators)}. " if denominators else "")
                  + "A parser that does not recognise traffic is not proof that a different protocol was used.")
-        evs = self._events([e.event_id for e in sorted(entries, key=lambda e: (e.first, e.event_id))][:EXAMPLE_LIMIT])
+        evs = self._events([event_id for _first, event_id in group.cites])
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "source.port", "destination.ip", "destination.port",
                                            "network.app_proto", "network.protocols")),
@@ -1027,13 +1133,59 @@ class _Piece:
     dst: str
     dport: int
     transport: str
+    staged: bool = False            # the record is on the stage, so it can be cited
+
+
+@dataclass
+class _Identity:
+    """Every record of one connection identity that can be stitched, and how many of them were staged."""
+    pieces: list[_Piece] = field(default_factory=list)
+    staged: int = 0
+    last_staged: float | None = None
+    reportable: bool = False        # some record carried data with no protocol identified, on a port it cannot judge
+
+
+@dataclass
+class _LongGroup:
+    """The unidentified data-carrying connections to one (server, port, transport), folded at finalize."""
+    connections: int = 0
+    records: Counter = field(default_factory=Counter)
+    failed: int = 0
+    long: int = 0
+    sources: Counter = field(default_factory=Counter)        # long connections per source
+    longest: tuple | None = None                             # (span, start, end, source), the earliest on a tie
+    crossing: bool = False                                   # a long connection across the internal/external boundary
+    ranked: list[tuple] = field(default_factory=list)        # (-span, start, order, cited ids): the first-ranked long
+    rest: list[str] = field(default_factory=list)            # staged ids of every connection, in reading order
+
+    def add(self, pieces: list[_Piece], min_seconds: int) -> None:
+        self.connections += 1
+        self.records.update(p.sensor for p in pieces)
+        self.failed += sum(p.failed for p in pieces)
+        first, end = pieces[0], max(p.end for p in pieces)
+        span = end - first.start
+        if span >= min_seconds:
+            self.long += 1
+            self.sources[first.src] += 1
+            self.crossing = self.crossing or external(first.src) != external(first.dst)
+            if self.longest is None or (span, -first.start) > (self.longest[0], -self.longest[1]):
+                self.longest = (span, first.start, end, first.src)
+            ids = [p.event_id for p in pieces if not p.identified and p.payload and p.staged]
+            if ids:                                          # a connection with nothing to cite adds nothing
+                bisect.insort(self.ranked, (-span, first.start, self.long, ids))
+            while (len(self.ranked) > 1
+                   and len({i for *_rank, held in self.ranked[:-1] for i in held}) >= EXAMPLE_LIMIT):
+                self.ranked.pop()
+        if len(self.rest) < EXAMPLE_LIMIT:
+            self.rest.extend(p.event_id for p in pieces if p.staged)
+            del self.rest[EXAMPLE_LIMIT:]
 
 
 class LongUnidentifiedSession(_FlowRule):
     """A long connection that carried data both ways while no sensor identified its application protocol, on a
     port that is unregistered or registered only for protocols the recording sensor cannot parse."""
     id = "net.long_unidentified_session"
-    version = "3"
+    version = "4"
     title = "Long data-carrying connection with no identified protocol on a port its sensor cannot judge"
     severity, lane = "medium", "lead"
     attack = ("T1095", "T1571", "T1573")
@@ -1077,11 +1229,15 @@ class LongUnidentifiedSession(_FlowRule):
         "lanes": "lead: long unidentified traffic is ambiguous without the owning process. Severity medium",
     }
 
+    # Every record of a candidate connection is a piece (stitching needs them, from both sensors' targets): about
+    # 150 bytes each, held per connection identity in a keyed store (HOT identities in memory, the rest on disk);
+    # only its disk budget refuses. Finalize reads only identities with a record that can be reported, one at a time,
+    # and folds their connections into per-(server, port) groups held in a second store.
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+
     def __init__(self):
         super().__init__()
-        self.pieces: dict[tuple, list[_Piece]] = defaultdict(list)
-        self.staged_per_key: Counter = Counter()
-        self.last_staged: dict[tuple, float] = {}
+        self.pieces = KeyedStore(self, "lus_pieces", self.HOT, candidate=lambda state: state.reportable)
 
     def take(self, view: FlowView, event: TypedEvent) -> bool:
         if view.transport not in ("tcp", "udp"):
@@ -1099,22 +1255,29 @@ class LongUnidentifiedSession(_FlowRule):
         if view.payload is None:
             return False
         capable = bool(expected & PARSERS[view.sensor])
-        piece = _Piece(view.start, view.end, view.sensor, bool(view.protocols), view.payload, view.failed, capable,
-                       event.id, view.src, view.dst, view.dport, view.transport)
-        self.pieces[view.key].append(piece)
-        if not piece.identified and piece.payload and not capable:
+        state = self.pieces.get(view.key)
+        if state is None:
+            state = _Identity()
+            if not self.pieces.put(view.key, state):
+                return self._refused("connection records'")
+        staged = False
+        if not view.protocols and view.payload and not capable:
             # the first few candidate records of an identity, and the first of any later connection that reuses it
-            last = self.last_staged.get(view.key)
-            if self.staged_per_key[view.key] < self.STAGE_PER_CONNECTION or abs(view.start - last) > STITCH_GAP:
-                self.staged_per_key[view.key] += 1
-                self.last_staged[view.key] = view.start
+            if state.staged < self.STAGE_PER_CONNECTION or abs(view.start - state.last_staged) > STITCH_GAP:
+                state.staged += 1
+                state.last_staged = view.start
                 self._stage(event)
+                staged = True
+            state.reportable = True
+        state.pieces.append(_Piece(view.start, view.end, view.sensor, bool(view.protocols), view.payload,
+                                            view.failed, capable, event.id, view.src, view.dst, view.dport,
+                                            view.transport, staged))
         return True
 
     def _connections(self):
         """Stitched connections: records of one identity whose spans lie within STITCH_GAP of each other."""
-        for key in sorted(self.pieces):
-            pieces = sorted(self.pieces[key], key=lambda p: (p.start, p.end, p.event_id))
+        for key in sorted(self.pieces.keys(candidates=True)):
+            pieces = sorted(self.pieces.peek(key).pieces, key=lambda p: (p.start, p.end, p.event_id))
             current: list[_Piece] = []
             end = None
             for piece in pieces:
@@ -1127,49 +1290,48 @@ class LongUnidentifiedSession(_FlowRule):
                 yield current
 
     def finalize(self):
-        groups: dict[tuple, list[list[_Piece]]] = defaultdict(list)
-        for pieces in self._connections():
+        groups = KeyedStore(self, "lus_groups", self.HOT, candidate=lambda group: group.long > 0)
+        for i, pieces in enumerate(self._connections()):
             if any(p.identified or p.capable for p in pieces) or not any(p.payload for p in pieces):
                 continue                # identified, owned by the protocol/port rule, or never carried data
             first = pieces[0]
-            groups[(first.dst, first.dport, first.transport)].append(pieces)
-        out = []
-        for key in sorted(groups, key=lambda k: (ip_sort_key(k[0]),) + k[1:]):
-            connections = groups[key]
-            spans = [(max(p.end for p in c) - c[0].start, c) for c in connections]
-            long = [(span, c) for span, c in spans if span >= self.MIN_SECONDS]
-            if long:
-                out.append(self._match(key, connections, long))
+            group = groups.setdefault((first.dst, first.dport, first.transport), _LongGroup)
+            if group is None:
+                self.refuse("disk", "the connection groups' disk budget is spent; a connection is not evaluated")
+                continue
+            group.add(pieces, self.MIN_SECONDS)
+            if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
+                groups.trim()
+        out = [self._match(key, groups.peek(key))
+               for key in sorted(groups.keys(candidates=True), key=lambda k: (ip_sort_key(k[0]),) + k[1:])]
+        groups.clear()
         return out
 
-    def _match(self, key, connections, long) -> Match:
+    def _match(self, key, group: _LongGroup) -> Match:
         dst, port, transport = key
-        longest, longest_conn = max(long, key=lambda item: (item[0], -item[1][0].start))
-        records: Counter = Counter(p.sensor for c in connections for p in c)
-        failed = sum(p.failed for c in connections for p in c)
+        longest, start, end, longest_src = group.longest
+        records, failed = group.records, group.failed
         sensors = " or ".join(SENSOR_NAMES[s] for s in sorted(records))
         expected = expected_protocols(transport, port)
         registration = (f"{transport}/{port} is registered here for {', '.join(sorted(expected))}, which {sensors} "
                         f"cannot parse" if expected else f"{transport}/{port} is registered here for no protocol")
-        sources = _sources_phrase(Counter(c[0].src for _span, c in long))
-        claim = (f"{_plural(len(long), 'connection')} to {dst} on {transport}/{port} {sources} lasted at least "
+        sources = _sources_phrase(group.sources)
+        claim = (f"{_plural(group.long, 'connection')} to {dst} on {transport}/{port} {sources} lasted at least "
                  f"{self.MIN_SECONDS // 60} minutes with data in both directions and no application protocol "
-                 f"identified by {sensors}; the longest ran {longest / 60:.0f} minutes ({_iso(longest_conn[0].start)} "
-                 f"– {_iso(max(p.end for p in longest_conn))}, from {longest_conn[0].src}). "
-                 f"{_plural(len(connections), 'unidentified data-carrying connection')} to it on this port "
+                 f"identified by {sensors}; the longest ran {longest / 60:.0f} minutes ({_iso(start)} "
+                 f"– {_iso(end)}, from {longest_src}). "
+                 f"{_plural(group.connections, 'unidentified data-carrying connection')} to it on this port "
                  f"in total ({_sensor_counts(records)}"
                  + (f"; Suricata reported protocol detection 'failed' on {failed}" if failed else "") + "). "
                  f"{registration}. Times are as the sensors recorded them.")
-        ids = [p.event_id for _span, c in sorted(long, key=lambda item: (-item[0], item[1][0].start))
-               for p in c if not p.identified and p.payload and p.event_id in self._staged]
-        ids += [p.event_id for c in connections for p in c if p.event_id in self._staged]
+        ids = [event_id for *_rank, held in group.ranked for event_id in held] + group.rest
         evs = self._events(list(dict.fromkeys(ids))[:EXAMPLE_LIMIT])
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "flow.start",
                                            "flow.end")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs),
                       group_key=f"{dst}|{transport}/{port}")
-        if transport == "tcp" and any(external(c[0].src) != external(dst) for _span, c in long):
+        if transport == "tcp" and group.crossing:
             match.notes.append("net.long_external_connection reports each long TCP connection across the "
                                "internal/external boundary on its own (duration); this item adds that no sensor "
                                "identified an application protocol, groups every client of the port, and counts "
@@ -1184,7 +1346,7 @@ class LongUnidentifiedSession(_FlowRule):
 
 @dataclass
 class _Pair:
-    connections: dict[tuple, dict[str, list[int]]] = field(default_factory=dict)   # key -> sensor -> [out, in, n]
+    connections: int = 0                                                          # distinct connections
     ports: Counter = field(default_factory=Counter)
     first: float = float("inf")
     last: float = float("-inf")
@@ -1195,15 +1357,15 @@ class OutboundVolumeAsymmetry(_FlowRule):
     """An internal address sent far more to one external address than it received back, in absolute and relative
     terms, with the source's own outbound total as the denominator."""
     id = "net.outbound_volume_asymmetry"
-    version = "1"
+    version = "3"
     title = "Internal address sent much more data to one external address than it received"
     severity, lane = "high", "lead"
     attack = ("T1041", "T1048", "T1567")
     assures_negative = False
     positive_only_reason = (
-        "internal and external are judged from the built-in private-address list, not the site's own address plan, "
-        "and only connections that internal addresses initiated are read; transfers outside that view are not "
-        "evaluated, so the absence of a match proves nothing")
+        "internal and external are judged from the site's internal-network definition (the RFC 1918 and reserved "
+        "ranges when it is not configured), and only connections that internal addresses initiated are read; "
+        "transfers outside that view are not evaluated, so the absence of a match proves nothing")
     benign = ("backups and cloud file synchronisation", "log and telemetry shipping", "video and media uploads",
               "software publishing to external repositories")
     next_checks = ("the process on the internal host that owns the connections",
@@ -1236,9 +1398,18 @@ class OutboundVolumeAsymmetry(_FlowRule):
                  "bulk backup volumes; a 10:1 ratio excludes interactive and download-heavy traffic",
     }
 
+    # Connections are counted once across sensors, from the sensor that recorded the most bytes, so every
+    # internal-to-external connection's per-sensor tally (about 200 bytes) is held to the end, beside the pairs'
+    # summaries (about 1 KB each), in keyed stores: HOT in memory, the rest on disk; only their disk budget refuses.
+    HOT_PAIRS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    HOT_CONNECTIONS = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+
     def __init__(self):
         super().__init__()
-        self.pairs: dict[tuple[str, str], _Pair] = {}
+        self.pairs = KeyedStore(self, "ova_pairs", self.HOT_PAIRS)
+        # (source, destination, connection) -> sensor -> [out, in, records], read back one pair at a time
+        self.connections = KeyedStore(self, "ova_connections", self.HOT_CONNECTIONS,
+                                      group=lambda key: f"{key[0]}|{key[1]}")
 
     def take(self, view: FlowView, event: TypedEvent) -> bool:
         if view.c2s_bytes is None or view.s2c_bytes is None:
@@ -1247,8 +1418,15 @@ class OutboundVolumeAsymmetry(_FlowRule):
             return True
         pair = self.pairs.get((view.src, view.dst))
         if pair is None:
-            pair = self.pairs[(view.src, view.dst)] = _Pair()
-        per_sensor = pair.connections.setdefault(view.key, {})
+            pair = _Pair()
+            if not self.pairs.put((view.src, view.dst), pair):
+                return self._refused("(internal, external) pairs'")
+        per_sensor = self.connections.get((view.src, view.dst, view.key))
+        if per_sensor is None:
+            per_sensor = {}
+            if not self.connections.put((view.src, view.dst, view.key), per_sensor):
+                return self._refused("connections'")
+            pair.connections += 1
         tally = per_sensor.setdefault(view.sensor, [0, 0, 0])
         tally[0] += view.c2s_bytes
         tally[1] += view.s2c_bytes
@@ -1262,41 +1440,53 @@ class OutboundVolumeAsymmetry(_FlowRule):
             self._stage(event)
         return True
 
-    @staticmethod
-    def _resolve(pair: _Pair) -> tuple[int, int, Counter]:
-        """Outbound and inbound bytes with each connection counted once, from its best-recorded sensor."""
-        out = inn = 0
-        records: Counter = Counter()
-        for per_sensor in pair.connections.values():
+    def _resolved(self):
+        """((source, destination), outbound, inbound, records) per pair, each connection counted once from its
+        best-recorded sensor; one pair's connections are read at a time."""
+        pair, out, inn, records = None, 0, 0, Counter()
+        for (src, dst, _connection), per_sensor in self.connections.grouped():
+            if (src, dst) != pair:
+                if pair is not None:
+                    yield pair, out, inn, records
+                pair, out, inn, records = (src, dst), 0, 0, Counter()
             sensor = max(sorted(per_sensor), key=lambda s: per_sensor[s][0] + per_sensor[s][1])
             out += per_sensor[sensor][0]
             inn += per_sensor[sensor][1]
             for name, tally in per_sensor.items():
                 records[name] += tally[2]
-        return out, inn, records
+        if pair is not None:
+            yield pair, out, inn, records
 
     def finalize(self):
-        resolved = {key: self._resolve(pair) for key, pair in self.pairs.items()}
-        totals: Counter = Counter()
-        senders: dict[str, set[str]] = defaultdict(set)
-        for (src, dst), (out, _inn, _records) in resolved.items():
-            totals[src] += out
-            if out > 0:
-                senders[dst].add(src)
-        matches = []
-        for (src, dst) in sorted(resolved):
-            out, inn, records = resolved[(src, dst)]
-            if out < self.MIN_OUTBOUND_BYTES or out < self.MIN_RATIO * inn:
+        totals = KeyedStore(self, "ova_totals", self.HOT_PAIRS)       # internal source -> [bytes sent outside]
+        senders = KeyedStore(self, "ova_senders", self.HOT_PAIRS)     # external destination -> [internal senders]
+        hits = []
+        for i, ((src, dst), out, inn, records) in enumerate(self._resolved()):
+            total = totals.setdefault(src, lambda: [0])
+            sent = senders.setdefault(dst, lambda: [0]) if out > 0 else [0]
+            if total is None or sent is None:
+                self.refuse("disk", "the per-address totals' disk budget is spent; a pair is not evaluated")
                 continue
-            matches.append(self._match(src, dst, out, inn, records, totals[src], len(senders[dst] - {src})))
+            total[0] += out
+            sent[0] += out > 0
+            if out >= self.MIN_OUTBOUND_BYTES and out >= self.MIN_RATIO * inn:
+                hits.append((src, dst, out, inn, records))
+            if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
+                totals.trim()
+                senders.trim()
+        # a reported source sent data to the destination, so it is one of the destination's senders
+        matches = [self._match(src, dst, out, inn, records, totals.peek(src)[0], senders.peek(dst)[0] - 1)
+                   for src, dst, out, inn, records in sorted(hits, key=lambda hit: hit[:2])]
+        totals.clear()
+        senders.clear()
         return matches
 
     def _match(self, src, dst, out, inn, records, total, others) -> Match:
-        pair = self.pairs[(src, dst)]
+        pair = self.pairs.peek((src, dst))
         ratio = f"{out / inn:.1f}:1 outbound to inbound" if inn else "nothing came back"
         ports = ", ".join(f"{p} ({n})" for p, n in sorted(pair.ports.items(), key=lambda i: (-i[1], i[0]))[:5])
         claim = (f"{src} sent {out:,} bytes ({out / 2**20:.1f} MiB) to {dst} and received {inn:,} bytes back over "
-                 f"{_plural(len(pair.connections), 'connection')} it initiated ({_iso(pair.first)} – "
+                 f"{_plural(pair.connections, 'connection')} it initiated ({_iso(pair.first)} – "
                  f"{_iso(pair.last)}; {ratio}; ports {ports}). That is {out / total:.0%} of the {total:,} bytes "
                  f"{src} sent to external addresses in the hunt window. Byte counts include packet headers and each "
                  f"connection is counted once, from the sensor that recorded the most bytes for it "

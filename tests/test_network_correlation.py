@@ -192,7 +192,7 @@ def test_notable_process_external_connect_matches_with_kernel_identity(kw, lane)
 
 def test_claim_says_connect_call_and_states_the_socket_type_caveat():
     m = iec(_sock())[0]
-    assert "making 1 connect() call(s) to 1 non-private address(es) on port 4444" in m.claim
+    assert "making 1 connect() call(s) to 1 address(es) outside the site's internal networks on port 4444" in m.claim
     assert "UDP socket sends no packets" in m.claim
     assert "connected" not in InterpreterExternalConnection.title
 
@@ -225,7 +225,7 @@ def test_many_destinations_on_one_port_are_one_item():
                    exe="/usr/bin/python3.10", comm="python3", uid="0", user="root") for i in range(1, 6)]
     matches = iec(*socks)
     assert len(matches) == 1
-    assert "5 connect() call(s) to 5 non-private address(es) on port 443" in matches[0].claim
+    assert "5 connect() call(s) to 5 address(es) outside the site's internal networks on port 443" in matches[0].claim
 
 
 def test_web_account_daemon_started_by_the_service_manager_is_lowered_to_lead():

@@ -58,6 +58,12 @@ def _ai_agent_cell(m: dict) -> str:
     return text
 
 
+def _internal_networks_cell(m: dict) -> str:
+    """Which addresses the hunt treated as the site's, in one line."""
+    view = m.get("internal_networks") or {}
+    return str(view.get("line") or view.get("summary") or "Internal networks: not recorded").removeprefix("Internal networks: ")
+
+
 def render(m: dict, banner: str = BANNER) -> str:
     h = m["hunt"]
     graph = m.get("incident_graph") or {"incidents": [], "links": [], "nodes": [], "edges": []}
@@ -75,6 +81,7 @@ def render(m: dict, banner: str = BANNER) -> str:
            f"| Detection result | {esc(m['detection_result'])} |",
            f"| Window (UTC, half-open) | {esc(h['window']['start'])} → {esc(h['window']['end'])} |",
            f"| Sources | {esc(', '.join(h['targets']))} |",
+           f"| Internal networks | {cell(_internal_networks_cell(m))} |",
            f"| Lane counts | {esc(json.dumps(m['lane_counts'], sort_keys=True))} |",
            f"| Model investigator | {esc(m['agent'].get('status'))}: {esc(m['agent'].get('stop_reason', ''))} |",
            f"| AI agent | {cell(_ai_agent_cell(m))} |",
@@ -83,6 +90,8 @@ def render(m: dict, banner: str = BANNER) -> str:
            f"| Broken investigation citations | {m['integrity'].get('broken_investigation_citations', 0)} |", ""]
     for egress in m.get("banners") or []:
         out += [f"> **Model egress:** {cell(egress)}", ""]
+    if (m.get("internal_networks") or {}).get("warning"):
+        out += [f"> **Internal networks:** {cell(m['internal_networks']['warning'])}", ""]
     if not m["integrity"]["finalizable"]:
         out += [("> **Degraded report:** one or more citations could not be resolved to retained evidence. "
                  "Those findings are listed with the broken citation marked."), ""]

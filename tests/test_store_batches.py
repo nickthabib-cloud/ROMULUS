@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 
 from romulus.detect.base import Match
+from romulus.detect.bounded import StateBudget
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import stage as stage_mod
 from romulus.hunt import sweep as sw
@@ -111,12 +112,32 @@ def test_windows_dedup_stage_stores_only_bounded_ids_and_leaves_linux_untracked(
     assert stage.unique_windows([first]) == ([first], [])
     fresh, duplicates = stage.unique_windows([later])
     counts = {
-        table: stage.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-        for table in ("windows_seen", "event", "raw")
+        "windows_seen": stage.windows_db.execute("SELECT count(*) FROM windows_seen").fetchone()[0],
+        **{table: stage.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+           for table in ("event", "raw")},
     }
 
     assert fresh == [] and len(duplicates) == 1
     assert counts == {"windows_seen": 1, "event": 0, "raw": 0}
+    stage.close()
+
+
+def test_windows_dedup_has_its_own_budget_account_and_refuses_growth_honestly(tmp_path):
+    budget = StateBudget(tmp_path, disk_total=64 * 1024, reserve=0)
+    budget.plan(2)
+    account = budget.account("windows_seen")
+    stage = stage_mod.EventStage(tmp_path, budget=budget, windows_account=account)
+    first = _event(1).model_copy(update={"normalizer": "windows-ecs@2"})
+    refused = _event(2).model_copy(update={"normalizer": "windows-ecs@2"})
+
+    assert stage.unique_windows([first]) == ([first], [])
+    assert account.used > 0
+    budget.force_full("Windows dedup floor spent (test)", lambda candidate: candidate is account)
+    assert stage.unique_windows([refused]) == ([refused], [])
+
+    assert stage.windows_refused == 1
+    assert "Windows dedup floor spent" in stage.windows_refusal_reason
+    assert stage.windows_db.execute("SELECT count(*) FROM windows_seen").fetchone()[0] == 1
     stage.close()
 
 
