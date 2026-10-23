@@ -92,6 +92,7 @@ WINDOWS_HOST_DATASETS = (
     "windows.system",
     "windows.forwarded",
 )
+WINDOWS_CHANNELS = tuple(dict.fromkeys(event.channel for event in EVENT_CLASSES))
 _SECURITY_FAMILIES = frozenset(
     {event.family for event in EVENT_CLASSES if event.channel.casefold() == "security"}
 )
@@ -116,6 +117,11 @@ def datasets_for_families(families: set[str] | frozenset[str]) -> tuple[str, ...
         dataset for dataset in WINDOWS_HOST_DATASETS
         if WINDOWS_DATASET_FAMILIES.get(dataset, frozenset()).intersection(families)
     )
+
+
+def channels_for_families(families: set[str] | frozenset[str]) -> tuple[str, ...]:
+    selected = {event.channel for event in EVENT_CLASSES if event.family in families}
+    return tuple(channel for channel in WINDOWS_CHANNELS if channel in selected)
 
 
 def event_classes_for_families(families: set[str] | frozenset[str]) -> tuple[WindowsEventClass, ...]:

@@ -164,7 +164,6 @@ def windows_hit(event: LogicalWindowsEvent, shape: Shape) -> dict:
     dataset = _dataset(event)
     source = {
         "@timestamp": event.timestamp,
-        "event": {"dataset": dataset},
         "winlog": {
             "channel": event.channel,
             "provider_name": event.provider,
@@ -185,6 +184,7 @@ def windows_hit(event: LogicalWindowsEvent, shape: Shape) -> dict:
             "elastic_agent": {"id": "00000000-0000-0000-0000-000000000001"},
             "data_stream": {"type": "logs", "dataset": dataset, "namespace": "default"},
             "ecs": {"version": "8.17.0"},
+            "event": {"dataset": dataset},
         })
     slug = re.sub(r"[^a-z0-9]+", "-", event.channel.casefold()).strip("-")
     return {

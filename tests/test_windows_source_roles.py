@@ -31,6 +31,8 @@ def _windows_types() -> dict[str, str]:
         "@timestamp": "date",
         "event.dataset": "keyword",
         "winlog.computer_name": "keyword",
+        "winlog.channel": "keyword",
+        "winlog.provider_name": "keyword",
         "winlog.event_id": "keyword",
         "winlog.event_data": "flattened",
     }
@@ -76,7 +78,12 @@ def test_sweep_filters_derive_from_role_and_os_not_the_index_name():
     sweep.stats = {}
 
     assert Sweep._filters_for(sweep, linux.target, linux)[0].value == list(LINUX_HOST_DATASETS)
-    assert Sweep._filters_for(sweep, windows.target, windows)[0].value == list(WINDOWS_HOST_DATASETS)
+    assert Sweep._filters_for(sweep, windows.target, windows) == []
+    selectors = Sweep._any_of_for(sweep, windows.target, windows)
+    assert {group[0].field for group in selectors} == {"event.dataset", "event.channel"}
+    assert next(group[0].value for group in selectors if group[0].field == "event.dataset") == list(
+        WINDOWS_HOST_DATASETS
+    )
     assert Sweep._filters_for(sweep, network.target, network) == []
 
 
@@ -245,16 +252,48 @@ def test_windows_host_timeline_and_process_tree_use_catalog_datasets_and_native_
 
     [timeline_intent] = executor._intents(timeline)
     process_intents = executor._intents(process)
-    assert next(item.value for item in timeline_intent.filters if item.field == "event.dataset") == list(
-        WINDOWS_HOST_DATASETS
-    )
+    assert any(group[0].field == "event.channel" for group in timeline_intent.any_of)
     assert next(item.value for item in timeline_intent.filters if item.field == "host.name") == "ws01"
-    process_datasets = {
-        next(item.value for item in intent.filters if item.field == "event.dataset")
-        for intent in process_intents
-    }
+    assert len(process_intents) == 1
+    process_datasets = next(
+        group[0].value for group in process_intents[0].any_of if group[0].field == "event.dataset"
+    )
     assert {"system.security", "windows.security", "windows.sysmon_operational", "system.system",
-            "windows.system", "windows.forwarded"} <= process_datasets
+            "windows.system", "windows.forwarded"} <= set(process_datasets)
+
+
+def test_winlogbeat_without_event_dataset_is_retrieved_by_sweep_timeline_and_links():
+    """Winlogbeat 7/8 mappings expose winlog.channel even when event.dataset is absent.
+
+    https://www.elastic.co/guide/en/beats/winlogbeat/current/exported-fields-winlog.html
+    """
+    types = _windows_types()
+    types.pop("event.dataset")
+    contract = contract_from_types("winlogbeat-8", types, role="host", os_family="windows")
+    sweep = object.__new__(Sweep)
+    sweep.stats = {}
+    sweep_groups = Sweep._any_of_for(sweep, contract.target, contract)
+    executor = PivotExecutor(None, None, "h1", {contract.target: contract})
+    timeline = EntityTimelineRequest(
+        tool="entity_timeline",
+        arguments=EntityTimelineArgs(
+            entity=EntityRef(kind="host", value="ws01", role="host"), start=START, end=END,
+        ),
+    )
+    [timeline_intent] = executor._intents(timeline)
+    process = _event(1, data={"ProcessId": "512"})
+    fetcher = LinkFetcher(executor, START, END)
+    planned = fetcher._lineage(
+        LinkAnchor(finding_id="a", ts=process.ts, host=process.host, events=[process]),
+        LinkWindow(label="near", start=START, end=END),
+    )[2]
+
+    assert [[predicate.field for predicate in group] for group in sweep_groups] == [["event.channel"]]
+    assert any(group[0].field == "event.channel" for group in timeline_intent.any_of)
+    assert planned and all(any(group[0].field == "event.channel" for group in intent.any_of) for intent in planned)
+    for intent in [timeline_intent, *planned]:
+        query = build_query(intent, contract)
+        assert "winlog.channel" in str(query["bool"]["should"])
 
 
 def test_windows_lineage_session_and_flow_host_links_select_os_specific_keys_and_datasets():

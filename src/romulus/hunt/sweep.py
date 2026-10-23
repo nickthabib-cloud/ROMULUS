@@ -18,6 +18,7 @@ from romulus.evidence.normalize import (
 from romulus.evidence.typed import TypedEvent
 from romulus.evidence.windows import RecordIdContinuity
 from romulus.evidence.windows_catalog import (
+    WINDOWS_CHANNELS,
     WINDOWS_DATASET_FAMILIES,
     WINDOWS_HOST_DATASETS,
     collection_requirements,
@@ -86,10 +87,12 @@ def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
 
 
 def plan_partitions(client: ElasticClient, target: str, contract: FieldContract, window: Window,
-                    filters: list[Predicate]) -> list[tuple[Window, int]]:
+                    filters: list[Predicate], any_of: list[list[Predicate]] | None = None,
+                    ) -> list[tuple[Window, int]]:
     """5-minute histogram with exact counts; merge consecutive buckets up to PARTITION_MAX_DOCS.
     A single bucket above the limit becomes its own partition and is split adaptively at run time."""
     h = execute(client, SearchIntent(kind="histogram", target=target, window=window, filters=filters,
+                                     any_of=any_of or [],
                                      interval_seconds=BUCKET_SECONDS), contract)
     if h.completeness != Completeness.complete:
         raise RuntimeError(f"cannot plan partitions for {target}: {h.reasons} {h.error}")
@@ -153,11 +156,26 @@ class Sweep:
 
     def _filters_for(self, target: str, contract: FieldContract | None = None) -> list[Predicate]:
         if contract is not None and contract.role == "host":
-            datasets = WINDOWS_HOST_DATASETS if contract.os_family == "windows" else LINUX_HOST_DATASETS
+            if contract.os_family == "windows":
+                return []
+            datasets = LINUX_HOST_DATASETS
             # recorded so the report can list the target's other datasets as not assessed
             self.stats.setdefault("dataset_filter", {})[target] = list(datasets)
             return [Predicate(field="event.dataset", op="in", value=list(datasets))]
         return []
+
+    def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
+        """Select Windows event logs by dataset or native channel; Winlogbeat may omit event.dataset."""
+        if contract is None or contract.role != "host" or contract.os_family != "windows":
+            return []
+        groups: list[list[Predicate]] = []
+        if contract.supports("event.dataset", "in"):
+            groups.append([Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))])
+        if contract.supports("event.channel", "in"):
+            groups.append([Predicate(field="event.channel", op="in", value=list(WINDOWS_CHANNELS))])
+        self.stats.setdefault("dataset_filter", {})[target] = list(WINDOWS_HOST_DATASETS)
+        self.stats.setdefault("channel_filter", {})[target] = list(WINDOWS_CHANNELS)
+        return groups
 
     def _prepare_windows_inventory(self, target: str, contract: FieldContract | None) -> None:
         if contract is None or contract.os_family != "windows" or target in self._windows_inventory:
@@ -330,9 +348,10 @@ class Sweep:
         contract = self.contracts[target]
         self._prepare_windows_inventory(target, contract)
         filters = self._filters_for(target, contract)
+        any_of = self._any_of_for(target, contract)
         try:
             self.heartbeat()
-            parts = plan_partitions(self.client, target, contract, self.window, filters)
+            parts = plan_partitions(self.client, target, contract, self.window, filters, any_of)
             self.heartbeat()
         except Exception as e:  # noqa: BLE001 - one source failing must not hide the others
             reason = f"partition planning failed: {e}"[:300]
@@ -348,16 +367,18 @@ class Sweep:
         try:
             for index, (w, est) in enumerate(parts):
                 following = parts[index + 1] if index + 1 < len(parts) else None
-                self._next = (target, contract, filters, *following) if following else None
-                self.run_partition(target, contract, filters, w, est)
+                self._next = (target, contract, filters, any_of, *following) if following else None
+                self.run_partition(target, contract, filters, w, est, any_of=any_of)
         finally:
             self._next = None
             self._stop_prefetch()
 
     @staticmethod
-    def _raw_intent(target: str, filters: list[Predicate], w: Window, est: int) -> SearchIntent:
+    def _raw_intent(target: str, filters: list[Predicate], w: Window, est: int,
+                    any_of: list[list[Predicate]] | None = None) -> SearchIntent:
         cap = max(PARTITION_MAX_DOCS, int(est * 1.2) + 1000)
-        return SearchIntent(kind="raw", target=target, window=w, filters=filters, max_records=cap, purpose="sweep")
+        return SearchIntent(kind="raw", target=target, window=w, filters=filters, any_of=any_of or [],
+                            max_records=cap, purpose="sweep")
 
     def _fetch(self, intent: SearchIntent, contract: FieldContract):
         """The partition's records: the prefetched outcome when it is this very intent, else fetched now."""
@@ -371,11 +392,11 @@ class Sweep:
         """Begin fetching the next top-level partition on the background thread, when it will be fetched whole."""
         if not self.prefetch or self._next is None or self._ahead is not None:
             return
-        target, contract, filters, w, est = self._next
+        target, contract, filters, any_of, w, est = self._next
         self._next = None
         if est > PARTITION_MAX_DOCS and (w.end - w.start) > MIN_SPLIT * 2:
             return                                   # it is split before anything is fetched
-        intent = self._raw_intent(target, filters, w, est)
+        intent = self._raw_intent(target, filters, w, est, any_of)
         if self._pool is None:
             self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="romulus-sweep-prefetch")
         client = self.client
@@ -390,16 +411,18 @@ class Sweep:
             self._pool.shutdown(wait=False, cancel_futures=True)
             self._pool = None
 
-    def _count(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window) -> int | None:
+    def _count(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window,
+               any_of: list[list[Predicate]] | None = None) -> int | None:
         """The exact number of records in a window, or None when the source does not say exactly."""
         out = execute(self.client, SearchIntent(kind="histogram", target=target, window=w, filters=filters,
+                                                any_of=any_of or [],
                                                 interval_seconds=BUCKET_SECONDS, purpose="sweep count"), contract)
         if out.completeness == Completeness.complete and out.total_relation == "eq" and out.total is not None:
             return out.total
         return None
 
     def run_partition(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window, est: int,
-                      *, estimated: bool = False):
+                      *, estimated: bool = False, any_of: list[list[Predicate]] | None = None):
         """Evaluate one partition. `est` is the histogram's exact count for a planned partition; for a half of a
         split one (`estimated`) it is only an estimate, so the half is counted before it is fetched."""
         self.heartbeat()
@@ -407,11 +430,11 @@ class Sweep:
         if est > PARTITION_MAX_DOCS and splittable:
             # exact histogram count already exceeds the limit: subdivide before fetching anything
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, est // 2, estimated=True)
-            self.run_partition(target, contract, filters, b, est - est // 2, estimated=True)
+            self.run_partition(target, contract, filters, a, est // 2, estimated=True, any_of=any_of)
+            self.run_partition(target, contract, filters, b, est - est // 2, estimated=True, any_of=any_of)
             return
         pkey = w.key()
-        intent = self._raw_intent(target, filters, w, est)
+        intent = self._raw_intent(target, filters, w, est, any_of)
         cap = intent.max_records
         tid = "t-" + digest({"h": self.hunt_id, "target": target, "w": pkey})[:20]
         self.repo.upsert_task(tid, self.hunt_id, "sweep", "sweep", intent.model_dump(mode="json"), tid)
@@ -421,7 +444,7 @@ class Sweep:
         self.repo.update_task(tid, "leased", attempt=True)
         mid = w.start + (w.end - w.start) / 2
         children = [f"{w.start.isoformat()}/{mid.isoformat()}", f"{mid.isoformat()}/{w.end.isoformat()}"]
-        counted = self._count(target, contract, filters, w) if estimated and splittable else None
+        counted = self._count(target, contract, filters, w, any_of) if estimated and splittable else None
         if counted is not None and counted > fetch_limit(cap):
             # The fetch would stop at its cap and be split: split now, without reading records only to drop them.
             # The cap is the same, so the halves and their estimates are those a capped fetch would have given.
@@ -430,8 +453,8 @@ class Sweep:
                                                          "reasons": [f"cap:{cap}<total:{counted}"], "total": counted,
                                                          "returned": 0, "counted": True, "children": children})
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, counted // 2, estimated=True)
-            self.run_partition(target, contract, filters, b, counted // 2, estimated=True)
+            self.run_partition(target, contract, filters, a, counted // 2, estimated=True, any_of=any_of)
+            self.run_partition(target, contract, filters, b, counted // 2, estimated=True, any_of=any_of)
             return
         out = self._fetch(intent, contract)
         self._start_prefetch()
@@ -445,8 +468,8 @@ class Sweep:
                                                          "children": children})
             half = (out.total or est) // 2
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, half, estimated=True)
-            self.run_partition(target, contract, filters, b, half, estimated=True)
+            self.run_partition(target, contract, filters, a, half, estimated=True, any_of=any_of)
+            self.run_partition(target, contract, filters, b, half, estimated=True, any_of=any_of)
             return
         self.stats["partitions"] += 1
         self.stats["records"] += out.returned

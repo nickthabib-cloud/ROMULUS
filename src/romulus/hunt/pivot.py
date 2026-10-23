@@ -22,7 +22,12 @@ from romulus.detect.registry import fresh_direct_pack
 from romulus.evidence.auditd import AuditParseError, AuditRecord, parse_record
 from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, normalize_hits
 from romulus.evidence.typed import TypedEvent
-from romulus.evidence.windows_catalog import WINDOWS_HOST_DATASETS, datasets_for_families
+from romulus.evidence.windows_catalog import (
+    WINDOWS_CHANNELS,
+    WINDOWS_HOST_DATASETS,
+    channels_for_families,
+    datasets_for_families,
+)
 from romulus.hunt.publish import publish_match
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.execute import execute
@@ -103,6 +108,28 @@ def _host_datasets(contract: FieldContract, families: set[str] | None = None) ->
 
 def _supports(contract: FieldContract, field: str, op: str = "eq") -> bool:
     return contract.supports(field, op)
+
+
+def _windows_source_groups(
+    contract: FieldContract, families: set[str] | None = None,
+) -> list[list[Predicate]]:
+    datasets = datasets_for_families(families) if families else WINDOWS_HOST_DATASETS
+    channels = channels_for_families(families) if families else WINDOWS_CHANNELS
+    groups: list[list[Predicate]] = []
+    if datasets and _supports(contract, "event.dataset", "in"):
+        groups.append([Predicate(field="event.dataset", op="in", value=list(datasets))])
+    if channels and _supports(contract, "event.channel", "in"):
+        groups.append([Predicate(field="event.channel", op="in", value=list(channels))])
+    return groups
+
+
+def _and_any_of(left: list[list[Predicate]], right: list[list[Predicate]]) -> list[list[Predicate]]:
+    """Return disjunctive normal form for (OR left) AND (OR right)."""
+    if not left:
+        return right
+    if not right:
+        return left
+    return [[*a, *b] for a in left for b in right]
 
 
 def _event_entities(event: TypedEvent) -> list[EntityRef]:
@@ -527,6 +554,21 @@ class PivotExecutor:
                         [Predicate(field="destination.ip", op="eq", value=entity.value)],
                     ]
                 elif entity.kind == "ip" and not network:
+                    ip_groups = [
+                        [Predicate(field=field, op="eq", value=entity.value)]
+                        for field in ("source.ip", "destination.ip") if _supports(contract, field)
+                    ]
+                    if contract.os_family == "windows":
+                        source_groups = _windows_source_groups(contract)
+                        if not source_groups or not ip_groups:
+                            continue
+                        intents.append(SearchIntent(
+                            kind="raw", target=target, window=window,
+                            any_of=_and_any_of(source_groups, ip_groups),
+                            max_records=MAX_PIVOT_RECORDS,
+                            purpose=f"agent:{request.tool}:windows-events",
+                        ))
+                        continue
                     if not _supports(contract, "event.dataset"):
                         continue
                     supported_datasets = _host_datasets(contract)
@@ -535,12 +577,7 @@ class PivotExecutor:
                         if dataset not in supported_datasets:
                             continue
                         dataset_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
-                        dataset_any_of: list[list[Predicate]] = []
-                        for field in ("source.ip", "destination.ip"):
-                            if _supports(contract, field):
-                                dataset_any_of.append([
-                                    Predicate(field=field, op="eq", value=entity.value),
-                                ])
+                        dataset_any_of = ip_groups
                         if target in dataset_inventory and not dataset_any_of:
                             continue
                         intents.append(SearchIntent(
@@ -550,21 +587,42 @@ class PivotExecutor:
                             purpose=f"agent:{request.tool}:{dataset}",
                         ))
                     continue
-                elif (entity.kind == "host" and not network
-                      and _supports(contract, "event.dataset", "in") and _supports(contract, "host.name")):
-                    filters = [
-                        Predicate(field="event.dataset", op="in", value=list(_host_datasets(contract))),
-                        Predicate(field="host.name", op="eq", value=entity.value),
-                    ]
+                elif entity.kind == "host" and not network and _supports(contract, "host.name"):
+                    if contract.os_family == "windows":
+                        any_of = _windows_source_groups(contract)
+                        if not any_of:
+                            continue
+                        filters = [Predicate(field="host.name", op="eq", value=entity.value)]
+                    elif _supports(contract, "event.dataset", "in"):
+                        filters = [
+                            Predicate(field="event.dataset", op="in", value=list(_host_datasets(contract))),
+                            Predicate(field="host.name", op="eq", value=entity.value),
+                        ]
+                    else:
+                        continue
                 else:
                     continue
             elif isinstance(request, AuthActivityRequest):
-                if network or not _supports(contract, "event.dataset"):
+                if network:
                     continue
-                auth_datasets = (("systemd.journal",) if contract.os_family != "windows"
-                                 else _host_datasets(contract, {"auth"}))
                 if args.entity.kind == "host" and not _supports(contract, "host.name"):
                     continue
+                if contract.os_family == "windows":
+                    source_groups = _windows_source_groups(contract, {"auth"})
+                    if not source_groups:
+                        continue
+                    auth_filters = []
+                    if args.entity.kind == "host":
+                        auth_filters.append(Predicate(field="host.name", op="eq", value=args.entity.value))
+                    intents.append(SearchIntent(
+                        kind="raw", target=target, window=window, filters=auth_filters,
+                        any_of=source_groups, max_records=MAX_PIVOT_RECORDS,
+                        purpose=f"agent:{request.tool}:windows-events",
+                    ))
+                    continue
+                if not _supports(contract, "event.dataset"):
+                    continue
+                auth_datasets = ("systemd.journal",)
                 for dataset in auth_datasets:
                     auth_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
                     if args.entity.kind == "host":
@@ -575,12 +633,24 @@ class PivotExecutor:
                     ))
                 continue
             elif isinstance(request, ProcessTreeRequest):
-                if network or not (_supports(contract, "event.dataset") and _supports(contract, "host.name")):
+                if network or not _supports(contract, "host.name"):
                     continue
                 families = (
                     {"process_exec", "process_termination", "system_state"}
                     if contract.os_family == "windows" else {"process_exec"}
                 )
+                if contract.os_family == "windows":
+                    source_groups = _windows_source_groups(contract, families)
+                    if source_groups:
+                        intents.append(SearchIntent(
+                            kind="raw", target=target, window=window,
+                            filters=[Predicate(field="host.name", op="eq", value=args.host)],
+                            any_of=source_groups, max_records=MAX_PIVOT_RECORDS,
+                            purpose=f"agent:{request.tool}:windows-events",
+                        ))
+                    continue
+                if not _supports(contract, "event.dataset"):
+                    continue
                 for dataset in _host_datasets(contract, families):
                     intents.append(SearchIntent(
                         kind="raw", target=target, window=window,
@@ -620,6 +690,8 @@ class PivotExecutor:
         for predicate in intent.filters:
             if predicate.field == "event.dataset" and predicate.op == "eq" and isinstance(predicate.value, str):
                 return predicate.value
+        if any(predicate.field == "event.channel" for group in intent.any_of for predicate in group):
+            return "windows.events"
         return None
 
     @staticmethod
@@ -680,7 +752,8 @@ class PivotExecutor:
                 continue
             if _is_network(target, contract):
                 continue
-            if _supports(contract, "event.dataset"):
+            if (_supports(contract, "event.dataset")
+                    or (contract.os_family == "windows" and _supports(contract, "event.channel"))):
                 continue
             for dataset in _host_datasets(contract):
                 reason = f"dataset_unsearchable:{dataset}:event.dataset predicate unavailable"

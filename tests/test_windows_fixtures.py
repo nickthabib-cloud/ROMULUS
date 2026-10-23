@@ -27,6 +27,19 @@ def test_factory_covers_every_catalog_event_in_every_supported_shipper_shape():
         assert skips == {} and errors == []
 
 
+def test_winlogbeat_shapes_do_not_invent_an_event_dataset():
+    """Winlogbeat's documented event fields identify the source by agent.type + winlog.*.
+
+    https://www.elastic.co/guide/en/beats/winlogbeat/current/exported-fields-winlog.html
+    """
+    logical = all_logical_events()[0]
+
+    for shape in ("winlogbeat_7", "winlogbeat_8"):
+        source = windows_hit(logical, shape)["_source"]
+        assert source["agent"]["type"] == "winlogbeat"
+        assert "event" not in source or "dataset" not in source["event"]
+
+
 def test_each_logical_event_has_identical_typed_semantics_in_all_three_shapes():
     for logical in all_logical_events():
         normalized = []

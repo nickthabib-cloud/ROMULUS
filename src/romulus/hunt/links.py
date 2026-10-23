@@ -16,10 +16,12 @@ from romulus.hunt.pivot import (
     HOST_LOOKUP_BUDGET,
     MAX_PIVOT_RECORDS,
     PivotExecutor,
+    _and_any_of,
     _host_datasets,
     _is_network,
     _range,
     _supports,
+    _windows_source_groups,
 )
 from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.store.db import digest
@@ -288,9 +290,26 @@ class LinkFetcher:
                       os_family: str | None = None):
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
-            if _is_network(target, contract) or not _supports(contract, "event.dataset"):
+            if _is_network(target, contract):
                 continue
             if os_family is not None and contract.os_family != os_family:
+                continue
+            if contract.os_family == "windows":
+                source_groups = _windows_source_groups(contract, families)
+                if not source_groups:
+                    continue
+                filters = []
+                if host is not None:
+                    if not _supports(contract, "host.name"):
+                        continue
+                    filters.append(Predicate(field="host.name", op="eq", value=host))
+                intents.append(SearchIntent(
+                    kind="raw", target=target, window=Window(start=window.start, end=window.end),
+                    filters=filters, any_of=source_groups, max_records=MAX_PIVOT_RECORDS,
+                    purpose="expansion:windows-events",
+                ))
+                continue
+            if not _supports(contract, "event.dataset"):
                 continue
             for dataset in _host_datasets(contract, families):
                 filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
@@ -309,15 +328,30 @@ class LinkFetcher:
         """Typed host socket records whose remote endpoint is one of these (ip, port) pairs."""
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
-            if (_is_network(target, contract) or not _supports(contract, "event.dataset")
+            if (_is_network(target, contract)
                     or not all(_supports(contract, field) for field in ("destination.ip", "destination.port"))):
+                continue
+            endpoint_groups = [
+                [Predicate(field="destination.ip", op="eq", value=ip),
+                 Predicate(field="destination.port", op="eq", value=port)]
+                for ip, port in endpoints
+            ]
+            if contract.os_family == "windows":
+                source_groups = _windows_source_groups(contract, {"net_socket"})
+                if source_groups:
+                    intents.append(SearchIntent(
+                        kind="raw", target=target, window=Window(start=window.start, end=window.end),
+                        any_of=_and_any_of(source_groups, endpoint_groups),
+                        max_records=MAX_PIVOT_RECORDS, purpose="expansion:flow_host_side",
+                    ))
+                continue
+            if not _supports(contract, "event.dataset"):
                 continue
             for dataset in _host_datasets(contract, {"net_socket"}):
                 intents.append(SearchIntent(
                     kind="raw", target=target, window=Window(start=window.start, end=window.end),
                     filters=[Predicate(field="event.dataset", op="eq", value=dataset)],
-                    any_of=[[Predicate(field="destination.ip", op="eq", value=ip),
-                             Predicate(field="destination.port", op="eq", value=port)] for ip, port in endpoints],
+                    any_of=endpoint_groups,
                     max_records=MAX_PIVOT_RECORDS, purpose="expansion:flow_host_side",
                 ))
         return intents
