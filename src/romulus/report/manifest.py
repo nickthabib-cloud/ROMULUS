@@ -172,6 +172,11 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
     stats = sweep_detail.get("stats") or {}
     profiles = hunt_manifest.get("source_profiles") or {}
     out = []
+
+    def skip_explanation(reason: str) -> str:
+        if reason == "duplicate typed event across source partitions":
+            return "typed event deduplicated across source partitions; its additional raw provenance was retained"
+        return f"retrieved but not turned into a typed event: {reason}"
     for target, retrieved in sorted((stats.get("dataset_filter") or {}).items()):
         inventory = (profiles.get(target) or {}).get("datasets")
         if not isinstance(inventory, dict):
@@ -206,7 +211,7 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                 scoped_totals[reason] += count
                 out.append({"target": target, "dataset": None, "records": count,
                             "count_scope": "records retrieved in the hunt window",
-                            "reason": f"retrieved but not turned into a typed event: {reason}"})
+                            "reason": skip_explanation(reason)})
         global_scoped = stats.get("skips_scoped_global")
         if isinstance(global_scoped, dict):
             scoped_totals = Counter(global_scoped)
@@ -215,12 +220,12 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
             if remainder > 0:
                 out.append({"target": "all sweep targets", "dataset": None, "records": remainder,
                             "count_scope": "records retrieved in the hunt window",
-                            "reason": f"retrieved but not turned into a typed event: {reason}"})
+                            "reason": skip_explanation(reason)})
     else:
         for reason, count in sorted((stats.get("skips") or {}).items()):
             out.append({"target": "all sweep targets", "dataset": None, "records": count,
                         "count_scope": "records retrieved in the hunt window",
-                        "reason": f"retrieved but not turned into a typed event: {reason}"})
+                        "reason": skip_explanation(reason)})
     return out
 
 
