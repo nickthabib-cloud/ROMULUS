@@ -48,12 +48,13 @@ excluded with a recorded reason. A binary merely named `sshd` elsewhere is repor
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
 from romulus.detect.correlation import (
+    LINEAGE_DEPTH,
     PidTable,
     StageMissing,
     boot_of,
@@ -62,7 +63,14 @@ from romulus.detect.correlation import (
     external,
     merge_unknown_boot,
 )
-from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS, _py_pty_spawn, interpreter_name
+from romulus.detect.host import (
+    INTERPRETERS,
+    WEB_SERVICE_USERS,
+    _audit_serial,
+    _py_pty_spawn,
+    interpreter_name,
+    need,
+)
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
@@ -166,6 +174,7 @@ class _Shell:
     devtcp: bool
     shaped: bool
     incomplete: bool = False              # argv lost arguments: whether it read stdin is unknown
+    serial: int | None = None             # the exec's audit serial (orders execs of one instant)
 
 
 @dataclass
@@ -189,6 +198,8 @@ class _Hit:
     relation: str                         # "own process re-exec" | "descendant"
     gap: float
     window: list[_Socket] = field(default_factory=list)   # every external call of the owner in the window
+    judged: bool = False                  # joined when the shell was read: the budget had no room to hold it
+    unrecorded: bool = False              # the owner's exec was not recorded (the exec store took no new process)
 
     @property
     def helper(self) -> bool:
@@ -210,10 +221,20 @@ class _Hit:
                 and _port(self.socket.peer_port) not in NOT_A_CHANNEL)
 
 
+class _Groups(dict):
+    """An in-memory stand-in for a keyed store's setdefault (one shell's hits, in the finalize fallback)."""
+
+    def setdefault(self, key, factory):
+        if key not in self:
+            self[key] = factory()
+        return self[key]
+
+
 class ReverseShellByLineage(Playbook):
+    state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.shell_spawned_by_connected_process"
     anchor_class = "execution"
-    version = "4"
+    version = "5"
     title = "Shell or interpreter executed by a process holding an external connection (reverse shell by lineage)"
     kind = "aggregate"
     staged = True
@@ -266,13 +287,24 @@ class ReverseShellByLineage(Playbook):
                      "only), a superset of the net_socket and process_exec records this evaluator reads",
     }
 
+    # Shells, sockets and the exec history are held to finalize, as the join needs them all (a target is read whole
+    # before the next, so a shell's socket or ancestor may be read after it). Each lives in a keyed store or list
+    # over the rule's on-disk spill: HOT entries in memory, the rest on disk, never forgotten.
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    TRIM_EVERY = 10_000
+    # A shell the shells list has no room for is joined when it is read, against the sockets and lineage held then;
+    # its hits (only shells that joined a held connection, each a few hundred bytes) wait in memory for finalize,
+    # at most this many, and a shell past them is refused.
+    JUDGED_CAP = 100_000
+
     def __init__(self):
         super().__init__()
-        self.pids = PidTable()
-        self.shells: list[_Shell] = []
-        self.sockets: dict[tuple, list[_Socket]] = defaultdict(list)
-        self._seen: set[str] = set()
-        self._staged: set[str] = set()
+        self.pids = PidTable(PidTable.CAPACITY, owner=self)
+        self.shells = SpillList(self, "rs_shells", self.HOT)
+        self.sockets = KeyedStore(self, "rs_sockets", self.HOT)         # (host, pid) -> [_Socket]
+        self._judged: list[_Hit] = []
+        self._seen = RecentIds()        # bounded re-read guard
+        self._staged = RecentIds()      # bounded re-stage guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
 
@@ -289,6 +321,11 @@ class ReverseShellByLineage(Playbook):
             self._staged.add(event.id)
             self._pending.append(event)
 
+    def _trim(self) -> None:
+        self.pids.trim()
+        self.shells.trim()
+        self.sockets.trim()
+
     # ---------------------------------------------------------------- consume
     def consume(self, events):
         for event in events:
@@ -300,7 +337,12 @@ class ReverseShellByLineage(Playbook):
                 self._consider_shell(event)
             else:
                 self._consider_socket(event)
+        self._trim()
         return []
+
+    def _disk_full(self, what: str) -> None:
+        self.evaluated -= 1
+        self.refuse("disk", f"the {what} disk budget is spent; a later record is not evaluated")
 
     def _consider_shell(self, event: TypedEvent) -> None:
         exe = event.get("process.executable")
@@ -321,10 +363,30 @@ class ReverseShellByLineage(Playbook):
             devtcp = shaped = False
         else:
             devtcp, shaped = _devtcp_redirect(argv, exe), _reverse_shell_shaped(argv, exe)
-        self.shells.append(_Shell(
-            ts=event.ts.timestamp(), host=event.host or "", boot=boot_of(event), pid=pid,
-            ppid=event.get("process.ppid"), exe=str(exe), event_id=event.id, devtcp=devtcp, shaped=shaped,
-            incomplete=argv_incomplete(event)))
+        shell = _Shell(ts=event.ts.timestamp(), host=event.host or "", boot=boot_of(event), pid=pid,
+                       ppid=event.get("process.ppid"), exe=str(exe), event_id=event.id, devtcp=devtcp, shaped=shaped,
+                       incomplete=argv_incomplete(event), serial=_audit_serial(event))
+        if not self.shells.append(shell):
+            self._judge_now(shell, event)
+            return
+        self._stage(event)
+
+    def _judge_now(self, shell: _Shell, event: TypedEvent) -> None:
+        """The shells list has no room: join the shell now with the sockets and lineage held, without recording it.
+        A hit waits for finalize (cited, grouped as usual); a socket read after the shell cannot join it, and
+        coverage says so."""
+        self.note_limit("shells_judged", "the shell executions' list took no new record; a later shell was joined "
+                                         "when it was read, with the connections held then (a connection read after "
+                                         "it is not joined)")
+        hits = self._join(shell)
+        if not hits:
+            return
+        if len(self._judged) + len(hits) > self.JUDGED_CAP:
+            self._disk_full("shells judged when read'")
+            return
+        for hit in hits:
+            hit.judged = True
+        self._judged += hits
         self._stage(event)
 
     def _consider_socket(self, event: TypedEvent) -> None:
@@ -349,25 +411,46 @@ class ReverseShellByLineage(Playbook):
         self.evaluated += 1
         user = event.get("process.user")
         web = user in WEB_SERVICE_USERS or event.get("process.effective_user") in WEB_SERVICE_USERS
-        self.sockets[(event.host or "", pid)].append(_Socket(
+        held = self.sockets.setdefault((event.host or "", pid), list)
+        if held is None:
+            self._disk_full("sockets'")
+            return
+        held.append(_Socket(
             ts=event.ts.timestamp(), syscall=str(syscall), peer_ip=ip, peer_port=port, exe=str(exe), user=user,
             web=web, event_id=event.id, boot=boot_of(event)))
         self._stage(event)
 
     # ---------------------------------------------------------------- finalize
     def _owners(self, shell: _Shell):
-        """(pid, window_start, window_end, relation): the shell's own pre-exec identity, then each recorded
-        ancestor. An ancestor's window ends at the exec of its child on the chain: a socket it opened later
-        was not inherited down that chain."""
+        """(pid, window_start, window_end, relation, unrecorded): the shell's own pre-exec identity, then each
+        recorded ancestor. An ancestor's window ends at the exec of its child on the chain: a socket it opened later
+        was not inherited down that chain.
+
+        Once the exec store has refused any process in the hunt, the lineage may have gaps: then a pid whose exec is
+        not recorded (the shell's own earlier image, or the ancestor where the walk stops, named by its child's ppid)
+        still joins its held sockets in the MAX_GAP before its child, and the finding says its exec was not
+        recorded."""
         owners = []
-        prior = self.pids.exec_before(shell.host, shell.pid, shell.ts, shell.boot)
+        incomplete = self.pids.execs.incomplete
+        prior = self.pids.exec_before(shell.host, shell.pid, shell.ts, shell.boot, serial=shell.serial,
+                                      exclude=shell.event_id)
         if prior is not None:
-            owners.append((shell.pid, prior[0], shell.ts, "own process re-exec"))
-        child_ts = shell.ts
-        for pid, exec_ts, _exe, _raw in self.pids.lineage_entries(shell.host, shell.ppid, shell.ts,
-                                                                   boot=shell.boot):
-            owners.append((pid, exec_ts, child_ts, "descendant"))
-            child_ts = exec_ts
+            owners.append((shell.pid, prior[0], shell.ts, "own process re-exec", False))
+        elif incomplete:
+            owners.append((shell.pid, shell.ts - MAX_GAP, shell.ts, "own process re-exec", True))
+        pid, ts, boot, serial, child_ts = shell.ppid, shell.ts, shell.boot, shell.serial, shell.ts
+        for _ in range(LINEAGE_DEPTH):
+            if not isinstance(pid, int) or pid in (0, 1):
+                break
+            record = self.pids._record(shell.host, pid, ts, boot, serial=serial)
+            if record is None:
+                if incomplete:
+                    owners.append((pid, child_ts - MAX_GAP, child_ts, "descendant", True))
+                break
+            owners.append((pid, record.ts, child_ts, "descendant", False))
+            child_ts = record.ts
+            pid, ts, serial = record.ppid, record.ts, record.serial
+            boot = boot if boot is not None else record.boot
         return owners
 
     def _events(self, ids: list[str]) -> dict[str, TypedEvent]:
@@ -377,34 +460,80 @@ class ReverseShellByLineage(Playbook):
             raise StageMissing(f"{self.id}: {len(unique) - len(loaded)} cited event(s) absent from the stage")
         return {event.id: event for event in loaded}
 
-    def finalize(self):
-        groups: dict[tuple, list[_Hit]] = defaultdict(list)
-        for shell in sorted(self.shells, key=lambda s: (s.ts, s.event_id)):
-            for owner_pid, start, end, relation in self._owners(shell):
-                window = sorted((s for s in self.sockets.get((shell.host, owner_pid), ())
-                                 if start <= s.ts < end and shell.ts - s.ts <= MAX_GAP
-                                 and not boots_conflict(shell.boot, s.boot)),
-                                key=lambda s: (s.ts, s.event_id))
-                if not window:
-                    continue
-                # The headline socket is the latest one that could be a channel: a DNS or port-0 call made
-                # after the real connection must not hide its peer. Only DNS or probes left: the latest call.
-                channels = [s for s in window
-                            if s.syscall in ACCEPT_SYSCALLS or _port(s.peer_port) not in NOT_A_CHANNEL]
-                latest = channels[-1] if channels else window[-1]
-                if latest.syscall in ACCEPT_SYSCALLS and latest.exe in SSHD_PATHS:
-                    continue                            # the system sshd's accepted login: auth rules cover it
-                hit = _Hit(shell, latest, owner_pid, relation, shell.ts - latest.ts, window)
-                boot = shell.boot if shell.boot is not None else latest.boot
-                key = ((shell.host, latest.exe, "helpers") if hit.helper
-                       else (shell.host, boot, owner_pid, latest.peer_ip))
-                groups[key].append(hit)
-        groups = {**{k: v for k, v in groups.items() if len(k) == 3},
-                  **merge_unknown_boot({k: v for k, v in groups.items() if len(k) == 4}, 1)}
+    def _hits(self, shell: _Shell, groups: KeyedStore) -> None:
+        """Join one shell with its owners' external socket calls; every hit goes to its group."""
+        for hit in self._join(shell):
+            self._add_hit(hit, groups)
+
+    def _add_hit(self, hit: _Hit, groups) -> None:
+        shell, latest = hit.shell, hit.socket
+        boot = shell.boot if shell.boot is not None else latest.boot
+        key = ((shell.host, latest.exe, "helpers") if hit.helper
+               else (shell.host, boot, hit.owner_pid, latest.peer_ip))
+        need(groups.setdefault(key, list), self, "the joined hits' grouping").append(hit)
+
+    def _join(self, shell: _Shell) -> list[_Hit]:
+        """The shell's hits: one per owner with an external socket call in its window."""
         out = []
-        for key in sorted(groups, key=lambda k: tuple("" if part is None else str(part) for part in k)):
-            hits = groups[key]
+        for owner_pid, start, end, relation, unrecorded in self._owners(shell):
+            held = self.sockets.get((shell.host, owner_pid)) or self.sockets.peek((shell.host, owner_pid), ())
+            window = sorted((s for s in held
+                             if start <= s.ts < end and shell.ts - s.ts <= MAX_GAP
+                             and not boots_conflict(shell.boot, s.boot)),
+                            key=lambda s: (s.ts, s.event_id))
+            if not window:
+                continue
+            # The headline socket is the latest one that could be a channel: a DNS or port-0 call made
+            # after the real connection must not hide its peer. Only DNS or probes left: the latest call.
+            channels = [s for s in window
+                        if s.syscall in ACCEPT_SYSCALLS or _port(s.peer_port) not in NOT_A_CHANNEL]
+            latest = channels[-1] if channels else window[-1]
+            if latest.syscall in ACCEPT_SYSCALLS and latest.exe in SSHD_PATHS:
+                continue                            # the system sshd's accepted login: auth rules cover it
+            out.append(_Hit(shell, latest, owner_pid, relation, shell.ts - latest.ts, window, unrecorded=unrecorded))
+        return out
+
+    def finalize(self):
+        groups = KeyedStore(self, "rs_groups", self.HOT)
+        for i, shell in enumerate(self.shells):
+            self._hits(shell, groups)
+            if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
+                self._trim()
+                groups.trim()
+        for hit in self._judged:                    # shells joined when read (no room to hold them)
+            self._add_hit(hit, groups)
+        keys = groups.keys()
+        merged = {**{k: [k] for k in keys if len(k) == 3},
+                  **merge_unknown_boot({k: [k] for k in keys if len(k) == 4}, 1)}
+        out = []
+        for key in sorted(merged, key=lambda k: tuple("" if part is None else str(part) for part in k)):
+            hits = [hit for old in merged[key] for hit in groups.peek(old)]
             out.append(self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits))
+        groups.clear()
+        return out
+
+    def finalize_fallback(self, reason: str) -> list[Match]:
+        """Every joined hit, one shell at a time (grouping hits across shells needed disk); a table on disk that cannot
+        be read ends the pass with what was published."""
+        out = []
+
+        def publish(local: _Groups) -> None:
+            for key, hits in local.items():
+                m = self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits)
+                m.group_key += f"|alone:{hits[0].shell.event_id}"
+                m.notes.append(f"published one shell at a time: grouping the joins needed disk ({reason})")
+                out.append(m)
+        for hit in self._judged:                    # each shell joined when read, on its own
+            local = _Groups()
+            self._add_hit(hit, local)
+            publish(local)
+        try:
+            for shell in self.shells:
+                local = _Groups()
+                self._hits(shell, local)
+                publish(local)
+        except StateExhausted:
+            pass
         return out
 
     def _helpers(self, key: tuple, hits: list[_Hit]) -> Match:
@@ -473,7 +602,7 @@ class ReverseShellByLineage(Playbook):
         match = Match(self.id, claim, self.claim_type, cited, preds, cited[0].ts, self.severity, "lead", "medium",
                       list(dict.fromkeys(entity for e in cited for entity in e.entities())),
                       group_key=f"{host}|{exe}|helpers")
-        match.notes = notes
+        match.notes = notes + _budget_notes(hits)
         return match
 
     def _finding(self, key: tuple, hits: list[_Hit]) -> Match:
@@ -494,11 +623,14 @@ class ReverseShellByLineage(Playbook):
         others = [p for p in peers if p != f"{sock.peer_ip}:{sock.peer_port}"]
         shell_names = sorted({interpreter_name(basename(s.exe)) for s in shells})
         shell_pids = ", ".join(str(s.pid) for s in shells[:CITE_PER_GROUP])
+        between = (f"pid {owner_pid}'s own exec was not recorded (the exec store took no new process), so another "
+                   f"exec of it in between cannot be excluded" if first.unrecorded
+                   else f"with no other exec recorded for pid {owner_pid} in between")
         claim = (
             f"On {host}, {owner_desc} {verb} external address {sock.peer_ip}{port} (its latest external socket "
             f"call before the exec), and {len(shells)} shell/interpreter exec(s) ({', '.join(shell_names)}; "
             f"pid(s) {shell_pids}) followed under the same process lineage ({first.relation}; {first.gap:.2f}s "
-            f"after that call, with no other exec recorded for pid {owner_pid} in between).")
+            f"after that call, {between}).")
         if others:
             claim += (f" Other external peers of that pid in the same window: {', '.join(others[:PEERS_LISTED])}"
                       + (f" and {len(others) - PEERS_LISTED} more" if len(others) > PEERS_LISTED else "") + ".")
@@ -539,8 +671,20 @@ class ReverseShellByLineage(Playbook):
         match = Match(self.id, claim, self.claim_type, cited, preds, cited[0].ts, self.severity, lane,
                       "high" if lane == "high" else "medium", shell_event.entities(),
                       group_key=f"{host}|{boot}|{owner_pid}|{peer_ip}")
-        match.notes = notes
+        match.notes = notes + _budget_notes(hits)
         return match
+
+
+def _budget_notes(hits: list[_Hit]) -> list[str]:
+    notes = []
+    if any(h.judged for h in hits):
+        notes.append("a shell was judged when it was read, with the connections held then: the state budget had no "
+                     "room to hold it for the whole window")
+    if any(h.unrecorded for h in hits):
+        notes.append(f"the connecting process's exec was not recorded (the exec store took no new process once its "
+                     f"share of the state budget was spent): its window before its child is bounded by "
+                     f"{MAX_GAP:.0f}s, and another exec of the same pid in between cannot be excluded")
+    return notes
 
 
 LINEAGE_PLAYBOOKS = [ReverseShellByLineage]

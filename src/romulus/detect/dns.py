@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import ipaddress
 import math
-from bisect import bisect_left
+import sys
+from bisect import bisect_left, insort
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.bounded import HOT_COUNT, KeyedStore
 from romulus.detect.host import is_internal
 from romulus.evidence.typed import TypedEvent
 
@@ -276,8 +278,49 @@ class _Span:
         return f"{self.first.isoformat()} – {self.last.isoformat()}"
 
 
+_COMPENSATED_SUM = sys.version_info >= (3, 12)
+
+
+class _FloatSum:
+    """A running sum of floats equal, bit for bit, to the builtin `sum` over the same values in the same order (the
+    builtin compensates its float sums since Python 3.12), so a mean kept as a running total reads exactly as one
+    computed over every value held at once."""
+
+    __slots__ = ("c", "n", "s")
+
+    def __init__(self):
+        self.s = 0.0
+        self.c = 0.0
+        self.n = 0
+
+    def add(self, x: float) -> None:
+        self.n += 1
+        s = self.s
+        t = s + x
+        if _COMPENSATED_SUM:
+            self.c += (s - t) + x if abs(s) >= abs(x) else (x - t) + s
+        self.s = t
+
+    def total(self) -> float:
+        if not self.n:
+            return 0
+        return self.s + self.c if self.c and math.isfinite(self.c) else self.s
+
+
+def _top(kept: list[str], name: str, n: int = 3) -> None:
+    """Keep the `n` longest distinct names, ties by name: the examples a claim shows."""
+    if len(kept) >= n and (-len(name), name) >= (-len(kept[-1]), kept[-1]):
+        return
+    insort(kept, name, key=lambda s: (-len(s), s))
+    del kept[n:]
+
+
 # ------------------------------------------------------------------------------------------------ base
 class _DnsAggregate(Playbook):
+    """Per-group state lives in keyed stores: the HOT most recently used groups in memory, the rest on the rule's
+    disk spill, read back when a record of the group arrives again. No group is released, so a count covers the whole
+    hunt window however long the group's pauses; only a store's disk budget can refuse a record (stated on coverage).
+    Group states hold citation candidates as (time, id) only, so they move to disk at the end of every batch."""
     kind = "aggregate"
     anchor_class = "network_observation"
     claim_type = "aggregate_observation"
@@ -287,7 +330,6 @@ class _DnsAggregate(Playbook):
     def __init__(self):
         super().__init__()
         self._prev_query_flows: set = set()
-        self.examples: dict[tuple, _Examples] = defaultdict(_Examples)
         self._pending: dict[str, TypedEvent] = {}
         self.load = lambda ids: []
 
@@ -314,14 +356,64 @@ class _DnsAggregate(Playbook):
             raise RuntimeError(f"{self.id}: {len(wanted) - len(loaded)} cited event(s) absent from the stage")
         return sorted(loaded, key=lambda event: (event.ts, event.id))
 
-    def _cite(self, key: tuple) -> list[TypedEvent]:
-        return self._events(self.examples[key].ids())
+    def _stores(self) -> list[KeyedStore]:
+        return [value for value in vars(self).values() if isinstance(value, KeyedStore)]
+
+    def _trim(self) -> None:
+        for store in self._stores():
+            store.trim()
+
+    def _disk_full(self) -> None:
+        self.evaluated -= 1
+        self.refuse("disk", "the rule's disk budget for group state is spent; a record of a new group is not "
+                            "evaluated")
+
+    def _names_full(self) -> None:
+        self.evaluated -= 1
+        self.refuse("names", "the rule's disk budget for distinct names is spent; a record naming a new distinct "
+                             "name of a large group is not evaluated")
+
+    # A group's distinct items (names, addresses) decide its counts, so they are never capped: while a group has at
+    # most the rule's NAMES_INLINE of them they are a set in its state; beyond that they move to a keyed store on
+    # the rule's disk spill (key: the group's prefix and the item), most recently used in memory.
+    @staticmethod
+    def _first_time(store: KeyedStore, state, prefix: tuple, item: tuple, limit: int) -> bool | None:
+        """True when `item` is new among the group's distinct items, False when it was seen before, None when the
+        disk budget refuses to hold a new one (nothing is changed then)."""
+        held = state.inline
+        if held is not None:
+            if item in held:
+                return False
+            if len(held) < limit:
+                held.add(item)
+                return True
+            moved = [*sorted(held), item]
+            for at, each in enumerate(moved):
+                if not store.put(prefix + each, 1):
+                    for done in moved[:at]:
+                        store.pop(prefix + done)
+                    return None
+            state.inline = None
+            return True
+        key = prefix + item
+        if store.get(key) is not None:
+            return False
+        return True if store.put(key, 1) else None
+
+    @staticmethod
+    def _forget(store: KeyedStore, state, prefix: tuple, item: tuple) -> None:
+        """Undo `_first_time` of a new item (when a later part of the same record was refused)."""
+        if state.inline is not None:
+            state.inline.discard(item)
+        else:
+            store.pop(prefix + item)
 
     def release_state(self) -> None:
         self.load = lambda ids: []
         for value in vars(self).values():
-            if isinstance(value, (dict, list, set)):
+            if isinstance(value, (dict, list, set, KeyedStore)):
                 value.clear()
+        self.close_spill()
 
     def _questions(self, events: list[TypedEvent]):
         """Yield (event, client, server, names) for every question record. An answer record whose (flow, question
@@ -357,9 +449,25 @@ class _DnsAggregate(Playbook):
 
 
 # ---------------------------------------------------------------------------------------- zone transfer and ANY
+class _ZoneGroup:
+    """One (client, server, transfer zone or ANY) group of the zone-transfer rule."""
+
+    __slots__ = ("any_names", "asked_by_flow", "deciding", "examples", "replies", "requests", "span", "transports")
+
+    def __init__(self):
+        self.requests: Counter = Counter()          # qtype counts of questions
+        self.replies: Counter = Counter()           # (qtype, rcode) counts
+        self.transports: set[str] = set()
+        self.any_names: set[str] = set()
+        self.span = _Span()
+        self.deciding: tuple[datetime, str] | None = None
+        self.asked_by_flow: dict = {}
+        self.examples = _Examples()
+
+
 class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     id = "net.dns_zone_transfer_or_any_request"
-    version = "2"
+    version = "3"
     title = "DNS zone-transfer (AXFR/IXFR) or ANY question sent by one client to one server"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -402,16 +510,13 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                        "spoofed source",
     }
     QUERY_CAP = 1024        # question records per transfer group kept for pairing with the deciding answer
+    # Groups exist only for AXFR, IXFR and ANY questions, which are rare; a flood of spoofed-source ANY questions
+    # (about 3 KB per group with its citation candidates) overflows to disk.
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
-        self.requests: dict[tuple, Counter] = defaultdict(Counter)        # key -> qtype counts of questions
-        self.replies: dict[tuple, Counter] = defaultdict(Counter)         # key -> (qtype, rcode) counts
-        self.transports: dict[tuple, set] = defaultdict(set)
-        self.any_names: dict[tuple, set[str]] = defaultdict(set)
-        self.spans: dict[tuple, _Span] = defaultdict(_Span)
-        self.deciding: dict[tuple, tuple[datetime, str]] = {}
-        self.asked_by_flow: dict[tuple, dict] = defaultdict(dict)
+        self.groups = KeyedStore(self, "dns_zone_groups", self.HOT)
 
     def retained_events(self) -> list[TypedEvent]:
         return []
@@ -429,22 +534,32 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
             self.evaluated += 1
             if question_type not in self.REQUEST_TYPES:
                 continue
-            for name in question_names(event) or [""]:
-                self._add(event, record_role, client, server, question_type, name)
+            added = [self._add(event, record_role, client, server, question_type, name)
+                     for name in question_names(event) or [""]]
+            if not all(added):
+                self._disk_full()
+        self._trim()
         return []
 
-    def _add(self, event, record_role, client, server, question_type, name):
+    def _add(self, event, record_role, client, server, question_type, name) -> bool:
         if question_type in self.TRANSFER_TYPES:
             key = (client, server, "transfer", name)
         else:
             key = (client, server, "any", "")
-            if name and len(self.any_names[key]) < NAME_CAP:
-                self.any_names[key].add(name)
+        group = self.groups.setdefault(key, _ZoneGroup)
+        if group is None:
+            return False
+        if question_type not in self.TRANSFER_TYPES and name and name not in group.any_names:
+            if len(group.any_names) < NAME_CAP:
+                group.any_names.add(name)
+            else:
+                self.note_limit("names", f"an ANY-question group passed {NAME_CAP:,} distinct names held; its name "
+                                         f"count is a lower bound")
         transport = str(event.get("network.transport") or "").lower()
         if record_role in ("query", "transaction"):
-            self.requests[key][question_type] += 1
+            group.requests[question_type] += 1
             flow = flow_key(event)
-            flows = self.asked_by_flow[key] if question_type in self.TRANSFER_TYPES else None
+            flows = group.asked_by_flow if question_type in self.TRANSFER_TYPES else None
             if flows is not None and flow is not None and (flow in flows or len(flows) < self.QUERY_CAP):
                 held = flows.get(flow)
                 ref = (event.ts, event.id)
@@ -453,38 +568,42 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                     self._stage(event)
         if record_role == "answer" or (record_role == "transaction" and event.has("dns.response_code")):
             code = rcode(event.get("dns.response_code")) or "not recorded"
-            self.replies[key][(question_type, code)] += 1
+            group.replies[(question_type, code)] += 1
             if code == "NOERROR" and question_type in self.TRANSFER_TYPES and transport == "tcp":
-                held = self.deciding.get(key)
+                held = group.deciding
                 ref = (event.ts, event.id)
                 if held is None or ref < held:
-                    self.deciding[key] = ref
+                    group.deciding = ref
                     self._stage(event)
         if transport:
-            self.transports[key].add(transport)
-        self.spans[key].add(event.ts)
-        self._remember(self.examples[key], event)
+            group.transports.add(transport)
+        group.span.add(event.ts)
+        self._remember(group.examples, event)
+        return True
 
     def finalize(self):
         out = []
-        for key in sorted(set(self.requests) | set(self.replies)):
+        for key in sorted(self.groups.keys()):
+            group = self.groups.peek(key)
             client, server, kind, zone = key
-            asked, replies = self.requests.get(key, Counter()), self.replies.get(key, Counter())
+            asked, replies = group.requests, group.replies
             types = sorted(set(asked) | {t for t, _c in replies})
             transfer = kind == "transfer"
             if transfer:
                 subject = f"for zone '{zone}'" if zone else "for a zone whose name is not recorded"
             else:
-                names = sorted(self.any_names.get(key, ()))
+                names = sorted(group.any_names)
                 shown = ", ".join(f"'{_short(n)}'" for n in names[:5]) + (f" and {len(names) - 5} more"
                                                                          if len(names) > 5 else "")
-                subject = f"for {len(names)} distinct name(s) ({shown})" if names else "for names not recorded"
+                at_least = "at least " if len(names) >= NAME_CAP else ""
+                subject = (f"for {at_least}{len(names)} distinct name(s) ({shown})" if names
+                           else "for names not recorded")
             if asked:
                 claim = (f"{client} sent {sum(asked.values())} DNS question record(s) ({_tally(asked)}) {subject} "
-                         f"to {server} ({self.spans[key].text()}).")
+                         f"to {server} ({group.span.text()}).")
             else:
                 claim = (f"{client} received {sum(replies.values())} answer record(s) from {server} to "
-                         f"{'/'.join(types)} question(s) {subject} ({self.spans[key].text()}); the question records "
+                         f"{'/'.join(types)} question(s) {subject} ({group.span.text()}); the question records "
                          f"themselves were not retrieved.")
             accepted = sum(n for (t, code), n in replies.items() if code == "NOERROR" and t in self.TRANSFER_TYPES)
             if replies:
@@ -500,10 +619,10 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                           "not established.")
             client_internal, server_internal = _internal(client), _internal(server)
             notes = []
-            if "ANY" in types and client_internal is False and "tcp" not in self.transports.get(key, set()):
+            if "ANY" in types and client_internal is False and "tcp" not in group.transports:
                 notes.append("an ANY question over UDP from outside the internal ranges may carry a spoofed source "
                              "address (the request shape of DNS reflection, T1498.002)")
-            deciding_ref = self.deciding.get(key)
+            deciding_ref = group.deciding
             deciding = self._events([deciding_ref[1]])[0] if deciding_ref is not None else None
             if accepted and deciding is None:
                 claim += (" None of the NOERROR answers is recorded over TCP, the transport a zone transfer that "
@@ -511,7 +630,7 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
             first: list[TypedEvent] = []
             if transfer and client_internal is False and server_internal and deciding is not None:
                 lane, severity = "high", "high"
-                asked_ref = self.asked_by_flow.get(key, {}).get(flow_key(deciding))
+                asked_ref = group.asked_by_flow.get(flow_key(deciding))
                 asked_event = self._events([asked_ref[1]])[0] if asked_ref is not None else None
                 first = [deciding] + ([asked_event] if asked_event is not None else [])
                 claim += (f" The client is outside the internal address ranges and the server ({server}) is inside "
@@ -520,7 +639,7 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                              else "; its question record was not retrieved."))
             else:
                 lane, severity = self.lane, self.severity
-            evs = _fill(first, self._cite(key))
+            evs = _fill(first, self._events(group.examples.ids()))
             e0 = first[0] if first else evs[0]
             predicate = [pf(e, name) for e in (first or evs[:2])
                          for name in ("dns.question.type", "dns.question.name", "dns.response_code",
@@ -538,9 +657,43 @@ def _tally(counts: Counter) -> str:
 
 
 # ---------------------------------------------------------------------------------------- reverse-lookup sweep
+class _ReverseClient:
+    """Everything the reverse-lookup sweep rule holds for one client: counters over every distinct reverse name, and
+    its distinct names, addresses and blocks (in this state while few, on the rule's keyed stores beyond that)."""
+
+    __slots__ = ("addresses", "block_examples", "blocks", "densest", "examples", "inline", "internal", "n_blocks",
+                 "n_names", "queries", "span", "types", "vspan", "zone_names")
+
+    def __init__(self):
+        self.n_names = 0                            # distinct reverse names
+        self.inline: set | None = set()             # ("n", name) and ("a", address) seen, while few; else on disk
+        self.blocks: dict | None = {}               # block -> [block, addresses, lowest, highest], while few
+        self.block_examples: dict = {}              # block -> its earliest records (up to BLOCK_STORES blocks)
+        self.zone_names = 0
+        self.types: dict[str, int] = {}
+        self.queries = 0
+        self.span = _Span()
+        self.examples = _Examples()
+        self.addresses = 0                          # distinct addresses named
+        self.internal = 0                           # of them, in internal ranges
+        self.n_blocks = 0
+        self.densest = 0                            # addresses in the densest block
+        self.vspan: dict[int, list] = {}            # IP version -> [lowest, highest] address
+
+    @property
+    def names(self) -> range:
+        """The distinct reverse names as a sized view: they are counted exactly, not listed."""
+        return range(self.n_names)
+
+
+def _block_rank(entry: list) -> tuple:
+    """Densest first, then IPv4 before IPv6, then by block."""
+    return -entry[1], entry[0].version, entry[0]
+
+
 class DnsReverseLookupSweep(_DnsAggregate):
     id = "net.dns_reverse_lookup_sweep"
-    version = "2"
+    version = "3"
     title = "Many distinct reverse-lookup (in-addr.arpa / ip6.arpa) names queried by one client"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -578,19 +731,41 @@ class DnsReverseLookupSweep(_DnsAggregate):
                       "names is reported here at that rule's lane)",
         "citations": "the earliest records naming addresses in the densest block, then the client's earliest "
                      "reverse-lookup records",
+        "state": "per client, exact counts over every distinct reverse name of the hunt window: distinct names and "
+                 "addresses and per-block address counts are never capped (a client's own set while small, the "
+                 "rule's keyed stores on its disk spill beyond that), so a dense block named after any number of "
+                 "scattered names is still found and the density statement covers every name",
     }
     BLOCK_CITE = 10          # cited records per block
     BLOCK_STORES = 2048      # blocks per client holding citation candidates
+    # State grows with distinct clients and their distinct reverse names, never with lookups: a server resolving the
+    # same peers all day holds each name once. A client keeps its distinct names and addresses (NAMES_INLINE) and
+    # blocks (BLOCKS_INLINE) in its own state while few; beyond that they move to the keyed stores below, so a
+    # client's state stays small however many names it asks for.
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    NAMES_INLINE = 1024
+    BLOCKS_INLINE = 2048
 
     def __init__(self):
         super().__init__()
-        self.names: dict[str, set[str]] = defaultdict(set)
-        self.blocks: dict[str, dict] = defaultdict(lambda: defaultdict(set))
-        self.block_examples: dict[str, dict] = defaultdict(dict)
-        self.zone_names: dict[str, int] = defaultdict(int)
-        self.types: dict[str, Counter] = defaultdict(Counter)
-        self.queries: dict[str, int] = defaultdict(int)
-        self.spans: dict[str, _Span] = defaultdict(_Span)
+        self.clients = KeyedStore(self, "dns_reverse_clients", self.HOT, candidate=self.reportable)
+        # (client, "n", name) and (client, "a", address) -> 1, for clients beyond NAMES_INLINE distinct items
+        self.names_seen = KeyedStore(self, "dns_reverse_seen", self.HOT)
+        # (client, block) -> [block, addresses, lowest, highest], for clients beyond BLOCKS_INLINE blocks
+        self.blocks = KeyedStore(self, "dns_reverse_blocks", self.HOT, group=lambda key: key[0])
+
+    def reportable(self, state: _ReverseClient) -> bool:
+        return state.n_names >= self.MIN_DISTINCT or state.densest >= self.DENSE_BLOCK
+
+    @property
+    def examples(self) -> dict[tuple, _Examples]:
+        """Every client's earliest reverse-lookup records (reads the whole store: for tests and small hunts)."""
+        return {(client,): state.examples for client, state in self.clients.items()}
+
+    @property
+    def names(self) -> dict[str, range]:
+        """Every client's distinct reverse names, as sized views (reads the whole store: for tests and small hunts)."""
+        return {client: state.names for client, state in self.clients.items()}
 
     def retained_events(self) -> list[TypedEvent]:
         return []
@@ -600,60 +775,166 @@ class DnsReverseLookupSweep(_DnsAggregate):
             reverse = [name for name in all_names if reverse_zone(name) is not None]
             if not reverse:
                 continue
-            self.queries[client] += 1
-            self.types[client][qtype(event.get("dns.question.type")) or "type not recorded"] += 1
-            self.spans[client].add(event.ts)
-            self._remember(self.examples[(client,)], event)
+            state = self.clients.setdefault(client, _ReverseClient)
+            if state is None:
+                self._disk_full()
+                continue
+            fresh = self._admit(client, state, reverse)
+            if fresh is None:
+                self._names_full()
+                continue
+            state.queries += 1
+            kind = qtype(event.get("dns.question.type")) or "type not recorded"
+            state.types[kind] = state.types.get(kind, 0) + 1
+            state.span.add(event.ts)
+            self._remember(state.examples, event)
             for name in reverse:
-                self._name(event, client, name)
+                self._cite_block(event, state, name)
+            for kind, address, entry in fresh:
+                self._count(state, kind, address, entry)
+        self._trim()
         return []
 
-    def _name(self, event: TypedEvent, client: str, name: str) -> None:
+    def _cite_block(self, event: TypedEvent, state: _ReverseClient, name: str) -> None:
         address = reverse_address(name)
-        if address is not None:
-            prefix = 24 if address.version == 4 else 64
-            block = ipaddress.ip_network(f"{address}/{prefix}", strict=False)
-            stores = self.block_examples[client]
-            if block in stores or len(stores) < self.BLOCK_STORES:
-                self._remember(stores.setdefault(block, _Examples(self.BLOCK_CITE)), event)
-        names = self.names[client]
-        if name in names or len(names) >= NAME_CAP:
-            return
-        names.add(name)
         if address is None:
-            self.zone_names[client] += 1
             return
-        self.blocks[client][block].add(address)
+        block = _block_of(address)
+        stores = state.block_examples
+        if block in stores or len(stores) < self.BLOCK_STORES:
+            self._remember(stores.setdefault(block, _Examples(self.BLOCK_CITE)), event)
+
+    def _admit(self, client: str, state: _ReverseClient, reverse: list[str]) -> list | None:
+        """The record's new distinct names, as (kind, address, block entry): "zone" for a name of a reverse zone,
+        "name" for a new name of an address already named, "address" for a new address. Every new name, address and
+        block is already held; None (and nothing held) when the disk budget refuses one of them."""
+        undo, fresh = [], []
+        prefix = (client,)
+        for name in reverse:
+            new = self._first_time(self.names_seen, state, prefix, ("n", name), self.NAMES_INLINE)
+            if new is None:
+                break
+            if not new:
+                continue
+            undo.append(lambda item=("n", name): self._forget(self.names_seen, state, prefix, item))
+            address = reverse_address(name)
+            if address is None:
+                fresh.append(("zone", None, None))
+                continue
+            new_address = self._first_time(self.names_seen, state, prefix, ("a", str(address)), self.NAMES_INLINE)
+            if new_address is None:
+                break
+            if not new_address:
+                fresh.append(("name", address, None))          # a new name for an address already named
+                continue
+            undo.append(lambda item=("a", str(address)): self._forget(self.names_seen, state, prefix, item))
+            entry = self._block_entry(client, state, _block_of(address), undo)
+            if entry is None:
+                break
+            fresh.append(("address", address, entry))
+        else:
+            return fresh
+        for step in reversed(undo):
+            step()
+        return None
+
+    def _block_entry(self, client: str, state: _ReverseClient, block, undo: list) -> list | None:
+        """The block's [block, addresses, lowest, highest], created when new; None when the disk budget refuses."""
+        blocks = state.blocks
+        if blocks is not None:
+            entry = blocks.get(block)
+            if entry is not None:
+                return entry
+            if len(blocks) < self.BLOCKS_INLINE:
+                entry = blocks[block] = [block, 0, None, None]
+                undo.append(lambda: blocks.pop(block, None))
+                return entry
+            moved = [*blocks.values()]
+            for at, each in enumerate(moved):
+                if not self.blocks.put((client, str(each[0])), each):
+                    for done in moved[:at]:
+                        self.blocks.pop((client, str(done[0])))
+                    return None
+            state.blocks = None
+            undo.append(lambda: self._unspill_blocks(client, state, moved))
+        key = (client, str(block))
+        entry = self.blocks.get(key)
+        if entry is not None:
+            return entry
+        entry = [block, 0, None, None]
+        if not self.blocks.put(key, entry):
+            return None
+        undo.append(lambda: self.blocks.pop(key))
+        return entry
+
+    def _unspill_blocks(self, client: str, state: _ReverseClient, moved: list) -> None:
+        for each in moved:
+            self.blocks.pop((client, str(each[0])))
+        state.blocks = {each[0]: each for each in moved}
+
+    @staticmethod
+    def _count(state: _ReverseClient, kind: str, address, entry: list | None) -> None:
+        state.n_names += 1
+        if kind == "zone":
+            state.zone_names += 1
+            return
+        if kind == "name":
+            return
+        state.addresses += 1
+        if is_internal(address):
+            state.internal += 1
+        span = state.vspan.get(address.version)
+        if span is None:
+            state.vspan[address.version] = [address, address]
+        else:
+            span[0], span[1] = min(span[0], address), max(span[1], address)
+        if entry[1] == 0:
+            state.n_blocks += 1
+        entry[1] += 1
+        entry[2] = address if entry[2] is None else min(entry[2], address)
+        entry[3] = address if entry[3] is None else max(entry[3], address)
+        state.densest = max(state.densest, entry[1])
+
+    def _ranked_on_disk(self, wanted: set[str]) -> dict[str, list]:
+        """The five densest blocks of each wanted client whose blocks are on the store, read a client at a time."""
+        ranked: dict[str, list] = {}
+        for (client, _block), entry in self.blocks.grouped():
+            if client not in wanted or not entry[1]:
+                continue
+            top = ranked.setdefault(client, [])
+            insort(top, entry, key=_block_rank)
+            del top[5:]
+        return ranked
 
     def finalize(self):
         out = []
-        for client in sorted(self.names):
-            names = self.names[client]
-            blocks = self.blocks.get(client, {})
-            ranked = sorted(blocks.items(), key=lambda item: (-len(item[1]), item[0].version, item[0]))
-            densest = len(ranked[0][1]) if ranked else 0
-            if densest < self.DENSE_BLOCK and len(names) < self.MIN_DISTINCT:
+        candidates = sorted(self.clients.keys(candidates=True))
+        spilled = {client for client in candidates if self.clients.peek(client).blocks is None}
+        on_disk = self._ranked_on_disk(spilled) if spilled else {}
+        for client in candidates:
+            state = self.clients.peek(client)
+            if state.blocks is not None:
+                ranked = sorted((e for e in state.blocks.values() if e[1]), key=_block_rank)[:5]
+            else:
+                ranked = on_disk.get(client, [])
+            densest = state.densest
+            if densest < self.DENSE_BLOCK and state.n_names < self.MIN_DISTINCT:
                 continue
-            addresses = sum(len(a) for a in blocks.values())
-            capped = " at least" if len(names) >= NAME_CAP else ""
-            claim = (f"{client} sent {self.queries[client]} DNS question record(s) for{capped} {len(names)} distinct "
-                     f"reverse-lookup name(s) ({self.spans[client].text()}; question types: "
-                     f"{_tally(self.types[client])}). {addresses} of the names stand for single addresses in "
-                     f"{len(blocks)} block(s)")
-            if self.zone_names.get(client):
-                claim += f"; {self.zone_names[client]} name a reverse zone rather than one address"
-            shown = []
-            for block, members in ranked[:5]:
-                low, high = min(members), max(members)
-                shown.append(f"{block} ({len(members)} address(es), {low} – {high})")
+            addresses = state.addresses
+            claim = (f"{client} sent {state.queries} DNS question record(s) for {state.n_names} distinct "
+                     f"reverse-lookup name(s) ({state.span.text()}; question types: "
+                     f"{_tally(Counter(state.types))}). {addresses} of the names stand for single addresses in "
+                     f"{state.n_blocks} block(s)")
+            if state.zone_names:
+                claim += f"; {state.zone_names} name a reverse zone rather than one address"
+            shown = [f"{block} ({count} address(es), {low} – {high})" for block, count, low, high in ranked]
             claim += (f". Densest: {'; '.join(shown)}." if shown else ".")
             for version in (4, 6):
-                members = [a for block, found in blocks.items() if block.version == version for a in found]
-                if len(blocks) > 1 and members:
-                    claim += f" IPv{version} addresses span {min(members)} – {max(members)}."
-            internal = sum(1 for members in blocks.values() for a in members if is_internal(a))
-            if blocks:
-                claim += f" {internal} of the {addresses} addresses are in internal ranges."
+                span = state.vspan.get(version)
+                if state.n_blocks > 1 and span:
+                    claim += f" IPv{version} addresses span {span[0]} – {span[1]}."
+            if state.n_blocks:
+                claim += f" {state.internal} of the {addresses} addresses are in internal ranges."
             if densest >= self.DENSE_BLOCK:
                 claim += (" Questions for the names of many addresses packed into one block are the shape of a "
                           "reverse-DNS sweep (host discovery by name).")
@@ -661,9 +942,9 @@ class DnsReverseLookupSweep(_DnsAggregate):
                 claim += (f" No block holds {self.DENSE_BLOCK} or more of them: lookups spread across many blocks "
                           f"are the shape of a server resolving its peers' names as well as of a sparse sweep.")
             claim += " The question records do not show whether names were returned."
-            dense_store = self.block_examples.get(client, {}).get(ranked[0][0]) if ranked else None
+            dense_store = state.block_examples.get(ranked[0][0]) if ranked else None
             dense = self._events(dense_store.ids()) if dense_store else []
-            evs = _fill(dense, self._cite((client,)))
+            evs = _fill(dense, self._events(state.examples.ids()))
             e0 = evs[0]
             notes = ["ATT&CK context: " + ("T1018 (the client is in an internal range)" if _internal(client)
                                            else "T1590.002 (the client is outside the internal ranges)")]
@@ -674,13 +955,50 @@ class DnsReverseLookupSweep(_DnsAggregate):
         return out
 
 
+def _block_of(address):
+    """The IPv4 /24 or IPv6 /64 holding an address."""
+    return ipaddress.ip_network(f"{address}/{24 if address.version == 4 else 64}", strict=False)
+
+
 # ---------------------------------------------------------------------------------------- NXDOMAIN burst
 RESOLVER_PHRASE = "it acts as a DNS server for other addresses (a resolver or forwarder)"
 
 
+class _Address:
+    """Everything the NXDOMAIN rule holds for one address: the answers it was sent as a client, and the answers it
+    sent others as an answering server."""
+
+    __slots__ = ("buckets", "busiest", "codes", "counts", "decided", "late", "names_capped", "nx_names", "nx_sent",
+                 "nx_sent_total", "nx_unnamed", "sent_capped", "served", "servers", "span", "time_capped", "times")
+
+    def __init__(self):
+        self.codes: Counter = Counter()
+        # NXDOMAIN times held: every time in an unsettled bucket or a bucket that can still hold the peak
+        self.times: list[int] = []
+        self.nx_names: set[str] = set()
+        self.nx_unnamed = 0
+        self.servers: Counter = Counter()
+        self.span = _Span()
+        # aligned ten-minute bucket -> its earliest NXDOMAIN records (buckets held, as for `times`)
+        self.buckets: dict[int, _Examples] = {}
+        # bucket -> NXDOMAIN answers in it (buckets held), and the busiest bucket so far
+        self.counts: dict[int, int] = {}
+        self.busiest = 0
+        self.decided: int | None = None             # buckets up to this one are decided (held or released)
+        self.late = False                           # answers were read after their interval was decided
+        self.time_capped = False
+        self.names_capped = False
+        # as an answering server: client -> answer records with a recorded rcode it sent that client, and
+        # bucket -> client -> times of the NXDOMAIN answers it sent (buckets that can hold its own peak; capped)
+        self.served: Counter = Counter()
+        self.nx_sent: dict[int, dict[str, list[int]]] = {}
+        self.nx_sent_total = 0
+        self.sent_capped = False
+
+
 class DnsNxdomainBurst(_DnsAggregate):
     id = "net.dns_nxdomain_burst"
-    version = "3"
+    version = "4"
     title = "Many NXDOMAIN answers to one client within ten minutes"
     required_fields = ()
     severity, lane = "high", "lead"
@@ -695,9 +1013,16 @@ class DnsNxdomainBurst(_DnsAggregate):
                    "whether the client is a resolver forwarding for others")
     WINDOW = timedelta(minutes=10)
     MIN_BURST = 50
-    TIME_CAP = 2_000_000        # NXDOMAIN times kept per client; a peak above it is a lower bound
-    SENT_CAP = 2_000_000        # NXDOMAIN answer times kept per answering server, over all its clients
+    TIME_CAP = 2_000_000        # NXDOMAIN times held per client; a peak above it is a lower bound
+    SENT_CAP = 2_000_000        # NXDOMAIN answer times held per answering server, over all its clients
     CLIENTS_LISTED = 12
+    # How far behind the newest answer read an answer may still arrive. The sweep reads each target's partitions in
+    # time order and a DNS record's time is its packet time, so within one target a record arrives at most a
+    # sensor-to-index delay (seconds to minutes) behind newer ones; an hour is far above that. A ten-minute interval
+    # is settled once the newest record read is this much past the end of the next interval. Records that still
+    # arrive into a settled interval (another sensor target read later) are counted and stated (`late`).
+    SETTLE = timedelta(hours=1)
+    HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
     card: ClassVar[dict] = {
         "behavior": "one client received many NXDOMAIN (name does not exist) answers within a ten-minute "
                     "interval, the shape of algorithmically generated domain lookups",
@@ -724,27 +1049,35 @@ class DnsNxdomainBurst(_DnsAggregate):
                       "suffixes, browser probes) come in handfuls per minute; DGA families try hundreds of "
                       "candidates per cycle",
         "citations": "records from the peak ten-minute interval. Each client keeps the earliest 20 NXDOMAIN "
-                     "records of every aligned ten-minute bucket. The peak interval overlaps two buckets and is the "
-                     "earliest interval with its count, so its first bucket's records before it are fewer than its "
-                     "records in the second bucket (an interval starting at the first bucket's earliest record would "
-                     "otherwise hold at least as many); the two stores therefore hold 20 records inside it",
+                     "records of every aligned ten-minute bucket that can still hold the peak. The peak interval "
+                     "overlaps two buckets and is the earliest interval with its count, so its first bucket's records "
+                     "before it are fewer than its records in the second bucket (an interval starting at the first "
+                     "bucket's earliest record would otherwise hold at least as many); the two stores therefore hold "
+                     "20 records inside it",
+        "state": "one record per address, as a client and as an answering server, kept for the whole hunt window: "
+                 "the most recently used in memory, the rest on the rule's disk spill. Exact times and citation "
+                 "candidates are kept only for the buckets of the last hour and for buckets in a pair whose count "
+                 "reaches max(50, the client's busiest bucket), which is the only place the peak can be; a settled "
+                 "bucket below that is dropped from a record in memory, and every peak is decided at the end of the "
+                 "hunt",
     }
 
     def __init__(self):
         super().__init__()
-        self.codes: dict[str, Counter] = defaultdict(Counter)
-        self.times: dict[str, list[int]] = defaultdict(list)
-        self.nx_names: dict[str, set[str]] = defaultdict(set)
-        self.nx_unnamed: dict[str, int] = defaultdict(int)
-        self.servers: dict[str, Counter] = defaultdict(Counter)
-        self.spans: dict[str, _Span] = defaultdict(_Span)
-        # client -> aligned ten-minute bucket -> its earliest NXDOMAIN records
-        self.buckets: dict[str, dict[int, _Examples]] = defaultdict(dict)
-        # answering server -> client -> answer records with a recorded rcode it sent that client
-        self.served: dict[str, Counter] = defaultdict(Counter)
-        # answering server -> client -> times of the NXDOMAIN answers it sent that client (capped per server)
-        self.nx_sent: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
-        self.nx_sent_total: Counter = Counter()
+        self.addresses = KeyedStore(self, "dns_nx_addresses", self.HOT, candidate=self.reportable)
+        self.watermark: int | None = None      # newest answer time read (microseconds)
+        self._pruned_at: int | None = None
+
+    def reportable(self, state: _Address) -> bool:
+        """Whether some ten-minute interval of the address's held answers can reach the threshold: an interval lies
+        within two adjacent buckets, so no pair reaching it means no burst."""
+        counts = state.counts
+        return any(n + counts.get(b + 1, 0) >= self.MIN_BURST for b, n in counts.items())
+
+    @property
+    def times(self) -> dict[str, list[int]]:
+        """Every client's held NXDOMAIN times (reads the whole store: for tests and small hunts)."""
+        return {address: state.times for address, state in self.addresses.items() if state.times}
 
     def retained_events(self) -> list[TypedEvent]:
         return []
@@ -768,39 +1101,103 @@ class DnsNxdomainBurst(_DnsAggregate):
                 self.missing_required += 1
                 continue
             self.evaluated += 1
-            self.codes[client][code] += 1
-            if server and server != client:
-                self.served[server][client] += 1
+            state = self.addresses.setdefault(client, _Address)
+            sender = self.addresses.setdefault(server, _Address) if server and server != client else None
+            if state is None or (server and server != client and sender is None):
+                self._disk_full()
+                continue
+            state.codes[code] += 1
+            if sender is not None:
+                sender.served[client] += 1
             if code != "NXDOMAIN":
                 continue
             micros = _micros(event.ts)
-            if server and server != client and self.nx_sent_total[server] < self.SENT_CAP:
-                self.nx_sent_total[server] += 1
-                self.nx_sent[server][client].append(micros)
-            timed = len(self.times[client]) < self.TIME_CAP
+            bucket = micros // (self.WINDOW // _US)
+            self.watermark = micros if self.watermark is None else max(self.watermark, micros)
+            if sender is not None:
+                if sender.nx_sent_total < self.SENT_CAP:
+                    sender.nx_sent_total += 1
+                    sender.nx_sent.setdefault(bucket, {}).setdefault(client, []).append(micros)
+                else:
+                    sender.sent_capped = True
+            if state.decided is not None and bucket <= state.decided + 1:
+                # its interval (or the neighbour a decided interval was judged with) was already decided from the
+                # answers read before: the finding says so
+                state.late = True
+                self.note_limit("late", "NXDOMAIN answers arrived for ten-minute intervals already released (a "
+                                        "target read after another one); those clients' peaks are computed from "
+                                        "the answers still held and may be lower bounds")
+            counts = state.counts
+            counts[bucket] = counts.get(bucket, 0) + 1
+            state.busiest = max(state.busiest, counts[bucket])
+            timed = len(state.times) < self.TIME_CAP
             if timed:
-                self.times[client].append(micros)
+                state.times.append(micros)
+            else:
+                state.time_capped = True
+                self.note_limit("times", f"a client's NXDOMAIN times reached {self.TIME_CAP:,} held at once; its "
+                                         f"peak is a lower bound")
             names = question_names(event)
             if names is None:
-                self.nx_unnamed[client] += 1
+                state.nx_unnamed += 1
             else:
+                held = state.nx_names
                 for name in names:
-                    if len(self.nx_names[client]) < NAME_CAP:
-                        self.nx_names[client].add(name)
+                    if name in held:
+                        continue
+                    if len(held) < NAME_CAP:
+                        held.add(name)
+                    else:
+                        state.names_capped = True   # the per-client cap: the count is stated as a lower bound
             if server:
-                self.servers[client][server] += 1
-            self.spans[client].add(event.ts)
+                state.servers[server] += 1
+            state.span.add(event.ts)
             if timed:
-                # the peak is found among the kept times only, so only their buckets can be cited
-                bucket = micros // (self.WINDOW // _US)
-                self._remember(self.buckets[client].setdefault(bucket, _Examples()), event)
+                # the peak is found among the held times only, so only their buckets can be cited
+                self._remember(state.buckets.setdefault(bucket, _Examples()), event)
+        self._release()
+        self._trim()
         return []
 
-    def _peak_records(self, client: str, start: int) -> list[TypedEvent]:
+    def _release(self) -> None:
+        """Drop, from the address records in memory, every settled bucket that cannot hold the client's peak. The
+        peak is at least the busiest bucket (the interval from that bucket's first answer holds all of it) and lies
+        within two adjacent buckets, so a bucket is needed only while one of its pairs reaches max(MIN_BURST,
+        busiest): below that, no interval through it can reach the peak or the publication threshold. A bucket is
+        decided once the newest answer read is SETTLE past the end of its right neighbour, when both its pairs are
+        final. Records on disk keep their buckets until they are read back; finalize decides every peak from the
+        times each record holds, so the release only saves memory."""
+        window = self.WINDOW // _US
+        if self.watermark is None:
+            return
+        settled = (self.watermark - self.SETTLE // _US) // window          # buckets below this one are complete
+        if self._pruned_at is not None and settled <= self._pruned_at:
+            return
+        self._pruned_at = settled
+        upto = settled - 2                                                  # their right neighbour is complete too
+        for state in self.addresses.hot.values():
+            counts = state.counts
+            if counts:
+                floor = max(self.MIN_BURST, state.busiest)
+                released = {b for b in counts if b <= upto
+                            and counts.get(b - 1, 0) + counts[b] < floor and counts[b] + counts.get(b + 1, 0) < floor}
+                state.decided = upto if state.decided is None else max(state.decided, upto)
+                if released:
+                    for b in released:
+                        del counts[b]
+                        state.buckets.pop(b, None)
+                    state.times = [t for t in state.times if t // window not in released]
+            # An answering server's sent times are needed only where its own peak as a client can be: a held bucket,
+            # or the bucket after one (a peak interval starting in a bucket runs into the next).
+            sent = state.nx_sent
+            for b in [b for b in sent if b <= upto and b not in counts and b - 1 not in counts]:
+                state.nx_sent_total -= sum(len(times) for times in sent.pop(b).values())
+
+    def _peak_records(self, state: _Address, start: int) -> list[TypedEvent]:
         window = self.WINDOW // _US
         candidates: dict[str, datetime] = {}
         for bucket in (start // window, start // window + 1):
-            store = self.buckets[client].get(bucket)
+            store = state.buckets.get(bucket)
             for event_id, ts in store.refs() if store else ():
                 if start <= _micros(ts) < start + window:
                     candidates[event_id] = ts
@@ -821,20 +1218,21 @@ class DnsNxdomainBurst(_DnsAggregate):
                 best, start = i - j + 1, times[j]
         return best, start
 
-    def _as_server(self, address: str, start: int, bursts: set[str]) -> str:
+    def _as_server(self, address: str, state: _Address, start: int, bursts: dict) -> str:
         """Wording for a burst client that itself answered DNS for other addresses in the same data: it acts as a
         resolver or forwarder, so NXDOMAIN answers it received can be its upstream lookups for the clients it
         answered. Names those clients (the original askers) with the NXDOMAIN answers it sent each in the peak
         interval; '' when the address answered no other address."""
-        served = self.served.get(address)
+        served = state.served
         if not served:
             return ""
         window = self.WINDOW // _US
         in_peak = Counter()
-        for asker, times in self.nx_sent.get(address, {}).items():
-            n = sum(1 for t in times if start <= t < start + window)
-            if n:
-                in_peak[asker] = n
+        for bucket in (start // window, start // window + 1):         # the peak interval spans these two only
+            for asker, times in state.nx_sent.get(bucket, {}).items():
+                n = sum(1 for t in times if start <= t < start + window)
+                if n:
+                    in_peak[asker] += n
         text = (f" {address} also appears as the answering server: it sent {sum(served.values())} DNS answer "
                 f"record(s) to {len(served)} other address(es) in the same data, so {RESOLVER_PHRASE}; NXDOMAIN "
                 f"answers it received can be its upstream lookups on those clients' behalf.")
@@ -845,50 +1243,58 @@ class DnsNxdomainBurst(_DnsAggregate):
             more = f" and {len(ordered) - self.CLIENTS_LISTED} more" if len(ordered) > self.CLIENTS_LISTED else ""
             text += (f" In the peak interval it sent {sum(in_peak.values())} NXDOMAIN answer(s) to {len(in_peak)} "
                      f"client(s) ({listed}{more}).")
-            if not bursts & set(in_peak):
+            if not bursts.keys() & set(in_peak):
                 text += " No client it answered reached the burst threshold on its own."
         else:
             text += " It sent no NXDOMAIN answer in the peak interval."
-        if self.nx_sent_total[address] >= self.SENT_CAP:
+        if state.sent_capped:
             text += " (Its sent-answer times are capped: the per-client counts are lower bounds.)"
         return text
 
     def finalize(self):
         out = []
-        peaks = {client: self._peak(times) for client, times in self.times.items()}
-        bursts = {client for client, (peak, _start) in peaks.items() if peak >= self.MIN_BURST}
-        for client in sorted(self.times):
-            times = self.times[client]
-            peak, start = peaks[client]
-            if peak < self.MIN_BURST:
-                continue
-            codes = self.codes[client]
+        bursts: dict[str, tuple[int, int]] = {}         # every bursting client's (peak, start); read one at a time
+        for address in self.addresses.keys(candidates=True):
+            state = self.addresses.peek(address)
+            if state.times:
+                peak, start = self._peak(list(state.times))
+                if peak >= self.MIN_BURST:
+                    bursts[address] = (peak, start)
+        for client in sorted(bursts):
+            state = self.addresses.peek(client)
+            peak, start = bursts[client]
+            codes = state.codes
             nx, answered = codes["NXDOMAIN"], sum(codes.values())
-            names = self.nx_names.get(client, set())
-            capped = " (time list capped: the peak is a lower bound)" if len(times) >= self.TIME_CAP else ""
+            names = state.nx_names
+            capped = " (time list capped: the peak is a lower bound)" if state.time_capped else ""
+            if state.late:
+                capped += (" (some of these answers were read after their ten-minute interval had been released, "
+                           "from a target read later, so the peak and its citations come from the answers still "
+                           "held and the peak may be a lower bound)")
             claim = (f"{client} was sent {nx} NXDOMAIN answer(s) ({nx / answered:.0%} of the {answered} answer "
                      f"record(s) to it with a recorded rcode; rcodes: {_tally(codes)}) between "
-                     f"{self.spans[client].text()}; at most {peak} of them fell within one ten-minute interval, "
+                     f"{state.span.text()}; at most {peak} of them fell within one ten-minute interval, "
                      f"starting {_iso_micros(start)}{capped}.")
             if names:
                 domains = Counter(registered_domain(n) if n != "." else "." for n in names)
                 sample = sorted(names, key=lambda n: (-len(n), n))[:5]
-                claim += (f" The NXDOMAIN answers name {len(names)} distinct name(s) under {len(domains)} registered "
-                          f"domain(s) (last two labels, or three under a listed country suffix), e.g. "
+                at_least = "at least " if state.names_capped else ""
+                claim += (f" The NXDOMAIN answers name {at_least}{len(names)} distinct name(s) under {len(domains)} "
+                          f"registered domain(s) (last two labels, or three under a listed country suffix), e.g. "
                           f"{', '.join(_short(n) for n in sample)}.")
                 if len(names) < 10:
                     claim += " Few distinct names repeated many times is the shape of software retrying a name "
                     claim += "that does not exist (or a dead rendezvous domain), not of generated domains."
-            if self.nx_unnamed.get(client):
-                claim += f" {self.nx_unnamed[client]} NXDOMAIN answer record(s) carry no question name."
-            servers = self.servers.get(client)
+            if state.nx_unnamed:
+                claim += f" {state.nx_unnamed} NXDOMAIN answer record(s) carry no question name."
+            servers = state.servers
             if servers:
                 claim += f" Answering server(s): {_tally(Counter(dict(servers.most_common(5))))}."
-            claim += self._as_server(client, start, bursts)
+            claim += self._as_server(client, state, start, bursts)
             claim += (" A burst of NXDOMAIN answers is the shape of algorithmically generated domain lookups and "
                       "also of search-domain suffixing, stale software and blocklist lookups.")
             claim += " The cited records are from the peak interval."
-            evs = self._peak_records(client, start)
+            evs = self._peak_records(state, start)
             e0 = evs[0]
             predicate = [pf(e, n) for e in evs[:2] for n in ("dns.response_code", "destination.ip", "source.ip",
                                                              "dns.type") if e.has(n)]
@@ -898,9 +1304,33 @@ class DnsNxdomainBurst(_DnsAggregate):
 
 
 # ---------------------------------------------------------------------------------------- tunnel shape
+class _TunnelKey:
+    """Everything the tunnel-shape rule holds for one (client, registered domain): counters over every distinct
+    subdomain, and the distinct subdomains themselves while few (the rule's keyed store holds them beyond that)."""
+
+    __slots__ = ("entropy", "examples", "inline", "max_label", "n_long", "queries", "span", "strong_examples",
+                 "strong_long", "top_any", "top_long", "types", "unique", "untyped")
+
+    def __init__(self):
+        self.queries = 0
+        self.untyped = 0
+        self.span = _Span()
+        self.examples = _Examples()
+        self.inline: set[tuple] | None = set()       # (subdomain,) seen, while few; None once they are on disk
+        self.unique = 0                              # distinct subdomains
+        self.n_long = 0                              # of them, long
+        self.entropy = _FloatSum()                   # character entropy summed over the distinct long subdomains
+        self.top_any: list[str] = []                 # the three longest distinct subdomains
+        self.top_long: list[str] = []                # the three longest distinct long subdomains
+        self.max_label = 0
+        self.types: dict[str, int] = {}              # question types of questions that carry a subdomain
+        self.strong_long = 0                         # strong-type questions for long names
+        self.strong_examples: _Examples | None = None
+
+
 class DnsTunnelShape(_DnsAggregate):
     id = "net.dns_tunnel_shape"
-    version = "2"
+    version = "4"
     title = "Query names under one registered domain from one client with a DNS-tunnel shape"
     required_fields = ()
     severity, lane = "high", "lead"
@@ -967,19 +1397,26 @@ class DnsTunnelShape(_DnsAggregate):
         "limitations": "the registered domain is the last two labels (three under a short list of country "
                        "second-level suffixes), so customers of one shared hosting suffix group together; names "
                        "under .local and .arpa are not evaluated (no outside endpoint can answer them)",
+        "state": "one record per (client, registered domain), counted over the whole hunt window however long its "
+                 "pauses (a beacon that asks once a day is still one group): the most recently used records in "
+                 "memory, the rest on the rule's disk spill, read back when the pair is asked again. Every "
+                 "indicator is counted over every distinct subdomain of the pair, never a capped sample: a pair's "
+                 "distinct subdomains are a set in its record while few and on the rule's keyed store beyond that, "
+                 "so a tunnel that starts after any number of ordinary names under the same domain still counts",
     }
+    HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
+    ASKERS_HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
+    NAMES_INLINE = 256          # distinct subdomains a pair keeps in its own record; beyond, they are on `names`
 
     def __init__(self):
         super().__init__()
-        self.queries: dict[tuple, int] = defaultdict(int)
-        self.subdomains: dict[tuple, set[str]] = defaultdict(set)
-        self.long: dict[tuple, dict[str, float]] = defaultdict(dict)
-        self.max_label: dict[tuple, int] = defaultdict(int)
-        self.types: dict[tuple, Counter] = defaultdict(Counter)        # questions that carry a subdomain
-        self.strong_long: dict[tuple, int] = defaultdict(int)          # strong-type questions for long names
-        self.strong_examples: dict[tuple, _Examples] = defaultdict(lambda: _Examples(self.STRONG_CITE))
-        self.spans: dict[tuple, _Span] = defaultdict(_Span)
-        self.untyped: dict[tuple, int] = defaultdict(int)
+        self.pairs = KeyedStore(self, "dns_tunnel_pairs", self.HOT, candidate=self.reportable)
+        self.askers = KeyedStore(self, "dns_tunnel_askers", self.ASKERS_HOT)     # domain -> clients that asked
+        # (client, domain, subdomain) -> 1, for pairs beyond NAMES_INLINE distinct subdomains
+        self.names = KeyedStore(self, "dns_tunnel_names", self.HOT)
+
+    def reportable(self, record: _TunnelKey) -> bool:
+        return record.unique >= self.MIN_UNIQUE
 
     def retained_events(self) -> list[TypedEvent]:
         return []
@@ -1000,47 +1437,75 @@ class DnsTunnelShape(_DnsAggregate):
             kind = qtype(event.get("dns.question.type"))
             if kind is None:
                 self.missing_required += 1          # the type mix cannot be measured for this record
-            for name in names:
-                self._name(event, client, name, kind)
+            taken = [self._name(event, client, name, kind) for name in names]     # every name, no short circuit
+            if any(t is False for t in taken):
+                self._disk_full()                   # a name of the record was refused: never a clean evaluation
+            elif any(t is None for t in taken):
+                self._names_full()
+        self._trim()
         return []
 
-    def _name(self, event: TypedEvent, client: str, name: str, kind: str | None) -> None:
+    def _record(self, client: str, domain: str) -> _TunnelKey | None:
+        key = (client, domain)
+        record = self.pairs.get(key)
+        if record is not None:
+            return record
+        record = _TunnelKey()
+        if not self.pairs.put(key, record):
+            return None
+        if not self.askers.put(domain, self.askers.get(domain, 0) + 1):
+            self.note_limit("askers", "the disk budget of the per-domain client counts is spent; a later domain's "
+                                      "client count is a lower bound")
+        return record
+
+    def _name(self, event: TypedEvent, client: str, name: str, kind: str | None) -> bool | None:
+        """Count one question name: True when counted, False when the group budget refused a new pair, None when
+        the names budget refused a new distinct name (nothing of the name is counted then)."""
         labels = name.split(".")
         if labels[-1] in self.NOT_DELEGATED or len(labels) < 2:
-            return
+            return True
         domain = registered_domain(name)
-        key = (client, domain)
-        self.queries[key] += 1
-        if kind is None:
-            self.untyped[key] += 1
-        self.spans[key].add(event.ts)
-        self._remember(self.examples[key], event)
+        record = self._record(client, domain)
+        if record is None:
+            return False
         sub = subdomain_part(name, domain)
+        new = self._first_time(self.names, record, (client, domain), (sub,), self.NAMES_INLINE) if sub else False
+        if new is None:
+            return None                             # a new distinct name the disk budget cannot hold
+        record.queries += 1
+        if kind is None:
+            record.untyped += 1
+        record.span.add(event.ts)
+        self._remember(record.examples, event)
         if not sub:
-            return
+            return True
         if kind is not None:
-            self.types[key][kind] += 1
+            record.types[kind] = record.types.get(kind, 0) + 1
         long_name = self.is_long(sub)
         if long_name and kind is not None and self.strong(kind):
-            self.strong_long[key] += 1
-            self._remember(self.strong_examples[key], event)
-        subs = self.subdomains[key]
-        if sub in subs or len(subs) >= NAME_CAP:
-            return
-        subs.add(sub)
-        self.max_label[key] = max(self.max_label[key], max(len(label) for label in sub.split(".")))
+            record.strong_long += 1
+            if record.strong_examples is None:
+                record.strong_examples = _Examples(self.STRONG_CITE)
+            self._remember(record.strong_examples, event)
+        if not new:
+            return True
+        record.unique += 1
+        record.max_label = max(record.max_label, max(len(label) for label in sub.split(".")))
+        _top(record.top_any, sub)
         if long_name:
-            self.long[key][sub] = entropy(sub.replace(".", ""))
+            record.n_long += 1
+            record.entropy.add(entropy(sub.replace(".", "")))
+            _top(record.top_long, sub)
+        return True
 
-    def _assess(self, key: tuple) -> dict | None:
+    def _assess(self, record: _TunnelKey) -> dict | None:
         """The shape of one (client, registered domain) group, or None when it is not reported."""
-        unique = len(self.subdomains[key])
+        unique = record.unique
         if unique < self.MIN_UNIQUE:
             return None
-        long_names = self.long.get(key, {})
-        n_long = len(long_names)
-        mean_entropy = sum(long_names.values()) / n_long if n_long else 0.0
-        typed = self.types.get(key, Counter())
+        n_long = record.n_long
+        mean_entropy = record.entropy.total() / n_long if n_long else 0.0
+        typed = Counter(record.types)
         n_typed = sum(typed.values())
         unusual = sum(n for kind, n in typed.items() if self.unusual(kind))
         indicators = []
@@ -1054,54 +1519,55 @@ class DnsTunnelShape(_DnsAggregate):
             indicators.append("volume")
         if len(indicators) < 2:
             return None
-        strong = self.strong_long.get(key, 0)
+        strong = record.strong_long
         lane = "high" if len(indicators) == 4 and strong >= self.MIN_TYPED else self.lane
         return {"unique": unique, "n_long": n_long, "entropy": mean_entropy, "typed": typed, "n_typed": n_typed,
                 "unusual": unusual, "strong": strong, "indicators": indicators, "lane": lane}
 
     def finalize(self):
+        # the shape of every pair that can be reported, read one record at a time; records are read again to word
+        # the findings, so only the small shape summaries are held together
         shaped: dict[str, dict[str, dict]] = defaultdict(dict)
-        for key in sorted(self.subdomains):
-            found = self._assess(key)
+        for key in sorted(self.pairs.keys(candidates=True)):
+            found = self._assess(self.pairs.peek(key))
             if found is not None:
                 shaped[key[1]][key[0]] = found
-        askers: dict[str, int] = Counter(domain for _client, domain in self.queries)
         out = []
         for domain in sorted(shaped):
             members = shaped[domain]
             if len(members) >= self.SHARED_CLIENTS:
-                out.append(self._shared(domain, members, askers[domain]))
+                out.append(self._shared(domain, members, self.askers.peek(domain, 0)))
             else:
                 out += [self._single(client, domain, found) for client, found in sorted(members.items())]
         return out
 
-    def _cited(self, key: tuple, found: dict) -> list[TypedEvent]:
-        strong = self._events(self.strong_examples[key].ids()) if found["lane"] == "high" else []
-        return _fill(strong, self._cite(key))
+    def _cited(self, record: _TunnelKey, found: dict) -> list[TypedEvent]:
+        strong_store = record.strong_examples
+        strong = self._events(strong_store.ids()) if found["lane"] == "high" and strong_store else []
+        return _fill(strong, self._events(record.examples.ids()))
 
     def _single(self, client: str, domain: str, found: dict) -> Match:
-        key = (client, domain)
+        record = self.pairs.peek((client, domain))
         unique, typed = found["unique"], found["typed"]
-        capped = "at least " if unique >= NAME_CAP else ""
-        claim = (f"{client} sent {self.queries[key]} DNS question(s) for {capped}{unique} distinct subdomain(s) "
-                 f"under '{domain}' ({self.spans[key].text()}). {found['n_long']} of the distinct names have a label "
+        claim = (f"{client} sent {record.queries} DNS question(s) for {unique} distinct subdomain(s) "
+                 f"under '{domain}' ({record.span.text()}). {found['n_long']} of the distinct names have a label "
                  f"of {self.LONG_LABEL}+ characters or {self.LONG_SUBDOMAIN}+ characters left of the domain "
-                 f"(longest label {self.max_label[key]}); mean character entropy of those names "
+                 f"(longest label {record.max_label}); mean character entropy of those names "
                  f"{found['entropy']:.2f} bits/char; {found['unusual']} of {found['n_typed']} typed question(s) for "
                  f"subdomains are TXT, NULL, CNAME, MX or private-use types (question types: "
                  f"{_tally(typed) if typed else 'none recorded'}).")
-        if self.untyped.get(key):
-            claim += f" {self.untyped[key]} question(s) carry no question type."
+        if record.untyped:
+            claim += f" {record.untyped} question(s) carry no question type."
         claim += (f" Indicators met: {', '.join(found['indicators'])}. This is the query shape of data encoded into "
                   f"names (DNS tunnelling or exfiltration); reputation and anti-virus lookups that encode hashes look "
                   f"the same, so it is a deviation, not proof. The registered domain is the last two labels (three "
                   f"under a listed country suffix).")
-        sample = sorted(self.long.get(key) or self.subdomains[key], key=lambda s: (-len(s), s))[:3]
+        sample = record.top_long or record.top_any
         claim += f" Examples: {', '.join(_short(s + '.' + domain) for s in sample)}."
         if found["lane"] == "high":
             claim += (f" {found['strong']} questions for long names are NULL, CNAME, MX or private-use types, which "
                       f"clients almost never ask with long unique names; examples of them are cited.")
-        evs = self._cited(key, found)
+        evs = self._cited(record, found)
         predicate = [pf(e, n) for e in evs[:2] for n in ("dns.question.name", "dns.question.type", "source.ip")
                      if e.has(n)]
         return Match(self.id, claim, self.claim_type, evs, predicate, evs[0].ts, self.severity, found["lane"],
@@ -1115,9 +1581,11 @@ class DnsTunnelShape(_DnsAggregate):
         high = [client for client in clients if members[client]["lane"] == "high"]
         listed = ", ".join(f"{c} ({members[c]['unique']} names)" for c in clients[:10])
         more = f" and {len(clients) - 10} more (all listed in the notes)" if len(clients) > 10 else ""
-        first = min(self.spans[(c, domain)].first for c in clients)
-        last = max(self.spans[(c, domain)].last for c in clients)
-        claim = (f"{len(clients)} of the {askers} clients that queried '{domain}' sent questions with a DNS-tunnel "
+        spans = [self.pairs.peek((c, domain)).span for c in clients]
+        first, last = min(span.first for span in spans), max(span.last for span in spans)
+        askers = max(askers, len(clients))
+        of_askers = f"at least {askers}" if "askers" in self.limits else str(askers)
+        claim = (f"{len(clients)} of the {of_askers} clients that queried '{domain}' sent questions with a DNS-tunnel "
                  f"shape under it ({first.isoformat()} – {last.isoformat()}): {listed}{more}. The same encoded-name "
                  f"shape from many hosts to one domain is typical of deployed software that encodes hashes or "
                  f"identifiers into names (anti-virus, reputation, telemetry); a tunnel usually runs from one or two "
@@ -1129,7 +1597,7 @@ class DnsTunnelShape(_DnsAggregate):
         cited: dict[str, TypedEvent] = {}
         for client in clients:
             found = members[client]
-            per_client = self._cited((client, domain), found)
+            per_client = self._cited(self.pairs.peek((client, domain)), found)
             take = per_client if found["lane"] == "high" else per_client[:1]
             cited.update((e.id, e) for e in take)
         evs = sorted(cited.values(), key=lambda e: (e.ts, e.id))

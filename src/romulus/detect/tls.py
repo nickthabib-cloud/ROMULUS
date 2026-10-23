@@ -24,11 +24,11 @@ What the evidence shows, and what it does not:
 from __future__ import annotations
 
 import json
-from collections import defaultdict
 from datetime import datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
 from romulus.detect.correlation import canon_ip, external
 from romulus.evidence.typed import TypedEvent
 
@@ -97,12 +97,38 @@ class _CertificateRule(Playbook):
     families = ("tls_session", "net_session")
     required_fields = ("source.ip", "destination.ip")
     severity, lane = "medium", "lead"
+    # Citations are held as ids once the sweep has staged them. Per group the distinct sources and connections are
+    # counted up to a cap (a group to a popular server can reach millions of connections over weeks); above it the
+    # claim says "at least". Groups exist only for matching certificates (about 3 KB each) and are held in a keyed
+    # store: HOT in memory, the rest on disk; only its disk budget refuses a record of a new group.
+    staged = True
+    SOURCES_PER_GROUP = 10_000
+    CONNS_PER_GROUP = 20_000
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
-        self.groups: dict[tuple, list[TypedEvent]] = defaultdict(list)
-        self.info: dict[tuple, dict] = {}
+        self._seen = RecentIds()        # bounded re-read guard
+        self.groups = KeyedStore(self, "cert_groups", self.HOT)     # key -> {"info": ..., "examples": HeldExamples}
+        self._pending: list[TypedEvent] = []
+        self._fresh: list[HeldExamples] = []
+        self.load = lambda ids: []
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        for store in self._fresh:
+            store.staged()
+        self._fresh = []
+        self.groups.trim()                      # after staging: a trimmed group holds references only
+        return out
+
+    def release_state(self) -> None:
+        self.load = lambda ids: []
+        self.groups.clear()
+        self.close_spill()
+
+    def retained_events(self) -> list[TypedEvent]:
+        return []                               # staged on disk instead
 
     def judge(self, e: TypedEvent, cert: dict) -> list[str] | None:
         """Reasons one candidate server certificate matches: non-empty on a match, empty when it was judged and
@@ -132,43 +158,58 @@ class _CertificateRule(Playbook):
             # A certificate value that was present but unreadable (a name, a bound) can change which certificate
             # is the server's own and how it is judged: positives still stand, but the record is not a negative.
             unknown = any(p == "cert" or p.startswith(("cert[", "tls.")) for p in e.get("parse.malformed") or [])
+            refused = False
             for cert in candidates:
                 reasons = self.judge(e, cert)
                 if reasons is None:
                     unknown = True
                 elif reasons:
-                    self._keep(e, cert, reasons)
-            if unknown:
+                    refused = not self._keep(e, cert, reasons) or refused
+            if refused:
+                self.evaluated -= 1
+                self.refuse("disk", "the certificate groups' disk budget is spent; a record of a new group is not "
+                                    "evaluated")
+            elif unknown:
                 self.evaluated -= 1
                 self.missing_required += 1
         return []
 
-    def _keep(self, e: TypedEvent, cert: dict, reasons: list[str]) -> None:
+    def _keep(self, e: TypedEvent, cert: dict, reasons: list[str]) -> bool:
         key = (_identity(cert), str(e.get("destination.ip")))
-        g = self.info.get(key)
-        if g is not None and _preference(cert) < _preference(g["cert"]):
+        state = self.groups.setdefault(key, lambda: {
+            "info": {"cert": cert, "records": 0, "sources": set(), "ports": set(), "conns": set(), "reasons": set(),
+                     "first": e.ts, "last": e.ts, "capped": False},
+            "examples": HeldExamples(EXAMPLE_LIMIT, earliest=True)})
+        if state is None:
+            return False
+        g = state["info"]
+        if _preference(cert) < _preference(g["cert"]):
             g["cert"] = cert                    # the same certificate from another sensor: keep a fixed choice
-        if g is None:
-            g = self.info[key] = {"cert": cert, "records": 0, "sources": set(), "ports": set(), "conns": set(),
-                                  "reasons": set(), "first": e.ts, "last": e.ts}
         g["records"] += 1
-        g["sources"].add(str(e.get("source.ip")))
+        for name, value, cap in (("sources", str(e.get("source.ip")), self.SOURCES_PER_GROUP),
+                                 ("conns", str(e.get("network.community_id") or e.get("suricata.flow_id") or e.id),
+                                  self.CONNS_PER_GROUP)):
+            if value not in g[name]:
+                if len(g[name]) < cap:
+                    g[name].add(value)
+                elif name == "conns":
+                    g["capped"] = True              # more sources than the cap are already "and others"
+                    self.note_limit("connections", f"a certificate group passed {cap:,} distinct connections held; "
+                                                   f"its connection count is a lower bound")
         g["ports"].add(str(e.get("destination.port")))
-        g["conns"].add(str(e.get("network.community_id") or e.get("suricata.flow_id") or e.id))
         g["reasons"].update(reasons)
         g["first"], g["last"] = min(g["first"], e.ts), max(g["last"], e.ts)
-        group = self.groups[key]
-        if len(group) < EXAMPLE_LIMIT:
-            group.append(e)
-            group.sort(key=lambda event: (event.ts, event.id))
-        elif (e.ts, e.id) < (group[-1].ts, group[-1].id):
-            group[-1] = e                               # keep the earliest records whatever the reading order
-            group.sort(key=lambda event: (event.ts, event.id))
+        group = state["examples"]
+        if group.offer(e):                      # keep the earliest records whatever the reading order
+            self._pending.append(e)
+            self._fresh.append(group)
+        return True
 
-    def summary(self, key: tuple) -> str:
-        g = self.info[key]
+    @staticmethod
+    def summary(key: tuple, g: dict) -> str:
         sources = sorted(g["sources"])
-        return (f"{g['records']} record(s) of {len(g['conns'])} outbound TLS connection(s) from "
+        at_least = "at least " if g["capped"] else ""
+        return (f"{g['records']} record(s) of {at_least}{len(g['conns'])} outbound TLS connection(s) from "
                 f"{', '.join(sources[:5])}{' and others' if len(sources) > 5 else ''} to {key[1]} port(s) "
                 f"{', '.join(sorted(g['ports']))} ({g['first'].isoformat()} – {g['last'].isoformat()})")
 
@@ -178,6 +219,7 @@ class _CertificateRule(Playbook):
 
 class SelfSignedCertificateOutbound(_CertificateRule):
     id = "net.tls_self_signed_certificate_outbound"
+    version = "2"
     title = "Public server presented a certificate whose subject name equals its issuer name"
     attack = ("T1573.002", "T1587.003", "T1608.003")
     benign = (("appliances, VPN concentrators and management interfaces reached over the internet with their "
@@ -218,11 +260,12 @@ class SelfSignedCertificateOutbound(_CertificateRule):
 
     def finalize(self):
         out = []
-        for key, evs in self.groups.items():
-            g = self.info[key]
+        for key, state in self.groups.items():
+            evs = state["examples"].events(self.load)
+            g = state["info"]
             cert = g["cert"]
             compared = cert.get("names_compared") or "CN and O"
-            claim = (f"{self.summary(key)}: the server presented a certificate whose subject name equals its issuer "
+            claim = (f"{self.summary(key, g)}: the server presented a certificate whose subject name equals its issuer "
                      f"name ({describe(cert)}), and no other certificate in the handshake names it as issuer. "
                      f"Compared by {compared}; the signature was not verified.")
             out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
@@ -233,6 +276,7 @@ class SelfSignedCertificateOutbound(_CertificateRule):
 
 class ShortLivedOrNewCertificateOutbound(_CertificateRule):
     id = "net.tls_short_lived_or_new_certificate_outbound"
+    version = "2"
     title = "Public server presented a short-lived or recently issued certificate"
     attack = ("T1573.002", "T1588.004", "T1608.003")
     # Public CA default profiles issue for 45 days or more (the CA/Browser Forum schedule bottoms out at 47 days);
@@ -298,8 +342,9 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
 
     def finalize(self):
         out = []
-        for key, evs in self.groups.items():
-            g = self.info[key]
+        for key, state in self.groups.items():
+            evs = state["examples"].events(self.load)
+            g = state["info"]
             cert, parts = g["cert"], []
             validity = self.validity_days(cert)
             if "short-lived" in g["reasons"] and validity is not None:
@@ -311,7 +356,7 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
             elif age is not None and age < self.FRESH_DAYS:
                 parts.append(f"its notBefore is {age * 24:.1f} hours before the first such session "
                              f"(under {self.FRESH_DAYS} days)")
-            claim = (f"{self.summary(key)}: the server presented its certificate ({describe(cert)}), and "
+            claim = (f"{self.summary(key, g)}: the server presented its certificate ({describe(cert)}), and "
                      f"{'; '.join(parts)}.")
             out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
                              self.lane, "medium", evs[0].entities(), group_key=f"{key[0]}|{key[1]}"))
