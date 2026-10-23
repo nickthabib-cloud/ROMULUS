@@ -67,11 +67,18 @@ def test_the_direction_dependent_rules_are_exactly_these():
     assert all(pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id in AFFECTED)
 
 
-def test_each_affected_rule_carries_a_new_version_for_its_changed_coverage():
-    versions = {pb.id: pb.version for pb in ALL_PLAYBOOKS if pb.id in AFFECTED}
-    assert versions == {"net.horizontal_sweep": "3", "net.long_external_connection": "2", "net.beaconing": "2",
-                        "net.rare_client_fingerprint": "3", "net.tls_self_signed_certificate_outbound": "2",
-                        "net.tls_short_lived_or_new_certificate_outbound": "2"}
+WORDING = {"host.ssh_login_external_source", "host.interpreter_external_connection", "corr.process_network_link",
+           "net.outbound_volume_asymmetry"}
+
+
+def test_each_changed_rule_carries_a_new_version():
+    # the six direction-dependent rules (coverage semantics) and the four whose claim or reason wording changed
+    versions = {pb.id: pb.version for pb in ALL_PLAYBOOKS if pb.id in AFFECTED | WORDING}
+    assert versions == {"net.horizontal_sweep": "4", "net.long_external_connection": "3", "net.beaconing": "3",
+                        "net.rare_client_fingerprint": "4", "net.tls_self_signed_certificate_outbound": "3",
+                        "net.tls_short_lived_or_new_certificate_outbound": "3",
+                        "host.ssh_login_external_source": "5", "host.interpreter_external_connection": "5",
+                        "corr.process_network_link": "5", "net.outbound_volume_asymmetry": "3"}
 
 
 def test_bl_ext_dest_requires_a_configured_internal_network():

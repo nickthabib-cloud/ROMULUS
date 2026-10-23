@@ -1114,7 +1114,7 @@ class SshLoginFromExternal(Playbook):
     anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "4"
+    version = "5"
     title = "Successful SSH login from an address outside the site's internal networks"
     kind = "aggregate"
     families = ("auth",)

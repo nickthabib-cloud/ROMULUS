@@ -185,7 +185,7 @@ class _Stitched(Playbook):
 
 class LongExternalConnection(_Stitched):
     id = "net.long_external_connection"
-    version = "2"
+    version = "3"
     direction_dependent = True
     title = "Long-lived TCP connection between an internal and a public address"
     severity, lane = "medium", "lead"
@@ -282,7 +282,7 @@ class Beaconing(_Stitched):
     connection identity whose records are more than IDLE apart is counted as separate connections (one per stretch
     of activity), so a 5-tuple reused by a periodic client still shows its period."""
     id = "net.beaconing"
-    version = "2"
+    version = "3"
     direction_dependent = True
     title = "Regular, repeated connections from an internal address to one public endpoint"
     severity, lane = "medium", "lead"
@@ -378,7 +378,7 @@ class RareClientFingerprint(_Stitched):
     (every value of a list-valued fingerprint field counts). Rarity in one window, with no baseline, is context,
     not a verdict: the lane stays context."""
     id = "net.rare_client_fingerprint"
-    version = "3"
+    version = "4"
     direction_dependent = True
     title = "TLS or SSH handshake fingerprint, or SSH client software, seen from only one internal address"
     families = ("net_session", "tls_session", "ssh_session")
