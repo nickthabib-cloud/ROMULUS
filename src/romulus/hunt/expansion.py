@@ -498,8 +498,9 @@ class ExpansionEngine:
                 if budget_reason:
                     stop_reason = "budget"
                     anchor_reasons[anchor_row["id"]].append(budget_reason)
-                    if any(LANE_ORDER.get(row["lane"], 9) < LANE_ORDER.get(anchor_row["lane"], 9)
-                           for row in all_rows):
+                    if budget_reason == "source query budget exhausted" and any(
+                            LANE_ORDER.get(row["lane"], 9) < LANE_ORDER.get(anchor_row["lane"], 9)
+                            for row in all_rows):
                         anchor_reasons[anchor_row["id"]].append(BUDGET_TO_SEVERE_REASON)
                     blocked_anchors.add(anchor_row["id"])
                     continue

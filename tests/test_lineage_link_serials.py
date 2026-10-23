@@ -250,3 +250,23 @@ def test_no_link_type_is_complete_when_its_selection_left_a_step_unknown(link_ty
     if result.status != "unsupported":
         assert "a lookup returned unknown" in result.reasons
 
+
+def test_a_non_exec_anchor_never_takes_another_processs_exec_of_its_pid():
+    """A forked process that never execed reuses a pid an exited process execed with minutes earlier: the record's
+    own parent (the attacker's bash) is the lineage, never the earlier holder's, and the link says why it is partial."""
+    crond = ev("crond", ts=T - timedelta(minutes=4, seconds=1), process__pid=1200, process__ppid=1,
+               process__executable="/usr/sbin/cron", process__session_id=5, audit__serial=99)
+    cron = ev("cronjob", ts=T - timedelta(minutes=4), process__pid=4000, process__ppid=1200,
+              process__executable="/usr/bin/logrotate", process__session_id=5, audit__serial=100)
+    attacker = ev("attacker-bash", ts=T - timedelta(seconds=30), process__pid=3999, process__ppid=3000,
+                  process__executable="/usr/bin/bash", process__session_id=77, audit__serial=900)
+    write = ev("write", "file_change", process__pid=4000, process__ppid=3999, process__session_id=77,
+               file__path="/etc/cron.d/x", audit__serial=1000)
+
+    result = lineage(write, [crond, cron, attacker])
+
+    assert "attacker-bash" in result.event_ids
+    assert not {"crond", "cronjob"} & set(result.event_ids)
+    assert result.status == "partial"
+    assert any("forked without exec or the pid was reused" in reason for reason in result.reasons)
+

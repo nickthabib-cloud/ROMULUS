@@ -184,6 +184,16 @@ def _tuple_matches(left: tuple, right: tuple) -> bool:
     )
 
 
+def _same_process_as(exec_event: TypedEvent, record: TypedEvent) -> bool:
+    """Whether an exec of a record's pid can be the record's own process: the parent agrees (unless the record's
+    process was reparented to init) and the login session agrees where both carry one."""
+    parent, exec_parent = record.get("process.ppid"), exec_event.get("process.ppid")
+    session, exec_session = record.get("process.session_id"), exec_event.get("process.session_id")
+    parent_agrees = parent is None or parent in (0, 1) or exec_parent == parent
+    session_agrees = session is None or exec_session is None or exec_session == session
+    return parent_agrees and session_agrees
+
+
 class LinkFetcher:
     """Fetch each `(anchor, link, window)` once and keep typed-key semantics local and explicit."""
 
@@ -395,6 +405,14 @@ class LinkFetcher:
                     unknown.append(found.why or (
                         f"lineage incomplete: no exec record of pid {pid} on {host} at or before "
                         f"{root.ts.isoformat()} was retrieved, so its images and descendants cannot be identified"))
+                elif not _same_process_as(own, root):
+                    # The pid's latest exec belongs to another process: this one forked without exec, or the pid
+                    # was reused. Its own record's parent and session stand; its images cannot be identified.
+                    unknown.append(
+                        f"lineage incomplete: the latest exec of pid {pid} on {host} before {root.ts.isoformat()} "
+                        f"({own.get('process.executable')}) has another parent or session than the record, so the "
+                        f"record's process forked without exec or the pid was reused; its images cannot be identified")
+                    own = None
             process = own or root
             parent_pid, session = process.get("process.ppid"), process.get("process.session_id")
 
@@ -428,6 +446,7 @@ class LinkFetcher:
 
             related: dict[str, TypedEvent] = dict(images)
             first = min(images.values(), key=_order) if images else root
+            # With no image, the ancestors start from the record's own parent at the record's (time, serial).
             first_ts = first.ts.timestamp()
             # Ancestors: the parent's image when the process first execed (strictly before it), then up the chain.
             parent, when, serial, boot = first.get("process.ppid"), first_ts, _serial(first), root_boot
