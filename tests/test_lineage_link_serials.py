@@ -270,3 +270,20 @@ def test_a_non_exec_anchor_never_takes_another_processs_exec_of_its_pid():
     assert result.status == "partial"
     assert any("forked without exec or the pid was reused" in reason for reason in result.reasons)
 
+
+def test_a_daemon_reparented_to_init_never_takes_another_programs_exec_of_its_pid():
+    """A double-forked payload orphaned to init (ppid 1, no session) reuses a pid an exited logrotate execed with:
+    the program differs, so logrotate's lineage is never the payload's; the link is partial and says why."""
+    crond = ev("crond", ts=T - timedelta(minutes=4, seconds=1), process__pid=1200, process__ppid=1,
+               process__executable="/usr/sbin/cron", process__session_id=5, audit__serial=99)
+    cron = ev("cronjob", ts=T - timedelta(minutes=4), process__pid=4000, process__ppid=1200,
+              process__executable="/usr/bin/logrotate", process__session_id=5, audit__serial=100)
+    connect = ev("connect", "net_socket", process__pid=4000, process__ppid=1,
+                 process__executable="/usr/bin/python3", audit__serial=1000)
+
+    result = lineage(connect, [crond, cron])
+
+    assert not {"crond", "cronjob"} & set(result.event_ids)
+    assert result.status == "partial"
+    assert any("forked without exec or the pid was reused" in reason for reason in result.reasons)
+

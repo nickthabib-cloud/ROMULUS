@@ -44,7 +44,8 @@ from tests import throughput_fixture as tf
 # records them (it carried pid - 1 and an unrelated session): its events, raw copies and the ids built from them
 # change, and its login-session links go from a false complete over curl's session to unsupported (the shell has
 # no login session), so the context cells judged on them are partial. host.persistence_path_change carries a new
-# version for its serial-ordered package lineage. Lineage selections are unchanged.
+# version for its serial-ordered package lineage. Lineage selections are unchanged; the queries those login-session
+# fetches no longer spend let one capped source_ip link of the alert stack select more records (still partial).
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "b073e712c7f409328fcb352d35f6c8e0cb7e43608dbcc9745a9c59148ade795f",

@@ -185,13 +185,16 @@ def _tuple_matches(left: tuple, right: tuple) -> bool:
 
 
 def _same_process_as(exec_event: TypedEvent, record: TypedEvent) -> bool:
-    """Whether an exec of a record's pid can be the record's own process: the parent agrees (unless the record's
-    process was reparented to init) and the login session agrees where both carry one."""
+    """Whether an exec of a record's pid can be the record's own process: it ran the program the record names
+    (where both name one), the parent agrees (unless the record's process was reparented to init) and the login
+    session agrees where both carry one."""
+    program, exec_program = record.get("process.executable"), exec_event.get("process.executable")
     parent, exec_parent = record.get("process.ppid"), exec_event.get("process.ppid")
     session, exec_session = record.get("process.session_id"), exec_event.get("process.session_id")
+    program_agrees = program is None or exec_program is None or exec_program == program
     parent_agrees = parent is None or parent in (0, 1) or exec_parent == parent
     session_agrees = session is None or exec_session is None or exec_session == session
-    return parent_agrees and session_agrees
+    return program_agrees and parent_agrees and session_agrees
 
 
 class LinkFetcher:
