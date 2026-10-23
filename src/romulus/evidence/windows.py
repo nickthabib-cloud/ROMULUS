@@ -16,6 +16,12 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 WINDOWS_NORMALIZER = "windows-ecs@1"
 _GUID = re.compile(r"^\{?([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\}?$")
 _SID = re.compile(r"^S-\d+(?:-\d+)+$", re.IGNORECASE)
+# Windows Security event schemas use these values when the logon has no network endpoint.
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4624
+_ABSENT_FIELD_VALUES = {
+    "IpAddress": frozenset({"-", "::", "0", "0.0.0.0"}),
+    "IpPort": frozenset({"-", "0"}),
+}
 
 
 class WindowsInputError(ValueError):
@@ -321,6 +327,8 @@ def _put(fields: dict[str, FieldValue], record: WindowsRecord, typed: str, *nati
     for name in native:
         item = record.data.get(name)
         if item is None or item.value in (None, ""):
+            continue
+        if str(item.value).strip() in _ABSENT_FIELD_VALUES.get(name, frozenset()):
             continue
         try:
             value = transform(item.value) if transform else item.value

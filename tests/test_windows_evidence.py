@@ -25,7 +25,6 @@ def _hit(
         "_source": {
             "@timestamp": "2026-01-02T03:04:05Z",
             "agent": {"type": "winlogbeat"},
-            "event": {"dataset": "system.security"},
             "host": {"name": host_name},
             "winlog": {
                 "channel": channel,
@@ -33,6 +32,7 @@ def _hit(
                 "event_id": event_id,
                 "computer_name": computer,
                 "record_id": event_id + 1000,
+                "time_created": "2026-01-02T03:04:05Z",
                 "event_data": data or {},
             },
         },
@@ -225,6 +225,33 @@ def test_sessions_are_host_scoped_and_keep_logon_guid():
     assert event.get("auth.session_id") == "0x4a"
     assert event.get("auth.session_key") == "ws01:0x4a"
     assert event.get("auth.logon_guid") == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+@pytest.mark.parametrize(
+    ("logon_type", "ip_address", "ip_port"),
+    [("5", "-", "-"), ("4", "-", "-"), ("2", "::", "0")],
+)
+def test_non_network_logon_placeholders_are_absent_not_errors(logon_type, ip_address, ip_port):
+    """Microsoft 4624 uses '-' when a network address/port is not applicable.
+
+    https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4624
+    """
+    event_data = {
+        "TargetUserSid": "S-1-5-21-1-2-3-1001",
+        "TargetUserName": "service-user",
+        "TargetDomainName": "EXAMPLE",
+        "TargetLogonId": "0x44",
+        "LogonType": logon_type,
+        "IpAddress": ip_address,
+        "IpPort": ip_port,
+    }
+
+    events, skips, errors = normalize_hits([_hit(4624, data=event_data)])
+
+    assert skips == {} and errors == [] and len(events) == 1
+    assert events[0].get("source.ip") is None
+    assert events[0].get("source.port") is None
+    assert all(entity[0] != "ip" for entity in events[0].entities())
 
 
 def test_process_network_service_task_and_audit_fields_are_semantic_and_typed():
