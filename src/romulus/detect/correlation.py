@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 
+from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.bounded import (
     HOT_COUNT,
@@ -90,8 +91,9 @@ def _external_uncached(ip: str | None) -> bool:
     return routable_remote(ip) and not is_internal(ipaddress.ip_address(ip))
 
 
-# INTERNAL_NETS is a constant table, so an address's answer never changes during a run.
+# The answer depends on the installed internal-network definition: installing one clears this cache.
 _external_text = lru_cache(maxsize=ADDRESS_CACHE)(_external_uncached)
+netdef.on_install(_external_text.cache_clear)
 
 
 def external(ip: str | None) -> bool:
@@ -280,8 +282,9 @@ class InterpreterExternalConnection(Playbook):
     account, port), listing every destination, so routine update traffic is one lead, not one per address."""
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.interpreter_external_connection"
-    version = "4"
-    title = "Shell, interpreter, relay tool or web-service process made connect() calls to non-private addresses"
+    version = "5"
+    title = ("Shell, interpreter, relay tool or web-service process made connect() calls to addresses outside the "
+             "site's internal networks")
     kind = "aggregate"
     families = ("net_socket", "process_exec")
     required_fields = ()
@@ -389,8 +392,8 @@ class InterpreterExternalConnection(Playbook):
         else:
             lineage = " Its ancestry is not fully recorded in the window."
         claim = (f"auditd connect() records on {e0.host} show {_process_words(e0)}, {info['reason']}, making "
-                 f"{info['count']} connect() call(s) to {len(info['dests'])} non-private address(es) on port "
-                 f"{port} ({info['first'].isoformat()} – {info['last'].isoformat()}): {dests}{more}; "
+                 f"{info['count']} connect() call(s) to {len(info['dests'])} address(es) outside the site's internal "
+                 f"networks on port {port} ({info['first'].isoformat()} – {info['last'].isoformat()}): {dests}{more}; "
                  f"{outcomes}.{lineage} {SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
         preds = [pf(e0, "socket.syscall"), pf(e0, "process.executable"), pf(e0, "destination.port")]
         if e0.has("process.user"):
@@ -511,7 +514,7 @@ class ProcessNetworkLink(Playbook):
     address is not established for this host is linked but stated, and caps the lane at lead, as do
     multiple local addresses and records shared with another process."""
     id = "corr.process_network_link"
-    version = "4"
+    version = "5"
     title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
     staged = True
@@ -900,8 +903,8 @@ class ProcessNetworkLink(Playbook):
                 {"shared": "shared", "ambiguous": "ambiguous", "unestablished": "not established"}[c] for c in caps)
                 + ", the lane is capped at lead.")
         if g.notable is not None:
-            parts.append(f"The process is notable as {g.notable.reason} calling connect() to a non-private "
-                         f"address.")
+            parts.append(f"The process is notable as {g.notable.reason} calling connect() to an address "
+                         f"outside the site's internal networks.")
         # the first-seen alert (and flow) among the cited records
         by_order = sorted(g.first_partners, key=lambda item: item[2])
         alert_event = next((loaded[n.id] for _k, n, _o in by_order if n.family == "net_alert"), None)

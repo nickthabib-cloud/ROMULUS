@@ -7,12 +7,19 @@ from datetime import datetime
 from romulus.agent.controller import Investigator
 from romulus.agent.provider import agent_readiness
 from romulus.config import Settings
+from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, new_hunt_id
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
+from romulus.hunt.site_networks import (
+    check_host_addresses,
+    contradiction_reason,
+    install_for_hunt,
+    narrow_direction_negatives,
+)
 from romulus.hunt.stage import clear_stale_stages
 from romulus.hunt.sweep import Sweep
 from romulus.sources.es import ElasticClient
@@ -118,6 +125,19 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
                    "reason": "the AI agent phase is not available in this build; the provider is ready"}
     repo.audit("system", "hunt.ai_agent_summary", hunt_id, summary, owner_token=owner_token)
     return summary
+
+
+def _site_network_check(client: ElasticClient, contracts: dict, window: Window, heartbeat) -> dict:
+    """Host addresses in the hunt window outside the installed internal-network definition: a warning for the
+    sweep summary. A failed check is recorded and never stops the hunt."""
+    try:
+        result = check_host_addresses(client, contracts, netdef.current(), window, heartbeat=heartbeat)
+    except Exception as exc:          # a warning check must never sink the hunt
+        log.exception("internal-network check failed")
+        return {"definition": netdef.current().summary(), "error": f"{exc}"[:300], "warning": None}
+    if result["warning"]:
+        log.warning(result["warning"])
+    return result
 
 
 def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
@@ -290,6 +310,8 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     initial_manifest = hunt["manifest"]
     if expand is not None and bool((initial_manifest.get("expansion") or {}).get("enabled", True)) != expand:
         raise ValueError("expansion mode is immutable after hunt creation")
+    # the hunt's internal-network definition, installed once before the sweep
+    install_for_hunt(s, hunt_id, initial_manifest)
     claimed = repo.claim_hunt(hunt_id, _lease_seconds(s))
     owner_token = claimed["lease_owner"]
     h = repo.get_hunt(hunt_id)
@@ -331,11 +353,19 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
             hunt_id, "failed", owner_token=owner_token, stop_reason=f"sweep error: {e}",
         )
         raise
+    site_check = _site_network_check(client, contracts, window, heartbeat)
+    contradiction = contradiction_reason(site_check)
+    if contradiction:
+        # the hunt's own hosts contradict the definition (or it could not be checked): no direction-dependent
+        # rule may keep a complete negative, and the hunt says why it is partial
+        narrow_direction_negatives(repo, hunt_id, contradiction, owner_token=owner_token)
+        sweep.partial_reasons.append(contradiction)
     sweep_summary = {
         "finished": True,
         "complete": not sweep.partial_reasons,
         "partial_reasons": sweep.partial_reasons,
         "stats": sweep.stats,
+        "internal_networks": site_check,
     }
     repo.audit(
         "system", "hunt.sweep_summary", hunt_id, sweep_summary, owner_token=owner_token,
@@ -388,6 +418,8 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
         # the anchor and its own "linked" activity. Start a new hunt instead.
         raise RuntimeError(f"hunt {hunt_id} was normalized with {recorded}; this build is {NORMALIZER_VERSION}. "
                            "Start a new hunt over the same window instead of resuming.")
+    # expansion and the investigator read the definition the sweep used; a changed one is refused here
+    install_for_hunt(s, hunt_id, recorded_manifest)
     sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")
     sweep_summary = dict(sweep_audit["detail"]) if sweep_audit else {}
     if hunt["execution_state"] == "running" and not sweep_summary.get("finished"):

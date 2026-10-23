@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from romulus import __version__
 from romulus.config import Settings
 from romulus.decide.policy import POLICY_VERSION
+from romulus.detect.netdef import SiteNetworks
 from romulus.detect.registry import PACK_VERSION, pack_manifest
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.packets import PACKET_NORMALIZER
@@ -39,6 +40,8 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         "model": {"triage": s.ollama_model_triage, "synthesis": s.synthesis_model, "num_ctx": s.ollama_num_ctx,
                   "think": s.ollama_think},
         "agent_mode": s.agent_mode,
+        # which addresses are the site's: the sweep's direction-dependent rules read this definition
+        "internal_networks": SiteNetworks.from_settings(s).record(),
         "budgets": budgets or {"agent_steps_total": 60, "agent_steps_per_case": 8, "max_cases": 12,
                                "wall_clock_minutes": 120},
         # the AI agent's provider and model as configured when the hunt was created (no key, no URL path)

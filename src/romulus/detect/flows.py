@@ -17,7 +17,8 @@ order (the same identity a community ID hashes), so the same connection seen by 
 in several save-interval records, is counted once. A 5-tuple reused later is the same identity; rules that measure
 duration split it again where records are more than STITCH_GAP seconds apart.
 
-Internal and external are the built-in private-address boundary shared with the other network rules.
+Internal and external come from the site's internal-network definition (romulus.detect.netdef), shared with the
+other network rules.
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ from typing import ClassVar
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
+from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
@@ -571,7 +573,8 @@ class HorizontalSweep(_FlowRule):
     """One source reaching many distinct addresses on the same transport and port (or by ICMP) within a short
     window: the shape of host discovery and service sweeps, and of worm-style propagation."""
     id = "net.horizontal_sweep"
-    version = "3"
+    version = "4"
+    direction_dependent = True
     title = "One source contacted many distinct addresses on the same port within minutes"
     severity, lane = "medium", "lead"
     attack = ("T1046", "T1018", "T1595.001")
@@ -613,7 +616,10 @@ class HorizontalSweep(_FlowRule):
                      "port as the destination port)",
         "fidelity": "aggregate observation over typed connection records; 'answered' means the responder sent at "
                     "least one packet on a recorded connection (a TCP reset counts as an answer), 'no reply' means "
-                    "every recorded connection shows zero packets from it",
+                    "every recorded connection shows zero packets from it. Internal or external destinations are "
+                    "decided by the site's internal-network definition; under the default (not configured for the "
+                    "site) a partition holding an external-scope record, judged by the stricter external standard, "
+                    "is partial with the reason 'direction assumed', never a complete negative",
         "benign_and_cost": "authorized scanners, monitoring and management servers polling internal hosts; external "
                            "fan-out from resolvers or relays only when most destinations stay silent. One grouped "
                            "item per (source, transport, port, internal or external destinations)",
@@ -666,6 +672,10 @@ class HorizontalSweep(_FlowRule):
             if not self.destinations.put((key, view.dst), destination):
                 return self._refused("destinations'")
             group.reached += 1
+        if scope == "external":
+            # judged (not refused) by the stricter external fan-out standard; on a site in public space it may be
+            # internal, so the direction is an assumption
+            assume_direction(self)
         started = {width: destination.runs[width].add(view.start, width) for width in self.WINDOWS}
         if view.s2c_packets is not None:
             if view.s2c_packets > 0:
@@ -1347,15 +1357,15 @@ class OutboundVolumeAsymmetry(_FlowRule):
     """An internal address sent far more to one external address than it received back, in absolute and relative
     terms, with the source's own outbound total as the denominator."""
     id = "net.outbound_volume_asymmetry"
-    version = "2"
+    version = "3"
     title = "Internal address sent much more data to one external address than it received"
     severity, lane = "high", "lead"
     attack = ("T1041", "T1048", "T1567")
     assures_negative = False
     positive_only_reason = (
-        "internal and external are judged from the built-in private-address list, not the site's own address plan, "
-        "and only connections that internal addresses initiated are read; transfers outside that view are not "
-        "evaluated, so the absence of a match proves nothing")
+        "internal and external are judged from the site's internal-network definition (the RFC 1918 and reserved "
+        "ranges when it is not configured), and only connections that internal addresses initiated are read; "
+        "transfers outside that view are not evaluated, so the absence of a match proves nothing")
     benign = ("backups and cloud file synchronisation", "log and telemetry shipping", "video and media uploads",
               "software publishing to external repositories")
     next_checks = ("the process on the internal host that owns the connections",

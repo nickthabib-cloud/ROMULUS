@@ -1017,6 +1017,13 @@ class Repo:
         # databases upgraded from link-only accounting without double-counting.
         return max(task_spend, link_spend)
 
+    def host_resolution_tasks(self, hunt_id: str) -> list[dict]:
+        """The hunt's durable host-address lookups (one per looked-up address and window), oldest first."""
+        with self.engine.connect() as c:
+            return [dict(r) for r in c.execute(select(t.task).where(
+                t.task.c.hunt_id == hunt_id, t.task.c.kind == "expansion_link",
+                t.task.c.owner == "host-resolution").order_by(t.task.c.created_at, t.task.c.id)).mappings()]
+
     def tasks(self, hunt_id: str) -> list[dict]:
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(select(t.task).where(t.task.c.hunt_id == hunt_id)

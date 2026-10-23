@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
 from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
+from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
@@ -397,6 +398,7 @@ class Sweep:
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
+            before_assumed = pb.direction_assumed
             before_limits = {name: limit.records for name, limit in pb.limits.items()}
             # Every rule reads every batch, whatever the state budget: a store in no-growth mode refuses only
             # records that need a new key in it (each rule's own refusal path), and every match that needs no new
@@ -431,7 +433,9 @@ class Sweep:
             missing = pb.missing_required - before_missing
             # records a full state budget kept from evaluation: never a clean evaluation of this partition
             capped = pb.capped - before_capped
-            incomplete = rule_partial or bool(missing) or bool(capped)
+            # records skipped or judged for a direction the default internal-network definition only assumes
+            assumed = pb.direction_assumed - before_assumed
+            incomplete = rule_partial or bool(missing) or bool(capped) or bool(assumed)
             if not (set(pb.families) & families) and evaluated == 0:
                 state = "not_applicable_no_events" if not (rule_partial or capped) else "evaluated_partial"
             elif pb.kind == "aggregate" and matches:
@@ -452,6 +456,9 @@ class Sweep:
             if missing:
                 reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
             detail = {"missing_required": missing, "reasons": reasons}
+            if assumed:
+                reasons.append(DIRECTION_ASSUMED_REASON)
+                detail["direction_assumed"] = assumed
             if capped:
                 # this partition's own refusals, per budget (the rule's totals are on its hunt-level coverage)
                 refused = [f"state limit: {limit.text} ({limit.records - before_limits.get(name, 0)} record(s) not "
@@ -583,7 +590,10 @@ class Sweep:
             else:
                 state = "no_match_complete"
             reasons = (["no source partition of this rule was evaluated"] if not cells else
-                       [WINDOW_ROLLUP_PARTIAL] if any_partial else []) + limits
+                       [WINDOW_ROLLUP_PARTIAL] if any_partial else [])
+            if any(DIRECTION_ASSUMED_REASON in ((c["detail"] or {}).get("reasons") or []) for c in cells):
+                reasons.append(DIRECTION_ASSUMED_REASON)
+            reasons += limits
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
                                     len(ms) + consumed_matches, evaluated, {"reasons": reasons})
             pb.release_state()

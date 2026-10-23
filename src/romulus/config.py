@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+
+from romulus.detect.netdef import EXTERNAL_SETTING, INTERNAL_SETTING, SiteNetworks, parse_networks
 
 SECRET_KEYS = ("PASSWORD", "API_KEY", "SECRET", "TOKEN")
 
@@ -111,8 +113,13 @@ class Settings(BaseModel):
     model_egress: Literal["", "lab-public-data"] = ""
     # Extra hosts, addresses or CIDR networks treated as local (e.g. a team's model server on an enclave address).
     model_local_hosts: list[str] = []
+    # The site's internal address space (CIDRs) and carve-outs inside it that are outside the site (partner or
+    # VPN ranges). Unset, the default RFC 1918 and reserved ranges are used and labelled as the default.
+    internal_networks: list[str] = []
+    external_networks: list[str] = []
 
-    @field_validator("es_index_patterns", "pcap_allowed_dirs", "model_local_hosts", mode="before")
+    @field_validator("es_index_patterns", "pcap_allowed_dirs", "model_local_hosts", "internal_networks",
+                     "external_networks", mode="before")
     @classmethod
     def _split(cls, v):
         if isinstance(v, str):
@@ -140,6 +147,18 @@ class Settings(BaseModel):
         if v not in ("", "lab-public-data"):
             raise ValueError("ROMULUS_MODEL_EGRESS must be empty or lab-public-data")
         return v
+
+    @field_validator("internal_networks", "external_networks")
+    @classmethod
+    def _networks(cls, v: list[str], info) -> list[str]:
+        parse_networks(v, INTERNAL_SETTING if info.field_name == "internal_networks" else EXTERNAL_SETTING)
+        return v
+
+    @model_validator(mode="after")
+    def _site_networks(self):
+        # a carve-out must sit inside the internal set: checked once both lists are known
+        SiteNetworks.from_settings(self)
+        return self
 
     @property
     def stage_path(self) -> Path:
@@ -206,6 +225,7 @@ ENV_MAP = {
     "AGENT_MAX_SOURCE_QUERIES": "agent_max_source_queries",
     "AGENT_CONCURRENCY": "agent_concurrency",
     "ROMULUS_MODEL_EGRESS": "model_egress", "MODEL_LOCAL_HOSTS": "model_local_hosts",
+    "ROMULUS_INTERNAL_NETWORKS": "internal_networks", "ROMULUS_EXTERNAL_NETWORKS": "external_networks",
 }
 
 

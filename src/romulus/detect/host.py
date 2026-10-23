@@ -11,6 +11,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
 
+from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds, SpillList, StateExhausted
 from romulus.detect.linux_argv import canonical, program, read_operand_paths
@@ -133,11 +134,6 @@ NFT_BASE_CHAINS = {"input", "forward", "output", "prerouting", "postrouting"}
 FW_CHANGE_FLAGS = {"-A", "--append", "-I", "--insert", "-D", "--delete", "-R", "--replace", "-F", "--flush",
                    "-P", "--policy", "-X", "--delete-chain", "-N", "--new-chain", "-Z"}
 NFT_CHANGE = {"add", "insert", "delete", "flush", "replace", "create", "destroy"}
-# Explicit internal space (mission-configurable later). Not ipaddress.is_private, which also
-# classifies documentation/benchmark ranges as private.
-INTERNAL_NETS = [ipaddress.ip_network(n) for n in (
-    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10",
-    "::1/128", "fc00::/7", "fe80::/10")]
 
 
 def _normalize_posix_path(path: str) -> str:
@@ -183,7 +179,9 @@ def interpreter_name(argv0: str) -> str:
 
 
 def is_internal(ip: ipaddress._BaseAddress) -> bool:
-    return any(ip in n for n in INTERNAL_NETS if n.version == ip.version)
+    """Whether the address belongs to the site, by the internal-network definition installed for this hunt
+    (romulus.detect.netdef). Not ipaddress.is_private, which also counts documentation and benchmark ranges."""
+    return netdef.current().is_internal(ip)
 
 
 def _py_pty_spawn(code: str) -> bool:
@@ -1116,8 +1114,8 @@ class SshLoginFromExternal(Playbook):
     anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "4"
-    title = "Successful SSH login from a non-private source address"
+    version = "5"
+    title = "Successful SSH login from an address outside the site's internal networks"
     kind = "aggregate"
     families = ("auth",)
     required_fields = ("auth.service", "source.ip", "user.name")
@@ -1205,8 +1203,8 @@ class SshLoginFromExternal(Playbook):
         sources = "; ".join(part for part in (
             f"{journal} sshd 'Accepted' journal record(s)" if journal else "",
             f"{audit} audit USER_LOGIN record(s)" if audit else "") if part)
-        claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from non-private address "
-                 f"{ip} ({evs[0].ts.isoformat()} – {last.isoformat()}; {sources}).")
+        claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from {ip}, an "
+                 f"address outside the site's internal networks ({evs[0].ts.isoformat()} – {last.isoformat()}; {sources}).")
         m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"), pf(evs[0], "user.name")],
                   evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}")
         if journal + audit > 20:

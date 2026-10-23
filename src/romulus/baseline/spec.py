@@ -23,10 +23,10 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from romulus.detect import netdef
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
 from romulus.detect.dns import registered_domain
 from romulus.detect.dns import role as dns_role
-from romulus.detect.host import is_internal
 from romulus.evidence.typed import Outcome, TypedEvent
 
 type Scope = Literal["host", "account", "host_account", "internal_ip", "site"]
@@ -140,13 +140,14 @@ class KeyContext:
     - `service_accounts`: account names configured as service accounts, keyed by `bl.svc_exec_rate`
       whatever their uid (empty by default: the uid range does the work);
     - `system_uid_range`: inclusive uid range of system accounts;
-    - `is_internal`: whether an address belongs to the site. The default is the RFC 1918 / ULA / loopback /
-      link-local / CGNAT test; a per-site internal-network setting replaces it here."""
+    - `is_internal`: whether an address belongs to the site. The default is the internal-network definition
+      installed when the context is built (romulus.detect.netdef: the site's configured ranges, or the RFC
+      1918 and reserved default), so one context answers with one definition throughout."""
 
     pid_table: ParentLookup = field(default_factory=PidTable)
     service_accounts: frozenset[str] = frozenset()
     system_uid_range: tuple[int, int] = DEFAULT_SYSTEM_UID_RANGE
-    is_internal: Callable[[IPAddress], bool] = is_internal
+    is_internal: Callable[[IPAddress], bool] = field(default_factory=lambda: netdef.current().is_internal)
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,10 @@ class BaselineSpec:
     required_fields: dict[str, tuple[FieldRequirement, ...]]
     optional_fields: dict[str, tuple[str, ...]]
     _extract: Callable[[TypedEvent, KeyContext, BaselineSpec], KeyResult] = field(repr=False, compare=False)
+    # True when the spec's applicability is decided by the site's boundary (inside to outside): it may run only
+    # with an explicitly configured internal-network definition, and otherwise its result is unresolved, never
+    # "no match" (the default RFC 1918 view reads a site in public space as entirely outside).
+    requires_configured_networks: bool = False
 
     def keys(self, event: TypedEvent, context: KeyContext) -> KeyResult:
         if event.family not in self.families:
@@ -655,6 +660,7 @@ BASELINE_SPECS = (
             "net_session": ("tls.client.server_name", *_FLOW_IDS),
         },
         _extract=_destination,
+        requires_configured_networks=True,
     ),
     BaselineSpec(
         id="bl.svc_exec_rate", version="1", key_version="1", families=("process_exec",),

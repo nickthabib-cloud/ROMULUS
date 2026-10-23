@@ -29,7 +29,8 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
-from romulus.detect.correlation import canon_ip, external
+from romulus.detect.correlation import canon_ip, external, routable_remote
+from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
@@ -97,6 +98,7 @@ class _CertificateRule(Playbook):
     families = ("tls_session", "net_session")
     required_fields = ("source.ip", "destination.ip")
     severity, lane = "medium", "lead"
+    direction_dependent = True
     # Citations are held as ids once the sweep has staged them. Per group the distinct sources and connections are
     # counted up to a cap (a group to a popular server can reach millions of connections over weeks); above it the
     # claim says "at least". Groups exist only for matching certificates (about 3 KB each) and are held in a keyed
@@ -135,6 +137,13 @@ class _CertificateRule(Playbook):
         does not match, None when a field the judgement needs is missing."""
         raise NotImplementedError
 
+    @staticmethod
+    def skipped_for_direction(e: TypedEvent) -> bool:
+        """A first TLS record between two routable addresses that is not outbound: skipped for its direction alone."""
+        return (outbound(e) is False and e.get("arkime.continuation") is not True
+                and routable_remote(canon_ip(e.get("source.ip")))
+                and routable_remote(canon_ip(e.get("destination.ip"))))
+
     def consume(self, events):
         for e in self.applicable([e for e in events if e.id not in self._seen]):
             self._seen.add(e.id)               # a record read twice (split partitions) is judged once
@@ -146,8 +155,12 @@ class _CertificateRule(Playbook):
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
-            if not direction or e.get("arkime.continuation") is True:
-                continue                        # not outbound; or a later Arkime record (the first holds the handshake)
+            if e.get("arkime.continuation") is True:
+                continue                        # a later Arkime record: the first holds the handshake
+            if not direction:
+                if self.skipped_for_direction(e):
+                    assume_direction(self)
+                continue                        # not outbound
             certs = e.get("tls.server.certificates")
             candidates = [c for c in certs if not c.get("issues_other")] if isinstance(certs, list) else []
             if not candidates:
@@ -219,7 +232,7 @@ class _CertificateRule(Playbook):
 
 class SelfSignedCertificateOutbound(_CertificateRule):
     id = "net.tls_self_signed_certificate_outbound"
-    version = "2"
+    version = "3"
     title = "Public server presented a certificate whose subject name equals its issuer name"
     attack = ("T1573.002", "T1587.003", "T1608.003")
     benign = (("appliances, VPN concentrators and management interfaces reached over the internet with their "
@@ -251,6 +264,10 @@ class SelfSignedCertificateOutbound(_CertificateRule):
         "missing": "an outbound TLS record without a visible server certificate (TLS 1.3, resumption, malformed "
                    "block) or whose certificate has no recorded names is counted missing, so the negative is "
                    "partial",
+        "direction": "inside and outside are decided by the site's internal-network definition; under the default "
+                     "(RFC 1918 and reserved ranges, not configured for the site) a partition holding a TLS record "
+                     "between two routable addresses that is not outbound, skipped for that reason alone, is "
+                     "partial with the reason 'direction assumed', never a complete negative",
     }
 
     def judge(self, e, cert):
@@ -276,7 +293,7 @@ class SelfSignedCertificateOutbound(_CertificateRule):
 
 class ShortLivedOrNewCertificateOutbound(_CertificateRule):
     id = "net.tls_short_lived_or_new_certificate_outbound"
-    version = "2"
+    version = "3"
     title = "Public server presented a short-lived or recently issued certificate"
     attack = ("T1573.002", "T1588.004", "T1608.003")
     # Public CA default profiles issue for 45 days or more (the CA/Browser Forum schedule bottoms out at 47 days);
@@ -312,6 +329,10 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
                      "what this evaluator reads",
         "missing": "an outbound TLS record without a visible server certificate, or whose certificate lacks the "
                    "validity bounds needed, is counted missing, so the negative is partial",
+        "direction": "inside and outside are decided by the site's internal-network definition; under the default "
+                     "(RFC 1918 and reserved ranges, not configured for the site) a partition holding a TLS record "
+                     "between two routable addresses that is not outbound, skipped for that reason alone, is "
+                     "partial with the reason 'direction assumed', never a complete negative",
     }
 
     @staticmethod

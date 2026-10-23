@@ -111,10 +111,15 @@ class Playbook:
     # arrived before a gap still support it. Otherwise an exec with an incomplete argv is counted as missing a
     # required field and not evaluated: a test for an absent token, or for a last operand, cannot be decided.
     argv_prefix_safe: ClassVar[bool] = False
+    # True when the rule skips records, or judges them by another standard, for their direction across the site's
+    # boundary. Each such record is counted in `direction_assumed` while the internal-network definition is the
+    # default (romulus.detect.netdef.assume_direction), and a cell holding any is never a complete negative.
+    direction_dependent: ClassVar[bool] = False
 
     def __init__(self) -> None:
         self.evaluated = 0
         self.missing_required = 0
+        self.direction_assumed = 0
         # Records a full state budget kept from evaluation (see romulus.detect.bounded): the sweep makes the
         # partition's coverage partial with the limit named, exactly as for a record missing a required field.
         self.capped = 0

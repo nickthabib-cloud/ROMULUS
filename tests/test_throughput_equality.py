@@ -23,20 +23,32 @@ from tests import throughput_fixture as tf
 # each edge's kind; the deterministic findings are unchanged.
 # Rule versions bumped when detector state moved to disk-backed stores change rule_cells, candidates and
 # manifest only: with each rule's version set back, every digest matches the reference before them.
+# The per-site internal-network definition then changes, under the default definition the fixture runs with:
+# - rule_cells, manifest: the cells of the direction-dependent rules whose partitions held records skipped or
+#   judged for their direction go from complete to partial (matched to match_on_partial) with the reason
+#   "internal networks not configured for this site; direction assumed from RFC 1918 defaults"; the report's
+#   coverage rows and gaps for those rules follow.
+# - rule_cells, candidates, manifest: those six rules, and the four rules whose wording changed, carry new
+#   versions; "non-private address" becomes "an address outside the site's internal networks" in claims and
+#   titles, and net.outbound_volume_asymmetry's positive-only reason names the definition.
+# - tasks, audit, expansion, manifest: expansion also resolves a network anchor's endpoints the default reads as
+#   outside (one lookup here, 203.0.113.8, which no host record carries, so it is not a victim); the manifest's
+#   task counts follow, and it names the internal-network definition the hunt used.
+#   Findings, citations, lanes, links and anchors are unchanged.
 GOLDEN_STACK = {
     "anchors": "5bfad42385ad92785c91d770613dff8e893f140c4f8d1606128b7ea0f170c120",
-    "audit": "2fd12fa42a64f8c3bb7a8079c056f68e24d4c371b69644eaf02688e6c706ab6a",
-    "candidates": "ada7ff1865ef0adcd151b3ce0ce5d727b2f912f611921c527c563c8209eebf08",
+    "audit": "396dfe062e233988393b689f8722a852a9929b89125f19e3a85f111d933990e1",
+    "candidates": "6d72cb29b8cfed066360c4b3ac41d1fc18505ea368712bb182d14009bef5c9b1",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_entities": "af8053b6219447233c1329e280f0ca64054ceceeea79d5d84bfa12af8e067a23",
     "events": "7cb68efe39e15155efa9b2f8edc22e79b93fb3804ba23981e97fbde26c5b0664",
-    "expansion": "5a12fe7c7f06127db41f5229bda524a0c9e21e101f8d87dc32d10e5589358770",
+    "expansion": "8cf87266934aafe1f4c32bcd6e7945552797b91ffe84ec0b3d9109aefe43c9b2",
     "links": "204e7ff86b5e7785a6eba0ac4bc4ed4187a0095ddcf1dc7d9ce8a55d459a5ed5",
-    "manifest": "e45a2fa0ba8721aed135f5c7fd21fa700df092029fd118edd6e0e3bc23fa1998",
+    "manifest": "0ca8ffef816b439bfbb36bf86e175cb4fbcc11c41c28004a425099be895e2fdb",
     "raw": "1b5eb4a23e51d23ba7b032ca69c4d879d2884ae338a137aca44d30580051c347",
-    "rule_cells": "e4427778bfd7d66958534c2b1e8b5ad86fd32d7cc8b20f10bc6f169d4be45055",
+    "rule_cells": "5e1ca3dfb1a54f467e49c0791c5c16a447808d752fd801ebcfb57beff1e6c130",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "06e1c9c6b4e5134a66c7f122289b8a7537a0cfc704e9623f59be2c0bf03679db",
+    "tasks": "4a58a6a470b804c0cbfc0f276894dc7868bfc0ac7bee9ad7f511466a3f788bc9",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "ab962996ad3da493263e7cf5971b6d853a75684e82f9daff420d871ef389a1d0",
