@@ -19,7 +19,7 @@ from romulus.evidence.windows_catalog import (
     lookup_event_class,
 )
 from romulus.hunt.stage import EventStage
-from romulus.hunt.sweep import Sweep
+from romulus.hunt.sweep import MAX_WINDOWS_UNCATALOGUED, Sweep
 from romulus.site import load_site_facts
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.sources.profile import contract_from_types
@@ -431,6 +431,62 @@ def test_catalogued_windows_class_with_no_reader_is_counted_as_not_assessed(monk
         "channel": "System", "provider": "Service Control Manager", "event_id": 7045,
         "family": "service_change", "records": 9,
     }]
+
+
+def test_uncatalogued_winlogbeat_inventory_is_bounded_and_never_added_to_retrieval(monkeypatch):
+    from romulus.hunt import sweep as sweep_module
+
+    named = [
+        ("Microsoft-Windows-PowerShell/Operational", "Microsoft-Windows-PowerShell", 4104),
+        ("Microsoft-Windows-Windows Defender/Operational", "Microsoft-Windows-Windows Defender", 1116),
+        ("Microsoft-Windows-TaskScheduler/Operational", "Microsoft-Windows-TaskScheduler", 106),
+        ("Microsoft-Windows-WMI-Activity/Operational", "Microsoft-Windows-WMI-Activity", 5857),
+    ]
+    buckets = [{
+        "key": {"event.channel": channel, "event.provider": provider, "event.code": event_id},
+        "count": offset + 1,
+    } for offset, (channel, provider, event_id) in enumerate(named)]
+    buckets.extend({
+        "key": {
+            "event.channel": f"Uncatalogued-{number}",
+            "event.provider": "Test-Provider",
+            "event.code": 20_000 + number,
+        },
+        "count": 1,
+    } for number in range(MAX_WINDOWS_UNCATALOGUED))
+
+    monkeypatch.setattr(sweep_module, "execute", lambda _client, intent, _contract: SearchOutcome(
+        target=intent.target, fingerprint="inventory", started_at=START, ended_at=START,
+        completeness=Completeness.complete, total=sum(bucket["count"] for bucket in buckets),
+        total_relation="eq", returned=len(buckets), buckets=buckets,
+    ))
+    contract = _contract()
+    sweep = Sweep(None, object(), "h1", Window(start=START, end=START + timedelta(hours=1)), {
+        contract.target: contract,
+    })
+    sweep.pack = [WindowsProcessRule()]
+
+    sweep._prepare_windows_inventory(contract.target, contract)
+
+    rows = sweep.stats["windows_unassessed"][contract.target]
+    listed = {(row.get("channel"), row.get("provider"), row.get("event_id")) for row in rows}
+    assert set(named).issubset(listed)
+    assert sum(
+        row.get("uncatalogued", False) and not row.get("overflow", False) for row in rows
+    ) == MAX_WINDOWS_UNCATALOGUED
+    assert rows[-1] == {
+        "overflow": True,
+        "uncatalogued": True,
+        "classes": 4,
+        "records": 4,
+    }
+    retrieval_values = {
+        value
+        for group in sweep._any_of_for(contract.target, contract)
+        for predicate in group
+        for value in predicate.value
+    }
+    assert all(channel not in retrieval_values for channel, _provider, _event_id in named)
 
 
 def test_unknown_windows_classes_are_not_assessed_without_poisoning_every_rule():

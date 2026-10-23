@@ -192,6 +192,23 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                                       "evaluates it"})
     for target, classes in sorted((stats.get("windows_unassessed") or {}).items()):
         for event_class in classes:
+            if event_class.get("uncatalogued"):
+                if event_class.get("overflow"):
+                    dataset = f"{event_class['classes']:,} additional uncatalogued Windows event classes"
+                    reason = "inventory rows omitted after the bounded category limit"
+                else:
+                    dataset = (
+                        f"{event_class['channel']}|{event_class['provider']}|{event_class['event_id']}"
+                    )
+                    reason = "uncatalogued Windows event class was not retrieved or evaluated"
+                out.append({
+                    "target": target,
+                    "dataset": dataset,
+                    "records": event_class["records"],
+                    "count_scope": "source inventory for the hunt window; records were not retrieved",
+                    "reason": reason,
+                })
+                continue
             out.append({
                 "target": target,
                 "dataset": (

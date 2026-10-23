@@ -558,6 +558,36 @@ def test_catalogued_windows_classes_without_a_rule_reader_are_listed_with_counts
     }]
 
 
+def test_uncatalogued_windows_inventory_and_its_overflow_are_reported_as_not_retrieved():
+    rows = _not_assessed({}, {"stats": {"windows_unassessed": {"windows-target": [
+        {
+            "channel": "Microsoft-Windows-PowerShell/Operational",
+            "provider": "Microsoft-Windows-PowerShell",
+            "event_id": 4104,
+            "records": 8,
+            "uncatalogued": True,
+        },
+        {"overflow": True, "uncatalogued": True, "classes": 12, "records": 34},
+    ]}}})
+
+    assert rows == [
+        {
+            "target": "windows-target",
+            "dataset": "Microsoft-Windows-PowerShell/Operational|Microsoft-Windows-PowerShell|4104",
+            "records": 8,
+            "count_scope": "source inventory for the hunt window; records were not retrieved",
+            "reason": "uncatalogued Windows event class was not retrieved or evaluated",
+        },
+        {
+            "target": "windows-target",
+            "dataset": "12 additional uncatalogued Windows event classes",
+            "records": 34,
+            "count_scope": "source inventory for the hunt window; records were not retrieved",
+            "reason": "inventory rows omitted after the bounded category limit",
+        },
+    ]
+
+
 def test_scoped_windows_skips_do_not_hide_unscoped_linux_skips_in_mixed_hunts():
     detail = {"stats": {
         "skips": {"Windows unknown": 2, "journal noise": 3},

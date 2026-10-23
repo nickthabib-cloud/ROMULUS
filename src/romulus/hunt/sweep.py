@@ -80,6 +80,7 @@ BOOT_PLACEMENT_PARTITION = "boot-placement"
 DEFAULT_WINDOWS_LIVENESS_TOLERANCE = timedelta(minutes=15)
 MAX_SKIP_REASONS = 256
 SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category limit"
+MAX_WINDOWS_UNCATALOGUED = 256
 
 
 def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
@@ -207,15 +208,38 @@ class Sweep:
         inventory = set()
         counts: dict[str, int] = {}
         classes_by_token = {}
+        uncatalogued: list[dict] = []
+        uncatalogued_total = 0
+        uncatalogued_overflow_classes = 0
+        uncatalogued_overflow_records = 0
         for bucket in outcome.buckets:
             key = bucket.get("key") or {}
+            count = int(bucket.get("count") or 0)
             event_class = lookup_event_class(
                 key.get("event.channel"), key.get("event.provider"), key.get("event.code")
             )
             if event_class is not None:
                 inventory.add(event_class.token)
-                counts[event_class.token] = counts.get(event_class.token, 0) + int(bucket.get("count") or 0)
+                counts[event_class.token] = counts.get(event_class.token, 0) + count
                 classes_by_token[event_class.token] = event_class
+                continue
+            uncatalogued_total += 1
+            if len(uncatalogued) >= MAX_WINDOWS_UNCATALOGUED:
+                uncatalogued_overflow_classes += 1
+                uncatalogued_overflow_records += count
+                continue
+            raw_event_id = key.get("event.code")
+            try:
+                shown_event_id = int(raw_event_id)
+            except (TypeError, ValueError):
+                shown_event_id = str(raw_event_id or "<missing>")[:80]
+            uncatalogued.append({
+                "channel": str(key.get("event.channel") or "<missing>")[:200],
+                "provider": str(key.get("event.provider") or "<missing>")[:200],
+                "event_id": shown_event_id,
+                "records": count,
+                "uncatalogued": True,
+            })
         reasons = []
         if outcome.completeness != Completeness.complete:
             reasons.append(
@@ -224,7 +248,8 @@ class Sweep:
         self._windows_inventory[target] = inventory
         self._windows_inventory_reasons[target] = reasons
         self.stats.setdefault("windows_inventory", {})[target] = {
-            "cataloged_classes": len(inventory), "counts": dict(sorted(counts.items())), "reasons": reasons,
+            "cataloged_classes": len(inventory), "uncatalogued_classes": uncatalogued_total,
+            "counts": dict(sorted(counts.items())), "reasons": reasons,
         }
         read_tokens = set()
         for playbook in self.pack:
@@ -248,6 +273,14 @@ class Sweep:
                 "event_id": event_class.event_id,
                 "family": event_class.family,
                 "records": counts[token],
+            })
+        unassessed.extend(uncatalogued)
+        if uncatalogued_overflow_classes:
+            unassessed.append({
+                "overflow": True,
+                "uncatalogued": True,
+                "classes": uncatalogued_overflow_classes,
+                "records": uncatalogued_overflow_records,
             })
         if unassessed:
             self.stats.setdefault("windows_unassessed", {})[target] = unassessed
