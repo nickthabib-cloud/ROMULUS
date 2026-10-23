@@ -9,7 +9,7 @@ import pytest
 
 from romulus.config import Settings
 from romulus.hunt import run as hunt_run
-from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
+from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, RESERVED_REASON, ExpansionEngine
 from romulus.hunt.expansion_plan import TIER_PLAN
 from tests.test_expansion_engine import T0, WINDOW, add_anchor, repo_with_anchor, stable_state
 from tests.test_expansion_lane_budget import SteadyFetcher, set_lane
@@ -100,6 +100,44 @@ def test_a_discovered_anchor_brings_its_own_share_after_the_roots_spent_theirs()
     served = links_by_anchor(fetcher)
     assert served["F-found"] >= NARROW                       # the roots' 24 queries were spent; its own 12 were not
     assert sum(1 for call in fetcher.calls if call[0] == "F-found") >= len(NARROW)
+
+
+def test_roots_whose_shares_near_the_ceiling_leave_its_reserve_unspent_and_say_so():
+    repo = many_anchors(8)                       # shares 8 x 12 = 96, just below the ceiling of 100
+    summary = ExpansionEngine(repo, "h1", WINDOW, SteadyFetcher(repo), max_source_queries=100,
+                              per_anchor_source_queries=12).run()
+
+    # A fifth of the ceiling is the reserve; with no discovered anchor waiting, half of it goes to the roots.
+    assert summary["source_queries"] == 90
+    assert all(RESERVED_REASON in row["reasons"] for row in repo.expansion_anchors("h1"))
+
+
+def test_near_the_ceiling_a_reserve_is_kept_for_an_urgent_anchor_found_after_the_roots_spent_theirs():
+    repo = many_anchors(8)                       # shares 8 x 12 = 96, just below the ceiling of 100
+    for index in range(8):
+        set_lane(repo, f"F-{index:04d}", "high")
+    fetcher = SteadyFetcher(repo)
+    found = []
+
+    def discover(_result):
+        if len(fetcher.calls) >= 45 and not found:
+            candidate = f"F-found{len(found)}"
+            found.append(candidate)
+            add_anchor(repo, candidate, f"web{len(found)}", ts=T0 + timedelta(minutes=2))
+            set_lane(repo, candidate, "urgent", severity="critical", source_anchor_id="F-0000")
+
+    summary = ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=100, per_anchor_source_queries=12,
+                              after_link=discover).run()
+
+    served = links_by_anchor(fetcher)
+    assert served[found[0]] >= NARROW                        # the reserve covers its first tier
+    rows = {row["id"]: row for row in repo.expansion_anchors("h1")}
+    for candidate in found:
+        if len(served.get(candidate, ())) < LINKS_PER_ANCHOR:
+            assert any("budget" in reason for reason in rows[candidate]["reasons"])
+    assert summary["source_queries"] <= 100
+    assert summary["budget"] == {"per_anchor_source_queries": 12, "max_source_queries": 100,
+                                 "source_query_budget": 100, "ceiling_reached": True}
 
 
 def test_a_per_anchor_expansion_is_deterministic_and_resumes_to_the_same_end():

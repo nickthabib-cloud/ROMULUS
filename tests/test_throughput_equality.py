@@ -50,16 +50,18 @@ from tests import throughput_fixture as tf
 # candidate id. Two of the fixture's anchors tie, so their links run in the other order: only which task fetched
 # a raw record first (raw) and the order of the manifest's link accounting change; every link, anchor and finding
 # is the same.
+# The expansion summary records the budget it ran under (the fixture's fixed total of 180), and the report's
+# expansion summary carries it with the queries spent: expansion, audit and manifest change by those fields only.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "b073e712c7f409328fcb352d35f6c8e0cb7e43608dbcc9745a9c59148ade795f",
+    "audit": "538a65e82e05000f401b4dfa3288f0982b55c328e3cede607032141d0f81292d",
     "candidates": "2ad7bf7a7fb7a18555d594746745560c601f39317f8496653ac3bd21cb00a251",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_entities": "af8053b6219447233c1329e280f0ca64054ceceeea79d5d84bfa12af8e067a23",
     "events": "d091e0a4b829e399e1011c9930f8a347a09b480ab7ca069361090e9ae1405c7c",
-    "expansion": "ef487c832d36f2b26f185fa4f12747354d1572ec8f891dee5af8580dfd408438",
+    "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0c6ce53f0aa49c6f1e7aa63c0df576ecde37079b918cdce15183b8b30f946646",
-    "manifest": "c84a146a963417df1d6f3c2bf0c71ae24cd4ac8add50da14a9437ff6d6943b94",
+    "manifest": "6e357bde832b9ef364f9e928e5c964ba9a23e845f6d2820c0b698cfffea06aa3",
     "raw": "03d2790712d2ac341c4dafcc4b89d7f991a025f637d97f7ef22cd33e35f4fbe0",
     "rule_cells": "7d7950159c1c13f9e7e023ce522ec2932005616c0f7fa89e9afe553d993ff57d",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",

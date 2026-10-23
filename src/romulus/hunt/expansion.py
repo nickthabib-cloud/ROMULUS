@@ -354,24 +354,26 @@ class ExpansionEngine:
         return min(self.max_source_queries, self.per_anchor_source_queries * expandable)
 
     def _root_cap(self, all_rows: list[dict], blocked: set[str], lane_rank: int) -> int:
-        """Queries a root anchor may reach, given the most severe lane with work. While per-anchor shares are below
-        their ceiling every discovered anchor brings its own share, so roots may spend the whole budget. Otherwise a
-        fifth of it is a reserve for anchors discovered by expansion, and holds back roots only for a discovered
-        anchor at least as severe; a less severe one waits behind them. With none waiting, half of the reserve is
-        released to roots, but only when the other half still covers one fetch (two queries), so a discovered anchor
-        of that lane is never starved."""
+        """Queries a root anchor may reach, given the most severe lane with work. A fifth of the total (the fixed
+        total, or with per-anchor shares the ceiling) is a reserve for anchors discovered by expansion. With shares,
+        roots spend freely below the rest, since every discovered anchor brings its own share; the reserve keeps a
+        discovered anchor's queries when shares reach the ceiling. It holds back roots only for a discovered anchor
+        at least as severe; a less severe one waits behind them. With none waiting, half of the reserve is released
+        to roots, but only when the other half still covers one fetch (two queries), so a discovered anchor of that
+        lane is never starved."""
         budget = self.budget
-        if self.per_anchor_source_queries is not None and budget < self.max_source_queries:
+        total = budget if self.per_anchor_source_queries is None else self.max_source_queries
+        root_budget = total - max(1, (total + 4) // 5) if total else 0
+        reserve = total - root_budget
+        if self.per_anchor_source_queries is not None and budget <= root_budget:
             return budget
-        root_budget = budget - max(1, (budget + 4) // 5) if budget else 0
-        reserve = budget - root_budget
         children = [row for row in all_rows if 0 < row["depth"] < self.max_depth and row["status"] == "pending"
                     and row["id"] not in blocked]
         if any(LANE_ORDER.get(row["lane"], 9) <= lane_rank for row in children):
-            return root_budget
+            return min(budget, root_budget)
         if children:
             return budget
-        return root_budget + (reserve // 2 if reserve - reserve // 2 >= 2 else 0)
+        return min(budget, root_budget + (reserve // 2 if reserve - reserve // 2 >= 2 else 0))
 
     def _tier_slots(self, ordered: list[dict], anchor_reasons: dict[str, list[str]], root_cap: int) -> list[tuple]:
         """The unevaluated links of the lowest tier any of these anchors still has, in anchor order."""
@@ -473,7 +475,7 @@ class ExpansionEngine:
         if query_count >= self.budget:
             return "source query budget exhausted"
         if self.clock() - self.started >= self.wall_clock_seconds:
-            return "hunt wall-clock budget exhausted"
+            return "expansion wall-clock budget exhausted"
         return None
 
     def run(self) -> dict:
@@ -641,6 +643,13 @@ class ExpansionEngine:
             "expanded_partial": sum(row["status"] == "expanded_partial" for row in anchors),
             "unexpanded": [row["id"] for row in anchors if row["status"] == "unexpanded"],
             "source_queries": query_count,
+            # the budget the expansion ran under, so a reader can tell a cut by the ceiling from one by the shares
+            "budget": {
+                "per_anchor_source_queries": self.per_anchor_source_queries,
+                "max_source_queries": self.max_source_queries,
+                "source_query_budget": self._budget_for(anchors),
+                "ceiling_reached": self._budget_for(anchors) >= self.max_source_queries,
+            },
         }
         self.repo.audit("system", "hunt.expansion_summary", self.hunt_id, summary,
                         owner_token=self.owner_token)
