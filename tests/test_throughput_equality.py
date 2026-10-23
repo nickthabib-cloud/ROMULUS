@@ -35,16 +35,21 @@ from tests import throughput_fixture as tf
 #   outside (one lookup here, 203.0.113.8, which no host record carries, so it is not a victim); the manifest's
 #   task counts follow, and it names the internal-network definition the hunt used.
 #   Findings, citations, lanes, links and anchors are unchanged.
+# A process-lineage link now places the anchor's own process by (time, audit serial), including the anchor's
+# own record, and walks to its true parent: in the fixture, six lineage links select /bin/bash (the parent of the
+# anchor's siblings) instead of a sibling chmod, so links, the context findings judged on them (claims, cited
+# events, gate results), their context.finalize audit rows and the manifest change. Counts, lanes and anchors are
+# unchanged; ordering the expansion budget by lane changes nothing in this fixture.
 GOLDEN_STACK = {
     "anchors": "5bfad42385ad92785c91d770613dff8e893f140c4f8d1606128b7ea0f170c120",
-    "audit": "396dfe062e233988393b689f8722a852a9929b89125f19e3a85f111d933990e1",
-    "candidates": "6d72cb29b8cfed066360c4b3ac41d1fc18505ea368712bb182d14009bef5c9b1",
+    "audit": "bbc06f916b04a546ae1b317ffa4dd251b54d2b5d6e7ddbf899cfd9467c75499a",
+    "candidates": "ddce6ef167ac189fb468105ba6d181d36ac8585499c2d4f5390b59f2306ced6b",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_entities": "af8053b6219447233c1329e280f0ca64054ceceeea79d5d84bfa12af8e067a23",
     "events": "7cb68efe39e15155efa9b2f8edc22e79b93fb3804ba23981e97fbde26c5b0664",
     "expansion": "8cf87266934aafe1f4c32bcd6e7945552797b91ffe84ec0b3d9109aefe43c9b2",
-    "links": "204e7ff86b5e7785a6eba0ac4bc4ed4187a0095ddcf1dc7d9ce8a55d459a5ed5",
-    "manifest": "0ca8ffef816b439bfbb36bf86e175cb4fbcc11c41c28004a425099be895e2fdb",
+    "links": "ad66a396bb5b825d598e1b90b4807558aa3cc3bab52d16881bcf2c987a6e0aa3",
+    "manifest": "a7673ddb1ad28cd16f093158c24e0eafeba2a211c0daf189596b3a7da67616fa",
     "raw": "1b5eb4a23e51d23ba7b032ca69c4d879d2884ae338a137aca44d30580051c347",
     "rule_cells": "5e1ca3dfb1a54f467e49c0791c5c16a447808d752fd801ebcfb57beff1e6c130",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",

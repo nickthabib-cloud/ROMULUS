@@ -337,6 +337,23 @@ def test_package_lineage_needs_the_parent_exec_at_or_before_the_write():
     assert out[0].group_key == "app01|0|/etc/init.d|pid 102|/usr/bin/cp|2030-01-06T09:00:00+00:00"
 
 
+def test_package_lineage_orders_the_parents_exec_at_the_writes_instant_by_audit_serial():
+    # dpkg execed in the parent at the write's instant counts only when its audit serial is lower than the write's:
+    # one recorded after the write (a higher serial) was not the parent's image when the child wrote
+    def parent(serial):
+        return ev("process_exec", T0, process__executable="/usr/bin/dpkg", process__argv=["/usr/bin/dpkg"],
+                  process__pid=100, process__ppid=90, process__uid="0", audit__serial=serial)
+
+    def write():
+        return change("/etc/init.d/x", ts=T0, uid="0", exe="/usr/bin/cp", pid=102, ppid=100, audit__serial=501)
+
+    _pb, out = run_persist([parent(500), write()])
+    assert out[0].group_key.startswith("app01|package:dpkg")
+    _pb, out = run_persist([parent(502), write()])
+    assert out[0].group_key == "app01|0|/etc/init.d|pid 102|/usr/bin/cp|2030-01-06T09:00:00+00:00"
+    assert "package activity" not in out[0].claim
+
+
 def test_a_package_manager_name_outside_system_directories_is_not_package_activity():
     _pb, out = run_persist([change("/etc/cron.d/x", uid="0", exe="/tmp/dpkg", pid=7, ppid=1)])
     assert out[0].group_key == "app01|0|/etc/cron.d|pid 7|/tmp/dpkg|2030-01-06T09:00:00+00:00" and "package activity" not in out[0].claim

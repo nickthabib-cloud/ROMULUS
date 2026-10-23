@@ -13,6 +13,7 @@ from romulus.baseline.spec import (
     Pending,
     exec_pair_key,
     exec_serial,
+    parent_at,
 )
 from romulus.detect.correlation import boot_of, boots_conflict
 from romulus.evidence.typed import Outcome, TypedEvent
@@ -404,7 +405,8 @@ class PendingResolver:
             parent, reason = self.parents.parent(
                 pending.host, pending.ppid, pending.ts, pending.boot, pending.serial)
         else:
-            parent = self.parents.lookup(pending.host, pending.ppid, pending.ts.timestamp(), pending.boot)
+            parent = parent_at(self.parents, pending.host, pending.ppid, pending.ts.timestamp(), pending.boot,
+                               pending.serial)
             reason = None
         if parent is None or not isinstance(parent[1], str) or not parent[1]:
             return PendingResolution(pending.event_id, (), reason or BEFORE_HISTORY)

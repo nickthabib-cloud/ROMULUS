@@ -24,7 +24,15 @@ from romulus.detect.bounded import (
 )
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
-from romulus.detect.host import WEB_SERVICE_USERS, ExecLineage, ExecRecord, add_unheld, alone, need
+from romulus.detect.host import (
+    WEB_SERVICE_USERS,
+    ExecLineage,
+    ExecRecord,
+    _audit_serial,
+    add_unheld,
+    alone,
+    need,
+)
 from romulus.evidence.typed import Outcome, TypedEvent
 
 CITE = 10                       # records cited per finding; claims give exact totals
@@ -580,6 +588,7 @@ class _Change:
     auid: str | None
     tty: str | None
     outcome: Outcome
+    serial: int | None = None   # the record's audit serial: orders it among its parent's execs at one instant
 
 
 class PersistencePathChange(Playbook):
@@ -713,7 +722,7 @@ class PersistencePathChange(Playbook):
             exe=str(event.get("process.executable") or ""), pid=event.get("process.pid"),
             ppid=event.get("process.ppid"), auid=_str(event.get("process.auid")), tty=_str(event.get("process.tty")),
             boot=boot_of(event),
-            outcome=event.outcome)
+            outcome=event.outcome, serial=_audit_serial(event))
         if not self.changes.append(change):
             # a write to a persistence location is a finding by itself: published now, on its own
             self.note_limit("changes_alone", "the persistence-location changes' disk budget is spent; later changes "
@@ -731,26 +740,27 @@ class PersistencePathChange(Playbook):
     # ---------------------------------------------------------------- finalize
     def _manager(self, change: _Change) -> str | None:
         """The package manager in the writer's kernel-recorded lineage (its own executable, then parents)."""
-        exe, ppid, ts, boot = change.exe, change.ppid, change.ts, change.boot
+        exe, ppid, ts, boot, serial = change.exe, change.ppid, change.ts, change.boot, change.serial
         for _ in range(LINEAGE_DEPTH):
             name = posixpath.basename(exe)
             if name in PACKAGE_MANAGERS and exe.startswith(_SYSTEM_EXE_DIRS):
                 return name
             if not isinstance(ppid, int) or ppid <= 1:
                 return None
-            parent = self._parent(change.host, ppid, ts)
+            parent = self._parent(change.host, ppid, ts, serial)
             if parent is None or boots_conflict(boot, parent.boot):
                 return None
-            ts, ppid, exe, parent_boot = parent.ts, parent.ppid, parent.exe, parent.boot
+            ts, ppid, exe, parent_boot, serial = parent.ts, parent.ppid, parent.exe, parent.boot, parent.serial
             boot = boot if boot is not None else parent_boot
         return None
 
-    def _parent(self, host: str, ppid: int, ts: float) -> ExecRecord | None:
-        """The latest exec naming its executable of `ppid` at or before `ts`. A change records its host as ""
-        when the record had none; that host's execs are held under None."""
-        found = self.execs.latest(host, ppid, ts, where=_named)
+    def _parent(self, host: str, ppid: int, ts: float, serial: int | None = None) -> ExecRecord | None:
+        """The image of `ppid` (its latest exec naming its executable) when its child's record happened at (`ts`,
+        audit `serial`): strictly before it, ordered by serial at one instant; None when none or ambiguous. A change
+        records its host as "" when the record had none; that host's execs are held under None."""
+        found = self.execs.latest(host, ppid, ts, where=_named, serial=serial)
         if found is None and host == "":
-            found = self.execs.latest(None, ppid, ts, where=_named)
+            found = self.execs.latest(None, ppid, ts, where=_named, serial=serial)
         return found
 
     def _events(self, ids: list[str]) -> dict[str, TypedEvent]:

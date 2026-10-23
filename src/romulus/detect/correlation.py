@@ -17,6 +17,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
+from typing import NamedTuple
 
 from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, basename, pf
@@ -164,6 +165,13 @@ def merge_unknown_boot(groups: dict[tuple, list], index: int) -> dict[tuple, lis
     return out
 
 
+class ExecImage(NamedTuple):
+    """A pid's image at a moment (`PidTable.image`): the exec record, or why it is unknown."""
+    record: ExecRecord | None
+    why: str | None             # set only when execs exist but which one was the image cannot be decided
+    at: float | None            # the instant of the execs that cannot be ordered
+
+
 class PidTable:
     """Kernel-recorded exec history per (host, pid), for lineage questions about a socket's process: a view of an
     ExecLineage (the hunt's one exec store in a sweep, see `share_lineage`) over the exec records that name their
@@ -187,26 +195,47 @@ class PidTable:
         """Move the least recently used processes beyond the capacity to disk (when a batch ends)."""
         self.execs.trim()
 
-    def _record(self, host: str, pid: int, ts: float, boot: str | None = None, *, strict: bool = False,
-                serial: int | None = None, exclude: str | None = None):
-        """The pid's image at (`ts`, audit `serial`) as an ExecRecord (`ExecLineage.latest`), or None."""
+    def image(self, host: str, pid: int, ts: float, boot: str | None = None, *, strict: bool = False,
+              serial: int | None = None, exclude: str | None = None, inclusive: bool = False) -> ExecImage:
+        """The pid's image at (`ts`, audit `serial`) in `boot` (`ExecLineage.resolve`; `inclusive` for the process
+        that made the asking record itself, strict-before by default for a parent at its child's exec). `why` is
+        None when the record was found or no exec of the pid is recorded; when execs exist but which one was the
+        image cannot be decided, it names the ambiguity and `at` is the instant of the unordered execs."""
         if host is None:
-            return None                         # a record without a host is never joined
-        latest = self.execs.latest(host, pid, ts, strict=strict, where=_named, serial=serial, exclude=exclude)
+            return ExecImage(None, None, None)  # a record without a host is never joined
+        latest, ambiguous_at = self.execs.resolve(host, pid, ts, strict=strict, where=_named, serial=serial,
+                                                  exclude=exclude, inclusive=inclusive)
+        if ambiguous_at is not None:
+            when = datetime.fromtimestamp(ambiguous_at, UTC).isoformat()
+            return ExecImage(None, f"lineage ambiguous at {when} for pid {pid} on {host}: execs of different "
+                                   f"programs at one instant without audit serials to order them", ambiguous_at)
         # The latest exec of this pid before `ts` is in another boot: every earlier one is too (boots follow each
         # other in time), so this pid has no recorded exec in `boot` before `ts`.
         if latest is None or boots_conflict(boot, latest.boot):
-            return None
-        return latest
+            return ExecImage(None, None, None)
+        return ExecImage(latest, None, None)
+
+    def _record(self, host: str, pid: int, ts: float, boot: str | None = None, *, strict: bool = False,
+                serial: int | None = None, exclude: str | None = None, inclusive: bool = False):
+        """The pid's image at (`ts`, audit `serial`) as an ExecRecord, or None when unknown or ambiguous."""
+        return self.image(host, pid, ts, boot, strict=strict, serial=serial, exclude=exclude,
+                          inclusive=inclusive)[0]
 
     def _lookup(self, host: str, pid: int, ts: float, boot: str | None = None, *, strict: bool = False,
-                serial: int | None = None, exclude: str | None = None):
-        latest = self._record(host, pid, ts, boot, strict=strict, serial=serial, exclude=exclude)
+                serial: int | None = None, exclude: str | None = None, inclusive: bool = False):
+        latest = self._record(host, pid, ts, boot, strict=strict, serial=serial, exclude=exclude,
+                              inclusive=inclusive)
         return None if latest is None else (latest.ts, latest.exe, latest.ppid, latest.raw_id, latest.boot)
 
-    def lookup(self, host: str, pid: int, ts: float, boot: str | None = None, serial: int | None = None):
-        """The exec identity a PID had at (`ts`, audit `serial`) in `boot` (None when unknown or ambiguous); public
-        for expansion lineage links."""
+    def lookup(self, host: str, pid: int, ts: float, boot: str | None = None, serial: int | None = None,
+               *, inclusive: bool = False):
+        """The exec identity a PID had at (`ts`, audit `serial`) in `boot` (None when unknown or ambiguous):
+        strictly before that serial (a parent at its child's exec), or with `inclusive` at or equal to it (the
+        process of the asking record itself)."""
+        return self._lookup(host, pid, ts, boot, serial=serial, inclusive=inclusive)
+
+    def lookup_ordered(self, host: str, pid: int, ts: float, boot: str | None, serial: int | None):
+        """The baseline extractors' parent lookup (`parent_at`): the parent's image at its child's (ts, serial)."""
         return self._lookup(host, pid, ts, boot, serial=serial)
 
     def exec_before(self, host: str, pid: int, ts: float, boot: str | None = None, serial: int | None = None,
