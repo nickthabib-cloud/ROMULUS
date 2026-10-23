@@ -10,7 +10,13 @@ import romulus.hunt.run as hunt_run
 from romulus.config import Settings
 from romulus.doctor import check_site
 from romulus.hunt.manifest import build_manifest
-from romulus.site import SiteChangedError, SiteValidationError, ensure_site_unchanged, load_site_facts
+from romulus.site import (
+    SiteChangedError,
+    SiteValidationError,
+    _SiteDocument,
+    ensure_site_unchanged,
+    load_site_facts,
+)
 from romulus.sources.models import Window
 
 VALID = """\
@@ -68,6 +74,7 @@ def test_valid_site_file_is_canonical_strict_and_host_scoped(tmp_path):
     assert facts.attests("ws-22.example.test", "audit_policy", subcategory="Logon", outcome="failure") is True
     assert facts.attests("unmatched", "security_4688_command_line") is False
     assert facts.attests("ws-22.example.test", "security_event_log") is True
+    assert "schema_name" in _SiteDocument.model_fields and "schema" not in _SiteDocument.model_fields
 
 
 @pytest.mark.parametrize(

@@ -149,7 +149,7 @@ class CollectionGroup(BaseModel):
 class _SiteDocument(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema: Literal[COLLECTION_SCHEMA]
+    schema_name: Literal[COLLECTION_SCHEMA] = Field(alias="schema", serialization_alias="schema")
     collection: tuple[CollectionGroup, ...] = ()
     domain_controllers: tuple[str, ...] = ()
     directory_sync_accounts: tuple[str, ...] = ()
@@ -274,7 +274,7 @@ def load_site_facts(home: Path) -> SiteFacts:
         if "Extra inputs are not permitted" in detail:
             detail = f"unknown key: {detail}"
         raise SiteValidationError(f"invalid {COLLECTION_PATH.as_posix()}: {detail}") from exc
-    content = document.model_dump(mode="json")
+    content = document.model_dump(mode="json", by_alias=True)
     return SiteFacts(
         True,
         _digest(content),
