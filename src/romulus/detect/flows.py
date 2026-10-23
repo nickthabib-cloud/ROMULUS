@@ -659,9 +659,6 @@ class HorizontalSweep(_FlowRule):
         if not routable_remote(view.dst):
             return True                 # multicast, broadcast, loopback or link-local: not a host being reached
         scope = "external" if external(view.dst) else "internal"
-        if scope == "external":
-            # judged by the stricter external fan-out standard; on a site in public space it may be internal
-            assume_direction(self)
         key = (view.src, view.transport, view.dport, scope)
         group = self.sweeps.get(key)
         if group is None:
@@ -675,6 +672,10 @@ class HorizontalSweep(_FlowRule):
             if not self.destinations.put((key, view.dst), destination):
                 return self._refused("destinations'")
             group.reached += 1
+        if scope == "external":
+            # judged (not refused) by the stricter external fan-out standard; on a site in public space it may be
+            # internal, so the direction is an assumption
+            assume_direction(self)
         started = {width: destination.runs[width].add(view.start, width) for width in self.WINDOWS}
         if view.s2c_packets is not None:
             if view.s2c_packets > 0:
