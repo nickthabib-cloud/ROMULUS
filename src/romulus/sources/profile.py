@@ -69,6 +69,7 @@ class SourceProfile(BaseModel):
     target: str
     kind: str
     role: Literal["host", "network"]
+    os_family: Literal["linux", "windows", "unknown"]
     backend: str
     backend_version: str
     captured_at: datetime
@@ -291,9 +292,10 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
         notes.append("ds inventory truncated (sum_other_doc_count>0)")
     datasets = {b["key"]: b["doc_count"] for b in aggs.get("ds", {}).get("buckets", [])}
     role = source_role(field_types, set(datasets))
+    os_family = source_os_family(field_types, role)
     prof = {
         "target": target, "kind": "es_index" if schema == "lab_ecs" else schema,
-        "role": role,
+        "role": role, "os_family": os_family,
         "backend": client.settings.es_flavor, "backend_version": client.version,
         "captured_at": datetime.now(UTC), "field_types": field_types,
         "datasets": datasets,
@@ -302,12 +304,14 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
         "time_max": aggs.get("tmax", {}).get("value_as_string"),
         "doc_count": d.get("hits", {}).get("total", {}).get("value"), "notes": notes,
     }
+    # Role and OS are source semantics, so they intentionally participate in the profile id. Adding them changes
+    # ids made by older builds; the manifest also records both values explicitly for resume validation.
     pid = digest({k: v for k, v in prof.items() if k != "captured_at"})[:16]
     profile = SourceProfile(id=pid, **prof)
     return profile, contract_from_types(
         target,
         field_types,
-        role=role,
+        role=role, os_family=os_family,
         hosts=tuple(sorted(profile.hosts)),
         host_inventory_complete=not any(note.startswith("hosts inventory truncated") for note in notes),
     )

@@ -31,8 +31,10 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         "window": {"start": window.start.isoformat(), "end": window.end.isoformat(), "semantics": "[start, end) UTC"},
         "original_input": original_input,
         "targets": targets,
-        "source_profiles": {t: {"id": p["id"], "backend_version": p["backend_version"], "doc_count": p["doc_count"],
-                                "datasets": p["datasets"]} for t, p in profiles.items()},
+        "source_profiles": {t: {
+            "id": p["id"], "backend_version": p["backend_version"], "doc_count": p["doc_count"],
+            "datasets": p["datasets"], "role": p["role"], "os_family": p["os_family"],
+        } for t, p in profiles.items()},
         "pack": {"version": PACK_VERSION, "playbooks": pack_manifest()},
         "normalizer": NORMALIZER_VERSION,
         "packet_normalizer": PACKET_NORMALIZER,

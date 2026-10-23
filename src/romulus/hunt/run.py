@@ -86,6 +86,15 @@ def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient,
     for target in manifest["targets"]:
         profile, contract = build_profile(client, target)
         recorded = manifest.get("source_profiles", {}).get(target)
+        if hunt.get("_resume_scope_check") and recorded and (
+            recorded.get("role") not in (None, profile.role)
+            or recorded.get("os_family") not in (None, contract.os_family)
+        ):
+            raise RuntimeError(
+                f"source role/OS changed for {target}: manifest "
+                f"{recorded.get('role')}/{recorded.get('os_family')}, now "
+                f"{profile.role}/{contract.os_family}; start a new hunt instead of resuming"
+            )
         if recorded and profile.id != recorded["id"]:
             repo.audit("system", "source_profile_changed", hunt_id, {
                 "target": target, "now": profile.id, "manifest": recorded["id"],
@@ -415,7 +424,7 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
     )
     client = ElasticClient(s)
     try:
-        contracts = _contracts(s, repo, hunt, client, owner_token)
+        contracts = _contracts(s, repo, {**hunt, "_resume_scope_check": True}, client, owner_token)
     except Exception as exc:
         stop_reason = f"source preflight error: {exc}"
         repo.audit("system", "hunt.agent_summary", hunt_id, {

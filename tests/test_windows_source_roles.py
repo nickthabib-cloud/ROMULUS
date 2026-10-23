@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from romulus.agent.models import EntityRef
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest, ProcessTreeArgs, ProcessTreeRequest
+from romulus.config import Settings
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.windows_catalog import (
     EVENT_CLASSES,
@@ -15,7 +18,9 @@ from romulus.evidence.windows_catalog import (
     WINDOWS_DATASET_FAMILIES,
     WINDOWS_HOST_DATASETS,
 )
+from romulus.hunt import run as hunt_run
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
+from romulus.hunt.manifest import build_manifest
 from romulus.hunt.pivot import PivotExecutor, _is_network
 from romulus.hunt.sweep import LINUX_HOST_DATASETS, Sweep
 from romulus.sources import profile as profile_module
@@ -236,6 +241,41 @@ def test_live_profile_records_the_typed_role_and_profiles_the_event_computer():
     assert profile.role == "host" and contract.role == "host"
     assert contract.os_family == "windows"
     assert profile.hosts == {"ws01.example.test": 1}
+
+
+def test_manifest_records_profile_role_and_os_family():
+    manifest = build_manifest(
+        Settings(), Window(start=START, end=END), {}, "broad", ["mixed"],
+        {"mixed": {
+            "id": "profile-1", "backend_version": "8.0", "doc_count": 4,
+            "datasets": {"windows.security": 4}, "role": "host", "os_family": "windows",
+        }},
+    )
+
+    assert manifest["source_profiles"]["mixed"] == {
+        "id": "profile-1", "backend_version": "8.0", "doc_count": 4,
+        "datasets": {"windows.security": 4}, "role": "host", "os_family": "windows",
+    }
+
+
+def test_resume_contract_preflight_refuses_role_or_os_change(monkeypatch):
+    class Profile:
+        id = "profile-2"
+        role = "network"
+
+    contract = contract_from_types("mixed", {"@timestamp": "date"}, role="network", os_family="unknown")
+    monkeypatch.setattr(hunt_run, "build_profile", lambda _client, _target: (Profile(), contract))
+
+    with pytest.raises(RuntimeError, match="source role/OS changed"):
+        hunt_run._contracts(
+            Settings(), object(), {
+                "id": "h1",
+                "_resume_scope_check": True,
+                "manifest": {"targets": ["mixed"], "source_profiles": {
+                    "mixed": {"id": "profile-1", "role": "host", "os_family": "windows"},
+                }},
+            }, object(),
+        )
 
 
 def test_live_profile_pages_a_5000_host_windows_inventory():
