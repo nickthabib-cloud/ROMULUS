@@ -33,6 +33,7 @@ from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, SearchOutcome, Window
 from romulus.sources.profile import FieldContract
+from romulus.site import SiteFacts, absent_site_facts
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 
@@ -448,7 +449,8 @@ class PivotExecutor:
                  source_query_budget: int | None = None,
                  source_query_scope: str | None = None,
                  dataset_inventory: dict[str, set[str] | list[str] | tuple[str, ...]] | None = None,
-                 optimize_normalization: bool = True):
+                 optimize_normalization: bool = True,
+                 site_facts: SiteFacts | None = None):
         self.repo = repo
         self.client = client
         self.hunt_id = hunt_id
@@ -463,6 +465,15 @@ class PivotExecutor:
         }
         self.optimize_normalization = optimize_normalization
         self.raw_family_prefilter = optimize_normalization
+        self.site_facts = site_facts or absent_site_facts()
+
+    def process_termination_attested(self, host: str | None) -> bool:
+        return bool(host) and self.site_facts.attests(
+            host, "audit_policy", subcategory="Process Termination", outcome="success",
+        )
+
+    def system_log_attested(self, host: str | None) -> bool:
+        return bool(host) and self.site_facts.attests(host, "system_event_log")
 
     def _normalize_pivot_records(
         self, records: list[dict], raw_families: set[str] | None,
@@ -1216,6 +1227,7 @@ class PivotExecutor:
     @staticmethod
     def _select_windows_process_tree(
         events: list[TypedEvent], args: ProcessTreeArgs, anchor_ts: datetime | None,
+        termination_attested: bool = False,
     ) -> tuple[list[TypedEvent], str | None]:
         candidates = sorted(
             (event for event in events
@@ -1228,7 +1240,8 @@ class PivotExecutor:
             if event.family == "process_exec" and event.get("process.pid") == args.process_id
         ]
         pivot_time = anchor_ts or (roots[0].ts if roots else args.start)
-        root = min(roots, key=lambda event: abs((event.ts - pivot_time).total_seconds())) if roots else None
+        prior_roots = [event for event in roots if event.ts <= pivot_time]
+        root = max(prior_roots, key=lambda event: (event.ts, event.id)) if prior_roots else None
         root_guid = root.get("process.guid") if root is not None else None
         if root_guid:
             guids = {str(root_guid).casefold()}
@@ -1258,7 +1271,8 @@ class PivotExecutor:
                 if event.family == "process_exec"
                 and args.process_id in {event.get("process.pid"), event.get("process.ppid")}
             ]
-            return selected, "process_tree PID fence evidence unavailable"
+            reason = None if termination_attested else "process_tree PID fence evidence unavailable"
+            return selected, reason
         lower, upper = args.start, args.end
         for fence in fences:
             if fence.ts <= pivot_time:
@@ -1274,6 +1288,7 @@ class PivotExecutor:
     @staticmethod
     def _select_process_tree_by_os(
         events: list[TypedEvent], args: ProcessTreeArgs, anchor_ts: datetime | None,
+        termination_attested: bool = False,
     ) -> tuple[list[TypedEvent], str | None]:
         """Fence only Windows PID lineage; mixed-source Linux results keep Linux semantics."""
         windows = [event for event in events if event.get("host.os.family") == "windows"
@@ -1282,7 +1297,9 @@ class PivotExecutor:
             return events, None
         windows_objects = {id(event) for event in windows}
         other = [event for event in events if id(event) not in windows_objects]
-        selected, reason = PivotExecutor._select_windows_process_tree(windows, args, anchor_ts)
+        selected, reason = PivotExecutor._select_windows_process_tree(
+            windows, args, anchor_ts, termination_attested,
+        )
         return [*other, *selected], reason
 
     def run(self, case_id: str, request: ToolRequest, *,
@@ -1419,6 +1436,7 @@ class PivotExecutor:
         if isinstance(request, ProcessTreeRequest):
             retained, fence_reason = self._select_process_tree_by_os(
                 retained, request.arguments, anchor_ts,
+                self.process_termination_attested(request.arguments.host),
             )
             if fence_reason:
                 incomplete = True

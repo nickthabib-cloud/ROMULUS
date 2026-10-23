@@ -201,6 +201,7 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
             target: set(profile.get("datasets", {}))
             for target, profile in manifest.get("source_profiles", {}).items()
         },
+        site_facts=ensure_site_unchanged(s.home, manifest.get("site")),
     )
     budget_seconds = float((manifest.get("budgets") or {}).get("wall_clock_minutes", 120)) * 60
     started_at = hunt.get("started_at")
@@ -276,6 +277,7 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
             target: set(profile.get("datasets", {}))
             for target, profile in hunt["manifest"].get("source_profiles", {}).items()
         },
+        site_facts=ensure_site_unchanged(s.home, hunt["manifest"].get("site")),
     )
 
     return Investigator(

@@ -228,6 +228,14 @@ def test_sessions_are_host_scoped_and_keep_logon_guid():
     assert event.get("auth.logon_guid") == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
+@pytest.mark.parametrize("logon_id", ["0x3e7", "0x3e4", "0x3e5"])
+def test_well_known_service_logon_ids_do_not_become_session_keys(logon_id):
+    event = normalize_hits([_hit(4624, data={"TargetLogonId": logon_id, "LogonType": "5"})])[0][0]
+
+    assert event.get("auth.session_id") is None
+    assert event.get("auth.session_key") is None
+
+
 @pytest.mark.parametrize(
     ("logon_type", "ip_address", "ip_port"),
     [("5", "-", "-"), ("4", "-", "-"), ("2", "::", "0")],

@@ -13,6 +13,7 @@ from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.sources.models import Window
+from romulus.site import ensure_site_unchanged
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 
@@ -194,6 +195,7 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
         repo, client, hunt_id, contracts, owner_token=owner_token,
         source_query_budget=settings.agent_max_source_queries, source_query_scope="agent",
         dataset_inventory=inventory,
+        site_facts=ensure_site_unchanged(settings.home, manifest.get("site")),
     )
     pivot.source_queries = repo.agent_source_queries(hunt_id)
     fetcher = LinkFetcher(pivot, start, end)

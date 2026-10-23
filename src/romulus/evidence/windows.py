@@ -441,6 +441,9 @@ _ACCOUNT_ACTIONS = {
     4740: "lockout",
 }
 
+# These identifiers belong to Windows itself, not portable user sessions.
+_WELL_KNOWN_LOGON_IDS = {"0x3e4", "0x3e5", "0x3e7"}
+
 
 def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host: str) -> Outcome:
     event_id, family = record.event_class.event_id, record.event_class.family
@@ -466,7 +469,8 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         _put(fields, record, "source.ip", "IpAddress")
         _put(fields, record, "source.port", "IpPort", transform=_integer)
         session = record.data.get("TargetLogonId") or record.data.get("SubjectLogonId")
-        if session and session.value not in (None, "", "0x0", "0"):
+        if (session and str(session.value).casefold()
+                not in {"", "0", "0x0", *_WELL_KNOWN_LOGON_IDS}):
             session_id = str(session.value).casefold()
             fields["auth.session_id"] = fv(session_id, session.origin)
             fields["auth.session_key"] = fv(f"{host}:{session_id}", session.origin)

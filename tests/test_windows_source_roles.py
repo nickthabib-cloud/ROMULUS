@@ -378,14 +378,117 @@ def test_windows_process_tree_honors_pid_fences_and_reports_when_they_are_missin
     args = ProcessTreeArgs(host="ws01", process_id=512, start=START, end=END)
 
     selected, reason = PivotExecutor._select_windows_process_tree(
-        [root, child, terminated, reused], args, root.ts,
+        [root, child, terminated, reused], args, root.ts, termination_attested=True,
     )
-    unfenced, missing = PivotExecutor._select_windows_process_tree([root, child, reused], args, root.ts)
+    unfenced, missing = PivotExecutor._select_windows_process_tree(
+        [root, child, reused], args, root.ts, termination_attested=False,
+    )
 
     assert {event.id for event in selected} == {"root", "child"}
     assert reason is None
     assert {event.id for event in unfenced} == {"root", "child", "reused"}
     assert missing == "process_tree PID fence evidence unavailable"
+
+
+def test_windows_process_tree_root_is_latest_at_or_before_anchor_not_later_pid_reuse():
+    prior = _event(1, data={
+        "ProcessGuid": "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}", "ProcessId": "512",
+    }).model_copy(update={"id": "prior", "ts": START + timedelta(minutes=10)})
+    prior_child = _event(1, data={
+        "ProcessGuid": "{11111111-2222-3333-4444-555555555555}",
+        "ParentProcessGuid": "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}",
+        "ProcessId": "600", "ParentProcessId": "512",
+    }).model_copy(update={"id": "prior-child", "ts": START + timedelta(minutes=15)})
+    later_reuse = _event(1, data={
+        "ProcessGuid": "{BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF}", "ProcessId": "512",
+    }).model_copy(update={"id": "later-reuse", "ts": START + timedelta(minutes=21)})
+    later_child = _event(1, data={
+        "ProcessGuid": "{22222222-3333-4444-5555-666666666666}",
+        "ParentProcessGuid": "{BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF}",
+        "ProcessId": "700", "ParentProcessId": "512",
+    }).model_copy(update={"id": "later-child", "ts": START + timedelta(minutes=22)})
+    args = ProcessTreeArgs(host="ws01", process_id=512, start=START, end=END)
+
+    selected, reason = PivotExecutor._select_windows_process_tree(
+        [prior, prior_child, later_reuse, later_child], args, START + timedelta(minutes=20),
+    )
+
+    assert {event.id for event in selected} == {"prior", "prior-child"}
+    assert reason is None
+
+
+def test_pid_fallback_link_is_inferred_until_4689_collection_is_attested():
+    class Facts:
+        def __init__(self, attested):
+            self.attested = attested
+
+        def attests(self, _host, fact, **arguments):
+            return (
+                self.attested and fact == "audit_policy"
+                and arguments == {"subcategory": "Process Termination", "outcome": "success"}
+            )
+
+    process = _event(4688, channel="Security", provider=SECURITY, data={"NewProcessId": "0x200"})
+    contract = contract_from_types("windows", _windows_types(), role="host")
+    window = LinkWindow(label="near", start=START, end=END)
+
+    def strength(attested):
+        executor = PivotExecutor(
+            None, None, "h1", {contract.target: contract}, site_facts=Facts(attested),
+        )
+        return LinkFetcher(executor, START, END)._lineage(
+            LinkAnchor(finding_id="lineage", ts=process.ts, host=process.host, events=[process]), window,
+        )[1]
+
+    assert strength(False) == "inferred"
+    assert strength(True) == "observed"
+
+
+def test_windows_session_link_is_bounded_by_boot_fences():
+    before = _event(4624, channel="Security", provider=SECURITY, data={
+        "TargetLogonId": "0x44", "TargetUserSid": "S-1-5-21-1-2-3-1001",
+    }).model_copy(update={"id": "before", "ts": START + timedelta(minutes=10)})
+    same_boot = before.model_copy(update={"id": "same-boot", "ts": START + timedelta(minutes=15)})
+    boot = _event(6005, channel="System", provider="EventLog").model_copy(
+        update={"id": "boot", "ts": START + timedelta(minutes=20)}
+    )
+    after = before.model_copy(update={"id": "after", "ts": START + timedelta(minutes=25)})
+    contract = contract_from_types("windows", _windows_types(), role="host")
+    fetcher = LinkFetcher(PivotExecutor(None, None, "h1", {contract.target: contract}), START, END)
+
+    planned = fetcher._session(
+        LinkAnchor(finding_id="session", ts=before.ts, host=before.host, events=[before]),
+        LinkWindow(label="near", start=START, end=END),
+    )
+    selected = planned[4]([same_boot, boot, after])
+
+    assert {event.id for event in selected} == {"before", "same-boot"}
+
+
+def test_windows_logon_account_link_prefers_target_and_refuses_generic_sid():
+    logon = _event(4624, channel="Security", provider=SECURITY, data={
+        "SubjectUserSid": "S-1-5-18", "SubjectUserName": "SYSTEM",
+        "TargetUserSid": "S-1-5-21-1-2-3-1001", "TargetUserName": "alice",
+        "TargetDomainName": "EXAMPLE", "TargetLogonId": "0x44",
+    })
+    generic = logon.model_copy(update={
+        "id": "generic",
+        "fields": {**logon.fields, "auth.target_account": logon.fields["user.entity_id"]},
+    })
+    contract = contract_from_types("windows", _windows_types(), role="host")
+    fetcher = LinkFetcher(PivotExecutor(None, None, "h1", {contract.target: contract}), START, END)
+    window = LinkWindow(label="after", start=START, end=END)
+
+    target_plan = fetcher._account(LinkAnchor(
+        finding_id="target", ts=logon.ts, host=logon.host, events=[logon],
+    ), window)
+    generic_plan = fetcher._account(LinkAnchor(
+        finding_id="generic", ts=generic.ts, host=generic.host, events=[generic],
+    ), window)
+
+    assert target_plan[0] == {"auth.target_account": "sid:s-1-5-21-1-2-3-1001", "actor": "inferred"}
+    assert generic_plan[2] == []
+    assert generic_plan[5] == "cross-host account identity is well-known or machine-generic"
 
 
 def test_windows_process_tree_prefers_process_guid_lineage_over_pid_reuse():

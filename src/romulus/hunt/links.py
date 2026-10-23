@@ -38,6 +38,15 @@ FORWARD_LINKS = frozenset({"source_ip", "account", "host_after_anchor"})
 OBSERVED_FLOW_SPAN = timedelta(minutes=10)
 
 UNUSABLE_TEXT_KEYS = {"", "-1", "4294967295", "(null)", "(none)", "unset", "(unknown)"}
+_GENERIC_WINDOWS_SIDS = {
+    "sid:s-1-0-0", "sid:s-1-1-0", "sid:s-1-5-7", "sid:s-1-5-11",
+    "sid:s-1-5-18", "sid:s-1-5-19", "sid:s-1-5-20",
+}
+_GENERIC_WINDOWS_SID_PREFIXES = (
+    "sid:s-1-5-32-",  # built-in local groups
+    "sid:s-1-5-80-",  # service identities
+    "sid:s-1-5-90-",  # window manager identities
+)
 # Links that need a host identity: they search one host's own records.
 HOST_SIDE_LINKS = frozenset({"process_lineage", "login_session", "host_after_anchor"})
 RAW_FAMILIES_BY_LINK = {
@@ -68,6 +77,12 @@ def usable_key(value: Any) -> bool:
             return True
         return not (address.is_unspecified or address.is_loopback)
     return True
+
+
+def _portable_windows_account(value: Any) -> bool:
+    normalized = str(value or "").strip().casefold()
+    return (usable_key(value) and normalized not in _GENERIC_WINDOWS_SIDS
+            and not normalized.startswith(_GENERIC_WINDOWS_SID_PREFIXES))
 
 
 class LinkWindow(BaseModel):
@@ -477,7 +492,10 @@ class LinkFetcher:
             return list(related.values())
 
         reason = _host_reason(anchor) or (None if process_key else "required typed key is unusable")
-        return (key, "observed", intents if reason is None else [],
+        pid_fallback = os_family == "windows" and not usable_key(process_guid)
+        strength = ("observed" if not pid_fallback
+                    or self.executor.process_termination_attested(anchor.host) else "inferred")
+        return (key, strength, intents if reason is None else [],
                 lambda event: event.family in families, select, reason, [])
 
     def _session(self, anchor: LinkAnchor, window: LinkWindow):
@@ -489,7 +507,7 @@ class LinkFetcher:
         if os_family != "windows":
             key.update({"process.auid": auid, "host.boot.id": boot_id})
         reason = _host_reason(anchor) or (None if usable_key(session_id) else "required typed key is unusable")
-        session_families = {"auth"} if os_family == "windows" else {"process_exec"}
+        session_families = {"auth", "system_state"} if os_family == "windows" else {"process_exec"}
         intents = self._host_intents(window, session_families, anchor.host, os_family) if reason is None else []
 
         def matches(event):
@@ -499,8 +517,25 @@ class LinkFetcher:
                     and (auid is None or event.get("process.auid") == auid)
                     and not boots_conflict(boot_id, boot_of(event)))
 
-        return (key, "observed", intents, matches,
-                lambda events: [event for event in events if matches(event)], reason, [])
+        def select(events):
+            if os_family != "windows":
+                return [event for event in events if matches(event)]
+            candidates = sorted(anchor.events + events, key=lambda item: (item.ts, item.id))
+            lower, upper = window.start, window.end
+            for event in candidates:
+                if event.host != anchor.host or event.get("process.fence") != "boot":
+                    continue
+                if event.ts <= anchor.ts:
+                    lower = max(lower, event.ts)
+                elif event.ts < upper:
+                    upper = event.ts
+            return [event for event in candidates if lower <= event.ts < upper and matches(event)]
+
+        strength = ("observed" if os_family != "windows"
+                    or self.executor.system_log_attested(anchor.host) else "inferred")
+        retain = (lambda event: event.family in session_families) if os_family == "windows" else matches
+        return (key, strength, intents, retain,
+                select, reason, [])
 
     def _flow(self, anchor: LinkAnchor, window: LinkWindow):
         community_id = _value(anchor, "network.community_id")
@@ -627,12 +662,15 @@ class LinkFetcher:
 
     def _account(self, anchor: LinkAnchor, window: LinkWindow):
         os_family = _os_family(anchor)
-        fields = (["user.entity_id", "auth.target_account"] if os_family == "windows" else [
+        fields = (["auth.target_account", "user.entity_id"] if os_family == "windows" else [
             "user.name" if _value(anchor, "user.name") is not None else "process.auid"
         ])
         field = next((name for name in fields if _value(anchor, name) is not None), fields[-1])
         account = _value(anchor, field)
         key = {field: account, "actor": "inferred"}
+        if os_family == "windows" and not _portable_windows_account(account):
+            return (key, "inferred", [], lambda _event: False, lambda _events: [],
+                    "cross-host account identity is well-known or machine-generic", [])
         if not usable_key(account):
             return (key, "inferred", [], lambda _event: False, lambda _events: [],
                     "required typed key is unusable", [])
