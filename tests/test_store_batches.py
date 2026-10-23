@@ -97,7 +97,7 @@ def test_windows_dedup_stage_stores_only_bounded_ids_and_leaves_linux_untracked(
     stage.close()
 
 
-def test_same_event_seen_by_another_hunt_merges_raw_provenance_without_reownership():
+def test_same_event_seen_by_another_hunt_scopes_raw_provenance_without_reownership():
     repo = _repo()
     repo.create_hunt("h2", {"targets": ["other"]}, "d2", "t")
     first = _event(2).model_copy(update={"raw": [RawRef(target="a", native_id="1", digest="a")]})
@@ -109,10 +109,12 @@ def test_same_event_seen_by_another_hunt_merges_raw_provenance_without_reownersh
     repo.save_evidence("h1", [first], {"a/1": {"copy": 1}}, None)
     repo.save_evidence("h2", [later], {"b/2": {"copy": 2}}, None)
     stored = repo.events_by_ids([first.id])[0]
+    second_citation = repo.citation_events("h2", [first.id])[0]
 
     assert stored["hunt_id"] == "h1"
     raw_ids = {raw_id("a", "1"), raw_id("b", "2")}
-    assert set(stored["raw_ids"]) == raw_ids
+    assert set(stored["raw_ids"]) == {raw_id("a", "1")}
+    assert set(second_citation["raw_ids"]) == raw_ids
     assert {raw["id"] for raw in repo.raw_records(sorted(raw_ids))} == raw_ids
 
 

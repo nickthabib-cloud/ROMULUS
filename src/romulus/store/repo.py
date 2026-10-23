@@ -443,7 +443,13 @@ class Repo:
                 for eid in [*(link_events or []), *(link_evidence or [])]:
                     if eid in mine:
                         cited_by.setdefault(eid, link_hunt)
-            # (e) other hunts' baseline observations cite their first window event
+            # (e) a later hunt's scoped citation overlay also keeps the stable typed row it describes
+            for event_id, citation_hunt in c.execute(select(
+                t.event_citation.c.event_id, t.event_citation.c.hunt_id,
+            ).where(t.event_citation.c.hunt_id != hunt_id)):
+                if event_id in mine:
+                    cited_by.setdefault(event_id, citation_hunt)
+            # (f) other hunts' baseline observations cite their first window event
             for eid, obs_hunt in c.execute(observation_citations_query(hunt_id)):
                 cited_by.setdefault(eid, obs_hunt)
             for eid, owner in cited_by.items():
@@ -496,6 +502,7 @@ class Repo:
             rm("entity_links", t.event_entity.delete().where(or_(t.event_entity.c.entity_id.in_(ent_ids),
                                                                  t.event_entity.c.event_id.in_(drop_events))))
             rm("entities", t.entity.delete().where(t.entity.c.hunt_id == hunt_id))
+            rm("event_citations", t.event_citation.delete().where(t.event_citation.c.hunt_id == hunt_id))
             rm("typed_events", t.typed_event.delete().where(t.typed_event.c.id.in_(drop_events)))
             rm("raw_records", t.raw_record.delete().where(t.raw_record.c.id.in_(drop_raw)))
             rm("normalization_errors", t.normalization_error.delete().where(t.normalization_error.c.hunt_id == hunt_id))
@@ -1042,7 +1049,10 @@ class Repo:
                     link_rows.append({"event_id": e.id, "entity_id": eid, "role": role})
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
             _upsert_ignore(c, t.typed_event, ev_rows, ["id"])
-            self._merge_stored_raw(c, existing, events)
+            self._merge_citation_raw(c, hunt_id, events)
+            self._merge_stored_raw(
+                c, {event_id: row for event_id, row in existing.items() if row["hunt_id"] == hunt_id}, events,
+            )
             self._fill_boot(c, events)
             _upsert_ignore(c, t.entity, list(ent_rows.values()), ["id"])
             _upsert_ignore(c, t.event_entity, link_rows, ["event_id", "entity_id", "role"])
@@ -1071,6 +1081,39 @@ class Repo:
             ))
             row["event"] = stored
             row["raw_ids"] = merged_ids
+
+    @staticmethod
+    def _merge_citation_raw(c, hunt_id: str, events: list) -> None:
+        """Merge raw references into this hunt's citation view, never another hunt's typed row."""
+        ids = sorted({event.id for event in events})
+        existing = {
+            row["event_id"]: dict(row)
+            for row in c.execute(select(t.event_citation).where(
+                t.event_citation.c.hunt_id == hunt_id,
+                t.event_citation.c.event_id.in_(ids),
+            )).mappings()
+        }
+        for event in events:
+            row = existing.get(event.id)
+            stored = dict(row["event"]) if row else event.model_dump(mode="json")
+            stored_raw = list(stored.get("raw") or [])
+            known = {(item.get("target"), item.get("native_id")) for item in stored_raw}
+            additions = [raw.model_dump(mode="json") for raw in event.raw
+                         if (raw.target, raw.native_id) not in known]
+            stored["raw"] = [*stored_raw, *additions]
+            raw_ids = list(dict.fromkeys([
+                *((row or {}).get("raw_ids") or []),
+                *(raw_id(raw.target, raw.native_id) for raw in event.raw),
+            ]))
+            if row:
+                c.execute(t.event_citation.update().where(
+                    t.event_citation.c.hunt_id == hunt_id,
+                    t.event_citation.c.event_id == event.id,
+                ).values(event=stored, raw_ids=raw_ids))
+            else:
+                c.execute(t.event_citation.insert().values(
+                    hunt_id=hunt_id, event_id=event.id, event=stored, raw_ids=raw_ids,
+                ))
 
     def merge_evidence_raw(self, hunt_id: str, events: Iterable, raw_sources: dict[str, dict], *,
                            owner_token: str | None = None) -> None:
@@ -1101,7 +1144,10 @@ class Repo:
                             "first_task_id": None, "retrieved_at": utcnow(),
                         })
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
-            self._merge_stored_raw(c, existing, events)
+            self._merge_citation_raw(c, hunt_id, events)
+            self._merge_stored_raw(
+                c, {event_id: row for event_id, row in existing.items() if row["hunt_id"] == hunt_id}, events,
+            )
 
     @staticmethod
     def _fill_boot(c, events: list) -> None:
@@ -1129,6 +1175,21 @@ class Repo:
     def events_by_ids(self, ids: list[str]) -> list[dict]:
         with self.engine.connect() as c:
             return [dict(r) for r in c.execute(select(t.typed_event).where(t.typed_event.c.id.in_(ids))).mappings()]
+
+    def citation_events(self, hunt_id: str, ids: list[str]) -> list[dict]:
+        """Typed events with the raw provenance retained specifically for this hunt."""
+        rows = {row["id"]: row for row in self.events_by_ids(ids)}
+        with self.engine.connect() as c:
+            for overlay in c.execute(select(t.event_citation).where(
+                t.event_citation.c.hunt_id == hunt_id,
+                t.event_citation.c.event_id.in_(ids),
+            )).mappings():
+                row = rows.get(overlay["event_id"])
+                if row is not None:
+                    rows[overlay["event_id"]] = {
+                        **row, "event": overlay["event"], "raw_ids": overlay["raw_ids"],
+                    }
+        return list(rows.values())
 
     def raw_records(self, ids: list[str]) -> list[dict]:
         with self.engine.connect() as c:

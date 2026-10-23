@@ -27,7 +27,7 @@ def _jsonable(v):
 
 def _citations(repo: Repo, cand: dict) -> list[dict]:
     """Resolve every cited event to retained raw records (or mark the citation broken)."""
-    events = {e["id"]: e for e in repo.events_by_ids(cand["event_ids"])}
+    events = {e["id"]: e for e in repo.citation_events(cand["hunt_id"], cand["event_ids"])}
     cites = []
     for eid in cand["event_ids"]:
         ev = events.get(eid)
