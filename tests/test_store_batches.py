@@ -75,18 +75,25 @@ def test_save_evidence_takes_a_batch_larger_than_one_statement_can_bind(tmp_path
     assert repo.events_by_ids(["e000042"])[0]["event"] == events[42].model_dump(mode="json")
 
 
-def test_stage_deduplicates_across_calls_and_merges_later_raw_provenance(tmp_path):
+def test_windows_dedup_stage_stores_only_bounded_ids_and_leaves_linux_untracked(tmp_path):
     stage = stage_mod.EventStage(tmp_path)
-    first = _event(1).model_copy(update={"raw": [RawRef(target="a", native_id="1", digest="a")]})
+    linux = _event(0)
+    first = _event(1).model_copy(update={
+        "raw": [RawRef(target="a", native_id="1", digest="a")],
+        "normalizer": "windows-ecs@1",
+    })
     later = first.model_copy(update={"raw": [RawRef(target="b", native_id="2", digest="b")]})
 
-    assert stage.unique([first], {"a/1": {"copy": 1}}) == ([first], [])
-    fresh, duplicates = stage.unique([later], {"b/2": {"copy": 2}})
-    merged = stage.load([first.id])[0]
+    assert stage.unique_windows([linux]) == ([linux], [])
+    assert stage.unique_windows([first]) == ([first], [])
+    fresh, duplicates = stage.unique_windows([later])
+    counts = {
+        table: stage.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        for table in ("windows_seen", "event", "raw")
+    }
 
     assert fresh == [] and len(duplicates) == 1
-    assert {raw.key for raw in merged.raw} == {"a/1", "b/2"}
-    assert stage.raw_sources([merged]) == {"a/1": {"copy": 1}, "b/2": {"copy": 2}}
+    assert counts == {"windows_seen": 1, "event": 0, "raw": 0}
     stage.close()
 
 
@@ -109,14 +116,14 @@ def test_same_event_seen_by_another_hunt_merges_raw_provenance_without_reownersh
     assert {raw["id"] for raw in repo.raw_records(sorted(raw_ids))} == raw_ids
 
 
-def test_non_staged_aggregate_match_receives_later_partition_raw_provenance(tmp_path):
+def test_aggregate_stage_keeps_main_branch_event_and_raw_behavior(tmp_path):
     sweep = object.__new__(sw.Sweep)
     sweep.stage_dir = tmp_path
     first = _event(3).model_copy(update={"raw": [RawRef(target="a", native_id="1", digest="a")]})
     later = first.model_copy(update={"raw": [RawRef(target="b", native_id="2", digest="b")]})
     stage = sweep._event_stage()
-    stage.unique([first], {"a/1": {"copy": 1}})
-    stage.unique([later], {"b/2": {"copy": 2}})
+    stage.put([first], {"a/1": {"copy": 1}})
+    stage.put([later], {"b/2": {"copy": 2}})
     match = Match(
         "aggregate", "claim", "aggregate_observation", [first], [], T0,
         "medium", "lead", "medium",
@@ -124,8 +131,8 @@ def test_non_staged_aggregate_match_receives_later_partition_raw_provenance(tmp_
 
     raw_sources = sweep._merge_staged_match_raw(match)
 
-    assert {raw.key for raw in match.events[0].raw} == {"a/1", "b/2"}
-    assert raw_sources == {"a/1": {"copy": 1}, "b/2": {"copy": 2}}
+    assert {raw.key for raw in match.events[0].raw} == {"a/1"}
+    assert raw_sources == {"a/1": {"copy": 1}}
     sweep.close_stage()
 
 

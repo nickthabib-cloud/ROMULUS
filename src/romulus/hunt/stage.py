@@ -24,6 +24,7 @@ from romulus.evidence.typed import TypedEvent
 PREFIX = "romulus-stage-"
 PCAP_PREFIX = "romulus-pcap-"            # the packet stage's capture directory
 STALE_SECONDS = 6 * 3600
+WINDOWS_STABLE_ID_MAX_CHARS = 64
 
 
 def clear_stale_stages(directory: str | Path, older_than: float = STALE_SECONDS) -> int:
@@ -51,63 +52,61 @@ class EventStage:
         self.db.execute("PRAGMA synchronous=OFF")
         self.db.execute("CREATE TABLE event (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
         self.db.execute("CREATE TABLE raw (key TEXT PRIMARY KEY, body TEXT NOT NULL)")
+        # One bounded-width key per normalized Windows event. The row count is bounded by the hunt's retrieved
+        # Windows records; unlike aggregate staging this seam never serializes event bodies or raw telemetry.
+        # The bounded-state branch can place this table under its shared disk budget when W0 rebases onto it.
+        self.db.execute(
+            f"CREATE TABLE windows_seen (id TEXT PRIMARY KEY CHECK(length(id) <= "
+            f"{WINDOWS_STABLE_ID_MAX_CHARS})) WITHOUT ROWID"
+        )
         self.events = 0
 
-    @staticmethod
-    def _merge_raw(first: TypedEvent, later: TypedEvent) -> tuple[TypedEvent, bool]:
-        known = {raw.key for raw in first.raw}
-        additions = [raw for raw in later.raw if raw.key not in known]
-        if not additions:
-            return first, False
-        return first.model_copy(update={"raw": [*first.raw, *additions]}), True
-
-    def _store(self, events: list[TypedEvent], raw_sources: dict[str, dict], *, classify: bool
-               ) -> tuple[list[TypedEvent], list[TypedEvent]]:
-        if not events:
-            return [], []
-        ids = sorted({event.id for event in events})
-        stored: dict[str, TypedEvent] = {}
+    def unique_windows(self, events: list[TypedEvent]) -> tuple[list[TypedEvent], list[TypedEvent]]:
+        """Deduplicate only Windows stable ids, storing no event body and no raw telemetry."""
+        windows = [event for event in events if event.normalizer.startswith("windows-")]
+        if any(len(event.id) > WINDOWS_STABLE_ID_MAX_CHARS for event in windows):
+            raise ValueError("Windows stable event id exceeds the dedup table width")
+        ids = sorted({event.id for event in windows})
+        seen: set[str] = set()
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
-            marks = ",".join("?" * len(chunk))
-            for event_id, body in self.db.execute(
-                f"SELECT id, body FROM event WHERE id IN ({marks})", chunk,
-            ):
-                stored[event_id] = TypedEvent.model_validate_json(body)
-        fresh: list[TypedEvent] = []
-        duplicates: list[TypedEvent] = []
-        inserts: list[tuple[str, str]] = []
-        updates: list[tuple[str, str]] = []
-        for event in events:
-            prior = stored.get(event.id)
-            if prior is None:
-                stored[event.id] = event
-                fresh.append(event)
-                inserts.append((event.id, event.model_dump_json()))
+            if not chunk:
                 continue
-            merged, changed = self._merge_raw(prior, event)
-            stored[event.id] = merged
-            if changed:
-                updates.append((merged.model_dump_json(), event.id))
-            if classify:
-                duplicates.append(merged)
-        self.db.executemany("INSERT OR IGNORE INTO event VALUES (?, ?)", inserts)
-        self.db.executemany("UPDATE event SET body = ? WHERE id = ?", updates)
+            marks = ",".join("?" * len(chunk))
+            seen.update(row[0] for row in self.db.execute(
+                f"SELECT id FROM windows_seen WHERE id IN ({marks})", chunk,
+            ))
+        fresh, duplicates, inserts = [], [], []
+        for event in events:
+            if not event.normalizer.startswith("windows-"):
+                fresh.append(event)
+                continue
+            if event.id in seen:
+                duplicates.append(event)
+            else:
+                seen.add(event.id)
+                inserts.append((event.id,))
+                fresh.append(event)
+        self.db.executemany("INSERT OR IGNORE INTO windows_seen VALUES (?)", inserts)
+        self.db.commit()
+        return fresh, duplicates
+
+    def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+        """Stage aggregate inputs exactly as on main; first event body wins and raw copies are keyed."""
+        if not events:
+            return
+        first: dict[str, TypedEvent] = {}
+        for event in events:
+            first.setdefault(event.id, event)
+        self.db.executemany(
+            "INSERT OR IGNORE INTO event VALUES (?, ?)",
+            [(event_id, event.model_dump_json()) for event_id, event in first.items()],
+        )
         raws = {r.key: raw_sources[r.key] for e in events for r in e.raw if r.key in raw_sources}
         self.db.executemany("INSERT OR IGNORE INTO raw VALUES (?, ?)",
                             [(k, json.dumps(v, sort_keys=True)) for k, v in raws.items()])
         self.db.commit()
         self.events += len(events)
-        return fresh, duplicates
-
-    def unique(self, events: list[TypedEvent], raw_sources: dict[str, dict]
-               ) -> tuple[list[TypedEvent], list[TypedEvent]]:
-        """Return events not seen earlier in this sweep and merge later raw copies on disk."""
-        return self._store(events, raw_sources, classify=True)
-
-    def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
-        """Stage cited events and raw copies, merging provenance for repeated stable ids."""
-        self._store(events, raw_sources, classify=False)
 
     def load(self, ids: list[str]) -> list[TypedEvent]:
         out: dict[str, TypedEvent] = {}

@@ -530,7 +530,9 @@ class Sweep:
             return
         events, skips, errors = normalize_hits(out.records, self.boots)
         raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
-        events, duplicate_events = self._event_stage().unique(events, raw_sources)
+        duplicate_events = []
+        if any(event.normalizer.startswith("windows-") for event in events):
+            events, duplicate_events = self._event_stage().unique_windows(events)
         if duplicate_events:
             skips["duplicate typed event across source partitions"] = len(duplicate_events)
             self.repo.merge_evidence_raw(self.hunt_id, duplicate_events, raw_sources)

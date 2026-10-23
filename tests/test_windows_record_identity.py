@@ -101,11 +101,9 @@ def test_cross_partition_exact_copy_deduplicates_but_reused_record_id_does_not(t
     replacement = normalize_hits([reused])[0][0]
     stage = EventStage(tmp_path)
 
-    assert stage.unique([first], {first.raw[0].key: original["_source"]}) == ([first], [])
-    fresh, duplicates = stage.unique([duplicate], {duplicate.raw[0].key: copied["_source"]})
-    reused_fresh, reused_duplicates = stage.unique(
-        [replacement], {replacement.raw[0].key: reused["_source"]}
-    )
+    assert stage.unique_windows([first]) == ([first], [])
+    fresh, duplicates = stage.unique_windows([duplicate])
+    reused_fresh, reused_duplicates = stage.unique_windows([replacement])
 
     assert fresh == [] and len(duplicates) == 1
     assert reused_fresh == [replacement] and reused_duplicates == []
