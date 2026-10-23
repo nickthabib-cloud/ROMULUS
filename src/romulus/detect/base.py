@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar, Literal
 
-from romulus.evidence.typed import Outcome, TypedEvent
+from romulus.evidence.typed import Outcome, TypedEvent, event_os_family
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 LANES = ("urgent", "high", "lead", "context")
@@ -127,8 +127,8 @@ class Playbook:
         for e in events:
             if e.family not in self.families:
                 continue
-            os_family = e.get("host.os.family") or ("windows" if e.normalizer.startswith("windows-") else "linux")
-            if os_family not in self.os_families:
+            os_family = event_os_family(e)
+            if os_family != "unknown" and os_family not in self.os_families:
                 continue
             if any(e.get(f) in (None, "", [], {}) for f in self.required_fields):
                 self.missing_required += 1

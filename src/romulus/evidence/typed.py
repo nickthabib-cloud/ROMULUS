@@ -88,6 +88,18 @@ class TypedEvent(BaseModel):
         return out
 
 
+def event_os_family(event: TypedEvent) -> str:
+    """Return per-event OS scope; observer-network telemetry is not host Linux telemetry."""
+    explicit = event.get("host.os.family")
+    if explicit:
+        return str(explicit).casefold()
+    if event.normalizer.startswith("windows-"):
+        return "windows"
+    if event.family in NETWORK_OBSERVER_FAMILIES:
+        return "unknown"
+    return "linux"
+
+
 # A typed event is one normalization's view of raw records, and the store keeps one row per event id. The id
 # therefore carries the evidence version: a hunt run with improved normalization stores its own rows instead of
 # silently reusing an older hunt's (stale rows missing a newly normalized field, such as process.session_id,

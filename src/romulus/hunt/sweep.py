@@ -15,7 +15,7 @@ from romulus.evidence.normalize import (
     BootIntervals,
     normalize_hits,
 )
-from romulus.evidence.typed import TypedEvent
+from romulus.evidence.typed import TypedEvent, event_os_family
 from romulus.evidence.windows import RecordIdContinuity
 from romulus.evidence.windows_catalog import (
     WINDOWS_CHANNELS,
@@ -625,7 +625,15 @@ class Sweep:
         staged: dict[str, TypedEvent] = {}
         target_os = contract.os_family if contract is not None else "linux"
         for pb in self.pack:
-            target_applicable = target_os == "unknown" or target_os in pb.os_families
+            def in_os_scope(event: TypedEvent, os_families=pb.os_families) -> bool:
+                os_family = event_os_family(event)
+                return os_family == "unknown" or os_family in os_families
+
+            relevant_events = [event for event in events if event.family in pb.families]
+            target_applicable = (
+                any(in_os_scope(event) for event in relevant_events) if relevant_events
+                else target_os == "unknown" or target_os in pb.os_families
+            )
             windows_reasons = self._windows_rule_reasons(
                 target, contract, pb, out.records, gap_reasons, w,
             )
@@ -636,8 +644,7 @@ class Sweep:
             before_eval, before_missing = pb.evaluated, pb.missing_required
             scoped_events = [
                 event for event in events
-                if (event.get("host.os.family")
-                    or ("windows" if event.normalizer.startswith("windows-") else "linux")) in pb.os_families
+                if in_os_scope(event)
             ]
             matches = pb.consume(scoped_events)
             for m in matches:
@@ -651,6 +658,8 @@ class Sweep:
                 self._retain_aggregate_raw(pb, raw_sources)
             evaluated = pb.evaluated - before_eval
             missing = pb.missing_required - before_missing
+            if evaluated or matches:
+                target_applicable = True
             if not target_applicable:
                 state = "not_applicable_no_events"
             elif not (set(pb.families) & families) and evaluated == 0:
