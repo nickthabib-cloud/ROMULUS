@@ -1,14 +1,15 @@
-"""Expansion serves its query budget by severity: urgent anchors first, then high, then lead.
+"""Expansion runs every anchor's narrow links before any anchor widens, and serves the most severe lane first within
+each tier of the plan: urgent, then high, then lead.
 
-A benign anchor that appears later in a lower or equal lane (a newly configured network turning CCTV connects into
-high findings) must never take the queries an urgent anchor's remaining tiers need. Within a lane the tier-major,
-per-host fair order stays: a discovered anchor still gets its first tier before surviving deeper tiers there.
+An urgent anchor's wide windows must never take the queries every high anchor needs for its first ±5 min links (a
+hunt that did that left all its high anchors unexpanded), and a benign high anchor found later must never take the
+queries an urgent anchor's links of the same tier need.
 """
 from datetime import timedelta
 
 import pytest
 
-from romulus.hunt.expansion import BUDGET_TO_SEVERE_REASON, ExpansionEngine
+from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.expansion_plan import TIER_PLAN
 from tests.test_expansion_engine import (
     T0,
@@ -79,26 +80,24 @@ def anchors(repo):
     return {row["id"]: row for row in repo.expansion_anchors("h1")}
 
 
-def test_the_urgent_anchors_tiers_all_run_before_any_high_anchor_spends():
+def test_every_anchor_gets_its_narrow_links_before_any_anchor_widens_and_urgent_goes_first_in_each_tier():
     repo = urgent_and_later_highs()
     fetcher = SteadyFetcher(repo)
 
     ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=60).run()
 
-    order = [call[0] for call in fetcher.calls]
-    assert order[:LINKS_PER_ANCHOR] == ["F-urgent"] * LINKS_PER_ANCHOR
-    assert len(links_of(repo, "F-urgent")) == LINKS_PER_ANCHOR
+    labels = [call[2] for call in fetcher.calls]
+    first_wide = labels.index("anchor ±30 min")
+    assert {call[0] for call in fetcher.calls[:first_wide]} == {"F-urgent", "F-high-0", "F-high-1"}
+    narrow = TIER_PLAN[0][1] + TIER_PLAN[1][1]
+    for link_type in narrow:                       # within a narrow link type, the urgent anchor is served first
+        served = [call[0] for call in fetcher.calls[:first_wide] if call[1] == link_type]
+        assert served[0] == "F-urgent"
     rows = anchors(repo)
-    assert rows["F-urgent"]["status"] == "expanded_complete" and rows["F-urgent"]["reasons"] == []
-    # the highs share what is left, tier by tier and host by host, and say why they stopped
-    assert {call[0] for call in fetcher.calls[LINKS_PER_ANCHOR:]} == {"F-high-0", "F-high-1"}
-    for anchor_id in ("F-high-0", "F-high-1"):
-        assert rows[anchor_id]["status"] == "expanded_partial"
-        assert any("budget" in reason for reason in rows[anchor_id]["reasons"])
     assert "F-lead-0" not in rows                                  # a lead candidate is not an expansion anchor
 
 
-def test_a_lower_lane_anchor_discovered_later_never_takes_the_urgent_anchors_remaining_tiers():
+def test_a_high_anchor_discovered_later_never_takes_the_urgent_anchors_links_of_the_same_tier():
     repo = urgent_and_later_highs(highs=0, leads=0)
     fetcher = SteadyFetcher(repo)
     inserted = False
@@ -113,13 +112,17 @@ def test_a_lower_lane_anchor_discovered_later_never_takes_the_urgent_anchors_rem
 
     ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=60, after_link=discover_high).run()
 
-    order = [call[0] for call in fetcher.calls]
-    assert order[:LINKS_PER_ANCHOR] == ["F-urgent"] * LINKS_PER_ANCHOR
-    assert anchors(repo)["F-urgent"]["status"] == "expanded_complete"
-    assert "F-found" in order                                      # it still runs, from what is left
+    t1 = [(call[0], call[1]) for call in fetcher.calls if call[2] == "anchor ±5 min" and call[1] in TIER_PLAN[0][1]]
+    for link_type in TIER_PLAN[0][1]:
+        served = [anchor for anchor, kind in t1 if kind == link_type]
+        assert served[0] == "F-urgent"
+    urgent_narrow = {(call[1], call[2]) for call in fetcher.calls
+                     if call[0] == "F-urgent" and call[2] == "anchor ±5 min"}
+    assert urgent_narrow >= {(kind, "anchor ±5 min") for kind in TIER_PLAN[0][1] + TIER_PLAN[1][1]}
+    assert "F-found" in [call[0] for call in fetcher.calls]       # it still runs, its narrow links first
 
 
-def test_a_more_severe_anchor_discovered_later_is_served_before_the_lower_lane_continues():
+def test_a_more_severe_anchor_discovered_later_gets_its_narrow_links_before_the_lower_lane_continues():
     repo = urgent_and_later_highs(highs=1, leads=0)
     set_lane(repo, "F-urgent", "high")                            # two high roots, no urgent yet
     fetcher = SteadyFetcher(repo)
@@ -135,13 +138,13 @@ def test_a_more_severe_anchor_discovered_later_is_served_before_the_lower_lane_c
 
     ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=200, after_link=discover_urgent).run()
 
-    order = [call[0] for call in fetcher.calls]
-    first = order.index("F-critical")
+    order = [(call[0], call[1], call[2]) for call in fetcher.calls]
+    first = [anchor for anchor, *_ in order].index("F-critical")
     assert first == 1                                              # right after the link that found it
-    assert order[first:first + LINKS_PER_ANCHOR] == ["F-critical"] * LINKS_PER_ANCHOR
+    assert order[first] == ("F-critical", TIER_PLAN[0][1][0], "anchor ±5 min")
 
 
-def test_an_urgent_root_waiting_for_the_reserve_gets_it_before_a_less_severe_discovered_anchor():
+def test_under_a_tight_budget_the_narrow_links_of_every_anchor_come_before_the_urgent_anchors_wide_ones():
     repo = urgent_and_later_highs(highs=0, leads=0)
     fetcher = SteadyFetcher(repo)
     inserted = False
@@ -157,11 +160,14 @@ def test_an_urgent_root_waiting_for_the_reserve_gets_it_before_a_less_severe_dis
     summary = ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=20,
                               after_link=discover_high).run()
 
-    assert summary["source_queries"] == 20
-    assert [call[0] for call in fetcher.calls] == ["F-urgent"] * 10       # all 20 queries, 2 per fetch
+    assert summary["source_queries"] <= 20
+    found = [call for call in fetcher.calls if call[0] == "F-found"]
+    assert found and all(call[2] == "anchor ±5 min" for call in found)   # the high anchor got narrow links
+    assert not any(call[0] == "F-urgent" and call[2] == "anchor ±30 min"
+                   for call in fetcher.calls[:fetcher.calls.index(found[0])])
     rows = anchors(repo)
-    assert rows["F-found"]["status"] == "unexpanded"
-    assert BUDGET_TO_SEVERE_REASON in rows["F-found"]["reasons"]
+    assert rows["F-urgent"]["status"] in {"expanded_partial", "expanded_complete"}
+    assert any("budget" in reason for row in rows.values() for reason in row["reasons"])
 
 
 def test_within_a_lane_a_discovered_anchor_still_gets_its_first_tier_before_surviving_deeper_tiers():
@@ -210,5 +216,3 @@ def test_a_resumed_lane_ordered_expansion_ends_where_an_uninterrupted_one_does(c
 
     assert stable_state(repo) == stable_state(uninterrupted)
     assert summary == expected
-    if crash_after <= LINKS_PER_ANCHOR:
-        assert resumed.calls[0][0] == "F-urgent"                   # the urgent anchor's tiers resume first

@@ -60,8 +60,8 @@ def expansion_windows(ts: datetime, hunt_window: Window) -> list[LinkWindow]:
 
 
 RESERVED_REASON = "source query budget reserved for discovered anchors"
-# Expansion serves the most severe lane that still has work before any less severe one. An anchor the budget
-# stopped while a more severe anchor existed says where its queries went.
+# Within each tier of the expansion plan the most severe lane is served first. An anchor the budget stopped while a
+# more severe anchor existed says where its queries went.
 BUDGET_TO_SEVERE_REASON = "source query budget given to more severe anchors"
 # Under the default internal-network definition, the endpoints it reads as outside are looked up to learn whether
 # they are site hosts. Those fallback lookups together may spend at most this share of the expansion budget, so a
@@ -324,10 +324,10 @@ class ExpansionEngine:
 
     def _root_cap(self, all_rows: list[dict], blocked: set[str], lane_rank: int, root_budget: int,
                   reserve: int) -> int:
-        """Queries a root anchor of the lane being served may reach. The reserve exists for anchors discovered by
-        expansion, and holds back a root only for a discovered anchor at least as severe; a less severe one waits
-        behind the root. With none waiting, half of the reserve is released to roots, but only when the other half
-        still covers one fetch (two queries), so a discovered anchor of the lane being served is never starved."""
+        """Queries a root anchor may reach, given the most severe lane with work. The reserve exists for anchors
+        discovered by expansion, and holds back roots only for a discovered anchor at least as severe; a less severe
+        one waits behind them. With none waiting, half of the reserve is released to roots, but only when the other
+        half still covers one fetch (two queries), so a discovered anchor of that lane is never starved."""
         children = [row for row in all_rows if 0 < row["depth"] < self.max_depth and row["status"] == "pending"
                     and row["id"] not in blocked]
         if any(LANE_ORDER.get(row["lane"], 9) <= lane_rank for row in children):
@@ -468,16 +468,16 @@ class ExpansionEngine:
                     stop_reason = "depth_limit"
                     continue
                 eligible.append(row)
-            # Serve the most severe lane that still has work. Within it, always choose the globally lowest
-            # unfinished tier, so a newly discovered anchor of that lane receives T1 before surviving T2+ work.
-            slots, root_cap = [], root_budget
-            for rank in sorted({LANE_ORDER.get(row["lane"], 9) for row in eligible}):
-                root_cap = self._root_cap(all_rows, blocked_anchors, rank, root_budget, reserve)
-                slots = self._tier_slots(
-                    self._ordered_anchors([row for row in eligible if LANE_ORDER.get(row["lane"], 9) == rank]),
-                    anchor_reasons, root_cap)
-                if slots:
-                    break
+            # Always choose the globally lowest unfinished tier, so every anchor, and a newly discovered one, gets its
+            # narrow links before any anchor widens its window. Within the tier the most severe lane goes first, so
+            # when the budget runs out inside a tier it is the less severe anchors' links that wait.
+            ranks = sorted({LANE_ORDER.get(row["lane"], 9) for row in eligible})
+            ordered = [anchor_row for rank in ranks
+                       for anchor_row in self._ordered_anchors(
+                           [row for row in eligible if LANE_ORDER.get(row["lane"], 9) == rank])]
+            root_cap = (self._root_cap(all_rows, blocked_anchors, ranks[0], root_budget, reserve)
+                        if ranks else root_budget)
+            slots = self._tier_slots(ordered, anchor_reasons, root_cap)
             if not slots:
                 break
             for anchor_id, blocked_cap in list(reserve_blocked.items()):
