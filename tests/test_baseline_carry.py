@@ -221,3 +221,25 @@ def test_equal_time_generations_order_by_serial_or_stay_ambiguous(chunk_size):
     for _ in range(2):
         refed.observe_rows([exec_(1, "/usr/bin/env", None)], chunk_size=chunk_size)
     assert parent_at(refed, 2)[0][1] == "/usr/bin/env"
+
+
+def test_pending_resolver_over_a_pid_table_orders_the_parents_execs_at_the_childs_instant_by_serial():
+    """A resolver over an in-memory pid table asks with the child's serial: the parent's exec before it (a lower
+    serial at the same instant) is the parent, not the exec that replaced it after the child started."""
+    from romulus.detect.correlation import PidTable
+    from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
+
+    def exec_(event_id, executable, serial):
+        fields = {"process.pid": 10, "process.ppid": 1, "process.executable": executable, "audit.serial": serial,
+                  "host.boot.id": "boot-a"}
+        return TypedEvent(id=event_id, family="process_exec", ts=START, host="host", outcome=Outcome.success,
+                          fields={name: fv(value, f"{event_id}:{name}") for name, value in fields.items()},
+                          raw=[RawRef(target="t", native_id=event_id, digest="d")], normalizer="test@1")
+
+    table = PidTable()
+    table.add(exec_("bash", "/usr/bin/bash", 100))
+    table.add(exec_("cat", "/usr/bin/cat", 102))
+    resolved = PendingResolver(table).resolve(Pending("host", "boot-a", 10, START, "child", "/bin/sh", 101))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key == {"child_executable": "/bin/sh", "parent_executable": "/usr/bin/bash"}

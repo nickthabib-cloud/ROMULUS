@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -87,6 +87,43 @@ class LinkAnchor(BaseModel):
     events: list[TypedEvent] = Field(default_factory=list)
 
 
+class Selection(NamedTuple):
+    """A link's typed selection over the records it retrieved, with every step it could not decide. A link whose
+    selection left a step unknown is partial, whatever its retrieval was: its negative is not complete."""
+    events: list[TypedEvent]
+    unresolved: list[str]
+
+
+# Distinct undecided steps a selection names; the rest are counted in one more reason.
+MAX_UNRESOLVED_REASONS = 8
+
+
+def _unresolved(reasons: list[str]) -> list[str]:
+    distinct = sorted(set(reasons))
+    if len(distinct) <= MAX_UNRESOLVED_REASONS:
+        return distinct
+    return [*distinct[:MAX_UNRESOLVED_REASONS],
+            f"and {len(distinct) - MAX_UNRESOLVED_REASONS} more undecided step(s)"]
+
+
+def _serial(event: TypedEvent) -> int | None:
+    value = event.get("audit.serial")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _order(event: TypedEvent) -> tuple:
+    return event.ts, _serial(event) is None, _serial(event) or 0, event.id
+
+
+def _after(event: TypedEvent, root: TypedEvent) -> bool | None:
+    """Whether `event` happened after `root`: by time, then by audit serial at one instant; None when they share an
+    instant and a serial is missing (their order is unknown)."""
+    if event.ts != root.ts:
+        return event.ts > root.ts
+    left, right = _serial(event), _serial(root)
+    return None if left is None or right is None else left > right
+
+
 class LinkResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -145,6 +182,19 @@ def _tuple_matches(left: tuple, right: tuple) -> bool:
         (src, sport, dst, dport) == (rsrc, rsport, rdst, rdport)
         or (src, sport, dst, dport) == (rdst, rdport, rsrc, rsport)
     )
+
+
+def _same_process_as(exec_event: TypedEvent, record: TypedEvent) -> bool:
+    """Whether an exec of a record's pid can be the record's own process: it ran the program the record names
+    (where both name one), the parent agrees (unless the record's process was reparented to init) and the login
+    session agrees where both carry one."""
+    program, exec_program = record.get("process.executable"), exec_event.get("process.executable")
+    parent, exec_parent = record.get("process.ppid"), exec_event.get("process.ppid")
+    session, exec_session = record.get("process.session_id"), exec_event.get("process.session_id")
+    program_agrees = program is None or exec_program is None or exec_program == program
+    parent_agrees = parent is None or parent in (0, 1) or exec_parent == parent
+    session_agrees = session is None or exec_session is None or exec_session == session
+    return program_agrees and parent_agrees and session_agrees
 
 
 class LinkFetcher:
@@ -238,17 +288,26 @@ class LinkFetcher:
         batch = self.executor.fetch_intents(
             anchor.finding_id, fetch_key, intents, placed, **fetch_options,
         )
-        linked = select(batch.events)
+        selected = select(batch.events)
+        if not isinstance(selected, Selection):
+            selected = Selection(list(selected), [])
+        anchored = set(anchor.event_ids)
         linked = sorted(
-            (event for event in linked if event.id not in set(anchor.event_ids)),
+            (event for event in selected.events if event.id not in anchored),
             key=lambda event: (event.ts, event.id),
         )
+        # A step the selection could not decide (an ambiguous or missing lineage record) leaves the link partial
+        # with that reason: complete retrieval never makes an undecided selection a complete negative.
+        status, reasons = batch.status, list(batch.reasons)
+        if selected.unresolved:
+            status = "partial" if status == "complete" else status
+            reasons += [reason for reason in _unresolved(selected.unresolved) if reason not in reasons]
         result = LinkResult(
             id="link-" + fetch_key[:20], anchor_id=anchor.finding_id, link_type=link_type,
-            window=window, strength=strength, key=key, status=batch.status,
+            window=window, strength=strength, key=key, status=status,
             event_ids=[event.id for event in linked],
             evidence_ids=sorted(set(anchor.event_ids + [event.id for event in linked])),
-            task_ids=batch.task_ids, coverage=batch.coverage, reasons=batch.reasons,
+            task_ids=batch.task_ids, coverage=batch.coverage, reasons=reasons,
             duration_ms=batch.duration_ms,
             query_spend=getattr(self.executor, "source_queries", query_start) - query_start,
         )
@@ -319,6 +378,10 @@ class LinkFetcher:
         intents = self._host_intents(window, ("linux.audit",), anchor.host) if isinstance(pid, int) else []
 
         def select(events):
+            """The anchored process's exec images (the programs it ran in place), its recorded ancestors and its
+            recorded descendants. Execs of one instant are ordered by audit serial; a step that cannot be decided
+            (execs of different programs at one instant without serials, or the anchor's own image not
+            retrieved) is named in the selection, so the link is partial rather than an empty complete."""
             # A record of another boot is another process. The link retrieves audit records without their journald
             # copies; their boot comes from the hunt's boot-interval map. One the map cannot place (a gap between
             # boots, near a boot's edge) is kept: a pid reused after a reboot cannot be excluded for it.
@@ -327,67 +390,107 @@ class LinkFetcher:
                           and not boots_conflict(boot_id, boot_of(event))}
             root = next((event for event in anchor.events if event.get("process.pid") == pid), None)
             if root is None:
-                return []
+                return Selection([], [f"lineage undecided: no anchor record carries pid {pid}"])
+            host = anchor.host or ""
             root_boot = boot_of(root) or boot_id
             table = PidTable()
-            by_raw = {}
             for event in all_events.values():
                 table.add(event)
-                for raw in event.raw:
-                    by_raw[raw.native_id] = event
-            root_entry = table.lookup(anchor.host or "", pid, root.ts.timestamp(), root_boot)
-            if root_entry is None:
-                return []
-            root_raws = {root_entry[3]}
-            related: dict[str, TypedEvent] = {}
-            root_parent = root.get("process.ppid")
-            root_session = root.get("process.session_id")
-            # An exec does not create a new process. Treat later exec records for the same
-            # pid/process boundary as continuations so their descendants remain in lineage.
-            for candidate in sorted(all_events.values(), key=lambda item: (item.ts, item.id)):
-                if candidate.id == root.id or candidate.ts < root.ts:
-                    continue
-                if (candidate.get("process.pid") != pid
-                        or candidate.get("process.ppid") != root_parent
-                        or (root_session is not None
-                            and candidate.get("process.session_id") != root_session)):
-                    continue
-                continuation = table.lookup(anchor.host or "", pid, candidate.ts.timestamp(), root_boot)
-                if continuation is not None:
-                    root_raws.add(continuation[3])
-                    related[candidate.id] = candidate
-            parent, when, boot = root.get("process.ppid"), root.ts.timestamp(), root_boot
+            unknown: list[str] = []
+
+            # The process of the anchor record: an exec record is its own image; any other record (a file read, a
+            # socket) is the pid's image at that record's (time, serial), counting an exec at its own serial.
+            own = all_events.get(root.id)
+            if own is None:
+                found = table.image(host, pid, root.ts.timestamp(), root_boot, serial=_serial(root), inclusive=True)
+                own = all_events.get(found.record.event_id) if found.record is not None else None
+                if own is None:
+                    unknown.append(found.why or (
+                        f"lineage incomplete: no exec record of pid {pid} on {host} at or before "
+                        f"{root.ts.isoformat()} was retrieved, so its images and descendants cannot be identified"))
+                elif not _same_process_as(own, root):
+                    # The pid's latest exec belongs to another process: this one forked without exec, or the pid
+                    # was reused. Its own record's parent and session stand; its images cannot be identified.
+                    unknown.append(
+                        f"lineage incomplete: the latest exec of pid {pid} on {host} before {root.ts.isoformat()} "
+                        f"({own.get('process.executable')}) has another parent or session than the record, so the "
+                        f"record's process forked without exec or the pid was reused; its images cannot be identified")
+                    own = None
+            process = own or root
+            parent_pid, session = process.get("process.ppid"), process.get("process.session_id")
+
+            def same_process(event: TypedEvent) -> bool:
+                # An exec does not create a process: an exec of this pid that kept its parent and session (and boot)
+                # is the same process running another program.
+                return (event.get("process.pid") == pid and event.get("process.ppid") == parent_pid
+                        and (session is None or event.get("process.session_id") == session)
+                        and not boots_conflict(root_boot, boot_of(event)))
+
+            images: dict[str, TypedEvent] = {}
+            if own is not None:
+                images[own.id] = own
+                current = own                   # the images it replaced, each strictly before the next
+                for _ in range(32):
+                    found = table.image(host, pid, current.ts.timestamp(), root_boot, serial=_serial(current),
+                                        strict=True, exclude=current.id)
+                    prior = all_events.get(found.record.event_id) if found.record is not None else None
+                    if prior is None:
+                        if found.why:
+                            unknown.append(found.why)
+                        break
+                    if prior.id in images or not same_process(prior):
+                        break                   # a different process held the pid before
+                    images[prior.id] = prior
+                    current = prior
+            for candidate in sorted(all_events.values(), key=_order):
+                # Later images, and images at the same instant whose order is unknown: the same process either way.
+                if candidate.id not in images and same_process(candidate) and _after(candidate, process) is not False:
+                    images[candidate.id] = candidate
+
+            related: dict[str, TypedEvent] = dict(images)
+            first = min(images.values(), key=_order) if images else root
+            # With no image, the ancestors start from the record's own parent at the record's (time, serial).
+            first_ts = first.ts.timestamp()
+            # Ancestors: the parent's image when the process first execed (strictly before it), then up the chain.
+            parent, when, serial, boot = first.get("process.ppid"), first_ts, _serial(first), root_boot
             for _ in range(32):
                 if not isinstance(parent, int) or parent in (0, 1):
                     break
-                entry = table.lookup(anchor.host or "", parent, when, boot)
-                if entry is None:
-                    break
-                ancestor = by_raw.get(entry[3])
+                found = table.image(host, parent, when, boot, serial=serial)
+                ancestor = all_events.get(found.record.event_id) if found.record is not None else None
                 if ancestor is None:
+                    if found.why:
+                        unknown.append(found.why)
+                    break                       # an ancestor whose exec was not retrieved ends the chain
+                if ancestor.id in related:
                     break
                 related[ancestor.id] = ancestor
-                parent, when = ancestor.get("process.ppid"), ancestor.ts.timestamp()
-                boot = boot or entry[4]
-            for candidate in sorted(all_events.values(), key=lambda item: (item.ts, item.id)):
-                if candidate.ts < root.ts or candidate.id == root.id:
+                parent, when, serial = found.record.ppid, found.record.ts, found.record.serial
+                boot = boot or found.record.boot
+            # Descendants: a record whose parent chain reaches one of the process's images.
+            for candidate in sorted(all_events.values(), key=_order):
+                if candidate.id in related or candidate.ts < first.ts:
                     continue
-                parent, when, boot = candidate.get("process.ppid"), candidate.ts.timestamp(), boot_of(candidate)
+                parent, when, serial = candidate.get("process.ppid"), candidate.ts.timestamp(), _serial(candidate)
+                boot = boot_of(candidate)
                 for _ in range(32):
                     if not isinstance(parent, int) or parent in (0, 1):
                         break
-                    entry = table.lookup(anchor.host or "", parent, when, boot)
-                    if entry is None:
+                    found = table.image(host, parent, when, boot, serial=serial)
+                    if found.record is None:
+                        # Undecided only where the unordered execs could be the process's or its descendants'
+                        # (not before its first image, where no chain reaches it).
+                        if found.why and found.at is not None and found.at >= first_ts:
+                            unknown.append(found.why)
                         break
-                    if entry[3] in root_raws:
+                    if found.record.event_id in images:
                         related[candidate.id] = candidate
                         break
-                    ancestor = by_raw.get(entry[3])
-                    if ancestor is None:
-                        break
-                    parent, when = ancestor.get("process.ppid"), ancestor.ts.timestamp()
-                    boot = boot or entry[4]
-            return list(related.values())
+                    if found.record.ts < first_ts or found.record.event_id not in all_events:
+                        break                   # older than the process: this chain never reaches it
+                    parent, when, serial = found.record.ppid, found.record.ts, found.record.serial
+                    boot = boot or found.record.boot
+            return Selection(list(related.values()), unknown)
 
         reason = _host_reason(anchor) or (None if usable_key(pid) else "required typed key is unusable")
         return (key, "observed", intents if reason is None else [],

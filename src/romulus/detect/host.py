@@ -1552,9 +1552,24 @@ class ExecLineage:
         return found if found is not None else self.store.peek((host, pid), None) or []
 
     def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,
-               serial: int | None = None, exclude: str | None = None) -> ExecRecord | None:
-        """The record of `pid` that was its image when something happened at (`ts`, audit `serial`): its latest exec
-        before that, among the records `where` accepts, or None when there is none or it is ambiguous.
+               serial: int | None = None, exclude: str | None = None, inclusive: bool = False) -> ExecRecord | None:
+        """The record of `pid` that was its image at (`ts`, audit `serial`), or None when there is none or it is
+        ambiguous (`resolve` tells the two apart)."""
+        return self.resolve(host, pid, ts, strict=strict, where=where, serial=serial, exclude=exclude,
+                            inclusive=inclusive)[0]
+
+    def resolve(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,
+                serial: int | None = None, exclude: str | None = None,
+                inclusive: bool = False) -> tuple[ExecRecord | None, float | None]:
+        """(record, ambiguous_at): the record of `pid` that was its image when something happened at (`ts`, audit
+        `serial`): its latest exec before that, among the records `where` accepts. None with `ambiguous_at` None
+        when no exec is recorded; None with `ambiguous_at` set to the instant of the execs that cannot be ordered
+        when execs exist but which one was the image is unknown.
+
+        Two questions use this. The image a parent pid held when its child execed at (`ts`, `serial`) is strictly
+        before the child (the default): an exec of the parent at that instant precedes only with a lower serial.
+        The image of the process that made a record itself (`inclusive`) also counts the exec whose serial equals
+        the record's, so the exec record asking about its own pid gets itself, not the image it replaced.
 
         Execs are ordered by (time, audit serial), as the baseline carry orders them (`place_child`). An exec at the
         same instant precedes only when both serials are known and its serial is lower; without them its order is
@@ -1577,8 +1592,8 @@ class ExecLineage:
                 if record.event_id == exclude or (strict and exclude is None):
                     continue
                 if serial is not None and record.serial is not None:
-                    if record.serial < serial:
-                        at_instant.append(record)       # precedes the asking record at this instant
+                    if record.serial < serial or (inclusive and record.serial == serial):
+                        at_instant.append(record)       # precedes (or, inclusive, is) the asking record
                 else:
                     unsure.append(record)               # one serial missing: its order is unknown
                 continue
@@ -1590,13 +1605,13 @@ class ExecLineage:
         group = at_instant or before
         answer = _latest_image(sorted(group, key=_record_order)) if group else None
         if group and answer is None:
-            return None
+            return None, group[0].ts
         if unsure:
             if len({record.exe for record in unsure} | ({answer.exe} if at_instant else set())) > 1:
-                return None                     # differing images at one instant without serials: ambiguous
+                return None, ts                 # differing images at one instant without serials: ambiguous
             if not at_instant:                  # one image at that instant: its latest record
                 answer = max(unsure, key=_record_order)
-        return answer
+        return answer, None
 
 
 class ProcessLineage:
