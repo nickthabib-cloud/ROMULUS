@@ -116,12 +116,10 @@ After the deterministic hunt, an AI agent will read everything ROMULUS found, fo
 
 Full design: [`docs/architecture/ai-investigating-agent.md`](docs/architecture/ai-investigating-agent.md).
 
-## Design principles
-
 - **Strong indicators are reported on their own, immediately.** Correlation and attack paths come second.
 - **Nothing reportable is lost** to UI limits, model context or rendering. One report manifest feeds every output.
 - **Read-only and on-site.** ROMULUS never writes to your telemetry and sends nothing off the host it runs on (except the optional, labelled test-model exception above). Secrets never appear in logs, prompts or reports.
-- **Models propose, code decides.** Any model output is a typed proposal that is validated; it never writes queries, filters, shell commands or paths.
+
 
 ## Architecture
 
