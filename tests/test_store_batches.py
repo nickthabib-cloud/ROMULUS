@@ -1,5 +1,6 @@
 """Batched store writes: one compiled statement executed over many rows, the same conflict rules, any batch size;
 one transaction for a partition's coverage cells; each staged event serialized once per partition."""
+import time
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -73,6 +74,28 @@ def test_save_evidence_takes_a_batch_larger_than_one_statement_can_bind(tmp_path
         assert count(t.typed_event) == 12_000 and count(t.raw_record) == 36_000
         assert count(t.event_entity) == 12_000 * 3
     assert repo.events_by_ids(["e000042"])[0]["event"] == events[42].model_dump(mode="json")
+
+
+def test_linux_save_evidence_stays_close_to_the_no_overlay_write_path(monkeypatch):
+    events = [_event(n) for n in range(8_000)]
+    raw = {ref.key: {"n": ref.native_id} for event in events for ref in event.raw}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Repo, "_merge_citation_raw", staticmethod(lambda *_args: None))
+        baseline_repo = _repo()
+        started = time.perf_counter()
+        baseline_repo.save_evidence("h1", events, raw, None)
+        baseline = time.perf_counter() - started
+
+    repo = _repo()
+    started = time.perf_counter()
+    repo.save_evidence("h1", events, raw, None)
+    elapsed = time.perf_counter() - started
+    with repo.engine.connect() as connection:
+        overlays = connection.execute(select(func.count()).select_from(t.event_citation)).scalar_one()
+
+    assert overlays == 0
+    assert elapsed <= baseline * 1.5 + 0.1, (baseline, elapsed)
 
 
 def test_windows_dedup_stage_stores_only_bounded_ids_and_leaves_linux_untracked(tmp_path):

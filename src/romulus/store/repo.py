@@ -1049,7 +1049,9 @@ class Repo:
                     link_rows.append({"event_id": e.id, "entity_id": eid, "role": role})
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
             _upsert_ignore(c, t.typed_event, ev_rows, ["id"])
-            self._merge_citation_raw(c, hunt_id, events)
+            foreign = {event_id: row for event_id, row in existing.items() if row["hunt_id"] != hunt_id}
+            if foreign:
+                self._merge_citation_raw(c, hunt_id, events, foreign)
             self._merge_stored_raw(
                 c, {event_id: row for event_id, row in existing.items() if row["hunt_id"] == hunt_id}, events,
             )
@@ -1083,10 +1085,10 @@ class Repo:
             row["raw_ids"] = merged_ids
 
     @staticmethod
-    def _merge_citation_raw(c, hunt_id: str, events: list) -> None:
-        """Merge raw references into this hunt's citation view, never another hunt's typed row."""
-        ids = sorted({event.id for event in events})
-        existing = {
+    def _merge_citation_raw(c, hunt_id: str, events: list, foreign: dict[str, dict]) -> None:
+        """Overlay only new raw copies of events whose stable row belongs to another hunt."""
+        ids = sorted(foreign)
+        overlays = {
             row["event_id"]: dict(row)
             for row in c.execute(select(t.event_citation).where(
                 t.event_citation.c.hunt_id == hunt_id,
@@ -1094,15 +1096,20 @@ class Repo:
             )).mappings()
         }
         for event in events:
-            row = existing.get(event.id)
-            stored = dict(row["event"]) if row else event.model_dump(mode="json")
+            global_row = foreign.get(event.id)
+            if global_row is None:
+                continue
+            row = overlays.get(event.id)
+            stored = dict(row["event"] if row else global_row["event"])
             stored_raw = list(stored.get("raw") or [])
             known = {(item.get("target"), item.get("native_id")) for item in stored_raw}
             additions = [raw.model_dump(mode="json") for raw in event.raw
                          if (raw.target, raw.native_id) not in known]
+            if not additions:
+                continue
             stored["raw"] = [*stored_raw, *additions]
             raw_ids = list(dict.fromkeys([
-                *((row or {}).get("raw_ids") or []),
+                *((row or global_row).get("raw_ids") or []),
                 *(raw_id(raw.target, raw.native_id) for raw in event.raw),
             ]))
             if row:
@@ -1114,6 +1121,9 @@ class Repo:
                 c.execute(t.event_citation.insert().values(
                     hunt_id=hunt_id, event_id=event.id, event=stored, raw_ids=raw_ids,
                 ))
+            overlays[event.id] = {
+                "hunt_id": hunt_id, "event_id": event.id, "event": stored, "raw_ids": raw_ids,
+            }
 
     def merge_evidence_raw(self, hunt_id: str, events: Iterable, raw_sources: dict[str, dict], *,
                            owner_token: str | None = None) -> None:
@@ -1144,7 +1154,9 @@ class Repo:
                             "first_task_id": None, "retrieved_at": utcnow(),
                         })
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
-            self._merge_citation_raw(c, hunt_id, events)
+            foreign = {event_id: row for event_id, row in existing.items() if row["hunt_id"] != hunt_id}
+            if foreign:
+                self._merge_citation_raw(c, hunt_id, events, foreign)
             self._merge_stored_raw(
                 c, {event_id: row for event_id, row in existing.items() if row["hunt_id"] == hunt_id}, events,
             )

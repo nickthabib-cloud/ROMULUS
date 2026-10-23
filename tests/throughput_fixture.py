@@ -634,6 +634,7 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
         tasks.append(row)
     snapshot = {
         "events": table("typed_event", ["id"]),
+        "event_citations": table("event_citation", ["hunt_id", "event_id"]),
         "raw": table("raw_record", ["id"]),
         "entities": table("entity", ["id"]),
         "event_entities": table("event_entity", ["event_id", "entity_id", "role"]),

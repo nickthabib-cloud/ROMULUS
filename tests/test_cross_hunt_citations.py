@@ -1,9 +1,17 @@
 from datetime import UTC, datetime
 
+from sqlalchemy import func, select
+
 from romulus.evidence.typed import RawRef, TypedEvent
 from romulus.report.manifest import _citations
+from romulus.store import schema as t
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
+
+
+def _citation_count(repo: Repo) -> int:
+    with repo.engine.connect() as connection:
+        return connection.execute(select(func.count()).select_from(t.event_citation)).scalar_one()
 
 
 def test_cross_hunt_raw_merge_is_scoped_to_the_current_hunts_citations():
@@ -19,6 +27,7 @@ def test_cross_hunt_raw_merge_is_scoped_to_the_current_hunts_citations():
     )
     second = first.model_copy(update={"raw": [first_ref, second_ref]})
     repo.save_evidence("h1", [first], {first_ref.key: {"copy": 1}}, None)
+    assert _citation_count(repo) == 0
     repo.save_evidence("h2", [second], {
         first_ref.key: {"copy": 1}, second_ref.key: {"copy": 2},
     }, None)
@@ -30,3 +39,24 @@ def test_cross_hunt_raw_merge_is_scoped_to_the_current_hunts_citations():
     assert [ref["native_id"] for ref in stored["event"]["raw"]] == ["copy-1"]
     assert [citation["native_id"] for citation in h1] == ["copy-1"]
     assert [citation["native_id"] for citation in h2] == ["copy-1", "copy-2"]
+    assert _citation_count(repo) == 1
+
+
+def test_another_hunt_reuses_the_global_event_when_no_raw_copy_is_added():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {}, "d1", "test")
+    repo.create_hunt("h2", {}, "d2", "test")
+    ref = RawRef(target="shared", native_id="copy-1", digest="digest-1")
+    event = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host="ws01",
+        fields={}, raw=[ref], normalizer="windows-ecs@1",
+    )
+
+    repo.save_evidence("h1", [event], {ref.key: {"copy": 1}}, None)
+    repo.save_evidence("h2", [event], {ref.key: {"copy": 1}}, None)
+
+    assert _citation_count(repo) == 0
+    assert [item["native_id"] for item in _citations(
+        repo, {"hunt_id": "h2", "event_ids": [event.id]},
+    )] == ["copy-1"]

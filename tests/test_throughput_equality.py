@@ -26,6 +26,7 @@ GOLDEN_STACK = {
     "audit": "2fd12fa42a64f8c3bb7a8079c056f68e24d4c371b69644eaf02688e6c706ab6a",
     "candidates": "e28018f1f233df951ea98448740a1e146210d18064f2b37d8a320e2fb946c6a8",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
+    "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "af8053b6219447233c1329e280f0ca64054ceceeea79d5d84bfa12af8e067a23",
     "events": "7cb68efe39e15155efa9b2f8edc22e79b93fb3804ba23981e97fbde26c5b0664",
     "expansion": "5a12fe7c7f06127db41f5229bda524a0c9e21e101f8d87dc32d10e5589358770",
