@@ -45,7 +45,6 @@ Sources are read through Elasticsearch or OpenSearch with **read-only** credenti
 | `urgent` | Strong evidence of attacker activity; look now |
 | `high` | Strong indicator that needs confirmation |
 | `lead` | Worth an analyst's look; uncertain or grouped activity (batches say so) |
-| `context` | Kept for completeness; activity with positive evidence of being benign |
 
 Nothing that might be attacker activity is dropped: noise is handled by grouping similar records into one finding, never by hiding them.
 
