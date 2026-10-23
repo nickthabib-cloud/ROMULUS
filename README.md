@@ -19,7 +19,7 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 3. **Reads packets** for the sessions that matter: it fetches them from Arkime by session ID and decodes them with TShark (for example, a file whose content does not match its claimed type).
 4. **Expands** from the strongest findings along typed links (the same process tree, the same login session, the same network flow) and judges the linked activity in that context: discovery commands, privilege probing, credential access, data staging and lateral movement that would be too weak on their own.
 5. **Assembles incidents**: findings joined by observed links, with a cited, time-ordered narrative. Inferred links are shown, but always labelled as hypotheses.
-6. **Ai Agent Investifation**: Ai agent reviews initial round of sweeps and develops hypothesis. It then follows leads and develops attack path narrative.
+6. **Ai Agent Investigation**: Ai agent reviews initial round of sweeps and develops hypothesis. It then follows leads and develops attack path narrative.
 7. **Reports**: an immutable report revision (JSON and Markdown) and a browser UI with findings, incidents and an attack-path timeline.
 
 
