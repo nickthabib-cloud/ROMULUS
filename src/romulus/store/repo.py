@@ -473,7 +473,10 @@ class Repo:
             # (e) a later hunt's scoped citation overlay also keeps the stable typed row it describes
             citation_overlays = {
                 (row["event_id"], row["hunt_id"]): dict(row)
-                for row in c.execute(select(t.event_citation).where(
+                for row in c.execute(select(t.event_citation).join(
+                    t.typed_event, t.typed_event.c.id == t.event_citation.c.event_id,
+                ).where(
+                    t.typed_event.c.hunt_id == hunt_id,
                     t.event_citation.c.hunt_id != hunt_id,
                 )).mappings()
             }
