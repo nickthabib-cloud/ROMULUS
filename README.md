@@ -10,16 +10,17 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 
 ---
 
-## What it does today
+## How it works (In progress)
 
-1. **Sweeps** the hunt window across your sources with a catalog of typed detection rules: web shells, reverse shells, credential-file reads, downloads piped to a shell, firewall tampering, privilege-escalation tooling, port scans, beaconing, suspicious IDS alert stacks, indicator matches and much more. The goal is to find any malicious activity the telemetry can show, on any mission network. The detection catalog is built from systematic research:
+1. **Sweeps** the hunt window across your sources with a catalog of typed detection rules: web shells, reverse shells, credential-file reads, downloads piped to a shell, firewall tampering, privilege-escalation tooling, port scans, beaconing, suspicious IDS alert stacks, indicator matches and much more. The goal is to find any malicious activity the telemetry can show, on any mission network. The detection catalog is being built from systematic research:
   - MITRE ATT&CK Enterprise and ICS techniques;
   - Public detection corpora (Sigma, CAR, Atomic Red Team, LOLBAS/GTFOBins, ET Open and others);
   - Any telemetry family a hunt may meet: Windows, AD, Linux, macOS, identity and cloud logs, network devices, Zeek, Suricata, PCAP and ICS protocols.
 3. **Reads packets** for the sessions that matter: it fetches them from Arkime by session ID and decodes them with TShark (for example, a file whose content does not match its claimed type).
 4. **Expands** from the strongest findings along typed links (the same process tree, the same login session, the same network flow) and judges the linked activity in that context: discovery commands, privilege probing, credential access, data staging and lateral movement that would be too weak on their own.
 5. **Assembles incidents**: findings joined by observed links, with a cited, time-ordered narrative. Inferred links are shown, but always labelled as hypotheses.
-6. **Reports**: an immutable report revision (JSON and Markdown) and a browser UI with findings, incidents and an attack-path timeline.
+6. **Ai Agent Investigation**: Ai agent reviews initial round of sweeps and develops hypothesis. It then follows leads, creats custom queries, and develops its own attack path narrative based on further findings.
+7. **Reports**: an immutable report revision (JSON and Markdown) and a browser UI with findings, incidents and an attack-path timeline.
 
 
 
@@ -44,7 +45,6 @@ Sources are read through Elasticsearch or OpenSearch with **read-only** credenti
 | `urgent` | Strong evidence of attacker activity; look now |
 | `high` | Strong indicator that needs confirmation |
 | `lead` | Worth an analyst's look; uncertain or grouped activity (batches say so) |
-| `context` | Kept for completeness; activity with positive evidence of being benign |
 
 Nothing that might be attacker activity is dropped: noise is handled by grouping similar records into one finding, never by hiding them.
 
@@ -116,12 +116,10 @@ After the deterministic hunt, an AI agent will read everything ROMULUS found, fo
 
 Full design: [`docs/architecture/ai-investigating-agent.md`](docs/architecture/ai-investigating-agent.md).
 
-## Design principles
-
 - **Strong indicators are reported on their own, immediately.** Correlation and attack paths come second.
 - **Nothing reportable is lost** to UI limits, model context or rendering. One report manifest feeds every output.
 - **Read-only and on-site.** ROMULUS never writes to your telemetry and sends nothing off the host it runs on (except the optional, labelled test-model exception above). Secrets never appear in logs, prompts or reports.
-- **Models propose, code decides.** Any model output is a typed proposal that is validated; it never writes queries, filters, shell commands or paths.
+
 
 ## Architecture
 
@@ -136,7 +134,7 @@ Python 3.12 modular monolith (`src/romulus/`), SQLite (WAL) as the single state 
 
 - ROMULUS is for **authorized, defensive** threat hunting on networks you are permitted to analyze.
 - It is not hardened for exposure: the web UI has no built-in TLS yet. Bind it to localhost or put it behind a TLS reverse proxy on a trusted network.
-- Report security issues privately to *(contact to be added)*, not in public issues.
+
 
 ## Development
 

@@ -60,6 +60,9 @@ def expansion_windows(ts: datetime, hunt_window: Window) -> list[LinkWindow]:
 
 
 RESERVED_REASON = "source query budget reserved for discovered anchors"
+# Expansion serves the most severe lane that still has work before any less severe one. An anchor the budget
+# stopped while a more severe anchor existed says where its queries went.
+BUDGET_TO_SEVERE_REASON = "source query budget given to more severe anchors"
 # Under the default internal-network definition, the endpoints it reads as outside are looked up to learn whether
 # they are site hosts. Those fallback lookups together may spend at most this share of the expansion budget, so a
 # network full of internet endpoints cannot starve the links themselves.
@@ -319,6 +322,72 @@ class ExpansionEngine:
                     ordered.append(by_host[host].popleft())
         return ordered
 
+    def _root_cap(self, all_rows: list[dict], blocked: set[str], lane_rank: int, root_budget: int,
+                  reserve: int) -> int:
+        """Queries a root anchor of the lane being served may reach. The reserve exists for anchors discovered by
+        expansion, and holds back a root only for a discovered anchor at least as severe; a less severe one waits
+        behind the root. With none waiting, half of the reserve is released to roots, but only when the other half
+        still covers one fetch (two queries), so a discovered anchor of the lane being served is never starved."""
+        children = [row for row in all_rows if 0 < row["depth"] < self.max_depth and row["status"] == "pending"
+                    and row["id"] not in blocked]
+        if any(LANE_ORDER.get(row["lane"], 9) <= lane_rank for row in children):
+            return root_budget
+        if children:
+            return self.max_source_queries
+        return root_budget + (reserve // 2 if reserve - reserve // 2 >= 2 else 0)
+
+    def _tier_slots(self, ordered: list[dict], anchor_reasons: dict[str, list[str]], root_cap: int) -> list[tuple]:
+        """The unevaluated links of the lowest tier any of these anchors still has, in anchor order."""
+        for _tier, link_types, window_label in TIER_PLAN:
+            tier_slots = []
+            for link_type in link_types:
+                for anchor_row in ordered:
+                    candidate = self.repo.candidate(anchor_row["candidate_id"])
+                    candidate_ts = _utc(candidate["ts"])
+                    anchor_events = self._events(candidate["event_ids"])
+                    base_anchor = LinkAnchor(
+                        finding_id=candidate["id"], ts=candidate_ts, host=anchor_row["host"],
+                        event_ids=candidate["event_ids"], events=anchor_events,
+                    )
+                    window = next(
+                        item for item in expansion_windows(candidate_ts, self.window)
+                        if item.label == window_label
+                    )
+                    variants, dropped = self._link_anchors(base_anchor, link_type)
+                    if link_type in HOST_SIDE_LINKS and not base_anchor.host:
+                        cap = root_cap if anchor_row["depth"] == 0 else self.max_source_queries
+                        variants, dropped_ips, notes = self._victim_variants(
+                            candidate["id"], variants, anchor_events, query_cap=cap)
+                        anchor_reasons[anchor_row["id"]].extend(
+                            note for note in notes if note not in anchor_reasons[anchor_row["id"]])
+                        if dropped_ips:
+                            anchor_reasons[anchor_row["id"]].append(
+                                "keys_not_expanded:" + json.dumps(
+                                    [{"victim_ip": ip} for ip in dropped_ips],
+                                    sort_keys=True, separators=(",", ":")))
+                    if dropped:
+                        anchor_reasons[anchor_row["id"]].append(
+                            "keys_not_expanded:" + json.dumps(
+                                dropped, sort_keys=True, separators=(",", ":"),
+                            ),
+                        )
+                    for variant in variants:
+                        if hasattr(self.fetcher, "result_id"):
+                            stored = self.repo.expansion_link(
+                                self.fetcher.result_id(variant, link_type, window),
+                            )
+                        else:
+                            stored = self.repo.expansion_link_for(
+                                candidate["id"], link_type, window.label, window.start, window.end,
+                            )
+                        if not (stored and stored["evaluated"]):
+                            tier_slots.append((
+                                anchor_row, candidate, variant, link_type, window, stored,
+                            ))
+            if tier_slots:
+                return tier_slots
+        return []
+
     @staticmethod
     def _stored_result(row: dict) -> LinkResult:
         return LinkResult(
@@ -388,18 +457,6 @@ class ExpansionEngine:
         while True:
             self._seed_anchors()
             all_rows = self.repo.expansion_anchors(self.hunt_id)
-            # The reserve exists for anchors discovered by expansion. While none that can still expand is
-            # waiting, half of it is released to root anchors, but only when the other half still covers one
-            # fetch (two queries), so a discovered anchor is never starved.
-            children_waiting = any(0 < row["depth"] < self.max_depth and row["status"] == "pending"
-                                   and row["id"] not in blocked_anchors for row in all_rows)
-            releasable = reserve // 2 if reserve - reserve // 2 >= 2 else 0
-            root_cap = root_budget if children_waiting else root_budget + releasable
-            for anchor_id, blocked_cap in list(reserve_blocked.items()):
-                if root_cap > blocked_cap:       # the reserve was released since: the root may spend again
-                    del reserve_blocked[anchor_id]
-                    blocked_anchors.discard(anchor_id)
-                    anchor_reasons[anchor_id] = [r for r in anchor_reasons[anchor_id] if r != RESERVED_REASON]
             eligible = []
             for row in all_rows:
                 if row["status"] != "pending" or row["id"] in blocked_anchors:
@@ -411,61 +468,23 @@ class ExpansionEngine:
                     stop_reason = "depth_limit"
                     continue
                 eligible.append(row)
-            ordered = self._ordered_anchors(eligible)
-            slots = []
-            # Always choose the globally lowest unfinished tier. A newly discovered
-            # anchor therefore receives T1 before any surviving T2+ work continues.
-            for _tier, link_types, window_label in TIER_PLAN:
-                tier_slots = []
-                for link_type in link_types:
-                    for anchor_row in ordered:
-                        candidate = self.repo.candidate(anchor_row["candidate_id"])
-                        candidate_ts = _utc(candidate["ts"])
-                        anchor_events = self._events(candidate["event_ids"])
-                        base_anchor = LinkAnchor(
-                            finding_id=candidate["id"], ts=candidate_ts, host=anchor_row["host"],
-                            event_ids=candidate["event_ids"], events=anchor_events,
-                        )
-                        window = next(
-                            item for item in expansion_windows(candidate_ts, self.window)
-                            if item.label == window_label
-                        )
-                        variants, dropped = self._link_anchors(base_anchor, link_type)
-                        if link_type in HOST_SIDE_LINKS and not base_anchor.host:
-                            cap = root_cap if anchor_row["depth"] == 0 else self.max_source_queries
-                            variants, dropped_ips, notes = self._victim_variants(
-                                candidate["id"], variants, anchor_events, query_cap=cap)
-                            anchor_reasons[anchor_row["id"]].extend(
-                                note for note in notes if note not in anchor_reasons[anchor_row["id"]])
-                            if dropped_ips:
-                                anchor_reasons[anchor_row["id"]].append(
-                                    "keys_not_expanded:" + json.dumps(
-                                        [{"victim_ip": ip} for ip in dropped_ips],
-                                        sort_keys=True, separators=(",", ":")))
-                        if dropped:
-                            anchor_reasons[anchor_row["id"]].append(
-                                "keys_not_expanded:" + json.dumps(
-                                    dropped, sort_keys=True, separators=(",", ":"),
-                                ),
-                            )
-                        for variant in variants:
-                            if hasattr(self.fetcher, "result_id"):
-                                stored = self.repo.expansion_link(
-                                    self.fetcher.result_id(variant, link_type, window),
-                                )
-                            else:
-                                stored = self.repo.expansion_link_for(
-                                    candidate["id"], link_type, window.label, window.start, window.end,
-                                )
-                            if not (stored and stored["evaluated"]):
-                                tier_slots.append((
-                                    anchor_row, candidate, variant, link_type, window, stored,
-                                ))
-                if tier_slots:
-                    slots = tier_slots
+            # Serve the most severe lane that still has work. Within it, always choose the globally lowest
+            # unfinished tier, so a newly discovered anchor of that lane receives T1 before surviving T2+ work.
+            slots, root_cap = [], root_budget
+            for rank in sorted({LANE_ORDER.get(row["lane"], 9) for row in eligible}):
+                root_cap = self._root_cap(all_rows, blocked_anchors, rank, root_budget, reserve)
+                slots = self._tier_slots(
+                    self._ordered_anchors([row for row in eligible if LANE_ORDER.get(row["lane"], 9) == rank]),
+                    anchor_reasons, root_cap)
+                if slots:
                     break
             if not slots:
                 break
+            for anchor_id, blocked_cap in list(reserve_blocked.items()):
+                if root_cap > blocked_cap:       # the reserve was released since: the root may spend again
+                    del reserve_blocked[anchor_id]
+                    blocked_anchors.discard(anchor_id)
+                    anchor_reasons[anchor_id] = [r for r in anchor_reasons[anchor_id] if r != RESERVED_REASON]
             spent = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
             if isinstance(spent, int):
                 query_count = max(query_count, spent)
@@ -479,6 +498,10 @@ class ExpansionEngine:
                 if budget_reason:
                     stop_reason = "budget"
                     anchor_reasons[anchor_row["id"]].append(budget_reason)
+                    if budget_reason == "source query budget exhausted" and any(
+                            LANE_ORDER.get(row["lane"], 9) < LANE_ORDER.get(anchor_row["lane"], 9)
+                            for row in all_rows):
+                        anchor_reasons[anchor_row["id"]].append(BUDGET_TO_SEVERE_REASON)
                     blocked_anchors.add(anchor_row["id"])
                     continue
                 if stored:
@@ -519,9 +542,9 @@ class ExpansionEngine:
                 if result.status == "failed":
                     stop_reason = "source_failure"
                     source_failed = True
-                self._seed_anchors()
                 if self.after_link:
                     self.after_link(result)
+                self._seed_anchors()
                 if {row["id"] for row in self.repo.expansion_anchors(self.hunt_id)} - known_anchor_ids:
                     break
             if not made_progress:
