@@ -82,6 +82,7 @@ def usable_key(value: Any) -> bool:
 def _portable_windows_account(value: Any) -> bool:
     normalized = str(value or "").strip().casefold()
     return (usable_key(value) and normalized not in _GENERIC_WINDOWS_SIDS
+            and normalized not in {"name:", "name:-"} and not normalized.endswith("\\-")
             and not normalized.startswith(_GENERIC_WINDOWS_SID_PREFIXES))
 
 

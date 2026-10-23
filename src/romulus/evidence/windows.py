@@ -22,6 +22,12 @@ _SID = re.compile(r"^S-\d+(?:-\d+)+$", re.IGNORECASE)
 _ABSENT_FIELD_VALUES = {
     "IpAddress": frozenset({"-", "::", "0", "0.0.0.0"}),
     "IpPort": frozenset({"-", "0"}),
+    "SubjectUserSid": frozenset({"-", "s-1-0-0"}),
+    "TargetUserSid": frozenset({"-", "s-1-0-0"}),
+    "SubjectDomainName": frozenset({"-"}),
+    "TargetDomainName": frozenset({"-"}),
+    "SubjectUserName": frozenset({"-"}),
+    "TargetUserName": frozenset({"-"}),
 }
 
 
@@ -347,12 +353,16 @@ def _event_time(value: object) -> datetime:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
+def _native_value_is_absent(name: str, value: object) -> bool:
+    if value in (None, ""):
+        return True
+    return str(value).strip().casefold() in _ABSENT_FIELD_VALUES.get(name, frozenset())
+
+
 def _put(fields: dict[str, FieldValue], record: WindowsRecord, typed: str, *native: str, transform=None) -> None:
     for name in native:
         item = record.data.get(name)
-        if item is None or item.value in (None, ""):
-            continue
-        if str(item.value).strip() in _ABSENT_FIELD_VALUES.get(name, frozenset()):
+        if item is None or _native_value_is_absent(name, item.value):
             continue
         try:
             value = transform(item.value) if transform else item.value
@@ -365,17 +375,23 @@ def _put(fields: dict[str, FieldValue], record: WindowsRecord, typed: str, *nati
 
 
 def _account(record: WindowsRecord, prefix: str) -> tuple[str | None, str | None, str | None, str | None]:
-    sid = record.value(f"{prefix}UserSid")
-    domain = record.value(f"{prefix}DomainName")
-    name = record.value(f"{prefix}UserName")
+    sid_field = f"{prefix}UserSid"
+    domain_field = f"{prefix}DomainName"
+    name_field = f"{prefix}UserName"
+    sid = record.value(sid_field)
+    domain = record.value(domain_field)
+    name = record.value(name_field)
+    sid = None if _native_value_is_absent(sid_field, sid) else str(sid).strip()
+    domain = None if _native_value_is_absent(domain_field, domain) else str(domain).strip()
+    name = None if _native_value_is_absent(name_field, name) else str(name).strip()
     sid_text = str(sid).strip() if sid is not None else ""
-    if _SID.fullmatch(sid_text) and sid_text.casefold() != "s-1-0-0":
+    if _SID.fullmatch(sid_text):
         key = f"sid:{sid_text.casefold()}"
-        origin = record.origin(f"{prefix}UserSid")
+        origin = record.origin(sid_field)
     elif name:
         joined = f"{domain}\\{name}" if domain and str(domain) not in {"-", "."} else str(name)
         key = f"name:{joined.casefold()}"
-        origin = record.origin(f"{prefix}UserName")
+        origin = record.origin(name_field)
     else:
         key = None
         origin = None

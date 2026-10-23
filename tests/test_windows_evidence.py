@@ -209,6 +209,19 @@ def test_invalid_and_sentinel_sids_fall_back_to_name_with_name_lineage(sid):
     assert event.fields["auth.target_account"].origin.endswith("TargetUserName")
 
 
+def test_null_sid_and_placeholder_account_names_are_absent():
+    event = normalize_hits([_hit(4688, data={
+        "TargetUserSid": "S-1-0-0",
+        "TargetDomainName": "-",
+        "TargetUserName": "-",
+    })])[0][0]
+
+    assert event.get("auth.target_account") is None
+    assert event.get("account.name") is None
+    assert event.get("account.domain") is None
+    assert not [entity for entity in event.entities() if entity[0] == "account"]
+
+
 def test_sysmon_process_user_is_a_case_insensitive_account_identity():
     event = normalize_hits(
         [

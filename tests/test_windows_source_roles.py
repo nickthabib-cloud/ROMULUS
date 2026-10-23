@@ -19,7 +19,7 @@ from romulus.evidence.windows_catalog import (
     WINDOWS_HOST_DATASETS,
 )
 from romulus.hunt import run as hunt_run
-from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
+from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow, _portable_windows_account
 from romulus.hunt.manifest import build_manifest
 from romulus.hunt.pivot import PivotExecutor, _is_network
 from romulus.hunt.sweep import LINUX_HOST_DATASETS, Sweep
@@ -618,6 +618,10 @@ def test_windows_logon_account_link_prefers_target_and_refuses_generic_sid():
     assert target_plan[0] == {"auth.target_account": "sid:s-1-5-21-1-2-3-1001", "actor": "inferred"}
     assert generic_plan[2] == []
     assert generic_plan[5] == "cross-host account identity is well-known or machine-generic"
+
+
+def test_placeholder_account_key_is_never_portable_across_hosts():
+    assert _portable_windows_account("name:-") is False
 
 
 def test_windows_process_tree_prefers_process_guid_lineage_over_pid_reuse():
