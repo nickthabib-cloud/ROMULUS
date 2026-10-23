@@ -193,8 +193,9 @@ class Playbook:
     budget = None
     # True once the playbook keeps per-key state (a KeyedStore, SpillList or spill).
     holds_state = False
-    # The slice of the hunt's disk budget this rule's state is charged to (romulus.detect.bounded.SLICES): "strong"
-    # for strong-indicator rules, whose slice routine volume can never spend; "routine" otherwise.
+    # "strong" for strong-indicator rules: below the stage volume's reserve their stores still read keys they hold
+    # on disk back into memory (a read is not growth), and the event stage still takes their citations; "routine"
+    # otherwise. Every store, strong or routine, has the same guaranteed floor of the hunt's disk budget.
     state_slice: ClassVar[str] = "routine"
 
     def state_budget(self):
@@ -207,7 +208,7 @@ class Playbook:
         """This playbook's private on-disk tables (created on first use)."""
         if self._spill is None:
             from romulus.detect.bounded import Spill
-            self._spill = Spill(self.spill_dir, self.state_budget(), self.state_slice)
+            self._spill = Spill(self.spill_dir, self.state_budget())
         return self._spill
 
     def refuse_unevaluated(self, events: list[TypedEvent], evaluated: int, text: str) -> None:

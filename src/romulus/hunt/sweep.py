@@ -8,7 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
-from romulus.detect.bounded import StateBudget, StateExhausted
+from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
@@ -140,6 +140,11 @@ class Sweep:
         for pb in self.pack:
             pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
             pb.budget = self.budget
+        # one guaranteed floor per live store of the pack (a store shared by several rules counts once), and one for
+        # the event stage, which holds the citations of every rule
+        self.budget.plan(live_stores(self.pack) + 1)
+        self._stage_account = self.budget.account("event_stage")
+        self._stage_size = 0
         self.partial_reasons: list[str] = []
         preflight = self.budget.preflight()
         if preflight:
@@ -152,6 +157,34 @@ class Sweep:
                       "boot": {"recorded": 0, "from_interval": 0, "unknown": 0}}
 
     # -------------------------------------------------------------------------------------
+    def _sources_for(self, m: Match, raw_sources: dict[str, dict]) -> dict[str, dict]:
+        """Raw copies for a match published while a partition is read: this partition's, and from the event stage
+        for a cited record a staged rule held from an earlier partition."""
+        missing = [e for e in m.events if any(r.key not in raw_sources for r in e.raw)]
+        stage = getattr(self, "_stage", None)
+        if not missing or stage is None:
+            return raw_sources
+        return {**stage.raw_sources(missing), **raw_sources}
+
+    def _stage_put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+        """Stage citations, charging the stage's growth to its own account of the hunt's state budget. A write the
+        volume cannot take marks the budget broken: those citations are lost to their rules, which say so."""
+        import sqlite3
+        stage = self._event_stage()
+        try:
+            stage.put(events, raw_sources)
+        except sqlite3.OperationalError as exc:
+            self.budget.fail(f"writing the event stage failed ({exc})")
+            for pb in self.pack:
+                if pb.staged:
+                    pb.note_limit("stage", f"the event stage could not take this partition's citations "
+                                           f"({self.budget.broken}); findings that cite them are not computed")
+            return
+        size = stage.db.execute("PRAGMA page_count").fetchone()[0] * stage.db.execute("PRAGMA page_size").fetchone()[0]
+        if size > self._stage_size:
+            self.budget.charge(self._stage_account, size - self._stage_size)
+            self._stage_size = size
+
     def _publish(self, m: Match, task_id: str | None, raw_sources: dict[str, dict]):
         playbook = next(playbook for playbook in self.pack if playbook.id == m.playbook_id)
         row = publish_match(self.repo, self.hunt_id, playbook, m, task_id, raw_sources)
@@ -365,8 +398,8 @@ class Sweep:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
             before_limits = {name: limit.records for name, limit in pb.limits.items()}
-            # Every rule reads every batch, whatever the state budget: once a slice is spent its stores refuse
-            # only records that need new state (each rule's own refusal path), and every match that needs no new
+            # Every rule reads every batch, whatever the state budget: a store in no-growth mode refuses only
+            # records that need a new key in it (each rule's own refusal path), and every match that needs no new
             # state still publishes.
             try:
                 matches = pb.consume(events)
@@ -379,11 +412,18 @@ class Sweep:
                                       f"a write to the stage volume failed ({exc}); this rule's later records of "
                                       f"the batch are not evaluated")
             for m in matches:
-                self._publish(m, tid, raw_sources)
+                self._publish(m, tid, self._sources_for(m, raw_sources) if pb.staged else raw_sources)
             if pb.staged:
-                # joining aggregates: full events and their raw copies go to disk, not memory
-                for event in pb.drain_staged():
-                    staged.setdefault(event.id, event)
+                # joining aggregates: full events and their raw copies go to disk, not memory. Below the stage
+                # volume's reserve the stage takes only strong rules' citations; another rule's held examples are
+                # then not loadable, and its finalize says so.
+                drained = pb.drain_staged()
+                if drained and self.budget.hard and pb.state_slice != "strong":
+                    pb.note_limit("stage", f"the event stage took no new citation of this rule "
+                                           f"({self.budget.hard}); its findings that cite them are not computed")
+                else:
+                    for event in drained:
+                        staged.setdefault(event.id, event)
             elif pb.kind == "aggregate":
                 # aggregates retain examples: stash raw copies of their retained events now
                 self._retain_aggregate_raw(pb, raw_sources)
@@ -421,8 +461,8 @@ class Sweep:
                                f"was full; " + "; ".join(refused))
                 detail["state_capped"] = capped
             cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated, detail))
-        if any(pb.staged for pb in self.pack):
-            self._event_stage().put(list(staged.values()), raw_sources)
+        if staged:
+            self._stage_put(list(staged.values()), raw_sources)
         staged.clear()
         # the event stage shares the stage volume: its growth counts toward the free-space reserve
         self.budget.check_free()
@@ -552,9 +592,9 @@ class Sweep:
             self.partial_reasons.append(f"state budget: {self.budget.spent}")
             self.stats["state_budget"] = {"spent": self.budget.spent, "disk_bytes": self.budget.disk_used,
                                           "disk_total": self.budget.disk_total, "reserve": self.budget.reserve,
-                                          "slices": {name: {"used": self.budget.slice_used[name],
-                                                            "total": self.budget.slice_total[name]}
-                                                     for name in self.budget.slice_total}}
+                                          "floor": self.budget.floor, "shared": self.budget.pool,
+                                          "shared_used": self.budget.pool_used,
+                                          "stores_without_new_keys": sorted(self.budget.full)}
         self.close_stage()
 
     @staticmethod
@@ -562,14 +602,15 @@ class Sweep:
         """A rule's finalize. When it needs disk the stage volume cannot give, the rule publishes what it can from
         state readable without writing (`finalize_fallback`: strong per-record items), and its window cell says
         which results were not computed (the hunt goes on)."""
+        from romulus.detect.correlation import StageMissing
         try:
             return pb.finalize()
-        except StateExhausted as exc:
+        except (StateExhausted, StageMissing, LookupError) as exc:
             pb.note_limit("state_disk", f"finalize stopped: {exc}; this rule's groupings were not computed, only "
                                         f"what it could publish without disk")
             try:
                 return pb.finalize_fallback(str(exc))
-            except StateExhausted:
+            except (StateExhausted, StageMissing, LookupError):
                 return []
 
     def close_stage(self) -> None:

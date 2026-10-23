@@ -10,7 +10,7 @@ import pytest
 
 from romulus.detect import bounded
 from romulus.detect.base import Playbook
-from romulus.detect.bounded import KeyedStore, Spill, SpillList, StateBudget, StateExhausted
+from romulus.detect.bounded import KeyedStore, Spill, SpillList, StateBudget, StateExhausted, live_stores
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt import sweep as sw
 from romulus.sources.models import Completeness, SearchOutcome, Window
@@ -83,6 +83,7 @@ def _sweep(monkeypatch, tmp_path, pack, batches, budget: StateBudget):
     sweep.pack = pack
     for pb in pack:
         pb.spill_dir, pb.budget = tmp_path, budget
+    budget.plan(live_stores(pack) + 1)          # one floor per store of this pack, and one for the event stage
     for n in range(len(batches)):
         start = START + timedelta(minutes=5 * n)
         sweep.run_partition("romulus-host-x", None, [], Window(start=start, end=start + timedelta(minutes=5)), est=1)
@@ -101,23 +102,39 @@ def _parts(cells, rule_id):
     return sorted((c for c in cells if c["rule_id"] == rule_id and c["target"] != "*"), key=lambda c: c["partition"])
 
 
-def test_a_spent_slice_refuses_only_records_needing_new_state_and_the_hunt_completes(monkeypatch, tmp_path):
-    budget = StateBudget(tmp_path, disk_total=80_000, reserve=0)      # the routine slice: 60,000 bytes
-    growing, stateless = _Growing(), _Stateless()
-    sweep, cells = _sweep(monkeypatch, tmp_path, [growing, stateless], _batches(8), budget)
-    assert budget.slice_over["routine"] and not budget.slice_over["strong"]
-    assert budget.slice_used["routine"] >= 60_000                     # growth of existing states counted it
+class _Quiet(_Growing):
+    """A second store that is quiet until the last batch, then needs new keys (hosts named q*)."""
+    id = "test.quiet"
+
+    def consume(self, events):
+        return super().consume([e for e in events if e.host.startswith("q")])
+
+
+def test_a_store_past_its_floor_refuses_only_its_own_new_keys_and_never_another_stores_floor(monkeypatch, tmp_path):
+    budget = StateBudget(tmp_path, disk_total=80_000, reserve=0)
+    growing, quiet, stateless = _Growing(), _Quiet(), _Stateless()
+    batches = _batches(8)
+    batches[-1] += [_event(10_000 + i, f"q{i}") for i in range(3)]        # the quiet store's first records
+    sweep, cells = _sweep(monkeypatch, tmp_path, [growing, quiet, stateless], batches, budget)
+    # three stores (two rules' and the event stage's): a floor of 80,000 / 6 each, half the total shared
+    assert budget.floor == 80_000 // 6 and budget.pool == 80_000 - 3 * (80_000 // 6)
+    assert list(budget.full) == [f"{growing.id}:notes"]               # only the busy store took no new key
+    assert growing.notes.disk_bytes >= budget.floor                   # growth of existing states counted it
     mine = _parts(cells, growing.id)
     assert mine[0]["state"] == "evaluated_complete" and mine[0]["evaluated"] == 21
-    # once spent, the recurring hosts are still evaluated (their states update); only the new host is refused
+    # once past its floor with the headroom spent, the recurring hosts are still evaluated (their states update);
+    # only the new hosts are refused (the batch's new host and, for this rule, the quiet store's three)
     assert mine[-1]["state"] == "evaluated_partial" and mine[-1]["evaluated"] == 20
-    assert mine[-1]["detail"]["state_capped"] == 1
+    assert mine[-1]["detail"]["state_capped"] == 4
     window = next(c for c in cells if c["rule_id"] == growing.id and c["target"] == "*")
     assert window["state"] in ("evaluated_partial", "match_on_partial")
-    assert any("state budget is spent" in r for r in window["detail"]["reasons"])
+    assert any("past its guaranteed floor" in r for r in window["detail"]["reasons"])
+    # the quiet store's floor was never taken: its new keys are all held
+    assert _parts(cells, quiet.id)[-1]["evaluated"] == 3 and not _parts(cells, quiet.id)[-1]["detail"].get(
+        "state_capped")
     assert all(c["state"] == "no_match_complete" for c in cells if c["rule_id"] == stateless.id)
     assert any("state budget" in r for r in sweep.partial_reasons)
-    assert sweep.stats["state_budget"]["spent"].startswith("detector state on disk of routine rules")
+    assert sweep.stats["state_budget"]["stores_without_new_keys"] == [f"{growing.id}:notes"]
 
 
 def test_free_space_below_the_reserve_at_preflight_holds_no_new_state(monkeypatch, tmp_path):
@@ -386,7 +403,8 @@ def test_settings_reach_the_state_budget(tmp_path):
     size, free = bounded.volume_usage(tmp_path)
     assert (budget.disk_total, budget.memory_total) == (3 * 2**30, 256 * 2**20)
     assert budget.reserve == max(2**29, int(size * bounded.RESERVE_SHARE))       # the setting is a floor
-    assert budget.slice_total["strong"] == int(3 * 2**30 * bounded.STRONG_SHARE)
+    budget.plan(10)
+    assert budget.floor == 3 * 2**30 // 20 and budget.pool == 3 * 2**30 - 10 * budget.floor
     auto = sw.state_budget(load_settings(env_file=tmp_path / "none.env", environ={"ROMULUS_HOME": str(tmp_path)}),
                            tmp_path)
     assert auto.reserve == max(2 * 2**30, int(size * bounded.RESERVE_SHARE))
@@ -487,3 +505,140 @@ def test_the_automatic_total_and_reserve_leave_a_shared_volume_room(monkeypatch,
     assert budget.disk_total == int(size * 0.10)                    # 10 GiB, not half of the free space
     monkeypatch.setattr(bounded, "volume_usage", lambda directory: (size, 16 * 2**30))
     assert StateBudget(tmp_path).disk_total == (16 * 2**30 - int(size * 0.15)) // 2
+
+
+# ---- floors, the event stage and reads below the reserve ------------------------------------------------------------
+def _owner(tmp_path, budget, name="test.store", strong=False):
+    owner = _Owner()
+    owner.id = name
+    if strong:
+        owner.state_slice = "strong"
+    owner.spill_dir, owner.budget = tmp_path / name, budget
+    return owner
+
+
+def test_every_store_keeps_its_floor_whatever_another_store_holds(tmp_path):
+    budget = StateBudget(tmp_path, disk_total=300_000, reserve=0)
+    budget.plan(3)                                                   # floor 50,000; 150,000 shared
+    busy, quiet = _owner(tmp_path, budget, "busy"), _owner(tmp_path, budget, "quiet")
+    big, small = KeyedStore(busy, "s", hot=1), KeyedStore(quiet, "s", hot=1)
+    refused = 0
+    for i in range(400):
+        if not big.put(f"k{i}", "x" * 1000 + str(i)):
+            refused += 1
+        big.trim()
+    assert refused and budget.pool_used >= budget.pool and big.disk_bytes < 210_000
+    taken = 0
+    for i in range(60):                                               # about 1 KB each: the floor holds ~45
+        if small.put(f"k{i}", "y" * 1000 + str(i)):
+            taken += 1
+        small.trim()
+    assert 40 <= taken < 60 and small.disk_bytes >= budget.floor - 2_000
+    assert set(budget.full) == {"busy:s", "quiet:s"}
+    busy.close_spill()
+    quiet.close_spill()
+
+
+class _Citer(Playbook):
+    """A staged aggregate that holds the id of every record it reads and loads them all at finalize."""
+    id = "test.citer"
+    title = "test"
+    kind = "aggregate"
+    families = ("process_exec",)
+    staged = True
+
+    def __init__(self):
+        super().__init__()
+        self.ids, self._pending, self.loaded = [], [], None
+
+    def consume(self, events):
+        for e in self.applicable(events):
+            if (e.host == "host0") == (self.state_slice == "strong"):   # the two citers cite different records
+                self.ids.append(e.id)
+                self._pending.append(e)
+        return []
+
+    def drain_staged(self):
+        out, self._pending = self._pending, []
+        return out
+
+    def finalize(self):
+        found = self.load(self.ids)
+        if len(found) != len(self.ids):
+            raise LookupError(f"{len(self.ids) - len(found)} cited event(s) absent from the stage")
+        self.loaded = len(found)
+        return []
+
+
+class _StrongCiter(_Citer):
+    id = "test.strong_citer"
+    state_slice = "strong"
+
+
+def test_the_event_stage_is_charged_and_below_the_reserve_takes_only_strong_citations(monkeypatch, tmp_path):
+    free = {"bytes": 10 * 2**30}
+    monkeypatch.setattr(StateBudget, "free", lambda self: free["bytes"])
+    budget = StateBudget(tmp_path, disk_total=2**40, reserve=2**30)
+    routine, strong = _Citer(), _StrongCiter()
+    original = routine.consume
+
+    def consume(events):
+        out = original(events)
+        if events and events[0].id == "e21":
+            free["bytes"] = 100             # the volume reaches its reserve during the second partition
+        return out
+    routine.consume = consume
+    sweep, cells = _sweep(monkeypatch, tmp_path, [routine, strong], _batches(3), budget)
+    stage = next(a for a in budget.accounts if a.name == "event_stage")
+    assert stage.used > 0                                            # the stage's growth is in the budget
+    assert budget.low_space
+    assert strong.loaded == 21                                       # a strong rule's citations are still staged
+    assert routine.loaded is None                                    # a routine rule's later ones are not
+    window = next(c for c in cells if c["rule_id"] == routine.id and c["target"] == "*")
+    assert window["state"] == "evaluated_partial"
+    assert any("event stage took no new citation" in r for r in window["detail"]["reasons"])
+    assert any("finalize stopped" in r for r in window["detail"]["reasons"])
+    assert any("below the reserve" in r for r in sweep.partial_reasons)
+
+
+def test_a_stage_write_the_volume_cannot_take_is_partial_and_the_hunt_completes(monkeypatch, tmp_path):
+    from romulus.hunt.stage import EventStage
+    budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    calls = {"n": 0}
+    original = EventStage.put
+
+    def put(self, events, raw_sources):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("database or disk is full")
+        return original(self, events, raw_sources)
+    monkeypatch.setattr(EventStage, "put", put)
+    rule = _Citer()
+    _unused, cells = _sweep(monkeypatch, tmp_path, [rule], _batches(3), budget)
+    assert "disk is full" in budget.broken and rule.loaded is None
+    window = next(c for c in cells if c["rule_id"] == rule.id and c["target"] == "*")
+    assert window["state"] == "evaluated_partial"
+    assert any("could not take this partition's citations" in r for r in window["detail"]["reasons"])
+
+
+def test_below_the_reserve_a_strong_store_still_updates_a_key_it_holds_on_disk(tmp_path):
+    budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    for strong in (True, False):
+        owner = _owner(tmp_path, budget, f"rule{int(strong)}", strong=strong)
+        store = KeyedStore(owner, "s", hot=1)
+        store.put("held", [1])
+        store.put("other", [2])
+        store.trim()                                                 # "held" is on disk
+        budget.low_space = "the stage volume's free space is below the reserve (test)"
+        state = store.get("held")
+        if strong:
+            assert state == [1]                                      # read back without writing
+            state.append(3)
+            assert store.put("held", state) and store.get("held") == [1, 3]
+            assert len(store) == 2 and dict(store.items()) == {"other": [2], "held": [1, 3]}
+            assert not store.put("new", [4])                         # a new key is still refused
+        else:
+            assert state is None and not store.put("held", [5])     # a routine store refuses honestly
+            assert dict(store.items()) == {"other": [2], "held": [1]}
+        budget.low_space = ""
+        owner.close_spill()

@@ -143,17 +143,11 @@ RESERVE_SHARE = 0.15              # ... and at least this share of the volume's 
 TOTAL_SHARE = 0.10                # the automatic disk total: at most this share of the volume's size
 DISK_TOTAL_FLOOR = 256 * 2**20    # the automatic disk total never goes below this (the reserve still applies)
 DISK_TOTAL_FALLBACK = 16 * 2**30  # the hunt's disk total when the stage volume cannot be read
-STRONG_SHARE = 0.25               # the share of the disk total protected for strong-indicator rules
 MEMORY_TOTAL = 1536 * 2**20       # the memory every hot set of the hunt shares (an estimate, see KeyedStore)
 SAMPLE = 32                       # states sized at each measurement of a hot set, drawn across the whole set
 REMEASURE_TRIMS = 16              # a hot set is measured again at least every this many trims
 KEY_OVERHEAD = 200                # per hot key: the key, its order number and two table slots
 HOT_FLOOR = 16                    # the memory budget never moves a hot set below this many states
-# A rule's state belongs to one slice of the hunt's disk total. Strong-indicator rules (indicator matches, tamper
-# commands, account changes, web-service shells, downloads fed to interpreters, reverse shells, hijacked files)
-# have a protected slice, so routine volume (flows, sessions, DNS, network groups, certificates, joins) can never
-# spend it.
-SLICES = ("strong", "routine")
 
 
 class StateExhausted(RuntimeError):
@@ -177,37 +171,43 @@ def volume_usage(directory) -> tuple[int, int] | None:
     return usage.total, usage.free
 
 
-class _Flags(dict):
-    """A slice -> reason map that keeps its budget's `calm` flag current whenever a reason is set."""
+class Account:
+    """One store's bytes on disk (a keyed store, a record list, a join's rows, the event stage)."""
 
-    def __init__(self, budget, keys):
-        super().__init__(dict.fromkeys(keys, ""))
-        self._budget = budget
+    __slots__ = ("name", "strong", "used")
 
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        self._budget._recalm()
+    def __init__(self, name: str, strong: bool):
+        self.name = name
+        self.strong = strong            # a strong-indicator rule's store (see `Playbook.state_slice`)
+        self.used = 0
 
 
 class StateBudget:
-    """The hunt's ledger for detector state, shared by every playbook's spill.
+    """The hunt's ledger for detector state, shared by every store of every playbook and by the event stage.
 
-    Disk: each spill charges its database's growth to its rule's slice (`SLICES`). The automatic total is the smaller
-    of half the stage volume's free space (after the reserve) and TOTAL_SHARE of the volume, and the reserve is the
-    larger of the setting and RESERVE_SHARE of the volume, because the stage volume may also hold the telemetry
-    platform's own data. When a slice reaches its share of the total, its rules keep running in no-growth mode:
-    existing states update, a record that needs a new key is refused (coverage partial, the reason named), and every
-    match that needs no new state still publishes. Below the reserve, or after a failed write, no state is read back
-    from or written to disk: only states in memory update. Every spill also caps its own database at the volume's
-    headroom (`PRAGMA max_page_count`), so a long statement stops itself. At finalize the slices no longer apply
-    (finalize re-reads what consume kept); only the reserve does.
+    Disk, by fair-share floors. Every store has an Account of its bytes on disk. Half the hunt's disk total is split
+    into equal guaranteed floors, one per store (`floor` = total / (2 x stores)); the other half is headroom any
+    store may take beyond its floor while it lasts. A store below its floor can always take a new key; above it, it
+    can while the shared headroom lasts. So no store, however busy, can take another store's floor: a store that
+    reaches its floor once the headroom is spent goes into no-growth mode alone. In no-growth mode its rule keeps
+    reading every record: existing states update, a record that needs a new key in that store is refused (coverage
+    partial, the reason named), and every match that needs no new state still publishes. Half for floors keeps a
+    quiet rule's guarantee meaningful (with 70 stores and a 10 GiB total, about 73 MiB each) while the busiest stores
+    still share the other half by need.
+
+    The automatic total is the smaller of half the stage volume's free space (after the reserve) and TOTAL_SHARE of
+    the volume, and the reserve is the larger of the setting and RESERVE_SHARE of the volume, because the stage volume
+    may also hold the telemetry platform's own data. Below the reserve, or after a failed write, no state is written
+    to disk: states in memory update, a strong store's existing keys are read back into memory without writing, and
+    nothing new is taken. Every spill also caps its own database at the volume's headroom (`PRAGMA max_page_count`),
+    so a long statement stops itself. At finalize the floors no longer apply (finalize re-reads what consume kept);
+    only the reserve does.
 
     Memory: each store reports an estimate of its hot set's size; while the estimates together exceed
     `memory_total`, a store above its fair share moves its least recently used states to disk at its next trim."""
 
     def __init__(self, directory=None, *, disk_total: int | None = None, reserve: int | None = None,
-                 reserve_floor: int = DISK_RESERVE, memory_total: int = MEMORY_TOTAL,
-                 strong_share: float = STRONG_SHARE):
+                 reserve_floor: int = DISK_RESERVE, memory_total: int = MEMORY_TOTAL):
         self.directory = directory
         usage = volume_usage(directory)
         if reserve is None:             # the larger of the floor and RESERVE_SHARE of the volume
@@ -220,13 +220,14 @@ class StateBudget:
             else:
                 disk_total = max(DISK_TOTAL_FLOOR, min((usage[1] - self.reserve) // 2, int(usage[0] * TOTAL_SHARE)))
         self.disk_total = disk_total
-        strong = int(disk_total * strong_share)
-        self.slice_total = {"strong": strong, "routine": disk_total - strong}
-        self.slice_used = dict.fromkeys(SLICES, 0)
+        self.accounts: list[Account] = []
+        self.stores = 0                 # stores the floors are planned for (0: as many as have accounts)
+        self.pool_used = 0              # bytes the stores hold above their floors
+        self.full: dict[str, str] = {}  # stores that refused a new key, and why
+        self.forced: list = []          # (predicate on an Account, reason): stores forced into no-growth mode (tests)
         self.calm = True                # no limit reached: the per-record check is one attribute read
-        self.slice_over = _Flags(self, SLICES)
-        self.disk_used = 0
-        self.over_total = ""            # every slice spent at once (sticky)
+        self.disk_used = 0              # the spills' real database growth (for the summary)
+        self.over_total = ""            # every store in no-growth mode at once (sticky; probes and tests)
         self.low_space = ""             # why the stage volume is at its reserve (sticky)
         self.broken = ""                # a write failed (sticky)
         self.finalizing = False
@@ -241,9 +242,69 @@ class StateBudget:
             self._recalm()
 
     def _recalm(self) -> None:
-        slices = self.__dict__.get("slice_over") or {}
-        object.__setattr__(self, "calm", not (self.__dict__.get("over_total") or self.__dict__.get("low_space")
-                                              or self.__dict__.get("broken") or any(slices.values())))
+        d = self.__dict__
+        calm = not (d.get("over_total") or d.get("low_space") or d.get("broken") or d.get("forced"))
+        if calm and "accounts" in d:
+            calm = self.pool_used < self.pool
+        object.__setattr__(self, "calm", calm)
+
+    # ---- floors ----
+    @property
+    def floor(self) -> int:
+        """The bytes on disk every store is guaranteed."""
+        return self.disk_total // (2 * max(1, self.stores or len(self.accounts)))
+
+    @property
+    def pool(self) -> int:
+        """The bytes beyond their floors the stores share."""
+        return self.disk_total - self.floor * max(1, self.stores or len(self.accounts))
+
+    def plan(self, stores: int) -> None:
+        """Fix the number of stores the floors are planned for (the sweep counts its pack's live stores)."""
+        self.stores = max(1, stores)
+        self._repool()
+
+    def account(self, name: str, strong: bool = False) -> Account:
+        account = Account(name, strong)
+        self.accounts.append(account)
+        if not self.stores:
+            self._repool()              # unplanned (a rule driven alone): floors follow the stores seen so far
+        return account
+
+    def _repool(self) -> None:
+        floor = self.floor
+        self.pool_used = sum(max(0, a.used - floor) for a in self.accounts)
+        self._recalm()
+
+    def charge(self, account: Account, nbytes: int) -> None:
+        """A store's bytes on disk changed by `nbytes` (negative when states were read back or cleared)."""
+        if not nbytes:
+            return
+        floor = self.floor
+        before = max(0, account.used - floor)
+        account.used += nbytes
+        self.pool_used += max(0, account.used - floor) - before
+        self._recalm()
+
+    def force_full(self, reason: str, where) -> None:
+        """Put every store whose Account satisfies `where` into no-growth mode (tests and probes)."""
+        self.forced.append((where, reason))
+        self._recalm()
+
+    def new_key_reason(self, account: Account | None) -> str:
+        """Why a record needing a new key in this store is refused now ("" while it is not)."""
+        if self.finalizing:
+            return self.hard
+        reason = self.hard or self.over_total
+        if not reason and account is not None:
+            reason = next((why for where, why in self.forced if where(account)), "")
+            if not reason and self.pool_used >= self.pool and account.used >= self.floor:
+                reason = (f"its state on disk ({account.used / 2**20:.1f} MiB) is past its guaranteed floor "
+                          f"({self.floor / 2**20:.1f} MiB) and the headroom the stores share "
+                          f"({self.pool / 2**20:.1f} MiB) is spent")
+        if reason and account is not None and account.name not in self.full:
+            self.full[account.name] = reason
+        return reason
 
     # ---- disk ----
     def free(self) -> int | None:
@@ -266,14 +327,10 @@ class StateBudget:
         self.check_free()
         return self.low_space
 
-    def grew(self, nbytes: int, slice_: str = "routine") -> None:
-        if nbytes <= 0:
-            return
-        self.disk_used += nbytes
-        self.slice_used[slice_] += nbytes
-        if self.slice_used[slice_] >= self.slice_total[slice_] and not self.slice_over[slice_]:
-            self.slice_over[slice_] = (f"detector state on disk of {slice_} rules reached its share of the hunt's "
-                                       f"budget ({self.slice_total[slice_] / 2**30:.2f} GiB)")
+    def grew(self, nbytes: int) -> None:
+        """A spill database grew (real bytes, for the summary); the volume's free space is read again."""
+        if nbytes > 0:
+            self.disk_used += nbytes
         self.check_free()
 
     def fail(self, reason: str) -> None:
@@ -281,19 +338,17 @@ class StateBudget:
 
     @property
     def hard(self) -> str:
-        """Why no state may be read back from or written to disk now ("" while it may)."""
+        """Why no state may be written to disk now ("" while it may)."""
         return self.broken or self.low_space
-
-    def new_key_reason(self, slice_: str) -> str:
-        """Why a record needing new state of this slice is refused now ("" while it is not)."""
-        if self.finalizing:
-            return self.hard
-        return self.hard or self.over_total or self.slice_over.get(slice_, "")
 
     @property
     def spent(self) -> str:
         """Every limit reached so far, for the sweep's summary ("" when none)."""
-        reasons = [self.broken, self.low_space, self.over_total, *self.slice_over.values()]
+        reasons = [self.broken, self.low_space, self.over_total]
+        if self.full:
+            names = sorted(self.full)
+            reasons.append(f"{len(names)} store(s) took no new keys after reaching their floor with the shared "
+                           f"headroom spent: {', '.join(names[:10])}{' and others' if len(names) > 10 else ''}")
         return "; ".join(dict.fromkeys(r for r in reasons if r))
 
     def may_write(self) -> bool:
@@ -328,8 +383,29 @@ def _budget_of(owner) -> StateBudget:
     return owner.state_budget()
 
 
-def _slice_of(owner) -> str:
-    return getattr(owner, "state_slice", "routine")
+def _strong(owner) -> bool:
+    return getattr(owner, "state_slice", "routine") == "strong"
+
+
+def register_store(owner, store) -> None:
+    """Note a store on its owner (weakly), so the sweep can plan one floor per live store."""
+    import weakref
+    owner.holds_state = True
+    stores = owner.__dict__.get("_state_stores")
+    if stores is None:
+        stores = owner.__dict__["_state_stores"] = []
+    stores.append(weakref.ref(store))
+
+
+def live_stores(pack) -> int:
+    """The stores a pack's playbooks hold now (a store shared by several counts once)."""
+    seen = set()
+    for pb in pack:
+        for ref in pb.__dict__.get("_state_stores", ()):
+            store = ref()
+            if store is not None:
+                seen.add(id(store))
+    return len(seen)
 
 
 def deep_size(value, depth: int = 0) -> int:
@@ -374,10 +450,10 @@ class Spill:
     flush first. It lives in its own directory (mode 0700) under the sweep's stage directory, holds telemetry-derived
     values, and is removed by `close` (the sweep closes it on every exit path it controls; a killed process leaves it
     to the stale-stage cleanup, which goes by directory age: every write and every sweep heartbeat refreshes it).
-    Its database's growth is charged to the rule's slice of the hunt's state budget, and the database is capped at
-    the volume's headroom above the reserve, so no statement can run the volume into it."""
+    Its database's growth is reported to the hunt's state budget (the stores' own Accounts hold their bytes), and the
+    database is capped at the volume's headroom above the reserve, so no statement can run the volume into it."""
 
-    def __init__(self, directory=None, budget: StateBudget | None = None, slice_: str = "routine"):
+    def __init__(self, directory=None, budget: StateBudget | None = None):
         import sqlite3
         import tempfile
         from pathlib import Path
@@ -391,7 +467,6 @@ class Spill:
             self.db.execute(f"PRAGMA {pragma}")
         self._page = self.db.execute("PRAGMA page_size").fetchone()[0]
         self.budget = budget if budget is not None else StateBudget(directory)
-        self.slice = slice_
         self._size = 0
         self._buffers: dict[str, tuple[str, list[tuple]]] = {}
 
@@ -415,8 +490,8 @@ class Spill:
 
     def write(self, sql: str, rows: list[tuple]) -> None:
         """Write rows, charging the database's growth to the budget. Raises StateExhausted when the stage volume is
-        at its free-space reserve or a write failed (nothing of a failed batch can be trusted). A slice's share does
-        not stop a write already under way: the rule refuses records needing new state once it is spent."""
+        at its free-space reserve or a write failed (nothing of a failed batch can be trusted). A store past its floor
+        does not stop a write already under way: its rule refuses records needing a new key."""
         import sqlite3
         reason = self.budget.hard
         if reason:
@@ -470,7 +545,7 @@ class Spill:
         except sqlite3.Error:
             return
         if size > self._size:
-            self.budget.grew(size - self._size, self.slice)
+            self.budget.grew(size - self._size)
             self._size = size
         self.touch()
 
@@ -620,16 +695,19 @@ def _hot_limit(store, n: int, values, keep: int | None) -> int:
 DISK_BUDGET = 8 * 2**30
 
 
-def _budget_refuses(owner) -> bool:
-    """Whether the hunt's state budget refuses new state of the owner's slice now; when it does, the owner's
-    coverage names why (the caller refuses the record through its own path)."""
+def store_refuses(owner, account_of) -> bool:
+    """Whether the hunt's state budget refuses a new key in a store now; when it does, the owner's coverage names
+    the store and why (the caller refuses the record through its own path). `account_of()` gives the store's
+    Account (called only when the budget is not calm)."""
     budget = None if owner is None else owner.budget
     if budget is None or budget.calm:
         return False
-    reason = budget.new_key_reason(_slice_of(owner))
+    account = account_of()
+    reason = budget.new_key_reason(account)
     if reason:
-        owner.note_limit("state_budget", f"the hunt's state budget is spent ({reason}); records of this rule that "
-                                         f"need new state are not evaluated")
+        owner.note_limit(f"state_budget:{account.name if account is not None else ''}",
+                         f"the store {account.name if account is not None else ''} took no new key: {reason}; "
+                         f"records of this rule that need one are not evaluated")
         return True
     return False
 
@@ -650,9 +728,10 @@ class KeyedStore:
     (StateBudget) is over its total and this store is above its fair share. Only disk refuses: `put` of a new key
     returns False once the store's rows on disk reach `disk_budget` bytes (the bytes on disk now: a state read back
     leaves the disk until it is moved there again), and the rule refuses that record through its honest coverage
-    path. A new key is also refused while the rule's slice of the hunt's StateBudget is spent; below the volume's
-    reserve (or after a failed write) no state is read back from or written to disk, so only states in memory
-    update. A refusal never stops the rule: records that need no new state are still evaluated.
+    path. A new key is also refused while this store is past its floor in the hunt's StateBudget and the shared
+    headroom is spent; below the volume's reserve (or after a failed write) nothing is written to disk, states in
+    memory update, and a strong rule's store reads a key held on disk back into memory without writing (a read is
+    not growth). A refusal never stops the rule: records that need no new state are still evaluated.
 
     Keys are stored as canonical bytes (`key_bytes`), so equal keys meet on disk whatever their object identity. A
     Bloom filter of the keys on disk spares a query for keys that never left memory. Every key keeps the number of
@@ -682,8 +761,32 @@ class KeyedStore:
         self.disk_bytes = 0
         self.broken = ""
         self._ready = False
+        self._account: Account | None = None
+        self._shadow: set = set()       # keys read back below the reserve: their row on disk is stale
+        # The bytes the store holds for the budget: what is on disk plus what was read back from it and will go back
+        # (a read is not growth), so a busy store does not look empty while its states are in memory mid-batch.
+        self.held_bytes = 0
+        self._held: dict = {}           # key read back from disk -> its bytes there
         if owner is not None:
-            owner.holds_state = True
+            register_store(owner, self)
+
+    def account(self) -> Account | None:
+        """This store's Account in the hunt's state budget (created on first use)."""
+        if self._account is None and self.owner is not None:
+            owner = self.owner
+            self._account = _budget_of(owner).account(f"{getattr(owner, 'id', type(owner).__name__)}:{self.name}",
+                                                     _strong(owner))
+            if self.held_bytes:
+                owner.budget.charge(self._account, self.held_bytes)
+        return self._account
+
+    def _bill(self, nbytes: int) -> None:
+        """The bytes the store holds changed by `nbytes`: charged to its Account."""
+        budget = None if self.owner is None else self.owner.budget
+        account = self.account() if budget is not None else None
+        self.held_bytes += nbytes
+        if account is not None:
+            budget.charge(account, nbytes)
 
     # ---- disk -------------------------------------------------------------------------------------
     def _db(self):
@@ -704,7 +807,7 @@ class KeyedStore:
     def _load(self, key, *, remove: bool):
         """(state, order number) of a key on disk, or None."""
         kb = self._maybe_on_disk(key)
-        if kb is None:
+        if kb is None or (self._shadow and key in self._shadow):
             return None
         db = self._db()
         row = db.execute(f"SELECT v, n, s FROM {self.name} WHERE k = ?", (kb,)).fetchone()
@@ -714,7 +817,7 @@ class KeyedStore:
             db.execute(f"DELETE FROM {self.name} WHERE k = ?", (kb,))
             self.on_disk -= 1
             self.disk_bytes -= row[1]
-        return pickle.loads(row[0]), row[2]
+        return pickle.loads(row[0]), row[2], row[1]
 
     def _rows(self, sql: str):
         if self.broken:
@@ -743,13 +846,28 @@ class KeyedStore:
             if self._ordered:
                 self.hot.move_to_end(key)
             return state
-        if not self.on_disk or self._hard():
+        if not self.on_disk:
             return default
+        if self._hard():
+            return self._read_in_place(key, default)
         found = self._load(key, remove=True)
         if found is None:
             return default
-        state, self._seq[key] = found
+        state, self._seq[key], self._held[key] = found
         self.hot[key] = state
+        return state
+
+    def _read_in_place(self, key, default):
+        """Below the reserve: a strong rule's store reads a key held on disk back into memory without writing (its row
+        stays, marked stale), so a record on a key it already holds still evaluates; any other store does not."""
+        if not _strong(self.owner):
+            return default
+        found = self._load(key, remove=False)
+        if found is None:
+            return default
+        state, self._seq[key], _size = found
+        self.hot[key] = state
+        self._shadow.add(key)
         return state
 
     def peek(self, key, default=None):
@@ -764,7 +882,7 @@ class KeyedStore:
         return key in self.hot or self._load(key, remove=False) is not None
 
     def __len__(self) -> int:
-        return len(self.hot) + self.on_disk
+        return len(self.hot) + self.on_disk - len(self._shadow)
 
     def put(self, key, state) -> bool:
         """Hold the key's state (new, or replacing the held one); False when a new key meets the spent disk budget
@@ -775,17 +893,21 @@ class KeyedStore:
                 self.hot.move_to_end(key)
             return True
         if not self._ordered:                       # nothing has left memory: no disk, and the dict keeps order
-            if _budget_refuses(self.owner):
+            if store_refuses(self.owner, self.account):
                 return False
             self.hot[key] = state
             return True
         if self._hard():
-            _budget_refuses(self.owner)
+            if self._read_in_place(key, None) is not None:
+                self.hot[key] = state               # an existing key of a strong store: replaced in memory
+                return True
+            store_refuses(self.owner, self.account)
             return False
         found = self._load(key, remove=True)
         if found is not None:
             seq = found[1]
-        elif self.disk_bytes >= self.disk_budget or _budget_refuses(self.owner):
+            self._held[key] = found[2]
+        elif self.disk_bytes >= self.disk_budget or store_refuses(self.owner, self.account):
             return False
         else:
             seq = self._next
@@ -812,9 +934,16 @@ class KeyedStore:
         if state is not None:
             if self._ordered:
                 self._seq.pop(key, None)
+            if key in self._held:
+                self._bill(-self._held.pop(key))
             return state
+        if self._hard():
+            return default
         found = self._load(key, remove=True)
-        return default if found is None else found[0]
+        if found is None:
+            return default
+        self._bill(-found[2])
+        return found[0]
 
     def trim(self, keep: int | None = None) -> None:
         """Write the least recently used states beyond what memory may keep (or beyond `keep`) to disk. When the
@@ -839,10 +968,12 @@ class KeyedStore:
             self._ordered = True
         if self._filter is None:
             self._filter = _KeyFilter()
-        evicted, rows, nbytes = [], [], 0
+        evicted, rows, nbytes, before = [], [], 0, {}
         while len(self.hot) > limit:
             key, state = self.hot.popitem(last=False)
             seq = self._seq.pop(key)
+            if key in self._held:
+                before[key] = self._held.pop(key)
             evicted.append((key, state, seq))
             kb = key_bytes(key)
             blob = pickle.dumps(state, protocol=4)
@@ -857,6 +988,7 @@ class KeyedStore:
                 self.hot[key] = state
                 self.hot.move_to_end(key, last=False)
                 self._seq[key] = seq
+            self._held.update(before)
             if budget.broken:
                 self.broken = budget.broken                 # a partial write: the table can no longer be trusted
             if keep is None and (not budget.finalizing
@@ -866,6 +998,7 @@ class KeyedStore:
         for row in rows:
             self._filter.add(row[0])
         self.disk_bytes += nbytes
+        self._bill(nbytes - sum(before.values()))
         self.on_disk += len(rows)
         if self._filter.count > self._filter.capacity:
             self._rebuild_filter()
@@ -889,8 +1022,9 @@ class KeyedStore:
                 yield key, state
             return
         where = " WHERE c = 1" if candidates else ""
-        disk = ((s, pickle.loads(kp), pickle.loads(v))
-                for kp, v, s in self._rows(f"SELECT kp, v, s FROM {self.name}{where} ORDER BY s"))
+        disk = ((s, key, pickle.loads(v))
+                for kp, v, s in self._rows(f"SELECT kp, v, s FROM {self.name}{where} ORDER BY s")
+                if (key := pickle.loads(kp)) not in self._shadow)
         for _seq, key, state in heapq.merge(hot, disk, key=_first):
             yield key, state
 
@@ -901,7 +1035,8 @@ class KeyedStore:
         if not self.on_disk:
             return [key for _seq, key in hot]
         where = " WHERE c = 1" if candidates else ""
-        disk = ((s, pickle.loads(kp)) for kp, s in self._rows(f"SELECT kp, s FROM {self.name}{where} ORDER BY s"))
+        disk = ((s, key) for kp, s in self._rows(f"SELECT kp, s FROM {self.name}{where} ORDER BY s")
+                if (key := pickle.loads(kp)) not in self._shadow)
         return [key for _seq, key in heapq.merge(hot, disk, key=_first)]
 
     def grouped(self):
@@ -923,8 +1058,11 @@ class KeyedStore:
         self._ordered = False
         if self.on_disk and self.owner is not None and self._ready and self.owner._spill is not None:
             self._db().execute(f"DELETE FROM {self.name}")
+        self._bill(-self.held_bytes)
         self.on_disk = self.disk_bytes = 0
         self._filter = None
+        self._shadow = set()
+        self._held = {}
         self.broken = ""
         self._ready = False             # the spill may be closed and recreated: create the table again on use
         if self.owner is not None and self.owner.budget is not None:
@@ -958,15 +1096,24 @@ class SpillList:
         self.disk_bytes = 0
         self.broken = ""
         self._ready = False
+        self._account: Account | None = None
+        self.held_bytes = 0
         if owner is not None:
-            owner.holds_state = True
+            register_store(owner, self)
+
+    account = KeyedStore.account
+    _bill = KeyedStore._bill
+
+    def _charge(self, nbytes: int) -> None:
+        self.disk_bytes += nbytes
+        self._bill(nbytes)
 
     def __len__(self) -> int:
         return len(self.buffer) + self.on_disk
 
     def append(self, record, order: tuple = (0.0, "")) -> bool:
         """Hold a record; False when the list's disk budget or the hunt's state budget refuses it."""
-        if self.disk_bytes >= self.disk_budget or (self.refusable and _budget_refuses(self.owner)):
+        if self.disk_bytes >= self.disk_budget or (self.refusable and store_refuses(self.owner, self.account)):
             return False
         self.buffer.append((order, record))
         return True
@@ -1001,7 +1148,7 @@ class SpillList:
             if not budget.finalizing and keep is None:
                 return
             raise
-        self.disk_bytes += nbytes
+        self._charge(nbytes)
         self.on_disk += len(rows)
         self.buffer = []
 
@@ -1033,7 +1180,8 @@ class SpillList:
     def clear(self) -> None:
         if self.on_disk and self._ready and self.owner._spill is not None:
             self.owner.spill().db.execute(f"DELETE FROM {self.name}")
-        self.buffer, self.on_disk, self.disk_bytes = [], 0, 0
+        self._charge(-self.disk_bytes)
+        self.buffer, self.on_disk = [], 0
         self.broken = ""
         self._ready = False
         if self.owner is not None and self.owner.budget is not None:
