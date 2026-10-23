@@ -16,6 +16,7 @@ from tests.test_expansion_engine import (
     WINDOW,
     ScriptedFetcher,
     add_anchor,
+    event,
     repo_with_anchor,
     stable_state,
 )
@@ -189,6 +190,38 @@ def test_within_a_lane_a_discovered_anchor_still_gets_its_first_tier_before_surv
     child_t1 = order.index(("F-child", "login_session", "anchor ±5 min"))
     assert all(anchor_id == "F-urgent" for anchor_id, *_ in order[:child_t1])
     assert ("F-urgent", "login_session", "anchor ±30 min") in order[child_t1:]
+
+
+def tied_anchors(names):
+    """An urgent anchor and two high anchors on one host at the same instant, whose candidate ids are `names`: a
+    candidate id carries its hunt's id, so two runs of one hunt name the same two findings differently."""
+    repo = repo_with_anchor(candidate_id="F-urgent")
+    for evidence, rule_id in (("tie-a", "corr.process_network_link"), ("tie-b", "host.interpreter_external_connection")):
+        record = event(f"{evidence}-event", host="cam1", ts=T0 - timedelta(minutes=10))
+        repo.save_evidence("h1", [record], {}, None)
+        repo.save_candidate({
+            "id": names[evidence], "hunt_id": "h1", "rule_id": rule_id, "rule_version": "1", "claim": "tied",
+            "claim_type": "observed_action", "event_ids": [record.id], "predicate_fields": [],
+            "entities": [["host", "cam1", "host"]], "ts": record.ts, "severity": "high", "confidence": "high",
+            "lane": "high", "priority": 40.0, "priority_reasons": [], "gate_results": {}, "benign_alternatives": [],
+            "next_checks": [], "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+        })
+    return repo
+
+
+def test_anchors_tied_on_lane_severity_and_time_are_ordered_the_same_in_every_run_of_a_hunt():
+    outcomes = []
+    for names in ({"tie-a": "F-1", "tie-b": "F-2"}, {"tie-a": "F-2", "tie-b": "F-1"}):
+        evidence_of = {name: evidence for evidence, name in names.items()} | {"F-urgent": "urgent"}
+        repo = tied_anchors(names)
+        fetcher = SteadyFetcher(repo)
+        ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=16).run()
+        rows = anchors(repo)
+        cut = [evidence_of[anchor_id] for anchor_id, row in rows.items()
+               if any("budget" in reason for reason in row["reasons"])]
+        outcomes.append(([(evidence_of[call[0]], call[1], call[2]) for call in fetcher.calls], sorted(cut)))
+    assert outcomes[0][1]                                          # the budget cut falls among the tied anchors
+    assert outcomes[0] == outcomes[1]
 
 
 def test_lane_ordered_expansion_is_deterministic():

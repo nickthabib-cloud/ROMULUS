@@ -32,6 +32,7 @@ from romulus.hunt.pivot import HOST_AMBIGUOUS, HOST_LOOKUP_BUDGET, NO_HOST_RECOR
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.sources.models import Window
+from romulus.store.db import digest
 from romulus.store.repo import Repo
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -100,6 +101,8 @@ class ExpansionEngine:
         # rebuilt from the durable lookup tasks on first use, so a resumed hunt neither repeats nor re-spends
         self._fallback: dict[str, tuple[str | None, str | None]] | None = None
         self._fallback_queries = 0
+        # anchor id -> its hunt-independent identity, the last tie-break of the anchor order
+        self._identities: dict[str, str] = {}
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
@@ -302,11 +305,22 @@ class ExpansionEngine:
             existing.add(candidate["id"])
             depths[candidate["id"]] = depth
 
-    @staticmethod
-    def _anchor_priority(row: dict) -> tuple:
+    def _identity(self, row: dict) -> str:
+        """The anchor's rule and evidence, which are the same in every hunt over the same records. A candidate id also
+        carries its hunt's id, so ordering ties by it would give two runs of one hunt different anchor orders, and a
+        budget cut inside a tier would then fall on different links."""
+        if row["id"] not in self._identities:
+            candidate = self.repo.candidate(row["candidate_id"])
+            self._identities[row["id"]] = digest({
+                "rule_id": candidate["rule_id"],
+                "evidence": candidate.get("group_key") or sorted(candidate["event_ids"]),
+            })
+        return self._identities[row["id"]]
+
+    def _anchor_priority(self, row: dict) -> tuple:
         return (
             LANE_ORDER.get(row["lane"], 9), SEVERITY_ORDER.get(row["severity"], 9),
-            _utc(row["ts"]), row["id"],
+            _utc(row["ts"]), self._identity(row), row["id"],
         )
 
     def _ordered_anchors(self, rows: list[dict]) -> list[dict]:
