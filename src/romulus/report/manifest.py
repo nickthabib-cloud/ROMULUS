@@ -309,6 +309,7 @@ def _expansion_investigations(repo: Repo, hunt_id: str, audit: dict) -> dict:
             "anchors": len(anchors), "links": len(links),
             "unworked_count": len(by_status["unexpanded"] + by_status["pending"]),
             "partial_links": sum(row["status"] != "complete" for row in links),
+            "source_queries": audit.get("source_queries"), "budget": audit.get("budget"),
         },
         "anchor_accounting": {
             **by_status,

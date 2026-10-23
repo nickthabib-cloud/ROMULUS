@@ -39,6 +39,10 @@ SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 DEFAULT_MAX_DEPTH = 3
 DEFAULT_MAX_SOURCE_QUERIES = 180
 MAX_ANCHOR_KEYS = 8
+# The source queries each anchor brings to the expansion budget: every link of its plan fetched twice at the
+# two-query floor of a physical fetch. The budget is shared, so an anchor with several keys draws on what one with
+# fewer did not use.
+PER_ANCHOR_SOURCE_QUERIES = 4 * sum(len(link_types) for _tier, link_types, _label in TIER_PLAN)
 NETWORK_FAMILIES = {"net_alert", "net_flow", "net_session", "dns_query", "http_tx",
                     "file_transfer", "tls_session", "ssh_session"}
 
@@ -80,6 +84,7 @@ class ExpansionEngine:
         self, repo: Repo, hunt_id: str, hunt_window: Window, fetcher: LinkFetcher,
         *, max_depth: int = DEFAULT_MAX_DEPTH,
         max_source_queries: int = DEFAULT_MAX_SOURCE_QUERIES,
+        per_anchor_source_queries: int | None = None,
         wall_clock_seconds: float = 7200,
         owner_token: str | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -87,7 +92,11 @@ class ExpansionEngine:
         after_link: Callable[[LinkResult], None] | None = None,
     ):
         self.repo, self.hunt_id, self.window, self.fetcher = repo, hunt_id, hunt_window, fetcher
+        # Without per-anchor shares, max_source_queries is the expansion's fixed total; with them, each anchor that
+        # can still be expanded brings per_anchor_source_queries and max_source_queries is the ceiling on the sum.
         self.max_depth, self.max_source_queries = max_depth, max_source_queries
+        self.per_anchor_source_queries = per_anchor_source_queries
+        self.budget = max_source_queries if per_anchor_source_queries is None else 0
         self.wall_clock_seconds, self.owner_token = wall_clock_seconds, owner_token
         self.clock, self.heartbeat, self.after_link = clock, heartbeat, after_link
         self.started = clock()
@@ -187,7 +196,7 @@ class ExpansionEngine:
         known = self._fallback_map()
         if ip in known:
             return known[ip]
-        remaining = fallback_lookup_cap(self.max_source_queries) - self._fallback_queries
+        remaining = fallback_lookup_cap(self.budget) - self._fallback_queries
         if remaining <= 0:
             return None, f"victim host not looked up for {ip}: {FALLBACK_CAP_REASON}"
         before = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
@@ -336,19 +345,35 @@ class ExpansionEngine:
                     ordered.append(by_host[host].popleft())
         return ordered
 
-    def _root_cap(self, all_rows: list[dict], blocked: set[str], lane_rank: int, root_budget: int,
-                  reserve: int) -> int:
-        """Queries a root anchor may reach, given the most severe lane with work. The reserve exists for anchors
-        discovered by expansion, and holds back roots only for a discovered anchor at least as severe; a less severe
-        one waits behind them. With none waiting, half of the reserve is released to roots, but only when the other
-        half still covers one fetch (two queries), so a discovered anchor of that lane is never starved."""
+    def _budget_for(self, all_rows: list[dict]) -> int:
+        """The source queries the expansion may have spent by now: its fixed total, or one share for every anchor that
+        can still be expanded (roots and discovered anchors alike, whichever run recorded them), up to the ceiling."""
+        if self.per_anchor_source_queries is None:
+            return self.max_source_queries
+        expandable = sum(1 for row in all_rows if row["depth"] < self.max_depth)
+        return min(self.max_source_queries, self.per_anchor_source_queries * expandable)
+
+    def _root_cap(self, all_rows: list[dict], blocked: set[str], lane_rank: int) -> int:
+        """Queries a root anchor may reach, given the most severe lane with work. A fifth of the total (the fixed
+        total, or with per-anchor shares the ceiling) is a reserve for anchors discovered by expansion. With shares,
+        roots spend freely below the rest, since every discovered anchor brings its own share; the reserve keeps a
+        discovered anchor's queries when shares reach the ceiling. It holds back roots only for a discovered anchor
+        at least as severe; a less severe one waits behind them. With none waiting, half of the reserve is released
+        to roots, but only when the other half still covers one fetch (two queries), so a discovered anchor of that
+        lane is never starved."""
+        budget = self.budget
+        total = budget if self.per_anchor_source_queries is None else self.max_source_queries
+        root_budget = total - max(1, (total + 4) // 5) if total else 0
+        reserve = total - root_budget
+        if self.per_anchor_source_queries is not None and budget <= root_budget:
+            return budget
         children = [row for row in all_rows if 0 < row["depth"] < self.max_depth and row["status"] == "pending"
                     and row["id"] not in blocked]
         if any(LANE_ORDER.get(row["lane"], 9) <= lane_rank for row in children):
-            return root_budget
+            return min(budget, root_budget)
         if children:
-            return self.max_source_queries
-        return root_budget + (reserve // 2 if reserve - reserve // 2 >= 2 else 0)
+            return budget
+        return min(budget, root_budget + (reserve // 2 if reserve - reserve // 2 >= 2 else 0))
 
     def _tier_slots(self, ordered: list[dict], anchor_reasons: dict[str, list[str]], root_cap: int) -> list[tuple]:
         """The unevaluated links of the lowest tier any of these anchors still has, in anchor order."""
@@ -447,10 +472,10 @@ class ExpansionEngine:
         self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
 
     def _budget_reason(self, query_count: int) -> str | None:
-        if query_count >= self.max_source_queries:
+        if query_count >= self.budget:
             return "source query budget exhausted"
         if self.clock() - self.started >= self.wall_clock_seconds:
-            return "hunt wall-clock budget exhausted"
+            return "expansion wall-clock budget exhausted"
         return None
 
     def run(self) -> dict:
@@ -461,16 +486,15 @@ class ExpansionEngine:
             executor.source_queries = query_count
         anchor_reasons: dict[str, list[str]] = defaultdict(list)
         blocked_anchors: set[str] = set()
-        root_budget = self.max_source_queries - max(1, (self.max_source_queries + 4) // 5)
-        if self.max_source_queries == 0:
-            root_budget = 0
         stop_reason = "fixpoint"
         source_failed = False
-        reserve = self.max_source_queries - root_budget
-        reserve_blocked: dict[str, int] = {}     # root anchor id -> the root cap it was blocked under
+        # anchor id -> (the query limit it was stopped under, the reasons that stop added). The limit grows when the
+        # reserve is released or a discovered anchor brings its share; the anchor then spends again.
+        budget_blocked: dict[str, tuple[int, list[str]]] = {}
         while True:
             self._seed_anchors()
             all_rows = self.repo.expansion_anchors(self.hunt_id)
+            self.budget = self._budget_for(all_rows)
             eligible = []
             for row in all_rows:
                 if row["status"] != "pending" or row["id"] in blocked_anchors:
@@ -489,16 +513,23 @@ class ExpansionEngine:
             ordered = [anchor_row for rank in ranks
                        for anchor_row in self._ordered_anchors(
                            [row for row in eligible if LANE_ORDER.get(row["lane"], 9) == rank])]
-            root_cap = (self._root_cap(all_rows, blocked_anchors, ranks[0], root_budget, reserve)
-                        if ranks else root_budget)
+            if not ranks:
+                break               # every pending anchor is stopped, and only a newly found anchor grows the budget
+            root_cap = self._root_cap(all_rows, blocked_anchors, ranks[0])
+            depths = {row["id"]: row["depth"] for row in all_rows}
+            released = False
+            for anchor_id, (limit, added) in list(budget_blocked.items()):
+                if (root_cap if depths[anchor_id] == 0 else self.budget) > limit:
+                    del budget_blocked[anchor_id]
+                    blocked_anchors.discard(anchor_id)
+                    for reason in added:
+                        anchor_reasons[anchor_id].remove(reason)
+                    released = True
+            if released:
+                continue
             slots = self._tier_slots(ordered, anchor_reasons, root_cap)
             if not slots:
                 break
-            for anchor_id, blocked_cap in list(reserve_blocked.items()):
-                if root_cap > blocked_cap:       # the reserve was released since: the root may spend again
-                    del reserve_blocked[anchor_id]
-                    blocked_anchors.discard(anchor_id)
-                    anchor_reasons[anchor_id] = [r for r in anchor_reasons[anchor_id] if r != RESERVED_REASON]
             spent = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
             if isinstance(spent, int):
                 query_count = max(query_count, spent)
@@ -511,27 +542,25 @@ class ExpansionEngine:
                     budget_reason = self._budget_reason(query_count)
                 if budget_reason:
                     stop_reason = "budget"
-                    anchor_reasons[anchor_row["id"]].append(budget_reason)
+                    added = [budget_reason]
                     if budget_reason == "source query budget exhausted" and any(
                             LANE_ORDER.get(row["lane"], 9) < LANE_ORDER.get(anchor_row["lane"], 9)
                             for row in all_rows):
-                        anchor_reasons[anchor_row["id"]].append(BUDGET_TO_SEVERE_REASON)
+                        added.append(BUDGET_TO_SEVERE_REASON)
+                    anchor_reasons[anchor_row["id"]].extend(added)
+                    if budget_reason == "source query budget exhausted":
+                        budget_blocked[anchor_row["id"]] = (self.budget, added)
                     blocked_anchors.add(anchor_row["id"])
                     continue
-                if stored:
-                    remaining = self.max_source_queries - query_count
-                else:
-                    allowed_budget = self.max_source_queries
-                    if anchor_row["depth"] == 0:
-                        allowed_budget = root_cap
-                    remaining = allowed_budget - query_count
+                allowed_budget = root_cap if anchor_row["depth"] == 0 and not stored else self.budget
+                remaining = allowed_budget - query_count
                 # Every physical fetch is budgeted for at least two queries. Do not
                 # let that floor cross the root-anchor reserve or the global cap.
                 if not stored and remaining < 2:
                     stop_reason = "budget"
-                    reason = RESERVED_REASON if anchor_row["depth"] == 0 else "source query budget exhausted"
-                    if anchor_row["depth"] == 0:
-                        reserve_blocked[anchor_row["id"]] = root_cap
+                    reason = (RESERVED_REASON if anchor_row["depth"] == 0 and root_cap < self.budget
+                              else "source query budget exhausted")
+                    budget_blocked[anchor_row["id"]] = (allowed_budget, [reason])
                     anchor_reasons[anchor_row["id"]].append(reason)
                     blocked_anchors.add(anchor_row["id"])
                     continue
@@ -614,6 +643,13 @@ class ExpansionEngine:
             "expanded_partial": sum(row["status"] == "expanded_partial" for row in anchors),
             "unexpanded": [row["id"] for row in anchors if row["status"] == "unexpanded"],
             "source_queries": query_count,
+            # the budget the expansion ran under, so a reader can tell a cut by the ceiling from one by the shares
+            "budget": {
+                "per_anchor_source_queries": self.per_anchor_source_queries,
+                "max_source_queries": self.max_source_queries,
+                "source_query_budget": self._budget_for(anchors),
+                "ceiling_reached": self._budget_for(anchors) >= self.max_source_queries,
+            },
         }
         self.repo.audit("system", "hunt.expansion_summary", self.hunt_id, summary,
                         owner_token=self.owner_token)
