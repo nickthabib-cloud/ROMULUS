@@ -304,8 +304,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         # Return freed pages to the filesystem, but never while a hunt may be writing: VACUUM blocks
         # writers and could push a running sweep past its busy timeout. Compaction then simply waits
         # for the next deletion made while nothing is running.
-        busy = any(h["execution_state"] in ("running", "planned", "paused") for h in repo.list_hunts())
-        if not busy:
+        if not repo.hunts_with_live_lease():
             try:
                 with repo.engine.connect() as c:
                     c.exec_driver_sql("VACUUM")

@@ -8,7 +8,7 @@ from romulus.detect.correlation import CORRELATION_PLAYBOOKS
 from romulus.detect.dns import DNS_PLAYBOOKS
 from romulus.detect.flows import FLOW_PLAYBOOKS
 from romulus.detect.hijack import HIJACK_PLAYBOOKS
-from romulus.detect.host import HOST_PLAYBOOKS
+from romulus.detect.host import HOST_PLAYBOOKS, share_lineage
 from romulus.detect.indicators import INDICATOR_PLAYBOOKS
 from romulus.detect.kernel_files import KERNEL_FILE_PLAYBOOKS
 from romulus.detect.lineage import LINEAGE_PLAYBOOKS
@@ -41,7 +41,9 @@ def anchor_class_for_rule(rule_id: str) -> str:
 def fresh_pack():
     """New evaluator instances for one hunt (they carry aggregate state)."""
     # context rules run only in expansion, packet rules only in the packet stage
-    return [cls() for cls in ALL_PLAYBOOKS if cls.kind not in ("context", "packet")]
+    pack = [cls() for cls in ALL_PLAYBOOKS if cls.kind not in ("context", "packet")]
+    share_lineage(pack)           # one exec lineage for every rule that keeps one
+    return pack
 
 
 def fresh_direct_pack():

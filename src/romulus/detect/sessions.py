@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import itertools
 import statistics
-from collections import defaultdict
+from array import array
+from bisect import bisect_left, bisect_right
 from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
+from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
@@ -45,26 +47,68 @@ def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, UTC).isoformat()
 
 
+def _absorb(parts: list[list], start: float, end: float, seq: int, event_id: str, protocols: frozenset,
+            idle: float) -> bool:
+    """Add one record to a connection's stretches of activity: [start, end, first record's order, its id,
+    protocols], kept sorted and disjoint, each more than `idle` from the next. Stretches the record comes within
+    `idle` of are merged; True when the record opened a new stretch (it was then more than `idle` from every record
+    of the identity read before it)."""
+    lo = bisect_left(parts, start - idle, key=lambda p: p[1])
+    hi = bisect_right(parts, end + idle, key=lambda p: p[0])
+    if lo == hi:
+        parts.insert(lo, [start, end, seq, event_id, protocols])
+        return True
+    touched = parts[lo:hi]
+    lead = min(touched, key=lambda p: p[2])
+    parts[lo:hi] = [[min(start, touched[0][0]), max(end, max(p[1] for p in touched)), lead[2], lead[3],
+                     protocols.union(*(p[4] for p in touched))]]
+    return False
+
+
 class _Stitched(Playbook):
     """Groups net_session records into connections by community ID (or the 5-tuple when absent). Memory
-    holds per-connection summaries and event ids; the events themselves are staged on disk."""
+    holds per-connection summaries and event ids; the events themselves are staged on disk.
+
+    Every connection the rule can report (`wants`) is held for the whole window in a keyed store: the HOT most
+    recently used in memory, the rest on the rule's disk spill, read back when the identity is seen again. Nothing
+    is closed or forgotten on a time horizon, so a channel that sleeps for hours keeps its whole history. Each
+    connection also keeps its stretches of activity (records more than IDLE apart start a new stretch): Arkime writes
+    a long session's intermediate record at least every tcpSaveTimeout (720 s by default) and closes a TCP session
+    idle for tcpTimeout (480 s), so a gap of an hour is a channel that slept or a 5-tuple used again. Only the
+    store's disk budget may refuse a record of a new connection (counted, and said on coverage)."""
     kind = "aggregate"
     anchor_class = "network_observation"
     staged = True
     claim_type = "network_observation"
     families = ("net_session",)
     required_fields = ("source.ip", "destination.ip", "flow.start", "flow.end")
+    IDLE = 3600.0
+    CONN_IDS = EXAMPLE_LIMIT        # record ids held (and staged) per connection
+    HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
 
     def __init__(self):
         super().__init__()
-        self.conns: dict[str, dict] = {}
-        self._seen: set[str] = set()
+        self.conns = KeyedStore(self, f"conns_{type(self).__name__.lower()}", self.HOT, candidate=self.candidate)
+        self._seen = RecentIds()        # bounded re-read guard
         self._pending: list[TypedEvent] = []
         self.load = lambda ids: []
+        self._seq = 0
+
+    def candidate(self, conn: dict) -> bool:
+        """Whether a held connection can be reported (read at finalize); every one by default."""
+        return True
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
+        self.conns.trim()
         return out
+
+    def release_state(self) -> None:
+        self.load = lambda ids: []
+        for value in list(vars(self).values()):
+            if isinstance(value, KeyedStore):
+                value.clear()
+        self.close_spill()
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         loaded = self.load(ids)
@@ -79,6 +123,17 @@ class _Stitched(Playbook):
         return f"{e.get('network.transport')}|{e.get('source.ip')}:{e.get('source.port')}|" \
                f"{e.get('destination.ip')}:{e.get('destination.port')}"
 
+    def wants(self, e: TypedEvent) -> bool:
+        """Whether this rule can report the connection a first record opens (judged from that record, as the
+        connection's address, port and transport fields are)."""
+        return True
+
+    @staticmethod
+    def skipped_for_direction(e: TypedEvent) -> bool:
+        """Whether a record this rule does not want was refused for its direction across the site boundary alone
+        (direction-dependent rules say so; see Playbook.direction_dependent)."""
+        return False
+
     def consume(self, events):
         for e in self.applicable([e for e in events if e.id not in self._seen]):
             self._seen.add(e.id)               # re-reading a partition must not count a record twice
@@ -90,25 +145,39 @@ class _Stitched(Playbook):
             key = self._conn_key(e)
             c = self.conns.get(key)
             if c is None:
-                c = self.conns[key] = {"start": start, "end": end, "records": 0, "events": [], "c2s": 0, "s2c": 0,
-                                       "src": e.get("source.ip"), "sport": e.get("source.port"),
-                                       "dst": e.get("destination.ip"), "dport": e.get("destination.port"),
-                                       "transport": e.get("network.transport"), "observer": e.host,
-                                       "protocols": set()}
+                if not self.wants(e):
+                    if self.skipped_for_direction(e):
+                        assume_direction(self)  # judged by a direction the default definition only assumes
+                    continue                  # judged: a connection this rule cannot report
+                c = {"start": start, "end": end, "records": 0, "events": [], "c2s": 0, "s2c": 0,
+                     "src": e.get("source.ip"), "sport": e.get("source.port"),
+                     "dst": e.get("destination.ip"), "dport": e.get("destination.port"),
+                     "transport": e.get("network.transport"), "observer": e.host, "protocols": set(),
+                     "seq": self._seq, "parts": []}
+                if not self.conns.put(key, c):
+                    self.evaluated -= 1
+                    self.refuse("disk", "the connections' disk budget is spent; a record of a new connection is not "
+                                        "evaluated")
+                    continue
             protocols = e.get("network.protocols")
-            c["protocols"].update(protocols if isinstance(protocols, list) else [protocols] if protocols else [])
+            protocols = frozenset(protocols if isinstance(protocols, list) else [protocols] if protocols else [])
+            c["protocols"].update(protocols)
             c["start"], c["end"] = min(c["start"], start), max(c["end"], end)
             c["records"] += 1
             c["c2s"] += int(e.get("source.bytes") or 0)
             c["s2c"] += int(e.get("destination.bytes") or 0)
-            if len(c["events"]) < EXAMPLE_LIMIT:
-                c["events"].append(e.id)
+            opened = _absorb(c["parts"], start, end, self._seq, e.id, protocols, self.IDLE)
+            self._seq += 1
+            if self.cite(c, e, opened):
                 self._pending.append(e)
-            self.observe(e, c)
         return []
 
-    def observe(self, e: TypedEvent, conn: dict) -> None:
-        """Per-record hook for subclasses."""
+    def cite(self, conn: dict, e: TypedEvent, opened: bool) -> bool:
+        """Whether this record may be cited later (so it goes to the stage): the connection's first CONN_IDS."""
+        if len(conn["events"]) >= self.CONN_IDS:
+            return False
+        conn["events"].append(e.id)
+        return True
 
     def retained_events(self) -> list[TypedEvent]:
         return []           # staged on disk instead
@@ -155,23 +224,31 @@ class LongExternalConnection(_Stitched):
         return (e.get("network.transport") == "tcp" and _both_routable(e)
                 and _public(e.get("source.ip")) == _public(e.get("destination.ip")))
 
-    def observe(self, e, conn):
-        if self.skipped_for_direction(e):
-            assume_direction(self)
+    def wants(self, e: TypedEvent) -> bool:
+        # a TCP connection with exactly one public end; anything else is never reported
+        return e.get("network.transport") == "tcp" and _public(e.get("source.ip")) != _public(e.get("destination.ip"))
+
+    def candidate(self, conn: dict) -> bool:
+        return conn["end"] - conn["start"] >= self.MIN_SECONDS
 
     def finalize(self):
         out = []
-        for key, c in self.conns.items():
-            if c["transport"] != "tcp" or c["end"] - c["start"] < self.MIN_SECONDS:
-                continue
-            if _public(c["src"]) == _public(c["dst"]):
-                continue                          # both internal or both public: not a boundary connection
+        order = sorted((c["seq"], key) for key, c in self.conns.items(candidates=True))
+        for _seq, key in order:
+            c = self.conns.peek(key)
             evs = self._events(c["events"])
             minutes = (c["end"] - c["start"]) / 60
             claim = (f"Arkime recorded {c['records']} session record(s) for one TCP connection {c['src']}:{c['sport']} "
                      f"-> {c['dst']}:{c['dport']} spanning {minutes:.0f} minutes ({_iso(c['start'])} – "
                      f"{_iso(c['end'])}), {c['c2s']} bytes from the client and {c['s2c']} bytes from the server. "
                      f"Only the part of the connection that started inside the hunt window is counted.")
+            gaps = len(c["parts"]) - 1
+            if gaps:
+                # Arkime writes a live connection's record at least every save interval: a long silence is a
+                # channel that slept, or the 5-tuple used again by a separate connection. Either way it is reported.
+                claim += (f" The records show {gaps} gap(s) of more than {self.IDLE / 3600:.0f} hour(s) without a "
+                          f"record, so this may be one channel that slept between bursts or the same 5-tuple reused "
+                          f"by separate connections; the span covers all of them.")
             preds = [pf(evs[0], "source.ip"), pf(evs[0], "destination.ip"), pf(evs[0], "flow.start"),
                      pf(evs[-1], "flow.end")]
             out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity, self.lane,
@@ -179,8 +256,31 @@ class LongExternalConnection(_Stitched):
         return out
 
 
+class _Series:
+    """One (internal source, public destination, port, transport) series, built at finalize: every connection's
+    start (8 bytes each), the earliest connections' first record ids, and the protocols every connection was
+    identified as."""
+
+    __slots__ = ("first", "protocols", "starts")
+
+    def __init__(self):
+        self.starts = array("d")
+        self.first: list[tuple[float, int, str]] = []        # (start, first record's order, its id), earliest
+        self.protocols: frozenset | None = None
+
+    def add(self, part: list) -> None:
+        start, _end, seq, event_id, protocols = part
+        self.starts.append(start)
+        ref = (start, seq, event_id)
+        if len(self.first) < EXAMPLE_LIMIT or ref < self.first[-1]:
+            self.first = sorted([*self.first, ref])[:EXAMPLE_LIMIT]
+        self.protocols = protocols if self.protocols is None else self.protocols & protocols
+
+
 class Beaconing(_Stitched):
-    """Many separate connections from one internal address to one public endpoint at regular intervals."""
+    """Many separate connections from one internal address to one public endpoint at regular intervals. A
+    connection identity whose records are more than IDLE apart is counted as separate connections (one per stretch
+    of activity), so a 5-tuple reused by a periodic client still shows its period."""
     id = "net.beaconing"
     version = "2"
     direction_dependent = True
@@ -222,20 +322,32 @@ class Beaconing(_Stitched):
         """Only internal-to-public series are judged: any other routable pair is skipped for its direction alone."""
         return _both_routable(e) and not (_public(e.get("destination.ip")) and not _public(e.get("source.ip")))
 
-    def observe(self, e, conn):
-        if self.skipped_for_direction(e):
-            assume_direction(self)
+    TRIM_EVERY = 10_000
+
+    def wants(self, e: TypedEvent) -> bool:
+        return _public(e.get("destination.ip")) and not _public(e.get("source.ip"))
+
+    def cite(self, conn: dict, e: TypedEvent, opened: bool) -> bool:
+        # A stretch is cited by its first record read, which opened a stretch when it was read (stretches only merge
+        # as records arrive): staging exactly the records that open one keeps every possible citation.
+        return opened
 
     def finalize(self):
-        series: dict[tuple, list[dict]] = defaultdict(list)
-        for c in self.conns.values():
-            if _public(c["dst"]) and not _public(c["src"]):
-                series[(c["src"], c["dst"], c["dport"], c["transport"])].append(c)
-        out = []
-        for (src, dst, dport, transport), conns in series.items():
-            if len(conns) < self.MIN_CONNECTIONS:
+        series = KeyedStore(self, "beacon_series", self.HOT)
+        for i, (_key, c) in enumerate(self.conns.items()):
+            s = series.setdefault((c["src"], c["dst"], c["dport"], c["transport"]), _Series)
+            if s is None:
+                self.refuse("disk", "the series' disk budget is spent; a connection is not evaluated")
                 continue
-            starts = sorted(c["start"] for c in conns)
+            for part in c["parts"]:
+                s.add(part)
+            if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
+                series.trim()
+        out = []
+        for (src, dst, dport, transport), s in series.items():
+            if len(s.starts) < self.MIN_CONNECTIONS:
+                continue
+            starts = sorted(s.starts)
             gaps = [b - a for a, b in itertools.pairwise(starts)]
             median = statistics.median(gaps)
             if median < self.MIN_INTERVAL:
@@ -243,11 +355,11 @@ class Beaconing(_Stitched):
             mad = statistics.median(abs(g - median) for g in gaps)
             if mad / median > self.MAX_JITTER:
                 continue
-            evs = self._events([c["events"][0] for c in sorted(conns, key=lambda c: c["start"])][:EXAMPLE_LIMIT])
+            evs = self._events([event_id for _start, _seq, event_id in s.first])
             # Protocols that are periodic by design, identified by Arkime's parser from packet content (not the
             # port): still reported, in the context lane, never dropped
-            periodic = sorted(set.intersection(*(c["protocols"] for c in conns)) & PERIODIC_BY_DESIGN)
-            claim = (f"Arkime recorded {len(conns)} separate {transport} connections from {src} to {dst} port {dport} "
+            periodic = sorted(s.protocols & PERIODIC_BY_DESIGN)
+            claim = (f"Arkime recorded {len(starts)} separate {transport} connections from {src} to {dst} port {dport} "
                      f"({_iso(starts[0])} – {_iso(starts[-1])}) starting every {median:.0f} s (median), with a median "
                      f"deviation of {mad:.1f} s between starts."
                      + (f" Arkime's parser identified every connection as {', '.join(periodic)}, a protocol that is "
@@ -256,6 +368,7 @@ class Beaconing(_Stitched):
             out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity,
                              "context" if periodic else self.lane, "medium", evs[0].entities(),
                              group_key=f"{src}|{dst}|{dport}|{transport}"))
+        series.clear()
         return out
 
 
@@ -304,9 +417,22 @@ class RareClientFingerprint(_Stitched):
                      "for that reason alone, is partial with the reason 'direction assumed'",
     }
 
+    # A value is reported only while one source used it on at most MAX_CONNECTIONS connections, so a value holds at
+    # most two sources and MAX_CONNECTIONS + 1 connections; once it cannot be rare its citations are dropped. Values
+    # (about 600 bytes each) are held in a keyed store: HOT in memory, the rest on disk; only its disk budget refuses.
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+
     def __init__(self):
         super().__init__()
-        self.prints: dict[tuple[str, str], dict] = {}
+        self.prints = KeyedStore(self, "rare_prints", self.HOT, candidate=self._rare)
+
+    def _rare(self, p: dict) -> bool:
+        return len(p["sources"]) == 1 and len(p["conns"]) <= self.MAX_CONNECTIONS
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out = super().drain_staged()
+        self.prints.trim()
+        return out
 
     def consume(self, events):
         for e in self.applicable([e for e in events if e.id not in self._seen]):
@@ -320,7 +446,10 @@ class RareClientFingerprint(_Stitched):
                 # a fingerprint present but unreadable, or one whose session direction is unknown
                 self.evaluated -= 1
                 self.missing_required += 1
-            self.observe(e, None)
+            elif not self.observe(e, None):
+                self.evaluated -= 1
+                self.refuse("disk", "the fingerprint values' disk budget is spent; a record carrying a new value is "
+                                    "not evaluated")
         return []
 
     @staticmethod
@@ -335,29 +464,39 @@ class RareClientFingerprint(_Stitched):
         return (not cls._judged(e) and _both_routable(e)
                 and any(e.has(field) for _kind, field, _label in cls.KINDS))
 
-    def observe(self, e, conn):
+    def observe(self, e, conn) -> bool:
         if not self._judged(e):
             if self.skipped_for_direction(e):
-                assume_direction(self)
-            return
+                assume_direction(self)              # judged by a direction the default definition only assumes
+            return True
+        taken = True
         for kind, field, _label in self.KINDS:
             value = e.get(field)
             for item in value if isinstance(value, list) else [value]:
                 if not isinstance(item, str) or not item:
                     continue
-                p = self.prints.setdefault((kind, item), {"sources": set(), "conns": set(), "events": [],
-                                                          "field": field})
-                p["sources"].add(canon_ip(e.get("source.ip")))
-                p["conns"].add(self._conn_key(e))
-                if len(p["events"]) < EXAMPLE_LIMIT and e.id not in p["events"]:
+                p = self.prints.setdefault((kind, item), lambda field=field: {"sources": set(), "conns": set(),
+                                                                              "events": [], "field": field})
+                if p is None:
+                    taken = False
+                    continue
+                source = canon_ip(e.get("source.ip"))
+                if len(p["sources"]) < 2:
+                    p["sources"].add(source)
+                if len(p["conns"]) <= self.MAX_CONNECTIONS:
+                    p["conns"].add(self._conn_key(e))
+                if not self._rare(p):
+                    p["events"] = []                  # it can no longer be reported: nothing to cite
+                elif len(p["events"]) < EXAMPLE_LIMIT and e.id not in p["events"]:
                     p["events"].append(e.id)
                     self._pending.append(e)          # the stage ignores events it already holds
+        return taken
 
     def finalize(self):
         out = []
         labels = {kind: label for kind, _field, label in self.KINDS}
-        for (kind, value), p in self.prints.items():
-            if len(p["sources"]) != 1 or len(p["conns"]) > self.MAX_CONNECTIONS:
+        for (kind, value), p in self.prints.items(candidates=True):
+            if not self._rare(p):
                 continue
             evs = self._events(p["events"])
             src = next(iter(p["sources"]))
@@ -377,7 +516,7 @@ class ArkimeSshReverseShellTag(Playbook):
     shape of the encrypted session; ROMULUS does not reproduce or verify the heuristic. It is reported like an
     IDS alert: a vendor detection with its own false-positive rate, a lead to check, never proof."""
     id = "net.arkime_ssh_reverse_shell_tag"
-    version = "2"
+    version = "3"
     title = "Arkime's heuristic tagged an SSH session as a possible reverse shell"
     kind = "aggregate"
     anchor_class = "network_observation"
@@ -413,12 +552,35 @@ class ArkimeSshReverseShellTag(Playbook):
         "retrieval": "the sweep retrieves every Arkime session record in each partition, a superset",
     }
 
+    # One state per (client, server, server port) pair with SSH or a tag, in a keyed store: HOT pairs in memory, the
+    # rest on disk, only its disk budget refuses. A pair remembers at most PAIR_CONNS_CAP SSH connections for the
+    # untagged count (the claim says "at least" above it); a tagged pair also holds its context and cited references.
+    staged = True
+    HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+
     def __init__(self):
         super().__init__()
-        self._seen: set[str] = set()
-        self.groups: dict[tuple, list[TypedEvent]] = defaultdict(list)
-        self.info: dict[tuple, dict] = {}
-        self.ssh_conns: dict[tuple, set[str]] = defaultdict(set)    # every SSH connection of a pair, tagged or not
+        self._seen = RecentIds()        # bounded re-read guard
+        self.pairs = KeyedStore(self, "ssh_pairs", self.HOT, candidate=lambda pair: pair["info"] is not None)
+        self._pending: list[TypedEvent] = []
+        self._fresh: list[HeldExamples] = []
+        self.load = lambda ids: []
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending, []
+        for store in self._fresh:
+            store.staged()
+        self._fresh = []
+        self.pairs.trim()                       # after staging: a trimmed pair holds references only
+        return out
+
+    def release_state(self) -> None:
+        self.load = lambda ids: []
+        self.pairs.clear()
+        self.close_spill()
+
+    def retained_events(self) -> list[TypedEvent]:
+        return []                               # staged on disk instead
 
     def consume(self, events):
         for e in self.applicable([e for e in events if e.id not in self._seen]):
@@ -429,17 +591,28 @@ class ArkimeSshReverseShellTag(Playbook):
                 continue
             key = (str(e.get("source.ip")), str(e.get("destination.ip")), str(e.get("destination.port")))
             protocols = e.get("network.protocols")
-            if "ssh" in (protocols if isinstance(protocols, list) else [protocols]):
-                conns = self.ssh_conns[key]
-                if len(conns) < self.PAIR_CONNS_CAP:
-                    conns.add(self._conn_key(e))
+            ssh = "ssh" in (protocols if isinstance(protocols, list) else [protocols])
             tags = e.get("arkime.tags")
             tags = tags if isinstance(tags, list) else [tags]
-            if self.TAG not in tags:
+            tagged = self.TAG in tags
+            if not ssh and not tagged:
                 continue
-            g = self.info.setdefault(key, {"records": 0, "conns": set(), "first": e.ts, "last": e.ts, "c2s": 0,
-                                           "s2c": 0, "versions": set(), "hassh": set(), "hassh_server": set(),
-                                           "tags": set(), "end": None})
+            pair = self.pairs.setdefault(key, lambda: {"ssh": set(), "info": None, "examples": None})
+            if pair is None:
+                self.evaluated -= 1
+                self.refuse("disk", "the SSH pairs' disk budget is spent; a record of a new pair is not evaluated")
+                continue
+            if ssh:
+                conns = pair["ssh"]
+                if len(conns) < self.PAIR_CONNS_CAP:
+                    conns.add(self._conn_key(e))
+            if not tagged:
+                continue
+            if pair["info"] is None:
+                pair["info"] = {"records": 0, "conns": set(), "first": e.ts, "last": e.ts, "c2s": 0, "s2c": 0,
+                                "versions": set(), "hassh": set(), "hassh_server": set(), "tags": set(), "end": None}
+                pair["examples"] = HeldExamples(EXAMPLE_LIMIT)
+            g = pair["info"]
             g["records"] += 1
             g["conns"].add(self._conn_key(e))
             g["first"], g["last"] = min(g["first"], e.ts), max(g["last"], e.ts)
@@ -457,8 +630,10 @@ class ArkimeSshReverseShellTag(Playbook):
                 value = e.get(name)
                 g[bucket].update(v for v in (value if isinstance(value, list) else [value]) if isinstance(v, str))
             g["tags"].update(t for t in tags if isinstance(t, str) and t != self.TAG)
-            if len(self.groups[key]) < EXAMPLE_LIMIT:
-                self.groups[key].append(e)
+            group = pair["examples"]
+            if group.offer(e):
+                self._pending.append(e)
+                self._fresh.append(group)
         return []
 
     @staticmethod
@@ -475,7 +650,7 @@ class ArkimeSshReverseShellTag(Playbook):
             return f" The client {src} is internal and the server {dst} is a public address."
         return f" The client {src} is a public address and the server {dst} is internal."
 
-    def _context(self, key: tuple, g: dict) -> str:
+    def _context(self, key: tuple, g: dict, known: set) -> str:
         """The session's own context, stated beside the tag: address scope, bytes, announced software,
         fingerprints, other tags, and the pair's untagged SSH connections (a denominator for the heuristic)."""
         src, dst, port = key
@@ -499,9 +674,11 @@ class ArkimeSshReverseShellTag(Playbook):
             text += f" Fingerprints: {'; '.join(p for p in prints if p)}."
         if g["tags"]:
             text += f" Other Arkime tags on these records: {', '.join(sorted(g['tags']))}."
-        known = self.ssh_conns.get(key, set())
         others = len(known - g["conns"])
         at_least = "at least " if len(known) >= self.PAIR_CONNS_CAP else ""
+        if at_least:
+            self.note_limit("connections", f"a pair passed {self.PAIR_CONNS_CAP:,} SSH connections held; its untagged "
+                                           f"count is a lower bound")
         text += (f" Arkime recorded {at_least}{others} other SSH connection(s) from {src} to {dst} port {port} without "
                  "the tag "
                  "in the window." if others else
@@ -514,13 +691,14 @@ class ArkimeSshReverseShellTag(Playbook):
 
     def finalize(self):
         out = []
-        for key, evs in self.groups.items():
-            g = self.info[key]
+        for key, pair in self.pairs.items(candidates=True):
+            evs = pair["examples"].events(self.load)
+            g = pair["info"]
             src, dst, port = key
             claim = (f"Arkime's heuristic tagged {g['records']} session record(s) of {len(g['conns'])} connection(s) "
                      f"from {src} to {dst} port {port} '{self.TAG}' ({g['first'].isoformat()} – "
                      f"{g['last'].isoformat()}). This is Arkime's own detection from the traffic shape, like an IDS "
-                     f"alert; it does not show that a shell ran.") + self._context(key, g)
+                     f"alert; it does not show that a shell ran.") + self._context(key, g, pair["ssh"])
             out.append(Match(self.id, claim, self.claim_type, evs,
                              [pf(evs[0], "arkime.tags"), pf(evs[0], "source.ip"), pf(evs[0], "destination.ip")],
                              evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),

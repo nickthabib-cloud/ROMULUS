@@ -158,6 +158,9 @@ class PivotResult(BaseModel):
     status: Literal["complete", "partial", "failed", "unsupported"]
     task_ids: list[str] = Field(default_factory=list)
     event_ids: list[str] = Field(default_factory=list)
+    # Complete reach retained for hunt-layer link persistence and stable toolbox paging.
+    # It is excluded from ordinary model-facing dumps; the toolbox exposes bounded pages.
+    reach_event_ids: list[str] = Field(default_factory=list, exclude=True)
     candidate_ids: list[str] = Field(default_factory=list)
     entities: list[EntityRef] = Field(default_factory=list)
     event_summaries: list[dict[str, Any]] = Field(default_factory=list)

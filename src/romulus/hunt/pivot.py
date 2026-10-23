@@ -383,12 +383,18 @@ HOST_LOOKUP_BUDGET = "source query budget exhausted"
 NO_HOST_RECORD = "no host record carries host.ip"      # a complete lookup: no host claims the address
 HOST_AMBIGUOUS = "victim host ambiguous"               # a complete lookup: several hosts claim the address
 
+
+def _link_task_kind(executor) -> str:
+    """Keep borrowed executor methods compatible while separating agent link work."""
+    return "agent_follow_link" if getattr(executor, "source_query_scope", None) == "agent" else "expansion_link"
+
 class PivotExecutor:
     """Translate accepted tools to safe intents, then normalize and directly detect results."""
 
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str,
                  contracts: dict[str, FieldContract], heartbeat=None, owner_token: str | None = None,
                  source_query_budget: int | None = None,
+                 source_query_scope: str | None = None,
                  dataset_inventory: dict[str, set[str] | list[str] | tuple[str, ...]] | None = None,
                  optimize_normalization: bool = True):
         self.repo = repo
@@ -398,6 +404,7 @@ class PivotExecutor:
         self.heartbeat = heartbeat or (lambda: None)
         self.owner_token = owner_token
         self.source_query_budget = source_query_budget
+        self.source_query_scope = source_query_scope
         self.source_queries = 0
         self.dataset_inventory = {
             target: tuple(sorted(datasets)) for target, datasets in (dataset_inventory or {}).items()
@@ -420,17 +427,30 @@ class PivotExecutor:
         self, intent: SearchIntent, contract: FieldContract, *, pit=None,
         spend_task_id: str | None = None,
     ) -> SearchOutcome:
-        if self.source_query_budget is not None and self.source_queries >= self.source_query_budget:
+        def budget_outcome() -> SearchOutcome:
             now = datetime.now(UTC)
-            reason = f"expansion_source_query_budget:{self.source_query_budget}"
+            prefix = self.source_query_scope or "expansion"
+            reason = f"{prefix}_source_query_budget:{self.source_query_budget}"
             return SearchOutcome(
                 target=intent.target, fingerprint=digest(intent.model_dump(mode="json")),
                 started_at=now, ended_at=now, completeness=Completeness.failed,
                 reasons=[reason], error=reason,
             )
-        if spend_task_id is not None:
+        if self.source_query_budget is not None and self.source_queries >= self.source_query_budget:
+            return budget_outcome()
+        if self.source_query_scope == "agent" and self.source_query_budget is not None:
+            reserved = self.repo.reserve_agent_source_query(
+                self.hunt_id, self.source_query_budget, spend_task_id, owner_token=self.owner_token,
+            )
+            if reserved is None:
+                self.source_queries = self.source_query_budget
+                return budget_outcome()
+            self.source_queries = reserved
+        elif spend_task_id is not None:
             self.repo.record_task_source_query(spend_task_id, owner_token=self.owner_token)
-        self.source_queries += 1
+            self.source_queries += 1
+        else:
+            self.source_queries += 1
         self.heartbeat()
         outcome = (execute(self.client, intent, contract) if pit is None
                    else execute(self.client, intent, contract, pit=pit))
@@ -638,8 +658,14 @@ class PivotExecutor:
                    and (contract.spec("host.name") is not None and contract.spec("host.name").aggregatable)]
         if not targets:
             return None, f"victim host unknown for {ip}: no host source has a searchable host.ip field"
-        fingerprint = digest({"hunt": self.hunt_id, "resolve_host_ip": ip, "start": start.isoformat(),
-                              "end": end.isoformat(), "targets": [target for target, _ in targets]})
+        fingerprint = digest({
+            "hunt": self.hunt_id,
+            "source_query_scope": getattr(self, "source_query_scope", None) or "expansion",
+            "resolve_host_ip": ip,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "targets": [target for target, _ in targets],
+        })
         task_id = "t-" + fingerprint[:20]
         prior = self.repo.task(task_id)
         if prior and prior["state"] == "evaluated" and isinstance(prior.get("outcome"), dict):
@@ -647,7 +673,7 @@ class PivotExecutor:
         if query_cap is not None and self.source_queries + len(targets) > query_cap:
             return None, f"victim host not resolved for {ip}: {HOST_LOOKUP_BUDGET}"
         intent_record = {"resolve_host_ip": ip, "targets": [target for target, _ in targets]}
-        self.repo.upsert_task(task_id, self.hunt_id, "expansion_link", "host-resolution", intent_record,
+        self.repo.upsert_task(task_id, self.hunt_id, _link_task_kind(self), "host-resolution", intent_record,
                               fingerprint, owner_token=self.owner_token)
         self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
         names: set[str] = set()
@@ -775,11 +801,15 @@ class PivotExecutor:
         incomplete = bool(coverage)
         fetch_query_start = self.source_queries
         for intent in intents:
-            fingerprint = digest({"fetch_key": fetch_key, "intent": intent.model_dump(mode="json")})
+            fingerprint = digest({
+                "source_query_scope": self.source_query_scope or "expansion",
+                "fetch_key": fetch_key,
+                "intent": intent.model_dump(mode="json"),
+            })
             task_id = "t-" + fingerprint[:20]
             task_ids.append(task_id)
             self.repo.upsert_task(
-                task_id, self.hunt_id, "expansion_link", owner,
+                task_id, self.hunt_id, _link_task_kind(self), owner,
                 intent.model_dump(mode="json"), fingerprint, owner_token=self.owner_token,
             )
             self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
@@ -854,7 +884,11 @@ class PivotExecutor:
                 )
             else:
                 self.repo.update_task(task_id, "evaluated", outcome=outcome_digest, owner_token=self.owner_token)
-        status = "failed" if successful == 0 else "partial" if incomplete else "complete"
+        budget_limited = (self.source_query_scope == "agent" and self.source_query_budget is not None
+                          and any(reason == f"agent_source_query_budget:{self.source_query_budget}"
+                                  for reason in reasons))
+        status = ("partial" if successful == 0 and budget_limited else
+                  "failed" if successful == 0 else "partial" if incomplete else "complete")
         return PivotEventBatch(
             status=status, task_ids=task_ids,
             events=sorted(retained.values(), key=lambda event: (event.ts, event.id)),
@@ -1195,7 +1229,12 @@ class PivotExecutor:
             (entity.kind, entity.value, entity.role): entity
             for event in unique_events.values() for entity in _event_entities(event)
         }
-        if successful_outcomes == 0:
+        budget_limited = any(reason.endswith(f"_source_query_budget:{self.source_query_budget}")
+                             for reason in reasons)
+        if successful_outcomes == 0 and budget_limited:
+            # The agent's source cap is an intentional bounded stop, not a source outage.
+            status = "partial"
+        elif successful_outcomes == 0:
             status = "failed"
         elif incomplete:
             status = "partial"
@@ -1206,6 +1245,7 @@ class PivotExecutor:
             status=status,
             task_ids=task_ids,
             event_ids=[event.id for event in sampled_events],
+            reach_event_ids=sorted(unique_events),
             candidate_ids=candidate_ids,
             entities=list(unique_entities.values()),
             event_summaries=[_summary(event) for event in sampled_events],

@@ -264,6 +264,28 @@ def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
     return coverage
 
 
+def coverage_for_rules(repo: Repo, hunt_id: str, rule_ids: set[str]) -> dict:
+    """Canonical coverage using only the requested rule rows from SQL."""
+    h = repo.get_hunt(hunt_id) or {}
+    hm = h.get("manifest") or {}
+    sweep = repo.latest_audit(hunt_id, "hunt.sweep_summary")
+    detail = (sweep or {}).get("detail") or {}
+    finished = bool(sweep and detail.get("finished", detail.get("complete")))
+    coverage = _coverage(
+        repo.rule_cells(hunt_id, rule_ids), targets=hm.get("targets"),
+        rule_ids=sorted(rule_ids), sweep_finished=finished,
+    )
+    presence = repo.rule_presence_counts(
+        hunt_id, {(gap["target"], gap["partition"]) for gap in coverage["gaps"]},
+    )
+    for gap in coverage["gaps"]:
+        key = (gap["target"], gap["partition"])
+        if key in presence:
+            gap["every_rule_there"] = len(gap["rules"]) == presence[key]
+    coverage["not_assessed"] = _not_assessed(hm, detail)
+    return coverage
+
+
 def _case_conclusion(summary: str | None) -> dict | None:
     if not summary:
         return None

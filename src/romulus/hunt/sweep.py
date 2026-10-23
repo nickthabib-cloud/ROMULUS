@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
+from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import (
@@ -68,6 +69,19 @@ def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
     return BootIntervals.from_json((row or {}).get("detail") or {})
 
 
+def state_budget(settings, stage_dir) -> StateBudget:
+    """The hunt's state budget from the settings (defaults when a setting is absent)."""
+    disk_gb = float(getattr(settings, "state_disk_gb", 0) or 0)
+    reserve_gb = getattr(settings, "state_disk_reserve_gb", None)
+    memory_mb = getattr(settings, "state_memory_mb", None)
+    kwargs = {}
+    if reserve_gb is not None:
+        kwargs["reserve_floor"] = int(float(reserve_gb) * 2**30)
+    if memory_mb is not None:
+        kwargs["memory_total"] = int(memory_mb) * 2**20
+    return StateBudget(stage_dir, disk_total=int(disk_gb * 2**30) or None, **kwargs)
+
+
 def plan_partitions(client: ElasticClient, target: str, contract: FieldContract, window: Window,
                     filters: list[Predicate]) -> list[tuple[Window, int]]:
     """5-minute histogram with exact counts; merge consecutive buckets up to PARTITION_MAX_DOCS.
@@ -111,10 +125,32 @@ class Sweep:
         self._pool: ThreadPoolExecutor | None = None
         self.contracts = contracts
         self.on_candidate = on_candidate or (lambda c: None)
-        self.heartbeat = heartbeat or (lambda: None)
+        beat = heartbeat or (lambda: None)
+
+        def heartbeat_and_touch():
+            beat()
+            for pb in self.pack:                # a live spill is never mistaken for a killed process's leftover
+                if pb._spill is not None:
+                    pb._spill.touch()
+        self.heartbeat = heartbeat_and_touch
         self.stage_dir = stage_dir
+        # One state budget for the hunt: the disk every playbook's spill may use (and the free space left on the
+        # stage volume), and the memory their hot sets share. Read the stage volume's free space before the sweep.
+        self.budget = state_budget(settings, stage_dir)
         self.pack: list[Playbook] = fresh_pack()
+        for pb in self.pack:
+            pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
+            pb.budget = self.budget
+        # one guaranteed floor per live store of the pack (a store shared by several rules counts once), and one for
+        # the event stage, which holds the citations of every rule
+        self.budget.plan(live_stores(self.pack) + 1)
+        self._stage_account = self.budget.account("event_stage")
+        self._stage_size = 0
         self.partial_reasons: list[str] = []
+        preflight = self.budget.preflight()
+        if preflight:
+            self.partial_reasons.append(f"state budget: {preflight}; rules evaluate only records that need no new "
+                                        f"state")
         # Built as partitions are read, in time order per target: each batch's events are placed with what has
         # been observed so far. Expansion and the context pass use the whole map, recorded at finalize.
         self.boots = BootIntervals()
@@ -122,6 +158,34 @@ class Sweep:
                       "boot": {"recorded": 0, "from_interval": 0, "unknown": 0}}
 
     # -------------------------------------------------------------------------------------
+    def _sources_for(self, m: Match, raw_sources: dict[str, dict]) -> dict[str, dict]:
+        """Raw copies for a match published while a partition is read: this partition's, and from the event stage
+        for a cited record a staged rule held from an earlier partition."""
+        missing = [e for e in m.events if any(r.key not in raw_sources for r in e.raw)]
+        stage = getattr(self, "_stage", None)
+        if not missing or stage is None:
+            return raw_sources
+        return {**stage.raw_sources(missing), **raw_sources}
+
+    def _stage_put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+        """Stage citations, charging the stage's growth to its own account of the hunt's state budget. A write the
+        volume cannot take marks the budget broken: those citations are lost to their rules, which say so."""
+        import sqlite3
+        stage = self._event_stage()
+        try:
+            stage.put(events, raw_sources)
+        except sqlite3.OperationalError as exc:
+            self.budget.fail(f"writing the event stage failed ({exc})")
+            for pb in self.pack:
+                if pb.staged:
+                    pb.note_limit("stage", f"the event stage could not take this partition's citations "
+                                           f"({self.budget.broken}); findings that cite them are not computed")
+            return
+        size = stage.db.execute("PRAGMA page_count").fetchone()[0] * stage.db.execute("PRAGMA page_size").fetchone()[0]
+        if size > self._stage_size:
+            self.budget.charge(self._stage_account, size - self._stage_size)
+            self._stage_size = size
+
     def _publish(self, m: Match, task_id: str | None, raw_sources: dict[str, dict]):
         playbook = next(playbook for playbook in self.pack if playbook.id == m.playbook_id)
         row = publish_match(self.repo, self.hunt_id, playbook, m, task_id, raw_sources)
@@ -333,36 +397,59 @@ class Sweep:
         staged: dict[str, TypedEvent] = {}
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
-            before_eval, before_missing, before_assumed = pb.evaluated, pb.missing_required, pb.direction_assumed
-            matches = pb.consume(events)
+            before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
+            before_assumed = pb.direction_assumed
+            before_limits = {name: limit.records for name, limit in pb.limits.items()}
+            # Every rule reads every batch, whatever the state budget: a store in no-growth mode refuses only
+            # records that need a new key in it (each rule's own refusal path), and every match that needs no new
+            # state still publishes.
+            try:
+                matches = pb.consume(events)
+            except StateExhausted as exc:
+                # a write to the stage volume failed mid-batch (a rule that writes rows directly): the records it
+                # had not evaluated yet are refused, counted exactly
+                matches = []
+                pb.refuse_unevaluated(events, pb.evaluated - before_eval + pb.missing_required - before_missing
+                                      + pb.capped - before_capped,
+                                      f"a write to the stage volume failed ({exc}); this rule's later records of "
+                                      f"the batch are not evaluated")
             for m in matches:
-                self._publish(m, tid, raw_sources)
+                self._publish(m, tid, self._sources_for(m, raw_sources) if pb.staged else raw_sources)
             if pb.staged:
-                # joining aggregates: full events and their raw copies go to disk, not memory
-                for event in pb.drain_staged():
-                    staged.setdefault(event.id, event)
+                # joining aggregates: full events and their raw copies go to disk, not memory. Below the stage
+                # volume's reserve the stage takes only strong rules' citations; another rule's held examples are
+                # then not loadable, and its finalize says so.
+                drained = pb.drain_staged()
+                if drained and self.budget.hard and pb.state_slice != "strong":
+                    pb.note_limit("stage", f"the event stage took no new citation of this rule "
+                                           f"({self.budget.hard}); its findings that cite them are not computed")
+                else:
+                    for event in drained:
+                        staged.setdefault(event.id, event)
             elif pb.kind == "aggregate":
                 # aggregates retain examples: stash raw copies of their retained events now
                 self._retain_aggregate_raw(pb, raw_sources)
             evaluated = pb.evaluated - before_eval
             missing = pb.missing_required - before_missing
+            # records a full state budget kept from evaluation: never a clean evaluation of this partition
+            capped = pb.capped - before_capped
             # records skipped or judged for a direction the default internal-network definition only assumes
             assumed = pb.direction_assumed - before_assumed
-            gap = rule_partial or missing or assumed
+            incomplete = rule_partial or bool(missing) or bool(capped) or bool(assumed)
             if not (set(pb.families) & families) and evaluated == 0:
-                state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
+                state = "not_applicable_no_events" if not (rule_partial or capped) else "evaluated_partial"
             elif pb.kind == "aggregate" and matches:
                 # aggregate rules may publish indicator events during consume(); those are matches
-                state = "match_on_partial" if gap else "matched"
+                state = "match_on_partial" if incomplete else "matched"
             elif pb.kind == "aggregate":
-                state = "evaluated_partial" if gap else "evaluated_complete"
+                state = "evaluated_partial" if incomplete else "evaluated_complete"
             elif matches:
-                state = "match_on_partial" if gap else "matched"
+                state = "match_on_partial" if incomplete else "matched"
             elif not pb.assures_negative:
                 # script-text rules can show intent but never prove absence (spec section 1)
-                state = "positive_only_partial" if gap else "positive_only"
+                state = "positive_only_partial" if incomplete else "positive_only"
             else:
-                state = "evaluated_partial" if gap else "no_match_complete"
+                state = "evaluated_partial" if incomplete else "no_match_complete"
             reasons = list(base_reasons)
             if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
                 reasons.append(error_reason)
@@ -372,10 +459,20 @@ class Sweep:
             if assumed:
                 reasons.append(DIRECTION_ASSUMED_REASON)
                 detail["direction_assumed"] = assumed
+            if capped:
+                # this partition's own refusals, per budget (the rule's totals are on its hunt-level coverage)
+                refused = [f"state limit: {limit.text} ({limit.records - before_limits.get(name, 0)} record(s) not "
+                           f"evaluated)" for name, limit in pb.limits.items()
+                           if limit.records > before_limits.get(name, 0)]
+                reasons.append(f"state_capped={capped}: records not evaluated because a state budget of this rule "
+                               f"was full; " + "; ".join(refused))
+                detail["state_capped"] = capped
             cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated, detail))
-        if any(pb.staged for pb in self.pack):
-            self._event_stage().put(list(staged.values()), raw_sources)
+        if staged:
+            self._stage_put(list(staged.values()), raw_sources)
         staged.clear()
+        # the event stage shares the stage volume: its growth counts toward the free-space reserve
+        self.budget.check_free()
         # the partition's cells together: a crash before this leaves them all visibly `planned`
         self.repo.set_rule_cells(self.hunt_id, cells)
         self.repo.update_task(tid, "evaluated")
@@ -449,6 +546,7 @@ class Sweep:
 
     def finalize(self):
         self.heartbeat()
+        self.budget.finalizing = True           # finalize re-reads kept state: only the free-space reserve applies
         # Every partition has been read: record the whole map once, for expansion, the context pass and resume.
         self.repo.audit("system", BOOT_INTERVALS_AUDIT, self.hunt_id, self.boots.to_json())
         self._boot_summary()
@@ -461,17 +559,21 @@ class Sweep:
                 stage = self._event_stage()
                 pb.bind_loader(stage.load)
                 pb.heartbeat = self.heartbeat
-                ms = pb.finalize()
+                ms = self._finalize_rule(pb)
                 for m in ms:
                     self._publish(m, None, {**agg_raw, **stage.raw_sources(m.events)})
             else:
-                ms = pb.finalize()
+                ms = self._finalize_rule(pb)
                 for m in ms:
                     self._publish(m, None, agg_raw)
             cells = [c for c in self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
                      if c["target"] != "*" and c["state"] != "split"]
             any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")
                               for c in cells)
+            # A state budget reached at any point (in consume or at finalize) makes the whole-window result partial
+            # and is named on the window cell.
+            limits = pb.limit_reasons()
+            any_partial = any_partial or bool(limits)
             evaluated = sum(c["evaluated"] or 0 for c in cells)
             consumed_matches = sum(c["matched"] or 0 for c in cells)
             matched_any = bool(ms) or consumed_matches > 0
@@ -491,15 +593,42 @@ class Sweep:
                        [WINDOW_ROLLUP_PARTIAL] if any_partial else [])
             if any(DIRECTION_ASSUMED_REASON in ((c["detail"] or {}).get("reasons") or []) for c in cells):
                 reasons.append(DIRECTION_ASSUMED_REASON)
+            reasons += limits
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
                                     len(ms) + consumed_matches, evaluated, {"reasons": reasons})
             pb.release_state()
         agg_raw.clear()
+        if self.budget.spent:
+            self.partial_reasons.append(f"state budget: {self.budget.spent}")
+            self.stats["state_budget"] = {"spent": self.budget.spent, "disk_bytes": self.budget.disk_used,
+                                          "disk_total": self.budget.disk_total, "reserve": self.budget.reserve,
+                                          "floor": self.budget.floor, "shared": self.budget.pool,
+                                          "shared_used": self.budget.pool_used,
+                                          "stores_without_new_keys": sorted(self.budget.full)}
         self.close_stage()
 
+    @staticmethod
+    def _finalize_rule(pb: Playbook) -> list[Match]:
+        """A rule's finalize. When it needs disk the stage volume cannot give, the rule publishes what it can from
+        state readable without writing (`finalize_fallback`: strong per-record items), and its window cell says
+        which results were not computed (the hunt goes on)."""
+        from romulus.detect.correlation import StageMissing
+        try:
+            return pb.finalize()
+        except (StateExhausted, StageMissing, LookupError) as exc:
+            pb.note_limit("state_disk", f"finalize stopped: {exc}; this rule's groupings were not computed, only "
+                                        f"what it could publish without disk")
+            try:
+                return pb.finalize_fallback(str(exc))
+            except (StateExhausted, StageMissing, LookupError):
+                return []
+
     def close_stage(self) -> None:
-        """Remove the disk stage (raw telemetry copies). Called by finalize and on every failure path."""
+        """Remove the disk stage (raw telemetry copies) and the playbooks' spills. Called by finalize and on every
+        failure path."""
         stage = getattr(self, "_stage", None)
         if stage is not None:
             stage.close()
             self._stage = None
+        for pb in self.pack:
+            pb.close_spill()

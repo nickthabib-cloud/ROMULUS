@@ -17,6 +17,7 @@ from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.registry import fresh_direct_pack, rule_kind
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.context import finalize_context
+from romulus.hunt.expansion_plan import TIER_PLAN
 from romulus.hunt.links import (
     HOST_SIDE_LINKS,
     LinkAnchor,
@@ -24,23 +25,15 @@ from romulus.hunt.links import (
     LinkResult,
     LinkType,
     LinkWindow,
+    is_agent_reach,
     usable_key,
 )
 from romulus.hunt.pivot import HOST_AMBIGUOUS, HOST_LOOKUP_BUDGET, NO_HOST_RECORD
-from romulus.hunt.publish import publish_match
+from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
-TIER_PLAN: tuple[tuple[str, tuple[LinkType, ...], str], ...] = (
-    ("T1", ("login_session", "process_lineage", "network_flow"), "anchor ±5 min"),
-    ("T2", ("host_after_anchor", "flow_host_side"), "anchor ±5 min"),
-    ("T3", ("login_session", "process_lineage", "network_flow", "host_after_anchor",
-            "flow_host_side"), "anchor ±30 min"),
-    ("T4", ("source_ip", "account"), "anchor ±5 min"),
-    ("T5", ("login_session", "process_lineage", "network_flow", "host_after_anchor",
-            "flow_host_side", "source_ip", "account"), "anchor ±2 h"),
-)
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 DEFAULT_MAX_DEPTH = 3
 DEFAULT_MAX_SOURCE_QUERIES = 180
@@ -286,6 +279,10 @@ class ExpansionEngine:
         for candidate in self.repo.candidates(self.hunt_id, ["urgent", "high"]):
             if candidate["id"] in existing:
                 continue
+            # Agent-published discoveries remain case contributions. A resume must not silently
+            # promote them into deterministic expansion roots with a different reach contract.
+            if candidate.get("source_case_id") is not None:
+                continue
             # A context finding is already the product of a link from an anchor; expanding it again would
             # refetch the same session or lineage at depth + 1 and drain the reserve.
             if rule_kind(candidate["rule_id"]) == "context":
@@ -354,13 +351,12 @@ class ExpansionEngine:
         events = self._events(result.event_ids)
         for playbook in fresh_direct_pack():
             for match in playbook.consume(events):
-                if result.strength == "inferred":
-                    # The finding stands on its own cited records and keeps its own lane (strong indicators are
-                    # reported on their own). Only its relation to the anchor is inferred.
-                    match.claim += (f" Its relation to {candidate['id']} rests on inferred {result.link_type} link "
-                                    f"{result.id} and is a hypothesis; the actor is not proven identical.")
-                    match.notes.append("reached through an inferred expansion link: the relation to the anchor "
-                                       "is a hypothesis, the finding itself is not")
+                # The finding stands on its own cited records and keeps its machine lane. Only its relation to
+                # the anchor may be a hypothesis.
+                mark_hypothesis_relation(
+                    match, anchor_id=candidate["id"], link_type=result.link_type,
+                    link_id=result.id, strength=result.strength,
+                )
                 publish_match(
                     self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                     source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
@@ -531,7 +527,10 @@ class ExpansionEngine:
             if not made_progress:
                 continue
 
-        final_links = self.repo.expansion_links(self.hunt_id)
+        final_links = [
+            link for link in self.repo.expansion_links(self.hunt_id)
+            if not is_agent_reach(link["link_type"], link["strength"])
+        ]
         for row in self.repo.expansion_anchors(self.hunt_id):
             # Only anchors this run worked are finalized: those still pending. An anchor a previous run finalized
             # (resume re-runs expansion) was never scheduled here, so its recorded status and reasons stand; above

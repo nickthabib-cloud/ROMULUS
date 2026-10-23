@@ -10,7 +10,7 @@ from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.expansion import ExpansionEngine
-from romulus.hunt.links import LinkFetcher
+from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, new_hunt_id
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
@@ -241,7 +241,10 @@ def _run_expansion_safely(
         return _run_expansion(s, repo, client, hunt, contracts, window, owner_token)
     except Exception as exc:
         log.exception("expansion failed")
-        linked = {link["anchor_id"] for link in repo.expansion_links(hunt["id"])}
+        linked = {
+            link["anchor_id"] for link in repo.expansion_links(hunt["id"])
+            if not is_agent_reach(link["link_type"], link["strength"])
+        }
         for anchor in repo.expansion_anchors(hunt["id"]):
             if anchor["status"] == "pending":
                 # an anchor some of whose links ran was partly expanded, not unexpanded
@@ -331,7 +334,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     def heartbeat():
         repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
 
-    stage_dir = s.home / "stage"
+    stage_dir = s.stage_path
     clear_stale_stages(stage_dir)
     sweep = Sweep(
         repo, client, hunt_id, window, contracts, on_candidate, heartbeat=heartbeat, stage_dir=stage_dir,

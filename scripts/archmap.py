@@ -26,6 +26,11 @@ LAYER_RULES: dict[str, set[str]] = {
     "baseline": {"hunt", "sources"},
     "store": {"mission", "sources", "evidence", "detect", "decide", "agent", "correlate", "report", "worker"},
 }
+TRANSITIVE_LAYER_RULES: dict[str, set[str]] = {
+    # Model-facing code must remain loadable without importing source adapters,
+    # including through a seemingly source-neutral hunt helper.
+    "agent": {"sources"},
+}
 
 
 def module_name(path: Path) -> str:
@@ -81,6 +86,23 @@ def violations(imports: dict[str, set[str]]) -> list[str]:
                 banned = LAYER_RULES.get(src_pkg, set())
             if dst_pkg in banned:
                 out.append(f"{mod} imports {t} (layer rule: {src_pkg} must not import {dst_pkg})")
+    for src_pkg, banned in TRANSITIVE_LAYER_RULES.items():
+        for origin in sorted(mod for mod in imports if top(mod) == src_pkg):
+            pending = [(origin, [origin])]
+            visited = {origin}
+            while pending:
+                current, route = pending.pop()
+                for target in sorted(imports.get(current, ())):
+                    if top(target) in banned:
+                        out.append(
+                            f"{origin} reaches {target} through {' -> '.join(route)} "
+                            f"(transitive layer rule: {src_pkg} must not reach {top(target)})",
+                        )
+                        pending = []
+                        break
+                    if target in imports and target not in visited:
+                        visited.add(target)
+                        pending.append((target, [*route, target]))
     return sorted(out)
 
 

@@ -63,6 +63,39 @@ def _process_event(argv=None, *, event_id="event-1", ts=START) -> TypedEvent:
     )
 
 
+def _auth_event(event_id: str, *, host: str, account: str, session: int, boot: str) -> TypedEvent:
+    return TypedEvent(
+        id=event_id, family="auth", ts=START, host=host, outcome=Outcome.success,
+        fields={
+            "user.name": fv(account, f"{event_id}:user"),
+            "process.session_id": fv(session, f"{event_id}:session"),
+            "host.boot_id": fv(boot, f"{event_id}:boot"),
+            "auth.phase": fv("login", f"{event_id}:phase"),
+        },
+        raw=[RawRef(target="romulus-host-x", native_id=event_id, digest="d")],
+        normalizer="test@1",
+    )
+
+
+def test_auth_activity_retains_account_or_host_across_sessions_and_boots():
+    account_request = AuthActivityRequest(tool="auth_activity", arguments=AuthActivityArgs(
+        entity=EntityRef(kind="account", value="alice", role="actor"), start=START, end=END,
+    ))
+    host_request = AuthActivityRequest(tool="auth_activity", arguments=AuthActivityArgs(
+        entity=EntityRef(kind="host", value="web01", role="host"), start=START, end=END,
+    ))
+    alice_first = _auth_event("alice-first", host="web01", account="alice", session=1, boot="boot-a")
+    alice_other = _auth_event("alice-other", host="web02", account="alice", session=2, boot="boot-b")
+    bob_same_host = _auth_event("bob", host="web01", account="bob", session=1, boot="boot-c")
+
+    assert PivotExecutor._retain(account_request, alice_first)
+    assert PivotExecutor._retain(account_request, alice_other)
+    assert not PivotExecutor._retain(account_request, bob_same_host)
+    assert PivotExecutor._retain(host_request, alice_first)
+    assert PivotExecutor._retain(host_request, bob_same_host)
+    assert not PivotExecutor._retain(host_request, alice_other)
+
+
 def test_executor_counts_and_stops_actual_source_queries(monkeypatch):
     calls = []
 
@@ -84,6 +117,151 @@ def test_executor_counts_and_stops_actual_source_queries(monkeypatch):
     assert executor.source_queries == 2
     assert outcomes[2].completeness == Completeness.failed
     assert outcomes[2].reasons == ["expansion_source_query_budget:2"]
+
+
+def test_agent_source_query_cap_is_a_partial_bounded_stop():
+    contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
+        "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+    })}
+    request = ProcessTreeRequest(tool="process_tree", arguments=ProcessTreeArgs(
+        host="video", process_id=123, start=START, end=END,
+    ))
+
+    result = PivotExecutor(
+        _repo(), FakeClient(), "h1", contracts, source_query_budget=0,
+    ).run("case-1", request)
+
+    assert result.status == "partial"
+    assert result.reasons == ["expansion_source_query_budget:0"]
+    assert result.coverage[0].status == "failed"
+
+
+def test_agent_source_query_cap_is_atomic_and_survives_new_executors(monkeypatch):
+    repo = _repo()
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+    for task_id in ("task-1", "task-2"):
+        repo.upsert_task(task_id, "h1", "pivot", "session", {}, task_id)
+
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+    ))
+    first = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=1, source_query_scope="agent",
+    )
+    second = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=1, source_query_scope="agent",
+    )
+
+    allowed = first._execute(intent, contract, spend_task_id="task-1")
+    refused = second._execute(intent, contract, spend_task_id="task-2")
+
+    assert allowed.completeness == Completeness.complete
+    assert refused.completeness == Completeness.failed
+    assert refused.reasons == ["agent_source_query_budget:1"]
+    assert repo.agent_source_queries("h1") == 1
+
+
+def test_agent_source_query_cap_makes_link_fetch_partial_not_failed():
+    repo = _repo()
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+    executor = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=0, source_query_scope="agent",
+    )
+
+    batch = executor.fetch_intents("anchor", "fetch-key", [intent], lambda _event: True)
+
+    assert batch.status == "partial"
+    assert batch.reasons == ["agent_source_query_budget:0"]
+
+
+def test_agent_link_fetch_uses_its_own_task_kind_and_never_counts_as_expansion(monkeypatch):
+    repo = _repo()
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    intent = SearchIntent(kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10)
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+    ))
+    executor = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=5, source_query_scope="agent",
+    )
+
+    batch = executor.fetch_intents("anchor", "fetch-key", [intent], lambda _event: True)
+
+    assert batch.status == "complete"
+    assert [task["kind"] for task in repo.tasks("h1")] == ["agent_follow_link"]
+    assert repo.expansion_source_queries("h1") == 0
+
+
+@pytest.mark.parametrize("agent_first", [False, True])
+def test_agent_and_deterministic_link_fetches_have_separate_tasks_in_both_orders(
+        monkeypatch, agent_first):
+    repo = _repo()
+    contract = contract_from_types("host-x", {"@timestamp": "date"})
+    intent = SearchIntent(
+        kind="raw", target="host-x", window=Window(start=START, end=END), max_records=10,
+    )
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=0, total_relation="eq", returned=0,
+    ))
+    deterministic = PivotExecutor(repo, FakeClient(), "h1", {"host-x": contract})
+    agent = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=5, source_query_scope="agent",
+    )
+
+    ordered = [agent, deterministic] if agent_first else [deterministic, agent]
+    results = [executor.fetch_intents(
+        "same-anchor", "same-link-window-and-key", [intent], lambda _event: True,
+    ) for executor in ordered]
+
+    assert all(result.status == "complete" for result in results)
+    tasks = {task["kind"]: task for task in repo.tasks("h1")}
+    assert set(tasks) == {"agent_follow_link", "expansion_link"}
+    assert tasks["agent_follow_link"]["id"] != tasks["expansion_link"]["id"]
+    assert tasks["agent_follow_link"]["source_queries"] == 1
+    assert tasks["expansion_link"]["source_queries"] == 1
+    assert repo.agent_source_queries("h1") == 1
+
+
+@pytest.mark.parametrize("agent_first", [False, True])
+def test_agent_and_deterministic_host_resolution_have_separate_tasks_in_both_orders(
+        monkeypatch, agent_first):
+    repo = _repo()
+    contract = contract_from_types("host-x", {
+        "@timestamp": "date", "host.ip": "ip", "host.name": "keyword",
+    })
+    monkeypatch.setattr(pivot_module, "execute", lambda *_args, **_kwargs: SearchOutcome(
+        target="host-x", fingerprint="fp", started_at=START, ended_at=END,
+        completeness=Completeness.complete, total=1, total_relation="eq", returned=1,
+        buckets=[{"key": {"host.name": "victim"}, "count": 1}],
+    ))
+    deterministic = PivotExecutor(repo, FakeClient(), "h1", {"host-x": contract})
+    agent = PivotExecutor(
+        repo, FakeClient(), "h1", {"host-x": contract},
+        source_query_budget=5, source_query_scope="agent",
+    )
+
+    ordered = [agent, deterministic] if agent_first else [deterministic, agent]
+    outcomes = [executor.resolve_host_ip(
+        "same-anchor", "10.0.0.2", START, END,
+    ) for executor in ordered]
+
+    assert outcomes == [("victim", None), ("victim", None)]
+    tasks = {task["kind"]: task for task in repo.tasks("h1")}
+    assert set(tasks) == {"agent_follow_link", "expansion_link"}
+    assert tasks["agent_follow_link"]["id"] != tasks["expansion_link"]["id"]
+    assert tasks["agent_follow_link"]["source_queries"] == 1
+    assert tasks["expansion_link"]["source_queries"] == 1
+    assert repo.agent_source_queries("h1") == 1
 
 
 def test_fetch_query_cap_leaves_unattempted_ranges_unresolved(monkeypatch):
