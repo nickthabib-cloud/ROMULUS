@@ -211,3 +211,34 @@ def test_deleting_one_hunt_keeps_raw_records_used_by_another_hunts_overlay():
 
     repo.delete_hunt("h3", actor="test")
     assert repo.raw_records([shared_id]) == []
+
+
+def test_transferred_owner_merges_later_refs_into_its_snapshotted_citations():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {}, "d1", "test")
+    repo.create_hunt("h2", {}, "d2", "test")
+    owner_ref = RawRef(target="windows-a", native_id="copy-1", digest="digest-1")
+    transferred_ref = RawRef(target="windows-b", native_id="copy-2", digest="digest-2")
+    later_ref = RawRef(target="windows-c", native_id="copy-3", digest="digest-3")
+    owner = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host="ws01",
+        fields={}, raw=[owner_ref], normalizer="windows-ecs@1",
+    )
+
+    repo.save_evidence("h1", [owner], {owner_ref.key: {"copy": 1}}, None)
+    repo.save_evidence(
+        "h2", [owner.model_copy(update={"raw": [transferred_ref]})],
+        {transferred_ref.key: {"copy": 2}}, None,
+    )
+    repo.delete_hunt("h1", actor="test")
+    repo.save_evidence(
+        "h2", [owner.model_copy(update={"raw": [later_ref]})],
+        {later_ref.key: {"copy": 3}}, None,
+    )
+
+    assert [citation["native_id"] for citation in _citations(
+        repo, {"hunt_id": "h2", "event_ids": [owner.id]},
+    )] == ["copy-2", "copy-3"]
+    assert _citation_count(repo) == 0
+    assert repo.raw_records([raw_id(owner_ref.target, owner_ref.native_id)]) == []

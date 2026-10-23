@@ -427,7 +427,13 @@ class Repo:
             # can depend on it through (a) their findings' event_ids, (b) their investigation steps'
             # pivot digests, (c) their own entity links (written by save_evidence per hunt), and (d) their
             # expansion links.
-            mine = {r.id for r in c.execute(select(t.typed_event.c.id).where(t.typed_event.c.hunt_id == hunt_id))}
+            owned_raw = {
+                event_id: list(raw_ids or [])
+                for event_id, raw_ids in c.execute(select(
+                    t.typed_event.c.id, t.typed_event.c.raw_ids,
+                ).where(t.typed_event.c.hunt_id == hunt_id))
+            }
+            mine = set(owned_raw)
             cited_by: dict[str, str] = {}
             for cid_hunt, eids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)
                                             .where(t.candidate.c.hunt_id != hunt_id)):
@@ -465,21 +471,39 @@ class Repo:
                     if eid in mine:
                         cited_by.setdefault(eid, link_hunt)
             # (e) a later hunt's scoped citation overlay also keeps the stable typed row it describes
-            for event_id, citation_hunt in c.execute(select(
-                t.event_citation.c.event_id, t.event_citation.c.hunt_id,
-            ).where(t.event_citation.c.hunt_id != hunt_id)):
+            citation_overlays = {
+                (row["event_id"], row["hunt_id"]): dict(row)
+                for row in c.execute(select(t.event_citation).where(
+                    t.event_citation.c.hunt_id != hunt_id,
+                )).mappings()
+            }
+            for event_id, citation_hunt in citation_overlays:
                 if event_id in mine:
                     cited_by.setdefault(event_id, citation_hunt)
             # (f) other hunts' baseline observations cite their first window event
             for eid, obs_hunt in c.execute(observation_citations_query(hunt_id)):
                 cited_by.setdefault(eid, obs_hunt)
+            displaced_raw: set[str] = set()
             for eid, owner in cited_by.items():
-                c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(hunt_id=owner))
+                overlay = citation_overlays.get((eid, owner))
+                values: dict[str, Any] = {"hunt_id": owner}
+                if overlay is not None:
+                    displaced_raw.update(owned_raw[eid])
+                    values.update(event=overlay["event"], raw_ids=overlay["raw_ids"])
+                    normalizer = (overlay["event"] or {}).get("normalizer")
+                    if isinstance(normalizer, str):
+                        values["normalizer"] = normalizer
+                c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(**values))
+                if overlay is not None:
+                    c.execute(t.event_citation.delete().where(
+                        t.event_citation.c.hunt_id == owner,
+                        t.event_citation.c.event_id == eid,
+                    ))
             drop_events = mine - set(cited_by)
 
             # Raw copies referenced only by this hunt's dropped events or scoped citation overlays.
             # An overlay can cite a duplicate source copy that the stable global event never cited.
-            candidate_raw: set[str] = set()
+            candidate_raw: set[str] = set(displaced_raw)
             for (raw_ids,) in c.execute(select(t.typed_event.c.raw_ids).where(t.typed_event.c.id.in_(drop_events))):
                 candidate_raw.update(raw_ids or [])
             for (raw_ids,) in c.execute(select(t.event_citation.c.raw_ids).where(
