@@ -477,14 +477,21 @@ class Repo:
                 c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(hunt_id=owner))
             drop_events = mine - set(cited_by)
 
-            # raw copies referenced only by the events being dropped
+            # Raw copies referenced only by this hunt's dropped events or scoped citation overlays.
+            # An overlay can cite a duplicate source copy that the stable global event never cited.
             candidate_raw: set[str] = set()
             for (raw_ids,) in c.execute(select(t.typed_event.c.raw_ids).where(t.typed_event.c.id.in_(drop_events))):
+                candidate_raw.update(raw_ids or [])
+            for (raw_ids,) in c.execute(select(t.event_citation.c.raw_ids).where(
+                    t.event_citation.c.hunt_id == hunt_id)):
                 candidate_raw.update(raw_ids or [])
             still_used: set[str] = set()
             if candidate_raw:
                 for (raw_ids,) in c.execute(select(t.typed_event.c.raw_ids).where(
                         t.typed_event.c.id.not_in(drop_events) if drop_events else true())):
+                    still_used.update(set(raw_ids or []) & candidate_raw)
+                for (raw_ids,) in c.execute(select(t.event_citation.c.raw_ids).where(
+                        t.event_citation.c.hunt_id != hunt_id)):
                     still_used.update(set(raw_ids or []) & candidate_raw)
             drop_raw = candidate_raw - still_used
 
@@ -1128,24 +1135,34 @@ class Repo:
             if global_row is None:
                 continue
             row = overlays.get(event.id)
-            stored = dict(row["event"] if row else global_row["event"])
-            stored_raw = list(stored.get("raw") or [])
-            known = {(item.get("target"), item.get("native_id")) for item in stored_raw}
-            additions = [raw.model_dump(mode="json") for raw in event.raw
-                         if (raw.target, raw.native_id) not in known]
-            if not additions:
-                continue
-            stored["raw"] = [*stored_raw, *additions]
-            raw_ids = list(dict.fromkeys([
-                *((row or global_row).get("raw_ids") or []),
-                *(raw_id(raw.target, raw.native_id) for raw in event.raw),
-            ]))
             if row:
+                stored = dict(row["event"])
+                stored_raw = list(stored.get("raw") or [])
+                known = {(item.get("target"), item.get("native_id")) for item in stored_raw}
+                additions = [raw.model_dump(mode="json") for raw in event.raw
+                             if (raw.target, raw.native_id) not in known]
+                if not additions:
+                    continue
+                stored["raw"] = [*stored_raw, *additions]
+                raw_ids = list(dict.fromkeys([
+                    *(row.get("raw_ids") or []),
+                    *(raw_id(raw.target, raw.native_id) for raw in event.raw),
+                ]))
                 c.execute(t.event_citation.update().where(
                     t.event_citation.c.hunt_id == hunt_id,
                     t.event_citation.c.event_id == event.id,
                 ).values(event=stored, raw_ids=raw_ids))
             else:
+                global_raw = list((global_row["event"] or {}).get("raw") or [])
+                global_known = {(item.get("target"), item.get("native_id")) for item in global_raw}
+                if all((raw.target, raw.native_id) in global_known for raw in event.raw):
+                    continue
+                # This hunt's first overlay starts from what this hunt actually retrieved,
+                # never from the owning hunt's citation set.
+                stored = event.model_dump(mode="json")
+                raw_ids = list(dict.fromkeys(
+                    raw_id(raw.target, raw.native_id) for raw in event.raw
+                ))
                 c.execute(t.event_citation.insert().values(
                     hunt_id=hunt_id, event_id=event.id, event=stored, raw_ids=raw_ids,
                 ))

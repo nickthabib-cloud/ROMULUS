@@ -710,6 +710,20 @@ class PivotExecutor:
         return None
 
     @staticmethod
+    def _intent_datasets(intent: SearchIntent) -> set[str]:
+        """Datasets an intent searches, including dataset alternatives in ``any_of``."""
+        datasets: set[str] = set()
+        predicates = [*intent.filters, *(predicate for group in intent.any_of for predicate in group)]
+        for predicate in predicates:
+            if predicate.field != "event.dataset":
+                continue
+            if predicate.op == "eq" and isinstance(predicate.value, str):
+                datasets.add(predicate.value)
+            elif predicate.op == "in" and isinstance(predicate.value, (list, tuple, set, frozenset)):
+                datasets.update(value for value in predicate.value if isinstance(value, str))
+        return datasets
+
+    @staticmethod
     def _ip_normalization_reasons(intent: SearchIntent, records: list[dict]) -> list[str]:
         if (PivotExecutor._intent_dataset(intent) != "linux.audit"
                 or "entity_timeline" not in intent.purpose):
@@ -738,7 +752,11 @@ class PivotExecutor:
         args = request.arguments
         unresolved: list[PivotCoverage] = []
         intents = intents or []
-        planned = {(intent.target, PivotExecutor._intent_dataset(intent)) for intent in intents}
+        planned = {
+            (intent.target, dataset)
+            for intent in intents
+            for dataset in PivotExecutor._intent_datasets(intent)
+        }
         for target, contract in self.contracts.items():
             inventoried = self.dataset_inventory.get(target)
             if inventoried is not None:

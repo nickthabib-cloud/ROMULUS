@@ -391,6 +391,41 @@ def test_windows_host_timeline_and_process_tree_use_catalog_datasets_and_native_
             "windows.system", "windows.forwarded"} <= set(process_datasets)
 
 
+def test_windows_ip_timeline_does_not_mark_its_any_of_datasets_unsearchable():
+    types = {
+        **_windows_types(),
+        "source.ip": "ip",
+        "destination.ip": "ip",
+    }
+    contract = contract_from_types("windows-host", types, role="host", os_family="windows")
+    inventory = {"windows.security", "windows.sysmon_operational"}
+    executor = PivotExecutor(
+        None, None, "h1", {contract.target: contract},
+        dataset_inventory={contract.target: inventory},
+    )
+    request = EntityTimelineRequest(
+        tool="entity_timeline",
+        arguments=EntityTimelineArgs(
+            entity=EntityRef(kind="ip", value="203.0.113.8", role="src"),
+            start=START,
+            end=END,
+        ),
+    )
+
+    intents, unresolved = executor.plan(request)
+
+    assert len(intents) == 1
+    planned_datasets = {
+        value
+        for group in intents[0].any_of
+        for predicate in group
+        if predicate.field == "event.dataset"
+        for value in predicate.value
+    }
+    assert inventory <= planned_datasets
+    assert unresolved == []
+
+
 def test_winlogbeat_without_event_dataset_is_retrieved_by_sweep_timeline_and_links():
     """Winlogbeat 7/8 mappings expose winlog.channel even when event.dataset is absent.
 
