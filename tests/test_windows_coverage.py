@@ -53,6 +53,13 @@ class WindowsProcessRule(Playbook):
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 1),)
 
 
+class UndeclaredWindowsProcessRule(Playbook):
+    id = "test.windows.process.undeclared"
+    title = "test"
+    families = ("process_exec",)
+    os_families = ("windows",)
+
+
 def _contract():
     return contract_from_types(
         "target-name-is-irrelevant",
@@ -147,6 +154,51 @@ def test_windows_coverage_gate_requires_inventory_continuity_and_matching_attest
         truncated.target, truncated, rule, [_hit(10), _hit(11)], [],
     )
     assert "collection not attested: source host inventory truncated" in missing
+
+
+def test_windows_partition_requires_channel_liveness_at_both_edges(tmp_path):
+    contract = _contract()
+    rule = WindowsProcessRule()
+    window = Window(start=START, end=START + timedelta(hours=6))
+    sweep = Sweep(None, None, "h1", window, {contract.target: contract}, site_facts=_site(tmp_path))
+    event_class = lookup_event_class(SYSMON_CHANNEL, SYSMON, 1)
+    assert event_class is not None
+    sweep._windows_inventory[contract.target] = {event_class.token}
+    sweep._windows_inventory_reasons[contract.target] = []
+    early = _hit(10)
+    early["_source"]["@timestamp"] = (START + timedelta(minutes=5)).isoformat()
+    late = _hit(11)
+    late["_source"]["@timestamp"] = (START + timedelta(hours=5, minutes=55)).isoformat()
+
+    reasons = sweep._windows_rule_reasons(contract.target, contract, rule, [early], [], window)
+    head_reasons = sweep._windows_rule_reasons(contract.target, contract, rule, [late], [], window)
+    live_reasons = sweep._windows_rule_reasons(contract.target, contract, rule, [early, late], [], window)
+
+    assert reasons == [
+        "no records from ws01.example.test/Microsoft-Windows-Sysmon/Operational "
+        "after 2026-01-02T00:05:00+00:00"
+    ]
+    assert head_reasons == [
+        "no records from ws01.example.test/Microsoft-Windows-Sysmon/Operational "
+        "before 2026-01-02T05:55:00+00:00"
+    ]
+    assert live_reasons == []
+
+
+def test_rule_without_declared_classes_requires_every_catalog_class_for_its_family(tmp_path):
+    contract = _contract()
+    rule = UndeclaredWindowsProcessRule()
+    window = Window(start=START, end=START + timedelta(minutes=5))
+    sweep = Sweep(None, None, "h1", window, {contract.target: contract}, site_facts=_site(tmp_path))
+    sysmon = lookup_event_class(SYSMON_CHANNEL, SYSMON, 1)
+    security = lookup_event_class("Security", SECURITY, 4688)
+    assert sysmon is not None and security is not None
+    sweep._windows_inventory[contract.target] = {sysmon.token}
+    sweep._windows_inventory_reasons[contract.target] = []
+
+    reasons = sweep._windows_rule_reasons(contract.target, contract, rule, [_hit(10), _hit(11)], [])
+
+    assert any("Security|Microsoft-Windows-Security-Auditing|4688" in reason for reason in reasons)
 
 
 def test_skip_reason_state_is_bounded_without_losing_the_total_count():

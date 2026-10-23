@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
 from romulus.detect.registry import fresh_pack
@@ -76,6 +76,7 @@ BOOT_LISTED = 100
 BOOT_BLIND_LISTED = 20
 # A rule-coverage cell recording that sweep-time boot placement was contradicted on some host
 BOOT_PLACEMENT_PARTITION = "boot-placement"
+DEFAULT_WINDOWS_LIVENESS_TOLERANCE = timedelta(minutes=15)
 MAX_SKIP_REASONS = 256
 SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category limit"
 
@@ -121,7 +122,8 @@ class Sweep:
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
                  contracts: dict[str, FieldContract], on_candidate: Callable[[dict], None] | None = None,
                  heartbeat: Callable[[], None] | None = None, stage_dir=None, prefetch: bool | None = None,
-                 site_facts: SiteFacts | None = None):
+                 site_facts: SiteFacts | None = None,
+                 windows_liveness_tolerance: timedelta = DEFAULT_WINDOWS_LIVENESS_TOLERANCE):
         self.repo, self.client, self.hunt_id, self.window = repo, client, hunt_id, window
         # Fetch the next partition while this one is evaluated (the client's setting unless given). It changes
         # when a partition's records are read, never what is read or the order partitions are evaluated in.
@@ -132,6 +134,8 @@ class Sweep:
         self._pool: ThreadPoolExecutor | None = None
         self.contracts = contracts
         self.site_facts = site_facts or absent_site_facts()
+        # Three 5-minute planning buckets tolerate normal low-volume jitter but expose material head/tail outages.
+        self.windows_liveness_tolerance = windows_liveness_tolerance
         self._windows_inventory: dict[str, set[str]] = {}
         self._windows_inventory_reasons: dict[str, list[str]] = {}
         self._windows_record_ids = RecordIdContinuity()
@@ -235,6 +239,7 @@ class Sweep:
         playbook: Playbook,
         records: list[dict],
         gap_reasons: list[str],
+        partition: Window | None = None,
     ) -> list[str]:
         if contract is None or contract.os_family != "windows" or "windows" not in playbook.os_families:
             return []
@@ -253,18 +258,13 @@ class Sweep:
                     )
                 else:
                     required.append(event_class)
-            for event_class in required:
-                if event_class.token not in inventory:
-                    reasons.append(
-                        "event class absent from source inventory: "
-                        f"{event_class.channel}|{event_class.provider}|{event_class.event_id}"
-                    )
         else:
-            required = [event_class for event_class in catalog if event_class.token in inventory]
-            if not required:
+            required = list(catalog)
+        for event_class in required:
+            if event_class.token not in inventory:
                 reasons.append(
-                    "event class absent from source inventory for family/families: "
-                    + ", ".join(sorted(set(playbook.families)))
+                    "event class absent from source inventory: "
+                    f"{event_class.channel}|{event_class.provider}|{event_class.event_id}"
                 )
         reasons.extend(gap_reasons)
         hosts = self._windows_hosts(contract, records)
@@ -280,12 +280,31 @@ class Sweep:
             )
             for record in records
         }
+        observed_times: dict[tuple[str, str], list[datetime]] = {}
+        for record in records:
+            source = record.get("_source") or {}
+            winlog = source.get("winlog") or {}
+            host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+            channel = str(winlog.get("channel") or "").casefold()
+            raw_time = winlog.get("time_created") or source.get("@timestamp")
+            try:
+                when = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00")).astimezone(UTC)
+            except (TypeError, ValueError):
+                continue
+            observed_times.setdefault((host, channel), []).append(when)
         for host in hosts:
             for event_class in required:
-                if (host, event_class.channel.casefold()) not in observed_channels:
+                channel_key = (host, event_class.channel.casefold())
+                if channel_key not in observed_channels:
                     reasons.append(
                         f"shipper gaps unresolved: no records on {event_class.channel} for {host} in partition"
                     )
+                elif partition is not None and observed_times.get(channel_key):
+                    first, last = min(observed_times[channel_key]), max(observed_times[channel_key])
+                    if first > partition.start + self.windows_liveness_tolerance:
+                        reasons.append(f"no records from {host}/{event_class.channel} before {first.isoformat()}")
+                    if last < partition.end - self.windows_liveness_tolerance:
+                        reasons.append(f"no records from {host}/{event_class.channel} after {last.isoformat()}")
                 for fact, arguments, label in collection_requirements(event_class):
                     if not self.site_facts.attests(host, fact, **arguments):
                         reasons.append(f"collection not attested: {label} on {host}")
@@ -538,7 +557,7 @@ class Sweep:
         for pb in self.pack:
             target_applicable = target_os == "unknown" or target_os in pb.os_families
             windows_reasons = self._windows_rule_reasons(
-                target, contract, pb, out.records, gap_reasons,
+                target, contract, pb, out.records, gap_reasons, w,
             )
             windows_gate_reasons.update(windows_reasons)
             rule_partial = target_applicable and (
