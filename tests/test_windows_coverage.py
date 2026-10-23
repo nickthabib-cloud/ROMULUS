@@ -104,20 +104,22 @@ def test_record_id_gap_scan_is_streaming_duplicate_safe_and_names_each_gap():
     ]
     assert any("out of order" in reason for reason in second)
     assert any("non-numeric" in reason for reason in second)
-    assert len(continuity.last) == 1
+    assert continuity.state_count == 1
 
 
-def test_record_id_continuity_refuses_singletons_and_bounds_host_channel_state():
-    continuity = RecordIdContinuity(max_keys=1)
+def test_record_id_continuity_spills_5000_host_channels_without_a_count_cap():
+    continuity = RecordIdContinuity()
+    records = []
+    for host_number in range(5_000):
+        for record_id in (10, 11):
+            hit = _hit(record_id, native_id=f"{host_number}-{record_id}")
+            hit["_source"]["winlog"]["computer_name"] = f"ws{host_number:04d}.example.test"
+            records.append(hit)
 
-    singleton = continuity.observe("target", [_hit(10)])
-    second_host = _hit(20)
-    second_host["_source"]["winlog"]["computer_name"] = "ws02.example.test"
-    overflow = continuity.observe("target", [second_host])
+    reasons = continuity.observe("target", records)
 
-    assert any("fewer than two" in reason for reason in singleton)
-    assert any("capacity" in reason for reason in overflow)
-    assert len(continuity.last) == 1
+    assert reasons == []
+    assert continuity.state_count == 5_000
 
 
 def test_windows_coverage_gate_requires_inventory_continuity_and_matching_attestation(tmp_path):
@@ -175,12 +177,12 @@ def test_windows_partition_requires_channel_liveness_at_both_edges(tmp_path):
     live_reasons = sweep._windows_rule_reasons(contract.target, contract, rule, [early, late], [], window)
 
     assert reasons == [
-        "no records from ws01.example.test/Microsoft-Windows-Sysmon/Operational "
-        "after 2026-01-02T00:05:00+00:00"
+        ("no records from ws01.example.test/Microsoft-Windows-Sysmon/Operational "
+         "after 2026-01-02T00:05:00+00:00")
     ]
     assert head_reasons == [
-        "no records from ws01.example.test/Microsoft-Windows-Sysmon/Operational "
-        "before 2026-01-02T05:55:00+00:00"
+        ("no records from ws01.example.test/Microsoft-Windows-Sysmon/Operational "
+         "before 2026-01-02T05:55:00+00:00")
     ]
     assert live_reasons == []
 
@@ -199,6 +201,25 @@ def test_rule_without_declared_classes_requires_every_catalog_class_for_its_fami
     reasons = sweep._windows_rule_reasons(contract.target, contract, rule, [_hit(10), _hit(11)], [])
 
     assert any("Security|Microsoft-Windows-Security-Auditing|4688" in reason for reason in reasons)
+
+
+def test_windows_reasons_summarize_5000_hosts_per_class_with_ten_host_sample():
+    hosts = tuple(f"ws{number:04d}.example.test" for number in range(5_000))
+    contract = _contract().model_copy(update={"hosts": hosts})
+    rule = WindowsProcessRule()
+    sweep = Sweep(None, None, "h1", Window(start=START, end=START + timedelta(hours=1)), {
+        contract.target: contract,
+    })
+    event_class = lookup_event_class(SYSMON_CHANNEL, SYSMON, 1)
+    assert event_class is not None
+    sweep._windows_inventory[contract.target] = {event_class.token}
+    sweep._windows_inventory_reasons[contract.target] = []
+
+    reasons = sweep._windows_rule_reasons(contract.target, contract, rule, [], [])
+
+    assert len(reasons) == 2
+    assert all("5,000 hosts" in reason for reason in reasons)
+    assert all(sum(host in reason for host in hosts) == 10 for reason in reasons)
 
 
 def test_skip_reason_state_is_bounded_without_losing_the_total_count():

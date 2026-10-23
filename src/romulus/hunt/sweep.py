@@ -317,26 +317,65 @@ class Sweep:
             channel = str(winlog.get("channel") or "").casefold()
             raw_time = winlog.get("time_created") or source.get("@timestamp")
             try:
-                when = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00")).astimezone(UTC)
+                when = datetime.fromisoformat(str(raw_time)).astimezone(UTC)
             except (TypeError, ValueError):
                 continue
             observed_times.setdefault((host, channel), []).append(when)
-        for host in hosts:
-            for event_class in required:
+        def summarize(label: str, affected: list[str], event_class) -> str | None:
+            affected = sorted(set(affected))
+            if not affected:
+                return None
+            if len(affected) == 1:
+                return f"{label} on {affected[0]}"
+            sample = ", ".join(affected[:10])
+            token = f"{event_class.channel}|{event_class.provider}|{event_class.event_id}"
+            return f"{label} on {len(affected):,} hosts [{token}] (sample: {sample})"
+
+        for event_class in required:
+            absent_hosts: list[str] = []
+            late_start_hosts: list[str] = []
+            early_stop_hosts: list[str] = []
+            unattested_by_label: dict[str, list[str]] = {}
+            single_edge_details: dict[tuple[str, str], str] = {}
+            for host in hosts:
                 channel_key = (host, event_class.channel.casefold())
                 if channel_key not in observed_channels:
-                    reasons.append(
-                        f"shipper gaps unresolved: no records on {event_class.channel} for {host} in partition"
-                    )
+                    absent_hosts.append(host)
                 elif partition is not None and observed_times.get(channel_key):
                     first, last = min(observed_times[channel_key]), max(observed_times[channel_key])
                     if first > partition.start + self.windows_liveness_tolerance:
-                        reasons.append(f"no records from {host}/{event_class.channel} before {first.isoformat()}")
+                        late_start_hosts.append(host)
+                        single_edge_details[("before", host)] = first.isoformat()
                     if last < partition.end - self.windows_liveness_tolerance:
-                        reasons.append(f"no records from {host}/{event_class.channel} after {last.isoformat()}")
+                        early_stop_hosts.append(host)
+                        single_edge_details[("after", host)] = last.isoformat()
                 for fact, arguments, label in collection_requirements(event_class):
                     if not self.site_facts.attests(host, fact, **arguments):
-                        reasons.append(f"collection not attested: {label} on {host}")
+                        unattested_by_label.setdefault(label, []).append(host)
+            summarized = summarize(
+                f"shipper gaps unresolved: no records on {event_class.channel} in partition",
+                absent_hosts, event_class,
+            )
+            if summarized:
+                reasons.append(summarized)
+            for edge, affected in (("before", late_start_hosts), ("after", early_stop_hosts)):
+                if len(set(affected)) == 1:
+                    host = affected[0]
+                    reasons.append(
+                        f"no records from {host}/{event_class.channel} {edge} "
+                        f"{single_edge_details[(edge, host)]}"
+                    )
+                else:
+                    summarized = summarize(
+                        f"no records from {event_class.channel} near partition {edge} edge",
+                        affected, event_class,
+                    )
+                    if summarized:
+                        reasons.append(summarized)
+            for label, affected in unattested_by_label.items():
+                summarized = summarize(f"collection not attested: {label}", affected, event_class)
+                if summarized:
+                    reasons.append(summarized)
         return sorted(set(reasons))
 
     @staticmethod
@@ -771,3 +810,7 @@ class Sweep:
         if stage is not None:
             stage.close()
             self._stage = None
+        continuity = getattr(self, "_windows_record_ids", None)
+        if continuity is not None:
+            continuity.close()
+            self._windows_record_ids = None

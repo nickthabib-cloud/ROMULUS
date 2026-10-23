@@ -1,12 +1,17 @@
 """Build SourceProfiles and FieldContracts from the live mapping of a concrete target."""
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from romulus.store.db import digest
+
+HOST_INVENTORY_PAGE_SIZE = 500
+HOST_INVENTORY_PAGE_LIMIT = 100
+HOST_INVENTORY_BYTE_BUDGET = 8 * 1024 * 1024
 
 # Which predicate ops each native mapping type supports *with a retrieval-superset guarantee*.
 # `text` fields are analyzed: phrase matching can miss qualifying records (tokenization), so no
@@ -230,20 +235,60 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
     tf, ds_field, host_field = (("firstPacket", "protocol", "node") if schema == "arkime_sessions"
                                 else ("@timestamp", dataset_field,
                                       "winlog.computer_name" if windows else "host.name"))
+    host_aggregation = ({"composite": {
+        "size": HOST_INVENTORY_PAGE_SIZE,
+        "sources": [{"host": {"terms": {"field": host_field}}}],
+    }} if windows else {"terms": {"field": host_field, "size": 500}})
     body = {
         "size": 0, "track_total_hits": True,
         "aggs": {
             "tmin": {"min": {"field": tf}}, "tmax": {"max": {"field": tf}},
             "ds": {"terms": {"field": ds_field, "size": 200}},
-            "hosts": {"terms": {"field": host_field, "size": 500}},
+            "hosts": host_aggregation,
         },
     }
-    d = client.search(target, body)
-    aggs = d.get("aggregations", {})
+    host_counts: dict[str, int] = {}
     notes = []
-    for k in ("ds", "hosts"):
-        if aggs.get(k, {}).get("sum_other_doc_count"):
-            notes.append(f"{k} inventory truncated (sum_other_doc_count>0)")
+    if not windows:
+        d = client.search(target, body)
+        host_agg = d.get("aggregations", {}).get("hosts", {})
+        host_counts = {str(b["key"]): int(b["doc_count"]) for b in host_agg.get("buckets", [])}
+        if host_agg.get("sum_other_doc_count"):
+            notes.append("hosts inventory truncated (sum_other_doc_count>0)")
+    else:
+        first = None
+        host_bytes = 0
+        for _page in range(HOST_INVENTORY_PAGE_LIMIT):
+            d = client.search(target, body)
+            first = first or d
+            host_agg = d.get("aggregations", {}).get("hosts", {})
+            host_bytes += len(json.dumps(host_agg, separators=(",", ":"), default=str).encode())
+            if host_bytes > HOST_INVENTORY_BYTE_BUDGET:
+                notes.append(
+                    f"hosts inventory truncated (composite byte budget {HOST_INVENTORY_BYTE_BUDGET} exceeded)"
+                )
+                break
+            for bucket in host_agg.get("buckets", []):
+                key = bucket.get("key") or {}
+                host = key.get("host") if isinstance(key, dict) else key
+                if host not in (None, ""):
+                    host_counts[str(host)] = host_counts.get(str(host), 0) + int(bucket.get("doc_count") or 0)
+            after = host_agg.get("after_key")
+            if not after or not host_agg.get("buckets"):
+                break
+            body = {
+                **body,
+                "aggs": {
+                    **body["aggs"],
+                    "hosts": {"composite": {**body["aggs"]["hosts"]["composite"], "after": after}},
+                },
+            }
+        else:
+            notes.append(f"hosts inventory truncated (composite page budget {HOST_INVENTORY_PAGE_LIMIT} exceeded)")
+        d = first or {}
+    aggs = d.get("aggregations", {})
+    if aggs.get("ds", {}).get("sum_other_doc_count"):
+        notes.append("ds inventory truncated (sum_other_doc_count>0)")
     datasets = {b["key"]: b["doc_count"] for b in aggs.get("ds", {}).get("buckets", [])}
     role = source_role(field_types, set(datasets))
     prof = {
@@ -252,7 +297,7 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
         "backend": client.settings.es_flavor, "backend_version": client.version,
         "captured_at": datetime.now(UTC), "field_types": field_types,
         "datasets": datasets,
-        "hosts": {b["key"]: b["doc_count"] for b in aggs.get("hosts", {}).get("buckets", [])},
+        "hosts": host_counts,
         "time_min": aggs.get("tmin", {}).get("value_as_string"),
         "time_max": aggs.get("tmax", {}).get("value_as_string"),
         "doc_count": d.get("hits", {}).get("total", {}).get("value"), "notes": notes,

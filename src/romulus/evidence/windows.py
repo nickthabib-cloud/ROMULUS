@@ -6,7 +6,8 @@ import hashlib
 import json
 import ntpath
 import re
-from dataclasses import dataclass, field
+import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from xml.etree import ElementTree
 
@@ -50,14 +51,29 @@ class WindowsRecord:
         return self.data[name].origin
 
 
-@dataclass
 class RecordIdContinuity:
-    """Streaming gap counter with one integer per (target, computer, channel), never one entry per record."""
+    """Streaming gap state spilled to a SQLite temporary file.
 
-    last: dict[tuple[str, str, str], int] = field(default_factory=dict)
-    samples: dict[tuple[str, str, str], int] = field(default_factory=dict)
-    signatures: dict[tuple[str, str, str], str] = field(default_factory=dict)
-    max_keys: int = 4096
+    State remains one row per (target, computer, channel), never one entry per record. SQLite's empty filename
+    creates an OS-backed temporary database that is removed on close, avoiding a fleet-size completeness cap
+    without holding every host/channel key in Python memory.
+    """
+
+    def __init__(self) -> None:
+        self._db = sqlite3.connect("")
+        self._db.execute(
+            "CREATE TABLE continuity ("
+            "target TEXT NOT NULL, computer TEXT NOT NULL, channel TEXT NOT NULL, "
+            "last_id INTEGER NOT NULL, samples INTEGER NOT NULL, signature TEXT NOT NULL, "
+            "PRIMARY KEY (target, computer, channel)) WITHOUT ROWID"
+        )
+
+    @property
+    def state_count(self) -> int:
+        return int(self._db.execute("SELECT count(*) FROM continuity").fetchone()[0])
+
+    def close(self) -> None:
+        self._db.close()
 
     def observe(self, target: str, records: list[dict]) -> list[str]:
         gaps: dict[tuple[str, str], int] = {}
@@ -65,7 +81,6 @@ class RecordIdContinuity:
         malformed: set[tuple[str, str]] = set()
         reused: set[tuple[str, str]] = set()
         touched: set[tuple[str, str, str]] = set()
-        overflowed = False
         for record in records:
             source = record.get("_source") or {}
             if not is_windows_source(source):
@@ -85,26 +100,34 @@ class RecordIdContinuity:
                 continue
             key = (target, *group)
             signature = windows_record_signature(record)
-            if key not in self.last and len(self.last) >= self.max_keys:
-                overflowed = True
-                continue
-            prior = self.last.get(key)
-            if prior is None:
-                self.last[key] = record_id
-                self.samples[key] = 1
-                self.signatures[key] = signature
+            row = self._db.execute(
+                "SELECT last_id, samples, signature FROM continuity "
+                "WHERE target = ? AND computer = ? AND channel = ?", key,
+            ).fetchone()
+            if row is None:
+                self._db.execute(
+                    "INSERT INTO continuity VALUES (?, ?, ?, ?, ?, ?)",
+                    (*key, record_id, 1, signature),
+                )
                 touched.add(key)
-            elif record_id == prior:
-                if self.signatures.get(key) != signature:
-                    reused.add(group)
-                    self.signatures[key] = signature
                 continue
-            elif record_id > prior:
+            prior, samples, prior_signature = row
+            if record_id == prior:
+                if prior_signature != signature:
+                    reused.add(group)
+                    self._db.execute(
+                        "UPDATE continuity SET signature = ? "
+                        "WHERE target = ? AND computer = ? AND channel = ?", (signature, *key),
+                    )
+                continue
+            if record_id > prior:
                 if record_id > prior + 1:
                     gaps[group] = gaps.get(group, 0) + record_id - prior - 1
-                self.last[key] = record_id
-                self.samples[key] = min(2, self.samples.get(key, 1) + 1)
-                self.signatures[key] = signature
+                self._db.execute(
+                    "UPDATE continuity SET last_id = ?, samples = ?, signature = ? "
+                    "WHERE target = ? AND computer = ? AND channel = ?",
+                    (record_id, min(2, samples + 1), signature, *key),
+                )
                 touched.add(key)
             else:
                 # Time-ordered source results are not record-id ordered for this group. Refuse completeness
@@ -129,10 +152,11 @@ class RecordIdContinuity:
         reasons += [
             f"shipper gaps unresolved: fewer than two record_id samples on {channel} for {computer}"
             for _target, computer, channel in sorted(touched)
-            if self.samples.get((_target, computer, channel), 0) < 2
+            if self._db.execute(
+                "SELECT samples FROM continuity WHERE target = ? AND computer = ? AND channel = ?",
+                (_target, computer, channel),
+            ).fetchone()[0] < 2
         ]
-        if overflowed:
-            reasons.append(f"shipper gaps unresolved: continuity state capacity {self.max_keys} exceeded")
         return reasons
 
 

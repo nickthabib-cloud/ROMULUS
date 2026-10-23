@@ -18,6 +18,7 @@ from romulus.evidence.windows_catalog import (
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
 from romulus.hunt.pivot import PivotExecutor, _is_network
 from romulus.hunt.sweep import LINUX_HOST_DATASETS, Sweep
+from romulus.sources import profile as profile_module
 from romulus.sources.compile import build_query
 from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.sources.profile import build_profile, contract_from_types, flatten_mapping
@@ -218,14 +219,15 @@ def test_live_profile_records_the_typed_role_and_profiles_the_event_computer():
 
         @staticmethod
         def search(_target, body):
-            assert body["aggs"]["hosts"]["terms"]["field"] == "winlog.computer_name"
+            source = body["aggs"]["hosts"]["composite"]["sources"][0]
+            assert source == {"host": {"terms": {"field": "winlog.computer_name"}}}
             return {
                 "hits": {"total": {"value": 1}},
                 "aggregations": {
                     "tmin": {},
                     "tmax": {},
                     "ds": {"buckets": [{"key": "windows.security", "doc_count": 1}]},
-                    "hosts": {"buckets": [{"key": "ws01.example.test", "doc_count": 1}]},
+                    "hosts": {"buckets": [{"key": {"host": "ws01.example.test"}, "doc_count": 1}]},
                 },
             }
 
@@ -234,6 +236,93 @@ def test_live_profile_records_the_typed_role_and_profiles_the_event_computer():
     assert profile.role == "host" and contract.role == "host"
     assert contract.os_family == "windows"
     assert profile.hosts == {"ws01.example.test": 1}
+
+
+def test_live_profile_pages_a_5000_host_windows_inventory():
+    class Client:
+        version = "8.0"
+
+        class settings:
+            es_flavor = "elasticsearch"
+
+        calls = 0
+
+        @staticmethod
+        def mapping(_target):
+            return {"idx": {"mappings": {"properties": {
+                "@timestamp": {"type": "date"},
+                "event": {"properties": {"dataset": {"type": "keyword"}}},
+                "winlog": {"properties": {"computer_name": {"type": "keyword"}}},
+            }}}}
+
+        @classmethod
+        def search(cls, _target, body):
+            cls.calls += 1
+            composite = body["aggs"]["hosts"]["composite"]
+            start = int((composite.get("after") or {"host": "ws-1"})["host"][2:]) + 1
+            stop = min(start + composite["size"], 5_000)
+            buckets = [
+                {"key": {"host": f"ws{number:04d}"}, "doc_count": 1}
+                for number in range(start, stop)
+            ]
+            hosts = {"buckets": buckets}
+            if stop < 5_000:
+                hosts["after_key"] = {"host": f"ws{stop - 1:04d}"}
+            return {
+                "hits": {"total": {"value": 5_000}},
+                "aggregations": {
+                    "tmin": {}, "tmax": {},
+                    "ds": {"buckets": [{"key": "windows.security", "doc_count": 5_000}]},
+                    "hosts": hosts,
+                },
+            }
+
+    profile, contract = build_profile(Client(), "windows-5000")
+
+    assert len(profile.hosts) == 5_000
+    assert Client.calls == 10
+    assert contract.host_inventory_complete is True
+    assert profile.notes == []
+
+
+def test_live_profile_marks_host_inventory_partial_at_page_budget(monkeypatch):
+    monkeypatch.setattr(profile_module, "HOST_INVENTORY_PAGE_LIMIT", 1)
+
+    class Client:
+        version = "8.0"
+
+        class settings:
+            es_flavor = "elasticsearch"
+
+        @staticmethod
+        def mapping(_target):
+            return {"idx": {"mappings": {"properties": {
+                "@timestamp": {"type": "date"},
+                "event": {"properties": {"dataset": {"type": "keyword"}}},
+                "winlog": {"properties": {"computer_name": {"type": "keyword"}}},
+            }}}}
+
+        @staticmethod
+        def search(_target, _body):
+            return {
+                "hits": {"total": {"value": 501}},
+                "aggregations": {
+                    "tmin": {}, "tmax": {}, "ds": {"buckets": []},
+                    "hosts": {
+                        "buckets": [
+                            {"key": {"host": f"ws{number:04d}"}, "doc_count": 1}
+                            for number in range(500)
+                        ],
+                        "after_key": {"host": "ws0499"},
+                    },
+                },
+            }
+
+    profile, contract = build_profile(Client(), "windows-truncated")
+
+    assert len(profile.hosts) == 500
+    assert profile.notes == ["hosts inventory truncated (composite page budget 1 exceeded)"]
+    assert contract.host_inventory_complete is False
 
 
 def test_windows_host_timeline_and_process_tree_use_catalog_datasets_and_native_host_key():
