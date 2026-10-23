@@ -6,7 +6,7 @@ import ipaddress
 import itertools
 import posixpath
 import re
-from bisect import bisect_left, bisect_right, insort
+from bisect import bisect_right, insort
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import ClassVar, NamedTuple
@@ -1413,6 +1413,7 @@ class Ancestor(NamedTuple):
     marker: str            # "package" | "cloud-init" | "logrotate" | ""
     event_id: str
     boot: str | None = None
+    serial: int | None = None   # the exec's audit serial (orders execs of one instant)
 
 
 class Lineage(NamedTuple):
@@ -1434,6 +1435,7 @@ class ExecRecord(NamedTuple):
     raw_id: str             # the first raw record's native id
     boot: str | None
     flags: int
+    serial: int | None = None   # the audit serial: orders execs of one pid at one instant (a #! chain)
 
 
 # A real-uid-0 exec outside any login session (no audit login uid), with its executable and argv recorded and a
@@ -1441,8 +1443,22 @@ class ExecRecord(NamedTuple):
 DAEMON = 1
 
 
-def _record_order(record: ExecRecord) -> tuple[float, str]:
-    return record.ts, record.event_id
+def _record_order(record: ExecRecord) -> tuple:
+    return record.ts, record.serial is None, record.serial or 0, record.event_id
+
+
+def _latest_image(tied: list[ExecRecord]) -> ExecRecord | None:
+    """One instant's execs of one pid: the latest by audit serial, or None when they cannot be ordered (a serial
+    missing or repeated) and their executables differ, as the baseline carry decides it (`place_child`)."""
+    serials = [record.serial for record in tied]
+    if None not in serials and len(set(serials)) == len(serials):
+        return max(tied, key=lambda record: record.serial)
+    return tied[-1] if len({record.exe for record in tied}) == 1 else None
+
+
+def _audit_serial(event: TypedEvent) -> int | None:
+    serial = event.get("audit.serial")
+    return serial if isinstance(serial, int) and not isinstance(serial, bool) else None
 
 
 def _record_ts(record: ExecRecord) -> float:
@@ -1477,10 +1493,14 @@ class ExecLineage:
     def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None):
         self.store = KeyedStore(owner, "exec_lineage", capacity)
         self.members = members if members is not None else [owner] if owner is not None else []
+        # The one store every ancestry rule reads, and most of a host hunt's state (one record per exec): it holds a
+        # floor of the hunt's disk budget for each rule it serves, as their own stores would have had.
+        self.store.weight = max(1, len(self.members))
         self._observed = RecentIds()            # exec records already observed (by any rule sharing this store)
         # processes whose exec record the state budget refused to hold (recent ones): a rule may still judge a join
         # whose other side it holds, saying the lineage was not recorded
         self.refused = RecentIds()
+        self.incomplete = False                 # any process refused so far in the hunt: lineage may have gaps
 
     @property
     def records(self) -> KeyedStore:
@@ -1506,7 +1526,7 @@ class ExecLineage:
         exe = event.get("process.executable")
         return ExecRecord(ancestor.ts, event.id, ancestor.ppid, str(exe) if exe else "", ancestor.name,
                           ancestor.user, ancestor.marker, event.raw[0].native_id if event.raw else "",
-                          ancestor.boot, DAEMON if _daemon(event) else 0)
+                          ancestor.boot, DAEMON if _daemon(event) else 0, ancestor.serial)
 
     def observe(self, event: TypedEvent) -> None:
         """Hold an exec record (once, however many rules hand it over)."""
@@ -1520,6 +1540,7 @@ class ExecLineage:
         if entries is None:
             if not self.store.put(key, [self.record(event)]):
                 self.refused.add(key)
+                self.incomplete = True
                 for member in self.members:
                     member.note_limit("lineage", "the exec store took no new process (its share of the state budget "
                                                  "is spent); a later process's lineage is not recorded")
@@ -1532,16 +1553,52 @@ class ExecLineage:
         found = self.store.get((host, pid))
         return found if found is not None else self.store.peek((host, pid), None) or []
 
-    def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False,
-               where=None) -> ExecRecord | None:
-        """The latest record of `pid` at or before `ts` (strictly before with `strict`) that `where` accepts; among
-        records of the same time, the last in (time, event id) order."""
+    def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,
+               serial: int | None = None, exclude: str | None = None) -> ExecRecord | None:
+        """The record of `pid` that was its image when something happened at (`ts`, audit `serial`): its latest exec
+        before that, among the records `where` accepts, or None when there is none or it is ambiguous.
+
+        Execs are ordered by (time, audit serial), as the baseline carry orders them (`place_child`). An exec at the
+        same instant precedes only when both serials are known and its serial is lower; without them its order is
+        unknown, so the answer is None when execs of that instant name different executables (a `#!/usr/bin/env`
+        chain execs twice in one pid at one instant: without serials the image at that instant is unknown, never an
+        arbitrary pick). When they all name one executable the answer is that instant's latest record, as it is for
+        a process asked about at its own exec instant; the carry instead also waits on a lone exec at the child's
+        instant, since it can take a later answer and a lineage step has none. `exclude` is the asking record's own event id; `strict` (the image
+        a pid held before its own record) needs it, or it ignores every exec at that instant."""
+        if not isinstance(serial, int) or isinstance(serial, bool):
+            serial = None                       # only a recorded integer serial orders execs
         entries = self.entries(host, pid)
-        index = (bisect_left if strict else bisect_right)(entries, ts, key=_record_ts)
+        index = bisect_right(entries, ts, key=_record_ts)
+        at_instant, unsure, before, before_ts = [], [], [], None
         for position in range(index - 1, -1, -1):
-            if where is None or where(entries[position]):
-                return entries[position]
-        return None
+            record = entries[position]
+            if where is not None and not where(record):
+                continue
+            if record.ts == ts:
+                if record.event_id == exclude or (strict and exclude is None):
+                    continue
+                if serial is not None and record.serial is not None:
+                    if record.serial < serial:
+                        at_instant.append(record)       # precedes the asking record at this instant
+                else:
+                    unsure.append(record)               # one serial missing: its order is unknown
+                continue
+            if before_ts is None:
+                before_ts = record.ts
+            elif record.ts != before_ts:
+                break
+            before.append(record)
+        group = at_instant or before
+        answer = _latest_image(sorted(group, key=_record_order)) if group else None
+        if group and answer is None:
+            return None
+        if unsure:
+            if len({record.exe for record in unsure} | ({answer.exe} if at_instant else set())) > 1:
+                return None                     # differing images at one instant without serials: ambiguous
+            if not at_instant:                  # one image at that instant: its latest record
+                answer = max(unsure, key=_record_order)
+        return answer
 
 
 class ProcessLineage:
@@ -1586,31 +1643,35 @@ class ProcessLineage:
                   else "logrotate" if system and name in LOG_ROTATORS else "")
         ppid = event.get("process.ppid")
         return Ancestor(event.ts.timestamp(), ppid if isinstance(ppid, int) else None, name,
-                        event.get("process.user"), marker, event.id, boot_of(event))
+                        event.get("process.user"), marker, event.id, boot_of(event), _audit_serial(event))
 
     def observe(self, event: TypedEvent) -> None:
         if event.family == "process_exec":
             self.execs.observe(event)
 
-    def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None) -> Ancestor | None:
-        """The latest exec of `ppid` no later than `ts`, unless it was recorded in a boot other than `boot`: the
-        pid restarted at the reboot, and every earlier exec of it is in that boot or an earlier one."""
+    def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None,
+               serial: int | None = None) -> Ancestor | None:
+        """The exec of `ppid` that was its image at (`ts`, audit `serial`) (`ExecLineage.latest`: None when that is
+        ambiguous), unless it was recorded in a boot other than `boot`: the pid restarted at the reboot, and every
+        earlier exec of it is in that boot or an earlier one."""
         if ppid is None or ppid <= 1:
             return None
-        found = self.execs.latest(host, ppid, ts)
+        found = self.execs.latest(host, ppid, ts, serial=serial)
         if found is None or boots_conflict(boot, found.boot):
             return None
-        return Ancestor(found.ts, found.ppid, found.name, found.user, found.marker, found.event_id, found.boot)
+        return Ancestor(found.ts, found.ppid, found.name, found.user, found.marker, found.event_id, found.boot,
+                        found.serial)
 
     def classify(self, event: TypedEvent) -> Lineage:
         """The record's own account or nearest exec ancestor that is a web-service account (which wins at any
         depth), else the nearest package-manager, cloud-init or log-rotation ancestor."""
         return self._walk(event.host, self.entry(event))
 
-    def classify_pid(self, host: str | None, pid: int | None, ts: float, boot: str | None = None) -> Lineage:
-        """Lineage of the process with this pid at this time in `boot` (its latest exec record no later than ts),
+    def classify_pid(self, host: str | None, pid: int | None, ts: float, boot: str | None = None,
+                     serial: int | None = None) -> Lineage:
+        """Lineage of the process with this pid at this time in `boot` (its exec record that was its image then),
         for records that name a process but are not exec records themselves."""
-        start = self.parent(host, pid, ts, boot) if isinstance(pid, int) else None
+        start = self.parent(host, pid, ts, boot, serial) if isinstance(pid, int) else None
         return self._walk(host, start, boot) if start is not None else Lineage("", None, 0)
 
     def _walk(self, host: str | None, current: Ancestor, boot: str | None = None) -> Lineage:
@@ -1621,7 +1682,7 @@ class ProcessLineage:
             if current.marker and nearest is None:
                 nearest = Lineage(current.marker, current, depth)
             boot = boot if boot is not None else current.boot      # a parent is in its child's boot
-            found = self.parent(host, current.ppid, current.ts, boot)
+            found = self.parent(host, current.ppid, current.ts, boot, current.serial)
             if found is None or found.event_id == current.event_id:
                 break
             current = found

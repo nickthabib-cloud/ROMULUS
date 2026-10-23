@@ -1299,7 +1299,8 @@ class AccountOrGroupChange(Playbook):
         """A change for each tool record no command of its process explains."""
         for record in unjoined:
             ts = record.ts.timestamp()
-            lineage = self.lineage.classify_pid(record.host, record.get("process.pid"), ts, boot_of(record))
+            lineage = self.lineage.classify_pid(record.host, record.get("process.pid"), ts, boot_of(record),
+                                                record.get("audit.serial"))
             actor = str(record.get("process.login_user") or record.get("process.user")
                         or (f"audit login uid {record.get('process.auid')}" if record.has("process.auid")
                             else "an unrecorded account"))
@@ -1307,7 +1308,8 @@ class AccountOrGroupChange(Playbook):
             group = record.get("account.group")
             pid = record.get("process.pid")
             exec_seen = (isinstance(pid, int)
-                         and self.lineage.parent(record.host, pid, ts, boot_of(record)) is not None)
+                         and self.lineage.parent(record.host, pid, ts, boot_of(record),
+                                                             record.get("audit.serial")) is not None)
             yield _Change(record.host, ts, str(record.get("account.action")),
                           (str(name),) if name else (), (str(group),) if group else (),
                           _RECORD_PHRASE.get(str(record.get("account.action")), "an account change"),

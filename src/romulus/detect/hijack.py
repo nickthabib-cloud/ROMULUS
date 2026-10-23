@@ -721,15 +721,17 @@ class NonRootWriteRootExecutedFile(Playbook):
     def _service_lineage(self, event: TypedEvent) -> bool:
         """True when the ppid chain, through root exec records outside any login session, reaches pid 1."""
         ppid, ts, boot = event.get("process.ppid"), event.ts.timestamp(), boot_of(event)
+        serial = event.get("audit.serial")
         for _ in range(LINEAGE_DEPTH):
             if ppid == 1:
                 return True
             if not isinstance(ppid, int) or ppid <= 1:
                 return False
-            parent = self.daemons.latest(event.host, ppid, ts, where=_daemon)
+            parent = self.daemons.latest(event.host, ppid, ts, where=_daemon,
+                                         serial=serial if isinstance(serial, int) else None)
             if parent is None or boots_conflict(boot, parent.boot):
                 return False
-            ts, ppid = parent.ts, parent.ppid
+            ts, ppid, serial = parent.ts, parent.ppid, parent.serial
             boot = boot if boot is not None else parent.boot
         return False
 

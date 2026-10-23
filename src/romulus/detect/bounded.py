@@ -174,12 +174,13 @@ def volume_usage(directory) -> tuple[int, int] | None:
 class Account:
     """One store's bytes on disk (a keyed store, a record list, a join's rows, the event stage)."""
 
-    __slots__ = ("name", "strong", "used")
+    __slots__ = ("name", "strong", "used", "weight")
 
-    def __init__(self, name: str, strong: bool):
+    def __init__(self, name: str, strong: bool, weight: int = 1):
         self.name = name
         self.strong = strong            # a strong-indicator rule's store (see `Playbook.state_slice`)
         self.used = 0
+        self.weight = weight            # floors this store holds: one per rule it serves (see `KeyedStore.weight`)
 
 
 class StateBudget:
@@ -251,21 +252,24 @@ class StateBudget:
     # ---- floors ----
     @property
     def floor(self) -> int:
-        """The bytes on disk every store is guaranteed."""
-        return self.disk_total // (2 * max(1, self.stores or len(self.accounts)))
+        """The bytes on disk one floor guarantees (a store serving several rules holds one per rule)."""
+        return self.disk_total // (2 * max(1, self.stores or sum(a.weight for a in self.accounts)))
+
+    def floor_of(self, account: Account) -> int:
+        return self.floor * account.weight
 
     @property
     def pool(self) -> int:
         """The bytes beyond their floors the stores share."""
-        return self.disk_total - self.floor * max(1, self.stores or len(self.accounts))
+        return self.disk_total - self.floor * max(1, self.stores or sum(a.weight for a in self.accounts))
 
     def plan(self, stores: int) -> None:
-        """Fix the number of stores the floors are planned for (the sweep counts its pack's live stores)."""
+        """Fix the number of floors planned for (the sweep counts its pack's live stores, each by its weight)."""
         self.stores = max(1, stores)
         self._repool()
 
-    def account(self, name: str, strong: bool = False) -> Account:
-        account = Account(name, strong)
+    def account(self, name: str, strong: bool = False, weight: int = 1) -> Account:
+        account = Account(name, strong, weight)
         self.accounts.append(account)
         if not self.stores:
             self._repool()              # unplanned (a rule driven alone): floors follow the stores seen so far
@@ -273,14 +277,14 @@ class StateBudget:
 
     def _repool(self) -> None:
         floor = self.floor
-        self.pool_used = sum(max(0, a.used - floor) for a in self.accounts)
+        self.pool_used = sum(max(0, a.used - floor * a.weight) for a in self.accounts)
         self._recalm()
 
     def charge(self, account: Account, nbytes: int) -> None:
         """A store's bytes on disk changed by `nbytes` (negative when states were read back or cleared)."""
         if not nbytes:
             return
-        floor = self.floor
+        floor = self.floor * account.weight
         before = max(0, account.used - floor)
         account.used += nbytes
         self.pool_used += max(0, account.used - floor) - before
@@ -298,9 +302,9 @@ class StateBudget:
         reason = self.hard or self.over_total
         if not reason and account is not None:
             reason = next((why for where, why in self.forced if where(account)), "")
-            if not reason and self.pool_used >= self.pool and account.used >= self.floor:
+            if not reason and self.pool_used >= self.pool and account.used >= self.floor_of(account):
                 reason = (f"its state on disk ({account.used / 2**20:.1f} MiB) is past its guaranteed floor "
-                          f"({self.floor / 2**20:.1f} MiB) and the headroom the stores share "
+                          f"({self.floor_of(account) / 2**20:.1f} MiB) and the headroom the stores share "
                           f"({self.pool / 2**20:.1f} MiB) is spent")
         if reason and account is not None and account.name not in self.full:
             self.full[account.name] = reason
@@ -398,14 +402,15 @@ def register_store(owner, store) -> None:
 
 
 def live_stores(pack) -> int:
-    """The stores a pack's playbooks hold now (a store shared by several counts once)."""
-    seen = set()
+    """The floors a pack's live stores hold: one per store, a store serving several rules (the exec lineage) one
+    per rule it serves (its `weight`), a store shared by several rules counted once."""
+    seen = {}
     for pb in pack:
         for ref in pb.__dict__.get("_state_stores", ()):
             store = ref()
             if store is not None:
-                seen.add(id(store))
-    return len(seen)
+                seen[id(store)] = max(1, int(getattr(store, "weight", 1)))
+    return sum(seen.values())
 
 
 def deep_size(value, depth: int = 0) -> int:
@@ -775,7 +780,7 @@ class KeyedStore:
         if self._account is None and self.owner is not None:
             owner = self.owner
             self._account = _budget_of(owner).account(f"{getattr(owner, 'id', type(owner).__name__)}:{self.name}",
-                                                     _strong(owner))
+                                                     _strong(owner), max(1, int(getattr(self, "weight", 1))))
             if self.held_bytes:
                 owner.budget.charge(self._account, self.held_bytes)
         return self._account
