@@ -171,6 +171,51 @@ def test_mixed_os_target_evaluates_each_event_os_and_network_is_not_linux(monkey
     assert cells["test.linux_network"]["evaluated"] == 1
 
 
+def test_sweep_filters_event_os_once_inside_each_playbook(monkeypatch):
+    class CountingPlaybook(Playbook):
+        id = "test.os_filter_once"
+        version = 1
+        families = ("process_exec",)
+        os_families = ("linux",)
+
+        def __init__(self):
+            super().__init__()
+            self.os_checks = 0
+
+        def event_in_os_scope(self, event):
+            self.os_checks += 1
+            return super().event_in_os_scope(event)
+
+    events = [
+        TypedEvent(
+            id=f"process-{os_family}", family="process_exec", ts=START, host="host",
+            fields={"host.os.family": fv(os_family, "fixture")}, raw=[], normalizer="fixture",
+        )
+        for os_family in ("linux", "windows")
+    ]
+    events.append(TypedEvent(
+        id="flow", family="net_flow", ts=START, host="sensor", fields={}, raw=[], normalizer="fixture",
+    ))
+    monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, [
+        {"_id": "raw", "_index": "mixed", "_source": {}},
+    ]))
+    monkeypatch.setattr(sw, "normalize_hits", lambda _records, _boots=None: (events, {}, []))
+    contract = contract_from_types("mixed", {"@timestamp": "date"}, role="host", os_family="unknown")
+    repo = _repo()
+    sweep = sw.Sweep(repo, FakeClient(), "h1", Window(
+        start=START, end=START + timedelta(minutes=5),
+    ), {"mixed": contract})
+    playbook = CountingPlaybook()
+    sweep.pack = [playbook]
+
+    sweep.run_partition(
+        "mixed", contract, [], Window(start=START, end=START + timedelta(minutes=5)), est=1,
+    )
+
+    assert playbook.os_checks == 2
+    assert playbook.evaluated == 1
+
+
 def test_aggregate_rules_with_zero_evaluated_are_not_complete_negatives(monkeypatch):
     monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, []))
     repo = _repo()

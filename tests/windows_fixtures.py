@@ -17,6 +17,7 @@ SHAPES: tuple[Shape, ...] = ("winlogbeat_7", "winlogbeat_8", "elastic_agent")
 # https://learn.microsoft.com/windows/security/threat-protection/auditing/security-auditing-overview
 # Sysmon IDs 1/3/5 and channel: https://learn.microsoft.com/sysinternals/downloads/sysmon#events
 # System sources: https://learn.microsoft.com/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs
+# Elastic Agent Windows data-stream envelope: https://www.elastic.co/docs/reference/integrations/windows
 _DOCUMENTED_EVENT_KEYS = (
     *[("Security", SECURITY, event_id) for event_id in (
         4688, 4689, 4624, 4625, 4648, 4672, 4634, 4647, 4720, 4722, 4724, 4726,

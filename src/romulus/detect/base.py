@@ -119,6 +119,12 @@ class Playbook:
     def __init__(self) -> None:
         self.evaluated = 0
         self.missing_required = 0
+        self.os_applicable = 0
+        self._events_pre_scoped = False
+
+    def event_in_os_scope(self, event: TypedEvent) -> bool:
+        os_family = event_os_family(event)
+        return os_family == "unknown" or os_family in self.os_families
 
     def applicable(self, events: list[TypedEvent]) -> list[TypedEvent]:
         """Events of the right family. Events missing required fields are counted (they make a
@@ -127,9 +133,10 @@ class Playbook:
         for e in events:
             if e.family not in self.families:
                 continue
-            os_family = event_os_family(e)
-            if os_family != "unknown" and os_family not in self.os_families:
-                continue
+            if not self._events_pre_scoped:
+                if not self.event_in_os_scope(e):
+                    continue
+                self.os_applicable += 1
             if any(e.get(f) in (None, "", [], {}) for f in self.required_fields):
                 self.missing_required += 1
                 continue
@@ -140,6 +147,25 @@ class Playbook:
             out.append(e)
         self.evaluated += len(out)
         return out
+
+    def consume_partition(self, events: list[TypedEvent]) -> list[Match]:
+        """Consume a sweep partition after applying this playbook's OS scope exactly once.
+
+        Direct calls to ``consume`` retain the public playbook behavior used by focused rule tests. The sweep
+        uses this wrapper so custom and context ``consume`` implementations receive only in-scope records and
+        the common ``applicable`` helper does not repeat the same OS classification.
+        """
+        scoped = []
+        for event in events:
+            if event.family not in self.families or not self.event_in_os_scope(event):
+                continue
+            scoped.append(event)
+        self.os_applicable += len(scoped)
+        self._events_pre_scoped = True
+        try:
+            return self.consume(scoped)
+        finally:
+            self._events_pre_scoped = False
 
     def consume(self, events: list[TypedEvent]) -> list[Match]:
         """Direct playbooks return matches immediately (publishable before the hunt ends)."""

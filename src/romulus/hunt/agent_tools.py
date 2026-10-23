@@ -12,8 +12,8 @@ from romulus.hunt.expansion import ExpansionEngine, expansion_windows
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
-from romulus.sources.models import Window
 from romulus.site import ensure_site_unchanged
+from romulus.sources.models import Window
 from romulus.store.db import digest
 from romulus.store.repo import Repo
 
