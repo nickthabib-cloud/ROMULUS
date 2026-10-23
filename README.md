@@ -134,7 +134,7 @@ Python 3.12 modular monolith (`src/romulus/`), SQLite (WAL) as the single state 
 
 - ROMULUS is for **authorized, defensive** threat hunting on networks you are permitted to analyze.
 - It is not hardened for exposure: the web UI has no built-in TLS yet. Bind it to localhost or put it behind a TLS reverse proxy on a trusted network.
-- Report security issues privately to *(contact to be added)*, not in public issues.
+
 
 ## Development
 
