@@ -37,6 +37,7 @@ from romulus.evidence.windows import (
     is_windows_source,
     normalize_windows,
     windows_record_key,
+    windows_record_signature,
 )
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
@@ -1883,7 +1884,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     its audit header time in (an incremental placement, see `BootIntervals`). Otherwise it stays unknown: never
     guessed."""
     events, skips, errors = [], defaultdict(int), []
-    windows_events: dict[tuple[str, str, str], TypedEvent] = {}
+    windows_events: dict[tuple[tuple[str, str, str], str], TypedEvent] = {}
+    windows_signatures: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     audit_hits = []
     audit_copies: list[tuple[tuple[str, int, int], str, str, str]] = []
     journal_boots: list[tuple[str, str, int | None, str, bool]] = []
@@ -1893,11 +1895,16 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             if is_windows_source(h["_source"]):
                 windows_event = normalize_windows(h)
                 logical_key = windows_record_key(h)
-                prior = windows_events.get(logical_key) if logical_key is not None else None
+                signature = windows_record_signature(h)
+                identity = (logical_key, signature) if logical_key is not None else None
+                prior = windows_events.get(identity) if identity is not None else None
                 if prior is None:
                     events.append(windows_event)
-                    if logical_key is not None:
-                        windows_events[logical_key] = windows_event
+                    if identity is not None:
+                        if windows_signatures[logical_key]:
+                            skips["record_id reused (log cleared or reverted)"] += 1
+                        windows_signatures[logical_key].add(signature)
+                        windows_events[identity] = windows_event
                 else:
                     known = {raw.key for raw in prior.raw}
                     prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)

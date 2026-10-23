@@ -50,12 +50,14 @@ class RecordIdContinuity:
 
     last: dict[tuple[str, str, str], int] = field(default_factory=dict)
     samples: dict[tuple[str, str, str], int] = field(default_factory=dict)
+    signatures: dict[tuple[str, str, str], str] = field(default_factory=dict)
     max_keys: int = 4096
 
     def observe(self, target: str, records: list[dict]) -> list[str]:
         gaps: dict[tuple[str, str], int] = {}
         unordered: set[tuple[str, str]] = set()
         malformed: set[tuple[str, str]] = set()
+        reused: set[tuple[str, str]] = set()
         touched: set[tuple[str, str, str]] = set()
         overflowed = False
         for record in records:
@@ -76,6 +78,7 @@ class RecordIdContinuity:
                 malformed.add(group)
                 continue
             key = (target, *group)
+            signature = windows_record_signature(record)
             if key not in self.last and len(self.last) >= self.max_keys:
                 overflowed = True
                 continue
@@ -83,14 +86,19 @@ class RecordIdContinuity:
             if prior is None:
                 self.last[key] = record_id
                 self.samples[key] = 1
+                self.signatures[key] = signature
                 touched.add(key)
             elif record_id == prior:
+                if self.signatures.get(key) != signature:
+                    reused.add(group)
+                    self.signatures[key] = signature
                 continue
             elif record_id > prior:
                 if record_id > prior + 1:
                     gaps[group] = gaps.get(group, 0) + record_id - prior - 1
                 self.last[key] = record_id
                 self.samples[key] = min(2, self.samples.get(key, 1) + 1)
+                self.signatures[key] = signature
                 touched.add(key)
             else:
                 # Time-ordered source results are not record-id ordered for this group. Refuse completeness
@@ -99,6 +107,10 @@ class RecordIdContinuity:
         reasons = [
             f"shipper gaps: {count} records missing on {channel} for {computer}"
             for (computer, channel), count in sorted(gaps.items())
+        ]
+        reasons += [
+            f"record_id reused (log cleared or reverted) on {channel} for {computer}"
+            for computer, channel in sorted(reused)
         ]
         reasons += [
             f"shipper gaps unresolved: record_id out of order on {channel} for {computer}"
@@ -146,6 +158,42 @@ def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
     if not computer or not channel or record_id in (None, "") or isinstance(record_id, bool):
         return None
     return computer, channel, str(record_id)
+
+
+def windows_record_signature(hit: dict) -> str:
+    """Stable content discriminator for copies that share a native record id.
+
+    Shipper envelope fields such as index, document id, ingest time and agent metadata are deliberately
+    excluded. Native event time is preferred; when it is unavailable the structured Windows payload is
+    hashed so a log reset cannot collapse a different record onto an earlier event.
+    """
+    source = hit.get("_source") or {}
+    winlog = source.get("winlog") or {}
+    event_data = winlog.get("event_data") if isinstance(winlog.get("event_data"), dict) else {}
+    provider = str(winlog.get("provider_name") or "").strip().casefold()
+    native_event_id = winlog.get("event_id")
+    try:
+        native_event_id = int(native_event_id)
+    except (TypeError, ValueError):
+        native_event_id = str(native_event_id or "").strip()
+    native_time = (
+        winlog.get("time_created")
+        or event_data.get("TimeCreated")
+        or event_data.get("SystemTime")
+        or _get(source, "event.created")
+    )
+    if native_time not in (None, ""):
+        identity = {"provider": provider, "event_id": native_event_id, "time_created": str(native_time)}
+    else:
+        identity = {
+            "provider": provider,
+            "event_id": native_event_id,
+            "event_data": event_data,
+            "user_data": winlog.get("user_data") if isinstance(winlog.get("user_data"), dict) else {},
+            "event_original": _get(source, "event.original") or "",
+        }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _xml_data(original: str, native_id: str) -> dict[str, FieldValue]:
@@ -490,7 +538,8 @@ def normalize_windows(hit: dict) -> TypedEvent:
     outcome = _semantic_fields(fields, record, host)
     logical_key = windows_record_key(hit)
     identity_refs = [ref] if logical_key is None else [RawRef(
-        target=f"windows:{logical_key[0]}:{logical_key[1]}", native_id=logical_key[2]
+        target=f"windows:{logical_key[0]}:{logical_key[1]}:{logical_key[2]}",
+        native_id=windows_record_signature(hit),
     )]
     return TypedEvent(
         id=event_id(record.event_class.family, identity_refs, WINDOWS_NORMALIZER),
