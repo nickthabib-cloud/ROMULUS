@@ -67,7 +67,8 @@ EVENT_FAMILIES = {
 
 @pytest.mark.parametrize(("event_id", "family"), EVENT_FAMILIES.items())
 def test_security_event_catalog_rows_normalize_to_their_typed_families(event_id, family):
-    events, skips, errors = normalize_hits([_hit(event_id)])
+    provider = "Microsoft-Windows-Eventlog" if event_id == 1102 else SECURITY
+    events, skips, errors = normalize_hits([_hit(event_id, provider=provider)])
 
     assert skips == {} and errors == [] and len(events) == 1
     assert events[0].family == family

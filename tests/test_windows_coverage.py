@@ -11,6 +11,7 @@ from romulus.evidence.typed import RawRef, TypedEvent
 from romulus.evidence.windows import RecordIdContinuity
 from romulus.evidence.windows_catalog import (
     EVENT_CLASSES,
+    SECURITY,
     SYSMON,
     SYSMON_CHANNEL,
     collection_requirements,
@@ -166,6 +167,16 @@ def test_system_channel_collection_requires_an_explicit_event_log_attestation():
     assert event_class is not None
     assert collection_requirements(event_class) == (
         ("system_event_log", {}, "Windows System event log"),
+    )
+
+
+def test_security_1102_uses_eventlog_provider_and_security_channel_attestation():
+    event_class = lookup_event_class("Security", "Microsoft-Windows-Eventlog", 1102)
+
+    assert event_class is not None
+    assert lookup_event_class("Security", SECURITY, 1102) is None
+    assert collection_requirements(event_class) == (
+        ("security_event_log", {}, "Windows Security event log"),
     )
 
 

@@ -8,10 +8,32 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from romulus.evidence.typed import TypedEvent
-from romulus.evidence.windows_catalog import EVENT_CLASSES, SECURITY, SYSMON
+from romulus.evidence.windows_catalog import SECURITY, SYSMON
 
 Shape = Literal["winlogbeat_7", "winlogbeat_8", "elastic_agent"]
 SHAPES: tuple[Shape, ...] = ("winlogbeat_7", "winlogbeat_8", "elastic_agent")
+
+# This fixture inventory is intentionally independent of the production catalog. Security event XML:
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/security-auditing-overview
+# Sysmon IDs 1/3/5 and channel: https://learn.microsoft.com/sysinternals/downloads/sysmon#events
+# System sources: https://learn.microsoft.com/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs
+_DOCUMENTED_EVENT_KEYS = (
+    *[("Security", SECURITY, event_id) for event_id in (
+        4688, 4689, 4624, 4625, 4648, 4672, 4634, 4647, 4720, 4722, 4724, 4726,
+        4728, 4732, 4756, 4738, 4740, 4697, 4698, 4702,
+    )],
+    ("Microsoft-Windows-Sysmon/Operational", SYSMON, 1),
+    ("Microsoft-Windows-Sysmon/Operational", SYSMON, 3),
+    ("Microsoft-Windows-Sysmon/Operational", SYSMON, 5),
+    ("Security", "Microsoft-Windows-Eventlog", 1102),
+    ("Security", SECURITY, 4719),
+    ("System", "Service Control Manager", 7045),
+    ("System", "Microsoft-Windows-Eventlog", 104),
+    ("System", "Microsoft-Windows-Kernel-General", 12),
+    ("System", "Microsoft-Windows-Kernel-General", 13),
+    ("System", "EventLog", 6005),
+    ("System", "EventLog", 6006),
+)
 
 
 @dataclass(frozen=True)
@@ -138,15 +160,15 @@ def all_logical_events() -> list[LogicalWindowsEvent]:
     start = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
     return [
         LogicalWindowsEvent(
-            channel=event.channel,
-            provider=event.provider,
-            event_id=event.event_id,
+            channel=channel,
+            provider=provider,
+            event_id=event_id,
             computer="ws01.example.test",
             record_id=10_000 + ordinal,
             timestamp=(start + timedelta(seconds=ordinal)).isoformat().replace("+00:00", "Z"),
-            data=_data(event.provider, event.event_id, ordinal),
+            data=_data(provider, event_id, ordinal),
         )
-        for ordinal, event in enumerate(EVENT_CLASSES, 1)
+        for ordinal, (channel, provider, event_id) in enumerate(_DOCUMENTED_EVENT_KEYS, 1)
     ]
 
 

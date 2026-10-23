@@ -27,6 +27,16 @@ def test_factory_covers_every_catalog_event_in_every_supported_shipper_shape():
         assert skips == {} and errors == []
 
 
+def test_1102_fixture_uses_the_documented_eventlog_provider_independently_of_catalog():
+    """Microsoft's event XML names Microsoft-Windows-Eventlog, not Security-Auditing.
+
+    https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1102
+    """
+    [event] = [event for event in all_logical_events() if event.event_id == 1102]
+    assert event.channel == "Security"
+    assert event.provider == "Microsoft-Windows-Eventlog"
+
+
 def test_winlogbeat_shapes_do_not_invent_an_event_dataset():
     """Winlogbeat's documented event fields identify the source by agent.type + winlog.*.
 

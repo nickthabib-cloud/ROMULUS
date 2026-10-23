@@ -21,6 +21,7 @@ collection:
       installed: true
       event_ids: [1, 3, 5]
     security_4688_command_line: true
+    security_event_log: true
     powershell_script_block: false
     audit_policy:
       Process Creation: success
@@ -66,6 +67,7 @@ def test_valid_site_file_is_canonical_strict_and_host_scoped(tmp_path):
     assert facts.attests("ws-22", "sysmon", event_id=7) is False
     assert facts.attests("ws-22.example.test", "audit_policy", subcategory="Logon", outcome="failure") is True
     assert facts.attests("unmatched", "security_4688_command_line") is False
+    assert facts.attests("ws-22.example.test", "security_event_log") is True
 
 
 @pytest.mark.parametrize(

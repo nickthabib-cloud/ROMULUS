@@ -103,6 +103,7 @@ class CollectionGroup(BaseModel):
     audit_policy: dict[str, Literal["success", "failure", "both"]] = Field(default_factory=dict)
     defender_operational: StrictBool = False
     task_scheduler_operational: StrictBool = False
+    security_event_log: StrictBool = False
     system_event_log: StrictBool = False
 
     @field_validator("hosts", mode="before")
@@ -229,6 +230,7 @@ class SiteFacts:
                 "powershell_script_block",
                 "defender_operational",
                 "task_scheduler_operational",
+                "security_event_log",
                 "system_event_log",
             }:
                 values.append(bool(getattr(group, fact)))
