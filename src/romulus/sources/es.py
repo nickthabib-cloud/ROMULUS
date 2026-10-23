@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,6 +23,10 @@ class SourceError(RuntimeError):
     def __init__(self, message: str, retryable: bool = False):
         super().__init__(message)
         self.retryable = retryable
+
+
+class SourceBudgetExhausted(SourceError):
+    """A caller-supplied physical page or deadline budget stopped retrieval."""
 
 
 @dataclass
@@ -206,12 +211,19 @@ class ElasticClient:
 
     def iterate(self, q: CompiledQuery, max_records: int, page_size: int = PAGE_SIZE,
                 pit: PitSession | None = None,
+                on_query: Callable[[], bool] | None = None,
+                deadline: float | None = None,
+                clock: Callable[[], float] = time.monotonic,
                 ) -> Iterator[tuple[list[dict], dict]]:
         """Exhaustive raw retrieval with PIT + search_after. Yields (hits, page_meta).
 
         Raises SourceError on failure; the caller records partial coverage.
         """
         owned = pit is None
+        # Opening and closing an owned PIT are physical requests too. Both are reserved before the open, so the
+        # close that must follow is always inside the caller's budget.
+        if owned and on_query is not None and not (on_query() and on_query()):
+            raise SourceBudgetExhausted("source query budget exhausted")
         session = pit or PitSession(self._open_pit(q.target))
         try:
             body = dict(q.body)
@@ -225,7 +237,13 @@ class ElasticClient:
             body["track_total_hits"] = True
             fetched = 0
             while True:
+                if deadline is not None and clock() >= deadline:
+                    raise SourceBudgetExhausted("source wall-clock budget exhausted")
+                if on_query is not None and not on_query():
+                    raise SourceBudgetExhausted("source query budget exhausted")
                 d = self.search(None, body)
+                if deadline is not None and clock() >= deadline:
+                    raise SourceBudgetExhausted("source wall-clock budget exhausted")
                 session.id = d.get("pit_id", session.id)
                 body["pit"]["id"] = session.id
                 hits = d.get("hits", {}).get("hits", [])

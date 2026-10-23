@@ -77,6 +77,8 @@ class Pending:
     ts: datetime
     event_id: str
     child_executable: str
+    # The child's audit serial: it places the child among its parent's execs at the same instant.
+    serial: int | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,22 @@ class ParentLookup(Protocol):
     before `ts` in `boot`, or None."""
 
     def lookup(self, host: str, pid: int, ts: float, boot: str | None = None) -> tuple | None: ...
+
+
+def exec_serial(event: TypedEvent) -> int | None:
+    """The record's audit serial, which increases within a boot; None when absent or not an integer."""
+    value = event.get("audit.serial")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def parent_at(table: ParentLookup, host: str, pid: int, ts: float, boot: str | None,
+              serial: int | None):
+    """The parent identity for a child at (ts, serial). A table that orders one instant's execs by audit serial
+    (`lookup_ordered`) is asked with the child's serial; any other table is asked by time alone."""
+    ordered = getattr(table, "lookup_ordered", None)
+    if ordered is not None:
+        return ordered(host, pid, ts, boot, serial)
+    return table.lookup(host, pid, ts, boot)
 
 
 # Accounts whose uid falls in this range are system (service) accounts: 1-999 is the default SYS_UID_MIN to
@@ -366,13 +384,18 @@ def _exec_pair(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> Ke
         return Missing("process.ppid is absent", ("process.ppid",))
     if isinstance(ppid, bool) or not isinstance(ppid, int) or ppid < 0:
         return Missing("process.ppid is not a process id", ("process.ppid",))
-    boot = boot_of(event)
-    parent = context.pid_table.lookup(event.host, ppid, event.ts.timestamp(), boot)
+    boot, serial = boot_of(event), exec_serial(event)
+    parent = parent_at(context.pid_table, event.host, ppid, event.ts.timestamp(), boot, serial)
     if parent is None or boots_conflict(boot, parent[4]):
-        return Pending(event.host, boot, ppid, event.ts, event.id, executable)
-    return [_key(spec, _scope("host", host=host), {
-        "parent_executable": parent[1], "child_executable": executable,
-    })]
+        return Pending(event.host, boot, ppid, event.ts, event.id, executable, serial)
+    return [exec_pair_key(spec, host, parent[1], executable)]
+
+
+def exec_pair_key(spec: BaselineSpec, host: str, parent_executable: str, child_executable: str) -> BaselineKey:
+    """The exec-pair key under `spec`'s id and key version; a Pending resolved later builds the same key."""
+    return _key(spec, _scope("host", host=host.strip().lower()), {
+        "parent_executable": parent_executable, "child_executable": child_executable,
+    })
 
 
 # A key is stored once per scope and bucket, so its size is bounded: the masked shape keeps at most this many
@@ -506,6 +529,8 @@ def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec)
     dns_id = event.get("dns.id")
     if isinstance(dns_id, (bool, list, dict)):
         dns_id = None
+    elif dns_id is not None:
+        dns_id = str(dns_id)
     token = None if flow is None else _sha256(canonical_json(["dns", flow, names, dns_id]))
     return _with_token(keys, token)
 
