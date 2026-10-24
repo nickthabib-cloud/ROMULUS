@@ -60,6 +60,10 @@ from tests import throughput_fixture as tf
 # shows outside clients opened to the fixture's internal servers, with the 451,500 bytes the servers sent on them.
 # Findings and citations are unchanged; the port-scan probes to db1 have no recorded opener and a server's port
 # shape, but the internal side sent no data on them, so they are not named.
+# Link fetches now persist only their final selected records, and task outcomes no longer duplicate selected event
+# ids. The removed event, raw and event-entity rows were never cited by a finding, expansion link or coverage cell;
+# retained normalized events and raw payloads are unchanged. Raw first_task_id now names the selecting link task
+# instead of an earlier broad fetch task. No removed event introduced a unique entity, so the entity digest is stable.
 # Audit SYSCALL groups that become no other typed event now become process_observed events, so the evidence version
 # moved: every typed event id is rehashed and every event names the new normalizer, which changes every digest that
 # carries an event id (events, event_entities, candidates, links, tasks, audit, manifest) and every normalized and
@@ -104,15 +108,15 @@ GOLDEN_STACK = {
     "candidates": "85aa8b8e1a1c218be7c2cd434bbb0097d5aab3c380ce138ea63cb55de9271fcb",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "event_entities": "cf18bb6ae3e613d6cb411550ad8fa0e61c4070c55b24c85e174dcfe2add2841e",
-    "events": "c9a4a79653fa4a88195d9f0126cc0c60a9b6eba2679d4c76a26abc514f560f80",
+    "event_entities": "8224880134ac06339cbde46274c20ea7d2fa4a41e30f1426a576e0afd4270b58",
+    "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
     "manifest": "6195c36b863cf8cff722fede990ba3ffaf293bf5b3014762b28fd6a9f7aba223",
-    "raw": "80a0409b9be30979db49d2050bf90b7a4ed6dd2014360e1a21151df3756d0329",
+    "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     "rule_cells": "cd18a41e572a8e6a96b11d2342b4e16d80bba294d83dc9aa0ec3f879732c66e1",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "d42f33f46c7207b0d74950445787a42c7945859ef2d1065d5cf2bc19a9948fb1",
+    "tasks": "79a32a2c417b61351a7ce50d01b3a45b4d5789993e407fa5b00d4e911e8671f3",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",
@@ -143,6 +147,45 @@ PIVOT_FAMILIES = (None, frozenset({"process_exec"}), frozenset({"net_socket"}),
                   frozenset({"process_exec", "net_socket", "auth"}), frozenset({"net_flow"}))
 
 
+def _assert_every_citation_resolves_with_raw(snapshot):
+    events = {row["id"]: row for row in snapshot["events"]}
+    raw_ids = {row["id"] for row in snapshot["raw"]}
+    citation_keys = {
+        "event_id", "event_ids", "evidence_id", "evidence_ids", "first_event_id",
+        "first_event_ids", "anchor_event_id", "anchor_event_ids",
+    }
+    cited = {
+        event_id
+        for row in [*snapshot["candidates"], *snapshot["links"]]
+        for field in ("event_ids", "evidence_ids")
+        for event_id in row.get(field) or []
+    }
+
+    def coverage_citations(value, key=""):
+        if isinstance(value, dict):
+            for name, nested in value.items():
+                yield from coverage_citations(nested, name)
+        elif isinstance(value, list):
+            if key in citation_keys:
+                yield from (item for item in value if isinstance(item, str))
+            else:
+                for nested in value:
+                    yield from coverage_citations(nested, key)
+        elif isinstance(value, str) and key in citation_keys:
+            yield value
+
+    cited.update(
+        event_id for cell in snapshot["rule_cells"]
+        for event_id in coverage_citations(cell.get("detail") or {})
+    )
+    assert cited
+    assert cited <= set(events)
+    assert all(events[event_id]["raw_ids"] for event_id in cited)
+    assert {
+        raw_id for event_id in cited for raw_id in events[event_id]["raw_ids"]
+    } <= raw_ids
+
+
 def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
@@ -166,6 +209,7 @@ def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(docs, tmp_
     assert sum(t["state"] == "split" for t in snapshot["tasks"]) >= 2
     assert sum(link["status"] == "complete" for link in snapshot["links"]) > 10
     assert snapshot["manifest"]["findings"]
+    _assert_every_citation_resolves_with_raw(snapshot)
     assert tf.digests(snapshot) == GOLDEN_STACK
 
 

@@ -6,7 +6,7 @@ import math
 import re
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
@@ -78,6 +78,7 @@ class PivotEventBatch:
     coverage: list[PivotCoverage]
     reasons: list[str]
     duration_ms: int
+    task_by_event: dict[str, str] = field(default_factory=dict)
 
 
 def _is_network(target: str, contract: FieldContract | None = None) -> bool:
@@ -944,6 +945,27 @@ class PivotExecutor:
             leaves.append((current, outcome, covered_ranges, unresolved_ranges))
         return leaves
 
+    def save_batch_selection(self, batch: PivotEventBatch, events: list[TypedEvent]) -> None:
+        """Persist only the final events selected from a fetched link batch."""
+        self._save_selected_events(events, batch.raw_sources, batch.task_by_event, batch.task_ids)
+
+    def _save_selected_events(
+        self,
+        events: list[TypedEvent],
+        raw_sources: dict[str, dict],
+        task_by_event: dict[str, str],
+        task_ids: list[str],
+    ) -> None:
+        fallback_task = task_ids[0] if len(task_ids) == 1 else None
+        grouped: dict[str | None, dict[str, TypedEvent]] = {}
+        for event in events:
+            task_id = task_by_event.get(event.id, fallback_task)
+            grouped.setdefault(task_id, {}).setdefault(event.id, event)
+        for task_id, selected in grouped.items():
+            self.repo.save_evidence(
+                self.hunt_id, selected.values(), raw_sources, task_id, owner_token=self.owner_token,
+            )
+
     def fetch_intents(
         self,
         owner: str,
@@ -955,6 +977,7 @@ class PivotExecutor:
         query_cap: int | None = None,
         planning_coverage: list[PivotCoverage] | None = None,
         raw_families: set[str] | None = None,
+        persist: bool = True,
     ) -> PivotEventBatch:
         """Execute deterministic typed link intents without evaluating any playbook."""
         if anchor_ts is not None:
@@ -964,6 +987,7 @@ class PivotExecutor:
         started = perf_counter()
         task_ids: list[str] = []
         retained: dict[str, TypedEvent] = {}
+        task_by_event: dict[str, str] = {}
         raw_sources: dict[str, dict] = {}
         coverage: list[PivotCoverage] = list(planning_coverage or [])
         reasons: list[str] = [reason for cell in coverage for reason in cell.reasons]
@@ -1019,9 +1043,12 @@ class PivotExecutor:
                         for record in outcome.records
                     }
                     raw_sources.update(sources)
-                    self.repo.save_evidence(
-                        self.hunt_id, selected, sources, task_id, owner_token=self.owner_token,
-                    )
+                    for event in selected:
+                        task_by_event.setdefault(event.id, task_id)
+                    if persist:
+                        self.repo.save_evidence(
+                            self.hunt_id, selected, sources, task_id, owner_token=self.owner_token,
+                        )
                     retained.update({event.id: event for event in selected})
                     status = ("complete" if outcome.completeness == Completeness.complete
                               and not errors and not normalization_reasons else "partial")
@@ -1043,7 +1070,6 @@ class PivotExecutor:
                 ),
                 "reasons": sorted(set(task_reasons)),
                 "coverage": [cell.model_dump(mode="json") for cell in task_coverage],
-                "event_ids": sorted(event.id for event in retained.values()),
                 # records the source returned for this task, so evaluation can count expansion's retrieval cost
                 "returned": sum(cell.returned or 0 for cell in task_coverage),
             }
@@ -1064,6 +1090,7 @@ class PivotExecutor:
             events=sorted(retained.values(), key=lambda event: (event.ts, event.id)),
             raw_sources=raw_sources, coverage=_coalesce_coverage(coverage),
             reasons=sorted(set(reasons)), duration_ms=int((perf_counter() - started) * 1000),
+            task_by_event=task_by_event,
         )
 
     def _sample_terminal(
@@ -1383,6 +1410,7 @@ class PivotExecutor:
 
         task_ids: list[str] = []
         retained: list[TypedEvent] = []
+        task_by_event: dict[str, str] = {}
         raw_sources: dict[str, dict] = {}
         reasons: list[str] = [reason for cell in planning_coverage for reason in cell.reasons]
         coverage: list[PivotCoverage] = list(planning_coverage)
@@ -1446,9 +1474,8 @@ class PivotExecutor:
                         for record in outcome.records
                     }
                     raw_sources.update(sources)
-                    self.repo.save_evidence(
-                        self.hunt_id, selected, sources, task_id, owner_token=self.owner_token,
-                    )
+                    for event in selected:
+                        task_by_event.setdefault(event.id, task_id)
                     retained.extend(selected)
                     status = ("complete" if outcome.completeness == Completeness.complete
                               and not errors and not normalization_reasons else "partial")
@@ -1506,6 +1533,8 @@ class PivotExecutor:
                     "covered_ranges": [],
                     "unresolved_ranges": [_range(cell.start, cell.end, fence_reason)],
                 }) for cell in coverage]
+
+        self._save_selected_events(retained, raw_sources, task_by_event, task_ids)
 
         candidate_ids: list[str] = []
         for playbook in fresh_direct_pack():

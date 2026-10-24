@@ -104,7 +104,8 @@ class PredicateExecutor:
                              buckets=[{"key": {"host.name": h}, "count": n} for h, n in sorted(names.items())])
 
     def fetch_intents(self, owner, fetch_key, intents, retain, *, anchor_ts=None, query_cap=None,
-                      planning_coverage=None):
+                      planning_coverage=None, persist=True):
+        del persist
         self.source_queries += len(intents)
         self.sent.extend(intents)
         hits = [e for e in self.events if any(_honours(i, e) for i in intents) and retain(e)]
