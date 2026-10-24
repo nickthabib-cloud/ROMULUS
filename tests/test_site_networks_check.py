@@ -140,7 +140,8 @@ def test_under_the_default_a_site_in_public_space_is_flagged():
 
 def test_network_and_session_targets_are_not_host_telemetry_and_a_host_target_without_host_ip_is_named():
     fake = FakeES({HOST: ["10.0.0.5"], NETWORK: ["203.0.113.1"], ARKIME: ["203.0.113.2"], "logs-web-x": []},
-                  types={ARKIME: {"firstPacket": "date", "lastPacket": "date", "network.community_id": "keyword",
+                  types={NETWORK: {"@timestamp": "date", "source.ip": "ip", "destination.ip": "ip"},
+                         ARKIME: {"firstPacket": "date", "lastPacket": "date", "network.community_id": "keyword",
                                   "host.ip": "ip"},
                          "logs-web-x": {"@timestamp": "date", "host.name": "keyword"}})
     result = sn.check_host_addresses(_client(fake), _contracts(fake), SiteNetworks.default(), WINDOW)

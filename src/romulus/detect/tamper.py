@@ -372,6 +372,7 @@ def _actor(e: TypedEvent) -> str:
 
 
 class _TamperRule(Playbook):
+    os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     kind = "aggregate"
     claim_type = "aggregate_observation"

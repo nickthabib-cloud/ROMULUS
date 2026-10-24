@@ -334,6 +334,7 @@ def interpreter_indicators(argv: list[str]) -> list[str]:
 
 
 class WebServiceSpawnsInterpreter(Playbook):
+    os_families = ("linux",)
     """Stack-counted: routine shapes collapse into one context item; rare shapes become leads and
     are escalated only when typed argv indicators are present (rarity alone is not suspicion)."""
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
@@ -493,6 +494,7 @@ class WebServiceSpawnsInterpreter(Playbook):
 
 
 class DownloaderFeedsInterpreter(Playbook):
+    os_families = ("linux",)
     """Sequence: a downloader exec and a stdin-reading interpreter exec with the same parent on the
     same host within MAX_GAP seconds (the shape of `curl URL | sh` typed into a shell or a script)."""
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
@@ -636,6 +638,7 @@ class DownloaderFeedsInterpreter(Playbook):
 
 
 class DownloadPipedToShell(Playbook):
+    os_families = ("linux",)
     """Script-text indicator: a shell was started with a script containing downloader | interpreter.
     Positive-only: whether the pipeline ran is shown by process-level evidence
     (host.downloader_feeds_interpreter), never inferred from text."""
@@ -681,6 +684,7 @@ class DownloadPipedToShell(Playbook):
 
 
 class PtyUpgrade(Playbook):
+    os_families = ("linux",)
     id = "host.python_pty_spawn"
     argv_prefix_safe = True
     # argv/text-identified programs and actions: findings only, never a complete negative
@@ -708,6 +712,7 @@ class PtyUpgrade(Playbook):
 
 
 class ExecFromTempDir(Playbook):
+    os_families = ("linux",)
     id = "host.exec_from_temp_dir"
     argv_prefix_safe = True
     # argv/text-identified programs and actions: findings only, never a complete negative
@@ -742,6 +747,7 @@ _DEBCONF_ACTIONS = {"configure", "reconfigure"}
 
 
 class ScriptFromTempDir(Playbook):
+    os_families = ("linux",)
     """Positive-only argv indicator: an interpreter was given a temp-directory script operand."""
     id = "host.script_from_temp_dir"
     argv_prefix_safe = True
@@ -809,6 +815,7 @@ def _flag_value(args: list[str], *flags: str) -> str | None:
 
 
 class FirewallRuleChange(Playbook):
+    os_families = ("linux",)
     """Direct findings for commands that block or unblock a specific address on a built-in chain, leads for
     commands that weaken the firewall (disable, flush, accept-by-default, open a port, remove a block); other
     rule-change commands are grouped per host as context."""
@@ -1010,6 +1017,7 @@ def _firewall_weakening(name: str, args: list[str], chain: str | None, target: s
 
 
 class CredentialStoreRead(Playbook):
+    os_families = ("linux",)
     id = "host.credential_store_read"
     argv_prefix_safe = True
     anchor_class = "credential_access"
@@ -1054,6 +1062,7 @@ class CredentialStoreRead(Playbook):
 
 
 class AuthorizedKeysWrite(Playbook):
+    os_families = ("linux",)
     """Indicator of an authorized_keys write: a tee/cp/mv/install exec naming the file (observed action),
     or a shell script containing a redirect into it (script content). Positive-only: shell-builtin
     redirects create no process, so absence can only be assured by file-access telemetry."""
@@ -1109,6 +1118,7 @@ class AuthorizedKeysWrite(Playbook):
 
 
 class SshLoginFromExternal(Playbook):
+    os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.ssh_login_external_source"
     anchor_class = "remote_login"
@@ -1241,6 +1251,7 @@ def unbacked_executable(exe: str) -> tuple[str, str] | None:
 
 
 class UnbackedExecutable(Playbook):
+    os_families = ("linux",)
     """A process whose kernel-recorded executable is memory-backed, deleted or in an in-memory runtime directory,
     seen on any audit record that carries the executable (exec, socket or file-change calls)."""
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
@@ -1412,6 +1423,7 @@ class Ancestor(NamedTuple):
     event_id: str
     boot: str | None = None
     serial: int | None = None   # the exec's audit serial (orders execs of one instant)
+    order_domain: object | None = None  # audit, or one Windows (computer, channel) record-id sequence
 
 
 class Lineage(NamedTuple):
@@ -1434,6 +1446,7 @@ class ExecRecord(NamedTuple):
     boot: str | None
     flags: int
     serial: int | None = None   # the audit serial: orders execs of one pid at one instant (a #! chain)
+    order_domain: object | None = None
 
 
 # A real-uid-0 exec outside any login session (no audit login uid), with its executable and argv recorded and a
@@ -1442,19 +1455,36 @@ DAEMON = 1
 
 
 def _record_order(record: ExecRecord) -> tuple:
-    return record.ts, record.serial is None, record.serial or 0, record.event_id
+    return record.ts, repr(record.order_domain), record.serial is None, record.serial or 0, record.event_id
 
 
 def _latest_image(tied: list[ExecRecord]) -> ExecRecord | None:
     """One instant's execs of one pid: the latest by audit serial, or None when they cannot be ordered (a serial
     missing or repeated) and their executables differ, as the baseline carry decides it (`place_child`)."""
     serials = [record.serial for record in tied]
-    if None not in serials and len(set(serials)) == len(serials):
+    domains = {record.order_domain for record in tied}
+    if None not in serials and None not in domains and len(domains) == 1 and len(set(serials)) == len(serials):
         return max(tied, key=lambda record: record.serial)
     return tied[-1] if len({record.exe for record in tied}) == 1 else None
 
 
+def exec_order(event: TypedEvent) -> tuple[int | None, object | None]:
+    """A same-instant ordering token, valid only inside its monotonic source sequence."""
+    serial = event.get("audit.serial")
+    if isinstance(serial, int) and not isinstance(serial, bool):
+        return serial, "audit"
+    record_id = event.get("winlog.record_id")
+    computer = event.get("winlog.computer_name")
+    channel = event.get("event.channel")
+    if (isinstance(record_id, int) and not isinstance(record_id, bool)
+            and computer not in (None, "") and channel not in (None, "")):
+        domain = ("winlog", str(computer).strip().rstrip(".").casefold(), str(channel).strip().casefold())
+        return record_id, domain
+    return None, None
+
+
 def _audit_serial(event: TypedEvent) -> int | None:
+    """The Linux audit ordering value retained for callers that only operate on audit events."""
     serial = event.get("audit.serial")
     return serial if isinstance(serial, int) and not isinstance(serial, bool) else None
 
@@ -1524,7 +1554,7 @@ class ExecLineage:
         exe = event.get("process.executable")
         return ExecRecord(ancestor.ts, event.id, ancestor.ppid, str(exe) if exe else "", ancestor.name,
                           ancestor.user, ancestor.marker, event.raw[0].native_id if event.raw else "",
-                          ancestor.boot, DAEMON if _daemon(event) else 0, ancestor.serial)
+                          ancestor.boot, DAEMON if _daemon(event) else 0, ancestor.serial, ancestor.order_domain)
 
     def observe(self, event: TypedEvent) -> None:
         """Hold an exec record (once, however many rules hand it over)."""
@@ -1552,14 +1582,15 @@ class ExecLineage:
         return found if found is not None else self.store.peek((host, pid), None) or []
 
     def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,
-               serial: int | None = None, exclude: str | None = None, inclusive: bool = False) -> ExecRecord | None:
+               serial: int | None = None, order_domain=None, exclude: str | None = None,
+               inclusive: bool = False) -> ExecRecord | None:
         """The record of `pid` that was its image at (`ts`, audit `serial`), or None when there is none or it is
         ambiguous (`resolve` tells the two apart)."""
-        return self.resolve(host, pid, ts, strict=strict, where=where, serial=serial, exclude=exclude,
-                            inclusive=inclusive)[0]
+        return self.resolve(host, pid, ts, strict=strict, where=where, serial=serial,
+                            order_domain=order_domain, exclude=exclude, inclusive=inclusive)[0]
 
     def resolve(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,
-                serial: int | None = None, exclude: str | None = None,
+                serial: int | None = None, order_domain=None, exclude: str | None = None,
                 inclusive: bool = False) -> tuple[ExecRecord | None, float | None]:
         """(record, ambiguous_at): the record of `pid` that was its image when something happened at (`ts`, audit
         `serial`): its latest exec before that, among the records `where` accepts. None with `ambiguous_at` None
@@ -1581,6 +1612,9 @@ class ExecLineage:
         a pid held before its own record) needs it, or it ignores every exec at that instant."""
         if not isinstance(serial, int) or isinstance(serial, bool):
             serial = None                       # only a recorded integer serial orders execs
+            order_domain = None
+        elif order_domain is None:
+            order_domain = "audit"              # compatibility for existing Linux audit-serial callers
         entries = self.entries(host, pid)
         index = bisect_right(entries, ts, key=_record_ts)
         at_instant, unsure, before, before_ts = [], [], [], None
@@ -1591,7 +1625,8 @@ class ExecLineage:
             if record.ts == ts:
                 if record.event_id == exclude or (strict and exclude is None):
                     continue
-                if serial is not None and record.serial is not None:
+                if (serial is not None and record.serial is not None
+                        and record.order_domain == order_domain):
                     if record.serial < serial or (inclusive and record.serial == serial):
                         at_instant.append(record)       # precedes (or, inclusive, is) the asking record
                 else:
@@ -1655,25 +1690,26 @@ class ProcessLineage:
                   else "cloud-init" if system and name in CLOUD_INIT_TOOLS
                   else "logrotate" if system and name in LOG_ROTATORS else "")
         ppid = event.get("process.ppid")
+        serial, order_domain = exec_order(event)
         return Ancestor(event.ts.timestamp(), ppid if isinstance(ppid, int) else None, name,
-                        event.get("process.user"), marker, event.id, boot_of(event), _audit_serial(event))
+                        event.get("process.user"), marker, event.id, boot_of(event), serial, order_domain)
 
     def observe(self, event: TypedEvent) -> None:
         if event.family == "process_exec":
             self.execs.observe(event)
 
     def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None,
-               serial: int | None = None) -> Ancestor | None:
+               serial: int | None = None, order_domain=None) -> Ancestor | None:
         """The exec of `ppid` that was its image at (`ts`, audit `serial`) (`ExecLineage.latest`: None when that is
         ambiguous), unless it was recorded in a boot other than `boot`: the pid restarted at the reboot, and every
         earlier exec of it is in that boot or an earlier one."""
         if ppid is None or ppid <= 1:
             return None
-        found = self.execs.latest(host, ppid, ts, serial=serial)
+        found = self.execs.latest(host, ppid, ts, serial=serial, order_domain=order_domain)
         if found is None or boots_conflict(boot, found.boot):
             return None
         return Ancestor(found.ts, found.ppid, found.name, found.user, found.marker, found.event_id, found.boot,
-                        found.serial)
+                        found.serial, found.order_domain)
 
     def classify(self, event: TypedEvent) -> Lineage:
         """The record's own account or nearest exec ancestor that is a web-service account (which wins at any
@@ -1695,7 +1731,7 @@ class ProcessLineage:
             if current.marker and nearest is None:
                 nearest = Lineage(current.marker, current, depth)
             boot = boot if boot is not None else current.boot      # a parent is in its child's boot
-            found = self.parent(host, current.ppid, current.ts, boot, current.serial)
+            found = self.parent(host, current.ppid, current.ts, boot, current.serial, current.order_domain)
             if found is None or found.event_id == current.event_id:
                 break
             current = found

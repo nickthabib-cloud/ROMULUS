@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import deque
 from collections.abc import Callable
@@ -14,14 +15,23 @@ from romulus.agent.tools import (
     AuthActivityRequest,
     EntityTimelineRequest,
     IdsAlertsRequest,
+    ProcessTreeArgs,
     ProcessTreeRequest,
     ToolRequest,
 )
+from romulus.detect.host import ExecLineage
 from romulus.detect.registry import fresh_direct_pack
 from romulus.evidence.auditd import AuditParseError, AuditRecord, parse_record
 from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, normalize_hits
 from romulus.evidence.typed import TypedEvent
+from romulus.evidence.windows_catalog import (
+    WINDOWS_CHANNELS,
+    WINDOWS_HOST_DATASETS,
+    channels_for_families,
+    datasets_for_families,
+)
 from romulus.hunt.publish import publish_match
+from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, SearchOutcome, Window
@@ -71,11 +81,58 @@ class PivotEventBatch:
 
 
 def _is_network(target: str, contract: FieldContract | None = None) -> bool:
-    return "network" in target.lower() or bool(contract and contract.time_field == "firstPacket")
+    del target
+    return bool(contract and contract.role == "network")
+
+
+def _host_datasets(contract: FieldContract, families: set[str] | None = None) -> tuple[str, ...]:
+    if contract.os_family == "windows":
+        return datasets_for_families(families) if families else WINDOWS_HOST_DATASETS
+    if families:
+        by_family = {
+            "process_exec": ("linux.audit",),
+            "net_socket": ("linux.audit",),
+            "auth": ("linux.audit", "systemd.journal"),
+            "privilege_use": ("systemd.journal",),
+            "service_change": ("linux.audit", "systemd.journal"),
+            "account_change": ("linux.audit",),
+            "audit_config": ("linux.audit",),
+            "system_state": ("linux.audit",),
+            "file_change": ("linux.audit",),
+            "http_access": ("apache.access",),
+            "web_error": ("apache.error",),
+        }
+        selected = {
+            dataset for family in families for dataset in by_family.get(family, ())
+        }
+        return tuple(dataset for dataset in HOST_TIMELINE_DATASETS if dataset in selected)
+    return tuple(HOST_TIMELINE_DATASETS)
 
 
 def _supports(contract: FieldContract, field: str, op: str = "eq") -> bool:
     return contract.supports(field, op)
+
+
+def _windows_source_groups(
+    contract: FieldContract, families: set[str] | None = None,
+) -> list[list[Predicate]]:
+    datasets = datasets_for_families(families) if families else WINDOWS_HOST_DATASETS
+    channels = channels_for_families(families) if families else WINDOWS_CHANNELS
+    groups: list[list[Predicate]] = []
+    if datasets and _supports(contract, "event.dataset", "in"):
+        groups.append([Predicate(field="event.dataset", op="in", value=list(datasets))])
+    if channels and _supports(contract, "event.channel", "in"):
+        groups.append([Predicate(field="event.channel", op="in", value=list(channels))])
+    return groups
+
+
+def _and_any_of(left: list[list[Predicate]], right: list[list[Predicate]]) -> list[list[Predicate]]:
+    """Return disjunctive normal form for (OR left) AND (OR right)."""
+    if not left:
+        return right
+    if not right:
+        return left
+    return [[*a, *b] for a in left for b in right]
 
 
 def _event_entities(event: TypedEvent) -> list[EntityRef]:
@@ -396,7 +453,8 @@ class PivotExecutor:
                  source_query_budget: int | None = None,
                  source_query_scope: str | None = None,
                  dataset_inventory: dict[str, set[str] | list[str] | tuple[str, ...]] | None = None,
-                 optimize_normalization: bool = True):
+                 optimize_normalization: bool = True,
+                 site_facts: SiteFacts | None = None):
         self.repo = repo
         self.client = client
         self.hunt_id = hunt_id
@@ -411,6 +469,15 @@ class PivotExecutor:
         }
         self.optimize_normalization = optimize_normalization
         self.raw_family_prefilter = optimize_normalization
+        self.site_facts = site_facts or absent_site_facts()
+
+    def process_termination_attested(self, host: str | None) -> bool:
+        return bool(host) and self.site_facts.attests(
+            host, "audit_policy", subcategory="Process Termination", outcome="success",
+        )
+
+    def system_log_attested(self, host: str | None) -> bool:
+        return bool(host) and self.site_facts.attests(host, "system_event_log")
 
     def _normalize_pivot_records(
         self, records: list[dict], raw_families: set[str] | None,
@@ -502,19 +569,30 @@ class PivotExecutor:
                         [Predicate(field="destination.ip", op="eq", value=entity.value)],
                     ]
                 elif entity.kind == "ip" and not network:
+                    ip_groups = [
+                        [Predicate(field=field, op="eq", value=entity.value)]
+                        for field in ("source.ip", "destination.ip") if _supports(contract, field)
+                    ]
+                    if contract.os_family == "windows":
+                        source_groups = _windows_source_groups(contract)
+                        if not source_groups or not ip_groups:
+                            continue
+                        intents.append(SearchIntent(
+                            kind="raw", target=target, window=window,
+                            any_of=_and_any_of(source_groups, ip_groups),
+                            max_records=MAX_PIVOT_RECORDS,
+                            purpose=f"agent:{request.tool}:windows-events",
+                        ))
+                        continue
                     if not _supports(contract, "event.dataset"):
                         continue
-                    datasets = dataset_inventory.get(target, tuple(HOST_TIMELINE_DATASETS))
+                    supported_datasets = _host_datasets(contract)
+                    datasets = dataset_inventory.get(target, supported_datasets)
                     for dataset in datasets:
-                        if dataset not in HOST_TIMELINE_DATASETS:
+                        if dataset not in supported_datasets:
                             continue
                         dataset_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
-                        dataset_any_of: list[list[Predicate]] = []
-                        for field in ("source.ip", "destination.ip"):
-                            if _supports(contract, field):
-                                dataset_any_of.append([
-                                    Predicate(field=field, op="eq", value=entity.value),
-                                ])
+                        dataset_any_of = ip_groups
                         if target in dataset_inventory and not dataset_any_of:
                             continue
                         intents.append(SearchIntent(
@@ -524,29 +602,80 @@ class PivotExecutor:
                             purpose=f"agent:{request.tool}:{dataset}",
                         ))
                     continue
-                elif (entity.kind == "host" and not network
-                      and _supports(contract, "event.dataset", "in") and _supports(contract, "host.name")):
-                    filters = [
-                        Predicate(field="event.dataset", op="in", value=HOST_TIMELINE_DATASETS),
-                        Predicate(field="host.name", op="eq", value=entity.value),
-                    ]
+                elif entity.kind == "host" and not network and _supports(contract, "host.name"):
+                    if contract.os_family == "windows":
+                        any_of = _windows_source_groups(contract)
+                        if not any_of:
+                            continue
+                        filters = [Predicate(field="host.name", op="eq", value=entity.value)]
+                    elif _supports(contract, "event.dataset", "in"):
+                        filters = [
+                            Predicate(field="event.dataset", op="in", value=list(_host_datasets(contract))),
+                            Predicate(field="host.name", op="eq", value=entity.value),
+                        ]
+                    else:
+                        continue
                 else:
                     continue
             elif isinstance(request, AuthActivityRequest):
-                if network or not _supports(contract, "event.dataset"):
+                if network:
                     continue
-                filters = [Predicate(field="event.dataset", op="eq", value="systemd.journal")]
-                if args.entity.kind == "host":
-                    if not _supports(contract, "host.name"):
+                if args.entity.kind == "host" and not _supports(contract, "host.name"):
+                    continue
+                if contract.os_family == "windows":
+                    source_groups = _windows_source_groups(contract, {"auth"})
+                    if not source_groups:
                         continue
-                    filters.append(Predicate(field="host.name", op="eq", value=args.entity.value))
-            elif isinstance(request, ProcessTreeRequest):
-                if network or not (_supports(contract, "event.dataset") and _supports(contract, "host.name")):
+                    auth_filters = []
+                    if args.entity.kind == "host":
+                        auth_filters.append(Predicate(field="host.name", op="eq", value=args.entity.value))
+                    intents.append(SearchIntent(
+                        kind="raw", target=target, window=window, filters=auth_filters,
+                        any_of=source_groups, max_records=MAX_PIVOT_RECORDS,
+                        purpose=f"agent:{request.tool}:windows-events",
+                    ))
                     continue
-                filters = [
-                    Predicate(field="event.dataset", op="eq", value="linux.audit"),
-                    Predicate(field="host.name", op="eq", value=args.host),
-                ]
+                if not _supports(contract, "event.dataset"):
+                    continue
+                auth_datasets = ("systemd.journal",)
+                for dataset in auth_datasets:
+                    auth_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
+                    if args.entity.kind == "host":
+                        auth_filters.append(Predicate(field="host.name", op="eq", value=args.entity.value))
+                    intents.append(SearchIntent(
+                        kind="raw", target=target, window=window, filters=auth_filters,
+                        max_records=MAX_PIVOT_RECORDS, purpose=f"agent:{request.tool}:{dataset}",
+                    ))
+                continue
+            elif isinstance(request, ProcessTreeRequest):
+                if network or not _supports(contract, "host.name"):
+                    continue
+                families = (
+                    {"process_exec", "process_termination", "system_state"}
+                    if contract.os_family == "windows" else {"process_exec"}
+                )
+                if contract.os_family == "windows":
+                    source_groups = _windows_source_groups(contract, families)
+                    if source_groups:
+                        intents.append(SearchIntent(
+                            kind="raw", target=target, window=window,
+                            filters=[Predicate(field="host.name", op="eq", value=args.host)],
+                            any_of=source_groups, max_records=MAX_PIVOT_RECORDS,
+                            purpose=f"agent:{request.tool}:windows-events",
+                        ))
+                    continue
+                if not _supports(contract, "event.dataset"):
+                    continue
+                for dataset in _host_datasets(contract, families):
+                    intents.append(SearchIntent(
+                        kind="raw", target=target, window=window,
+                        filters=[
+                            Predicate(field="event.dataset", op="eq", value=dataset),
+                            Predicate(field="host.name", op="eq", value=args.host),
+                        ],
+                        max_records=MAX_PIVOT_RECORDS, purpose=f"agent:{request.tool}:{dataset}",
+                    ))
+                continue
             elif isinstance(request, IdsAlertsRequest):
                 if not network or not _supports(contract, "event.dataset"):
                     continue
@@ -576,7 +705,23 @@ class PivotExecutor:
         for predicate in intent.filters:
             if predicate.field == "event.dataset" and predicate.op == "eq" and isinstance(predicate.value, str):
                 return predicate.value
+        if any(predicate.field == "event.channel" for group in intent.any_of for predicate in group):
+            return "windows.events"
         return None
+
+    @staticmethod
+    def _intent_datasets(intent: SearchIntent) -> set[str]:
+        """Datasets an intent searches, including dataset alternatives in ``any_of``."""
+        datasets: set[str] = set()
+        predicates = [*intent.filters, *(predicate for group in intent.any_of for predicate in group)]
+        for predicate in predicates:
+            if predicate.field != "event.dataset":
+                continue
+            if predicate.op == "eq" and isinstance(predicate.value, str):
+                datasets.add(predicate.value)
+            elif predicate.op == "in" and isinstance(predicate.value, (list, tuple, set, frozenset)):
+                datasets.update(value for value in predicate.value if isinstance(value, str))
+        return datasets
 
     @staticmethod
     def _ip_normalization_reasons(intent: SearchIntent, records: list[dict]) -> list[str]:
@@ -607,7 +752,11 @@ class PivotExecutor:
         args = request.arguments
         unresolved: list[PivotCoverage] = []
         intents = intents or []
-        planned = {(intent.target, PivotExecutor._intent_dataset(intent)) for intent in intents}
+        planned = {
+            (intent.target, dataset)
+            for intent in intents
+            for dataset in PivotExecutor._intent_datasets(intent)
+        }
         for target, contract in self.contracts.items():
             inventoried = self.dataset_inventory.get(target)
             if inventoried is not None:
@@ -622,7 +771,7 @@ class PivotExecutor:
                     ))
                     continue
                 normalized = set(NETWORK_TIMELINE_DATASETS if _is_network(target, contract)
-                                 else HOST_TIMELINE_DATASETS)
+                                 else _host_datasets(contract))
                 for dataset in inventoried:
                     if (target, dataset) in planned:
                         continue
@@ -636,9 +785,10 @@ class PivotExecutor:
                 continue
             if _is_network(target, contract):
                 continue
-            if _supports(contract, "event.dataset"):
+            if (_supports(contract, "event.dataset")
+                    or (contract.os_family == "windows" and _supports(contract, "event.channel"))):
                 continue
-            for dataset in HOST_TIMELINE_DATASETS:
+            for dataset in _host_datasets(contract):
                 reason = f"dataset_unsearchable:{dataset}:event.dataset predicate unavailable"
                 unresolved.append(PivotCoverage(
                     target=target, dataset=dataset, start=args.start, end=args.end,
@@ -658,14 +808,19 @@ class PivotExecutor:
                    and (contract.spec("host.name") is not None and contract.spec("host.name").aggregatable)]
         if not targets:
             return None, f"victim host unknown for {ip}: no host source has a searchable host.ip field"
-        fingerprint = digest({
+        fingerprint_input = {
             "hunt": self.hunt_id,
             "source_query_scope": getattr(self, "source_query_scope", None) or "expansion",
             "resolve_host_ip": ip,
             "start": start.isoformat(),
             "end": end.isoformat(),
             "targets": [target for target, _ in targets],
-        })
+        }
+        # Only Windows resolution semantics changed. Preserve Linux task identities byte-for-byte so existing
+        # durable results and deterministic Linux report goldens remain valid.
+        if any(contract.os_family == "windows" for _target, contract in targets):
+            fingerprint_input["host_identity"] = "typed-v2"
+        fingerprint = digest(fingerprint_input)
         task_id = "t-" + fingerprint[:20]
         prior = self.repo.task(task_id)
         if prior and prior["state"] == "evaluated" and isinstance(prior.get("outcome"), dict):
@@ -676,7 +831,7 @@ class PivotExecutor:
         self.repo.upsert_task(task_id, self.hunt_id, _link_task_kind(self), "host-resolution", intent_record,
                               fingerprint, owner_token=self.owner_token)
         self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
-        names: set[str] = set()
+        identities: dict[tuple[str, str], str] = {}
         incomplete: list[str] = []
         for target, contract in targets:
             intent = SearchIntent(kind="aggregate", target=target, window=Window(start=start, end=end),
@@ -685,16 +840,30 @@ class PivotExecutor:
             outcome = self._execute(intent, contract, spend_task_id=task_id)
             if outcome.completeness != Completeness.complete:
                 incomplete.append(f"{target}: {'; '.join(outcome.reasons or [outcome.error or 'incomplete'])}")
-            names.update(str(bucket["key"].get("host.name")) for bucket in outcome.buckets
-                         if bucket["key"].get("host.name") not in (None, ""))
+            for bucket in outcome.buckets:
+                name = bucket["key"].get("host.name")
+                if name in (None, ""):
+                    continue
+                # Windows contracts aggregate their native computer-name field, which commonly carries an FQDN,
+                # while normalization deliberately uses the lower-case short name as the typed host identity.
+                # Resolve to that same identity before links, anchors and scheduling consume it.
+                resolved = str(name)
+                if contract.os_family == "windows":
+                    native = resolved.strip().rstrip(".").casefold()
+                    resolved = native.split(".", 1)[0]
+                else:
+                    native = resolved
+                if resolved:
+                    identities[(contract.os_family or "unknown", native)] = resolved
         if incomplete:
             host, reason = None, f"victim host unresolved for {ip}: host lookup incomplete ({'; '.join(incomplete)})"
-        elif len(names) == 1:
-            host, reason = next(iter(names)), None
-        elif not names:
+        elif len(identities) == 1:
+            host, reason = next(iter(identities.values())), None
+        elif not identities:
             host, reason = None, f"victim host unknown for {ip}: {NO_HOST_RECORD} {ip}"
         else:
-            host, reason = None, f"{HOST_AMBIGUOUS} for {ip}: {sorted(names)[:5]}"
+            native_names = sorted(native for _os_family, native in identities)
+            host, reason = None, f"{HOST_AMBIGUOUS} for {ip}: {native_names[:5]}"
         # An incomplete lookup (timeout, shard failure, budget) is not a final answer: it stays retryable.
         self.repo.update_task(task_id, "partial" if incomplete else "evaluated",
                               outcome={"host": host, "reason": reason}, owner_token=self.owner_token)
@@ -1059,25 +1228,137 @@ class PivotExecutor:
     @staticmethod
     def _retain(request: ToolRequest, event: TypedEvent) -> bool:
         args = request.arguments
+        windows_host = event.get("host.os.family") == "windows" or event.normalizer.startswith("windows-")
+
+        def same_host(left: object, right: object) -> bool:
+            left_text = str(left or "").strip().rstrip(".")
+            right_text = str(right or "").strip().rstrip(".")
+            if windows_host:
+                return left_text.split(".", 1)[0].casefold() == right_text.split(".", 1)[0].casefold()
+            return left_text == right_text
+
         if isinstance(request, EntityTimelineRequest):
             entity = args.entity
-            return any(item.kind == entity.kind and item.value == entity.value for item in _event_entities(event))
+            return any(
+                item.kind == entity.kind
+                and (same_host(item.value, entity.value) if entity.kind == "host" else item.value == entity.value)
+                for item in _event_entities(event)
+            )
         if isinstance(request, AuthActivityRequest):
             if event.family not in {"auth", "privilege_use"}:
                 return False
             entity = args.entity
-            return (event.host == entity.value if entity.kind == "host" else
+            return (same_host(event.host, entity.value) if entity.kind == "host" else
                     any(item.kind == "account" and item.value == entity.value for item in _event_entities(event)))
         if isinstance(request, ProcessTreeRequest):
-            return (event.family == "process_exec" and event.host == args.host
+            if not same_host(event.host, args.host):
+                return False
+            if event.get("host.os.family") == "windows":
+                return event.family in {"process_exec", "process_termination", "system_state"}
+            return (event.family == "process_exec"
                     and args.process_id in {event.get("process.pid"), event.get("process.ppid")})
         if isinstance(request, IdsAlertsRequest):
             if event.family != "net_alert":
                 return False
             entity = args.entity
-            return (event.host == entity.value if entity.kind == "host" else
+            return (same_host(event.host, entity.value) if entity.kind == "host" else
                     any(item.kind == "ip" and item.value == entity.value for item in _event_entities(event)))
         return False
+
+    @staticmethod
+    def _select_windows_process_tree(
+        events: list[TypedEvent], args: ProcessTreeArgs, anchor_ts: datetime | None,
+        termination_attested: bool = False,
+    ) -> tuple[list[TypedEvent], str | None]:
+        candidates = sorted(
+            (event for event in events
+             if str(event.host or "").strip().rstrip(".").split(".", 1)[0].casefold()
+             == str(args.host).strip().rstrip(".").split(".", 1)[0].casefold()),
+            key=lambda event: (event.ts, event.id),
+        )
+        roots = [
+            event for event in candidates
+            if event.family == "process_exec" and event.get("process.pid") == args.process_id
+        ]
+        pivot_time = anchor_ts or (roots[0].ts if roots else args.start)
+        prior_roots = [event for event in roots if event.ts <= pivot_time]
+        root = None
+        if prior_roots:
+            lineage = ExecLineage()
+            by_id = {}
+            for event in prior_roots:
+                lineage.observe(event)
+                by_id[event.id] = event
+            # Ask just after the anchor instant: every root at that instant is eligible, while ExecLineage orders
+            # records only inside one audit or (computer, channel) record-id sequence and refuses differing images
+            # across incomparable sequences.
+            latest = lineage.latest(
+                prior_roots[0].host,
+                args.process_id,
+                math.nextafter(pivot_time.timestamp(), math.inf),
+            )
+            if latest is None:
+                return [], "process_tree root at anchor instant is ambiguous"
+            root = by_id.get(latest.event_id)
+        root_guid = root.get("process.guid") if root is not None else None
+        if root_guid:
+            guids = {str(root_guid).casefold()}
+            selected: dict[str, TypedEvent] = {}
+            changed = True
+            while changed:
+                changed = False
+                for event in candidates:
+                    if event.family != "process_exec":
+                        continue
+                    guid = str(event.get("process.guid") or "").casefold()
+                    parent = str(event.get("process.parent.guid") or "").casefold()
+                    if guid in guids or parent in guids:
+                        selected[event.id] = event
+                        if guid and guid not in guids:
+                            guids.add(guid)
+                            changed = True
+            return list(selected.values()), None
+        fences = [
+            event for event in candidates
+            if event.get("process.fence") == "boot"
+            or (event.get("process.fence") == "termination" and event.get("process.pid") == args.process_id)
+        ]
+        if not fences:
+            selected = [
+                event for event in candidates
+                if event.family == "process_exec"
+                and args.process_id in {event.get("process.pid"), event.get("process.ppid")}
+            ]
+            reason = None if termination_attested else "process_tree PID fence evidence unavailable"
+            return selected, reason
+        lower, upper = args.start, args.end
+        for fence in fences:
+            if fence.ts <= pivot_time:
+                lower = max(lower, fence.ts)
+            else:
+                upper = min(upper, fence.ts)
+        return [
+            event for event in candidates
+            if event.family == "process_exec" and lower <= event.ts < upper
+            and args.process_id in {event.get("process.pid"), event.get("process.ppid")}
+        ], None
+
+    @staticmethod
+    def _select_process_tree_by_os(
+        events: list[TypedEvent], args: ProcessTreeArgs, anchor_ts: datetime | None,
+        termination_attested: bool = False,
+    ) -> tuple[list[TypedEvent], str | None]:
+        """Fence only Windows PID lineage; mixed-source Linux results keep Linux semantics."""
+        windows = [event for event in events if event.get("host.os.family") == "windows"
+                   or event.normalizer.startswith("windows-")]
+        if not windows:
+            return events, None
+        windows_objects = {id(event) for event in windows}
+        other = [event for event in events if id(event) not in windows_objects]
+        selected, reason = PivotExecutor._select_windows_process_tree(
+            windows, args, anchor_ts, termination_attested,
+        )
+        return [*other, *selected], reason
 
     def run(self, case_id: str, request: ToolRequest, *,
             anchor_ts: datetime | None = None) -> PivotResult:
@@ -1209,6 +1490,21 @@ class PivotExecutor:
                 task_id, "executed", outcome=outcome_digest, owner_token=self.owner_token,
             )
             self.repo.update_task(task_id, "evaluated", owner_token=self.owner_token)
+
+        if isinstance(request, ProcessTreeRequest):
+            retained, fence_reason = self._select_process_tree_by_os(
+                retained, request.arguments, anchor_ts,
+                self.process_termination_attested(request.arguments.host),
+            )
+            if fence_reason:
+                incomplete = True
+                reasons.append(fence_reason)
+                coverage = [cell.model_copy(update={
+                    "status": "partial",
+                    "reasons": sorted(set(cell.reasons + [fence_reason])),
+                    "covered_ranges": [],
+                    "unresolved_ranges": [_range(cell.start, cell.end, fence_reason)],
+                }) for cell in coverage]
 
         candidate_ids: list[str] = []
         for playbook in fresh_direct_pack():

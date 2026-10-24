@@ -170,9 +170,28 @@ def test_manifest_citations_resolve_and_renderers_agree():
     assert [f["id"] for f in j["findings"]] == re.findall(r'<a id="f-([0-9a-f]+)"></a>', md)
     # partial hunt with findings states both facts and never claims cleanliness
     s = outcome_sentence(m)
-    assert "finding" in s and "partial" in s and "clean" not in s.replace("not a statement that the environment is clean", "")
+    assert "finding" in s and "partial" in s and "clean" not in s.replace(
+        "not a statement that the environment is clean", "",
+    )
 
 
+def test_duplicate_partition_events_have_a_separate_not_assessed_explanation():
+    from romulus.report.manifest import _not_assessed
+
+    rows = _not_assessed({}, {"stats": {"skips": {
+        "duplicate typed event across source partitions": 3,
+        "dataset: unsupported": 2,
+        "record_id reused (log cleared or reverted)": 1,
+    }}})
+    reasons = {row["records"]: row["reason"] for row in rows}
+
+    assert reasons[3] == (
+        "typed event deduplicated across source partitions; its additional raw provenance was retained"
+    )
+    assert reasons[2] == "retrieved but not turned into a typed event: dataset: unsupported"
+    assert reasons[1] == (
+        "typed Windows events retained separately after record_id reuse (log cleared or reverted)"
+    )
 def test_revisions_are_append_only():
     repo, cid = _repo_with_finding()
     r1 = publish_revision(repo, "h1", "test")

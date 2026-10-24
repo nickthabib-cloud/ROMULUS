@@ -11,7 +11,7 @@ from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
 from romulus.hunt.pivot import PivotEventBatch, PivotExecutor
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.sources.profile import contract_from_types
-from romulus.store.db import make_engine, migrate
+from romulus.store.db import digest, make_engine, migrate
 from romulus.store.repo import Repo
 
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
@@ -39,6 +39,18 @@ def contracts(*, host_ip=False):
             "@timestamp": "date", "event.dataset": "keyword", "source.ip": "ip", "destination.ip": "ip",
             "source.port": "integer", "destination.port": "integer", "network.community_id": "keyword",
             "network.transport": "keyword"}),
+    }
+
+
+def windows_contracts():
+    return {
+        "host-x": contract_from_types("host-x", {
+            "@timestamp": "date", "event.dataset": "keyword", "host.ip": "ip",
+            "winlog.computer_name": "keyword", "winlog.channel": "keyword",
+            "winlog.provider_name": "keyword", "winlog.event_id": "keyword",
+            "winlog.event_data": "flattened",
+        }, role="host", os_family="windows"),
+        "network-x": contracts()["network-x"],
     }
 
 
@@ -101,6 +113,25 @@ class PredicateExecutor:
                                reasons=[], duration_ms=1)
 
 
+class WindowsFqdnExecutor(PredicateExecutor):
+    """The Windows aggregation returns its native FQDN while raw events carry typed short host names."""
+
+    names = ("WS01.Example.Test.",)
+
+    def _execute(self, intent, contract, *, pit=None, spend_task_id=None):
+        if intent.purpose != "expansion:resolve_host_ip":
+            return super()._execute(intent, contract, pit=pit, spend_task_id=spend_task_id)
+        if spend_task_id is not None:
+            self.repo.record_task_source_query(spend_task_id)
+        self.source_queries += 1
+        self.sent.append(intent)
+        return SearchOutcome(
+            target=intent.target, fingerprint="fqdn", started_at=T0, ended_at=T0,
+            completeness=Completeness.complete, total=1, total_relation="eq",
+            buckets=[{"key": {"host.name": name}, "count": 1} for name in self.names],
+        )
+
+
 def network_anchor_repo(src="10.0.0.2", dst="203.0.113.8", sport=50000, dport=443):
     engine = make_engine(":memory:")
     migrate(engine)
@@ -156,6 +187,70 @@ def test_an_endpoint_that_resolves_to_one_host_runs_host_side_links_on_that_host
                          for link in after)
     assert any("web1-later" in link["event_ids"] for link in after)
     assert _host_name_values(executor) <= {"web1"}
+
+
+def test_windows_fqdn_resolution_uses_the_typed_short_host_for_after_links():
+    repo = network_anchor_repo()
+    later = ev(
+        "ws01-later", "process_exec", host="ws01", target="host-x", ts=T0 + timedelta(minutes=1),
+        process__pid=77,
+    )
+    executor = WindowsFqdnExecutor(repo, [later], windows_contracts())
+
+    ExpansionEngine(
+        repo, "h1", WINDOW, LinkFetcher(executor, WINDOW.start, WINDOW.end), max_depth=1,
+    ).run()
+
+    after = [link for link in repo.expansion_links("h1") if link["link_type"] == "host_after_anchor"]
+    assert after and all(link["key"]["host.name"] == "ws01" for link in after)
+    assert any(link["status"] == "complete" and "ws01-later" in link["event_ids"] for link in after)
+    assert _host_name_values(executor) <= {"ws01"}
+
+
+def test_windows_fqdn_resolution_can_complete_an_empty_after_window():
+    repo = network_anchor_repo()
+    executor = WindowsFqdnExecutor(repo, [], windows_contracts())
+
+    ExpansionEngine(
+        repo, "h1", WINDOW, LinkFetcher(executor, WINDOW.start, WINDOW.end), max_depth=1,
+    ).run()
+
+    after = [link for link in repo.expansion_links("h1") if link["link_type"] == "host_after_anchor"]
+    assert after and all(
+        link["status"] == "complete" and link["key"]["host.name"] == "ws01" and not link["event_ids"]
+        for link in after
+    )
+
+
+def test_windows_fqdns_with_one_short_label_remain_ambiguous_native_hosts():
+    repo = network_anchor_repo()
+    executor = WindowsFqdnExecutor(repo, [], windows_contracts())
+    executor.names = ("WS01.a.example.test", "WS01.b.example.test")
+
+    host, reason = executor.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end)
+
+    assert host is None
+    assert reason is not None and "victim host ambiguous" in reason
+    assert "ws01.a.example.test" in reason and "ws01.b.example.test" in reason
+
+
+def test_linux_host_resolution_preserves_its_full_typed_host_name():
+    repo = network_anchor_repo()
+    marker = ev(
+        "linux-ip", "process_exec", host="linux01.example.test", target="host-x",
+        host__ip="10.0.0.2", process__pid=1,
+    )
+    executor = PredicateExecutor(repo, [marker], contracts(host_ip=True))
+
+    assert executor.resolve_host_ip(
+        "F-net", "10.0.0.2", WINDOW.start, WINDOW.end,
+    ) == ("linux01.example.test", None)
+    [task] = repo.host_resolution_tasks("h1")
+    legacy_fingerprint = digest({
+        "hunt": "h1", "source_query_scope": "expansion", "resolve_host_ip": "10.0.0.2",
+        "start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat(), "targets": ["host-x"],
+    })
+    assert task["id"] == "t-" + legacy_fingerprint[:20]
 
 
 def test_an_ambiguous_endpoint_is_unsupported_with_the_candidates():

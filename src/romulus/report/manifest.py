@@ -28,7 +28,7 @@ def _jsonable(v):
 
 def _citations(repo: Repo, cand: dict) -> list[dict]:
     """Resolve every cited event to retained raw records (or mark the citation broken)."""
-    events = {e["id"]: e for e in repo.events_by_ids(cand["event_ids"])}
+    events = {e["id"]: e for e in repo.citation_events(cand["hunt_id"], cand["event_ids"])}
     cites = []
     for eid in cand["event_ids"]:
         ev = events.get(eid)
@@ -173,6 +173,13 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
     stats = sweep_detail.get("stats") or {}
     profiles = hunt_manifest.get("source_profiles") or {}
     out = []
+
+    def skip_explanation(reason: str) -> str:
+        if reason == "duplicate typed event across source partitions":
+            return "typed event deduplicated across source partitions; its additional raw provenance was retained"
+        if reason == "record_id reused (log cleared or reverted)":
+            return "typed Windows events retained separately after record_id reuse (log cleared or reverted)"
+        return f"retrieved but not turned into a typed event: {reason}"
     for target, retrieved in sorted((stats.get("dataset_filter") or {}).items()):
         inventory = (profiles.get(target) or {}).get("datasets")
         if not isinstance(inventory, dict):
@@ -186,10 +193,59 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                             "count_scope": "whole index at source preflight, not only the hunt window",
                             "reason": "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
                                       "evaluates it"})
-    for reason, count in sorted((stats.get("skips") or {}).items()):
-        out.append({"target": "all sweep targets", "dataset": None, "records": count,
-                    "count_scope": "records retrieved in the hunt window",
-                    "reason": f"retrieved but not turned into a typed event: {reason}"})
+    for target, classes in sorted((stats.get("windows_unassessed") or {}).items()):
+        for event_class in classes:
+            if event_class.get("uncatalogued"):
+                if event_class.get("overflow"):
+                    dataset = f"{event_class['classes']:,} additional uncatalogued Windows event classes"
+                    reason = "inventory rows omitted after the bounded category limit"
+                else:
+                    dataset = (
+                        f"{event_class['channel']}|{event_class['provider']}|{event_class['event_id']}"
+                    )
+                    reason = "uncatalogued Windows event class was not retrieved or evaluated"
+                out.append({
+                    "target": target,
+                    "dataset": dataset,
+                    "records": event_class["records"],
+                    "count_scope": "source inventory for the hunt window; records were not retrieved",
+                    "reason": reason,
+                })
+                continue
+            out.append({
+                "target": target,
+                "dataset": (
+                    f"{event_class['channel']}|{event_class['provider']}|{event_class['event_id']}"
+                ),
+                "records": event_class["records"],
+                "count_scope": "records retrieved in the hunt window",
+                "reason": (
+                    f"catalogued Windows {event_class['family']} event class has no rule reader in this pack"
+                ),
+            })
+    scoped_skips = stats.get("skips_by_target") or {}
+    if scoped_skips:
+        scoped_totals: Counter = Counter()
+        for target, reasons in sorted(scoped_skips.items()):
+            for reason, count in sorted(reasons.items()):
+                scoped_totals[reason] += count
+                out.append({"target": target, "dataset": None, "records": count,
+                            "count_scope": "records retrieved in the hunt window",
+                            "reason": skip_explanation(reason)})
+        global_scoped = stats.get("skips_scoped_global")
+        if isinstance(global_scoped, dict):
+            scoped_totals = Counter(global_scoped)
+        for reason, count in sorted((stats.get("skips") or {}).items()):
+            remainder = count - scoped_totals[reason]
+            if remainder > 0:
+                out.append({"target": "all sweep targets", "dataset": None, "records": remainder,
+                            "count_scope": "records retrieved in the hunt window",
+                            "reason": skip_explanation(reason)})
+    else:
+        for reason, count in sorted((stats.get("skips") or {}).items()):
+            out.append({"target": "all sweep targets", "dataset": None, "records": count,
+                        "count_scope": "records retrieved in the hunt window",
+                        "reason": skip_explanation(reason)})
     return out
 
 
@@ -586,7 +642,7 @@ def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
 
 def _content_candidate_key(repo: Repo, candidate: dict) -> str:
     raw_keys = set()
-    for row in repo.events_by_ids(candidate["event_ids"]):
+    for row in repo.citation_events(candidate["hunt_id"], candidate["event_ids"]):
         for reference in row["event"].get("raw", []):
             raw_keys.add(f"{reference['target']}/{reference['native_id']}")
     evidence_identity = candidate.get("group_key") or sorted(raw_keys) or sorted(candidate["event_ids"])

@@ -308,7 +308,7 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
         loaded = []
         for start in range(0, len(missing), EVENT_CHUNK):
             loaded += [TypedEvent.model_validate(item["event"])
-                       for item in repo.events_by_ids(missing[start:start + EVENT_CHUNK])]
+                       for item in repo.citation_events(hunt_id, missing[start:start + EVENT_CHUNK])]
         boots.fill(loaded, rederive=True)
         return sorted(found + loaded, key=lambda event: (event.ts, event.id))
 

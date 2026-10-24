@@ -171,6 +171,13 @@ class _StepView:
 
     def events_by_ids(self, ids: list[str]) -> list[dict]:
         rows = self._repo.events_by_ids(ids)
+        return self._mutated(rows)
+
+    def citation_events(self, hunt_id: str, ids: list[str]) -> list[dict]:
+        rows = self._repo.citation_events(hunt_id, ids)
+        return self._mutated(rows)
+
+    def _mutated(self, rows: list[dict]) -> list[dict]:
         if not self._mutations:
             return rows
         rows = copy.deepcopy(rows)

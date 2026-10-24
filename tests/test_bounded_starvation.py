@@ -16,6 +16,7 @@ from romulus.detect.indicators import Indicator, IndicatorMatch, IndicatorSet
 from romulus.detect.lineage import ReverseShellByLineage
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import sweep as sw
+from romulus.hunt.stage import EventStage
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -239,6 +240,45 @@ def test_routine_volume_spends_only_its_own_floors_and_strong_records_still_publ
                     WebServiceSpawnsInterpreter.id):
         assert _capped(cells, rule_id) == 0
     _cites_what_it_states(published)
+
+
+def test_sysmon_volume_cannot_spend_the_indicator_store_floor(monkeypatch, tmp_path):
+    monkeypatch.setattr(_Listed, "HOT", 1)
+    budget = StateBudget(tmp_path, disk_total=96 * 1024, reserve=0)
+    rule = _Listed()
+    rule.spill_dir, rule.budget = tmp_path, budget
+    windows_account = budget.account("windows_seen")
+    budget.plan(live_stores([rule]) + 1)
+    stage = EventStage(tmp_path, budget=budget, windows_account=windows_account)
+    flood = []
+    for number in range(8_000):
+        item = ev("process_exec" if number % 2 == 0 else "net_socket", T0, host=f"ws{number % 500}")
+        item.id = f"windows-{number:08d}"
+        item.normalizer = "windows-ecs@2"
+        flood.append(item)
+
+    stage.unique_windows(flood)
+
+    windows_hit = query(T0 + timedelta(hours=1), "one.c2.test")
+    windows_hit.host = "ws01"
+    windows_hit.normalizer = "windows-ecs@2"
+    linux_hit = query(T0 + timedelta(hours=1, seconds=1), "two.c2.test")
+    linux_hit.host = "linux01"
+    fresh, duplicates = stage.unique_windows([windows_hit, linux_hit])
+    assert fresh == [windows_hit, linux_hit] and duplicates == []   # the spent dedup floor withholds nothing
+    rule.consume(fresh)
+    cited = rule.drain_staged()
+    stage.put(cited, {})
+    rule.bind_loader(stage.load)
+    findings = rule.finalize()
+
+    assert stage.windows_refused > 0
+    assert set(budget.full) == {"windows_seen"}
+    assert len(findings) == 2
+    assert {finding.events[0].host for finding in findings} == {"ws01", "linux01"}
+    assert not rule.limits
+    rule.release_state()
+    stage.close()
 
 
 def _probe_pack():
