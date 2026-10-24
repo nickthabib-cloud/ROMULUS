@@ -612,7 +612,7 @@ class Sweep:
                        [WINDOW_ROLLUP_PARTIAL] if any_partial else [])
             if any(DIRECTION_ASSUMED_REASON in ((c["detail"] or {}).get("reasons") or []) for c in cells):
                 reasons.append(DIRECTION_ASSUMED_REASON)
-            reasons += limits
+            reasons += limits + pb.coverage_notes()
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
                                     len(ms) + consumed_matches, evaluated, {"reasons": reasons})
             pb.release_state()

@@ -31,6 +31,23 @@ PREFIX = "romulus-stage-"
 PCAP_PREFIX = "romulus-pcap-"            # the packet stage's capture directory
 STALE_SECONDS = 6 * 3600
 
+# Held events. Every statement that releases a hold or keeps a held event looks rows up by a primary key or an index
+# (one id or key at a time), so a release costs the same however many holds the stage has; tests check the plans.
+HOLD_ADD = "INSERT INTO hold VALUES (?, ?, 1) ON CONFLICT (id, owner) DO UPDATE SET n = n + 1"
+HOLD_DECREMENT = "UPDATE hold SET n = n - 1 WHERE id = ? AND owner = ?"
+HOLD_DROP = "DELETE FROM hold WHERE id = ? AND owner = ? AND n <= 0"
+UNHELD = ("SELECT 1 FROM event WHERE id = ? AND kept = 0 "
+          "AND NOT EXISTS (SELECT 1 FROM hold WHERE hold.id = event.id)")
+HELD_RAW = "SELECT key FROM event_raw WHERE id = ?"
+EVENT_DROP = "DELETE FROM event WHERE id = ?"
+EVENT_RAW_DROP = "DELETE FROM event_raw WHERE id = ?"
+RAW_DROP = ("DELETE FROM raw WHERE key = ? AND kept = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM event_raw WHERE event_raw.key = raw.key)")
+EVENT_KEEP = "UPDATE event SET kept = 1 WHERE id = ? AND kept = 0"
+RAW_KEEP = "UPDATE raw SET kept = 1 WHERE key = ? AND kept = 0"
+INDEXED_STATEMENTS = (HOLD_DECREMENT, HOLD_DROP, UNHELD, HELD_RAW, EVENT_DROP, EVENT_RAW_DROP, RAW_DROP, EVENT_KEEP,
+                      RAW_KEEP)
+
 
 def clear_stale_stages(directory: str | Path, older_than: float = STALE_SECONDS) -> int:
     """Remove stage directories a killed process left behind. Only ones older than any live sweep's
@@ -58,9 +75,11 @@ class EventStage:
         # kept = 1: staged to be kept to the end; 0: present only while a playbook holds it (table hold)
         self.db.execute("CREATE TABLE event (id TEXT PRIMARY KEY, body TEXT NOT NULL, kept INTEGER NOT NULL)")
         self.db.execute("CREATE TABLE raw (key TEXT PRIMARY KEY, body TEXT NOT NULL, kept INTEGER NOT NULL)")
-        self.db.execute("CREATE TABLE hold (owner TEXT NOT NULL, id TEXT NOT NULL, n INTEGER NOT NULL, "
-                        "PRIMARY KEY (owner, id))")
-        # the raw copies a held (not kept) event references, so its release can tell which copies to remove
+        # holds by event first, so "is this event still held by anyone" is a primary-key lookup
+        self.db.execute("CREATE TABLE hold (id TEXT NOT NULL, owner TEXT NOT NULL, n INTEGER NOT NULL, "
+                        "PRIMARY KEY (id, owner))")
+        # the raw copies a held (not kept) event references, so its release can tell which copies to remove; a held
+        # event that becomes kept loses its rows here
         self.db.execute("CREATE TABLE event_raw (id TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (id, key))")
         self.db.execute("CREATE INDEX event_raw_key ON event_raw (key)")
         self.events = 0
@@ -75,12 +94,13 @@ class EventStage:
             first.setdefault(e.id, e)
         self.db.executemany("INSERT OR IGNORE INTO event VALUES (?, ?, 1)",
                             [(eid, e.model_dump_json()) for eid, e in first.items()])
-        # an event or raw copy staged earlier only as a hold is kept from now on
-        self.db.executemany("UPDATE event SET kept = 1 WHERE id = ? AND kept = 0", [(eid,) for eid in first])
+        # an event or raw copy staged earlier only as a hold is kept from now on: a release never removes it
+        self.db.executemany(EVENT_KEEP, [(eid,) for eid in first])
+        self.db.executemany(EVENT_RAW_DROP, [(eid,) for eid in first])
         raws = {r.key: raw_sources[r.key] for e in events for r in e.raw if r.key in raw_sources}
         self.db.executemany("INSERT OR IGNORE INTO raw VALUES (?, ?, 1)",
                             [(k, json.dumps(v, sort_keys=True)) for k, v in raws.items()])
-        self.db.executemany("UPDATE raw SET kept = 1 WHERE key = ? AND kept = 0", [(k,) for k in raws])
+        self.db.executemany(RAW_KEEP, [(k,) for k in raws])
         self.db.commit()
         self.events += len(events)
 
@@ -101,10 +121,11 @@ class EventStage:
         # an event already on the stage (kept, or held before) is not serialized again
         self.db.executemany("INSERT INTO event VALUES (?, ?, 0)",
                             [(eid, e.model_dump_json()) for eid, e in first.items() if eid not in present])
-        self.db.executemany("INSERT INTO hold VALUES (?, ?, 1) ON CONFLICT (owner, id) DO UPDATE SET n = n + 1",
-                            [(owner, e.id) for owner, e in held])
+        self.db.executemany(HOLD_ADD, [(e.id, owner) for owner, e in held])
+        kept = {row[0] for i in range(0, len(ids), 500) for row in self.db.execute(
+            f"SELECT id FROM event WHERE kept = 1 AND id IN ({','.join('?' * len(ids[i:i + 500]))})", ids[i:i + 500])}
         self.db.executemany("INSERT OR IGNORE INTO event_raw VALUES (?, ?)",
-                            [(eid, r.key) for eid, e in first.items() for r in e.raw])
+                            [(eid, r.key) for eid, e in first.items() if eid not in kept for r in e.raw])
         raws = {r.key: raw_sources[r.key] for e in first.values() for r in e.raw if r.key in raw_sources}
         self.db.executemany("INSERT OR IGNORE INTO raw VALUES (?, ?, 0)",
                             [(k, json.dumps(v, sort_keys=True)) for k, v in raws.items()])
@@ -116,25 +137,16 @@ class EventStage:
         is removed, with each raw copy that no kept event and no other held event references."""
         if not ids:
             return
-        self.db.executemany("UPDATE hold SET n = n - 1 WHERE owner = ? AND id = ?", [(owner, i) for i in ids])
-        self.db.execute("DELETE FROM hold WHERE n <= 0")
-        unique = sorted(set(ids))
-        for i in range(0, len(unique), 500):
-            chunk = unique[i:i + 500]
-            marks = ",".join("?" * len(chunk))
-            gone = [row[0] for row in self.db.execute(
-                f"SELECT id FROM event WHERE id IN ({marks}) AND kept = 0 "
-                f"AND NOT EXISTS (SELECT 1 FROM hold WHERE hold.id = event.id)", chunk)]
-            if not gone:
-                continue
-            marks = ",".join("?" * len(gone))
-            keys = [row[0] for row in self.db.execute(f"SELECT DISTINCT key FROM event_raw WHERE id IN ({marks})",
-                                                      gone)]
-            self.db.execute(f"DELETE FROM event WHERE id IN ({marks})", gone)
-            self.db.execute(f"DELETE FROM event_raw WHERE id IN ({marks})", gone)
-            self.db.executemany("DELETE FROM raw WHERE key = ? AND kept = 0 "
-                                "AND NOT EXISTS (SELECT 1 FROM event_raw WHERE event_raw.key = raw.key)",
-                                [(k,) for k in keys])
+        pairs = [(i, owner) for i in ids]
+        self.db.executemany(HOLD_DECREMENT, pairs)
+        self.db.executemany(HOLD_DROP, sorted(set(pairs)))
+        for event_id in sorted(set(ids)):
+            if self.db.execute(UNHELD, (event_id,)).fetchone() is None:
+                continue                # kept, still held by someone, or already gone
+            keys = [row[0] for row in self.db.execute(HELD_RAW, (event_id,))]
+            self.db.execute(EVENT_DROP, (event_id,))
+            self.db.execute(EVENT_RAW_DROP, (event_id,))
+            self.db.executemany(RAW_DROP, [(k,) for k in keys])
         self.db.commit()
 
     def count(self) -> int:

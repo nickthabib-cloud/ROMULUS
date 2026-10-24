@@ -86,11 +86,13 @@ def test_an_internal_servers_answers_picked_up_mid_stream_are_not_an_upload_and_
     # the old reading took Arkime's mid-stream orientation as the opener and reported "a connection it initiated"
     rule = OutboundVolumeAsymmetry()
     assert run(rule, events(*_ssh_download())) == []
-    [reason] = rule.limit_reasons()            # the root shows the outside client opened it: an internal server
+    # the root's SYN shows the outside client opened it: an internal server answering, named as information only
+    assert rule.limit_reasons() == []
     sent = 12_494_784 + 17 * 12_500_000
-    assert reason == ("not read as uploads: connections a recorded opening shows an external address opened, so the "
-                      f"internal address answered as a server: the internal addresses sent {sent:,} bytes on them, "
-                      f"the most from one pair {sent:,} bytes from {INSIDE} to {OUTSIDE} (1 connection(s))")
+    assert rule.coverage_notes() == [
+        ("not read as uploads (informational): connections an Arkime session shows an external address opened (it "
+        "counted the SYN), so the internal address answered as a server: the internal addresses sent "
+        f"{sent:,} bytes on them, the most from one pair {sent:,} bytes from {INSIDE} to {OUTSIDE} (1 connection(s))")]
 
 
 def test_mid_stream_records_with_no_opening_and_a_servers_port_shape_are_not_an_upload_and_are_named():
@@ -145,10 +147,12 @@ def test_a_suricata_flow_an_outside_client_opened_to_an_internal_server_is_not_a
                    c2s=MIB, s2c=600 * MIB, pkts_c=900, pkts_s=9000)
     rule = OutboundVolumeAsymmetry()
     assert run(rule, events(download)) == []
-    [reason] = rule.limit_reasons()
-    assert ("so the internal address answered as a server; 1 of them shown only by a Suricata flow in state "
-            "established or closed, which shows a tracked handshake on a sensor that does not pick up mid-stream: "
-            f"the internal addresses sent {600 * MIB:,} bytes on them") in reason
+    [reason] = rule.limit_reasons()             # a Suricata state alone can be wrong: the cell is partial
+    assert reason.startswith("not read as uploads: connections whose only record of the opening, by an external "
+                             "address, is a Suricata flow in state established or closed, which shows a tracked "
+                             "handshake on a sensor that does not pick up mid-stream, so the internal address answered "
+                             f"as a server: the internal addresses sent {600 * MIB:,} bytes on them")
+    assert rule.coverage_notes() == []
 
 
 def test_a_servers_answers_from_its_service_port_with_no_recorded_opening_are_not_an_upload():
@@ -530,3 +534,105 @@ def test_the_sweep_holds_a_long_connections_bounds_and_releases_the_superseded_o
         assert stage.db.execute("SELECT COUNT(*) FROM event WHERE kept = 0").fetchone()[0] <= 2 * len(holds)
     finally:
         sweep.close_stage()
+
+
+# ---- the stage at mission scale, and what the window cell names ------------------------------------------------------
+
+def test_releasing_holds_costs_the_same_however_many_holds_the_stage_has(tmp_path):
+    import time
+
+    from romulus.hunt import stage as stage_mod
+    stage = stage_mod.EventStage(tmp_path)
+    try:
+        db = stage.db
+        n = 200_000
+        db.executemany("INSERT INTO event VALUES (?, '{}', 0)", [(f"e{i}",) for i in range(n)])
+        db.executemany("INSERT INTO hold VALUES (?, 'rule', 1)", [(f"e{i}",) for i in range(n)])
+        db.executemany("INSERT INTO event_raw VALUES (?, ?)", [(f"e{i}", f"k{i}") for i in range(n)])
+        db.executemany("INSERT INTO raw VALUES (?, '{}', 0)", [(f"k{i}",) for i in range(n)])
+        db.commit()
+        started = time.perf_counter()
+        stage.release("rule", [f"e{i}" for i in range(0, n, 20)])                  # 10,000 releases
+        elapsed = time.perf_counter() - started
+        assert stage.count() == n - n // 20 and elapsed < 5.0, elapsed
+        # every statement a release or a keep runs looks rows up by a key: none scans a table
+        for sql in stage_mod.INDEXED_STATEMENTS:
+            args = tuple("x" for _ in range(sql.count("?")))
+            plan = [row[3] for row in db.execute(f"EXPLAIN QUERY PLAN {sql}", args)]
+            assert not [step for step in plan if step.startswith("SCAN")], (sql, plan)
+    finally:
+        stage.close()
+
+
+def test_a_held_event_that_becomes_kept_drops_its_release_bookkeeping(tmp_path):
+    from romulus.hunt.stage import EventStage
+    [a] = events(eve("a"))
+    raw = {r.key: {"doc": r.native_id} for r in a.raw}
+    stage = EventStage(tmp_path)
+    try:
+        stage.hold([("r1", a)], raw)
+        assert stage.db.execute("SELECT COUNT(*) FROM event_raw").fetchone()[0] == len(a.raw)
+        stage.put([a], raw)
+        assert stage.db.execute("SELECT COUNT(*) FROM event_raw").fetchone()[0] == 0
+        stage.release("r1", [a.id])
+        assert stage.load([a.id]) and set(stage.raw_sources([a])) == {r.key for r in a.raw}
+    finally:
+        stage.close()
+
+
+def test_a_bound_taken_by_an_unstaged_record_releases_the_hold_it_replaces():
+    bounds, ends = flows.BoundStage(), flows.Ends()
+    a, b, c = events(eve("a"), eve("b", sport=50001, start=T0 + timedelta(minutes=1)),
+                     eve("c", sport=50002, start=T0 + timedelta(minutes=2)))
+    bounds.offer("g", ends, 1.0, 1.0, a)
+    bounds.offer("g", ends, 2.0, 2.0, b)
+    bounds.drain()
+    assert ends.held == [a.id, b.id]
+    bounds.offer("g", ends, 3.0, 3.0, c, stage=False)     # c is the latest now, and is not held
+    bounds.drain()
+    assert bounds.last == ([], [b.id]) and ends.held == [a.id, None]
+
+
+def test_single_record_unidentified_candidates_hold_no_bounds(tmp_path):
+    candidates = [eve(f"u{i}", sport=40000 + i, dst=f"198.51.{100 + i // 250}.{1 + i % 250}", dport=80, c2s=3000,
+                      s2c=8000, pkts_s=8, start=T0 + timedelta(seconds=i)) for i in range(2000)]
+    evs = events(*candidates)
+    rule, held = ProtocolPortMismatch(), 0
+    for i in range(0, len(evs), 250):
+        rule.consume(evs[i:i + 250])
+        rule.drain_staged()
+        held += len(rule.drain_bounds()[0])
+    assert held == 0
+
+
+def test_server_shaped_pairs_that_meet_the_thresholds_are_listed_by_name():
+    low = [eve("dns", src=INSIDE, sport=53, dst=OUTSIDE, dport=40000, state="new", c2s=200 * MIB, s2c=MIB,
+               pkts_c=150_000, pkts_s=10),
+           eve("ntp", proto="UDP", src="10.0.0.6", sport=123, dst="198.51.100.7", dport=45000, c2s=150 * MIB, s2c=0,
+               pkts_c=110_000, pkts_s=0)]
+    rule = OutboundVolumeAsymmetry()
+    assert run(rule, events(*low)) == []
+    [reason] = rule.limit_reasons()
+    assert ("2 pairs met the upload thresholds (at least 50 MiB sent and at least 10 times what came back) on these "
+            "connections and were not read as uploads only because of the port shape: "
+            f"{INSIDE} to {OUTSIDE}, {200 * MIB:,} bytes sent and {MIB:,} back, from tcp/53; "
+            f"10.0.0.6 to 198.51.100.7, {150 * MIB:,} bytes sent and 0 back, from udp/123") in reason
+
+
+def test_the_server_shaped_list_is_bounded_and_says_how_many_more():
+    low = [eve(f"s{i:02d}", src=f"10.0.1.{i + 1}", sport=1000 + i, dst=OUTSIDE, dport=40000 + i, state="new",
+               c2s=(60 + i) * MIB, s2c=0, pkts_c=50_000, pkts_s=0) for i in range(13)]
+    rule = OutboundVolumeAsymmetry()
+    run(rule, events(*low))
+    [reason] = rule.limit_reasons()
+    assert "13 pairs met the upload thresholds" in reason and reason.count(" bytes sent and ") == 10
+    assert "; and 3 more" in reason and "10.0.1.13 to" in reason and "10.0.1.1 to" not in reason
+
+
+def test_a_servers_handshake_answer_to_a_scanner_is_not_named():
+    # Arkime saw the scanner's SYN; the internal server answered with a SYN-ACK and a reset, headers only
+    answered = flagged(ark("syn", src=OUTSIDE, sport=60000, dst=INSIDE, dport=22, c2s=74, s2c=74 + 54, pkts_c=1,
+                           pkts_s=2), syn=1, syn_ack=1)
+    rule = OutboundVolumeAsymmetry()
+    assert run(rule, events(answered)) == []
+    assert rule.limit_reasons() == [] and rule.coverage_notes() == []

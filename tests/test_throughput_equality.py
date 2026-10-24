@@ -56,11 +56,10 @@ from tests import throughput_fixture as tf
 # cite the records that bound each interval they state. Seven of them carry new versions (rule_cells, candidates and
 # manifest findings change by rule_version only), and net.outbound_volume_asymmetry's positive-only reason now names
 # the connections it does not read as uploads, so the manifest's negative_claim for it changes. Its window cell
-# goes from positive_only to positive_only_partial (rule_cells, and the manifest's coverage rules and gaps): the
-# 301 connections outside clients opened to the fixture's internal servers (Suricata 'closed' flows) are named on it
-# with the 451,500 bytes the servers sent on them. Findings and citations are unchanged; the port-scan probes to
-# db1 have no recorded opener and a server's port shape, but the internal side sent nothing on them, so they are
-# not named.
+# stays positive_only and gains one informational reason (rule_cells only): the 301 connections that an Arkime SYN
+# shows outside clients opened to the fixture's internal servers, with the 451,500 bytes the servers sent on them.
+# Findings and citations are unchanged; the port-scan probes to db1 have no recorded opener and a server's port
+# shape, but the internal side sent no data on them, so they are not named.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "538a65e82e05000f401b4dfa3288f0982b55c328e3cede607032141d0f81292d",
@@ -70,9 +69,9 @@ GOLDEN_STACK = {
     "events": "d091e0a4b829e399e1011c9930f8a347a09b480ab7ca069361090e9ae1405c7c",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0c6ce53f0aa49c6f1e7aa63c0df576ecde37079b918cdce15183b8b30f946646",
-    "manifest": "24fb180460ea858727200380c131becbdff04e7db4bfc03f55483c4b662f4e88",
+    "manifest": "fdfb48da9484ed5627d7bcae89a1e6c7cd99c00115d236e12619d871f48b3f62",
     "raw": "03d2790712d2ac341c4dafcc4b89d7f991a025f637d97f7ef22cd33e35f4fbe0",
-    "rule_cells": "94c2f4ffeaa76be243ec9b5da23f2f7d479524c87ec50893cceef48f7922d417",
+    "rule_cells": "74526e022d2376adc58d65943eca07fef2b4b95f76c009b781357fde8f69dd19",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "8547b413b445d75e25845cbc8ad6277db4e7bb5e9a18b0ed53bffb63b4df7b9b",
 }

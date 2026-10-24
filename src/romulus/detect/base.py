@@ -139,6 +139,11 @@ class Playbook:
         limit.records += records
         limit.hits += 1
 
+    def coverage_notes(self) -> list[str]:
+        """Informational lines for the rule's window cell, set at finalize: what the rule judged out of its scope and
+        how much of it there was. Unlike a limit, a note does not make the cell partial."""
+        return []
+
     def limit_reasons(self) -> list[str]:
         """Every state budget this playbook reached, worded for the coverage ledger."""
         return [self.limits[name].reason() for name in sorted(self.limits)]

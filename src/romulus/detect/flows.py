@@ -30,6 +30,7 @@ other network rules.
 from __future__ import annotations
 
 import bisect
+import heapq
 import ipaddress
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -291,6 +292,8 @@ class FlowView:
     protocols: frozenset[str] | None    # identified application protocols; None when the sensor recorded no field
     failed: bool                        # Suricata reported that protocol detection failed
     opened: bool = False                # a typed field shows the source opened the TCP connection (OPENED_STATES)
+    c2s_data: int | None = None         # application bytes the source side sent (Arkime's own count, else estimated)
+    s2c_data: int | None = None         # ... and the destination side; None when the counters are absent
 
     @property
     def key(self) -> tuple:
@@ -302,6 +305,14 @@ class FlowView:
     @property
     def service(self) -> str:
         return f"{self.transport}/{self.dport}" if self.dport is not None else self.transport
+
+
+def _framed_data(transport, frame_bytes, packets) -> int | None:
+    """Application bytes one side sent, estimated from whole-frame bytes and packets (0 for headers alone); None when
+    a counter is absent."""
+    if frame_bytes is None or packets is None:
+        return None
+    return max(frame_bytes - HEADER_BYTES.get(transport, DEFAULT_HEADER_BYTES) * packets, 0)
 
 
 def _framed_payload(transport, c2s_bytes, c2s_packets, s2c_bytes, s2c_packets) -> bool | None:
@@ -335,10 +346,12 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         c2s, s2c = _int(event.get("source.bytes")), _int(event.get("destination.bytes"))
         s2c_packets = _int(event.get("destination.packets"))
         data_c, data_s = _int(event.get("client.bytes")), _int(event.get("server.bytes"))
+        c2s_packets = _int(event.get("source.packets"))
         if data_c is not None and data_s is not None:
             payload = data_c > 0 and data_s > 0
         else:
-            payload = _framed_payload(transport, c2s, _int(event.get("source.packets")), s2c, s2c_packets)
+            payload = _framed_payload(transport, c2s, c2s_packets, s2c, s2c_packets)
+            data_c, data_s = _framed_data(transport, c2s, c2s_packets), _framed_data(transport, s2c, s2c_packets)
         listed = event.get("network.protocols")
         if listed is None:
             protocols, failed = None, False
@@ -351,7 +364,9 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         sensor = SURICATA
         c2s, s2c = _int(event.get("flow.bytes_toserver")), _int(event.get("flow.bytes_toclient"))
         s2c_packets = _int(event.get("flow.pkts_toclient"))
-        payload = _framed_payload(transport, c2s, _int(event.get("flow.pkts_toserver")), s2c, s2c_packets)
+        c2s_packets = _int(event.get("flow.pkts_toserver"))
+        payload = _framed_payload(transport, c2s, c2s_packets, s2c, s2c_packets)
+        data_c, data_s = _framed_data(transport, c2s, c2s_packets), _framed_data(transport, s2c, s2c_packets)
         # Suricata writes app_proto only once detection concluded; its absence is the record's own statement that
         # no protocol was identified, and 'failed' says detection gave up.
         app = event.get("network.app_proto")
@@ -361,7 +376,7 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         state = event.get("flow.state")
         opened = transport == "tcp" and isinstance(state, str) and state in OPENED_STATES
     return FlowView(sensor, src, sport, dst, dport, transport, start, end, timed, c2s, s2c, s2c_packets, payload,
-                    protocols, failed, opened)
+                    protocols, failed, opened, data_c, data_s)
 
 
 def ip_sort_key(ip: str):
@@ -440,13 +455,20 @@ class BoundStage:
         self.last: tuple[list[str], list[str]] = ([], [])
 
     def offer(self, key, ends: Ends, start: float, end: float, event: TypedEvent, stage: bool = True) -> bool:
-        """Offer a record to the group's bounds; True when it became one of them."""
-        first, last = ends.offer(start, end, event.id)
-        if stage and first:
-            self.pending[(key, 0)] = (event, ends)
-        if stage and last:
-            self.pending[(key, 1)] = (event, ends)
-        return first or last
+        """Offer a record to the group's bounds; True when it became one of them. A bound taken by a record that is
+        not staged releases the hold it replaces (that record is no longer the bound)."""
+        moved = ends.offer(start, end, event.id)
+        for side in (0, 1):
+            if not moved[side]:
+                continue
+            if stage:
+                self.pending[(key, side)] = (event, ends)
+                continue
+            self.pending.pop((key, side), None)
+            if ends.held[side] is not None:
+                self.releasing.append(ends.held[side])
+                ends.held[side] = None
+        return moved[0] or moved[1]
 
     def settle(self, key, ends: Ends) -> None:
         """The group's latest record bounds an interval that has closed (a later record starts a new one): it is kept
@@ -1178,9 +1200,12 @@ class ProtocolPortMismatch(_FlowRule):
                 return self._refused("candidate connections'")
             self._stage(event)
         entry.first, entry.last = min(entry.first, view.start), max(entry.last, view.end)
-        self.bounds.offer(("connection", view.key), entry.ends, view.start, view.end, event)
         entry.records[view.sensor] += 1
         entry.failed += view.failed
+        # A connection's first record is kept above, and it bounds a connection of one record on both sides: bounds
+        # are held only once the connection has more records than that.
+        self.bounds.offer(("connection", view.key), entry.ends, view.start, view.end, event,
+                          stage=sum(entry.records.values()) > 1)
         return True
 
     def finalize(self):
@@ -1548,6 +1573,10 @@ SERVER_SHAPED = "server-shaped"     # opener not recorded; external port ephemer
 UNSHAPED = "unshaped"               # opener not recorded; both ports ephemeral or both below that range
 PORTLESS = "portless"               # opener not recorded, on a transport without ports
 COUNTED = frozenset({OPENED_INSIDE, CLIENT_SHAPED, UNSHAPED, PORTLESS})
+# Connections not read as uploads, as the window cell names them: served and shown by an Arkime SYN (informational),
+# served and shown only by a Suricata flow state, and server-shaped (both partial: each can be wrong).
+SERVED_ARKIME, SERVED_SURICATA = "served (Arkime)", "served (Suricata only)"
+NOT_READ_LISTED = 10                # qualifying server-shaped pairs listed by name on the window cell
 # The typed fact that showed an opener (bit flags on _Connection.opened_inside / opened_outside).
 ARKIME_SYN, SURICATA_STATE = 1, 2
 SURICATA_STATE_NOTE = ("a Suricata flow in state established or closed, which shows a tracked handshake on a sensor "
@@ -1622,7 +1651,7 @@ class _PairTotals:
     first: float = float("inf")
     last: float = float("-inf")
     counted: set = field(default_factory=set)               # the pair's cited connections that are counted
-    not_read: Counter = field(default_factory=Counter)      # (reading, 'connections' | 'bytes' | 'suricata only')
+    not_read: Counter = field(default_factory=Counter)      # (kind, 'connections' | 'bytes' | 'received')
 
     @property
     def connections(self) -> int:
@@ -1631,10 +1660,17 @@ class _PairTotals:
     def add(self, conn: _Connection, reading: str, transport: str, inside_port, outside_port) -> None:
         best = conn.best()
         if reading not in COUNTED:
-            if best[0]:                 # a connection on which the internal address sent nothing adds no upload
-                self.not_read[reading, "connections"] += 1
-                self.not_read[reading, "bytes"] += best[0]
-                self.not_read[reading, "suricata only"] += conn.opened_outside == SURICATA_STATE
+            # Named only when the internal address sent application data: a SYN-ACK, acknowledgements or a reset
+            # carry none (their estimated data stays at zero), and MIN_PAYLOAD_BYTES is the same floor the other
+            # flow rules use for "carried data". Probes a site's servers merely answered are not named.
+            if best[3] >= MIN_PAYLOAD_BYTES:
+                kind = reading if reading != SERVED else (SERVED_ARKIME if conn.opened_outside & ARKIME_SYN
+                                                          else SERVED_SURICATA)
+                self.not_read[kind, "connections"] += 1
+                self.not_read[kind, "bytes"] += best[0]
+                self.not_read[kind, "received"] += best[1]
+                if inside_port is not None:
+                    self.inside_ports.setdefault(kind, Counter())[f"{transport}/{inside_port}"] += 1
             return
         self.out += best[0]
         self.inn += best[1]
@@ -1687,7 +1723,8 @@ class OutboundVolumeAsymmetry(_FlowRule):
         "internal and external are judged from the site's internal-network definition (the RFC 1918 and reserved "
         "ranges when it is not configured). Connections a recorded opening shows an outside address opened (an "
         "internal server answering), and connections whose opener is not recorded but whose ports have an internal "
-        "server's shape, are not read as uploads; both are counted on the window cell with their bytes. A Suricata "
+        "server's shape, are not read as uploads; those carrying data from the internal address are named on the "
+        "window cell with their bytes, and server-shaped pairs that met the upload thresholds are listed. A Suricata "
         "flow state counts as a recorded opening only on a sensor that does not pick up mid-stream (stream.midstream "
         "off, its default); on one that does, such a connection may have been opened from inside. Transfers outside "
         "that view are not seen, so the absence of a match proves nothing")
@@ -1724,8 +1761,12 @@ class OutboundVolumeAsymmetry(_FlowRule):
                            "connection an outside address is shown to have opened to an internal server is not read "
                            "as an upload (the server's answers are the outside client's download), nor is one whose "
                            "opener is not recorded and whose external port is ephemeral while the internal port is "
-                           "not (an internal server answering): both are named on the window cell with their count, "
-                           "the bytes the internal addresses sent on them and the largest pair. Connections with no "
+                           "not (an internal server answering). Those on which the internal address sent application "
+                           "data (at least 64 bytes beyond packet headers, so a SYN-ACK or reset to a scanner is not "
+                           "one) are named on the window cell with their count, the bytes and the largest pair: as an "
+                           "informational line when an Arkime SYN shows the outside opener, and as a partial cell when "
+                           "only a Suricata flow state shows it or only the port shape does; server-shaped pairs that "
+                           "met the upload thresholds are listed by name (ten, then how many more). Connections with no "
                            "recorded opener and no clear port shape (both ports ephemeral or both below that range, "
                            "or no ports at all) are counted and worded as possibly a server's answers. One item per "
                            "(internal source, external destination); the claim gives the destination's other internal "
@@ -1754,6 +1795,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
     def __init__(self):
         super().__init__()
         self.pairs = KeyedStore(self, "ova_pairs", self.HOT_PAIRS)
+        self._notes: list[str] = []     # the window cell's informational lines, set at finalize
         # (internal, external, connection) -> _Connection, read back one pair at a time
         self.connections = KeyedStore(self, "ova_connections", self.HOT_CONNECTIONS,
                                       group=lambda key: f"{key[0]}|{key[1]}")
@@ -1778,10 +1820,14 @@ class OutboundVolumeAsymmetry(_FlowRule):
             conn = _Connection()
             if not self.connections.put((inside, outside, view.key), conn):
                 return self._refused("connections'")
-        tally = conn.tallies.setdefault(view.sensor, [0, 0, 0])
+        # [bytes the internal address sent, received, records, application bytes it sent (all its bytes when the
+        # counters cannot tell)]
+        tally = conn.tallies.setdefault(view.sensor, [0, 0, 0, 0])
+        data = view.c2s_data if inside_first else view.s2c_data
         tally[0] += sent
         tally[1] += received
         tally[2] += 1
+        tally[3] += sent if data is None else data
         if view.opened:
             fact = ARKIME_SYN if view.sensor == ARKIME else SURICATA_STATE
             if inside_first:
@@ -1826,14 +1872,26 @@ class OutboundVolumeAsymmetry(_FlowRule):
         totals_by_source = KeyedStore(self, "ova_totals", self.HOT_PAIRS)     # internal source -> [bytes sent out]
         senders = KeyedStore(self, "ova_senders", self.HOT_PAIRS)             # external destination -> [senders]
         not_read: Counter = Counter()
-        largest: dict[str, tuple[int, str, str]] = {}                        # reading -> (bytes, internal, external)
+        largest: dict[str, tuple[int, str, str]] = {}                        # kind -> (bytes, internal, external)
+        shaped: list[tuple] = []        # the qualifying server-shaped pairs with the most bytes (a bounded heap)
         hits = []
+        self._notes = []
         for i, ((src, dst), totals) in enumerate(self._resolved()):
             not_read.update(totals.not_read)
-            for reading in (SERVED, SERVER_SHAPED):
-                sent_here = totals.not_read[reading, "bytes"]
-                if sent_here and sent_here > largest.get(reading, (0,))[0]:
-                    largest[reading] = (sent_here, src, dst)
+            for kind in (SERVED_ARKIME, SERVED_SURICATA, SERVER_SHAPED):
+                sent_here = totals.not_read[kind, "bytes"]
+                if sent_here and sent_here > largest.get(kind, (0,))[0]:
+                    largest[kind] = (sent_here, src, dst)
+            out, back = totals.not_read[SERVER_SHAPED, "bytes"], totals.not_read[SERVER_SHAPED, "received"]
+            if out >= self.MIN_OUTBOUND_BYTES and out >= self.MIN_RATIO * back:
+                # met the upload thresholds on connections not read as uploads only because of their port shape
+                not_read[SERVER_SHAPED, "qualifying"] += 1
+                ports = totals.inside_ports.get(SERVER_SHAPED, Counter())
+                entry = (out, src, dst, back, ", ".join(p for p, _n in ports.most_common(3)))
+                if len(shaped) < NOT_READ_LISTED:
+                    heapq.heappush(shaped, entry)
+                elif entry > shaped[0]:
+                    heapq.heapreplace(shaped, entry)
             if not totals.connections:
                 continue
             total = totals_by_source.setdefault(src, lambda: [0])
@@ -1848,7 +1906,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
             if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
                 totals_by_source.trim()
                 senders.trim()
-        self._note_not_read(not_read, largest)
+        self._note_not_read(not_read, largest, sorted(shaped, reverse=True))
         # a reported source sent data to the destination, so it is one of the destination's senders
         matches = [self._match(src, dst, totals, totals_by_source.peek(src)[0], senders.peek(dst)[0] - 1)
                    for src, dst, totals in sorted(hits, key=lambda hit: hit[:2])]
@@ -1862,26 +1920,43 @@ class OutboundVolumeAsymmetry(_FlowRule):
         senders.clear()
         return [match for match in matches if match is not None]
 
-    def _note_not_read(self, not_read: Counter, largest: dict) -> None:
-        """Name, on the window cell, the connections whose internal-address bytes were not read as uploads: how many,
-        the bytes, and the pair with the most."""
+    def _note_not_read(self, not_read: Counter, largest: dict, shaped: list[tuple]) -> None:
+        """Name, on the window cell, the connections whose internal-address data was not read as uploads: how many,
+        the bytes, and the pair with the most. Served connections an Arkime SYN shows are an informational note; those
+        shown only by a Suricata flow state, and server-shaped ones, make the cell partial (each reading can be wrong),
+        and server-shaped pairs that met the upload thresholds are listed by name."""
         texts = {
-            SERVED: "connections a recorded opening shows an external address opened, so the internal address "
-                    "answered as a server{suricata}",
+            SERVED_ARKIME: "connections an Arkime session shows an external address opened (it counted the SYN), so "
+                           "the internal address answered as a server",
+            SERVED_SURICATA: f"connections whose only record of the opening, by an external address, is "
+                             f"{SURICATA_STATE_NOTE}, so the internal address answered as a server",
             SERVER_SHAPED: f"connections whose opener is not recorded, with the internal address on a port below "
                            f"{EPHEMERAL_FLOOR} and the external address on one at or above it (the port shape of an "
                            f"internal server answering an outside client)",
         }
-        for reading, text in texts.items():
-            count = not_read[reading, "connections"]
+        for kind, text in texts.items():
+            count = not_read[kind, "connections"]
             if not count:
                 continue
-            suricata = not_read[reading, "suricata only"]
-            note = (f"; {suricata} of them shown only by {SURICATA_STATE_NOTE}" if suricata else "")
-            most, src, dst = largest[reading]
-            self.limits[f"not_read_{reading}"] = _NotRead(
-                text.format(suricata=note) + f": the internal addresses sent {not_read[reading, 'bytes']:,} bytes on "
-                f"them, the most from one pair {most:,} bytes from {src} to {dst}", records=count, hits=1)
+            most, src, dst = largest[kind]
+            text += (f": the internal addresses sent {not_read[kind, 'bytes']:,} bytes on them, the most from one pair "
+                     f"{most:,} bytes from {src} to {dst}")
+            qualifying = not_read[kind, "qualifying"]
+            if qualifying:
+                listed = "; ".join(f"{a} to {b}, {out:,} bytes sent and {back:,} back, from {ports}"
+                                   for out, a, b, back, ports in shaped)
+                more = f"; and {qualifying - len(shaped)} more" if qualifying > len(shaped) else ""
+                text += (f". {_plural(qualifying, 'pair')} met the upload thresholds (at least "
+                         f"{self.MIN_OUTBOUND_BYTES // 2**20} MiB sent and at least {self.MIN_RATIO:.0f} times what "
+                         f"came back) on these connections and {'was' if qualifying == 1 else 'were'} not read as "
+                         f"uploads only because of the port shape: {listed}{more}")
+            if kind == SERVED_ARKIME:
+                self._notes.append(f"not read as uploads (informational): {text} ({count} connection(s))")
+            else:
+                self.limits[f"not_read_{kind}"] = _NotRead(text, records=count, hits=1)
+
+    def coverage_notes(self) -> list[str]:
+        return list(getattr(self, "_notes", []))
 
     @staticmethod
     def _openings(src: str, dst: str, totals: _PairTotals) -> str:
