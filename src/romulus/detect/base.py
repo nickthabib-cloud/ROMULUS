@@ -36,6 +36,9 @@ class Match:
     entities: list[tuple[str, str, str]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     group_key: str = ""              # stable dedupe identity for aggregates
+    # Raw copies (target/native id -> source) of cited records a rule kept in its own store rather than the sweep's
+    # event stage; saved with the evidence like the stage's.
+    raw_copies: dict[str, dict] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # A positive stays valid on a command line some of whose arguments were lost; the claim says so.
@@ -92,6 +95,9 @@ class Playbook:
     version: ClassVar[str] = "1"
     title: ClassVar[str]
     families: ClassVar[tuple[str, ...]]
+    # Families of `families` the rule reads only as context (process lineage): a partition holding only these is no
+    # evaluation of the rule.
+    context_families: ClassVar[tuple[str, ...]] = ()
     # Cross-platform by default. OS-specific rules narrow this without relying on dataset or target names.
     os_families: ClassVar[tuple[str, ...]] = ("linux", "windows")
     # An OS-specific rule may narrow the catalog classes needed for a complete Windows negative. Empty means
@@ -235,6 +241,17 @@ class Playbook:
     def bind_loader(self, load) -> None:
         """Give a staged playbook the function that loads staged events back by id."""
         self.load = load
+
+    def bind_raw(self, raw_sources: dict[str, dict]) -> None:
+        """The raw copies of the partition being read (target/native id -> source), bound by the sweep while the rule
+        consumes it, for a rule that keeps records it may cite in its own disk-backed store. Detection reads typed
+        fields only: these are kept for citation, never matched against."""
+        self._raw_sources = raw_sources
+
+    def raw_of(self, event: TypedEvent) -> dict[str, dict]:
+        """The raw copies of an event's records in the partition being read (empty outside a sweep)."""
+        sources = getattr(self, "_raw_sources", None) or {}
+        return {r.key: sources[r.key] for r in event.raw if r.key in sources}
 
     def retained_events(self) -> list[TypedEvent]:
         """Every event an aggregate playbook may still cite at finalize. The sweep keeps raw copies of

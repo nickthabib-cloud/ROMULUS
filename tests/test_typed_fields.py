@@ -75,6 +75,10 @@ def _every_family() -> list[dict]:
              "exe=\"/usr/lib/systemd/systemd-update-utmp\" hostname=? addr=? terminal=? res=success'")
     b._audit("web1", at, 9003, "CONFIG_CHANGE", "op=add_rule key=\"watch\" list=4 res=1")
     b._audit("web1", at, 9004, "CONFIG_CHANGE", "audit_backlog_limit=8192 old=64 auid=0 ses=4 res=1")
+    b._audit("web1", at, 9005, "SYSCALL",
+             "arch=c000003e syscall=105 success=yes exit=0 a0=0 a1=0 a2=0 a3=0 items=0 ppid=1 pid=700 auid=4294967295 "
+             "uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm=\"cron\" "
+             "exe=\"/usr/sbin/cron\" key=(null)", enriched='ARCH=x86_64 SYSCALL=setuid AUID="unset" UID="root"')
     return [record for records in docs.values() for record in records] + b.host
 
 

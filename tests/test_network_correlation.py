@@ -123,15 +123,20 @@ def test_einprogress_connect_is_unknown_not_failed_and_other_failures_fail():
     assert refused[0].outcome == Outcome.failure
 
 
-def test_non_ip_sockets_and_non_socket_syscalls_are_counted_skips():
+def test_non_ip_sockets_and_non_socket_syscalls_are_process_observations_not_sockets():
     events, skips, errors = normalize_hits([
         audit_hit("s1", syscall(serial=1)), audit_hit("k1", sockaddr(serial=1, saddr="01002F72756E00")),
         audit_hit("s2", syscall(serial=2, nr=0)),                      # read(): not a socket call
         audit_hit("s3", syscall(serial=3, arch="40000003", nr=102)),   # i386 socketcall: not decoded
     ])
-    assert events == [] and errors == []
-    assert sum(skips.values()) == 3 and any("non-IP socket family (local)" in k for k in skips)
-    assert skips["audit syscall on an arch whose socket calls are not decoded (40000003)"] == 1
+    assert errors == [] and {e.family for e in events} == {"process_observed"}
+    # each names the process that made the call, from its SYSCALL record only (the SOCKADDR is not viewed)
+    assert [e.raw[0].native_id for e in events] == ["s1", "s2", "s3"] and all(len(e.raw) == 1 for e in events)
+    assert all((e.get("process.pid"), e.get("process.ppid"), e.get("process.executable")) == (200, 100, "/usr/bin/perl")
+               for e in events)
+    assert events[0].get("audit.syscall") == "connect" and events[0].get("audit.serial") == 1
+    # the undecoded arch's socket calls stay a counted skip
+    assert skips == {"audit syscall on an arch whose socket calls are not decoded (40000003)": 1}
 
 
 def test_connect_without_sockaddr_keeps_an_explicit_unknown_destination():
@@ -228,11 +233,34 @@ def test_many_destinations_on_one_port_are_one_item():
     assert "5 connect() call(s) to 5 address(es) outside the site's internal networks on port 443" in matches[0].claim
 
 
-def test_web_account_daemon_started_by_the_service_manager_is_lowered_to_lead():
+def observed(pid, ppid, exe, t0, serial, comm="x", uid="0", user="root"):
+    """A process_observed event: the process's own audit SYSCALL record of a call no other family models (read())."""
+    line = (f"type=SYSCALL msg=audit({t0:.3f}:{serial}): arch=c000003e syscall=0 success=yes exit=0 a0=3 a1=7ffc "
+            f"a2=10 a3=0 items=0 ppid={ppid} pid={pid} auid=4294967295 uid={uid} gid={uid} euid={uid} tty=(none) "
+            f"ses=4294967295 comm=\"{comm}\" exe=\"{exe}\" key=(null)ARCH=x86_64 SYSCALL=read AUID=\"unset\" "
+            f"UID=\"{user}\" EUID=\"{user}\"")
+    events, _, errors = normalize_hits([audit_hit(f"o{serial}", line)])
+    assert errors == [] and [e.family for e in events] == ["process_observed"]
+    return events[0]
+
+
+def test_web_account_daemon_under_pid_1_without_a_start_record_keeps_its_lane():
+    """A parent of pid 1 shows a start by the service manager or a reparent after the parent exited (a daemonized
+    web shell): without a record proving the start, the lineage is unknown and the lane is kept."""
     tree = [execd(150, 1, "/usr/bin/perl"), execd(100, 150, "/usr/bin/perl", t0=T0 - 30)]
     m = iec(*tree, _sock())[0]
+    assert m.proposed_lane == "high" and "not fully recorded" in m.claim
+    assert any("pid 150" in n and "parent pid 1" in n and "no record shows which" in n for n in m.notes)
+
+
+def test_web_account_daemon_started_by_the_service_manager_is_lowered_to_lead():
+    # pid 150 ran systemd's own image (forked by the service manager) just before its exec
+    spawn = observed(150, 1, "/usr/lib/systemd/systemd", T0 - 60.004, 40, comm="(perl)")
+    tree = [spawn, execd(150, 1, "/usr/bin/perl"), execd(100, 150, "/usr/bin/perl", t0=T0 - 30)]
+    m = iec(*tree, _sock())[0]
     assert m.proposed_lane == "lead" and "reaches the service manager with no web server" in m.claim
-    assert any("exec-100" in n and "exec-150" in n for n in m.notes)
+    assert any("exec-100" in n and "exec-150" in n and "o40" in n for n in m.notes)
+    assert spawn.id in {e.id for e in m.events}                          # the start record is cited
 
 
 def test_web_account_child_of_the_web_server_stays_high():
@@ -248,9 +276,13 @@ def test_unknown_lineage_never_lowers_the_lane():
 
 def test_reused_pid_uses_the_exec_in_force_at_connect_time():
     tree = [execd(100, 90, "/usr/sbin/apache2", t0=T0 - 3600),     # pid 100 was the web server an hour ago
-            execd(100, 1, "/usr/bin/perl", t0=T0 - 30)]            # now it is a daemon started by pid 1
+            observed(100, 1, "/usr/lib/systemd/systemd", T0 - 30.004, 41),
+            execd(100, 1, "/usr/bin/perl", t0=T0 - 30)]            # now it is a daemon the service manager started
     m = iec(*tree, _sock())[0]
-    assert m.proposed_lane == "lead"
+    assert m.proposed_lane == "lead" and "web server" not in m.claim.replace("no web server", "")
+    # without the start record the reused pid is still perl under pid 1, never the old web server: unknown, kept high
+    m = iec(*[tree[0], tree[2]], _sock())[0]
+    assert m.proposed_lane == "high" and "not fully recorded" in m.claim and "apache2" not in m.claim
 
 
 # ---- correlation -----------------------------------------------------------------------------

@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import NamedTuple
+from typing import ClassVar, NamedTuple
 
 from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, basename, pf
@@ -45,6 +45,7 @@ from romulus.detect.host import (  # boot_of and boots_conflict are defined in h
     interpreter_name,
     is_internal,
 )
+from romulus.detect.observed import EXEC, OBSERVED, ProcessView, Step, is_reaper, spawned
 from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome, TypedEvent
 
@@ -132,16 +133,150 @@ def process_interest(e: TypedEvent) -> tuple[str | None, str]:
     return None, "lead"
 
 
-def _process_words(e: TypedEvent) -> str:
-    pid = e.get("process.pid")
+def _process_words(e: TypedEvent, pids: list[int] | None = None, more: bool = False) -> str:
+    """The program, the pid(s) of its group (the record's own when `pids` is None; up to PIDS_LISTED, then a count;
+    `more`: records came from further processes not counted) and the account."""
+    if pids is None:
+        pid = e.get("process.pid")
+        pids = [pid] if pid is not None else []
     user = e.get("process.user") or e.get("process.uid")
-    return (f"'{e.get('process.executable')}'" + (f" (pid {pid}" if pid is not None else " (pid unknown")
-            + (f", user '{user}')" if user is not None else ")"))
+    if not pids:
+        who = "pid unknown"
+    elif len(pids) == 1 and not more:
+        who = f"pid {pids[0]}"
+    else:
+        who = (f"pids {', '.join(str(p) for p in pids[:PIDS_LISTED])}"
+               + (f" and {len(pids) - PIDS_LISTED} more" if len(pids) > PIDS_LISTED else "")
+               + (", and further processes not counted" if more else ""))
+    return f"'{e.get('process.executable')}' ({who}" + (f", user '{user}')" if user is not None else ")")
+
+
+# A group's processes: the pids a claim lists (the rest are counted), the distinct processes it keeps with their
+# earliest record (so the count is exact up to there), and the processes whose lineage its lane judgement walks.
+PIDS_LISTED = 8
+PROCESSES_HELD = 256
+PROCESSES_JUDGED = 16
+
+
+def process_key(e: TypedEvent) -> tuple | None:
+    """A connecting process as a group tells processes apart: pid, parent, boot and audit session (a reused pid
+    usually differs in one of them). None without a pid."""
+    pid = e.get("process.pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    return pid, e.get("process.ppid"), boot_of(e), e.get("process.session_id")
+
+
+def _order(ts: float, serial: int | None) -> tuple:
+    return ts, serial is None, serial or 0
+
+
+def note_process(procs: dict, key: tuple | None, ts: float, serial: int | None) -> bool:
+    """Keep a process's earliest record (time, audit serial) in a group's `procs`; False when the group already
+    holds PROCESSES_HELD other processes (the record's process is then counted as not held)."""
+    if key is None:
+        return True
+    held = procs.get(key)
+    if held is None:
+        if len(procs) >= PROCESSES_HELD:
+            return False
+        procs[key] = (ts, serial)
+    elif _order(ts, serial) < _order(*held):
+        procs[key] = (ts, serial)
+    return True
+
+
+class Judged(NamedTuple):
+    pid: int
+    ancestry: Ancestry
+
+
+def judge_processes(pids: PidTable, host: str | None, procs: dict, unheld: int
+                    ) -> tuple[list[Judged], int, list[TypedEvent], dict[str, dict]]:
+    """The lineage of a group's processes, each walked from its earliest record: the first PROCESSES_JUDGED by
+    time. Returns (judged, processes not judged, the observed records the named lineages rest on, their raw copies).
+    A lineage whose records cannot be read back for citation is unknown."""
+    ordered = sorted(procs.items(), key=lambda item: (_order(*item[1]), repr(item[0])))
+    judged = [Judged(key[0], pids.ancestry_of(host, key[0], ts, key[2], serial))
+              for key, (ts, serial) in ordered[:PROCESSES_JUDGED]]
+    unjudged = len(ordered) - len(judged) + (1 if unheld else 0)
+    wanted = list(dict.fromkeys(i for j in judged if j.ancestry.verdict != "unknown" for i in j.ancestry.cites))
+    found, raw = pids.execs.cited(wanted)
+    out, cited = [], {}
+    for item in judged:
+        ancestry = item.ancestry
+        if ancestry.verdict != "unknown":
+            if any(i not in found for i in ancestry.cites):
+                ancestry = ancestry._replace(verdict="unknown", why="a record this lineage rests on could not be read "
+                                                                    "back for citation")
+            else:
+                cited.update((i, found[i]) for i in ancestry.cites)
+        out.append(Judged(item.pid, ancestry))
+    raws = {r.key: raw[r.key] for event in cited.values() for r in event.raw if r.key in raw}
+    return out, unjudged, list(cited.values()), raws
+
+
+def _verdict_words(item: Judged, alone: bool) -> str:
+    ancestry = item.ancestry
+    subject, owner = ("It", "Its") if alone else (f"pid {item.pid}", f"pid {item.pid}'s")
+    if ancestry.verdict == "web_server":
+        web = ancestry.chain[-1]
+        if web.level == 0:
+            return f"{subject} is, or was forked from, the web server '{web.exe}'"
+        return f"{owner} ancestry includes the web server '{web.exe}'"
+    if ancestry.verdict == "service_manager":
+        return f"{owner} ancestry reaches the service manager with no web server"
+    return f"{owner} ancestry is not fully recorded in the window"
+
+
+def lineage_sentence(judged: list[Judged], unjudged: int) -> str:
+    """The claim's sentence on the group's lineage, per process when there are several."""
+    if not judged:
+        return (" The connecting process's pid is not recorded, so its ancestry is unknown." if not unjudged else
+                f" The ancestry of its {unjudged} process(es) was not judged.")
+    if len(judged) == 1 and not unjudged:
+        return f" {_verdict_words(judged[0], True)}."
+    text = " Ancestry, per process: " + "; ".join(_verdict_words(item, False) for item in judged) + "."
+    if unjudged:
+        text += (f" {unjudged} further process(es) were not judged (the lineage of the first {len(judged)} by time "
+                 f"was).")
+    return text
+
+
+def lineage_notes(judged: list[Judged]) -> list[str]:
+    """Why each process's lineage is unknown, and the chain each named lineage rests on."""
+    notes = []
+    for item in judged:
+        ancestry = item.ancestry
+        if ancestry.verdict == "unknown":
+            notes.append(f"lineage of pid {item.pid} not established: {ancestry.why}")
+        elif ancestry.verdict == "web_server":
+            notes.append(f"lineage of pid {item.pid}: " + " <- ".join(link.words() for link in ancestry.chain))
+    return notes
 
 
 WEB_SERVER_PREFIXES = ("apache2", "httpd", "nginx", "lighttpd", "php-fpm", "php-cgi", "uwsgi", "gunicorn", "caddy")
-SERVICE_MANAGERS = {"systemd", "init"}
 LINEAGE_DEPTH = 6
+# The families whose records teach a rule's process lineage: exec records, and the process state any other audit
+# SYSCALL record shows (`romulus.detect.observed`).
+LINEAGE_FAMILIES = ("process_exec", "process_observed", "net_socket", "file_change")
+# What the selection cards of the rules that judge lineage say about it.
+LINEAGE_LANES = (
+    f"lineage only lowers: a web-service group goes to lead when every one of its processes (at most "
+    f"{PROCESSES_JUDGED}, each walked from its earliest call through the parent each process had when it was "
+    "forked) is proved to descend from a start by the service manager with no web server in between; a parent of "
+    "pid 1, a subreaper, or a program merely named like the service manager never proves that, and any unknown, "
+    "unjudged or uncitable lineage keeps the lane. Residual: a unit started on request (systemd-run, a transient "
+    "unit) by an account allowed to start one has the same spawn record as a configured service, and is lowered "
+    "like one; who asked for it is in the journal, not in these records. Residual: a process that made itself a "
+    "subreaper above a web server, under a proven service start, adopts an orphan that then execs, and the web "
+    "server between them is not seen")
+LINEAGE_TELEMETRY = (
+    "lineage from process_exec and from the process state every other audit SYSCALL record shows (process_observed, "
+    "net_socket, file_change: process.pid, process.ppid, process.executable, process.session_id, audit.serial, "
+    "host.boot.id); present in the lab profile, where connect() is audited for every process (so systemd's spawn "
+    "child, connecting to journald before its exec as a child of pid 1 running /usr/lib/systemd/systemd, proves a "
+    "service start) and exec auditing covers euid 0 or uid<1000 only; the lab's audit records carry no unit name")
 _UNBOUNDED = 2**62
 
 
@@ -165,6 +300,64 @@ def merge_unknown_boot(groups: dict[tuple, list], index: int) -> dict[tuple, lis
     return out
 
 
+class ChainLink(NamedTuple):
+    """One process of an ancestry walk, as the claim and notes name it, with the record that shows it."""
+    pid: int
+    exe: str
+    raw_id: str
+    observed: bool          # an observed record (the process's own non-exec record, cited), not an exec record
+    level: int              # 0: the asking process; 1: its parent at fork; ...
+    start: bool = False     # the record proving the service manager started it
+    ppid: int | None = None             # the parent the record shows
+
+    def words(self) -> str:
+        record = f"{'observed' if self.observed else 'exec'} record {self.raw_id}"
+        if self.start:
+            what = ("running the service manager's own executable as a child of pid 1, before its exec"
+                    if self.observed else "exec of the service manager's spawn helper as a child of pid 1")
+            return f"{self.exe} (pid {self.pid}, {what}, {record})"
+        parent = f", parent pid {self.ppid}" if self.ppid is not None else ""
+        return f"{self.exe} (pid {self.pid}{parent}, {record})"
+
+
+class Ancestry(NamedTuple):
+    """An ancestry walk (`PidTable.ancestry_of`): the verdict, the processes it named, the event ids of the observed
+    records it rests on (cited with any claim that names them), and why it is unknown."""
+    verdict: str            # "web_server" | "service_manager" | "unknown"
+    chain: list[ChainLink]
+    cites: list[str]
+    why: str = ""
+
+
+def _link(pid: int, step: Step, level: int, *, start: bool = False) -> ChainLink:
+    return ChainLink(pid, step.exe, step.entry.raw_id, step.kind == OBSERVED, level, start, step.ppid)
+
+
+def _not_forked(child: Step | None, child_pid: int | None, pid: int, view: ProcessView) -> str | None:
+    """Why pid `pid` (its process `view` when its child was first recorded) is not shown to be the parent at fork of
+    the process below, whose earliest record is `child` (None: the walk began at this parent). A process whose parent
+    exits is adopted by pid 1 or by its nearest subreaper, so a recorded parent proves the fork only when the child's
+    earliest record shows it still running its parent's image (forked, not yet exec'd), or is its exec under a parent
+    recorded before it that is not a known subreaper."""
+    image = view.image.exe
+    if child is None:
+        return (f"pid {pid} ('{image}') adopts orphaned processes, and no record of its child shows it was forked "
+                f"there" if is_reaper(image) else None)
+    if child.kind == OBSERVED:
+        if child.exe != image:
+            return (f"the earliest record of pid {child_pid} shows it running '{child.exe}', not the image of its "
+                    f"recorded parent pid {pid} ('{image}'): it may have been adopted by pid {pid} after its parent "
+                    f"exited, so pid {pid} is not shown to be its parent at fork")
+        return None
+    if is_reaper(image):
+        return (f"pid {pid} ('{image}') adopts orphaned processes, and the earliest record of pid {child_pid} is its "
+                f"exec, so it may have been reparented to pid {pid}")
+    if not view.prior:
+        return (f"pid {pid} is recorded only after the earliest record of pid {child_pid}, so it is not shown to have "
+                f"been its parent then")
+    return None
+
+
 class ExecImage(NamedTuple):
     """A pid's image at a moment (`PidTable.image`): the exec record, or why it is unknown."""
     record: ExecRecord | None
@@ -185,11 +378,17 @@ class PidTable:
     # fetch, a baseline period) hold everything they were given in memory.
     CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
-    def __init__(self, capacity: int | None = None, owner=None):
-        self.execs = ExecLineage(owner, capacity if capacity is not None else _UNBOUNDED)
+    def __init__(self, capacity: int | None = None, owner=None, observing: bool = False):
+        self.execs = ExecLineage(owner, capacity if capacity is not None else _UNBOUNDED, observing=observing)
+        self.observing = observing
 
-    def add(self, e: TypedEvent) -> None:
-        self.execs.observe(e)
+    def add(self, e: TypedEvent, raw: dict[str, dict] | None = None) -> None:
+        """Hold an exec record; with `observing`, also the process state any other audit SYSCALL record shows (its
+        raw copies `raw` are kept for citation)."""
+        if e.family == "process_exec":
+            self.execs.observe(e)
+        elif self.observing:
+            self.execs.observe_process(e, raw)
 
     def trim(self) -> None:
         """Move the least recently used processes beyond the capacity to disk (when a batch ends)."""
@@ -266,43 +465,111 @@ class PidTable:
 
     def ancestry(self, host: str, ppid, ts: float, boot: str | None = None,
                  serial: int | None = None) -> tuple[str, list[tuple[str, str]]]:
-        """Walk up from a parent pid in `boot`. Returns (verdict, [(exe, raw id)]) with verdict 'web_server' when a
-        web server is an ancestor, 'service_manager' when the chain provably reaches pid 1 or systemd/init without
-        one, and 'unknown' when an ancestor's exec is not in the window."""
-        chain: list[tuple[str, str]] = []
-        pid = ppid
-        for _ in range(LINEAGE_DEPTH):
-            if pid in (0, 1):
-                return "service_manager", chain
-            if not isinstance(pid, int):
-                return "unknown", chain
-            record = self._record(host, pid, ts, boot, serial=serial)
-            if record is None:
-                return "unknown", chain
-            name = basename(record.exe)
-            chain.append((record.exe, record.raw_id))
-            if name.startswith(WEB_SERVER_PREFIXES):
-                return "web_server", chain
-            if name in SERVICE_MANAGERS:
-                return "service_manager", chain
-            pid, ts, serial = record.ppid, record.ts, record.serial
-            boot = boot if boot is not None else record.boot
-        return "unknown", chain
+        """Walk up from a parent pid in `boot` (`ancestry_of` without the child's own records). Returns (verdict,
+        [(exe, raw id)]). Without the child's records nothing shows that it was forked rather than adopted, so a
+        service manager or subreaper parent, like a parent of pid 1, gives 'unknown'."""
+        if not isinstance(ppid, int) or ppid in (0, 1):
+            return "unknown", []
+        found = self._walk(host, ppid, ts, boot, serial, inclusive=False, depth=1)
+        return found.verdict, [(link.exe, link.raw_id) for link in found.chain]
+
+    def ancestry_of(self, host: str | None, pid, ts: float, boot: str | None = None,
+                    serial: int | None = None) -> Ancestry:
+        """Walk up from the process that made a record at (`ts`, audit `serial`) in `boot`, through the parent each
+        process had when it was forked (`romulus.detect.observed`). The verdict is 'web_server' when a web server's
+        image is in the chain (the process itself before its exec counts), 'service_manager' when a process of the
+        chain is proved to have been started by the service manager with no web server below it, and 'unknown'
+        otherwise: a record not in the window, an ambiguous image, a parent of pid 1 or a subreaper that nothing
+        shows was the parent at fork, a record not kept for citation, or a lineage store that refused records."""
+        if host is None or not isinstance(pid, int) or isinstance(pid, bool):
+            return Ancestry("unknown", [], [], "the record names no host and process id")
+        return self._walk(host, pid, ts, boot, serial, inclusive=True, depth=0)
+
+    def _walk(self, host: str, pid: int, ts: float, boot: str | None, serial: int | None, *, inclusive: bool,
+              depth: int) -> Ancestry:
+        chain: list[ChainLink] = []
+        cites: list[str] = []
+        child: Step | None = None               # the earliest record of the process below (how it was started)
+        child_pid = None
+        # A step whose fork is not proved: the recorded parent is still an ancestor (orphans are adopted only by an
+        # ancestor or pid 1), so a web server above it is in the ancestry, but processes between may be missing, so
+        # no start by the service manager is proved through it.
+        gap: str | None = None
+        for level in range(depth, LINEAGE_DEPTH + 1):
+            view = self.execs.view(host, pid, ts, serial, boot, inclusive=inclusive)
+            if view.image is None:
+                when = datetime.fromtimestamp(ts, UTC).isoformat()
+                return Ancestry("unknown", chain, cites, view.why or (
+                    f"no exec or other audit record of pid {pid} on {host} at or before {when} is in the window"))
+            if any(not entry.cited for entry in view.used):
+                return Ancestry("unknown", chain, cites, (
+                    f"the earliest record of pid {pid} on {host}, which this lineage rests on, is not held for "
+                    f"citation (the store of observed records had no room, or it arrived after a later record of the "
+                    f"same process)"))
+            if level and gap is None:
+                gap = _not_forked(child, child_pid, pid, view)
+            cites += [entry.event_id for entry in view.used if entry.event_id not in cites]
+            named = view.named
+            if level:
+                chain.append(_link(pid, named, level))
+            # a web server's image in the process's own records (an exec, or its cited earliest record: an image
+            # seen in any other observation of the span is also one of these)
+            web = next((s for s in reversed(view.span) if basename(s.exe).startswith(WEB_SERVER_PREFIXES)
+                        and (s.kind == EXEC or s.entry.cited)), None)
+            if web is not None:
+                if web is not named or not level:
+                    chain.append(_link(pid, web, level))
+                return Ancestry("web_server", chain, cites)
+            first = view.first
+            if spawned(first):
+                if gap is not None:
+                    return Ancestry("unknown", chain, cites, gap)
+                if first is not named or not level:
+                    chain.append(_link(pid, first, level, start=True))
+                else:
+                    chain[-1] = chain[-1]._replace(start=True)
+                return self._started(chain, cites)
+            parent = first.ppid
+            if not isinstance(parent, int):
+                return Ancestry("unknown", chain, cites, f"the earliest record of pid {pid} on {host} names no parent")
+            if parent in (0, 1):
+                when = datetime.fromtimestamp(first.ts, UTC).isoformat()
+                return Ancestry("unknown", chain, cites, gap or (
+                    f"the earliest record of pid {pid} on {host} ({when}) shows parent pid {parent}: it was started by "
+                    f"the service manager or reparented to it after its parent exited, and no record shows which"))
+            child, child_pid = first, pid
+            pid, ts, serial, inclusive = parent, first.ts, first.serial, False
+            boot = boot if boot is not None else first.boot
+        return Ancestry("unknown", chain, cites, gap or f"the lineage is deeper than the {LINEAGE_DEPTH} levels walked")
+
+    def _started(self, chain: list[ChainLink], cites: list[str]) -> Ancestry:
+        """A service-manager verdict, unless a lineage store refused records in this hunt: then a record that would
+        change it may be missing."""
+        if self.execs.incomplete or self.execs.observed_incomplete:
+            return Ancestry("unknown", chain, cites, "the lineage stores refused records in this hunt (their share of "
+                                                     "the state budget was spent), so a missing record that would "
+                                                     "change this lineage cannot be excluded")
+        return Ancestry("service_manager", chain, cites)
 
 
 def _named(record: ExecRecord) -> bool:
     return bool(record.exe)
 
 
-def lineage_lane(reason: str | None, lane: str, verdict: str, chain) -> tuple[str, list[str]]:
-    """Lineage can only lower a lane. A web-service process whose ancestry provably reaches the service
-    manager without a web server is a daemon of that account, not a request-driven child: lead. Unknown
-    lineage keeps the lane, so missing records can never hide a web shell."""
-    if reason is None or "web-service account" not in reason or verdict != "service_manager" or lane != "high":
+def lineage_lane(reason: str | None, lane: str, judged: list[Judged], unjudged: int) -> tuple[str, list[str]]:
+    """Lineage can only lower a lane. A group of web-service processes each of which provably descends from a
+    service-manager start with no web server in between is a daemon of that account, not a request-driven child:
+    lead. A process whose lineage is unknown, or that was not judged, keeps the lane, so missing records can never
+    hide a web shell."""
+    if (reason is None or "web-service account" not in reason or lane != "high" or not judged or unjudged
+            or any(item.ancestry.verdict != "service_manager" for item in judged)):
         return lane, []
-    names = " <- ".join(f"{exe} ({rid})" for exe, rid in chain) or "pid 1"
-    return "lead", [(f"lane lowered to lead: auditd exec records trace the process to the service manager with no "
-                    f"web server in between ({names})")]
+    return "lead", [(f"lane lowered to lead: audit records trace pid {item.pid} to a start by the service manager "
+                     f"with no web server in between ("
+                     + " <- ".join(link.words() for link in item.ancestry.chain)
+                     + "); the start is proved by the service manager's spawn record, and a unit started on request "
+                       "(for example with systemd-run by an account allowed to) has the same record")
+                    for item in judged]
 
 
 class InterpreterExternalConnection(Playbook):
@@ -311,11 +578,12 @@ class InterpreterExternalConnection(Playbook):
     account, port), listing every destination, so routine update traffic is one lead, not one per address."""
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.interpreter_external_connection"
-    version = "5"
+    version = "6"
     title = ("Shell, interpreter, relay tool or web-service process made connect() calls to addresses outside the "
              "site's internal networks")
     kind = "aggregate"
-    families = ("net_socket", "process_exec")
+    families = LINEAGE_FAMILIES
+    context_families = ("process_observed", "file_change")     # its lineage only (exec records it always read)
     os_families = ("linux",)
     required_fields = ()
     assures_negative = False
@@ -328,6 +596,28 @@ class InterpreterExternalConnection(Playbook):
                    "entity_timeline of the host around the connection",
                    ("whether this process or a child then executed a shell "
                     "(host.shell_spawned_by_connected_process), which would make this a reverse shell"))
+    card: ClassVar[dict] = {
+        "behavior": "a shell, interpreter or relay tool (kernel exe), or a process running as a web-service account "
+                    "(uid or euid), made connect() calls to addresses outside the site's internal networks (port not 0)",
+        "telemetry": "Linux auditd net_socket (socket.syscall connect, destination.ip/port from SOCKADDR, "
+                     "process.executable, process.user/effective_user, process.pid, outcome); " + LINEAGE_TELEMETRY,
+        "fidelity": "direct observation of each call and its outcome; the socket type is not recorded (a UDP connect "
+                    "sends nothing); the lineage claim names the records it rests on, observed ones cited",
+        "benign_and_cost": "package managers and update checks, monitoring and backup scripts, web applications' "
+                           "approved API calls and daemons of the web account, resolvers' UDP connects; one item per "
+                           "(host, program, account, port) listing every destination and pid",
+        "query_cost": "none beyond the sweep: it reads the host partitions every host rule reads",
+        "next_pivot": "the connecting process's tree and the network records for the same destination and time",
+        "adds": "the outbound connection itself; host.shell_spawned_by_connected_process reports a shell under it, "
+                "corr.process_network_link joins it to sensor records",
+        "research_basis": "ATT&CK Enterprise 20.0 T1059, T1071, T1095; Linux reparenting of orphans to pid 1 or the "
+                          "nearest subreaper (prctl(2) PR_SET_CHILD_SUBREAPER); systemd's spawn child running the "
+                          "manager's image until it execs the service (systemd.exec(5))",
+        "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter only), a "
+                     "superset of the records this evaluator reads",
+        "lanes": "high for a web-service account, a shell or a relay tool; lead for another interpreter; lead when "
+                 "every call failed; " + LINEAGE_LANES,
+    }
 
     # Per (host, program, account, port) of notable processes: counts, destinations and the first cited calls (as ids
     # once staged), in a keyed store: the HOT most recent groups in memory, the rest on disk, never forgotten.
@@ -336,7 +626,7 @@ class InterpreterExternalConnection(Playbook):
 
     def __init__(self):
         super().__init__()
-        self.pids = PidTable(PidTable.CAPACITY, owner=self)
+        self.pids = PidTable(PidTable.CAPACITY, owner=self, observing=True)
         self.groups = KeyedStore(self, "iec_groups", self.HOT)        # key -> [info, HeldExamples]
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
@@ -354,9 +644,8 @@ class InterpreterExternalConnection(Playbook):
     def consume(self, events):
         self._batch, out = events, []
         for e in events:
-            if e.family == "process_exec":
-                self.pids.add(e)
-                continue
+            if e.family in LINEAGE_FAMILIES:
+                self.pids.add(e, self.raw_of(e))
             if e.family != "net_socket" or e.get("socket.syscall") != "connect":
                 continue
             if not e.has("process.executable") or not e.has("destination.ip"):
@@ -372,13 +661,14 @@ class InterpreterExternalConnection(Playbook):
             key = f"{e.host}|{e.get('process.executable')}|{e.get('process.user')}|{port}"
             state = self.groups.setdefault(key, lambda e=e, reason=reason, lane=lane: [
                 {"count": 0, "dests": Counter(), "outcomes": Counter(), "first": e.ts, "last": e.ts,
-                 "reason": reason, "lane": lane}, HeldExamples(EXAMPLE_LIMIT)])
+                 "reason": reason, "lane": lane, "procs": {}, "unheld": 0}, HeldExamples(EXAMPLE_LIMIT)])
             if state is None:
                 # the call is a finding by itself: published now, on its own, instead of being refused
                 self.note_limit("groups_alone", "the groups' disk budget is spent; calls of a new group are published "
                                                 "one at a time")
+                # judged when read, before the rest of the hunt's records: its lineage is not judged (never lowered)
                 info = {"count": 1, "dests": Counter({ip: 1}), "outcomes": Counter({str(e.outcome): 1}),
-                        "first": e.ts, "last": e.ts, "reason": reason, "lane": lane}
+                        "first": e.ts, "last": e.ts, "reason": reason, "lane": lane, "procs": {}, "unheld": 1}
                 add_unheld(out, alone(self._group_match(key, info, [e]), self, e))
                 continue
             info, group = state
@@ -386,6 +676,8 @@ class InterpreterExternalConnection(Playbook):
             info["dests"][ip] += 1
             info["outcomes"][str(e.outcome)] += 1
             info["first"], info["last"] = min(info["first"], e.ts), max(info["last"], e.ts)
+            if not note_process(info["procs"], process_key(e), e.ts.timestamp(), _audit_serial(e)):
+                info["unheld"] += 1
             if group.offer(e):
                 self._pending.append(e)
                 self._fresh.append(group)
@@ -402,9 +694,10 @@ class InterpreterExternalConnection(Playbook):
     def _group_match(self, key: str, info: dict, evs: list[TypedEvent]) -> Match:
         evs = sorted(evs, key=lambda x: (x.ts, x.id))
         e0 = evs[0]
-        verdict, chain = self.pids.ancestry(e0.host, e0.get("process.ppid"), e0.ts.timestamp(), boot_of(e0),
-                                            _audit_serial(e0))
-        lane, notes = lineage_lane(info["reason"], info["lane"], verdict, chain)
+        procs = info["procs"]
+        judged, unjudged, lineage_events, raw = judge_processes(self.pids, e0.host, procs, info["unheld"])
+        lane, notes = lineage_lane(info["reason"], info["lane"], judged, unjudged)
+        notes += lineage_notes(judged)
         if lane == "high" and all(o == Outcome.failure for o in info["outcomes"]):
             lane = "lead"
             notes.append("lane lowered to lead: every connect() call failed")
@@ -415,24 +708,26 @@ class InterpreterExternalConnection(Playbook):
             ("failed", info["outcomes"].get(Outcome.failure, 0)),
             ("with unknown or in-progress outcome", info["outcomes"].get(Outcome.unknown, 0))) if n)
         port = e0.get("destination.port")
-        if verdict == "web_server":
-            lineage = f" Its ancestry includes the web server '{chain[-1][0]}'."
-        elif verdict == "service_manager":
-            lineage = " Its ancestry reaches the service manager with no web server."
-        else:
-            lineage = " Its ancestry is not fully recorded in the window."
-        claim = (f"auditd connect() records on {e0.host} show {_process_words(e0)}, {info['reason']}, making "
-                 f"{info['count']} connect() call(s) to {len(info['dests'])} address(es) outside the site's internal "
-                 f"networks on port {port} ({info['first'].isoformat()} – {info['last'].isoformat()}): {dests}{more}; "
-                 f"{outcomes}.{lineage} {SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
+        pids = sorted({key[0] for key in procs})
+        who = _process_words(e0, pids, bool(info["unheld"])) if pids else _process_words(e0)
+        claim = (f"auditd connect() records on {e0.host} show {who}, "
+                 f"{info['reason']}, making {info['count']} connect() call(s) to {len(info['dests'])} address(es) "
+                 f"outside the site's internal networks on port {port} ({info['first'].isoformat()} – "
+                 f"{info['last'].isoformat()}): {dests}{more}; {outcomes}.{lineage_sentence(judged, unjudged)} "
+                 f"{SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
         preds = [pf(e0, "socket.syscall"), pf(e0, "process.executable"), pf(e0, "destination.port")]
         if e0.has("process.user"):
             preds.append(pf(e0, "process.user"))
-        m = Match(self.id, claim, self.claim_type, evs, preds, e0.ts, self.severity, lane, "high",
+        known = {e.id for e in evs}
+        cited = evs + [e for e in lineage_events if e.id not in known]    # the observed records the lineage names
+        m = Match(self.id, claim, self.claim_type, cited, preds, e0.ts, self.severity, lane, "high",
                   e0.entities(), group_key=key)
+        m.raw_copies.update(raw)
         m.notes.extend(notes)
         if info["count"] > len(evs):
             m.notes.append(f"{info['count']} matching connect() records; {len(evs)} are cited")
+        if lineage_events:
+            m.notes.append(f"{len(lineage_events)} observed process record(s) the named lineage rests on are cited")
         return m
 
     def retained_events(self) -> list[TypedEvent]:
@@ -456,6 +751,10 @@ class Sock:
     outcome: str
     reason: str | None
     process_lane: str
+    ppid: int | None = None
+    boot: str | None = None
+    serial: int | None = None
+    session: int | None = None
 
     @property
     def group(self) -> str:
@@ -544,12 +843,13 @@ class ProcessNetworkLink(Playbook):
     address is not established for this host is linked but stated, and caps the lane at lead, as do
     multiple local addresses and records shared with another process."""
     id = "corr.process_network_link"
-    version = "5"
+    version = "6"
     title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
     staged = True
     claim_type = "correlated_observation"
-    families = ("net_socket",) + NETWORK_JOIN_FAMILIES
+    families = LINEAGE_FAMILIES + NETWORK_JOIN_FAMILIES
+    context_families = ("process_exec", "process_observed", "file_change")     # its lineage only
     os_families = ("linux",)
     required_fields = ()
     # a join that finds nothing proves nothing: sensors and audit rules each see only part of the traffic
@@ -560,6 +860,30 @@ class ProcessNetworkLink(Playbook):
               "benign IDS signatures on routine traffic")
     next_checks = ("flow detail for the linked community IDs", "process_tree for the connecting process",
                    "peer activity for the remote address across hosts and sessions")
+    card: ClassVar[dict] = {
+        "behavior": "an IP connect() recorded by auditd and network-sensor records of the same connection (same remote "
+                    "endpoint within seconds, or the same community ID inside the flow's lifetime), published when "
+                    "the joined records carry an IDS alert or the process meets the external-connection criteria",
+        "telemetry": "Linux auditd net_socket (destination.ip/port, process.executable, process.user, process.pid) "
+                     "and sensor flow, session, alert, HTTP, TLS, SSH and file-transfer records (source/destination "
+                     "ip and port, flow start/end, community_id, alert severity/category/signature); "
+                     + LINEAGE_TELEMETRY,
+        "fidelity": "each side directly observed; the link is inferred from address, port and time and worded as "
+                    "inferred; the host's own address on a sensor is inferred from its unique joins",
+        "benign_and_cost": "another host or process reaching the same endpoint at the same second (stated, capped at "
+                           "lead), benign IDS signatures on routine traffic; one item per (host, program, account, "
+                           "endpoint)",
+        "query_cost": "none beyond the sweep; the join runs on the rule's disk spill at finalize",
+        "next_pivot": "flow detail for the linked community IDs and the connecting process's tree",
+        "adds": "gives an IDS alert its process and a notable process its network evidence",
+        "research_basis": "ATT&CK Enterprise 20.0 T1071, T1095, T1571; Community ID flow hashing; the lineage basis "
+                          "of host.interpreter_external_connection",
+        "retrieval": "the sweep retrieves every record of the host and network datasets in each partition, a superset "
+                     "of the records this evaluator reads",
+        "lanes": "never above its strongest observed component: the IDS alert's own lane, or the notable process's "
+                 "(lead when every notable call failed); lead when the attribution is shared, ambiguous or not "
+                 "established; " + LINEAGE_LANES,
+    }
     HEARTBEAT_EVERY = 1000
     # Bytes of spilled rows (socket calls, network records and their endpoint index) after which a further record is
     # refused through the coverage ledger, counted at ROW_BYTES per row (about what a row takes on disk), so this is
@@ -580,7 +904,10 @@ class ProcessNetworkLink(Playbook):
         self.load = lambda ids: []
         self.heartbeat = lambda: None
         self._rows_account = None
+        self._tables = False
         register_store(self, self)      # its rows are one store of the hunt's state budget
+        # the lineage of the connecting processes, which can lower a web-service process's lane (never raise it)
+        self.pids = PidTable(PidTable.CAPACITY, owner=self, observing=True)
 
     def account(self):
         """The join rows' Account in the hunt's state budget."""
@@ -590,21 +917,26 @@ class ProcessNetworkLink(Playbook):
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
+        self.pids.trim()
         return out
 
     def _store(self) -> Spill:
-        if self._spill is None:
-            spill = self._spill = Spill(self.spill_dir, self.state_budget())
-            spill.table("sock", "id, host, ts, ip, port, exe, user, pid, outcome, reason, lane, grp, claimant")
+        """The join's tables, on the rule's spill (which the lineage's stores may share)."""
+        spill = self.spill()
+        if not self._tables:
+            spill.table("sock", "id, host, ts, ip, port, exe, user, pid, outcome, reason, lane, grp, claimant, "
+                                "ppid, boot, serial, session")
             spill.table("net", 'id, family, observer, start, "end", src, sport, dst, dport, cid, sev, cat, sig, '
                                "seq INTEGER PRIMARY KEY")
             spill.table("ep", "ip, port, start, net")
-        return self._spill
+            self._tables = True
+        return spill
 
     def close_spill(self) -> None:
         if self._spill is not None:
             self._spill.close()
             self._spill = None
+        self._tables = False
 
     def release_state(self) -> None:
         self.close_spill()
@@ -639,10 +971,12 @@ class ProcessNetworkLink(Playbook):
             return
         reason, lane = process_interest(e) if external(ip) else (None, "lead")
         self.evaluated += 1
+        key = process_key(e)
         s = Sock(e.id, e.host or "", e.ts.timestamp(), ip, int(port), str(e.get("process.executable")),
-                 str(e.get("process.user")), scalar(e.get("process.pid")), str(e.outcome), reason, lane)
+                 str(e.get("process.user")), scalar(e.get("process.pid")), str(e.outcome), reason, lane,
+                 *((scalar(key[1]), key[2], _audit_serial(e), scalar(key[3])) if key else (None, None, None, None)))
         row = (s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.process_lane, s.group,
-               _claimant_key(s.claimant))
+               _claimant_key(s.claimant), s.ppid, s.boot, s.serial, s.session)
         if not self._room(1):
             return
         try:
@@ -693,6 +1027,8 @@ class ProcessNetworkLink(Playbook):
 
     def consume(self, events):
         for e in events:
+            if e.family in LINEAGE_FAMILIES:
+                self.pids.add(e, self.raw_of(e))
             if e.id in self._seen:
                 continue                      # re-reading a partition must not count a record twice
             if e.family == "net_socket":
@@ -752,12 +1088,13 @@ class ProcessNetworkLink(Playbook):
 
     _ROWS = ('SELECT s.rowid, s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.lane, '
              's.grp, n.id, n.family, n.observer, n.start, n."end", n.src, n.sport, n.dst, n.dport, n.cid, n.sev, '
-             'n.cat, n.sig, nc.n, n.seq FROM link l JOIN sock s ON s.rowid = l.sock JOIN net n ON n.seq = l.net '
-             'JOIN nc ON nc.net = l.net ')
+             'n.cat, n.sig, nc.n, n.seq, s.ppid, s.boot, s.serial, s.session FROM link l JOIN sock s '
+             'ON s.rowid = l.sock JOIN net n ON n.seq = l.net JOIN nc ON nc.net = l.net ')
 
     @staticmethod
     def _row(row) -> tuple[int, Sock, Net, int, int]:
-        sock = Sock(row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11])
+        sock = Sock(row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11],
+                    row[28], row[29], row[30], row[31])
         net = Net(row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21], row[22],
                   row[23], row[24], row[25])
         return row[0], sock, net, row[26], row[27]
@@ -778,7 +1115,7 @@ class ProcessNetworkLink(Playbook):
             yield rows
 
     def finalize(self):
-        if self._spill is None:
+        if self._spill is None or not self._tables:
             return []
         try:
             return self._finalize()
@@ -850,8 +1187,12 @@ class ProcessNetworkLink(Playbook):
     def _group_match(self, g: _Group, address) -> Match | None:
         db = self._spill.db
         components = []
+        judged, unjudged, lineage_events, lineage_raw, lineage_lines = [], 0, [], {}, []
         if g.notable is not None:
-            lane = g.notable.process_lane
+            judged, unjudged, lineage_events, lineage_raw = judge_processes(self.pids, g.notable.host, g.procs,
+                                                                            g.unheld)
+            lane, lineage_lines = lineage_lane(g.notable.reason, g.notable.process_lane, judged, unjudged)
+            lineage_lines += lineage_notes(judged)
             if g.notable_all_failed:
                 lane = "lead"                       # every notable call failed: an attempt, not a connection
             components.append(lane)
@@ -905,7 +1246,8 @@ class ProcessNetworkLink(Playbook):
             ("succeeded", outcomes.get(Outcome.success, 0)), ("failed", outcomes.get(Outcome.failure, 0)),
             ("with unknown or in-progress outcome", outcomes.get(Outcome.unknown, 0))) if n)
         parts = [
-            (f"Observed on {s0.host} (auditd): {_process_words(first)} made {g.n_socks} connect() call(s) to "
+            (f"Observed on {s0.host} (auditd): {_process_words(first, sorted(g.pids), g.pids_more)} made "
+             f"{g.n_socks} connect() call(s) to "
              f"{s0.ip} port {s0.port} that join network records "
              f"({datetime.fromtimestamp(s0.ts, UTC).isoformat()} – "
              f"{datetime.fromtimestamp(g.last_ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."),
@@ -935,7 +1277,9 @@ class ProcessNetworkLink(Playbook):
                 + ", the lane is capped at lead.")
         if g.notable is not None:
             parts.append(f"The process is notable as {g.notable.reason} calling connect() to an address "
-                         f"outside the site's internal networks.")
+                         f"outside the site's internal networks." + lineage_sentence(judged, unjudged))
+        known = set(ids)
+        cited += [e for e in lineage_events if e.id not in known]         # the observed records the lineage names
         # the first-seen alert (and flow) among the cited records
         by_order = sorted(g.first_partners, key=lambda item: item[2])
         alert_event = next((loaded[n.id] for _k, n, _o in by_order if n.family == "net_alert"), None)
@@ -947,6 +1291,10 @@ class ProcessNetworkLink(Playbook):
             preds.append(pf(flow_event, "network.community_id"))
         m = Match(self.id, " ".join(parts), self.claim_type, cited, preds, first.ts, LANE_SEVERITY[lane], lane,
                   "medium", first.entities(), group_key=g.key)
+        m.raw_copies.update(lineage_raw)
+        m.notes.extend(lineage_lines)
+        if lineage_events:
+            m.notes.append(f"{len(lineage_events)} observed process record(s) the named lineage rests on are cited")
         for observer in observers:
             for version in (4, 6):
                 known = address.get((s0.host, observer, version))
@@ -978,6 +1326,10 @@ class _Group:
         self.alert_lane: str | None = None
         self.first_partners: list[tuple] = []     # (citation key, record, first-seen order), sorted by key
         self.order = 0
+        self.procs: dict = {}                     # notable processes and their earliest calls (`note_process`)
+        self.unheld = 0                           # notable calls of processes past PROCESSES_HELD
+        self.pids: set = set()                    # the group's pids (PROCESSES_HELD at most)
+        self.pids_more = False
 
     def shared(self, net_id: str, seq: int) -> None:
         self.db.execute("INSERT OR IGNORE INTO gsh VALUES (?, ?)", (net_id, seq))
@@ -988,10 +1340,18 @@ class _Group:
             self.socks.append(s)
         self.last_ts = s.ts
         self.outcomes[s.outcome] += 1
+        if s.pid is not None and s.pid not in self.pids:
+            if len(self.pids) < PROCESSES_HELD:
+                self.pids.add(s.pid)
+            else:
+                self.pids_more = True
         if s.reason is not None:
             if self.notable is None:
                 self.notable = s
             self.notable_all_failed = self.notable_all_failed and s.outcome == Outcome.failure
+            key = (s.pid, s.ppid, s.boot, s.session) if isinstance(s.pid, int) else None
+            if not note_process(self.procs, key, s.ts, s.serial):
+                self.unheld += 1
         self.db.execute("INSERT OR IGNORE INTO gs VALUES (?)", (sock_rowid,))
         for n, local, status in kept:
             if not self.db.execute(

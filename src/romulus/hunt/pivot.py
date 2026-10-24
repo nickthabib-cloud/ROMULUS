@@ -99,6 +99,7 @@ def _host_datasets(contract: FieldContract, families: set[str] | None = None) ->
             "audit_config": ("linux.audit",),
             "system_state": ("linux.audit",),
             "file_change": ("linux.audit",),
+            "process_observed": ("linux.audit",),
             "http_access": ("apache.access",),
             "web_error": ("apache.error",),
         }

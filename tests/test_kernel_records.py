@@ -97,7 +97,9 @@ def test_read_only_open_is_not_a_file_change(flags):
         path(11, 0, "/etc/crontab", "NORMAL"),
         cwd(11),
     ))
-    assert events == [] and errors == [] and skips == {"audit open without write intent": 1}
+    # not a file change: the record only shows the process that made the call (process lineage reads it)
+    assert errors == [] and skips == {} and [e.family for e in events] == ["process_observed"]
+    assert [r.native_id for r in events[0].raw] == ["r0"] and events[0].get("audit.syscall") == "openat"
 
 
 def test_write_open_of_an_existing_file_is_a_content_change():
@@ -127,7 +129,7 @@ def test_creat_is_always_write_intent():
 def test_unnamed_temporary_file_is_skipped_with_a_reason():
     events, skips, _ = normalize_hits(group(syscall(15, 257, "openat", a2="410002"),
                                             path(15, 0, "/tmp", "NORMAL", mode="041777"), cwd(15)))
-    assert events == [] and skips == {"audit open of an unnamed temporary file (O_TMPFILE)": 1}
+    assert skips == {} and [e.family for e in events] == ["process_observed"]
 
 
 def test_openat2_records_no_flags_so_the_change_is_absent_not_guessed():
@@ -256,12 +258,16 @@ def test_duplicate_path_items_are_a_file_family_error():
                                              path(38, 1, "/etc/b", "DELETE"), cwd(38)))
     assert events == [] and errors and errors[0][1].startswith("linux.audit.file:")
     from romulus.hunt.sweep import DATASET_FAMILIES
-    assert DATASET_FAMILIES["linux.audit.file"] == {"file_change"}
+    # the group's SYSCALL record would have shown its process to the lineage too
+    assert DATASET_FAMILIES["linux.audit.file"] == {"file_change", "process_observed"}
     assert "file_change" in DATASET_FAMILIES["linux.audit"]
 
 
-def test_unrelated_syscalls_are_still_counted_skips():
+def test_unrelated_syscalls_show_their_process_and_a_group_without_one_is_a_counted_skip():
     events, skips, _ = normalize_hits(group(syscall(39, 105, "setuid", items=0)))
+    assert skips == {} and [e.family for e in events] == ["process_observed"]
+    assert events[0].get("process.pid") is not None and events[0].get("audit.syscall") == "setuid"
+    events, skips, _ = normalize_hits(group(path(41, 0, "/etc/a", "NORMAL")))           # no SYSCALL record
     assert events == [] and skips == {"audit group without EXECVE, socket or file-change syscall": 1}
 
 

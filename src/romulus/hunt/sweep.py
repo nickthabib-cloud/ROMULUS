@@ -52,10 +52,11 @@ NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer"
 # an exec, socket or file record of that event and carries the whole audit family set.
 _AUDIT_ADMIN = {"account_change", "service_change", "audit_config", "system_state"}
 LINUX_DATASET_FAMILIES = {
-    "linux.audit": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
-    "linux.audit.socket": {"net_socket"},
-    "linux.audit.file": {"file_change"},
-    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
+    "linux.audit": {"process_exec", "net_socket", "auth", "file_change", "process_observed"} | _AUDIT_ADMIN,
+    "linux.audit.socket": {"net_socket", "process_observed"},
+    "linux.audit.file": {"file_change", "process_observed"},
+    "linux.audit.observed": {"process_observed"},
+    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change", "process_observed"} | _AUDIT_ADMIN,
     "linux.audit.admin": _AUDIT_ADMIN,
     "arkime.session": {"net_session"},
     "systemd.journal": {"auth", "privilege_use", "service_change"},
@@ -235,6 +236,8 @@ class Sweep:
 
     def _publish(self, m: Match, task_id: str | None, raw_sources: dict[str, dict]):
         playbook = next(playbook for playbook in self.pack if playbook.id == m.playbook_id)
+        if m.raw_copies:
+            raw_sources = {**m.raw_copies, **raw_sources}      # records the rule kept for citation itself
         row = publish_match(self.repo, self.hunt_id, playbook, m, task_id, raw_sources)
         if row is not None:
             self.stats["candidates"] += 1
@@ -765,7 +768,9 @@ class Sweep:
         released: list[tuple[str, list[str]]] = []       # (playbook, ids) holds the playbooks let go
         target_os = contract.os_family if contract is not None else "linux"
         for pb in self.pack:
-            relevant_events = [event for event in events if event.family in pb.families]
+            # families a rule reads only as context (its lineage) do not make a partition an evaluation of it
+            evaluated_families = set(pb.families) - set(pb.context_families)
+            relevant_events = [event for event in events if event.family in evaluated_families]
             target_fallback = not relevant_events and (
                 target_os == "unknown" or target_os in pb.os_families
             )
@@ -784,6 +789,7 @@ class Sweep:
             # Every rule reads every batch, whatever the state budget: a store in no-growth mode refuses only
             # records that need a new key in it (each rule's own refusal path), and every match that needs no new
             # state still publishes.
+            pb.bind_raw(raw_sources)
             try:
                 matches = pb.consume_scoped_partition(scoped_events)
             except StateExhausted as exc:
@@ -795,6 +801,7 @@ class Sweep:
                                       + pb.capped - before_capped,
                                       f"a write to the stage volume failed ({exc}); this rule's later records of "
                                       f"the batch are not evaluated")
+            pb.bind_raw({})
             for m in matches:
                 self._publish(m, tid, self._sources_for(m, raw_sources) if pb.staged else raw_sources)
             if pb.staged:
@@ -831,7 +838,7 @@ class Sweep:
             incomplete = rule_partial or bool(missing) or bool(capped) or bool(assumed)
             if not target_applicable:
                 state = "not_applicable_no_events"
-            elif not (set(pb.families) & families) and evaluated == 0:
+            elif not (evaluated_families & families) and evaluated == 0:
                 state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
             elif pb.kind == "aggregate" and matches:
                 # aggregate rules may publish indicator events during consume(); those are matches
