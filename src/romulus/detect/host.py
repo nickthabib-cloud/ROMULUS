@@ -15,6 +15,15 @@ from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds, SpillList, StateExhausted
 from romulus.detect.linux_argv import canonical, program, read_operand_paths
+from romulus.detect.observed import (
+    Observed,
+    ProcessView,
+    citation,
+    observation,
+    process_view,
+    same_state,
+    uncite,
+)
 from romulus.evidence.shellparse import (
     SHELLS,
     UnknownShellScript,
@@ -1447,6 +1456,7 @@ class ExecRecord(NamedTuple):
     flags: int
     serial: int | None = None   # the audit serial: orders execs of one pid at one instant (a #! chain)
     order_domain: object | None = None
+    session: int | None = None  # the audit session id (None when unset): it never changes within a process
 
 
 # A real-uid-0 exec outside any login session (no audit login uid), with its executable and argv recorded and a
@@ -1456,6 +1466,12 @@ DAEMON = 1
 
 def _record_order(record: ExecRecord) -> tuple:
     return record.ts, repr(record.order_domain), record.serial is None, record.serial or 0, record.event_id
+
+
+def _observed_order(entry: Observed) -> tuple:
+    """An observation's place among a pid's exec records and observations (`_record_order`'s form)."""
+    domain = "audit" if entry.serial is not None else None
+    return entry.ts, repr(domain), entry.serial is None, entry.serial or 0, entry.event_id
 
 
 def _latest_image(tied: list[ExecRecord]) -> ExecRecord | None:
@@ -1516,19 +1532,33 @@ class ExecLineage:
     In a sweep one ExecLineage is shared by every rule that needs ancestry (`share_lineage`): its rows live on the
     first such rule's spill, each record is observed once (the first rule to read a batch observes it, the others
     find it observed), and a disk refusal is noted on every rule that shares it. A rule constructed alone (tests,
-    expansion and baseline callers of PidTable) keeps its own. Each rule reads its own view of the records."""
+    expansion and baseline callers of PidTable) keeps its own. Each rule reads its own view of the records.
 
-    def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None):
+    With `observing`, it also holds what processes' own non-exec audit records show (`romulus.detect.observed`):
+    per (host, pid), one entry per change of image, parent, session or boot (`observed`, its own store), and the
+    first record of each entry for citation (`citations`, its own store, read only when a lineage names it)."""
+
+    # Records held for citation in memory; the rest wait on disk (they are read only when a finding cites them).
+    CITATIONS_HOT = 4096
+
+    def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None, observing: bool = False):
         self.store = KeyedStore(owner, "exec_lineage", capacity)
         self.members = members if members is not None else [owner] if owner is not None else []
         # The one store every ancestry rule reads, and most of a host hunt's state (one record per exec): it holds a
         # floor of the hunt's disk budget for each rule it serves, as their own stores would have had.
         self.store.weight = max(1, len(self.members))
-        self._observed = RecentIds()            # exec records already observed (by any rule sharing this store)
+        self._observed = RecentIds()            # records already observed (by any rule sharing this store)
         # processes whose exec record the state budget refused to hold (recent ones): a rule may still judge a join
         # whose other side it holds, saying the lineage was not recorded
         self.refused = RecentIds()
         self.incomplete = False                 # any process refused so far in the hunt: lineage may have gaps
+        self.observing = observing
+        self.observed = KeyedStore(owner, "proc_observed", capacity) if observing else None
+        self.citations = KeyedStore(owner, "proc_observed_records", self.CITATIONS_HOT) if observing else None
+        if self.observed is not None:
+            self.observed.weight = self.store.weight        # it serves the same rules as the exec records
+        # any observation refused so far in the hunt: a record that would change a lineage may be missing
+        self.observed_incomplete = False
 
     @property
     def records(self) -> KeyedStore:
@@ -1542,19 +1572,26 @@ class ExecLineage:
         """Processes whose records are on disk now (read back when needed; never forgotten)."""
         return self.store.on_disk
 
+    def _stores(self) -> list[KeyedStore]:
+        return [store for store in (self.store, self.observed, self.citations) if store is not None]
+
     def trim(self) -> None:
-        self.store.trim()
+        for store in self._stores():
+            store.trim()
 
     def clear(self) -> None:
-        self.store.clear()
+        for store in self._stores():
+            store.clear()
 
     @staticmethod
     def record(event: TypedEvent) -> ExecRecord:
         ancestor = ProcessLineage.entry(event)
         exe = event.get("process.executable")
+        session = event.get("process.session_id")
         return ExecRecord(ancestor.ts, event.id, ancestor.ppid, str(exe) if exe else "", ancestor.name,
                           ancestor.user, ancestor.marker, event.raw[0].native_id if event.raw else "",
-                          ancestor.boot, DAEMON if _daemon(event) else 0, ancestor.serial, ancestor.order_domain)
+                          ancestor.boot, DAEMON if _daemon(event) else 0, ancestor.serial, ancestor.order_domain,
+                          session if isinstance(session, int) and not isinstance(session, bool) else None)
 
     def observe(self, event: TypedEvent) -> None:
         """Hold an exec record (once, however many rules hand it over)."""
@@ -1580,6 +1617,93 @@ class ExecLineage:
         memory (below the stage volume's reserve)."""
         found = self.store.get((host, pid))
         return found if found is not None else self.store.peek((host, pid), None) or []
+
+    # ---- observations: what a process's own non-exec audit records show ----
+    def observe_process(self, event: TypedEvent, raw: dict[str, dict] | None = None) -> None:
+        """Hold the state (image, parent, session, boot) a process's own audit SYSCALL record shows, once per change
+        of state: a record that repeats the state of the entry before it (an observation, or the exec itself) only
+        moves that observation's latest time. A new entry keeps its record for citation (`raw`: its raw copies)."""
+        if self.observed is None:
+            return
+        found = observation(event)
+        seen = (event.id, event.ts)
+        if found is None or seen in self._observed:
+            return
+        self._observed.add(seen)
+        pid, entry = found
+        self.hold_observed(event.host, pid, entry, lambda: self._cite(event, raw))
+
+    def hold_observed(self, host: str | None, pid: int, entry: Observed, cite) -> None:
+        """Hold one observed state of (`host`, `pid`) unless the entry before it shows the same state; `cite()` keeps
+        a new entry's record for citation and says whether it was kept."""
+        key = (host, pid)
+        held = self.observed.get(key)
+        if held is None and self.observed.peek(key, None) is not None:
+            # held on disk but not brought back (below the stage volume's reserve): this record cannot be added
+            self._refused_observation()
+            return
+        order = _observed_order(entry)
+        index = bisect_right(held, order, key=_observed_order) if held else 0
+        previous = held[index - 1] if index else None
+        execs = self.entries(host, pid)
+        if execs:
+            latest = bisect_right(execs, order, key=_record_order)
+            if latest and (previous is None or _record_order(execs[latest - 1]) > _observed_order(previous)):
+                previous = execs[latest - 1]
+        if previous is not None and same_state(previous, entry):
+            if isinstance(previous, Observed) and entry.ts > previous.last:
+                held[index - 1] = previous._replace(last=entry.ts)         # in place: the store holds this list
+            return
+        if not held:
+            held = [entry]
+            if not self.observed.put(key, held):
+                self._refused_observation()
+                return
+            index = 0
+        else:
+            held.insert(index, entry)
+        held[index] = entry._replace(cited=cite())                         # in place: the store holds this list
+
+    def _refused_observation(self) -> None:
+        """A process's observed state was not held: from now on a lineage may miss a record that would change it."""
+        self.observed_incomplete = True
+        for member in self.members:
+            member.note_limit("lineage_observed", "the store of processes' observed states took no new process (its "
+                                                  "share of the state budget is spent): a later process's observed "
+                                                  "lineage is not recorded, so no lineage lowers a lane")
+
+    def _cite(self, event: TypedEvent, raw: dict[str, dict] | None) -> bool:
+        """Keep an observation's record for citation; False when its store refuses it (a lineage resting on it is then
+        unknown)."""
+        if self.citations.put(event.id, citation(event, raw or {})):
+            return True
+        for member in self.members:
+            member.note_limit("lineage_records", "the store of observed records took no new record (its share of the "
+                                                 "state budget is spent): a lineage resting on a later observation is "
+                                                 "unknown")
+        return False
+
+    def view(self, host: str | None, pid: int, ts: float, serial: int | None, boot: str | None, *,
+             inclusive: bool) -> ProcessView:
+        """The process holding `pid` at (`ts`, audit `serial`) from its execs and observations
+        (`romulus.detect.observed.process_view`)."""
+        observed = []
+        if self.observed is not None:
+            observed = self.observed.get((host, pid))
+            if observed is None:
+                observed = self.observed.peek((host, pid), None) or []
+        return process_view(self.entries(host, pid), observed, ts, serial, boot, inclusive=inclusive, pid=pid,
+                            host=host)
+
+    def cited(self, event_ids: list[str]) -> tuple[dict[str, TypedEvent], dict[str, dict]]:
+        """The observed records held for citation, by event id, and their raw copies (an id not held is absent)."""
+        events, raw = {}, {}
+        for event_id in event_ids:
+            blob = None if self.citations is None else self.citations.peek(event_id)
+            if blob is not None:
+                events[event_id], copies = uncite(blob)
+                raw.update(copies)
+        return events, raw
 
     def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,
                serial: int | None = None, order_domain=None, exclude: str | None = None,
@@ -1748,17 +1872,18 @@ def share_lineage(pack: list) -> None:
         shared_view = ProcessLineage(holders[0], holders)
         for pb in holders:
             pb.lineage = shared_view
-    sites, members = [], []
+    sites, members, observing = [], [], False
     for pb in pack:
         for holder in (pb, getattr(pb, "lineage", None), getattr(pb, "pids", None)):
             for name, value in list(getattr(holder, "__dict__", {}).items()):
                 if isinstance(value, ExecLineage):
                     sites.append((holder, name))
+                    observing = observing or value.observing
                     if pb not in members:
                         members.append(pb)
     if len(members) < 2:
         return
-    shared = ExecLineage(members[0], HOT_COUNT, members)
+    shared = ExecLineage(members[0], HOT_COUNT, members, observing=observing)
     for holder, name in sites:
         setattr(holder, name, shared)
 

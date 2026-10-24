@@ -176,7 +176,7 @@ def _partner_boot(partners: dict, host: str, ts: float, serial: int,
 
 # Families an audit group yields. Their records name no boot of their own; the boot-interval map may supply it.
 BOOT_FILL_FAMILIES = frozenset({"process_exec", "net_socket", "file_change", "auth", "account_change",
-                                "service_change", "audit_config", "system_state"})
+                                "service_change", "audit_config", "system_state", "process_observed"})
 # How far inside one boot's observed span, and away from every other boot's span and every boot record that names
 # no boot, an event's time must lie before the event is placed in that boot. Every time compared is the host's own
 # clock (the audit header, journald's receive or source time), so the margin covers only the difference between
@@ -873,6 +873,33 @@ def normalize_socket_group(host: str, members: list[tuple[dict, AuditRecord]], s
     return TypedEvent(id=event_id("net_socket", refs), family="net_socket", ts=datetime.fromtimestamp(rs.ts, UTC),
                       host=host or None, outcome=outcome, fields=f, raw=refs, normalizer=NORMALIZER_VERSION,
                       caveats=caveats)
+
+
+def normalize_observed_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent | None:
+    """One process_observed event from an audit group whose SYSCALL record becomes no other typed event (a read-only
+    open, a connect on a local socket, any call no family models): the process that made the call, as the kernel
+    recorded it at that instant (pid, parent, executable, ids, audit session). It is not an action claim; process
+    lineage reads it (`romulus.detect.observed`). It views the SYSCALL record only. None when the group has no
+    SYSCALL record naming the pid, parent and executable."""
+    found = next(((hit, record) for hit, record in members if record.type == "SYSCALL"), None)
+    if found is None:
+        return None
+    hs, rs = found
+    if not (rs.fields.get("pid", "").isdigit() and rs.fields.get("ppid", "").isdigit() and rs.fields.get("exe")):
+        return None
+    sid = hs["_id"]
+    refs = [_ref(hs)]
+    f = {"audit.serial": fv(rs.serial, f"{sid}:event.original#auditd:msg.serial"),
+         **_audit_boot_field(members), **_audit_time(sid, rs.ts), **_syscall_process_fields(sid, rs)}
+    if rs.enriched.get("SYSCALL"):
+        f["audit.syscall"] = fv(rs.enriched["SYSCALL"], f"{sid}:event.original#auditd:enriched.SYSCALL")
+    if rs.fields.get("key") not in (None, "(null)"):
+        f["audit.key"] = fv(rs.fields["key"], f"{sid}:event.original#auditd:SYSCALL.key")
+    succ = rs.fields.get("success")
+    outcome = Outcome.success if succ == "yes" else Outcome.failure if succ == "no" else Outcome.unknown
+    return TypedEvent(id=event_id("process_observed", refs), family="process_observed",
+                      ts=datetime.fromtimestamp(rs.ts, UTC), host=host or None, outcome=outcome, fields=f, raw=refs,
+                      normalizer=NORMALIZER_VERSION)
 
 
 def normalize_exec_group(host: str, members: list[tuple[dict, AuditRecord]]) -> TypedEvent:
@@ -1872,6 +1899,17 @@ SINGLE = {
 }
 
 
+def _observed_or_skip(events: list[TypedEvent], skips: dict[str, int], host: str,
+                      members: list[tuple[dict, AuditRecord]], reason: str) -> None:
+    """An audit group that is no event of its own family (`reason`): the process its SYSCALL record names, as a
+    process_observed event; counted as skipped only when no record names one."""
+    observed = normalize_observed_group(host, members)
+    if observed is None:
+        skips[reason] += 1
+    else:
+        events.append(observed)
+
+
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    audit_parse: Callable[[dict, str], AuditRecord] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
@@ -1968,21 +2006,27 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 try:
                     events.extend(normalize_file_group(host, members, file_call))
                 except Skip as s:
-                    skips[s.reason] += 1
+                    _observed_or_skip(events, skips, host, members, s.reason)
                 except (AuditParseError, ValueError, KeyError) as e:
                     # tagged by family so the sweep marks only file-change rules partial
                     errors.append((members[0][0]["_id"], f"linux.audit.file: {e}"))
                 continue
             if syscall is None:
                 arch = sys_rec.fields.get("arch", "") if sys_rec is not None else ""
-                skips["audit group without EXECVE, socket or file-change syscall"
-                      if not arch or arch in SOCKET_SYSCALLS
-                      else f"audit syscall on an arch whose socket calls are not decoded ({arch})"] += 1
+                if not arch or arch in SOCKET_SYSCALLS:
+                    _observed_or_skip(events, skips, host, members,
+                                      "audit group without EXECVE, socket or file-change syscall")
+                else:
+                    # the process is still observed; what its socket calls did is not decoded, and the skip says so
+                    observed = normalize_observed_group(host, members)
+                    if observed is not None:
+                        events.append(observed)
+                    skips[f"audit syscall on an arch whose socket calls are not decoded ({arch})"] += 1
                 continue
             try:
                 events.append(normalize_socket_group(host, members, syscall))
             except Skip as s:
-                skips[s.reason] += 1
+                _observed_or_skip(events, skips, host, members, s.reason)
             except (AuditParseError, ValueError, KeyError) as e:
                 # tagged by family so the sweep marks only socket rules partial
                 errors.append((members[0][0]["_id"], f"linux.audit.socket: {e}"))

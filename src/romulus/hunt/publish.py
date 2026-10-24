@@ -28,6 +28,8 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
     """Persist cited evidence and publish a machine-decided candidate once. Direct (sweep) findings only;
     context findings are published by the single post-expansion pass (romulus.hunt.context.finalize_context)."""
     decision = decide(match, hunt_id)
+    if match.raw_copies:
+        raw_sources = {**match.raw_copies, **raw_sources}
     repo.save_evidence(hunt_id, match.events, raw_sources, task_id, owner_token=owner_token)
     row = {
         "id": decision.candidate_id,
