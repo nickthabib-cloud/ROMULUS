@@ -135,6 +135,30 @@ def test_record_id_continuity_spills_5000_host_channels_without_a_count_cap():
     assert continuity.state_count == 5_000
 
 
+def test_record_id_continuity_bounds_5000_host_gap_reasons_with_exact_channel_counts():
+    continuity = RecordIdContinuity()
+    records = []
+    for host_number in range(5_000):
+        host = f"ws{host_number:04d}.example.test"
+        first = _hit(10, native_id=f"first-{host_number}")
+        first["_source"]["winlog"]["computer_name"] = host
+        second = _hit(12, native_id=f"second-{host_number}")
+        second["_source"]["@timestamp"] = "2026-01-02T01:05:00Z"
+        second["_source"]["winlog"]["computer_name"] = host
+        records.extend((first, second))
+
+    reasons = continuity.observe("target", records, liveness_tolerance=timedelta(minutes=15))
+
+    assert len(reasons) == 2
+    gap = next(reason for reason in reasons if reason.startswith("shipper gaps:"))
+    liveness = next(reason for reason in reasons if reason.startswith("no-record time gaps"))
+    assert f"5,000 records missing across 5,000 hosts on {SYSMON_CHANNEL}" in gap
+    assert f"5,000 hosts on {SYSMON_CHANNEL}" in liveness
+    assert sum(f"ws{number:04d}.example.test" in gap for number in range(5_000)) == 10
+    assert sum(f"ws{number:04d}.example.test" in liveness for number in range(5_000)) == 10
+    continuity.close()
+
+
 def test_record_id_continuity_has_its_own_floor_and_reports_refused_groups(tmp_path):
     budget = StateBudget(tmp_path, disk_total=64 * 1024, reserve=0)
     budget.plan(1)

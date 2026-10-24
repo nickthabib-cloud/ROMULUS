@@ -147,13 +147,14 @@ class RecordIdContinuity:
         reused: set[tuple[str, str]] = set()
         # Refusal reasons are controlled state-budget text, so aggregate groups by reason and retain only a sample.
         # A 5,000-host outage must not manufacture a 5,000-line in-memory coverage report.
-        refused: dict[str, list] = {}
+        refused: dict[tuple[str, str], list] = {}
 
         def record_refusal(group: tuple[str, str], reason: str) -> None:
-            state = refused.setdefault(reason, [0, []])
+            computer, channel = group
+            state = refused.setdefault((reason, channel), [0, []])
             state[0] += 1
             if len(state[1]) < 10:
-                state[1].append(group)
+                state[1].append(computer)
         touched: set[tuple[str, str, str]] = set()
         new_rows = 0
         self._cap()
@@ -249,60 +250,103 @@ class RecordIdContinuity:
                 # rather than retaining an event-count-sized set to reconstruct the sequence.
                 unordered.add(group)
         self._checkpoint()
-        reasons = [
-            f"shipper gaps: {count} records missing on {channel} for {computer}"
-            for (computer, channel), count in sorted(gaps.items())
-        ]
-        reasons += [
-            f"no records from {computer}/{channel} between {start} and {end}"
-            for (computer, channel), (_seconds, start, end) in sorted(time_gaps.items())
-        ]
-        reasons += [
-            f"record_id reused (log cleared or reverted) on {channel} for {computer}"
-            for computer, channel in sorted(reused)
-        ]
-        reasons += [
-            f"shipper gaps unresolved: record_id out of order on {channel} for {computer}"
-            for computer, channel in sorted(unordered)
-        ]
-        reasons += [
-            f"shipper gaps unresolved: non-numeric record_id on {channel} for {computer}"
-            for computer, channel in sorted(malformed)
-        ]
-        for reason, (count, samples) in sorted(refused.items()):
+        def mapped_by_channel(values: dict) -> dict[str, list[tuple[str, object]]]:
+            grouped: dict[str, list[tuple[str, object]]] = {}
+            for (computer, channel), value in sorted(values.items()):
+                grouped.setdefault(channel, []).append((computer, value))
+            return grouped
+
+        def groups_by_channel(values: set[tuple[str, str]]) -> dict[str, list[str]]:
+            grouped: dict[str, list[str]] = {}
+            for computer, channel in sorted(values):
+                grouped.setdefault(channel, []).append(computer)
+            return grouped
+
+        reasons: list[str] = []
+        for channel, groups in sorted(mapped_by_channel(gaps).items()):
+            if len(groups) <= 10:
+                reasons += [
+                    f"shipper gaps: {count} records missing on {channel} for {computer}"
+                    for computer, count in groups
+                ]
+            else:
+                sample = ", ".join(computer for computer, _count in groups[:10])
+                reasons.append(
+                    f"shipper gaps: {sum(int(count) for _computer, count in groups):,} records missing "
+                    f"across {len(groups):,} hosts on {channel} (sample: {sample})"
+                )
+        for channel, groups in sorted(mapped_by_channel(time_gaps).items()):
+            if len(groups) <= 10:
+                reasons += [
+                    f"no records from {computer}/{channel} between {gap[1]} and {gap[2]}"
+                    for computer, gap in groups
+                ]
+            else:
+                sample = "; ".join(
+                    f"{computer} between {gap[1]} and {gap[2]}" for computer, gap in groups[:10]
+                )
+                reasons.append(
+                    f"no-record time gaps for {len(groups):,} hosts on {channel} (sample: {sample})"
+                )
+        for channel, computers in sorted(groups_by_channel(reused).items()):
+            if len(computers) <= 10:
+                reasons += [
+                    f"record_id reused (log cleared or reverted) on {channel} for {computer}"
+                    for computer in computers
+                ]
+            else:
+                reasons.append(
+                    f"record_id reused (log cleared or reverted) for {len(computers):,} hosts on {channel} "
+                    f"(sample: {', '.join(computers[:10])})"
+                )
+        for label, groups, detail in (
+            ("record_id out of order", unordered, "shipper gaps unresolved: record_id out of order"),
+            ("non-numeric record_id", malformed, "shipper gaps unresolved: non-numeric record_id"),
+        ):
+            for channel, computers in sorted(groups_by_channel(groups).items()):
+                if len(computers) <= 10:
+                    reasons += [f"{detail} on {channel} for {computer}" for computer in computers]
+                else:
+                    reasons.append(
+                        f"shipper gaps unresolved: {label} for {len(computers):,} hosts on {channel} "
+                        f"(sample: {', '.join(computers[:10])})"
+                    )
+        for (reason, channel), (count, samples) in sorted(refused.items()):
             if count <= 10:
                 reasons += [
                     f"shipper gaps unresolved: continuity state refused on {channel} for {computer}: {reason}"
-                    for computer, channel in sorted(samples)
+                    for computer in sorted(samples)
                 ]
             else:
-                sample = ", ".join(f"{computer}/{channel}" for computer, channel in sorted(samples))
+                sample = ", ".join(sorted(samples))
                 reasons.append(
-                    f"shipper gaps unresolved: continuity state refused for {count:,} host/channel groups "
-                    f"(sample: {sample}): {reason}"
+                    f"shipper gaps unresolved: continuity state refused for {count:,} host/channel groups on "
+                    f"{channel} (sample: {sample}): {reason}"
                 )
-        short: list[tuple[str, str]] = []
-        short_count = 0
+        short: dict[str, list[str]] = {}
+        short_counts: dict[str, int] = {}
         for _target, computer, channel in sorted(touched):
             row = self._db.execute(
                 "SELECT samples FROM continuity WHERE target = ? AND computer = ? AND channel = ?",
                 (_target, computer, channel),
             ).fetchone()
             if row is not None and row[0] < 2:
-                short_count += 1
-                if len(short) < 10:
-                    short.append((computer, channel))
-        if short_count <= 10:
-            reasons += [
-                f"shipper gaps unresolved: fewer than two record_id samples on {channel} for {computer}"
-                for computer, channel in short
-            ]
-        else:
-            sample = ", ".join(f"{computer}/{channel}" for computer, channel in short)
-            reasons.append(
-                f"shipper gaps unresolved: fewer than two record_id samples for {short_count:,} "
-                f"host/channel groups (sample: {sample})"
-            )
+                short_counts[channel] = short_counts.get(channel, 0) + 1
+                samples = short.setdefault(channel, [])
+                if len(samples) < 10:
+                    samples.append(computer)
+        for channel, channel_count in sorted(short_counts.items()):
+            computers = short[channel]
+            if channel_count <= 10:
+                reasons += [
+                    f"shipper gaps unresolved: fewer than two record_id samples on {channel} for {computer}"
+                    for computer in computers
+                ]
+            else:
+                reasons.append(
+                    f"shipper gaps unresolved: fewer than two record_id samples for {channel_count:,} "
+                    f"host/channel groups on {channel} (sample: {', '.join(computers)})"
+                )
         return reasons
 
 
